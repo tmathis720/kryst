@@ -74,7 +74,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::traits::{MatVec, InnerProduct};
+    use crate::core::traits::MatVec;
 
     // Simple dense matrix type for testing
     #[derive(Clone)]

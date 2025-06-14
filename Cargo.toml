@@ -7,20 +7,9 @@ edition = "2021"
 faer = "0.22.6"
 num-traits = "0.2"
 thiserror = "1.0"
+rayon = "1.10"
 
 [dev-dependencies]
 rand = "0.8"
 approx = "0.5"
 criterion = "0.4"
-
-[features]
-parallel = ["rayon"]
-mpi = ["dep:mpi"]
-
-[dependencies.rayon]
-optional = true
-version = "1.10"
-
-[dependencies.mpi]
-optional = true
-version = "0.7"

@@ -13,7 +13,7 @@ fn bench_lu_vs_faer(c: &mut Criterion) {
     c.bench_function("kryst LU", |ben| {
         let mut solver = LuSolver::new();
         ben.iter(|| {
-            let _stats = solver.solve(black_box(&a), black_box(&b), black_box(&mut x)).unwrap();
+            let _stats = solver.solve(black_box(&a), None, black_box(&b), black_box(&mut x)).unwrap();
         })
     });
 
