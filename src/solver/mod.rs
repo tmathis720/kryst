@@ -1,16 +1,17 @@
 //! Krylov & direct solver interfaces.
 
 use crate::utils::convergence::SolveStats;
-use crate::core::traits::InnerProduct;
+use crate::preconditioner::Preconditioner;
 
 /// Common interface for any direct or iterative solver.
 pub trait LinearSolver<M, V> {
     type Error;
-    /// Solve A·x = b, writing result into `x`.
+    /// Solve A·x = b, optionally with preconditioner M⁻¹, writing result into `x`.
     /// Returns iteration stats (including convergence info).
     fn solve(
         &mut self,
         a: &M,
+        pc: Option<&dyn Preconditioner<M, V>>,
         b: &V,
         x: &mut V
     ) -> Result<SolveStats<<Self as LinearSolver<M, V>>::Scalar>, Self::Error>;
@@ -43,3 +44,6 @@ pub use tfqmr::TfqmrSolver;
 
 pub mod cgnr;
 pub use cgnr::{CgnrSolver, CgneSolver};
+
+pub mod pcg;
+pub use self::pcg::PcgSolver;

@@ -25,7 +25,8 @@ where
     type Error = KError;
     type Scalar = T;
 
-    fn solve(&mut self, a: &M, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+        let _ = pc; // BiCGStab does not use preconditioner (yet)
         let n = b.as_ref().len();
         let ip = ();
         let mut xk = x.as_ref().to_vec();
@@ -137,7 +138,7 @@ mod tests {
         let (a, b) = nonsym_3x3();
         let mut x = vec![0.0; 3];
         let mut solver = BiCgStabSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         eprintln!("BiCGStab stats: {{ converged: {}, iters: {}, final_res: {:e} }}", stats.converged, stats.iterations, stats.final_residual);
         // Compare to true solution
         let x_true = vec![1.0, 2.0, 3.0];

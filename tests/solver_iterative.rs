@@ -21,7 +21,7 @@ fn cg_vs_direct_on_spd() {
     let (a, b) = random_spd(n);
     let mut x_cg = vec![0.0; n];
     let mut solver = CgSolver::new(1e-8, 1000);
-    let stats = solver.solve(&a, &b, &mut x_cg).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x_cg).unwrap();
     assert!(stats.converged);
     // direct solve
     let mut x_direct = b.clone();
@@ -42,7 +42,7 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let b: Vec<f64> = (0..n).map(|_| rng.gen()).collect();
     let mut x_gmres = vec![0.0; n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
-    let stats = solver.solve(&a, &b, &mut x_gmres).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x_gmres).unwrap();
     assert!(stats.converged);
     // direct solve
     let mut x_direct = b.clone();

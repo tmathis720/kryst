@@ -26,7 +26,8 @@ where
     type Scalar = T;
     type Error = KError;
 
-    fn solve(&mut self, a: &M, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+        let _ = pc; // MINRES does not use preconditioner (yet)
         let n = b.as_ref().len();
         let ip = ();
 
@@ -234,7 +235,7 @@ mod tests {
         // run MINRES for up to 10 iters
         let mut x = vec![0.0; 3];
         let mut solver = MinresSolver::new(1e-6, 100);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
 
         // compute final residual norm
         let mut r_final = vec![0.0; 3];
@@ -277,7 +278,7 @@ mod tests {
 
         // Use a very tight tol so iter=1 is required
         let mut solver = MinresSolver::new(1e-14, 100);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
 
         // Since A=I, we expect x ≈ b exactly
         for i in 0..n {
@@ -318,7 +319,7 @@ mod tests {
         // solve A·x = b with MINRES
         let mut x = vec![0.0; 2];
         let mut solver = MinresSolver::new(1e-12, 100);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
 
         // check final residual ‖b - A x‖₂
         let mut r = vec![0.0; 2];

@@ -3,14 +3,11 @@
 use crate::error::KError;
 
 /// A preconditioner M ≈ A⁻¹.
-/// - `setup` is called once to factor or build M.
-/// - `apply` applies M to a vector: y ← M x.
-pub trait Preconditioner<M, V>: Send + Sync {
-    /// Factor or initialize the preconditioner from A.
-    fn setup(&mut self, a: &M) -> Result<(), KError>;
-
-    /// Apply preconditioner: y ← M x.
-    fn apply(&self, x: &V, y: &mut V) -> Result<(), KError>;
+pub trait Preconditioner<M, V> {
+    /// Apply M⁻¹ to r, writing z = M⁻¹ r
+    fn apply(&self, r: &V, z: &mut V) -> Result<(), KError>;
+    /// Optionally: setup/factorize from A
+    fn setup(&mut self, a: &M) -> Result<(), KError> { Ok(()) }
 }
 
 pub mod block_jacobi;

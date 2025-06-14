@@ -26,7 +26,7 @@ fn cg_with_jacobi() {
     let r_in = b.clone();
     let mut r_out = vec![0.0; b.len()];
     <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::apply(&pc, &r_in, &mut r_out).unwrap();
-    let stats = solver.solve(&a, &b, &mut x).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x).unwrap();
     assert!(stats.converged);
     // No stats to check; just ensure it runs without panic
 }
@@ -38,7 +38,18 @@ fn gmres_with_ilu0() {
     <Ilu0<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::setup(&mut pc, &a).unwrap();
     let mut solver = GmresSolver::new(4, 1e-6, 1000);
     let mut x = vec![0.0; 5];
-    let stats = solver.solve(&a, &b, &mut x).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x).unwrap();
     assert!(stats.converged);
     // No stats to check; just ensure it runs without panic
+}
+
+#[test]
+fn pcg_with_jacobi() {
+    let (a, b) = ill_cond(5, 1e6);
+    let mut pc = Jacobi::new();
+    <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::setup(&mut pc, &a).unwrap();
+    let mut solver = kryst::solver::PcgSolver::new(1e-6, 1000);
+    let mut x = vec![0.0; 5];
+    let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
+    assert!(stats.converged);
 }

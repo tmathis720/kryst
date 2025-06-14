@@ -25,7 +25,8 @@ where
     type Error = KError;
     type Scalar = T;
 
-    fn solve(&mut self, a: &M, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+        let _ = pc; // CGS does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
         let ip = ();
@@ -144,7 +145,7 @@ mod tests {
         };
         let mut x = vec![0.0; 5];
         let mut solver = CgsSolver::new(1e-10, 200);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         let tol = 1e-6;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() <= tol, "xi = {:.6}, expected = {:.6}", xi, ei);

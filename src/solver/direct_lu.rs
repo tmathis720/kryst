@@ -21,7 +21,8 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     type Error = KError;
     type Scalar = T;
 
-    fn solve(&mut self, a: &Mat<T>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+        let _ = pc; // Direct solvers do not use preconditioner
         // Factorize if needed
         let factor = FullPivLu::new(a.as_ref());
         self.factor = Some(factor);
@@ -56,7 +57,8 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     type Error = KError;
     type Scalar = T;
 
-    fn solve(&mut self, a: &Mat<T>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+        let _ = pc; // Direct solvers do not use preconditioner
         let factor = Qr::new(a.as_ref());
         x.clone_from(b);
         let n = x.len();
@@ -89,7 +91,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = LuSolver::<f64>::new();
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -111,7 +113,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = QrSolver::new();
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {

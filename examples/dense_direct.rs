@@ -20,11 +20,11 @@ fn main() {
 
     // LU solve
     let mut lus = LuSolver::new();
-    let stats_lu = lus.solve(&a, &b, &mut x).unwrap();
+    let stats_lu = lus.solve(&a, None, &b, &mut x).unwrap();
     println!("LU x = {:?}, stats = {:?}", x, stats_lu);
 
     // QR solve
     let mut qrs = QrSolver::new();
-    let stats_qr = qrs.solve(&a, &b, &mut x).unwrap();
+    let stats_qr = qrs.solve(&a, None, &b, &mut x).unwrap();
     println!("QR x = {:?}, stats = {:?}", x, stats_qr);
 }

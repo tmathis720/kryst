@@ -25,7 +25,8 @@ where
     type Error = KError;
     type Scalar = T;
 
-    fn solve(&mut self, a: &M, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+        let _ = pc; // CG does not use preconditioner
         let n = b.as_ref().len();
         let mut x_vec = x.as_ref().to_vec();
         let ip = ();
@@ -95,7 +96,7 @@ mod tests {
         let b = vec![1.0, 2.0];
         let mut x = vec![0.0, 0.0];
         let mut solver = CgSolver::new(1e-10, 20);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         let expected = vec![0.09090909090909091, 0.6363636363636364];
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -125,7 +126,7 @@ mod tests {
         };
         let mut x = vec![0.0; 3];
         let mut solver = CgSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         let tol = 1e-8;
         let mut r_final = vec![0.0; 3];
         a.matvec(&x, &mut r_final);
