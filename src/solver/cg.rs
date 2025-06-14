@@ -69,3 +69,71 @@ where
         Ok(stats)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::traits::{MatVec, InnerProduct};
+
+    // Simple dense matrix type for testing
+    #[derive(Clone)]
+    struct DenseMat {
+        data: Vec<Vec<f64>>,
+    }
+    impl MatVec<Vec<f64>> for DenseMat {
+        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
+            for (i, row) in self.data.iter().enumerate() {
+                y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
+            }
+        }
+    }
+
+    #[test]
+    fn cg_solves_simple_spd() {
+        // SPD system: [[4,1],[1,3]] x = [1,2]
+        let a = DenseMat { data: vec![vec![4.0, 1.0], vec![1.0, 3.0]] };
+        let b = vec![1.0, 2.0];
+        let mut x = vec![0.0, 0.0];
+        let mut solver = CgSolver::new(1e-10, 20);
+        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let expected = vec![0.09090909090909091, 0.6363636363636364];
+        let tol = 1e-8;
+        for (xi, ei) in x.iter().zip(expected.iter()) {
+            assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
+        }
+        assert!(stats.converged, "CG did not converge");
+    }
+
+    #[test]
+    fn cg_solves_spd() {
+        // Symmetric positive definite system
+        // A = [[4,1,0],[1,3,1],[0,1,2]]
+        // x_true = [1,2,3]
+        // b = A * x_true = [6,8,8]
+        let a = DenseMat {
+            data: vec![
+                vec![4.0, 1.0, 0.0],
+                vec![1.0, 3.0, 1.0],
+                vec![0.0, 1.0, 2.0],
+            ]
+        };
+        let x_true = vec![1.0, 2.0, 3.0];
+        let b = {
+            let mut b = vec![0.0; 3];
+            a.matvec(&x_true, &mut b);
+            b
+        };
+        let mut x = vec![0.0; 3];
+        let mut solver = CgSolver::new(1e-10, 100);
+        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let tol = 1e-8;
+        let mut r_final = vec![0.0; 3];
+        a.matvec(&x, &mut r_final);
+        for i in 0..3 {
+            r_final[i] = b[i] - r_final[i];
+        }
+        let res_norm = r_final.iter().map(|&ri| ri*ri).sum::<f64>().sqrt();
+        assert!(res_norm <= tol, "final residual = {:.6}, tol = {:.6}", res_norm, tol);
+        assert!(stats.converged, "CG did not converge");
+    }
+}

@@ -25,3 +25,21 @@ pub use cg::CgSolver;
 
 pub mod gmres;
 pub use gmres::GmresSolver;
+
+pub mod bicgstab;
+pub use bicgstab::BiCgStabSolver;
+
+pub mod cgs;
+pub use cgs::CgsSolver;
+
+pub mod qmr;
+pub use qmr::QmrSolver;
+
+pub mod minres;
+pub use minres::MinresSolver;
+
+pub mod tfqmr;
+pub use tfqmr::TfqmrSolver;
+
+pub mod cgnr;
+pub use cgnr::{CgnrSolver, CgneSolver};

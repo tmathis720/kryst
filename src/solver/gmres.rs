@@ -180,3 +180,51 @@ where
         Ok(stats)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::traits::MatVec;
+
+    #[derive(Clone)]
+    struct DenseMat {
+        data: Vec<Vec<f64>>,
+    }
+    impl MatVec<Vec<f64>> for DenseMat {
+        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
+            for (i, row) in self.data.iter().enumerate() {
+                y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
+            }
+        }
+    }
+
+    #[test]
+    fn gmres_solves_well_conditioned_nonsym() {
+        // 4x4 non-symmetric, well-conditioned system
+        // A = [[4,1,0,0],[1,3,1,0],[0,1,2,1],[0,0,1,3]]
+        // x_true = [1,2,3,4]
+        // b = A * x_true
+        let a = DenseMat {
+            data: vec![
+                vec![4.0, 1.0, 0.0, 0.0],
+                vec![1.0, 3.0, 1.0, 0.0],
+                vec![0.0, 1.0, 2.0, 1.0],
+                vec![0.0, 0.0, 1.0, 3.0],
+            ]
+        };
+        let x_true = vec![1.0, 2.0, 3.0, 4.0];
+        let b = {
+            let mut b = vec![0.0; 4];
+            a.matvec(&x_true, &mut b);
+            b
+        };
+        let mut x = vec![0.0; 4];
+        let mut solver = GmresSolver::new(4, 1e-10, 100);
+        let stats = solver.solve(&a, &b, &mut x).unwrap();
+        let tol = 1e-8;
+        for (xi, ei) in x.iter().zip(x_true.iter()) {
+            assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
+        }
+        assert!(stats.converged, "GMRES did not converge");
+    }
+}
