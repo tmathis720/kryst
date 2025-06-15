@@ -1,6 +1,5 @@
 //! kryst: PETSc-style PC/KSP interface over Faer
 
-#[cfg(feature = "parallel")]
 pub mod parallel;
 
 pub mod config;

@@ -14,6 +14,11 @@ impl<T> SparseRow<T> {
         Self { cols: Vec::new(), vals: Vec::new() }
     }
 }
+impl<T> Default for SparseRow<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct Ilup<T> {
     pub fill: usize,
@@ -94,14 +99,14 @@ where
         let z = z.as_mut();
         let mut y = vec![T::zero(); n];
         for i in 0..n {
-            let mut sum = r[i].clone();
+            let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
                 sum = sum - self.l[i].vals[j_idx] * y[j];
             }
             y[i] = sum;
         }
         for i in (0..n).rev() {
-            let mut sum = y[i].clone();
+            let mut sum = y[i];
             for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
                 if j > i {
                     sum = sum - self.u[i].vals[j_idx] * z[j];
@@ -109,7 +114,7 @@ where
             }
             let diag_idx = self.u[i].cols.iter().position(|&j| j == i)
                 .ok_or_else(|| KError::SolveError(format!("ILUP: zero diagonal in U at row {}", i)))?;
-            let diag = self.u[i].vals[diag_idx].clone();
+            let diag = self.u[i].vals[diag_idx];
             z[i] = sum / diag;
         }
         Ok(())

@@ -310,7 +310,7 @@ fn compute_strength_matrix(a: &Mat<f64>, threshold: f64) -> Mat<f64> {
                     let val = a[(i, j)];
                     let a_jj = a[(j, j)].abs();
                     if a_ii > 1e-14 && a_jj > 1e-14 {
-                        let strength = (val.abs() / (a_ii * a_jj).sqrt()) as f64;
+                        let strength = val.abs() / (a_ii * a_jj).sqrt();
                         if strength > threshold {
                             return Some((i, j, strength));
                         }
@@ -333,7 +333,7 @@ fn compute_strength_matrix(a: &Mat<f64>, threshold: f64) -> Mat<f64> {
 /// Perform double-pairwise aggregation:
 /// 1. Pairwise aggregate the graph to form coarse nodes.
 /// 2. On the coarse graph, perform another round of pairing to form larger aggregates.
-/// This function returns a vector where `aggregates[i]` = aggregate index of node i.
+///    This function returns a vector where `aggregates[i]` = aggregate index of node i.
 fn double_pairwise_aggregation(s: &Mat<f64>) -> Vec<usize> {
     // First pass: pairwise aggregation
     let first_pass = pairwise_aggregation(s);
@@ -468,9 +468,7 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
         p[(i, agg_id)] = 1.0;
     });
 
-    let p = Arc::try_unwrap(p).expect("Failed to unwrap Arc").into_inner().unwrap();
-
-    p
+    Arc::try_unwrap(p).expect("Failed to unwrap Arc").into_inner().unwrap()
 }
 
 #[cfg(test)]

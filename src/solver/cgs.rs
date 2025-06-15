@@ -40,7 +40,6 @@ where
         let mut p = r.clone();
         let mut q = V::from(vec![T::zero(); n]);
         let mut u = V::from(vec![T::zero(); n]);
-        let mut v = V::from(vec![T::zero(); n]);
         let mut rho = ip.dot(&r_tld, &r);
         let mut rho_old = T::zero();
         let res0 = ip.norm(&r);
@@ -69,7 +68,7 @@ where
             // v = A p
             let mut v_tmp = V::from(vec![T::zero(); n]);
             a.matvec(&p, &mut v_tmp);
-            v = v_tmp;
+            let v = v_tmp;
             let alpha = rho / ip.dot(&r_tld, &v);
             // q = u - alpha * v
             for (q_j, (u_j, v_j)) in q.as_mut().iter_mut().zip(u.as_ref().iter().zip(v.as_ref())) {
@@ -77,7 +76,7 @@ where
             }
             // x = x + alpha * (u + q)
             for (xj, (u_j, q_j)) in xk.iter_mut().zip(u.as_ref().iter().zip(q.as_ref())) {
-                *xj = *xj + alpha * (*u_j + *q_j);
+                *xj += alpha * (*u_j + *q_j);
             }
             // r = r - alpha * A(u + q)
             let mut upq = u.clone();

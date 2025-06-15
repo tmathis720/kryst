@@ -1,3 +1,4 @@
+#![allow(unused_assignments)]
 //! GMRES with fixed restart per Saad §6.4.
 
 use crate::core::traits::{InnerProduct, MatVec};
@@ -76,6 +77,7 @@ impl<T: Copy + Float> GmresSolver<T> {
         v_basis.push(vj1);
         false
     }
+    #[allow(dead_code)]
     fn arnoldi_with_pc<M, V>(
         a: &M,
         pc: &dyn crate::preconditioner::Preconditioner<M, V>,
@@ -185,10 +187,10 @@ where
         let res0 = beta;
         let mut stats = SolveStats { iterations: 0, final_residual: beta, converged: false };
 
-        let max_outer = (self.conv.max_iters + self.restart - 1) / self.restart;
+        let n_outer = self.conv.max_iters.div_ceil(self.restart);
         let mut iteration = 0;
         let epsilon = num_traits::cast::<f64, T>(1e-14).unwrap();
-        for _ in 0..max_outer {
+        for _ in 0..n_outer {
             let mut v_basis: Vec<V> = Vec::with_capacity(self.restart + 1); // Krylov basis
             let mut z_basis: Vec<V> = Vec::with_capacity(self.restart + 1); // Preconditioned basis (for right-preconditioning)
             let mut r0_norm = beta;
@@ -226,6 +228,7 @@ where
             let mut cs = vec![T::zero(); self.restart];
             let mut sn = vec![T::zero(); self.restart];
             let mut m = 0;
+            #[allow(unused_assignments)]
             let mut happy_breakdown = false;
             for j in 0..self.restart {
                 iteration += 1;

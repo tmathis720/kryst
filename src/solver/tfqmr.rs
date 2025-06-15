@@ -49,6 +49,7 @@ where
         if rho == T::zero() {
             return Ok(SolveStats { iterations: 0, final_residual: ip.norm(&r), converged: true });
         }
+        #[allow(unused_assignments)]
         let mut alpha = T::zero();
         let mut theta = T::zero();
         let mut eta = T::zero();
@@ -56,6 +57,7 @@ where
         let _d_scalar = T::zero();
 
         // vectors
+        #[allow(unused_assignments)]
         let mut v = V::from(vec![T::zero(); n]);
         let _p = V::from(vec![T::zero(); n]);
         let mut w = r.clone();     // w = r0
@@ -142,7 +144,6 @@ where
             if stop {
                 stats.final_residual = res_norm;
                 stats.iterations = k;
-                stats.converged = stats.converged;
                 return Ok(stats);
             }
         }

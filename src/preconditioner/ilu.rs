@@ -20,6 +20,12 @@ impl<T: Float + Send + Sync + ComplexField> Ilu0<T> {
     }
 }
 
+impl<T: num_traits::Float + Send + Sync + faer::traits::ComplexField> Default for Ilu0<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Float + Send + Sync + ComplexField> Preconditioner<Mat<T>, Vec<T>> for Ilu0<T> {
     fn setup(&mut self, a: &Mat<T>) -> Result<(), KError> {
         let (n, _) = (a.nrows(), a.ncols());

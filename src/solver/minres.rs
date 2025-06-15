@@ -61,16 +61,18 @@ where
         let mut beta_next;
         let mut c_prev = T::one(); // c_0 = 1
         let mut s_prev = T::zero(); // s_0 = 0
-        let mut c = T::one();
-        let mut s = T::zero();
-        let mut phi = beta1; // phi_0 = beta1
-        let mut phi_bar = T::zero(); // phi_bar_0 = 0
         let mut rho_bar = beta1; // rho_bar_0 = beta1
         let mut rho;
-        let mut delta_prev = T::zero();
-        let mut epsilon_prev = T::zero();
-        let mut delta;
-        let mut epsilon;
+        #[allow(unused_assignments)]
+        let mut delta = T::zero();
+        #[allow(unused_assignments)]
+        let mut epsilon = T::zero();
+        let mut _delta_prev = T::zero(); // Unused, suppress warning
+        let mut _epsilon_prev = T::zero(); // Unused, suppress warning
+        let mut phi = beta1; // Initial residual norm
+        let mut phi_bar;
+        let mut c;
+        let mut s;
 
         let mut stats = SolveStats {
             iterations: 0,
@@ -162,8 +164,8 @@ where
             rho_bar = -s * beta_next;
             c_prev = c;
             s_prev = s;
-            delta_prev = delta;
-            epsilon_prev = epsilon;
+            _delta_prev = delta;
+            _epsilon_prev = epsilon;
 
             // Track best residual & solution
             if phi_bar.abs() < phi_min {

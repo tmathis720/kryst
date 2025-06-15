@@ -57,10 +57,9 @@ where
         }
         let mut rho_prev = rho;
         let _beta = T::zero();
-        let mut alpha = T::zero();
+        // let mut alpha = T::zero(); // Unused
         
         // search directions and temporary buffers
-        let mut v = V::from(vec![T::zero(); n]);
         let mut w = V::from(vec![T::zero(); n]);
         let mut p = V::from(vec![T::zero(); n]);
         let mut q = V::from(vec![T::zero(); n]);
@@ -71,7 +70,7 @@ where
         let mut x_out = V::from(vec![T::zero(); n]);
         let mut theta = T::zero();
         let mut eta = T::one();
-        let mut epsilon = T::zero();
+        // let mut epsilon = T::zero(); // Unused
 
         let norm_r0 = ip.norm(&r);
         let mut stats = SolveStats { iterations: 0, final_residual: norm_r0, converged: false };
@@ -82,18 +81,17 @@ where
                 // v1 = r0 / rho
                 let inv_rho = T::one() / rho.sqrt();
                 for i in 0..n {
-                    v.as_mut()[i] = r.as_ref()[i] * inv_rho;
                     w.as_mut()[i] = r_tld.as_ref()[i] * inv_rho;
                 }
-                u = v.clone();
-                p = v.clone();
+                u = w.clone();
+                p = w.clone();
             } else {
                 // rho = <r_tld, r>
                 rho = ip.dot(&r_tld, &r);
                 let beta_j = rho / rho_prev;
                 // u = v + beta_j * q
                 for i in 0..n {
-                    u.as_mut()[i] = v.as_ref()[i] + beta_j * q.as_ref()[i];
+                    u.as_mut()[i] = w.as_ref()[i] + beta_j * q.as_ref()[i];
                 }
                 // p = u + beta_j * (q + beta_j * p)
                 for i in 0..n {
@@ -107,12 +105,12 @@ where
             let mut ap = V::from(vec![T::zero(); n]);
             a.matvec(&p, &mut ap);
             // alpha = <w, A p>
-            alpha = ip.dot(&w, &ap);
+            let alpha = ip.dot(&w, &ap);
             if alpha == T::zero() { break; }
             
             // update q = ap - alpha * v
             for i in 0..n {
-                q.as_mut()[i] = ap.as_ref()[i] - alpha * v.as_ref()[i];
+                q.as_mut()[i] = ap.as_ref()[i] - alpha * w.as_ref()[i];
             }
             // update d and solution vector
             // compute theta, epsilon, eta as in Saad
@@ -120,7 +118,7 @@ where
             theta = q.as_ref().iter().map(|&qi| qi * qi).sum::<T>().sqrt();
             let c = theta_prev / (alpha.sqrt() * theta_prev.hypot(alpha));
             let s = alpha / (alpha.sqrt() * theta_prev.hypot(alpha));
-            epsilon = s * theta_prev;
+            let epsilon = s * theta_prev;
             eta = c * eta;
             
             // d = u - epsilon * d
@@ -147,7 +145,7 @@ where
 
             // shift variables for next iter
             rho_prev = rho;
-            v = q.clone();
+            w = q.clone();
             // dual updates omitted...
         }
 

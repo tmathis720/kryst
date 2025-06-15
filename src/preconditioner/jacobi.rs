@@ -17,6 +17,12 @@ impl<T: Float> Jacobi<T> {
     }
 }
 
+impl<T: num_traits::Float> Default for Jacobi<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<M, V, T> Preconditioner<M, V> for Jacobi<T>
 where
     M: MatVec<V> + Indexing,

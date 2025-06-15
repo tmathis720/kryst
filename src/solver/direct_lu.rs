@@ -44,6 +44,12 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     }
 }
 
+impl<T: faer::traits::ComplexField + faer::traits::RealField> Default for LuSolver<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // QR solver
 pub struct QrSolver;
 
@@ -72,6 +78,12 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     }
 }
 
+impl Default for QrSolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +107,7 @@ mod tests {
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
-            assert!((*xi as f64 - *ei as f64).abs() < tol, "xi = {}, expected = {}", xi, ei);
+            assert!((f64::from(*xi) - f64::from(*ei)).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
         assert!(stats.converged);
     }
@@ -117,7 +129,7 @@ mod tests {
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
-            assert!((*xi as f64 - *ei as f64).abs() < tol, "xi = {}, expected = {}", xi, ei);
+            assert!((f64::from(*xi) - f64::from(*ei)).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
         assert!(stats.converged);
     }

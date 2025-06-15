@@ -31,18 +31,19 @@ where
 }
 
 /// Apply Chebyshev polynomial filter of degree m to r: z = p_m(A) r
-pub fn apply_chebyshev<M, T>(a: &M, r: &Vec<T>, z: &mut Vec<T>, alpha: T, beta: T, m: usize)
+#[allow(clippy::ptr_arg)]
+pub fn apply_chebyshev<M, T>(a: &M, r: &Vec<T>, z: &mut [T], alpha: T, beta: T, m: usize)
 where
     T: num_traits::Float + Clone,
     M: MatVec<Vec<T>>,
 {
     if (beta - alpha).abs() < T::epsilon() {
         // Degenerate interval: just copy r to z
-        z.copy_from_slice(&r);
+        z.copy_from_slice(r);
         return;
     }
     let n = r.len();
-    let mut v0 = r.clone();
+    let mut v0 = r.to_vec();
     let mut v1 = vec![T::zero(); n];
     let mut v2 = vec![T::zero(); n];
     let c = (beta + alpha) / T::from(2.0).unwrap();
