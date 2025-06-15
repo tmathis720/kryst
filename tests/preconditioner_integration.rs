@@ -1,7 +1,6 @@
 use kryst::preconditioner::{Preconditioner, Jacobi, Ilu0};
 use kryst::solver::{PcgSolver, GmresSolver, LinearSolver};
 use kryst::solver::gmres::Preconditioning;
-use kryst::fgmres::FgmresSolver;
 use faer::Mat;
 
 fn spd_matrix(n: usize) -> (Mat<f64>, Vec<f64>, Vec<f64>) {

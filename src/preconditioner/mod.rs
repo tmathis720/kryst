@@ -24,6 +24,7 @@ pub mod amg;
 pub mod ilut;
 pub mod ilup;
 pub mod chebyshev;
+pub mod approxinv;
 
 pub use jacobi::Jacobi;
 pub use sor::Sor;
@@ -32,6 +33,7 @@ pub use amg::AMG;
 pub use ilut::Ilut;
 pub use ilup::Ilup;
 pub use chebyshev::Chebyshev;
+pub use approxinv::ApproxInv;
 pub use self::sor::MatSorType;
 
 /// Unified preconditioner enum for all supported types.
@@ -42,14 +44,14 @@ pub enum PC<T> {
     Ilup { fill: usize },
     Ilut { fill: usize, droptol: T },
     Chebyshev { degree: usize, emin: Option<T>, emax: Option<T> },
-    ApproxInv { tol: T, pattern: PatternChoice },
+    ApproxInv { pattern: SparsityPattern, tol: T, max_iter: usize },
     BlockJacobi { blocks: Vec<Vec<usize>> },
     Multicolor { colors: Vec<usize> },
     AMG,
 }
 
-/// Pattern choice for approximate inverse preconditioners.
-pub enum PatternChoice {
+/// Sparsity pattern for approximate inverse preconditioners.
+pub enum SparsityPattern {
     Auto,
-    User(Vec<Vec<usize>>),
+    Manual(Vec<Vec<usize>>), // for each row, the list of column indices
 }

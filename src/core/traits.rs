@@ -27,3 +27,9 @@ pub trait MatShape {
     fn nrows(&self) -> usize;
     fn ncols(&self) -> usize;
 }
+
+/// Trait for extracting the sparsity pattern of a matrix row.
+pub trait RowPattern {
+    /// Returns the column indices of nonzeros in row i.
+    fn row_indices(&self, i: usize) -> &[usize];
+}
