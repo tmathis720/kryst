@@ -60,7 +60,7 @@ where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
     V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64>,
+    T: num_traits::Float + Clone + From<f64> + Send + Sync,
 {
     type Error = KError;
     type Scalar = T;
@@ -94,12 +94,22 @@ where
             let mut ap = V::from(vec![T::zero(); n]);
             a.matvec(&p.clone(), &mut ap);
             let p_dot_ap = if self.single_reduction {
-                // Fused dot product: p^T A p (before r update)
-                let mut p_dot_ap = T::zero();
-                for i in 0..n {
-                    p_dot_ap = p_dot_ap + p.as_ref()[i] * ap.as_ref()[i];
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    p.as_ref().par_iter()
+                        .zip(ap.as_ref().par_iter())
+                        .map(|(&pi, &api)| pi * api)
+                        .reduce(|| T::zero(), |acc, v| acc + v)
                 }
-                p_dot_ap
+                #[cfg(not(feature = "rayon"))]
+                {
+                    let mut p_dot_ap = T::zero();
+                    for i in 0..n {
+                        p_dot_ap = p_dot_ap + p.as_ref()[i] * ap.as_ref()[i];
+                    }
+                    p_dot_ap
+                }
             } else {
                 ip.dot(&p, &ap)
             };
@@ -118,10 +128,19 @@ where
                 let p_norm = ip.dot(&p, &p).sqrt();
                 let x_norm = ip.dot(&V::from(x_vec.clone()), &V::from(x_vec.clone())).sqrt();
                 if x_norm + alpha.abs() * p_norm > radius {
-                    // Step would exceed trust region: take as much as possible
                     let max_step = (radius - x_norm) / p_norm;
-                    for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                        *xj = *xj + max_step * *pj;
+                    #[cfg(feature = "rayon")]
+                    {
+                        use rayon::prelude::*;
+                        x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
+                            *xj = *xj + max_step * pj;
+                        });
+                    }
+                    #[cfg(not(feature = "rayon"))]
+                    {
+                        for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
+                            *xj = *xj + max_step * *pj;
+                        }
                     }
                     *x = V::from(x_vec.clone());
                     let res_norm_tr = ip.dot(&r, &r).sqrt();
@@ -131,11 +150,24 @@ where
                     return Ok(stats);
                 }
             }
-            for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                *xj = *xj + alpha * *pj;
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
+                    *xj = *xj + alpha * pj;
+                });
+                r.as_mut().par_iter_mut().zip(ap.as_ref().par_iter()).for_each(|(rj, &apj)| {
+                    *rj = *rj - alpha * apj;
+                });
             }
-            for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
-                *rj = *rj - alpha * *apj;
+            #[cfg(not(feature = "rayon"))]
+            {
+                for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
+                    *xj = *xj + alpha * *pj;
+                }
+                for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
+                    *rj = *rj - alpha * *apj;
+                }
             }
             let rsq_new = ip.dot(&r, &r);
             res_norm = match self.norm_type {
@@ -185,8 +217,18 @@ where
                 return Ok(stats);
             }
             let beta = rsq_new / rsq;
-            for (pj, rj) in p.as_mut().iter_mut().zip(r.as_ref()) {
-                *pj = *rj + beta * *pj;
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                p.as_mut().par_iter_mut().zip(r.as_ref().par_iter()).for_each(|(pj, &rj)| {
+                    *pj = rj + beta * *pj;
+                });
+            }
+            #[cfg(not(feature = "rayon"))]
+            {
+                for (pj, rj) in p.as_mut().iter_mut().zip(r.as_ref()) {
+                    *pj = *rj + beta * *pj;
+                }
             }
             rsq = rsq_new;
         }

@@ -32,8 +32,8 @@ impl<M, V, T> KspContext<M, V, T>
 where
     M: 'static + crate::core::traits::MatVec<V> + crate::core::traits::MatTransVec<V> + std::fmt::Debug,
     (): crate::core::traits::InnerProduct<V, Scalar = T>,
-    V: 'static + AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone + std::fmt::Debug,
-    T: 'static + num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::iter::Sum + num_traits::FromPrimitive,
+    V: 'static + AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone + std::fmt::Debug + Send + Sync,
+    T: 'static + num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::iter::Sum + num_traits::FromPrimitive + Send + Sync,
 {
     pub fn solve_context(&mut self, b: &V, x: &mut V) -> Result<crate::utils::convergence::SolveStats<T>, crate::error::KError> {
         match self.kind {

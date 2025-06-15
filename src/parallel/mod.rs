@@ -136,3 +136,8 @@ impl Comm for UniverseComm {
 
 #[cfg(all(not(feature = "mpi")))]
 pub trait Equivalence {}
+
+pub enum ReduceOp {
+    Sum,
+    // Add more as needed
+}

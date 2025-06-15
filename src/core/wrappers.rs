@@ -56,20 +56,44 @@ impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
     }
 }
 
-impl<T: Float + From<f64>> InnerProduct<Vec<T>> for () {
+impl<T: Float + From<f64> + Send + Sync> InnerProduct<Vec<T>> for () {
     type Scalar = T;
     fn dot(&self, x: &Vec<T>, y: &Vec<T>) -> T {
         assert_eq!(x.len(), y.len());
-        x.iter()
-            .zip(y.iter())
-            .map(|(xi, yi)| *xi * *yi)
-            .fold(T::zero(), |acc, v| acc + v)
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            x.as_slice()
+                .par_iter()
+                .zip(y.as_slice().par_iter())
+                .map(|(xi, yi)| *xi * *yi)
+                .reduce(|| T::zero(), |acc, v| acc + v)
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            x.iter()
+                .zip(y.iter())
+                .map(|(xi, yi)| *xi * *yi)
+                .fold(T::zero(), |acc, v| acc + v)
+        }
     }
     fn norm(&self, x: &Vec<T>) -> T {
-        x.iter()
-            .map(|xi| *xi * *xi)
-            .fold(T::zero(), |acc, v| acc + v)
-            .sqrt()
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            x.as_slice()
+                .par_iter()
+                .map(|xi| *xi * *xi)
+                .reduce(|| T::zero(), |acc, v| acc + v)
+                .sqrt()
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            x.iter()
+                .map(|xi| *xi * *xi)
+                .fold(T::zero(), |acc, v| acc + v)
+                .sqrt()
+        }
     }
 }
 
