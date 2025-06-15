@@ -99,7 +99,7 @@ where
                     }
                     let xi = x.as_ref()[i];
                     let yi = (xi - sigma) * self.inv_diag[i];
-                    y.as_mut()[i] = (T::one()-self.omega)*xi + self.omega*yi;
+                    y.as_mut()[i] = yi;
                 }
             }
             // BACKWARD sweep

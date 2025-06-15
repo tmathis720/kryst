@@ -15,6 +15,18 @@ impl<T: ComplexField + RealField> LuSolver<T> {
     pub fn new() -> Self {
         LuSolver { factor: None }
     }
+
+    /// Solve using the cached factorization (must have called solve/factorize before)
+    pub fn solve_cached(&self, b: &[T], x: &mut [T]) {
+        if let Some(factor) = &self.factor {
+            let n = b.len();
+            x.clone_from_slice(b);
+            let x_mat = MatMut::from_column_major_slice_mut(x, n, 1);
+            factor.solve_in_place_with_conj(Conj::No, x_mat);
+        } else {
+            panic!("LuSolver: solve_cached called before factorization");
+        }
+    }
 }
 
 impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<Mat<T>, Vec<T>> for LuSolver<T> {

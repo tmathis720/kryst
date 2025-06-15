@@ -66,6 +66,53 @@ impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> 
     }
 }
 
+use crate::core::traits::SubmatrixExtract;
+
+impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SubmatrixExtract for CsrMatrix<T> {
+    fn submatrix(&self, indices: &[usize]) -> Self {
+        let dense = self.inner.to_dense();
+        let n = indices.len();
+        let sub = faer::Mat::from_fn(n, n, |i, j| dense[(indices[i], indices[j])]);
+        // Convert dense submatrix to CSR (inefficient fallback)
+        let mut row_ptr = vec![0; n + 1];
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                let v = sub[(i, j)];
+                if v != T::zero() {
+                    col_idx.push(j);
+                    values.push(v);
+                }
+            }
+            row_ptr[i + 1] = col_idx.len();
+        }
+        CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
+    }
+}
+
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+#[cfg(feature = "rayon")]
+use rayon::iter::IntoParallelRefMutIterator;
+
+#[cfg(feature = "rayon")]
+impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero + Send + Sync> CsrMatrix<T> {
+    /// Parallel SpMV using Rayon
+    pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
+        assert_eq!(x.len(), self.ncols());
+        assert_eq!(y.len(), self.nrows());
+        let dense = self.inner.to_dense();
+        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+            let mut sum = T::zero();
+            for j in 0..self.ncols() {
+                sum = sum + dense[(i, j)] * x[j];
+            }
+            *yi = sum;
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

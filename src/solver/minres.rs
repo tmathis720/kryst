@@ -193,6 +193,7 @@ mod tests {
     use crate::core::traits::MatVec;
 
     #[derive(Clone)]
+    #[allow(dead_code)]
     struct DenseSymMat {
         data: Vec<Vec<f64>>,
     }

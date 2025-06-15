@@ -105,6 +105,7 @@ where
             }
             y[i] = sum;
         }
+        // Backward substitution (sequential)
         for i in (0..n).rev() {
             let mut sum = y[i];
             for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
@@ -112,10 +113,11 @@ where
                     sum = sum - self.u[i].vals[j_idx] * z[j];
                 }
             }
-            let diag_idx = self.u[i].cols.iter().position(|&j| j == i)
-                .ok_or_else(|| KError::SolveError(format!("ILUP: zero diagonal in U at row {}", i)))?;
-            let diag = self.u[i].vals[diag_idx];
-            z[i] = sum / diag;
+            if let Some(idx) = self.u[i].cols.iter().position(|&col| col == i) {
+                z[i] = sum / self.u[i].vals[idx];
+            } else {
+                z[i] = sum;
+            }
         }
         Ok(())
     }

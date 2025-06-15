@@ -1,6 +1,6 @@
 // Wrappers for faer::Mat, faer::MatRef, sparse types
 
-use crate::core::traits::{Indexing, InnerProduct, MatVec};
+use crate::core::traits::{Indexing, InnerProduct, MatTransVec, MatVec};
 use faer::{Mat, MatRef};
 use num_traits::Float;
 
@@ -25,6 +25,32 @@ impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
             y[i] = T::zero();
             for j in 0..self.ncols() {
                 y[i] = y[i] + self[(i, j)] * x[j];
+            }
+        }
+    }
+}
+
+impl<T: Float> MatTransVec<Vec<T>> for Mat<T> {
+    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+        assert_eq!(self.ncols(), y.len());
+        assert_eq!(self.nrows(), x.len());
+        for j in 0..self.ncols() {
+            y[j] = T::zero();
+            for i in 0..self.nrows() {
+                y[j] = y[j] + self[(i, j)] * x[i];
+            }
+        }
+    }
+}
+
+impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
+    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+        assert_eq!(self.ncols(), y.len());
+        assert_eq!(self.nrows(), x.len());
+        for j in 0..self.ncols() {
+            y[j] = T::zero();
+            for i in 0..self.nrows() {
+                y[j] = y[j] + self[(i, j)] * x[i];
             }
         }
     }

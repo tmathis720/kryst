@@ -34,7 +34,7 @@ where
 #[allow(clippy::ptr_arg)]
 pub fn apply_chebyshev<M, T>(a: &M, r: &Vec<T>, z: &mut [T], alpha: T, beta: T, m: usize)
 where
-    T: num_traits::Float + Clone,
+    T: num_traits::Float + Clone + Send + Sync,
     M: MatVec<Vec<T>>,
 {
     if (beta - alpha).abs() < T::epsilon() {
@@ -68,8 +68,18 @@ where
         std::mem::swap(&mut v0, &mut v1);
         std::mem::swap(&mut v1, &mut v2);
     }
-    for i in 0..n {
-        z[i] = tau * v1[i];
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        z.par_iter_mut().enumerate().for_each(|(i, zi)| {
+            *zi = tau * v1[i];
+        });
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        for i in 0..n {
+            z[i] = tau * v1[i];
+        }
     }
 }
 

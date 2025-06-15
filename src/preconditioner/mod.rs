@@ -21,6 +21,7 @@ pub mod ilu;
 pub mod jacobi;
 pub mod sor;
 pub mod amg;
+pub mod asm;
 pub mod ilut;
 pub mod ilup;
 pub mod chebyshev;
@@ -30,6 +31,7 @@ pub use jacobi::Jacobi;
 pub use sor::Sor;
 pub use ilu::Ilu0;
 pub use amg::AMG;
+pub use asm::AdditiveSchwarz;
 pub use ilut::Ilut;
 pub use ilup::Ilup;
 pub use chebyshev::Chebyshev;
@@ -48,6 +50,7 @@ pub enum PC<T> {
     BlockJacobi { blocks: Vec<Vec<usize>> },
     Multicolor { colors: Vec<usize> },
     AMG,
+    AdditiveSchwarz,
 }
 
 /// Sparsity pattern for approximate inverse preconditioners.

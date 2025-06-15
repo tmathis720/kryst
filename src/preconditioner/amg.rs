@@ -2,7 +2,10 @@
 // use crate::core::traits::{InnerProduct, MatVec}; // Remove unused imports
 use crate::preconditioner::Preconditioner;
 use faer::Mat;
+#[cfg(feature = "rayon")]
 use rayon::prelude::*;
+#[cfg(feature = "rayon")]
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
 use std::sync::{Arc, Mutex};
 
 pub struct AMG {
@@ -80,17 +83,34 @@ impl AMG {
     fn extract_diagonal_inverse(m: &Mat<f64>) -> Vec<f64> {
         assert_eq!(m.nrows(), m.ncols());
         let n = m.nrows();
-        (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let d = m[(i, i)];
-                if d.abs() < 1e-14 {
-                    0.0
-                } else {
-                    1.0 / d
-                }
-            })
-            .collect()
+        #[cfg(feature = "rayon")]
+        {
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let d = m[(i, i)];
+                    if d.abs() < 1e-14 {
+                        0.0
+                    } else {
+                        1.0 / d
+                    }
+                })
+                .collect()
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            (0..n)
+                .into_iter()
+                .map(|i| {
+                    let d = m[(i, i)];
+                    if d.abs() < 1e-14 {
+                        0.0
+                    } else {
+                        1.0 / d
+                    }
+                })
+                .collect()
+        }
     }
     fn smooth_jacobi_parallel(a: &Mat<f64>, diag_inv: &[f64], r: &[f64], z: &mut [f64], iterations: usize) {
         let n = r.len();
@@ -98,10 +118,20 @@ impl AMG {
         let mut temp = vec![0.0; n];
         for _ in 0..iterations {
             parallel_mat_vec(a, &z_vec, &mut temp);
-            temp.par_iter_mut().enumerate().for_each(|(i, val)| {
-                *val = r[i] - *val;
-            });
-            z_vec.par_iter_mut().enumerate().for_each(|(i, val)| *val += diag_inv[i] * temp[i]);
+            #[cfg(feature = "rayon")]
+            {
+                temp.par_iter_mut().enumerate().for_each(|(i, val)| {
+                    *val = r[i] - *val;
+                });
+                z_vec.par_iter_mut().enumerate().for_each(|(i, val)| *val += diag_inv[i] * temp[i]);
+            }
+            #[cfg(not(feature = "rayon"))]
+            {
+                temp.iter_mut().enumerate().for_each(|(i, val)| {
+                    *val = r[i] - *val;
+                });
+                z_vec.iter_mut().enumerate().for_each(|(i, val)| *val += diag_inv[i] * temp[i]);
+            }
         }
         z.copy_from_slice(&z_vec);
     }
@@ -195,23 +225,42 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
 /// Anisotropy is defined as the ratio max_off_diag/diag.
 fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
     let n = a.nrows();
-
-    (0..n)
-        .into_par_iter() // Parallel iterator
-        .map(|i| {
-            let diag = a[(i, i)];
-            let max_off_diag = (0..n)
-                .filter(|&j| i != j) // Exclude the diagonal element
-                .map(|j| a[(i, j)].abs()) // Compute absolute value of off-diagonal elements
-                .fold(0.0, f64::max); // Find the maximum off-diagonal element
-
-            if diag.abs() > 1e-14 {
-                max_off_diag / diag.abs()
-            } else {
-                0.0
-            }
-        })
-        .collect()
+    #[cfg(feature = "rayon")]
+    {
+        (0..n)
+            .into_par_iter() // Parallel iterator
+            .map(|i| {
+                let diag = a[(i, i)];
+                let max_off_diag = (0..n)
+                    .filter(|&j| i != j) // Exclude the diagonal element
+                    .map(|j| a[(i, j)].abs()) // Compute absolute value of off-diagonal elements
+                    .fold(0.0, f64::max); // Find the maximum off-diagonal element
+                if diag.abs() > 1e-14 {
+                    max_off_diag / diag.abs()
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        (0..n)
+            .into_iter()
+            .map(|i| {
+                let diag = a[(i, i)];
+                let max_off_diag = (0..n)
+                    .filter(|&j| i != j)
+                    .map(|j| a[(i, j)].abs())
+                    .fold(0.0, f64::max);
+                if diag.abs() > 1e-14 {
+                    max_off_diag / diag.abs()
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
 }
 
 /// Compute an adaptive threshold based on global anisotropy indicators.
@@ -229,16 +278,29 @@ fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
 fn smooth_interpolation(interpolation: &mut Mat<f64>, matrix: &Mat<f64>, weight: f64) {
     let row_count = interpolation.nrows().min(matrix.nrows());
     let col_count = interpolation.ncols().min(matrix.ncols());
-
     let interpolation = Arc::new(Mutex::new(interpolation));
-    (0..col_count).into_par_iter().for_each(|j| {
-        for i in 0..row_count {
-            let mut interpolation = interpolation.lock().unwrap();
-            let old_val = interpolation[(i, j)];
-            let diff = weight * matrix[(i, j)];
-            interpolation[(i, j)] = old_val - diff;
-        }
-    });
+    #[cfg(feature = "rayon")]
+    {
+        (0..col_count).into_par_iter().for_each(|j| {
+            for i in 0..row_count {
+                let mut interpolation = interpolation.lock().unwrap();
+                let old_val = interpolation[(i, j)];
+                let diff = weight * matrix[(i, j)];
+                interpolation[(i, j)] = old_val - diff;
+            }
+        });
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        (0..col_count).into_iter().for_each(|j| {
+            for i in 0..row_count {
+                let mut interpolation = interpolation.lock().unwrap();
+                let old_val = interpolation[(i, j)];
+                let diff = weight * matrix[(i, j)];
+                interpolation[(i, j)] = old_val - diff;
+            }
+        });
+    }
     let _interpolation = Arc::try_unwrap(interpolation).expect("Failed to unwrap Arc").into_inner().unwrap();
 }
 
@@ -247,7 +309,7 @@ fn smooth_interpolation(interpolation: &mut Mat<f64>, matrix: &Mat<f64>, weight:
 fn minimize_energy(interpolation: &mut Mat<f64>, _matrix: &Mat<f64>) {
     let rows = interpolation.nrows();
     let cols = interpolation.ncols();
-    // Step 1: In parallel, compute normalized rows
+    #[cfg(feature = "rayon")]
     let normalized_rows: Vec<Vec<f64>> = (0..rows).into_par_iter().map(|i| {
         let mut row_vec: Vec<f64> = (0..cols).map(|j| interpolation[(i, j)]).collect();
         let row_sum: f64 = row_vec.iter().map(|&val| val * val).sum();
@@ -261,7 +323,20 @@ fn minimize_energy(interpolation: &mut Mat<f64>, _matrix: &Mat<f64>) {
         }
         row_vec
     }).collect();
-    // Step 2: Sequentially write back
+    #[cfg(not(feature = "rayon"))]
+    let normalized_rows: Vec<Vec<f64>> = (0..rows).into_iter().map(|i| {
+        let mut row_vec: Vec<f64> = (0..cols).map(|j| interpolation[(i, j)]).collect();
+        let row_sum: f64 = row_vec.iter().map(|&val| val * val).sum();
+        let norm_factor = if row_sum.abs() > 1e-14 {
+            row_sum.sqrt()
+        } else {
+            1.0
+        };
+        for val in row_vec.iter_mut() {
+            *val /= norm_factor;
+        }
+        row_vec
+    }).collect();
     for i in 0..rows {
         for j in 0..cols {
             interpolation[(i, j)] = normalized_rows[i][j];
@@ -279,14 +354,28 @@ fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) {
     assert_eq!(rows, rlen, "Dimension mismatch in parallel_mat_vec!\n \
          Matrix is {}x{}, but result length is {}.\n \
          (Matrix rows must match result length.)", rows, cols, rlen);
-    result
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, res)| {
-            *res = (0..cols)
-                .map(|j| mat[(i, j)] * vec[j])
-                .sum();
-        });
+    #[cfg(feature = "rayon")]
+    {
+        result
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, res)| {
+                *res = (0..cols)
+                    .map(|j| mat[(i, j)] * vec[j])
+                    .sum();
+            });
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        result
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, res)| {
+                *res = (0..cols)
+                    .map(|j| mat[(i, j)] * vec[j])
+                    .sum();
+            });
+    }
 }
 
 
@@ -297,7 +386,7 @@ fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) {
 fn compute_strength_matrix(a: &Mat<f64>, threshold: f64) -> Mat<f64> {
     let n = a.nrows();
     let mut s = Mat::<f64>::zeros(n, n);
-
+    #[cfg(feature = "rayon")]
     let updates: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
@@ -320,11 +409,32 @@ fn compute_strength_matrix(a: &Mat<f64>, threshold: f64) -> Mat<f64> {
                 .collect::<Vec<_>>()
         })
         .collect();
-
+    #[cfg(not(feature = "rayon"))]
+    let updates: Vec<(usize, usize, f64)> = (0..n)
+        .into_iter()
+        .flat_map(|i| {
+            let a_ii = a[(i, i)].abs();
+            (0..n)
+                .filter_map(move |j| {
+                    if i == j {
+                        return Some((i, j, 0.0));
+                    }
+                    let val = a[(i, j)];
+                    let a_jj = a[(j, j)].abs();
+                    if a_ii > 1e-14 && a_jj > 1e-14 {
+                        let strength = val.abs() / (a_ii * a_jj).sqrt();
+                        if strength > threshold {
+                            return Some((i, j, strength));
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
     for (i, j, value) in updates {
         s[(i, j)] = value;
     }
-
     s
 }
 
@@ -445,11 +555,20 @@ fn build_coarse_graph(s: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
 
 /// Remap second pass aggregates to fine-level nodes.
 fn remap_aggregates(first_pass: &[usize], second_pass: &[usize]) -> Vec<usize> {
-    // Preallocate memory and use parallel iterator for improved performance
-    first_pass
-        .par_iter()
-        .map(|&coarse_agg| second_pass[coarse_agg])
-        .collect()
+    #[cfg(feature = "rayon")]
+    {
+        first_pass
+            .par_iter()
+            .map(|&coarse_agg| second_pass[coarse_agg])
+            .collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        first_pass
+            .iter()
+            .map(|&coarse_agg| second_pass[coarse_agg])
+            .collect()
+    }
 }
 
 /// Construct the prolongation matrix P from the aggregate assignments.
@@ -459,15 +578,21 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
     let n = a.nrows();
     let max_agg_id = *aggregates.iter().max().unwrap();
     let coarse_n = max_agg_id + 1;
-
     let p = Arc::new(Mutex::new(Mat::<f64>::zeros(n, coarse_n)));
-
-    // Use parallel iterator to populate the matrix
-    aggregates.par_iter().enumerate().for_each(|(i, &agg_id)| {
-        let mut p = p.lock().unwrap();
-        p[(i, agg_id)] = 1.0;
-    });
-
+    #[cfg(feature = "rayon")]
+    {
+        aggregates.par_iter().enumerate().for_each(|(i, &agg_id)| {
+            let mut p = p.lock().unwrap();
+            p[(i, agg_id)] = 1.0;
+        });
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        aggregates.iter().enumerate().for_each(|(i, &agg_id)| {
+            let mut p = p.lock().unwrap();
+            p[(i, agg_id)] = 1.0;
+        });
+    }
     Arc::try_unwrap(p).expect("Failed to unwrap Arc").into_inner().unwrap()
 }
 

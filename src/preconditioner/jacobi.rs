@@ -52,8 +52,18 @@ where
     fn apply(&self, x: &V, y: &mut V) -> Result<(), KError> {
         let x_ref = x.as_ref();
         let y_mut = y.as_mut();
-        for i in 0..x_ref.len() {
-            y_mut[i] = self.inv_diag[i] * x_ref[i];
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            y_mut.par_iter_mut().enumerate().for_each(|(i, yval)| {
+                *yval = self.inv_diag[i] * x_ref[i];
+            });
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            for i in 0..x_ref.len() {
+                y_mut[i] = self.inv_diag[i] * x_ref[i];
+            }
         }
         Ok(())
     }

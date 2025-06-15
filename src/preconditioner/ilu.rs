@@ -79,9 +79,8 @@ impl<T: Float + Send + Sync + ComplexField> Preconditioner<Mat<T>, Vec<T>> for I
             for j in (i+1)..n {
                 y1[i] = y1[i] - self.u[(i, j)] * y1[j];
             }
-            y1[i] = y1[i] / self.u[(i, i)];
         }
-        *y = y1;
+        y.copy_from_slice(&y1);
         Ok(())
     }
 }

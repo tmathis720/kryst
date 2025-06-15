@@ -6,6 +6,12 @@ pub trait MatVec<V> {
     fn matvec(&self, x: &V, y: &mut V);
 }
 
+/// Matrix–transpose–vector product: y ← Aᵗ x.
+pub trait MatTransVec<V> {
+    /// Compute y = Aᵗ · x.
+    fn mattransvec(&self, x: &V, y: &mut V);
+}
+
 /// Inner products & norms.
 pub trait InnerProduct<V> {
     /// Associated scalar type.
@@ -32,4 +38,16 @@ pub trait MatShape {
 pub trait RowPattern {
     /// Returns the column indices of nonzeros in row i.
     fn row_indices(&self, i: usize) -> &[usize];
+}
+
+/// Trait for extracting elements from a matrix.
+pub trait MatrixGet<T> {
+    /// Get the element at position (i, j).
+    fn get(&self, i: usize, j: usize) -> T;
+}
+
+/// Trait for extracting a submatrix by index set (for block/ASM preconditioners).
+pub trait SubmatrixExtract {
+    /// Returns the submatrix with rows and columns given by `indices`.
+    fn submatrix(&self, indices: &[usize]) -> Self;
 }

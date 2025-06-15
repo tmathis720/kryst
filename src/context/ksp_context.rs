@@ -30,10 +30,10 @@ pub struct KspContext<M, V, T> {
 
 impl<M, V, T> KspContext<M, V, T>
 where
-    M: 'static + crate::core::traits::MatVec<V> + std::fmt::Debug,
+    M: 'static + crate::core::traits::MatVec<V> + crate::core::traits::MatTransVec<V> + std::fmt::Debug,
     (): crate::core::traits::InnerProduct<V, Scalar = T>,
     V: 'static + AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone + std::fmt::Debug,
-    T: 'static + num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::iter::Sum,
+    T: 'static + num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::iter::Sum + num_traits::FromPrimitive,
 {
     pub fn solve_context(&mut self, b: &V, x: &mut V) -> Result<crate::utils::convergence::SolveStats<T>, crate::error::KError> {
         match self.kind {
@@ -69,8 +69,7 @@ where
                 solver.solve(&self.a, self.pc.as_deref(), b, x)
             }
             SolverKind::Qmr => {
-                let mut solver = crate::solver::qmr::QmrSolver::new(self.tol, self.max_it);
-                solver.solve(&self.a, self.pc.as_deref(), b, x)
+                return self.solve_qmr(b, x);
             }
             SolverKind::Tfqmr => {
                 let mut solver = crate::solver::tfqmr::TfqmrSolver::new(self.tol, self.max_it);
@@ -85,5 +84,13 @@ where
                 solver.solve(&self.a, self.pc.as_deref(), b, x)
             }
         }
+    }
+    #[allow(unused)]
+    fn solve_qmr(&mut self, b: &V, x: &mut V) -> Result<crate::utils::convergence::SolveStats<T>, crate::error::KError>
+    where
+        M: crate::core::traits::MatTransVec<V>,
+    {
+        let mut solver = crate::solver::qmr::QmrSolver::new(self.tol, self.max_it);
+        solver.solve(&self.a, self.pc.as_deref(), b, x)
     }
 }

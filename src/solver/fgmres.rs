@@ -123,6 +123,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         let res_norm = beta;
         let mut stats = SolveStats { iterations: 0, final_residual: res_norm, converged: false };
         let mut pc_mut = pc;
+        #[allow(unused_labels)]
         'outer: while total_iters < max_iters {
             let m = if self.preallocate { max_iters.min(restart) } else { restart.min(max_iters - total_iters) };
             // If not enough storage, grow by delta_allocate
@@ -156,7 +157,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             let mut res_norm = s[0].abs();
             let mut converged = false;
             let mut arnoldi_steps = m;
-            for j in 0..m {
+            'arnoldi: for j in 0..m {
                 // (a) Precondition: z_basis[j] = M.apply(v_basis[j])
                 z_basis[j] = v_basis[j].clone();
                 if let Some(ref mut pc) = pc_mut {
@@ -248,7 +249,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     stats.iterations = total_iters;
                     arnoldi_steps = j + 1; // Only j+1 Arnoldi steps performed
                     converged = true;
-                    break 'outer;
+                    break 'arnoldi;
                 }
             }
             // (4) Back-substitute and update x
