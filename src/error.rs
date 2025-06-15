@@ -8,4 +8,8 @@ pub enum KError {
     FactorError(String),
     #[error("solve error: {0}")]
     SolveError(String),
+    #[error("indefinite matrix detected (p^T A p <= 0)")]
+    IndefiniteMatrix,
+    #[error("indefinite preconditioner detected (beta < 0)")]
+    IndefinitePreconditioner,
 }

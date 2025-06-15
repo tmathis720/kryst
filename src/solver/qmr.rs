@@ -33,7 +33,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&dyn Preconditioner<M, V>>,
+        _pc: Option<&dyn Preconditioner<M, V>>,
         b: &V,
         x: &mut V,
     ) -> Result<SolveStats<T>, KError> {
@@ -48,7 +48,7 @@ where
             r.as_mut()[i] = b.as_ref()[i] - r.as_ref()[i];
         }
         // choose r_tld = r (no preconditioning in this basic stub)
-        let mut r_tld = r.clone();
+        let r_tld = r.clone();
 
         // bi-Lanczos scalars
         let mut rho = ip.dot(&r_tld, &r);
@@ -56,7 +56,7 @@ where
             return Ok(SolveStats { iterations: 0, final_residual: T::zero(), converged: true });
         }
         let mut rho_prev = rho;
-        let mut beta = T::zero();
+        let _beta = T::zero();
         let mut alpha = T::zero();
         
         // search directions and temporary buffers

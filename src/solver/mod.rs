@@ -47,3 +47,5 @@ pub use cgnr::{CgnrSolver, CgneSolver};
 
 pub mod pcg;
 pub use self::pcg::PcgSolver;
+
+pub mod fgmres;

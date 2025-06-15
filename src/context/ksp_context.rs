@@ -1,34 +1,88 @@
 //! Factory for Krylov methods (KSP).
 
-use crate::error::KError;
-use crate::solver::{CgSolver, GmresSolver, LinearSolver};
+use crate::solver::{CgSolver, GmresSolver, LinearSolver, PcgSolver, gmres::Preconditioning};
+use crate::solver::fgmres::FgmresSolver;
+use crate::preconditioner::Preconditioner;
 
-pub enum KspType {
-    Cg { tol: f64, max_iters: usize },
-    Gmres { restart: usize, tol: f64, max_iters: usize },
+pub enum SolverKind {
+    Cg,
+    Pcg,
+    GmresLeft,
+    GmresRight,
+    Fgmres,
+    Bicgstab,
+    Cgs,
+    Qmr,
+    Tfqmr,
+    Minres,
+    Cgnr,
 }
 
-pub struct KspContext {
-    pub kind: KspType,
+pub struct KspContext<M, V, T> {
+    pub kind: SolverKind,
+    pub a: M,
+    pub pc: Option<Box<dyn Preconditioner<M, V>>>,
+    pub flex_pc: Option<Box<dyn crate::preconditioner::FlexiblePreconditioner<M, V>>>,
+    pub tol: T,
+    pub max_it: usize,
+    pub restart: usize, // for GMRES
 }
 
-impl KspContext {
-    pub fn new(kind: KspType) -> Self {
-        Self { kind }
-    }
-
-    /// Build an instance of LinearSolver<M,V>.
-    pub fn build<M, V, T>(&self) -> Box<dyn LinearSolver<M, V, Error = KError, Scalar = T>>
-    where
-        M: 'static + crate::core::traits::MatVec<V>,
-        (): crate::core::traits::InnerProduct<V, Scalar = T>,
-        V: 'static + AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-        T: 'static + num_traits::Float + Clone + From<f64>,
-    {
+impl<M, V, T> KspContext<M, V, T>
+where
+    M: 'static + crate::core::traits::MatVec<V> + std::fmt::Debug,
+    (): crate::core::traits::InnerProduct<V, Scalar = T>,
+    V: 'static + AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone + std::fmt::Debug,
+    T: 'static + num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::iter::Sum,
+{
+    pub fn solve_context(&mut self, b: &V, x: &mut V) -> Result<crate::utils::convergence::SolveStats<T>, crate::error::KError> {
         match self.kind {
-            KspType::Cg { tol, max_iters } => Box::new(CgSolver::new(tol.into(), max_iters)),
-            KspType::Gmres { restart, tol, max_iters } => {
-                Box::new(GmresSolver::new(restart, tol.into(), max_iters))
+            SolverKind::Cg => {
+                let mut solver = CgSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Pcg => {
+                let mut solver = PcgSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::GmresLeft => {
+                let mut solver = GmresSolver::new(self.restart, self.tol, self.max_it).with_preconditioning(Preconditioning::Left);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::GmresRight => {
+                let mut solver = GmresSolver::new(self.restart, self.tol, self.max_it).with_preconditioning(Preconditioning::Right);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Fgmres => {
+                let mut solver = FgmresSolver::new(self.tol, self.max_it, self.restart);
+                match self.flex_pc {
+                    Some(ref mut flex_pc) => solver.solve_flex(&self.a, Some(flex_pc.as_mut()), b, x),
+                    None => solver.solve_flex(&self.a, None, b, x),
+                }
+            }
+            SolverKind::Bicgstab => {
+                let mut solver = crate::solver::bicgstab::BiCgStabSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Cgs => {
+                let mut solver = crate::solver::cgs::CgsSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Qmr => {
+                let mut solver = crate::solver::qmr::QmrSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Tfqmr => {
+                let mut solver = crate::solver::tfqmr::TfqmrSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Minres => {
+                let mut solver = crate::solver::minres::MinresSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Cgnr => {
+                let mut solver = crate::solver::cgnr::CgnrSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
             }
         }
     }

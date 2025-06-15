@@ -21,3 +21,9 @@ pub trait Indexing {
     /// Number of rows (or length for a vector).
     fn nrows(&self) -> usize;
 }
+
+/// Matrix shape trait: provides nrows/ncols for matrices and vectors.
+pub trait MatShape {
+    fn nrows(&self) -> usize;
+    fn ncols(&self) -> usize;
+}

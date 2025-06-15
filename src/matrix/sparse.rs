@@ -13,10 +13,10 @@ pub trait SparseMatrix<T> {
 use faer::sparse::{
     SymbolicSparseRowMat,    // owning symbolic CSR alias
     SparseRowMat,            // owning numeric CSR alias
-    CreationError,           // error type for builders
+    //CreationError,           // error type for builders
 };
 use faer::traits::ComplexField;
-use faer::sparse::linalg::matmul::sparse_dense_matmul;
+//use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
 pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,

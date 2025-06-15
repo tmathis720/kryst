@@ -42,7 +42,7 @@ where
         // r0 = b - A x0 = b
         let mut r = b.clone();
         // choose r_tld = r (can also pick random)
-        let mut r_tld = r.clone();
+        let r_tld = r.clone();
 
         // scalars
         let mut rho = ip.dot(&r, &r_tld);
@@ -53,11 +53,11 @@ where
         let mut theta = T::zero();
         let mut eta = T::zero();
         let mut c = T::one();
-        let mut d_scalar = T::zero();
+        let _d_scalar = T::zero();
 
         // vectors
         let mut v = V::from(vec![T::zero(); n]);
-        let mut p = V::from(vec![T::zero(); n]);
+        let _p = V::from(vec![T::zero(); n]);
         let mut w = r.clone();     // w = r0
         let mut y = r.clone();     // y = r0
         let mut u = V::from(vec![T::zero(); n]);
