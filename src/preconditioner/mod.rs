@@ -26,12 +26,13 @@ pub mod ilup;
 pub mod chebyshev;
 
 pub use jacobi::Jacobi;
-pub use sor::Ssor;
+pub use sor::Sor;
 pub use ilu::Ilu0;
 pub use amg::AMG;
 pub use ilut::Ilut;
 pub use ilup::Ilup;
 pub use chebyshev::Chebyshev;
+pub use self::sor::MatSorType;
 
 /// Unified preconditioner enum for all supported types.
 pub enum PC<T> {

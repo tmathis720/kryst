@@ -12,4 +12,8 @@ pub enum KError {
     IndefiniteMatrix,
     #[error("indefinite preconditioner detected (beta < 0)")]
     IndefinitePreconditioner,
+    #[error("zero pivot at row {0}")]
+    ZeroPivot(usize),
+    #[error("unsupported operation: {0}")]
+    Unsupported(&'static str),
 }

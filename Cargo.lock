@@ -680,6 +680,7 @@ name = "kryst"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "bitflags 2.9.1",
  "criterion",
  "faer",
  "num-traits",
