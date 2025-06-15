@@ -1,12 +1,13 @@
 // Adapted AMG implementation for kryst
 // use crate::core::traits::{InnerProduct, MatVec}; // Remove unused imports
 use crate::preconditioner::Preconditioner;
+use crate::error::KError;
 use faer::Mat;
+use crate::parallel::Comm;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 #[cfg(feature = "rayon")]
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
-use std::sync::{Arc, Mutex};
 
 pub struct AMG {
     levels: Vec<AMGLevel>,
@@ -148,8 +149,15 @@ impl AMG {
         AMG::smooth_jacobi_parallel(a, diag_inv, r, z, self.nu_pre);
         let mut az = vec![0.0; a.nrows()];
         parallel_mat_vec(a, z, &mut az);
-        for i in 0..az.len() {
-            az[i] = r[i] - az[i];
+        #[cfg(feature = "rayon")]
+        {
+            az.par_iter_mut().zip(r.par_iter()).for_each(|(azi, &ri)| *azi = ri - *azi);
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            for i in 0..az.len() {
+                az[i] = r[i] - az[i];
+            }
         }
         let mut coarse_residual = vec![0.0; coarse_matrix.nrows()];
         parallel_mat_vec(restriction, &az, &mut coarse_residual);
@@ -161,8 +169,15 @@ impl AMG {
         );
         let mut fine_correction = vec![0.0; a.nrows()];
         parallel_mat_vec(interpolation, &coarse_solution, &mut fine_correction);
-        for i in 0..z.len() {
-            z[i] += fine_correction[i];
+        #[cfg(feature = "rayon")]
+        {
+            z.par_iter_mut().zip(fine_correction.par_iter()).for_each(|(zi, &cf)| *zi += cf);
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            for i in 0..z.len() {
+                z[i] += fine_correction[i];
+            }
         }
         AMG::smooth_jacobi_parallel(a, diag_inv, r, z, self.nu_post);
     }
@@ -177,44 +192,170 @@ impl AMG {
         let mut ap = vec![0.0; n];
         let mut alpha;
         let mut beta;
-        let mut rr_new = residual.iter().map(|&val| val * val).sum::<f64>();
+        // initial residual norm
+        let mut rr_new = {
+            #[cfg(feature = "rayon")]
+            { residual.par_iter().map(|&v| v * v).sum::<f64>() }
+            #[cfg(not(feature = "rayon"))]
+            { residual.iter().map(|&v| v * v).sum::<f64>() }
+        };
         let mut rr_old;
         for _ in 0..n {
             parallel_mat_vec(a, &p, &mut ap);
+            #[cfg(feature = "rayon")]
+            let denominator = p.par_iter().zip(ap.par_iter()).map(|(&pi, &api)| pi * api).sum::<f64>();
+            #[cfg(not(feature = "rayon"))]
             let denominator = p.iter().zip(ap.iter()).map(|(&pi, &api)| pi * api).sum::<f64>();
             alpha = rr_new / denominator;
+            #[cfg(feature = "rayon")]
+            x.par_iter_mut().zip(p.par_iter()).for_each(|(xi, &pi)| *xi += alpha * pi);
+            #[cfg(not(feature = "rayon"))]
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
+            #[cfg(feature = "rayon")]
+            residual.par_iter_mut().zip(ap.par_iter()).for_each(|(ri, &api)| *ri -= alpha * api);
+            #[cfg(not(feature = "rayon"))]
             for (ri, &api) in residual.iter_mut().zip(ap.iter()) {
                 *ri -= alpha * api;
             }
+            // update our old and new residual norms
             rr_old = rr_new;
-            rr_new = residual.iter().map(|&val| val * val).sum::<f64>();
+            rr_new = {
+                #[cfg(feature = "rayon")]
+                { residual.par_iter().map(|&v| v * v).sum::<f64>() }
+                #[cfg(not(feature = "rayon"))]
+                { residual.iter().map(|&v| v * v).sum::<f64>() }
+            };
             if rr_new.sqrt() < 1e-10 {
                 break;
             }
             beta = rr_new / rr_old;
+            #[cfg(feature = "rayon")]
+            p.par_iter_mut().zip(residual.par_iter()).for_each(|(pi, &ri)| *pi = ri + beta * *pi);
+            #[cfg(not(feature = "rayon"))]
             for (pi, &ri) in p.iter_mut().zip(residual.iter()) {
                 *pi = ri + beta * *pi;
             }
         }
         z.copy_from_slice(&x);
     }
-}
+    fn solve_direct_with_comm(a: &Mat<f64>, r: &[f64], z: &mut [f64], comm: &crate::parallel::UniverseComm) {
+        let n = r.len();
+        assert_eq!(a.ncols(), n);
+        assert_eq!(a.nrows(), n);
+        assert_eq!(z.len(), n);
+        let mut x = vec![0.0; n];
+        let mut residual = r.to_vec();
+        let mut p = residual.clone();
+        let mut ap = vec![0.0; n];
+        let mut alpha;
+        let mut beta;
+        let mut rr_new = Comm::dot(comm, &residual, &residual);
+        let mut rr_old;
+        for _ in 0..n {
+            comm.parallel_mat_vec(a, &p, &mut ap);
+            let denominator = Comm::dot(comm, &p, &ap);
+            alpha = rr_new / denominator;
+            x.iter_mut().zip(p.iter()).for_each(|(xi, &pi)| *xi += alpha * pi);
+            residual.iter_mut().zip(ap.iter()).for_each(|(ri, &api)| *ri -= alpha * api);
+            rr_old = rr_new;
+            rr_new = Comm::dot(comm, &residual, &residual);
+            if rr_new.sqrt() < 1e-10 {
+                break;
+            }
+            beta = rr_new / rr_old;
+            p.iter_mut().zip(residual.iter()).for_each(|(pi, &ri)| *pi = ri + beta * *pi);
+        }
+        z.copy_from_slice(&x);
+    }
+    /// AMG V-cycle with distributed collectives and mat-vecs via Comm abstraction
+    pub fn apply_recursive_with_comm(&self, level: usize, r: &[f64], z: &mut [f64], comm: &crate::parallel::UniverseComm) {
+        if level + 1 == self.levels.len() {
+            AMG::solve_direct_with_comm(&self.levels[level].coarse_matrix, r, z, comm);
+            return;
+        }
+        let a = &self.levels[level].coarse_matrix;
+        let diag_inv = &self.levels[level].diag_inv;
+        let restriction = &self.levels[level].restriction;
+        let interpolation = &self.levels[level].interpolation;
+        // Pre-smoothing
+        AMG::smooth_jacobi_parallel_with_comm(a, diag_inv, r, z, self.nu_pre, comm);
+        // Compute residual: az = r - A z
+        let mut az = vec![0.0; a.nrows()];
+        comm.parallel_mat_vec(a, z, &mut az);
+        for i in 0..az.len() {
+            az[i] = r[i] - az[i];
+        }
+        // Restrict residual to coarse grid
+        let mut coarse_residual = vec![0.0; restriction.nrows()];
+        comm.parallel_mat_vec(restriction, &az, &mut coarse_residual);
+        // Recursive coarse solve
+        let mut coarse_solution = vec![0.0; coarse_residual.len()];
+        self.apply_recursive_with_comm(level + 1, &coarse_residual, &mut coarse_solution, comm);
+        // Prolongate correction
+        let mut fine_correction = vec![0.0; interpolation.nrows()];
+        comm.parallel_mat_vec(interpolation, &coarse_solution, &mut fine_correction);
+        for i in 0..z.len() {
+            z[i] += fine_correction[i];
+        }
+        // Post-smoothing
+        AMG::smooth_jacobi_parallel_with_comm(a, diag_inv, r, z, self.nu_post, comm);
+    }
 
-impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
-    fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
-        let residual = r.clone();
+    /// Distributed Jacobi smoother using Comm abstraction
+    fn smooth_jacobi_parallel_with_comm(
+        a: &Mat<f64>,
+        diag_inv: &[f64],
+        r: &[f64],
+        z: &mut [f64],
+        iterations: usize,
+        comm: &crate::parallel::UniverseComm,
+    ) {
+        let n = r.len();
+        let mut z_vec = z.to_vec();
+        let mut temp = vec![0.0; n];
+        for _ in 0..iterations {
+            comm.parallel_mat_vec(a, &z_vec, &mut temp);
+            temp.iter_mut().enumerate().for_each(|(i, val)| {
+                *val = r[i] - *val;
+            });
+            z_vec.iter_mut().enumerate().for_each(|(i, val)| *val += diag_inv[i] * temp[i]);
+        }
+        z.copy_from_slice(&z_vec);
+    }
+
+    /// Distributed AMG entry point
+    pub fn apply_with_comm(
+        &self,
+        r: &[f64],
+        z: &mut [f64],
+        comm: &crate::parallel::UniverseComm,
+    ) {
+        let residual = r;
         let mut solution = vec![0.0; residual.len()];
         if self.levels.is_empty() {
             let diag_inv = AMG::extract_diagonal_inverse(&self.matrix);
-            AMG::smooth_jacobi_parallel(&self.matrix, &diag_inv, &residual, &mut solution, 10);
+            AMG::smooth_jacobi_parallel_with_comm(&self.matrix, &diag_inv, residual, &mut solution, 10, comm);
         } else {
-            assert_eq!(self.levels[0].coarse_matrix.nrows(), self.matrix.nrows());
-            self.apply_recursive(0, &residual, &mut solution);
+            self.apply_recursive_with_comm(0, residual, &mut solution, comm);
         }
         z.copy_from_slice(&solution);
+    }
+}
+
+impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
+    fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        if self.levels.is_empty() {
+            let diag_inv = AMG::extract_diagonal_inverse(&self.matrix);
+            AMG::smooth_jacobi_parallel(&self.matrix, &diag_inv, r, z, 10);
+        } else {
+            self.apply_recursive(0, r, z);
+        }
+        Ok(())
+    }
+    fn setup(&mut self, _a: &Mat<f64>) -> Result<(), KError> {
+        // AMG is constructed with new(), so setup is a no-op
         Ok(())
     }
 }
@@ -278,32 +419,27 @@ fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
 fn smooth_interpolation(interpolation: &mut Mat<f64>, matrix: &Mat<f64>, weight: f64) {
     let row_count = interpolation.nrows().min(matrix.nrows());
     let col_count = interpolation.ncols().min(matrix.ncols());
-    let interpolation = Arc::new(Mutex::new(interpolation));
     #[cfg(feature = "rayon")]
     {
+        use std::sync::Mutex;
+        let interpolation = Mutex::new(interpolation);
         (0..col_count).into_par_iter().for_each(|j| {
             for i in 0..row_count {
-                let mut interpolation = interpolation.lock().unwrap();
-                let old_val = interpolation[(i, j)];
-                let diff = weight * matrix[(i, j)];
-                interpolation[(i, j)] = old_val - diff;
+                let mut interp_guard = interpolation.lock().unwrap();
+                interp_guard[(i, j)] -= weight * matrix[(i, j)];
             }
         });
+        let _ = interpolation.into_inner().unwrap();
     }
     #[cfg(not(feature = "rayon"))]
     {
-        (0..col_count).into_iter().for_each(|j| {
+        for j in 0..col_count {
             for i in 0..row_count {
-                let mut interpolation = interpolation.lock().unwrap();
-                let old_val = interpolation[(i, j)];
-                let diff = weight * matrix[(i, j)];
-                interpolation[(i, j)] = old_val - diff;
+                interpolation[(i, j)] -= weight * matrix[(i, j)];
             }
-        });
+        }
     }
-    let _interpolation = Arc::try_unwrap(interpolation).expect("Failed to unwrap Arc").into_inner().unwrap();
 }
-
 
 /// Normalize rows of the interpolation matrix to minimize energy.
 fn minimize_energy(interpolation: &mut Mat<f64>, _matrix: &Mat<f64>) {
@@ -578,22 +714,26 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
     let n = a.nrows();
     let max_agg_id = *aggregates.iter().max().unwrap();
     let coarse_n = max_agg_id + 1;
-    let p = Arc::new(Mutex::new(Mat::<f64>::zeros(n, coarse_n)));
+    let mut p = Mat::<f64>::zeros(n, coarse_n);
     #[cfg(feature = "rayon")]
     {
-        aggregates.par_iter().enumerate().for_each(|(i, &agg_id)| {
-            let mut p = p.lock().unwrap();
-            p[(i, agg_id)] = 1.0;
+        use std::sync::Mutex;
+        let p = Mutex::new(p);
+        (0..n).into_par_iter().for_each(|i| {
+            let agg_id = aggregates[i];
+            let mut p_guard = p.lock().unwrap();
+            p_guard[(i, agg_id)] = 1.0;
         });
+        let p = p.into_inner().unwrap();
+        return p;
     }
     #[cfg(not(feature = "rayon"))]
     {
-        aggregates.iter().enumerate().for_each(|(i, &agg_id)| {
-            let mut p = p.lock().unwrap();
+        for (i, &agg_id) in aggregates.iter().enumerate() {
             p[(i, agg_id)] = 1.0;
-        });
+        }
     }
-    Arc::try_unwrap(p).expect("Failed to unwrap Arc").into_inner().unwrap()
+    p
 }
 
 #[cfg(test)]
