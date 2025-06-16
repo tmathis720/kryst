@@ -9,7 +9,7 @@ repository = "https://github.com/tmathis720/kryst"
 documentation = "https://docs.rs/kryst"
 homepage = "https://github.com/tmathis720/kryst"
 readme = "README.md"
-categories = ["science", "mathematics", "algorithms", "parallel", "linear-algebra"]
+categories = ["science", "mathematics", "algorithms"]
 keywords = ["krylov", "gmres", "linear-solver", "parallel", "mpi"]
 
 [dependencies]
