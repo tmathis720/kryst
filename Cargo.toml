@@ -2,6 +2,15 @@
 name = "kryst"
 version = "0.5.0"
 edition = "2024"
+description = "Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with shared and distributed memory parallelism."
+license = "MIT"
+authors = ["Thomas James Mathis <tmathis720@gmail.com>"]
+repository = "https://github.com/tmathis720/kryst"
+documentation = "https://docs.rs/kryst"
+homepage = "https://github.com/tmathis720/kryst"
+readme = "README.md"
+categories = ["science", "mathematics", "algorithms", "parallel", "linear-algebra"]
+keywords = ["krylov", "gmres", "cg", "preconditioner", "linear-solver", "parallel", "mpi", "rayon"]
 
 [dependencies]
 faer = "0.22.6"
