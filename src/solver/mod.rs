@@ -49,3 +49,7 @@ pub mod pcg;
 pub use self::pcg::PcgSolver;
 
 pub mod fgmres;
+pub use fgmres::FgmresSolver;
+
+pub mod pca_gmres;
+pub use pca_gmres::PcaGmresSolver;

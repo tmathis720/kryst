@@ -35,16 +35,8 @@ where
     V: 'static + AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone + std::fmt::Debug + Send + Sync,
     T: 'static + num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::iter::Sum + num_traits::FromPrimitive + Send + Sync,
 {
-    pub fn solve_context(&mut self, b: &V, x: &mut V) -> Result<crate::utils::convergence::SolveStats<T>, crate::error::KError> {
+    pub fn solve_context<C: crate::parallel::Comm<Vec = Vec<T>>>(&mut self, b: &V, x: &mut V, comm: Option<&C>) -> Result<crate::utils::convergence::SolveStats<T>, crate::error::KError> {
         match self.kind {
-            SolverKind::Cg => {
-                let mut solver = CgSolver::new(self.tol, self.max_it);
-                solver.solve(&self.a, self.pc.as_deref(), b, x)
-            }
-            SolverKind::Pcg => {
-                let mut solver = PcgSolver::new(self.tol, self.max_it);
-                solver.solve(&self.a, self.pc.as_deref(), b, x)
-            }
             SolverKind::GmresLeft => {
                 let mut solver = GmresSolver::new(self.restart, self.tol, self.max_it).with_preconditioning(Preconditioning::Left);
                 solver.solve(&self.a, self.pc.as_deref(), b, x)
@@ -53,12 +45,21 @@ where
                 let mut solver = GmresSolver::new(self.restart, self.tol, self.max_it).with_preconditioning(Preconditioning::Right);
                 solver.solve(&self.a, self.pc.as_deref(), b, x)
             }
+            // All other solvers remain serial
             SolverKind::Fgmres => {
                 let mut solver = FgmresSolver::new(self.tol, self.max_it, self.restart);
                 match self.flex_pc {
                     Some(ref mut flex_pc) => solver.solve_flex(&self.a, Some(flex_pc.as_mut()), b, x),
                     None => solver.solve_flex(&self.a, None, b, x),
                 }
+            }
+            SolverKind::Cg => {
+                let mut solver = CgSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
+            }
+            SolverKind::Pcg => {
+                let mut solver = PcgSolver::new(self.tol, self.max_it);
+                solver.solve(&self.a, self.pc.as_deref(), b, x)
             }
             SolverKind::Bicgstab => {
                 let mut solver = crate::solver::bicgstab::BiCgStabSolver::new(self.tol, self.max_it);

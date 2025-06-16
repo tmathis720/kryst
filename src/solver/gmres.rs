@@ -168,7 +168,7 @@ where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
     V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64>,
+    T: num_traits::Float + Clone + From<f64> + num_traits::ToPrimitive + num_traits::Zero + num_traits::FromPrimitive,
 {
     type Error = KError;
     type Scalar = T;
