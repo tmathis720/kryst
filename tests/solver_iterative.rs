@@ -7,11 +7,11 @@ use approx::assert_abs_diff_eq;
 // Helper: small SPD matrix A = Mᵀ M + I
 fn random_spd(n: usize) -> (faer::Mat<f64>, Vec<f64>) {
     let mut rng = rand::thread_rng();
-    let data: Vec<f64> = (0..n*n).map(|_| rng.gen()).collect();
+    let data: Vec<f64> = (0..n*n).map(|_| rng.r#gen()).collect();
     let m = Mat::from_fn(n, n, |i, j| data[j * n + i]);
     let m_t = m.transpose();
     let a = &m_t * &m + Mat::<f64>::identity(n, n);
-    let b: Vec<f64> = (0..n).map(|_| rng.gen()).collect();
+    let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
     (a, b)
 }
 
@@ -37,9 +37,9 @@ fn cg_vs_direct_on_spd() {
 fn gmres_vs_direct_on_nonsymmetric() {
     let n = 10;
     let mut rng = rand::thread_rng();
-    let data: Vec<f64> = (0..n*n).map(|_| rng.gen()).collect();
+    let data: Vec<f64> = (0..n*n).map(|_| rng.r#gen()).collect();
     let a = Mat::from_fn(n, n, |i, j| data[j * n + i]);
-    let b: Vec<f64> = (0..n).map(|_| rng.gen()).collect();
+    let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
     let mut x_gmres = vec![0.0; n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
     let stats = solver.solve(&a, None, &b, &mut x_gmres).unwrap();

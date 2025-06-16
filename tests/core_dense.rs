@@ -7,10 +7,10 @@ use rand::Rng;
 fn matvec_random_small() {
     let n = 5;
     let mut rng = rand::thread_rng();
-    let vals: Vec<f64> = (0..n * n).map(|_| rng.gen()).collect();
+    let vals: Vec<f64> = (0..n * n).map(|_| rng.r#gen()).collect();
     // Use from_fn to build a column-major matrix
     let a = Mat::from_fn(n, n, |i, j| vals[j * n + i]);
-    let x: Vec<f64> = (0..n).map(|_| rng.gen()).collect();
+    let x: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
     let mut y = vec![0.0; n];
     a.matvec(&x, &mut y);
 
