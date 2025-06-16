@@ -10,7 +10,7 @@ documentation = "https://docs.rs/kryst"
 homepage = "https://github.com/tmathis720/kryst"
 readme = "README.md"
 categories = ["science", "mathematics", "algorithms", "parallel", "linear-algebra"]
-keywords = ["krylov", "gmres", "cg", "preconditioner", "linear-solver", "parallel", "mpi", "rayon"]
+keywords = ["krylov", "gmres", "linear-solver", "parallel", "mpi"]
 
 [dependencies]
 faer = "0.22.6"
