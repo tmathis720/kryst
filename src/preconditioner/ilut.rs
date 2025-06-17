@@ -1,15 +1,40 @@
 //! ILUT preconditioner stub
+//!
+//! Implements ILUT (Incomplete LU with threshold and fill-in control) as a preconditioner.
+//!
+//! # Overview
+//!
+//! ILUT is an incomplete LU factorization with user-specified fill-in and drop tolerance.
+//! It produces lower (L) and upper (U) triangular factors by dropping small entries and limiting
+//! the number of nonzeros per row, making it suitable as a preconditioner for iterative solvers
+//! on sparse matrices. The drop tolerance controls numerical dropping, and the fill parameter
+//! limits the number of nonzeros per row.
+//!
+//! # Usage
+//!
+//! - Create an `Ilut` preconditioner with the desired fill and drop tolerance.
+//! - Call `setup` with the system matrix to compute the factors.
+//! - Use `apply` to solve M⁻¹r ≈ A⁻¹r using the computed factors.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
 
 use crate::error::KError;
 use crate::preconditioner::Preconditioner;
 use crate::core::traits::MatShape;
 
+/// Sparse row structure for storing L/U factors.
+///
+/// Each row stores the column indices and values of nonzero entries.
 #[derive(Clone)]
 pub struct SparseRow<T> {
+    /// Column indices of nonzero entries
     pub cols: Vec<usize>,
+    /// Values of nonzero entries
     pub vals: Vec<T>,
 }
 impl<T> SparseRow<T> {
+    /// Create an empty sparse row
     pub fn new() -> Self {
         Self { cols: Vec::new(), vals: Vec::new() }
     }
@@ -20,6 +45,13 @@ impl<T> Default for SparseRow<T> {
     }
 }
 
+/// ILUT preconditioner struct.
+///
+/// - `fill`: Maximum number of nonzeros per row (fill-in control)
+/// - `droptol`: Drop tolerance (numerical dropping)
+/// - `l`: Lower triangular factor (sparse row format)
+/// - `u`: Upper triangular factor (sparse row format)
+/// - `n`: Matrix size
 pub struct Ilut<T> {
     pub fill: usize,
     pub droptol: T,
@@ -29,6 +61,7 @@ pub struct Ilut<T> {
 }
 
 impl<T: num_traits::Float + Clone + std::fmt::Debug> Ilut<T> {
+    /// Create a new ILUT preconditioner with fill and drop tolerance.
     pub fn new(fill: usize, droptol: T) -> Self {
         Self { fill, droptol, l: Vec::new(), u: Vec::new(), n: 0 }
     }
@@ -40,6 +73,10 @@ where
     M: crate::core::traits::MatVec<V> + MatShape + std::ops::Index<(usize, usize), Output = T>,
     V: AsRef<[T]> + AsMut<[T]>,
 {
+    /// Setup ILUT factors from matrix `a`.
+    ///
+    /// For each row, keeps only the largest `fill` entries above the drop tolerance.
+    /// Partitions each row into L (j < i) and U (j >= i).
     fn setup(&mut self, a: &M) -> Result<(), KError> {
         let n = a.nrows();
         self.n = n;
@@ -47,6 +84,7 @@ where
         self.u = vec![SparseRow::new(); n];
         for i in 0..n {
             let mut row = vec![];
+            // Gather all nonzero entries in row i
             for j in 0..n {
                 let val = a[(i, j)];
                 if !val.is_zero() {
@@ -77,11 +115,15 @@ where
         }
         Ok(())
     }
+    /// Apply ILUT preconditioner: solve Ly = r, then Uz = y.
+    ///
+    /// Forward substitution for L, then backward substitution for U.
     fn apply(&self, r: &V, z: &mut V) -> Result<(), KError> {
         let n = self.n;
         let r = r.as_ref();
         let z = z.as_mut();
         let mut y = vec![T::zero(); n];
+        // Forward substitution: solve L y = r
         for i in 0..n {
             let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
@@ -89,7 +131,7 @@ where
             }
             y[i] = sum;
         }
-        // Backward substitution (sequential)
+        // Backward substitution: solve U z = y
         for i in (0..n).rev() {
             let mut sum = y[i];
             for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
@@ -97,6 +139,7 @@ where
                     sum = sum - self.u[i].vals[j_idx] * z[j];
                 }
             }
+            // Diagonal entry must exist for U(i,i)
             if let Some(idx) = self.u[i].cols.iter().position(|&col| col == i) {
                 z[i] = sum / self.u[i].vals[idx];
             } else {

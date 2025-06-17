@@ -1,12 +1,42 @@
 //! Conjugate Gradient (unpreconditioned) per Saad §6.1.
+//!
+//! This module implements the classic Conjugate Gradient (CG) method for solving symmetric positive definite (SPD)
+//! linear systems. CG is a Krylov subspace method that is efficient for large, sparse SPD matrices, and is widely used
+//! in scientific computing.
+//!
+//! # Overview
+//!
+//! The CG algorithm iteratively refines the solution to Ax = b by constructing conjugate search directions and minimizing
+//! the quadratic form. This implementation supports several norm types, single-reduction optimization, trust-region logic,
+//! and solution monitoring.
+//!
+//! # Usage
+//!
+//! - Create a `CgSolver` with the desired tolerance and maximum iterations.
+//! - Optionally configure norm type, single-reduction, trust-region, or monitoring.
+//! - Call `solve` with the system matrix, right-hand side, and initial guess.
+//! - The solver returns convergence statistics and the solution vector.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 6.1.
+//! - https://en.wikipedia.org/wiki/Conjugate_gradient_method
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 
+/// Norm type for CG convergence and monitoring.
+///
+/// - `Preconditioned`: Preconditioned residual norm
+/// - `Unpreconditioned`: Standard residual norm
+/// - `Natural`: Natural norm (r^T M^{-1} r)
+/// - `None`: No norm (for custom stopping)
 pub enum CgNormType { Preconditioned, Unpreconditioned, Natural, None }
 
+/// Conjugate Gradient solver struct.
+///
+/// Stores convergence parameters, norm type, and optional monitoring.
 pub struct CgSolver<T> {
     pub conv: Convergence<T>,
     pub norm_type: CgNormType,
@@ -18,6 +48,7 @@ pub struct CgSolver<T> {
 }
 
 impl<T: Copy + num_traits::Float> CgSolver<T> {
+    /// Create a new CG solver with the given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self {
             conv: Convergence { tol, max_iters },
@@ -29,27 +60,33 @@ impl<T: Copy + num_traits::Float> CgSolver<T> {
             residual_history: Vec::new(),
         }
     }
+    /// Set the norm type for convergence and monitoring.
     pub fn with_norm(mut self, norm_type: CgNormType) -> Self {
         self.norm_type = norm_type;
         self
     }
+    /// Enable or disable single-reduction optimization.
     pub fn with_single_reduction(mut self, flag: bool) -> Self {
         self.single_reduction = flag;
         self
     }
+    /// Set a trust-region radius (Steihaug–Toint logic).
     pub fn with_radius(mut self, radius: T) -> Self {
         self.radius = Some(radius);
         self
     }
+    /// Set an objective function target for early stopping.
     pub fn with_obj_target(mut self, obj: T) -> Self {
         self.obj_target = Some(obj);
         self
     }
+    /// Set a monitor callback for residuals.
     pub fn with_monitor<F>(mut self, f: F) -> Self
     where F: FnMut(usize, T) + 'static {
         self.monitor = Some(Box::new(f));
         self
     }
+    /// Clear the residual history.
     pub fn clear_history(&mut self) {
         self.residual_history.clear();
     }
@@ -65,11 +102,21 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using the Conjugate Gradient algorithm.
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `pc` - Optional preconditioner (currently unused)
+    /// * `b` - Right-hand side vector
+    /// * `x` - Initial guess (input/output)
+    ///
+    /// Returns convergence statistics and the solution vector.
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CG does not use preconditioner
         let n = b.as_ref().len();
         let mut x_vec = x.as_ref().to_vec();
         let ip = ();
+        // Compute initial residual r = b - A x
         let mut r = {
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(x_vec.clone()), &mut tmp);
@@ -80,6 +127,7 @@ where
         let mut rsq = ip.dot(&r, &r);
         let res0 = rsq.sqrt();
         let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        // Choose norm for monitoring
         let dp = match self.norm_type {
             CgNormType::Preconditioned => ip.dot(&r, &r),
             CgNormType::Unpreconditioned => ip.dot(&r, &r),
@@ -91,8 +139,10 @@ where
         }
         self.residual_history.push(dp.sqrt());
         for i in 1..=self.conv.max_iters {
+            // Compute Ap = A p
             let mut ap = V::from(vec![T::zero(); n]);
             a.matvec(&p.clone(), &mut ap);
+            // Compute p^T A p (or single-reduction variant)
             let p_dot_ap = if self.single_reduction {
                 #[cfg(feature = "rayon")]
                 {
@@ -150,6 +200,7 @@ where
                     return Ok(stats);
                 }
             }
+            // Update x and r
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
@@ -176,7 +227,7 @@ where
                 CgNormType::Natural => ip.dot(&r, &p).abs().sqrt(),
                 CgNormType::None => T::zero(),
             };
-            // Objective function tracking
+            // Objective function tracking (optional early stopping)
             if let Some(obj_target) = self.obj_target {
                 let obj = {
                     let mut ax = V::from(vec![T::zero(); n]);

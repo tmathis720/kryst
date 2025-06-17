@@ -1,15 +1,34 @@
-//! CGS solver (Saad §7.2)
+//! Conjugate Gradient Squared (CGS) Solver
+//!
+//! This module implements the CGS iterative method for solving nonsymmetric linear systems Ax = b.
+//! The CGS algorithm is based on the BiConjugate Gradient (BiCG) method, but squares the residual
+//! polynomials to achieve faster convergence in some cases. It is suitable for large, sparse, nonsymmetric
+//! systems, but may suffer from breakdowns or instability for ill-conditioned problems.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.2
+//! - https://en.wikipedia.org/wiki/Conjugate_gradient_squared_method
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 
+/// CGS solver struct, holding convergence parameters.
+///
+/// # Type Parameters
+/// * `T` - Scalar type (e.g., f32, f64)
 pub struct CgsSolver<T> {
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: num_traits::Float> CgsSolver<T> {
+    /// Create a new CGS solver with given tolerance and maximum iterations.
+    ///
+    /// # Arguments
+    /// * `tol` - Relative residual tolerance for convergence
+    /// * `max_iters` - Maximum number of iterations
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
@@ -25,30 +44,44 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using the CGS algorithm.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec`
+    /// * `pc` - (Unused) Optional preconditioner (not supported in this implementation)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CGS does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
         let ip = ();
+        // Compute initial residual r = b - A x
         let mut r = {
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(xk.clone()), &mut tmp);
             let r_vec = b.as_ref().iter().zip(tmp.as_ref()).map(|(&bi, &axi)| bi - axi).collect::<Vec<_>>();
             V::from(r_vec)
         };
-        let r_tld = r.clone();
-        let mut p = r.clone();
-        let mut q = V::from(vec![T::zero(); n]);
-        let mut u = V::from(vec![T::zero(); n]);
-        let mut rho = ip.dot(&r_tld, &r);
+        let r_tld = r.clone(); // Shadow residual (fixed for all iterations)
+        let mut p = r.clone(); // Search direction
+        let mut q = V::from(vec![T::zero(); n]); // Auxiliary vector
+        let mut u = V::from(vec![T::zero(); n]); // Auxiliary vector
+        let mut rho = ip.dot(&r_tld, &r); // BiCG-like scalar
         let mut rho_old = T::zero();
-        let res0 = ip.norm(&r);
+        let res0 = ip.norm(&r); // Initial residual norm
         let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
         for i in 1..=self.conv.max_iters {
+            // Check for breakdown (division by zero)
             if rho.abs() < T::epsilon() {
                 break; // breakdown
             }
             if i == 1 {
+                // First iteration: initialize u and p
                 u = r.clone();
                 p = u.clone();
             } else {
@@ -69,6 +102,7 @@ where
             let mut v_tmp = V::from(vec![T::zero(); n]);
             a.matvec(&p, &mut v_tmp);
             let v = v_tmp;
+            // alpha = rho / (r_tld, v)
             let alpha = rho / ip.dot(&r_tld, &v);
             // q = u - alpha * v
             for (q_j, (u_j, v_j)) in q.as_mut().iter_mut().zip(u.as_ref().iter().zip(v.as_ref())) {
@@ -89,7 +123,7 @@ where
                 *rj = *rj - alpha * *wj;
             }
             let res_norm = ip.norm(&r);
-            // eprintln!("CGS iter {}: res_norm={:.3e}", i, res_norm);
+            // Check convergence
             let (stop, s) = self.conv.check(res_norm, res0, i);
             stats = s.clone();
             if stop && s.converged {
@@ -109,11 +143,13 @@ mod tests {
     use super::*;
     use crate::core::traits::MatVec;
 
+    /// Simple dense matrix for testing
     #[derive(Clone)]
     struct DenseMat {
         data: Vec<Vec<f64>>,
     }
     impl MatVec<Vec<f64>> for DenseMat {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             for (i, row) in self.data.iter().enumerate() {
                 y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();

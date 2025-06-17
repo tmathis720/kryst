@@ -1,4 +1,19 @@
 //! QMR solver (Saad §7.3)
+//!
+//! This module implements the Quasi-Minimal Residual (QMR) algorithm for solving large, sparse,
+//! nonsymmetric linear systems Ax = b. QMR is based on the Bi-Lanczos process and is designed to
+//! minimize the residual norm in a quasi-minimal sense. It is suitable for nonsymmetric and indefinite
+//! systems, and does not require breakdown-avoiding look-ahead as in BiCG.
+//!
+//! # Features
+//! - Handles general nonsymmetric systems
+//! - Uses both A and A^T (matrix and its transpose)
+//! - No preconditioning in this implementation
+//! - Tracks true residual for convergence
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.3
+//! - https://en.wikipedia.org/wiki/Quasi-minimal_residual_method
 
 use std::iter::Sum;
 
@@ -11,10 +26,12 @@ use num_traits::Float;
 
 /// Quasi-Minimal Residual (QMR) method for nonsymmetric A
 pub struct QmrSolver<T> {
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: Float> QmrSolver<T> {
+    /// Create a new QMR solver with given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
@@ -30,6 +47,17 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using the QMR algorithm.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec` and `MatTransVec`
+    /// * `_pc` - (Unused) Optional preconditioner (not supported in this implementation)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     fn solve(
         &mut self,
         a: &M,
@@ -39,6 +67,7 @@ where
     ) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
+        // Allocate all vectors needed for QMR
         let mut r = V::from(vec![T::zero(); n]);
         let mut r_tld = V::from(vec![T::zero(); n]);
         let mut p = V::from(vec![T::zero(); n]);
@@ -73,6 +102,7 @@ where
         let mut res_norm = norm_r0;
         for j in 0..self.conv.max_iters {
             if j == 0 {
+                // First iteration: initialize p and p_tld
                 p.clone_from(&r);
                 p_tld.clone_from(&r_tld);
             } else {
@@ -82,6 +112,7 @@ where
                     break;
                 }
                 beta = rho / rho_prev;
+                // Update search directions
                 for i in 0..n {
                     p.as_mut()[i] = r.as_ref()[i] + beta * p.as_ref()[i];
                     p_tld.as_mut()[i] = r_tld.as_ref()[i] + beta * p_tld.as_ref()[i];
@@ -139,9 +170,11 @@ mod tests {
     use super::*;
     use crate::core::traits::MatVec;
 
+    /// Simple dense matrix for testing
     #[derive(Clone, Debug)]
     struct DenseMat { data: Vec<Vec<f64>> }
     impl MatVec<Vec<f64>> for DenseMat {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             for i in 0..x.len() {
                 y[i] = self.data[i].iter().zip(x).map(|(a,b)| a*b).sum();
@@ -149,6 +182,7 @@ mod tests {
         }
     }
     impl crate::core::traits::MatTransVec<Vec<f64>> for DenseMat {
+        /// Matrix-transpose-vector multiplication: y = A^T x
         fn mattransvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             let n = self.data.len();
             let m = self.data[0].len();

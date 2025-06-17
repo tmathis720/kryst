@@ -1,10 +1,12 @@
+// Example: Solve a random SPD system using LU and QR direct solvers from kryst.
+
 use kryst::solver::{LuSolver, QrSolver, LinearSolver};
 use faer::Mat;
 use rand::Rng;
 
 fn main() {
     let n = 10;
-    // build a random SPD matrix: A = MᵀM + I
+    // Build a random SPD matrix: A = MᵀM + I
     let mut rng = rand::thread_rng();
     let data: Vec<f64> = (0..n*n).map(|_| rng.r#gen()).collect();
     let m = Mat::from_fn(n, n, |i, j| data[j * n + i]);
@@ -14,7 +16,7 @@ fn main() {
     // a = a + I
     for i in 0..n { a[(i,i)] = a[(i,i)] + 1.0; }
 
-    // rhs
+    // Right-hand side
     let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
     let mut x = vec![0.0; n];
 

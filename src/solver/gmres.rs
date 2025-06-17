@@ -1,5 +1,21 @@
 #![allow(unused_assignments)]
-//! GMRES with fixed restart per Saad §6.4.
+//! Generalized Minimal Residual (GMRES) solver with fixed restart (Saad §6.4)
+//!
+//! This module implements the restarted GMRES algorithm for solving large, sparse, and possibly nonsymmetric
+//! linear systems Ax = b. GMRES minimizes the residual over a Krylov subspace and supports both left and right
+//! preconditioning. The implementation includes happy breakdown detection, double orthogonalization, and
+//! robust back-substitution for the least-squares problem.
+//!
+//! # Features
+//! - Supports left, right, or no preconditioning
+//! - Double (iterative) Gram-Schmidt orthogonalization for numerical stability
+//! - Happy breakdown detection for early termination
+//! - Givens rotations for least-squares update
+//! - Robust back-substitution with zero-pivot protection
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §6.4
+//! - https://en.wikipedia.org/wiki/Generalized_minimal_residual_method
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
@@ -7,7 +23,7 @@ use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use num_traits::Float;
 
-/// Preconditioning mode for GMRES
+/// Preconditioning mode for GMRES (none, left, or right)
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Preconditioning {
     None,
@@ -15,13 +31,21 @@ pub enum Preconditioning {
     Right,
 }
 
+/// GMRES solver struct with restart and preconditioning options.
+///
+/// # Type Parameters
+/// * `T` - Scalar type (e.g., f32, f64)
 pub struct GmresSolver<T> {
+    /// Number of Arnoldi vectors before restart
     pub restart: usize,
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
+    /// Preconditioning mode
     pub preconditioning: Preconditioning,
 }
 
 impl<T: Copy + Float> GmresSolver<T> {
+    /// Create a new GMRES solver with restart, tolerance, and max iterations.
     pub fn new(restart: usize, tol: T, max_iters: usize) -> Self {
         Self {
             restart,
@@ -29,13 +53,15 @@ impl<T: Copy + Float> GmresSolver<T> {
             preconditioning: Preconditioning::Left, // default to left for backward compatibility
         }
     }
-    /// Set the preconditioning mode (left or right)
+    /// Set the preconditioning mode (left, right, or none).
     pub fn with_preconditioning(mut self, mode: Preconditioning) -> Self {
         self.preconditioning = mode;
         self
     }
 
     // --- Arnoldi process with double orthogonalization and happy breakdown ---
+    /// Perform one step of the Arnoldi process (no preconditioning).
+    /// Returns true if happy breakdown is detected.
     fn arnoldi<M, V>(
         a: &M,
         ip: &(),
@@ -53,7 +79,7 @@ impl<T: Copy + Float> GmresSolver<T> {
         let n = v_basis[0].as_ref().len();
         let mut w = V::from(vec![T::zero(); n]);
         a.matvec(&v_basis[j].clone(), &mut w);
-        // Modified Gram-Schmidt
+        // Modified Gram-Schmidt orthogonalization
         for i in 0..=j {
             h[i][j] = ip.dot(&w, &v_basis[i]);
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
@@ -78,6 +104,7 @@ impl<T: Copy + Float> GmresSolver<T> {
         false
     }
     #[allow(dead_code)]
+    /// Arnoldi process with preconditioning (for advanced use)
     fn arnoldi_with_pc<M, V>(
         a: &M,
         pc: &dyn crate::preconditioner::Preconditioner<M, V>,
@@ -123,6 +150,7 @@ impl<T: Copy + Float> GmresSolver<T> {
     }
 
     // --- Apply Givens rotation and update g together ---
+    /// Apply Givens rotations to Hessenberg matrix and update g vector.
     fn apply_givens_and_update_g(h: &mut [Vec<T>], g: &mut [T], cs: &mut [T], sn: &mut [T], j: usize, epsilon: T) {
         for i in 0..j {
             let temp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
@@ -148,6 +176,7 @@ impl<T: Copy + Float> GmresSolver<T> {
     }
 
     // --- Back-substitution for least squares with zero-pivot protection ---
+    /// Solve upper-triangular system Hy = g for y, with zero-pivot protection.
     fn back_substitution(h: &[Vec<T>], g: &[T], y: &mut [T], m: usize, epsilon: T) {
         for i in (0..m).rev() {
             y[i] = g[i];
@@ -173,10 +202,22 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using restarted GMRES.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec`
+    /// * `pc` - Optional preconditioner (left or right)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
         let mut xk = x.as_ref().to_vec();
+        // Compute initial residual r0 = b - A x
         let mut r0 = {
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(xk.clone()), &mut tmp);
@@ -191,6 +232,7 @@ where
         let mut iteration = 0;
         let epsilon = num_traits::cast::<f64, T>(1e-14).unwrap();
         for _ in 0..n_outer {
+            // Allocate Krylov and preconditioned bases
             let mut v_basis: Vec<V> = Vec::with_capacity(self.restart + 1); // Krylov basis
             let mut z_basis: Vec<V> = Vec::with_capacity(self.restart + 1); // Preconditioned basis (for right-preconditioning)
             let mut r0_norm = beta;
@@ -222,6 +264,7 @@ where
                     v_basis.push(V::from(v0));
                 }
             }
+            // Allocate Hessenberg matrix and Givens rotation storage
             let mut h = vec![vec![T::zero(); self.restart]; self.restart + 1];
             let mut g = vec![T::zero(); self.restart + 1];
             g[0] = r0_norm;
@@ -310,10 +353,12 @@ where
                     break;
                 }
             }
+            // Solve least-squares problem for y
             let mut y = vec![T::zero(); m];
             let h_upper: Vec<Vec<T>> = h.iter().take(m).map(|row| row[..m].to_vec()).collect();
             let g_upper = &g[..m];
             Self::back_substitution(&h_upper, g_upper, &mut y, m, epsilon);
+            // Update solution xk
             match (self.preconditioning, pc) {
                 (Preconditioning::Left, Some(_)) => {
                     // xk = xk + sum y[j] * v_basis[j]
@@ -339,6 +384,7 @@ where
                     }
                 }
             }
+            // Compute new residual
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(xk.clone()), &mut tmp);
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
@@ -363,11 +409,13 @@ mod tests {
     use crate::preconditioner::Preconditioner;
     use crate::preconditioner::Jacobi;
 
+    /// Simple dense matrix for testing
     #[derive(Clone)]
     struct DenseMat {
         data: Vec<Vec<f64>>,
     }
     impl MatVec<Vec<f64>> for DenseMat {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             for (i, row) in self.data.iter().enumerate() {
                 y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();

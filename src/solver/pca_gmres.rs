@@ -1,5 +1,23 @@
 //! Pipelined, Communication-Avoiding GMRES for Kryst
-//! Initial implementation with block orthogonalization and pipelining skeleton
+//!
+//! This module implements a pipelined, communication-avoiding GMRES (PCA-GMRES) solver with block orthogonalization
+//! and a pipelining skeleton. The algorithm is designed for high-performance distributed and parallel environments,
+//! reducing communication costs by overlapping computation and communication, and by using block Gram-Schmidt
+//! orthogonalization. The implementation supports left/right/no preconditioning, block size and pipeline depth control,
+//! and optional drop tolerance for partial change-of-basis.
+//!
+//! # Features
+//! - Block classical Gram-Schmidt orthogonalization
+//! - Pipelined Krylov subspace construction (skeleton)
+//! - Optional drop tolerance for partial change-of-basis
+//! - Left, right, or no preconditioning
+//! - Parallelization via Rayon (if enabled)
+//! - MPI all-reduce support (if enabled)
+//!
+//! # References
+//! - Hoemmen, M. (2010). Communication-Avoiding Krylov Subspace Methods. PhD thesis, UC Berkeley.
+//! - Ghysels, P., & Vanroose, W. (2014). Hiding global communication latency in the GMRES algorithm on massively parallel machines. SIAM J. Sci. Comput.
+//! - https://github.com/berkeleylab/SLATE/blob/develop/src/ca_gmres.cc
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
@@ -8,28 +26,31 @@ use crate::error::KError;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-/// Preconditioning modes
+/// Preconditioning modes for PCA-GMRES
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preconditioning { None, Left, Right }
 
 /// Pipelined Communication-Avoiding GMRES solver
+///
+/// # Type Parameters
+/// * `T` - Scalar type (e.g., f32, f64)
 pub struct PcaGmresSolver<T> {
-    /// Restart length (m)
+    /// Restart length (m): number of Arnoldi vectors before restart
     pub restart: usize,
-    /// Pipeline depth (ℓ)
+    /// Pipeline depth (ℓ): number of steps overlapped in the pipeline
     pub pipeline_depth: usize,
-    /// Block size for CA orthogonalization (s)
+    /// Block size for communication-avoiding orthogonalization (s)
     pub block_size: usize,
     /// Drop tolerance for partial change-of-basis (τ)
     pub tau: Option<T>,
-    /// Convergence criteria
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
-    /// Preconditioning mode
+    /// Preconditioning mode (none, left, right)
     pub preconditioning: Preconditioning,
 }
 
 impl<T: num_traits::Float + Send + Sync + From<f64> + std::ops::SubAssign + std::ops::MulAssign> PcaGmresSolver<T> {
-    /// Create a new solver: restart=m, pipeline depth=ℓ, block size=s, tolerance tol, max_iters
+    /// Create a new PCA-GMRES solver with restart, pipeline depth, block size, tolerance, and max iterations.
     pub fn new(restart: usize, pipeline_depth: usize, block_size: usize, tol: T, max_iters: usize) -> Self {
         Self {
             restart,
@@ -41,13 +62,13 @@ impl<T: num_traits::Float + Send + Sync + From<f64> + std::ops::SubAssign + std:
         }
     }
 
-    /// Set preconditioning mode
+    /// Set preconditioning mode (none, left, or right)
     pub fn with_preconditioning(mut self, mode: Preconditioning) -> Self {
         self.preconditioning = mode;
         self
     }
 
-    /// Set partial change-of-basis drop tolerance
+    /// Set partial change-of-basis drop tolerance (for s-step variants)
     pub fn with_tau(mut self, tau: T) -> Self {
         self.tau = Some(tau);
         self
@@ -64,6 +85,17 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using pipelined, communication-avoiding GMRES.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec`
+    /// * `pc` - Optional preconditioner (left or right)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     fn solve(&mut self,
              a: &M,
              pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
@@ -84,16 +116,15 @@ where
         let mut stats = SolveStats { iterations: 0, final_residual: beta, converged: false };
 
         let mut iteration = 0;
-        // Number of outer cycles
+        // Number of outer cycles (restarts)
         let n_outer = (self.conv.max_iters + self.restart - 1) / self.restart;
         for _outer in 0..n_outer {
-            // Build initial Arnoldi vector
+            // Build initial Arnoldi vector (normalized residual)
             let mut v_basis: Vec<V> = Vec::with_capacity(self.restart + 1);
-            // Normalize r0 into v0
             let v0 = r0.as_ref().iter().map(|&ri| ri / beta).collect::<Vec<_>>();
             v_basis.push(V::from(v0));
 
-            // Hessenberg and Givens data
+            // Hessenberg matrix and Givens rotation storage
             let m = self.restart;
             let mut h = vec![vec![T::zero(); m]; m+1];
             let mut g = vec![T::zero(); m+1];
@@ -146,7 +177,7 @@ where
                         local_dot[i*t + k] = ip.dot(&v_basis[i], &v_block[k]);
                     }
                 }
-                // Kick off a non-blocking all-reduce on local_dot → global_dot
+                // Kick off a non-blocking all-reduce on local_dot → global_dot (if MPI enabled)
                 #[cfg(feature = "mpi")]
                 let global_dot = {
                     use mpi::traits::*;
@@ -245,7 +276,7 @@ where
             // 6) Solve least-squares H y = g via back-substitution
             let m_eff = j;
             let mut y = vec![T::zero(); m_eff];
-            // Back-substitution
+            // Back-substitution for upper-triangular H
             for i in (0..m_eff).rev() {
                 let mut sum = g[i];
                 for k in i+1..m_eff { sum = sum - h[i][k] * y[k]; }
@@ -287,11 +318,13 @@ mod tests {
     use crate::core::traits::MatVec;
     use crate::utils::convergence::Convergence;
 
+    /// Simple dense matrix for testing
     #[derive(Clone)]
     struct DenseMat {
         data: Vec<Vec<f64>>,
     }
     impl MatVec<Vec<f64>> for DenseMat {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             for (i, row) in self.data.iter().enumerate() {
                 y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();

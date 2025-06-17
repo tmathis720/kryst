@@ -12,13 +12,14 @@ use rayon::prelude::*;
 #[cfg(feature = "rayon")]
 use rayon::iter::IntoParallelRefIterator;
 
-/// Additive Schwarz (overlapping block Jacobi) preconditioner
+/// Additive Schwarz (overlapping block Jacobi) preconditioner.
+/// Each block is solved independently (possibly in parallel), and the results are summed.
 pub struct AdditiveSchwarz<M, V, T> {
-    /// Number of overlap layers
+    /// Number of overlap layers.
     pub overlap: usize,
-    /// Local subdomain index sets (global indices) per block
+    /// Local subdomain index sets (global indices) per block.
     pub subdomains: Vec<Vec<usize>>,
-    /// One inner solver and submatrix per subdomain
+    /// One inner solver and submatrix per subdomain.
     pub local_blocks: Vec<(M, Mutex<Box<dyn LinearSolver<M, V, Scalar = T, Error = KError> + Send + Sync>>)>,
 }
 
@@ -34,7 +35,8 @@ where
         Self { overlap, subdomains, local_blocks: Vec::new() }
     }
 
-    /// Setup: extract submatrices and configure each local solver (e.g. GMRES+ILU)
+    /// Setup: extract submatrices and configure each local solver (e.g. GMRES+ILU).
+    /// The `solver_factory` closure is called to create a solver for each block.
     pub fn setup<S>(&mut self, a: &M, mut solver_factory: impl FnMut() -> S)
     where
         S: LinearSolver<M, V, Scalar = T, Error = KError> + Send + Sync + 'static,
@@ -70,6 +72,7 @@ where
     T: 'static + num_traits::Float + From<f64> + Send + Sync,
 {
     /// Apply `z = P^{-1} r` via overlapping block solves.
+    /// Each block's result is summed into the global vector.
     fn apply(&self, r: &V, z: &mut V) -> Result<(), KError> {
         for zi in z.as_mut().iter_mut() { *zi = T::zero(); }
         #[cfg(feature = "rayon")]

@@ -1,4 +1,7 @@
 //! kryst: PETSc-style PC/KSP interface over Faer
+//!
+//! This crate provides flexible, high-performance Krylov subspace solvers and preconditioners
+//! for dense and sparse linear systems, with support for shared and distributed memory parallelism.
 
 pub mod parallel;
 

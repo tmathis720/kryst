@@ -1,4 +1,6 @@
 //! Preconditioners for linear solvers.
+//!
+//! This module defines the Preconditioner trait and includes implementations such as Jacobi, ILU, SOR, AMG, Additive Schwarz, and more.
 
 use crate::error::KError;
 
@@ -16,6 +18,7 @@ pub trait FlexiblePreconditioner<M, V> {
     fn apply(&mut self, r: &V, z: &mut V) -> Result<(), crate::error::KError>;
 }
 
+// Submodules for various preconditioners
 pub mod block_jacobi;
 pub mod ilu;
 pub mod jacobi;
@@ -27,6 +30,7 @@ pub mod ilup;
 pub mod chebyshev;
 pub mod approxinv;
 
+// Re-exports for convenience
 pub use jacobi::Jacobi;
 pub use sor::Sor;
 pub use ilu::Ilu0;

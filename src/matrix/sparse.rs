@@ -18,6 +18,7 @@ use faer::sparse::{
 use faer::traits::ComplexField;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
+/// CSR matrix wrapper for Faer sparse matrices.
 pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,
 }
@@ -98,7 +99,7 @@ use rayon::iter::IntoParallelRefMutIterator;
 
 #[cfg(feature = "rayon")]
 impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero + Send + Sync> CsrMatrix<T> {
-    /// Parallel SpMV using Rayon
+    /// Parallel SpMV using Rayon.
     pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());

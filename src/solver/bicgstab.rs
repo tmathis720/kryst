@@ -1,4 +1,24 @@
 //! BiCGStab solver (Saad §7.1)
+//!
+//! This module implements the BiConjugate Gradient Stabilized (BiCGStab) method for solving
+//! non-symmetric linear systems. BiCGStab is a popular Krylov subspace method that combines the
+//! robustness of BiCG with smoother convergence, making it suitable for a wide range of problems.
+//!
+//! # Overview
+//!
+//! The BiCGStab algorithm iteratively refines the solution to Ax = b by constructing two coupled
+//! sequences of vectors and scalars, using short recurrences and a shadow residual. It is especially
+//! effective for large, sparse, and non-symmetric systems.
+//!
+//! # Usage
+//!
+//! - Create a `BiCgStabSolver` with the desired tolerance and maximum iterations.
+//! - Call `solve` with the system matrix, right-hand side, and initial guess.
+//! - The solver returns convergence statistics and the solution vector.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 7.1.
+//! - https://en.wikipedia.org/wiki/Biconjugate_gradient_stabilized_method
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::error::KError;
@@ -10,6 +30,9 @@ use rayon::prelude::*;
 #[cfg(feature = "mpi")]
 use crate::parallel::Comm;
 
+/// BiCGStab solver struct
+///
+/// Stores convergence parameters.
 pub struct BiCgStabSolver<T>
 where
     T: Send + Sync,
@@ -18,6 +41,7 @@ where
 }
 
 impl<T: num_traits::Float + Send + Sync> BiCgStabSolver<T> {
+    /// Create a new BiCGStab solver with the given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
@@ -33,6 +57,15 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using the BiCGStab algorithm.
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `pc` - Optional preconditioner (currently unused)
+    /// * `b` - Right-hand side vector
+    /// * `x` - Initial guess (input/output)
+    ///
+    /// Returns convergence statistics and the solution vector.
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let _ = pc; // BiCGStab does not use preconditioner (yet)
         let n = b.as_ref().len();
@@ -48,6 +81,7 @@ where
         let mut omega_prev = T::one();
         let mut v = V::from(vec![T::zero(); n]);
         let mut p = r.clone(); // Properly initialize p = r
+        // Compute initial residual norm
         let res0 = {
             #[cfg(feature = "mpi")]
             {
@@ -67,6 +101,7 @@ where
             return Ok(stats);
         }
         for i in 1..=self.conv.max_iters {
+            // rho = <r_hat, r>
             let rho = {
                 #[cfg(feature = "mpi")]
                 {
@@ -110,6 +145,7 @@ where
             a.matvec(&p.clone(), &mut v_tmp);
             v = v_tmp;
             let alpha_num = rho;
+            // alpha_den = <r_hat, v>
             let alpha_den = {
                 #[cfg(feature = "mpi")]
                 {
@@ -137,6 +173,7 @@ where
                     V::from(r.as_ref().iter().zip(v.as_ref()).map(|(&rj, &vj)| rj - alpha * vj).collect::<Vec<_>>())
                 }
             };
+            // Compute norm of s
             let s_norm = {
                 #[cfg(feature = "mpi")]
                 {
@@ -150,6 +187,7 @@ where
                 }
             };
             if s_norm <= self.conv.tol {
+                // Early convergence: update x and return
                 #[cfg(feature = "rayon")]
                 {
                     xk.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
@@ -169,6 +207,7 @@ where
             // t = A s
             let mut t = V::from(vec![T::zero(); n]);
             a.matvec(&s, &mut t);
+            // omega = <t, s> / <t, t>
             let omega_num = {
                 #[cfg(feature = "mpi")]
                 {
@@ -225,6 +264,7 @@ where
                 }
             };
             r = r_new;
+            // Compute norm of r
             let r_norm = {
                 #[cfg(feature = "mpi")]
                 {

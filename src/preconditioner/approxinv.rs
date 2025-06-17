@@ -1,4 +1,29 @@
 //! Sparse Approximate Inverse (SPAI) preconditioner
+//!
+//! This module implements the SPAI preconditioner, which constructs a sparse approximation to the inverse of a given matrix.
+//! The preconditioner is used to accelerate the convergence of iterative solvers for sparse linear systems.
+//!
+//! # Overview
+//!
+//! The SPAI preconditioner attempts to find a sparse matrix $M$ such that $AM \approx I$, where $A$ is the original matrix.
+//! For each column $j$ of $M$, the algorithm solves $A m_j \approx e_j$ (where $e_j$ is the $j$-th unit vector),
+//! restricting $m_j$ to a given sparsity pattern. The pattern can be provided manually or determined automatically.
+//!
+//! The implementation supports both exact and least-squares solutions for each column, and can use the `faer` library for efficient
+//! factorization and solution when working with `f64` types. For other types, a normal equations approach is used.
+//!
+//! # Features
+//! - Customizable sparsity pattern (manual or automatic)
+//! - Support for block and cache hints (not fully implemented)
+//! - Parallel application with Rayon (if enabled)
+//! - Tolerance and iteration controls
+//!
+//! # Usage
+//! See the tests at the bottom of this file for usage examples.
+
+// =====================
+//   SPAI PRECONDITIONER
+// =====================
 
 use crate::core::traits::MatVec;
 use crate::error::KError;
@@ -11,18 +36,38 @@ use faer::linalg::solvers::SolveCore;
 use std::marker::PhantomData;
 
 /// Sparse Approximate Inverse (SPAI) preconditioner
+///
+/// This struct stores the parameters and computed data for the SPAI preconditioner.
+/// The main field is `inv_rows`, which stores the sparse rows of the approximate inverse.
+///
+/// # Type Parameters
+/// - `M`: Matrix type (must implement `MatVec<V>`)
+/// - `V`: Vector type (must be convertible from/to `Vec<T>`)
+/// - `T`: Scalar type (must implement `Float`)
 pub struct ApproxInv<M, V, T> {
+    /// Sparsity pattern for the approximate inverse (manual or automatic)
     pub pattern:    SparsityPattern,
+    /// Tolerance for numerical operations (pivoting, etc.)
     pub tol:        T,
+    /// Maximum number of outer iterations (not used in this basic SPAI)
     pub max_iter:   usize,
-    pub nbsteps:    usize,    // max number of improvement steps per row
-    pub max_size:   usize,    // max dimensions of working arrays
-    pub max_new:    usize,    // max new fill per step
-    pub block_size: usize,    // block-size >1 support
-    pub cache_size: usize,    // cache-level hint
-    pub verbose:    bool,     // print timing/stats
-    pub sp:         bool,     // symmetric pattern flag
-    pub inv_rows:   Vec<Vec<(usize, T)>>, // CSR‐like: for each row i, (j, mij)
+    /// Maximum number of improvement steps per row (not used in this basic SPAI)
+    pub nbsteps:    usize,
+    /// Maximum size of working arrays (not used in this basic SPAI)
+    pub max_size:   usize,
+    /// Maximum new fill per step (not used in this basic SPAI)
+    pub max_new:    usize,
+    /// Block size for block SPAI (not implemented)
+    pub block_size: usize,
+    /// Cache size hint (not implemented)
+    pub cache_size: usize,
+    /// Verbosity flag (print timing/stats)
+    pub verbose:    bool,
+    /// Symmetric pattern flag (not implemented)
+    pub sp:         bool,
+    /// Inverse rows: for each row i, a vector of (column, value) pairs (CSR-like storage)
+    pub inv_rows:   Vec<Vec<(usize, T)>>,
+    /// Optionally stores the matrix A (not used in this implementation)
     pub a:          Option<M>,
     _phantom:       PhantomData<V>,
 }
@@ -32,6 +77,9 @@ where
     T: Float,
 {
     #[allow(clippy::too_many_arguments)]
+    /// Create a new SPAI preconditioner with the given parameters.
+    ///
+    /// Most parameters are for future extensions; only `pattern` and `tol` are essential.
     pub fn new(
         pattern: SparsityPattern,
         tol: T,
@@ -68,7 +116,12 @@ where
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone,
     T: Float + 'static + Send + Sync,
 {
+    /// Setup the SPAI preconditioner by computing the approximate inverse rows.
+    ///
+    /// For each column j, solves $A m_j \approx e_j$ with the given sparsity pattern.
+    /// Uses LU or QR from `faer` for `f64`, otherwise falls back to normal equations.
     fn setup(&mut self, a: &M) -> Result<(), KError> {
+        // Determine the matrix size n
         let n = match &self.pattern {
             SparsityPattern::Manual(pat) => pat.len(),
             SparsityPattern::Auto => {
@@ -83,6 +136,7 @@ where
         // Build SPAI by columns: for each column j, solve A m = e_j
         let mut cols = vec![vec![T::zero(); n]; n];
         for j in 0..n {
+            // Determine the sparsity pattern for column j
             let pattern: Vec<usize> = match &self.pattern {
                 SparsityPattern::Auto => {
                     if let Some(rowpat) = get_row_pattern(a) {
@@ -94,6 +148,7 @@ where
                 SparsityPattern::Manual(pat) => pat.get(j).cloned().unwrap_or_else(Vec::new),
             };
             let m = pattern.len();
+            // Build b: for each index in the pattern, compute the corresponding column of A
             let mut b = vec![vec![T::zero(); n]; m];
             for (row_idx, &i) in pattern.iter().enumerate() {
                 let mut ei = V::from(vec![T::zero(); n]);
@@ -104,8 +159,10 @@ where
                     b[row_idx][k] = col.as_ref()[k];
                 }
             }
+            // Build right-hand side e_j
             let mut e_j = vec![T::zero(); n];
             e_j[j] = T::one();
+            // Solve for m_j using either faer (for f64) or normal equations
             let m_vec: Vec<T> = if TypeId::of::<T>() == TypeId::of::<f64>() {
                 use faer::{Mat, MatMut};
                 use faer::linalg::solvers::{Qr, FullPivLu};
@@ -144,6 +201,7 @@ where
                         bt_e[r] = bt_e[r] + b[r][k] * e_j[k];
                     }
                 }
+                // Gaussian elimination (with partial pivoting)
                 let mut m_vec_pattern = bt_e.clone();
                 for k in 0..m {
                     let mut max_row = k;
@@ -168,6 +226,7 @@ where
                         m_vec_pattern[r] = m_vec_pattern[r] - f * m_vec_pattern[k];
                     }
                 }
+                // Back substitution
                 for k in (0..m).rev() {
                     let mut sum = m_vec_pattern[k];
                     for c in (k+1)..m {
@@ -187,11 +246,12 @@ where
                 }
                 full
             };
+            // Store the computed column in cols
             for i in 0..n {
                 cols[j][i] = m_vec[i];
             }
         }
-        // Transpose cols to row storage
+        // Transpose cols to row storage (CSR-like)
         self.inv_rows = vec![vec![]; n];
         for i in 0..n {
             for j in 0..n {
@@ -202,6 +262,9 @@ where
         }
         Ok(())
     }
+    /// Apply the SPAI preconditioner to a vector x, storing the result in y.
+    ///
+    /// Computes y = Mx, where M is the approximate inverse (stored in sparse row format).
     fn apply(&self, x: &V, y: &mut V) -> Result<(), KError> {
         // Zero-out y
         for yi in y.as_mut().iter_mut() {
@@ -236,6 +299,7 @@ where
 }
 
 // Helper: get nrows from a if possible
+// Attempts to downcast to known matrix traits to extract the number of rows.
 fn get_nrows<M: 'static>(a: &M) -> Option<usize> {
     use crate::core::traits::Indexing;
     let any = a as &dyn std::any::Any;
@@ -249,6 +313,7 @@ fn get_nrows<M: 'static>(a: &M) -> Option<usize> {
 }
 
 // Helper: get RowPattern trait object if implemented
+// Used for automatic sparsity pattern extraction.
 fn get_row_pattern<M: 'static>(a: &M) -> Option<&dyn crate::core::traits::RowPattern> {
     let any = a as &dyn std::any::Any;
     if let Some(rowpat) = any.downcast_ref::<&dyn crate::core::traits::RowPattern>() {
@@ -258,6 +323,10 @@ fn get_row_pattern<M: 'static>(a: &M) -> Option<&dyn crate::core::traits::RowPat
     }
 }
 
+// =====================
+//        TESTS
+// =====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +334,7 @@ mod tests {
     use crate::preconditioner::Preconditioner;
     use approx::assert_relative_eq;
 
+    /// Simple dense matrix for testing
     #[derive(Clone)]
     struct DenseMat<T> {
         data: Vec<Vec<T>>,
@@ -296,6 +366,7 @@ mod tests {
         }
     }
 
+    /// Construct an identity matrix of size n
     fn eye<T: Float>(n: usize) -> DenseMat<T> {
         DenseMat {
             data: (0..n)
@@ -372,6 +443,7 @@ mod tests {
 
     #[test]
     fn debug_faer_lu_inverse_rows() {
+        // Test faer LU for inverting a 2x2 matrix row-wise
         use faer::{Mat, MatMut};
         use faer::linalg::solvers::FullPivLu;
         let a = Mat::from_fn(2, 2, |j, i| match (i, j) {

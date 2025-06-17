@@ -1,27 +1,55 @@
 #![allow(clippy::needless_range_loop, unused_assignments, dead_code, clippy::type_complexity, clippy::too_many_arguments)]
-//! Flexible GMRES (Saad §9.4)
+//! Flexible GMRES (FGMRES) solver (Saad §9.4)
+//!
+//! This module implements the Flexible Generalized Minimal Residual (FGMRES) algorithm for solving
+//! large, sparse, and possibly nonsymmetric linear systems Ax = b. FGMRES extends GMRES by allowing
+//! the preconditioner to change at each iteration, which is useful for nonlinear or variable preconditioning.
+//!
+//! # Features
+//! - Supports both classical and modified Gram-Schmidt orthogonalization.
+//! - Allows for restart, preallocation, and custom monitoring.
+//! - Tracks residual history and supports happy breakdown detection.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §9.4
+//! - https://en.wikipedia.org/wiki/Generalized_minimal_residual_method
 
 use crate::preconditioner::FlexiblePreconditioner;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use crate::core::traits::{MatVec, InnerProduct};
 
+/// Orthogonalization method for Arnoldi process in FGMRES.
 pub enum Orthog { Classical, Modified }
 
 #[allow(clippy::type_complexity)]
+/// Flexible GMRES solver struct.
+///
+/// # Type Parameters
+/// * `T` - Scalar type (e.g., f32, f64)
 pub struct FgmresSolver<T> {
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
+    /// Restart parameter (number of Arnoldi vectors before restart)
     pub restart: usize,
+    /// Amount to grow basis storage by when needed
     pub delta_allocate: usize,
+    /// If true, preallocate all storage for max_iters
     pub preallocate: bool,
+    /// Orthogonalization method (classical or modified Gram-Schmidt)
     pub orthog: Orthog,
+    /// Happy breakdown tolerance
     pub haptol: T,
+    /// Optional callback to modify preconditioner during solve
     pub modify_pc: Option<Box<dyn FnMut(usize, usize, T) -> Result<(), KError>>>,
+    /// Optional callback to monitor residuals during solve
     pub monitor: Option<Box<dyn FnMut(usize, T)>>,
+    /// History of residual norms for each iteration
     pub residual_history: Vec<T>,
 }
 
 impl<T: num_traits::Float> FgmresSolver<T> {
+    /// Create a new FGMRES solver with given tolerance, max iterations, and restart.
     pub fn new(tol: T, max_iters: usize, restart: usize) -> Self {
         Self {
             conv: Convergence { tol, max_iters },
@@ -35,37 +63,54 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             residual_history: Vec::new(),
         }
     }
+    /// Set the orthogonalization method.
     pub fn with_orthog(mut self, orthog: Orthog) -> Self {
         self.orthog = orthog;
         self
     }
+    /// Enable or disable preallocation of all storage.
     pub fn with_preallocate(mut self, preallocate: bool) -> Self {
         self.preallocate = preallocate;
         self
     }
+    /// Set the amount to grow basis storage by when needed.
     pub fn with_delta_allocate(mut self, delta: usize) -> Self {
         self.delta_allocate = delta;
         self
     }
+    /// Set the happy breakdown tolerance.
     pub fn with_haptol(mut self, haptol: T) -> Self {
         self.haptol = haptol;
         self
     }
+    /// Set a callback to modify the preconditioner during the solve.
     pub fn with_modify_pc<F>(mut self, f: F) -> Self
     where F: FnMut(usize, usize, T) -> Result<(), KError> + 'static {
         self.modify_pc = Some(Box::new(f));
         self
     }
+    /// Set a callback to monitor residuals during the solve.
     pub fn with_monitor<F>(mut self, f: F) -> Self
     where F: FnMut(usize, T) + 'static {
         self.monitor = Some(Box::new(f));
         self
     }
+    /// Clear the residual history.
     pub fn clear_history(&mut self) {
         self.residual_history.clear();
     }
 
     /// Flexible GMRES solve (Saad §9.4)
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec`
+    /// * `pc` - Optional flexible preconditioner (can change per iteration)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     pub fn solve_flex<M, V>(
         &mut self,
         a: &M,
@@ -84,7 +129,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         let max_iters = self.conv.max_iters;
         let tol = self.conv.tol;
 
-        // x0 is input x
+        // Compute initial residual r = b - A x
         let mut r = b.clone();
         let mut tmp = V::from(vec![T::zero(); n]);
         a.matvec(x, &mut tmp);
@@ -97,6 +142,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         }
         // Allocate basis and Hessenberg storage
         let (mut v_basis, mut z_basis, mut h, mut cs, mut sn, mut s) = if self.preallocate {
+            // Preallocate for all iterations
             (
                 vec![V::from(vec![T::zero(); n]); max_iters + 1],
                 vec![V::from(vec![T::zero(); n]); max_iters],
@@ -106,6 +152,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 vec![T::zero(); max_iters + 1],
             )
         } else {
+            // Allocate for one restart cycle
             (
                 vec![V::from(vec![T::zero(); n]); restart + 1],
                 vec![V::from(vec![T::zero(); n]); restart],
@@ -125,8 +172,9 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         let mut pc_mut = pc;
         #[allow(unused_labels)]
         'outer: while total_iters < max_iters {
+            // Determine Arnoldi steps for this cycle
             let m = if self.preallocate { max_iters.min(restart) } else { restart.min(max_iters - total_iters) };
-            // If not enough storage, grow by delta_allocate
+            // Grow storage if needed
             if !self.preallocate && v_basis.len() < m + 1 {
                 let grow = self.delta_allocate.max(m + 1 - v_basis.len());
                 v_basis.extend((0..grow).map(|_| V::from(vec![T::zero(); n])));
@@ -139,12 +187,10 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 sn.extend(vec![T::zero(); grow]);
                 s.extend(vec![T::zero(); grow]);
             }
-            // If not enough storage, grow by delta_allocate
             if !self.preallocate && z_basis.len() < m {
                 let grow = self.delta_allocate.max(m - z_basis.len());
                 z_basis.extend((0..grow).map(|_| V::from(vec![T::zero(); n])));
             }
-            // If not enough storage, grow by delta_allocate
             if !self.preallocate && h.len() < m + 1 {
                 let grow = self.delta_allocate.max(m + 1 - h.len());
                 h.extend((0..grow).map(|_| vec![T::zero(); restart]));
@@ -152,7 +198,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     if row.len() < restart { row.extend(vec![T::zero(); restart - row.len()]); }
                 }
             }
-            // Perform one FGMRES cycle: Arnoldi, Givens, and monitoring.
+            // Arnoldi process and Givens rotations
             let m = if self.preallocate { max_iters.min(restart) } else { restart.min(max_iters - total_iters) };
             let mut res_norm = s[0].abs();
             let mut converged = false;
@@ -166,7 +212,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 // (b) w = A * z_basis[j]
                 let mut w = V::from(vec![T::zero(); n]);
                 a.matvec(&z_basis[j], &mut w);
-                // (c) Arnoldi orthonormalization (two-phase to avoid borrow conflicts)
+                // (c) Arnoldi orthonormalization
                 let mut h_col = vec![T::zero(); j+2];
                 match self.orthog {
                     Orthog::Classical => {
@@ -201,7 +247,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 }
                 h[j+1][j] = ip.norm(&w);
                 for i in 0..=j { h[i][j] = h_col[i]; }
-                // Happy breakdown logic
+                // Happy breakdown detection
                 let hapbnd = self.haptol * s[j].abs();
                 let happy_breakdown = h[j+1][j].abs() < hapbnd;
                 if !happy_breakdown {
@@ -217,7 +263,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     h[i+1][j] = -sn[i] * h[i][j] + cs[i] * h[i+1][j];
                     h[i][j] = temp;
                 }
-                // (e) Compute new rotation
+                // (e) Compute new Givens rotation
                 let (c, s_) = {
                     let h1 = h[j][j];
                     let h2 = h[j+1][j];
@@ -237,7 +283,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 h[j+1][j] = T::zero();
                 res_norm = s[j+1].abs();
                 total_iters += 1;
-                // Per-iteration monitor and history
+                // Per-iteration monitor and residual history
                 if let Some(ref mut monitor) = self.monitor {
                     monitor(total_iters, res_norm);
                 }
@@ -307,6 +353,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         }
     }
 
+    // (Optional) Standalone Arnoldi/FGMRES cycle for advanced use
     fn cycle<M, V>(
         &mut self,
         a: &M,
@@ -350,7 +397,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             // (b) w = A * z_basis[j]
             let mut w = V::from(vec![T::zero(); n]);
             a.matvec(&z_basis[j], &mut w);
-            // (c) Arnoldi orthonormalization (two-phase to avoid borrow conflicts)
+            // (c) Arnoldi orthonormalization
             let mut h_col = vec![T::zero(); j+2];
             match self.orthog {
                 Orthog::Classical => {
@@ -385,7 +432,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             }
             h[j+1][j] = ip.norm(&w);
             for i in 0..=j { h[i][j] = h_col[i]; }
-            // Happy breakdown logic
+            // Happy breakdown detection
             let hapbnd = self.haptol * s[j].abs();
             let happy_breakdown = h[j+1][j].abs() < hapbnd;
             if !happy_breakdown {
@@ -401,7 +448,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 h[i+1][j] = -sn[i] * h[i][j] + cs[i] * h[i+1][j];
                 h[i][j] = temp;
             }
-            // (e) Compute new rotation
+            // (e) Compute new Givens rotation
             let (c, s_) = {
                 let h1 = h[j][j];
                 let h2 = h[j+1][j];
@@ -446,6 +493,7 @@ mod tests {
     #[derive(Clone)]
     struct Simple2;
     impl MatVec<Vec<f64>> for Simple2 {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             y[0] = 2.0 * x[0] + 1.0 * x[1];
             y[1] = 1.0 * x[0] + 3.0 * x[1];
@@ -462,6 +510,7 @@ mod tests {
         }
     }
     impl Preconditioner<Simple2, Vec<f64>> for Jacobi {
+        /// Apply Jacobi preconditioner: z = D^{-1} r
         fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
             for (zi, (ri, &d)) in z.iter_mut().zip(r.iter().zip(self.inv_diag.iter())) {
                 *zi = *ri * d;
@@ -481,6 +530,7 @@ mod tests {
 
     #[test]
     fn fgmres_equiv_to_gmres_on_fixed_pc() {
+        // Test FGMRES on a simple 2x2 system with Jacobi preconditioner
         let a = Simple2;
         let jacobi = Jacobi::new();
         let mut flex_jacobi = FlexJacobi { inner: &jacobi };

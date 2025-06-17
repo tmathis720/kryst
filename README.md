@@ -1,3 +1,8 @@
+<!--
+    kryst: PETSc-style Krylov solvers and preconditioners for Rust.
+    This README describes the main features, usage, and documentation pointers.
+-->
+
 # kryst
 
 Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with shared and distributed memory parallelism.
@@ -12,6 +17,7 @@ Krylov subspace and preconditioned iterative solvers for dense and sparse linear
 - Extensible trait-based design for custom matrices and preconditioners
 
 ## Usage
+
 Add to your `Cargo.toml`:
 ```toml
 [dependencies]
@@ -26,6 +32,7 @@ mpi = ["dep:mpi"]
 ```
 
 ## Example
+
 ```rust
 use kryst::solver::GmresSolver;
 // ... set up your matrix A and vectors b, x ...
@@ -35,11 +42,14 @@ println!("Converged: {} in {} iterations", stats.converged, stats.iterations);
 ```
 
 ## Documentation
+
 - [API Docs (docs.rs)](https://docs.rs/kryst)
 - [Repository](https://github.com/yourusername/kryst)
 
 ## License
+
 MIT
 
 ## Contributing
+
 Contributions, bug reports, and feature requests are welcome! Open an issue or pull request on GitHub.

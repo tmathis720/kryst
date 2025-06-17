@@ -1,4 +1,16 @@
-//! Direct dense solves via Faer.
+//! Direct dense solvers using Faer: LU and QR factorizations.
+//!
+//! This module provides wrappers for direct dense linear solvers using the Faer library.
+//! It includes LU (with full pivoting) and QR solvers for square or rectangular systems.
+//! These solvers are suitable for small to medium-sized dense systems where direct methods are feasible.
+//!
+//! # Usage
+//! - Use `LuSolver` for general square systems (may be faster, but less stable for rank-deficient matrices).
+//! - Use `QrSolver` for square or rectangular systems (more stable for rank-deficient or nearly singular matrices).
+//!
+//! # References
+//! - Faer documentation: https://github.com/sarah-ek/faer-rs
+//! - Golub & Van Loan, Matrix Computations
 
 use crate::error::KError;
 use crate::solver::LinearSolver;
@@ -6,17 +18,28 @@ use faer::linalg::solvers::{FullPivLu, Qr, SolveCore};
 use faer::{Mat, MatMut, Conj};
 use faer::traits::{ComplexField, RealField};
 
-// LU solver
+/// LU solver using full pivoting from Faer.
+///
+/// Stores the LU factorization for reuse (if desired).
 pub struct LuSolver<T> {
+    /// Cached LU factorization (if computed)
     factor: Option<FullPivLu<T>>,
 }
 
 impl<T: ComplexField + RealField> LuSolver<T> {
+    /// Create a new LU solver (no factorization yet).
     pub fn new() -> Self {
         LuSolver { factor: None }
     }
 
-    /// Solve using the cached factorization (must have called solve/factorize before)
+    /// Solve using the cached LU factorization.
+    ///
+    /// # Panics
+    /// Panics if called before any factorization has been performed.
+    ///
+    /// # Arguments
+    /// * `b` - Right-hand side vector
+    /// * `x` - Output vector (solution)
     pub fn solve_cached(&self, b: &[T], x: &mut [T]) {
         if let Some(factor) = &self.factor {
             let n = b.len();
@@ -33,14 +56,24 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     type Error = KError;
     type Scalar = T;
 
+    /// Solve Ax = b using LU factorization (full pivoting).
+    ///
+    /// # Arguments
+    /// * `a` - Matrix (Faer Mat)
+    /// * `pc` - (Unused) Preconditioner (not supported for direct solvers)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: ignored; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` (always converged in 1 iteration)
     fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
         let _ = pc; // Direct solvers do not use preconditioner
-        // Factorize if needed
+        // Compute LU factorization (overwrites any previous factor)
         let factor = FullPivLu::new(a.as_ref());
         self.factor = Some(factor);
         // Copy b into x
         x.clone_from(b);
-        // Avoid double borrow: get len first
+        // Solve in-place: x = A^{-1} b
         let n = x.len();
         let x_mat = MatMut::from_column_major_slice_mut(x, n, 1);
         self.factor
@@ -62,10 +95,11 @@ impl<T: faer::traits::ComplexField + faer::traits::RealField> Default for LuSolv
     }
 }
 
-// QR solver
+/// QR solver using Faer (for square or rectangular systems).
 pub struct QrSolver;
 
 impl QrSolver {
+    /// Create a new QR solver.
     pub fn new() -> Self {
         QrSolver
     }
@@ -75,8 +109,19 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     type Error = KError;
     type Scalar = T;
 
+    /// Solve Ax = b using QR factorization.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix (Faer Mat)
+    /// * `pc` - (Unused) Preconditioner (not supported for direct solvers)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: ignored; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` (always converged in 1 iteration)
     fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
         let _ = pc; // Direct solvers do not use preconditioner
+        // Compute QR factorization
         let factor = Qr::new(a.as_ref());
         x.clone_from(b);
         let n = x.len();

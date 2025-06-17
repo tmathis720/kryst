@@ -1,3 +1,23 @@
+//! SOR/SSOR preconditioner implementation.
+//!
+//! Implements Successive Over-Relaxation (SOR) and Symmetric SOR (SSOR) as a preconditioner for iterative solvers.
+//!
+//! # Overview
+//!
+//! SOR is an iterative method and preconditioner that generalizes Gauss–Seidel by introducing a relaxation parameter ω.
+//! SSOR applies both forward and backward sweeps for improved convergence. This implementation supports various sweep types
+//! and options via bitflags, and can be used as a preconditioner for Krylov solvers.
+//!
+//! # Usage
+//!
+//! - Create a `Sor` preconditioner with the desired parameters (ω, sweeps, etc).
+//! - Call `setup` with the system matrix to extract the diagonal and store its inverse.
+//! - Use `apply` to apply the preconditioner to a vector.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.2.
+//! - https://en.wikipedia.org/wiki/Successive_over-relaxation
+
 use std::marker::PhantomData;
 use std::fmt;
 use bitflags::bitflags;
@@ -6,6 +26,9 @@ use crate::core::traits::{MatVec, Indexing};
 use crate::error::KError;
 use num_traits::Float;
 
+/// Bitflags for SOR sweep types and options.
+///
+/// Allows selection of forward, backward, symmetric, and Eisenstat sweeps.
 bitflags! {
     #[derive(Copy, Clone, Debug)]
     pub struct MatSorType: u32 {
@@ -20,14 +43,23 @@ bitflags! {
     }
 }
 
+/// SOR/SSOR preconditioner struct.
+///
+/// - `its`: Number of outer SOR iterations
+/// - `lits`: Number of local iterations (unused)
+/// - `sym`: Sweep type (forward, backward, symmetric, etc)
+/// - `omega`: Relaxation parameter (ω)
+/// - `fshift`: Diagonal shift (for regularization)
+/// - `inv_diag`: Inverse diagonal entries
+/// - `a`: Matrix reference (after setup)
 pub struct Sor<M, V, T> {
-    pub its:      usize,
-    pub lits:     usize,
-    pub sym:      MatSorType,
-    pub omega:    T,
-    pub fshift:   T,
-    pub inv_diag: Vec<T>,
-    pub a:        Option<M>,
+    pub its:      usize,      // Number of outer SOR iterations
+    pub lits:     usize,      // Number of local iterations (unused)
+    pub sym:      MatSorType, // Sweep type (forward, backward, symmetric)
+    pub omega:    T,          // Relaxation parameter
+    pub fshift:   T,          // Diagonal shift
+    pub inv_diag: Vec<T>,     // Inverse diagonal entries
+    pub a:        Option<M>,  // Matrix reference (after setup)
     _phantom:     PhantomData<V>,
 }
 
@@ -35,9 +67,11 @@ impl<M, V, T> Sor<M, V, T>
 where
     T: Float,
 {
+    /// Create a new SOR preconditioner with the given parameters.
     pub fn new(omega: T, its: usize, lits: usize, sym: MatSorType, fshift: T) -> Self {
         Self { its, lits, sym, omega, fshift, inv_diag: Vec::new(), a: None, _phantom: PhantomData }
     }
+    // Setters and getters for parameters
     pub fn set_omega(&mut self, omega: T) { self.omega = omega; }
     pub fn omega(&self) -> T { self.omega }
     pub fn set_its(&mut self, its: usize) { self.its = its; }
@@ -66,6 +100,9 @@ where
     V: AsRef<[T]> + AsMut<[T]> + From<Vec<T>>,
     T: Float + Copy,
 {
+    /// Setup SOR: extract diagonal and store inverse.
+    ///
+    /// Stores a reference to the matrix and computes the inverse of the diagonal (with optional shift).
     fn setup(&mut self, a: &M) -> Result<(), KError> {
         self.a = Some(a.clone());
         let n = a.nrows();
@@ -80,18 +117,24 @@ where
         Ok(())
     }
 
+    /// Apply SOR/SSOR preconditioner: y = M⁻¹ x.
+    ///
+    /// Performs the specified number of forward and/or backward sweeps, depending on the `sym` flags.
+    /// Each sweep updates the solution vector in-place using the SOR formula.
     fn apply(&self, x: &V, y: &mut V) -> Result<(), KError> {
         let a = self.a.as_ref().expect("SOR not setup");
         let n = x.as_ref().len();
         y.as_mut().fill(T::zero());
         for _ in 0..self.its {
-            // FORWARD sweep
+            // FORWARD sweep (Gauss–Seidel or SOR)
             if self.sym.intersects(MatSorType::APPLY_LOWER) {
                 for i in 0..n {
                     let mut sigma = T::zero();
+                    // Lower triangle: sum a[i,j] * y[j] for j < i
                     for j in 0..i {
                         sigma = sigma + a[(i, j)] * y.as_ref()[j];
                     }
+                    // Optionally include upper triangle (Eisenstat trick)
                     if !self.sym.contains(MatSorType::EISENSTAT) {
                         for j in (i+1)..n {
                             sigma = sigma + a[(i, j)] * x.as_ref()[j];
@@ -102,13 +145,15 @@ where
                     y.as_mut()[i] = yi;
                 }
             }
-            // BACKWARD sweep
+            // BACKWARD sweep (reverse Gauss–Seidel or SOR)
             if self.sym.intersects(MatSorType::APPLY_UPPER) {
                 for ii in (0..n).rev() {
                     let mut sigma = T::zero();
+                    // Upper triangle: sum a[ii,j] * y[j] for j > ii
                     for j in (ii+1)..n {
                         sigma = sigma + a[(ii, j)] * y.as_ref()[j];
                     }
+                    // Optionally include lower triangle (Eisenstat trick)
                     if !self.sym.contains(MatSorType::EISENSTAT) {
                         for j in 0..ii {
                             sigma = sigma + a[(ii, j)] * y.as_ref()[j];
@@ -116,6 +161,7 @@ where
                     }
                     let xi = x.as_ref()[ii];
                     let yi = (xi - sigma) * self.inv_diag[ii];
+                    // Weighted update: (1-omega)*xi + omega*yi
                     y.as_mut()[ii] = (T::one()-self.omega)*xi + self.omega*yi;
                 }
             }

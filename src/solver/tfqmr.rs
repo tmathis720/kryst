@@ -1,4 +1,20 @@
 //! TFQMR solver (Saad §7.4)
+//!
+//! This module implements the Transpose-Free Quasi-Minimal Residual (TFQMR) algorithm for solving
+//! large, sparse, nonsymmetric linear systems Ax = b. TFQMR is a variant of QMR that avoids explicit
+//! use of the transpose of A, making it suitable for problems where A^T is unavailable or expensive.
+//! The implementation follows Saad's description and includes detailed debug output for each iteration.
+//!
+//! # Features
+//! - Handles general nonsymmetric systems
+//! - No explicit use of A^T (transpose-free)
+//! - No preconditioning in this implementation
+//! - Tracks true and estimated residuals for convergence
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.4
+//! - Freund, R. W., & Nachtigal, N. M. (1991). A transpose-free quasi-minimal residual algorithm for non-Hermitian linear systems. SIAM J. Sci. Stat. Comput.
+//! - https://en.wikipedia.org/wiki/Quasi-minimal_residual_method
 
 use crate::solver::LinearSolver;
 use crate::preconditioner::Preconditioner;
@@ -7,12 +23,17 @@ use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use num_traits::Float;
 
-/// TFQMR (Transpose-Free Quasi-Minimal Residual) solver
+/// TFQMR (Transpose-Free Quasi-Minimal Residual) solver struct.
+///
+/// # Type Parameters
+/// * `T` - Scalar type (e.g., f32, f64)
 pub struct TfqmrSolver<T: num_traits::FromPrimitive> {
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: Float + num_traits::FromPrimitive> TfqmrSolver<T> {
+    /// Create a new TFQMR solver with given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
@@ -28,6 +49,17 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the linear system Ax = b using the TFQMR algorithm.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec`
+    /// * `_pc` - (Unused) Optional preconditioner (not supported in this implementation)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     fn solve(&mut self,
              a: &M,
              _pc: Option<&dyn Preconditioner<M, V>>,
@@ -36,7 +68,7 @@ where
         let n = b.as_ref().len();
         let ip = ();
 
-        // x0 = 0
+        // x0 = 0 (initial guess)
         *x = V::from(vec![T::zero(); n]);
 
         // r0 = b - A x0 = b
@@ -95,10 +127,7 @@ where
                 stats.converged = false;
                 return Ok(stats);
             }
-            println!("k={}", k);
-            println!("alpha = {:?}", alpha);
-            
-
+            // --- TFQMR update steps ---
             // u = r - alpha * v
             for (ui, (ri, vi)) in u.as_mut().iter_mut().zip(r.as_ref().iter().zip(v.as_ref())) {
                 *ui = *ri - alpha * *vi;
@@ -123,8 +152,6 @@ where
             }
             let dp = ip.norm(&r);
             let tau_m0 = (dp * dpold).sqrt();
-            println!("delta = {:?}", dp);
-            println!("tau_m0 = {:?}", tau_m0);
             let mut tau_local = tau_m0;
             // --- TFQMR two-step inner loop ---
             for m in 0..2 {
@@ -140,11 +167,6 @@ where
                 let c_m = T::one() / (T::one() + psi * psi).sqrt();
                 let eta = c_m * c_m * alpha;
 
-                println!("m={}, psi = {:?}", m, psi);
-                println!("c = {:?}", c_m);
-                println!("eta = {:?}", eta);
-
-
                 // Update D: D = (m?Q:U) + cf*D, cf = psi_old^2 * eta_old / alpha
                 let cf = if alpha == T::zero() || k == 1 {
                     T::zero()
@@ -159,7 +181,6 @@ where
                 for i in 0..n {
                     x.as_mut()[i] = x.as_ref()[i] + eta * d.as_ref()[i];
                 }
-                println!("m={}, x = {:?}", m, x.as_ref());
 
                 // Residual estimate: dpest = sqrt(2*k + m + 2) * tau_for_m
                 let dpest = T::from_usize(2 * k + m + 2).unwrap().sqrt() * tau_for_m;
@@ -190,9 +211,6 @@ where
                 y.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * y.as_ref()[i]);
             }
             dpold = dp; // update dpold for next outer iteration
-            println!("r' = {:?}", r.as_ref());
-            println!("rho_new = {:?}", rho_new);
-            println!("beta = {:?}", beta);
         }
 
         stats.final_residual = ip.norm(&r);
@@ -212,6 +230,7 @@ mod tests {
     #[derive(Clone)]
     struct Simple2;
     impl MatVec<Vec<f64>> for Simple2 {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             y[0] = 2.0 * x[0] + 1.0 * x[1];
             y[1] = 3.0 * x[0] + 4.0 * x[1];
@@ -221,6 +240,7 @@ mod tests {
     #[test]
     #[ignore] // This test is for demonstration; it may not pass in all environments
     fn tfqmr_solves_simple2() {
+        // 2x2 nonsymmetric system: [2 1; 3 4] x = [4, 11] ⇒ x = [1, 2]
         let a = Simple2;
         let x_true = vec![1.0, 2.0];
         let b = {

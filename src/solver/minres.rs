@@ -1,4 +1,18 @@
 //! MINRES solver (Saad §7.4)
+//!
+//! This module implements the MINimum RESidual (MINRES) algorithm for solving symmetric (possibly indefinite)
+//! linear systems Ax = b. MINRES is suitable for large, sparse, symmetric systems, including indefinite matrices.
+//! It minimizes the residual norm over a Krylov subspace using a short-term recurrence based on the Lanczos process.
+//!
+//! # Features
+//! - Handles symmetric positive definite and indefinite systems
+//! - No preconditioning (yet)
+//! - Tracks best solution by estimated residual norm
+//! - Includes detailed debug output for each iteration
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.4
+//! - https://en.wikipedia.org/wiki/MINRES
 
 use crate::solver::LinearSolver;
 use crate::core::traits::{MatVec, InnerProduct};
@@ -6,11 +20,17 @@ use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use num_traits::Float;
 
+/// MINRES solver struct, holding convergence parameters.
+///
+/// # Type Parameters
+/// * `T` - Scalar type (e.g., f32, f64)
 pub struct MinresSolver<T> {
+    /// Convergence criteria (tolerance and max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: Float> MinresSolver<T> {
+    /// Create a new MINRES solver with given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
@@ -26,6 +46,17 @@ where
     type Scalar = T;
     type Error = KError;
 
+    /// Solve the symmetric linear system Ax = b using the MINRES algorithm.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix implementing `MatVec` (must be symmetric)
+    /// * `pc` - (Unused) Optional preconditioner (not supported in this implementation)
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` if converged or max iterations reached
+    /// * `Err(KError)` on error
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let _ = pc; // MINRES does not use preconditioner (yet)
         let n = b.as_ref().len();
@@ -38,7 +69,7 @@ where
             r.as_mut()[i] = b.as_ref()[i] - r.as_ref()[i];
         }
 
-        // β₁ = ||r||₂
+        // β₁ = ||r||₂ (initial residual norm)
         let beta1 = ip.norm(&r);
         if beta1 == T::zero() {
             // already exact
@@ -47,13 +78,13 @@ where
         }
 
         // Saad Alg 7.4 initializations
-        let mut v_prev = V::from(vec![T::zero(); n]);
-        let mut v = V::from(r.as_ref().iter().map(|&ri| ri / beta1).collect::<Vec<_>>());
+        let mut v_prev = V::from(vec![T::zero(); n]); // v_{-1}
+        let mut v = V::from(r.as_ref().iter().map(|&ri| ri / beta1).collect::<Vec<_>>()); // v_0
         let mut w_prev = V::from(vec![T::zero(); n]); // w_{-1}
         let mut w = V::from(vec![T::zero(); n]);      // w_0
-        let mut x_out = V::from(vec![T::zero(); n]);
-        let mut x_best = x_out.clone();
-        let mut phi_min = beta1.abs();
+        let mut x_out = V::from(vec![T::zero(); n]);  // Solution vector
+        let mut x_best = x_out.clone();               // Best solution so far
+        let mut phi_min = beta1.abs();                // Best (smallest) estimated residual
 
         // Scalars for Givens and recurrences
         let mut beta = beta1;
@@ -192,12 +223,14 @@ mod tests {
     use super::*;
     use crate::core::traits::MatVec;
 
+    /// Simple dense symmetric matrix for testing
     #[derive(Clone)]
     #[allow(dead_code)]
     struct DenseSymMat {
         data: Vec<Vec<f64>>,
     }
     impl MatVec<Vec<f64>> for DenseSymMat {
+        /// Matrix-vector multiplication: y = A x
         fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
             for (i, row) in self.data.iter().enumerate() {
                 y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
@@ -208,7 +241,7 @@ mod tests {
     #[test]
     #[ignore]
     fn minres_reduces_residual_on_spd() {
-        // A small SPD matrix (3×3) from before:
+        // A small SPD matrix (3×3):
         //   A = [[4,1,0],
         //        [1,3,1],
         //        [0,1,2]]
@@ -262,6 +295,7 @@ mod tests {
         // A = Iₙ, so A·x = b should give x = b in one step.
         struct Identity(usize);
         impl MatVec<Vec<f64>> for Identity {
+            /// Matrix-vector multiplication: y = x (identity)
             fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
                 assert_eq!(x.len(), self.0);
                 assert_eq!(y.len(), self.0);
@@ -305,6 +339,7 @@ mod tests {
         // True solution x_true = [1, 1], since A·[1,1] = [1,1].
         struct Indefinite2;
         impl MatVec<Vec<f64>> for Indefinite2 {
+            /// Matrix-vector multiplication for symmetric indefinite 2x2
             fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
                 assert_eq!(x.len(), 2);
                 y[0] =     0.0 * x[0] + 1.0 * x[1];

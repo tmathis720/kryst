@@ -1,5 +1,30 @@
-// Adapted AMG implementation for kryst
-// use crate::core::traits::{InnerProduct, MatVec}; // Remove unused imports
+//! Algebraic Multigrid (AMG) preconditioner for kryst.
+//!
+//! This module implements a basic adaptive AMG preconditioner, supporting both serial and parallel (Rayon/MPI) execution.
+//! The AMG hierarchy is constructed using strength-of-connection, pairwise/double-pairwise aggregation, and smoothed/interpolated prolongation.
+//!
+//! # Overview
+//!
+//! Algebraic Multigrid (AMG) is a multilevel preconditioner for large sparse linear systems, especially those arising from discretized PDEs.
+//! AMG constructs a hierarchy of coarser problems using only the matrix entries (no geometric information), and applies smoothing and coarse-grid correction recursively.
+//!
+//! - The hierarchy is built by aggregating nodes based on strength-of-connection.
+//! - Prolongation (interpolation) and restriction operators are constructed for transfer between levels.
+//! - Smoothing is performed using Jacobi iterations.
+//! - The V-cycle is applied recursively, with a direct solve on the coarsest level.
+//!
+//! # References
+//!
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, §13.3.
+//! - Trottenberg, U., Oosterlee, C. W., & Schuller, A. (2000). Multigrid.
+//! - https://en.wikipedia.org/wiki/Algebraic_multigrid
+//!
+//! # Usage
+//!
+//! - Construct an `AMG` preconditioner with `AMG::new(matrix, max_levels, threshold)`.
+//! - Use the `apply` method to apply the preconditioner to a vector.
+//! - For distributed/parallel use, use `apply_with_comm`.
+
 use crate::preconditioner::Preconditioner;
 use crate::error::KError;
 use faer::Mat;
@@ -9,21 +34,42 @@ use rayon::prelude::*;
 #[cfg(feature = "rayon")]
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
 
+/// AMG preconditioner struct, holding the multigrid hierarchy and parameters.
+///
+/// - `levels`: Multigrid levels, from fine to coarse.
+/// - `nu_pre`: Number of pre-smoothing Jacobi iterations per V-cycle.
+/// - `nu_post`: Number of post-smoothing Jacobi iterations per V-cycle.
+/// - `matrix`: The original system matrix (for fallback smoothing).
 pub struct AMG {
+    /// Multigrid levels, from fine to coarse.
     levels: Vec<AMGLevel>,
+    /// Number of pre-smoothing Jacobi iterations per V-cycle.
     nu_pre: usize,
+    /// Number of post-smoothing Jacobi iterations per V-cycle.
     nu_post: usize,
+    /// The original system matrix (for fallback smoothing).
     matrix: Mat<f64>, // Store the system matrix
 }
 
+/// One level in the AMG hierarchy: interpolation, restriction, coarse matrix, and diagonal inverse.
 struct AMGLevel {
+    /// Prolongation (interpolation) operator to next finer level
     interpolation: Mat<f64>,
+    /// Restriction operator to next coarser level
     restriction: Mat<f64>,
+    /// Coarse-level matrix
     coarse_matrix: Mat<f64>,
+    /// Inverse of diagonal (for Jacobi smoothing)
     diag_inv: Vec<f64>,
 }
 
 impl AMG {
+    /// Construct a new AMG hierarchy from a matrix.
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `max_levels` - Maximum number of coarsening levels
+    /// * `base_threshold` - Base strength-of-connection threshold
     pub fn new(a: &Mat<f64>, max_levels: usize, base_threshold: f64) -> Self {
         let mut levels = Vec::new();
         let mut current_matrix = a.clone();
@@ -33,14 +79,18 @@ impl AMG {
             if n <= 10 {
                 break;
             }
+            // Compute adaptive threshold based on anisotropy
             let adaptive_threshold = compute_adaptive_threshold(&current_matrix, base_threshold);
+            // Generate interpolation and restriction operators
             let (mut interpolation, restriction) = AMG::generate_operators(
                 &current_matrix,
                 adaptive_threshold,
                 true,
             );
+            // Smooth and normalize interpolation
             smooth_interpolation(&mut interpolation, &current_matrix, 0.5);
             minimize_energy(&mut interpolation, &current_matrix);
+            // Build coarse matrix
             let coarse_matrix = &restriction * &current_matrix * &interpolation;
             let coarse_diag = Self::extract_diagonal_inverse(&coarse_matrix);
             levels.push(AMGLevel {
@@ -52,6 +102,7 @@ impl AMG {
             current_matrix = coarse_matrix.clone();
             current_diag = coarse_diag;
         }
+        // Add the coarsest level (identity prolongation/restriction)
         let diag_inv_final = Self::extract_diagonal_inverse(&current_matrix);
         levels.push(AMGLevel {
             interpolation: Mat::identity(current_matrix.nrows(), current_matrix.nrows()),
@@ -66,6 +117,9 @@ impl AMG {
             matrix: a.clone(),
         }
     }
+    /// Generate interpolation and restriction operators for a given matrix and threshold.
+    ///
+    /// Returns (prolongation, restriction).
     fn generate_operators(
         a: &Mat<f64>,
         threshold: f64,
@@ -81,6 +135,7 @@ impl AMG {
         let restriction = prolongation.transpose().to_owned();
         (prolongation, restriction)
     }
+    /// Extract the inverse of the diagonal of a matrix, with zero for near-singular entries.
     fn extract_diagonal_inverse(m: &Mat<f64>) -> Vec<f64> {
         assert_eq!(m.nrows(), m.ncols());
         let n = m.nrows();
@@ -113,6 +168,9 @@ impl AMG {
                 .collect()
         }
     }
+    /// Parallel Jacobi smoother for a given matrix and right-hand side.
+    ///
+    /// Applies a fixed number of Jacobi iterations to z, using the diagonal inverse.
     fn smooth_jacobi_parallel(a: &Mat<f64>, diag_inv: &[f64], r: &[f64], z: &mut [f64], iterations: usize) {
         let n = r.len();
         let mut z_vec = z.to_vec();
@@ -136,6 +194,9 @@ impl AMG {
         }
         z.copy_from_slice(&z_vec);
     }
+    /// Recursive AMG V-cycle application (serial/Rayon).
+    ///
+    /// Applies pre-smoothing, restricts the residual, recursively solves on the coarse grid, prolongates the correction, and post-smooths.
     fn apply_recursive(&self, level: usize, r: &[f64], z: &mut [f64]) {
         if level + 1 == self.levels.len() {
             AMG::solve_direct(&self.levels[level].coarse_matrix, r, z);
@@ -146,7 +207,9 @@ impl AMG {
         let restriction = &self.levels[level].restriction;
         let interpolation = &self.levels[level].interpolation;
         let coarse_matrix = &self.levels[level + 1].coarse_matrix;
+        // Pre-smoothing
         AMG::smooth_jacobi_parallel(a, diag_inv, r, z, self.nu_pre);
+        // Compute residual: az = r - A z
         let mut az = vec![0.0; a.nrows()];
         parallel_mat_vec(a, z, &mut az);
         #[cfg(feature = "rayon")]
@@ -159,14 +222,17 @@ impl AMG {
                 az[i] = r[i] - az[i];
             }
         }
+        // Restrict residual to coarse grid
         let mut coarse_residual = vec![0.0; coarse_matrix.nrows()];
         parallel_mat_vec(restriction, &az, &mut coarse_residual);
+        // Recursive coarse solve
         let mut coarse_solution = vec![0.0; coarse_matrix.nrows()];
         self.apply_recursive(
             level + 1,
             &coarse_residual,
             &mut coarse_solution,
         );
+        // Prolongate correction
         let mut fine_correction = vec![0.0; a.nrows()];
         parallel_mat_vec(interpolation, &coarse_solution, &mut fine_correction);
         #[cfg(feature = "rayon")]
@@ -179,8 +245,12 @@ impl AMG {
                 z[i] += fine_correction[i];
             }
         }
+        // Post-smoothing
         AMG::smooth_jacobi_parallel(a, diag_inv, r, z, self.nu_post);
     }
+    /// Fallback direct solver for coarse grid (CG iterations).
+    ///
+    /// Uses the Conjugate Gradient method for small dense matrices.
     fn solve_direct(a: &Mat<f64>, r: &[f64], z: &mut [f64]) {
         let n = r.len();
         assert_eq!(a.ncols(), n);
@@ -240,6 +310,9 @@ impl AMG {
         }
         z.copy_from_slice(&x);
     }
+    /// Direct solver for coarse grid using distributed collectives.
+    ///
+    /// Uses the Conjugate Gradient method with distributed dot products and mat-vecs.
     fn solve_direct_with_comm(a: &Mat<f64>, r: &[f64], z: &mut [f64], comm: &crate::parallel::UniverseComm) {
         let n = r.len();
         assert_eq!(a.ncols(), n);
@@ -269,7 +342,9 @@ impl AMG {
         }
         z.copy_from_slice(&x);
     }
-    /// AMG V-cycle with distributed collectives and mat-vecs via Comm abstraction
+    /// AMG V-cycle with distributed collectives and mat-vecs via Comm abstraction.
+    ///
+    /// Applies the V-cycle recursively using distributed operations.
     pub fn apply_recursive_with_comm(&self, level: usize, r: &[f64], z: &mut [f64], comm: &crate::parallel::UniverseComm) {
         if level + 1 == self.levels.len() {
             AMG::solve_direct_with_comm(&self.levels[level].coarse_matrix, r, z, comm);
@@ -303,7 +378,9 @@ impl AMG {
         AMG::smooth_jacobi_parallel_with_comm(a, diag_inv, r, z, self.nu_post, comm);
     }
 
-    /// Distributed Jacobi smoother using Comm abstraction
+    /// Distributed Jacobi smoother using Comm abstraction.
+    ///
+    /// Applies a fixed number of Jacobi iterations using distributed mat-vecs.
     fn smooth_jacobi_parallel_with_comm(
         a: &Mat<f64>,
         diag_inv: &[f64],
@@ -325,7 +402,9 @@ impl AMG {
         z.copy_from_slice(&z_vec);
     }
 
-    /// Distributed AMG entry point
+    /// Distributed AMG entry point.
+    ///
+    /// Applies the AMG preconditioner using distributed collectives.
     pub fn apply_with_comm(
         &self,
         r: &[f64],
@@ -345,6 +424,7 @@ impl AMG {
 }
 
 impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
+    /// Apply the AMG preconditioner: z = M⁻¹ r.
     fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         if self.levels.is_empty() {
             let diag_inv = AMG::extract_diagonal_inverse(&self.matrix);
@@ -354,8 +434,8 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
         }
         Ok(())
     }
+    /// AMG is constructed with new(), so setup is a no-op.
     fn setup(&mut self, _a: &Mat<f64>) -> Result<(), KError> {
-        // AMG is constructed with new(), so setup is a no-op
         Ok(())
     }
 }
@@ -405,6 +485,8 @@ fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
 }
 
 /// Compute an adaptive threshold based on global anisotropy indicators.
+///
+/// The threshold is scaled by the average anisotropy to improve coarsening for highly anisotropic problems.
 fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
     let anis = compute_anisotropy(a);
     let avg_anis = if anis.is_empty() {
@@ -416,6 +498,7 @@ fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
 }
 
 /// Smooth the interpolation matrix to improve prolongation accuracy.
+/// This applies a weighted Jacobi smoothing to the interpolation operator.
 fn smooth_interpolation(interpolation: &mut Mat<f64>, matrix: &Mat<f64>, weight: f64) {
     let row_count = interpolation.nrows().min(matrix.nrows());
     let col_count = interpolation.ncols().min(matrix.ncols());
@@ -442,6 +525,7 @@ fn smooth_interpolation(interpolation: &mut Mat<f64>, matrix: &Mat<f64>, weight:
 }
 
 /// Normalize rows of the interpolation matrix to minimize energy.
+/// This rescales each row to unit 2-norm.
 fn minimize_energy(interpolation: &mut Mat<f64>, _matrix: &Mat<f64>) {
     let rows = interpolation.nrows();
     let cols = interpolation.ncols();
@@ -480,7 +564,7 @@ fn minimize_energy(interpolation: &mut Mat<f64>, _matrix: &Mat<f64>) {
     }
 }
 
-/// Parallel mat-vec multiplication using rayon.
+/// Parallel mat-vec multiplication using rayon or serial fallback.
 fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) {
     let (rows, cols) = (mat.nrows(), mat.ncols());
     let (vlen, rlen) = (vec.len(), result.len());
@@ -513,7 +597,6 @@ fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) {
             });
     }
 }
-
 
 // ------------------- Helper Functions for Enhanced Coarsening -------------------
 
@@ -573,8 +656,6 @@ fn compute_strength_matrix(a: &Mat<f64>, threshold: f64) -> Mat<f64> {
     }
     s
 }
-
-
 
 /// Perform double-pairwise aggregation:
 /// 1. Pairwise aggregate the graph to form coarse nodes.

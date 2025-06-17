@@ -1,4 +1,24 @@
 //! CGNR/CGNE solvers (Saad Ch 8.3)
+//!
+//! This module implements the CGNR (Conjugate Gradient on the Normal Residual) and CGNE (Conjugate Gradient on the Normal Equations)
+//! methods for solving least-squares problems and non-square linear systems. Both methods reduce the original system to a symmetric
+//! positive definite system and apply the Conjugate Gradient algorithm.
+//!
+//! # Overview
+//!
+//! - CGNR solves (AᵗA)x = Aᵗb by applying CG to the normal equations for the residual.
+//! - CGNE solves (AAᵗ)y = b, then x = Aᵗy, by applying CG to the normal equations for the error.
+//! - Both are suitable for overdetermined or underdetermined systems and least-squares problems.
+//!
+//! # Usage
+//!
+//! - Create a `CgnrSolver` or `CgneSolver` with the desired tolerance and maximum iterations.
+//! - Call `solve` with the system matrix, right-hand side, and initial guess.
+//! - The solver returns convergence statistics and the solution vector.
+//!
+//! # References
+//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 8.3.
+//! - https://en.wikipedia.org/wiki/Conjugate_gradient_method#The_normal_equations
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
@@ -7,21 +27,29 @@ use crate::error::KError;
 
 use crate::utils::convergence::Convergence;
 
+/// CGNR solver struct.
+///
+/// Stores convergence parameters.
 pub struct CgnrSolver<T> {
     pub conv: Convergence<T>,
 }
 
+/// CGNE solver struct.
+///
+/// Stores convergence parameters.
 pub struct CgneSolver<T> {
     pub conv: Convergence<T>,
 }
 
 impl<T: num_traits::Float> CgnrSolver<T> {
+    /// Create a new CGNR solver with the given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
 }
 
 impl<T: num_traits::Float> CgneSolver<T> {
+    /// Create a new CGNE solver with the given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
         Self { conv: Convergence { tol, max_iters } }
     }
@@ -37,11 +65,21 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the least-squares problem using CGNR (CG on the normal residual).
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `pc` - Optional preconditioner (currently unused)
+    /// * `b` - Right-hand side vector
+    /// * `x` - Initial guess (input/output)
+    ///
+    /// Returns convergence statistics and the solution vector.
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CGNR does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
         let ip = ();
+        // Compute initial residual r = b - A x
         let mut r = {
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(xk.clone()), &mut tmp);
@@ -56,11 +94,15 @@ where
         let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
 
         for i in 1..=self.conv.max_iters {
+            // Compute Ap = A p
             let mut ap = V::from(vec![T::zero(); n]);
-            a.matvec(&p, &mut ap); // ap = A p
+            a.matvec(&p, &mut ap);
+            // Compute AtAp = A^T (A p)
             let mut at_ap = V::from(vec![T::zero(); n]);
-            a.matvec(&ap, &mut at_ap); // at_ap = A^T (A p)
+            a.matvec(&ap, &mut at_ap);
+            // Compute step size alpha
             let alpha = rz / ip.dot(&at_ap, &at_ap);
+            // Update x and r
             for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
                 *xj = *xj + alpha * *pj;
             }
@@ -76,6 +118,7 @@ where
                 *x = V::from(xk.clone());
                 return Ok(stats);
             }
+            // Update search direction
             let beta = rz_new / rz;
             let p_old = p.clone();
             for ((pj, zj), old_pj) in p.as_mut().iter_mut().zip(z.as_ref()).zip(p_old.as_ref()) {
@@ -98,11 +141,21 @@ where
     type Error = KError;
     type Scalar = T;
 
+    /// Solve the least-squares problem using CGNE (CG on the normal equations for the error).
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `pc` - Optional preconditioner (currently unused)
+    /// * `b` - Right-hand side vector
+    /// * `x` - Initial guess (input/output)
+    ///
+    /// Returns convergence statistics and the solution vector.
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CGNE does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
         let ip = ();
+        // Compute initial residual r = b - A x
         let mut r = {
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(xk.clone()), &mut tmp);
@@ -117,11 +170,15 @@ where
         let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
 
         for i in 1..=self.conv.max_iters {
+            // Compute At_p = A p
             let mut at_p = V::from(vec![T::zero(); n]);
-            a.matvec(&p, &mut at_p); // at_p = A p
+            a.matvec(&p, &mut at_p);
+            // Compute Ap = A^T (A p)
             let mut ap = V::from(vec![T::zero(); n]);
-            a.matvec(&at_p, &mut ap); // ap = A^T (A p)
+            a.matvec(&at_p, &mut ap);
+            // Compute step size alpha
             let alpha = rz / ip.dot(&ap, &ap);
+            // Update x and r
             for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
                 *xj = *xj + alpha * *pj;
             }
@@ -137,6 +194,7 @@ where
                 *x = V::from(xk.clone());
                 return Ok(stats);
             }
+            // Update search direction
             let beta = rz_new / rz;
             let p_old = p.clone();
             for ((pj, zj), old_pj) in p.as_mut().iter_mut().zip(z.as_ref()).zip(p_old.as_ref()) {

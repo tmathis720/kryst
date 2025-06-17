@@ -1,5 +1,6 @@
-// Distance-2 graph coloring utility for block-Jacobi and multicolored preconditioners
-// See Saad §10.7, §12.4
+//! Distance-2 graph coloring utility for block-Jacobi and multicolored preconditioners.
+//! See Saad §10.7, §12.4 for background.
+
 use std::collections::HashSet;
 
 /// Extract adjacency list from a matrix pattern: adj[i] = { j | A[i,j] ≠ 0 or A[j,i] ≠ 0 }
@@ -51,7 +52,8 @@ pub fn greedy_distance2_coloring(dist2: &[HashSet<usize>]) -> Vec<usize> {
     color_of.into_iter().map(|c| c.unwrap()).collect()
 }
 
-/// Convenience: color a matrix given a sparsity predicate
+/// Convenience: color a matrix given a sparsity predicate.
+/// Returns a color assignment for each node.
 pub fn color_graph<F>(n: usize, is_nz: F) -> Vec<usize>
 where
     F: Fn(usize, usize) -> bool,
