@@ -1,8 +1,18 @@
+//! Integration tests for preconditioners and solvers in the KrylovKit library.
+//!
+//! This module verifies that various preconditioners (e.g., Jacobi, ILU0) work correctly
+//! with iterative solvers (CG, PCG, GMRES) on small test matrices. It checks convergence,
+//! solution accuracy, and correct preconditioner application. These tests ensure that the
+//! preconditioner and solver interfaces are compatible and robust for a variety of matrix types.
+
 use kryst::preconditioner::{Preconditioner, Jacobi, Ilu0};
 use kryst::solver::{PcgSolver, GmresSolver, LinearSolver};
 use kryst::solver::gmres::Preconditioning;
 use faer::Mat;
 
+/// Construct a symmetric positive definite (SPD) tridiagonal matrix of size `n`.
+/// Returns the matrix, the right-hand side vector `b` for the solution x = [1, ..., 1],
+/// and the true solution vector.
 fn spd_matrix(n: usize) -> (Mat<f64>, Vec<f64>, Vec<f64>) {
     let mut a = Mat::zeros(n, n);
     for i in 0..n {
@@ -22,6 +32,9 @@ fn spd_matrix(n: usize) -> (Mat<f64>, Vec<f64>, Vec<f64>) {
     (a, b, x_true)
 }
 
+/// Construct a non-symmetric tridiagonal matrix of size `n`.
+/// Returns the matrix, the right-hand side vector `b` for the solution x = [1, ..., 1],
+/// and the true solution vector.
 fn nonsym_matrix(n: usize) -> (Mat<f64>, Vec<f64>, Vec<f64>) {
     let mut a = Mat::zeros(n, n);
     for i in 0..n {
@@ -43,13 +56,15 @@ fn nonsym_matrix(n: usize) -> (Mat<f64>, Vec<f64>, Vec<f64>) {
     (a, b, x_true)
 }
 
+/// Compute the relative L2 error between two vectors.
 fn rel_error(x: &[f64], x_true: &[f64]) -> f64 {
     let num: f64 = x.iter().zip(x_true).map(|(xi, ti)| (xi - ti).powi(2)).sum();
     let denom: f64 = x_true.iter().map(|ti| ti.powi(2)).sum();
     (num / denom).sqrt()
 }
 
-/// Build a badly conditioned diagonal matrix
+/// Build a badly conditioned diagonal matrix of size `n` with condition number `kappa`.
+/// Returns the matrix and a right-hand side vector of all ones.
 fn ill_cond(n: usize, kappa: f64) -> (Mat<f64>, Vec<f64>) {
     let mut diag = vec![1.0; n];
     diag[n-1] = kappa;
@@ -61,6 +76,8 @@ fn ill_cond(n: usize, kappa: f64) -> (Mat<f64>, Vec<f64>) {
     (a, b)
 }
 
+/// Test: CG with Jacobi preconditioner on an ill-conditioned diagonal matrix.
+/// Ensures that the Jacobi preconditioner can be set up and applied, and that the solver runs without panic.
 #[test]
 fn cg_with_jacobi() {
     let (a, b) = ill_cond(5, 1e6);
@@ -77,6 +94,8 @@ fn cg_with_jacobi() {
     // No stats to check; just ensure it runs without panic
 }
 
+/// Test: GMRES with ILU0 preconditioner on an ill-conditioned diagonal matrix.
+/// Ensures that the ILU0 preconditioner can be set up and applied, and that the solver runs without panic.
 #[test]
 fn gmres_with_ilu0() {
     let (a, b) = ill_cond(5, 1e4);
@@ -89,6 +108,8 @@ fn gmres_with_ilu0() {
     // No stats to check; just ensure it runs without panic
 }
 
+/// Test: PCG with Jacobi preconditioner on an ill-conditioned diagonal matrix.
+/// Checks that the solver converges with the preconditioner.
 #[test]
 fn pcg_with_jacobi() {
     let (a, b) = ill_cond(5, 1e6);
@@ -100,6 +121,8 @@ fn pcg_with_jacobi() {
     assert!(stats.converged);
 }
 
+/// Test: PCG with Jacobi preconditioner on a symmetric positive definite matrix.
+/// Checks that the solver converges to the correct solution within the expected number of iterations.
 #[test]
 fn spd_jacobi_pcg_converges() {
     let n = 10;
@@ -114,6 +137,8 @@ fn spd_jacobi_pcg_converges() {
     assert!(stats.iterations <= n);
 }
 
+/// Test: CG (no preconditioner) on a symmetric positive definite matrix.
+/// Checks that the solver converges to the correct solution.
 #[test]
 fn spd_no_pc_cg_converges() {
     let n = 10;
@@ -125,6 +150,8 @@ fn spd_no_pc_cg_converges() {
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
 
+/// Test: GMRES (no preconditioner, right preconditioning) on a non-symmetric matrix.
+/// Checks that the solver converges to the correct solution.
 #[test]
 fn nonsym_no_pc_gmresright_converges() {
     let n = 10;
@@ -136,6 +163,8 @@ fn nonsym_no_pc_gmresright_converges() {
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
 
+/// Test: GMRES with left preconditioning (ILU0) on a non-symmetric matrix.
+/// Checks that the solver converges to the correct solution.
 #[test]
 fn nonsym_left_pc_gmresleft_converges() {
     let n = 10;
@@ -149,7 +178,8 @@ fn nonsym_left_pc_gmresleft_converges() {
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
 
-// Remove FGMRES flexible vs fixed equivalence test for Jacobi, as Jacobi does not implement FlexiblePreconditioner
+// The following test is commented out because Jacobi does not implement FlexiblePreconditioner.
+// It would otherwise compare FGMRES and GMRES with Jacobi preconditioning for equivalence.
 // #[test]
 // fn fgmres_flexible_vs_fixed_equiv() {
 //     let n = 10;

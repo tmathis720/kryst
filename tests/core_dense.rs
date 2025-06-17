@@ -1,8 +1,17 @@
+//! Tests for core dense matrix operations: matrix-vector multiplication, dot product, and norm.
+//!
+//! These tests verify the correctness of the MatVec and InnerProduct trait implementations
+//! for dense matrices and vectors, using random and fixed data.
+
 use approx::assert_abs_diff_eq;
 use faer::Mat;
 use kryst::core::traits::{InnerProduct, MatVec};
 use rand::Rng;
 
+/// Test matrix-vector multiplication for a small random dense matrix.
+///
+/// This test constructs a random 5x5 matrix and a random vector, computes the matrix-vector
+/// product using the MatVec trait, and checks the result against a manual computation.
 #[test]
 fn matvec_random_small() {
     let n = 5;
@@ -21,6 +30,10 @@ fn matvec_random_small() {
     }
 }
 
+/// Test dot product and Euclidean norm for small vectors.
+///
+/// This test verifies that the InnerProduct trait correctly computes the dot product and
+/// the Euclidean norm (L2 norm) for two small vectors, comparing against manual calculations.
 #[test]
 fn dot_and_norm() {
     let x = vec![1.0, 2.0, 3.0];
