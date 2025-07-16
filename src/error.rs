@@ -16,4 +16,8 @@ pub enum KError {
     ZeroPivot(usize),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
+    #[error("unrecognized solver type: {0}")]
+    UnrecognizedSolverType(String),
+    #[error("unrecognized preconditioner type: {0}")]
+    UnrecognizedPcType(String),
 }
