@@ -187,5 +187,41 @@ fn test_pc_type_from_str() {
     assert_eq!(PcType::from_str("ilu0").unwrap(), PcType::Ilu0);
     assert_eq!(PcType::from_str("none").unwrap(), PcType::None);
     
+    // Test new direct solver types
+    assert_eq!(PcType::from_str("lu").unwrap(), PcType::Lu);
+    assert_eq!(PcType::from_str("LU").unwrap(), PcType::Lu); // Case insensitive
+    assert_eq!(PcType::from_str("qr").unwrap(), PcType::Qr);
+    assert_eq!(PcType::from_str("QR").unwrap(), PcType::Qr); // Case insensitive
+    
     assert!(PcType::from_str("invalid_pc").is_err());
+}
+
+#[test]
+fn test_preonly_configuration() {
+    use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+    
+    let mut ksp = KspContext::new();
+    
+    // Configure PREONLY with LU preconditioner
+    ksp.set_type(SolverType::Preonly).unwrap()
+       .set_pc_type(PcType::Lu).unwrap();
+    
+    // No direct access to private fields, but we can test by solving a system
+    // This test mainly verifies the configuration doesn't error
+}
+
+#[test]
+fn test_preonly_options_integration() {
+    use kryst::config::options::{KspOptions, PcOptions};
+    use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+    
+    let args = vec!["-ksp_type", "preonly", "-pc_type", "lu"];
+    let ksp_opts = KspOptions::from_args(&args).unwrap();
+    let pc_opts = PcOptions::from_args(&args).unwrap();
+    
+    let mut ksp = KspContext::new();
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+    
+    // Verify that configuration doesn't error - we can't directly test private fields
+    // but the configuration should succeed without panicking
 }

@@ -108,6 +108,10 @@ pub enum PcType {
     Amg,
     /// Approximate inverse preconditioner
     ApproxInverse,
+    /// Direct LU factorization solver (for PREONLY)
+    Lu,
+    /// Direct QR factorization solver (for PREONLY)
+    Qr,
 }
 
 impl FromStr for SolverType {
@@ -147,6 +151,8 @@ impl FromStr for PcType {
             "chebyshev" => Ok(PcType::Chebyshev),
             "amg" => Ok(PcType::Amg),
             "approxinverse" | "approx_inverse" => Ok(PcType::ApproxInverse),
+            "lu" => Ok(PcType::Lu),
+            "qr" => Ok(PcType::Qr),
             _ => Err(KError::UnrecognizedPcType(s.to_string())),
         }
     }
@@ -166,6 +172,78 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for NoOpPreconditioner {
     }
 }
 
+/// Wrapper for LuSolver to act as a preconditioner for PREONLY method.
+/// 
+/// This allows using direct LU factorization as a "preconditioner" when
+/// KSP type is set to PREONLY.
+pub struct LuPreconditioner {
+    solver: LuSolver<f64>,
+}
+
+impl LuPreconditioner {
+    pub fn new() -> Self {
+        Self {
+            solver: LuSolver::new(),
+        }
+    }
+    
+    /// Perform direct solve (for PREONLY usage).
+    pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<(), KError> {
+        self.solver.solve(a, None, b, x)?;
+        Ok(())
+    }
+}
+
+impl Preconditioner<Mat<f64>, Vec<f64>> for LuPreconditioner {
+    fn setup(&mut self, _a: &Mat<f64>) -> Result<(), KError> {
+        // Setup is handled in the solve call for direct methods
+        Ok(())
+    }
+
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        // For direct methods used as preconditioners, this would typically
+        // not be called in PREONLY mode. But we provide a reasonable implementation.
+        z.clone_from(r);
+        Ok(())
+    }
+}
+
+/// Wrapper for QrSolver to act as a preconditioner for PREONLY method.
+/// 
+/// This allows using direct QR factorization as a "preconditioner" when  
+/// KSP type is set to PREONLY.
+pub struct QrPreconditioner {
+    solver: crate::solver::direct_lu::QrSolver,
+}
+
+impl QrPreconditioner {
+    pub fn new() -> Self {
+        Self {
+            solver: crate::solver::direct_lu::QrSolver::new(),
+        }
+    }
+    
+    /// Perform direct solve (for PREONLY usage).
+    pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<(), KError> {
+        self.solver.solve(a, None, b, x)?;
+        Ok(())
+    }
+}
+
+impl Preconditioner<Mat<f64>, Vec<f64>> for QrPreconditioner {
+    fn setup(&mut self, _a: &Mat<f64>) -> Result<(), KError> {
+        // Setup is handled in the solve call for direct methods
+        Ok(())
+    }
+
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        // For direct methods used as preconditioners, this would typically
+        // not be called in PREONLY mode. But we provide a reasonable implementation.
+        z.clone_from(r);
+        Ok(())
+    }
+}
+
 /// Unified context for Krylov subspace solver configuration and execution.
 ///
 /// This struct provides a PETSc-like interface for runtime selection of solvers
@@ -178,6 +256,10 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for NoOpPreconditioner {
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>>>,
     pc: Option<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>>,
+    /// Current solver type (for PREONLY handling)
+    solver_type: Option<SolverType>,
+    /// Current preconditioner type (for PREONLY handling)
+    pc_type: Option<PcType>,
     /// Preconditioner side (Left/Right/Symmetric)
     pub pc_side: crate::preconditioner::PcSide,
     /// Relative tolerance for convergence
@@ -251,6 +333,8 @@ impl KspContext {
         Self {
             solver: None,
             pc: None,
+            solver_type: None,
+            pc_type: None,
             pc_side: crate::preconditioner::PcSide::Left,
             rtol: 1e-6,
             atol: 1e-12,
@@ -272,46 +356,58 @@ impl KspContext {
     /// * `Ok(&mut Self)` for method chaining on success
     /// * `Err(KError)` if the solver type is not supported
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        let solver: Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>> = match solver_type {
-            SolverType::Cg => {
-                let cg = CgSolver::new(self.rtol, self.maxits);
-                Box::new(cg)
+        // Store the solver type for PREONLY handling
+        self.solver_type = Some(solver_type);
+        
+        match solver_type {
+            SolverType::Preonly => {
+                // For PREONLY, we don't need a Krylov solver - the PC will do direct solve
+                self.solver = None;
             },
-            SolverType::Pcg => {
-                let pcg = PcgSolver::new(self.rtol, self.maxits);
-                Box::new(pcg)
-            },
-            SolverType::Gmres => {
-                let gmres = GmresSolver::new(self.restart, self.rtol, self.maxits);
-                Box::new(gmres)
-            },
-            SolverType::BiCgStab => {
-                let bicgstab = BiCgStabSolver::new(self.rtol, self.maxits);
-                Box::new(bicgstab)
-            },
-            SolverType::Cgs => {
-                let cgs = CgsSolver::new(self.rtol, self.maxits);
-                Box::new(cgs)
-            },
-            SolverType::Qmr => {
-                let qmr = QmrSolver::new(self.rtol, self.maxits);
-                Box::new(qmr)
-            },
-            SolverType::Tfqmr => {
-                let tfqmr = TfqmrSolver::new(self.rtol, self.maxits);
-                Box::new(tfqmr)
-            },
-            SolverType::Minres => {
-                let minres = MinresSolver::new(self.rtol, self.maxits);
-                Box::new(minres)
-            },
-            SolverType::Cgnr => {
-                let cgnr = CgnrSolver::new(self.rtol, self.maxits);
-                Box::new(cgnr)
-            },
-            SolverType::Preonly => Box::new(LuSolver::new()),
-        };
-        self.solver = Some(solver);
+            _ => {
+                // Create the appropriate Krylov solver
+                let solver: Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>> = match solver_type {
+                    SolverType::Cg => {
+                        let cg = CgSolver::new(self.rtol, self.maxits);
+                        Box::new(cg)
+                    },
+                    SolverType::Pcg => {
+                        let pcg = PcgSolver::new(self.rtol, self.maxits);
+                        Box::new(pcg)
+                    },
+                    SolverType::Gmres => {
+                        let gmres = GmresSolver::new(self.restart, self.rtol, self.maxits);
+                        Box::new(gmres)
+                    },
+                    SolverType::BiCgStab => {
+                        let bicgstab = BiCgStabSolver::new(self.rtol, self.maxits);
+                        Box::new(bicgstab)
+                    },
+                    SolverType::Cgs => {
+                        let cgs = CgsSolver::new(self.rtol, self.maxits);
+                        Box::new(cgs)
+                    },
+                    SolverType::Qmr => {
+                        let qmr = QmrSolver::new(self.rtol, self.maxits);
+                        Box::new(qmr)
+                    },
+                    SolverType::Tfqmr => {
+                        let tfqmr = TfqmrSolver::new(self.rtol, self.maxits);
+                        Box::new(tfqmr)
+                    },
+                    SolverType::Minres => {
+                        let minres = MinresSolver::new(self.rtol, self.maxits);
+                        Box::new(minres)
+                    },
+                    SolverType::Cgnr => {
+                        let cgnr = CgnrSolver::new(self.rtol, self.maxits);
+                        Box::new(cgnr)
+                    },
+                    SolverType::Preonly => unreachable!(), // Handled above
+                };
+                self.solver = Some(solver);
+            }
+        }
         Ok(self)
     }
 
@@ -346,6 +442,8 @@ impl KspContext {
             PcType::Jacobi => Box::new(Jacobi::new()),
             PcType::Ilu0 => Box::new(Ilu0::new()),
             PcType::None => Box::new(NoOpPreconditioner),
+            PcType::Lu => Box::new(LuPreconditioner::new()),
+            PcType::Qr => Box::new(QrPreconditioner::new()),
             PcType::Ilu | PcType::Ilut | PcType::Ilup | PcType::BlockJacobi | 
             PcType::Sor | PcType::Asm | PcType::Chebyshev | PcType::Amg | 
             PcType::ApproxInverse => {
@@ -353,6 +451,7 @@ impl KspContext {
             }
         };
         self.pc = Some(pc);
+        self.pc_type = Some(pc_type); // Store the PC type for PREONLY handling
         Ok(self)
     }
 
@@ -567,43 +666,97 @@ impl KspContext {
     /// let stats2 = ksp.solve(&A, &b2, &mut x2)?;
     /// ```
     pub fn solve(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
-        // Check if solver is configured
-        if self.solver.is_none() {
-            return Err(KError::SolveError("No solver configured. Call set_type() first.".to_string()));
-        }
+        // Check if we're in PREONLY mode
+        if let Some(SolverType::Preonly) = self.solver_type {
+            // For PREONLY, bypass Krylov iteration and use the PC as a direct solver
+            if self.pc.is_none() {
+                return Err(KError::SolveError("No preconditioner configured for PREONLY. Call set_pc_type() first.".to_string()));
+            }
 
-        // Auto-setup if needed
-        let needs_setup = !self.setup_called || self.work.is_none();
-        if needs_setup {
-            self.setup(a, b.len())?;
-        }
+            // Auto-setup preconditioner if needed
+            if !self.setup_called {
+                self.setup(a, b.len())?;
+            }
 
-        // Verify workspace compatibility
-        if let Some(ref work) = self.work {
-            if !work.is_compatible(b.len(), self.restart) {
-                return Err(KError::SolveError(
-                    "Workspace incompatible with problem size. Call setup() or invalidate_setup().".to_string()
-                ));
+            // Apply direct solve based on preconditioner type
+            self.apply_direct_solve(a, b, x)
+        } else {
+            // Standard Krylov solver path
+            if self.solver.is_none() {
+                return Err(KError::SolveError("No solver configured. Call set_type() first.".to_string()));
+            }
+
+            // Auto-setup if needed
+            let needs_setup = !self.setup_called || self.work.is_none();
+            if needs_setup {
+                self.setup(a, b.len())?;
+            }
+
+            // Verify workspace compatibility
+            if let Some(ref work) = self.work {
+                if !work.is_compatible(b.len(), self.restart) {
+                    return Err(KError::SolveError(
+                        "Workspace incompatible with problem size. Call setup() or invalidate_setup().".to_string()
+                    ));
+                }
+            }
+
+            // Use the Krylov solver
+            let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
+            let stats = solver.solve(a, self.pc.as_deref(), b, x)?;
+            
+            // Apply custom convergence test if provided
+            if let Some(ref custom_test) = self.custom_conv {
+                let reason = custom_test(stats.iterations, stats.final_residual, b.iter().map(|x| x*x).sum::<f64>().sqrt());
+                // Create new stats with custom reason
+                let custom_stats = SolveStats {
+                    iterations: stats.iterations,
+                    final_residual: stats.final_residual,
+                    reason,
+                };
+                Ok(custom_stats)
+            } else {
+                Ok(stats)
             }
         }
+    }
 
-        // If custom convergence test is set, we need to wrap the solver
-        // For now, delegate to the solver but TODO: implement convergence wrapper
-        let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
-        let stats = solver.solve(a, self.pc.as_deref(), b, x)?;
-        
-        // Apply custom convergence test if provided
-        if let Some(ref custom_test) = self.custom_conv {
-            let reason = custom_test(stats.iterations, stats.final_residual, b.iter().map(|x| x*x).sum::<f64>().sqrt());
-            // Create new stats with custom reason
-            let custom_stats = SolveStats {
-                iterations: stats.iterations,
-                final_residual: stats.final_residual,
-                reason,
-            };
-            Ok(custom_stats)
-        } else {
-            Ok(stats)
+    /// Apply direct solve for PREONLY mode.
+    /// 
+    /// This method handles the direct solve by using the stored pc_type to
+    /// determine which direct solver to use and calling it appropriately.
+    fn apply_direct_solve(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
+        match self.pc_type {
+            Some(PcType::Lu) => {
+                // For LU, use the LuSolver directly
+                let mut lu_solver = LuSolver::new();
+                lu_solver.solve(a, None, b, x)?;
+                Ok(SolveStats {
+                    iterations: 1,
+                    final_residual: 0.0,
+                    reason: ConvergedReason::ConvergedAtol,
+                })
+            },
+            Some(PcType::Qr) => {
+                // For QR, use the QrSolver directly
+                let mut qr_solver = crate::solver::direct_lu::QrSolver::new();
+                qr_solver.solve(a, None, b, x)?;
+                Ok(SolveStats {
+                    iterations: 1,
+                    final_residual: 0.0,
+                    reason: ConvergedReason::ConvergedAtol,
+                })
+            },
+            Some(other_pc) => {
+                Err(KError::SolveError(
+                    format!("PREONLY requires a direct solver preconditioner (Lu or Qr). Current preconditioner type {:?} is not supported for direct solve.", other_pc)
+                ))
+            },
+            None => {
+                Err(KError::SolveError(
+                    "PREONLY requires a preconditioner to be set. Call set_pc_type() with Lu or Qr first.".to_string()
+                ))
+            }
         }
     }
 

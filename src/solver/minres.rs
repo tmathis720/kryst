@@ -253,7 +253,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn minres_reduces_residual_on_spd() {
         // A small SPD matrix (3×3):
         //   A = [[4,1,0],
@@ -304,7 +303,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn minres_solves_identity() {
         // A = Iₙ, so A·x = b should give x = b in one step.
         struct Identity(usize);
@@ -346,7 +344,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn minres_solves_symmetric_indefinite() {
         // A simple 2×2 symmetric indefinite:
         //     [ 0  1 ]

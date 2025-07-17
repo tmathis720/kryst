@@ -15,6 +15,12 @@
 //! # Configure GMRES with custom restart
 //! cargo run --example options_demo -- -ksp_type gmres -ksp_gmres_restart 100 -pc_type ilu0
 //! 
+//! # Use direct LU solver (no Krylov iteration)
+//! cargo run --example options_demo -- -ksp_type preonly -pc_type lu
+//! 
+//! # Use direct QR solver (for least squares problems)
+//! cargo run --example options_demo -- -ksp_type preonly -pc_type qr
+//! 
 //! # Show all available options
 //! cargo run --example options_demo -- -help
 //! ```
@@ -116,6 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Try different options:");
     println!("  cargo run --example options_demo -- -ksp_type gmres -ksp_rtol 1e-12");
     println!("  cargo run --example options_demo -- -ksp_type bicgstab -pc_type jacobi");
+    println!("  cargo run --example options_demo -- -ksp_type preonly -pc_type lu");
+    println!("  cargo run --example options_demo -- -ksp_type preonly -pc_type qr");
     println!("  cargo run --example options_demo -- -help");
     
     Ok(())
