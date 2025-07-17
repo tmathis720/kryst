@@ -18,6 +18,11 @@ use crate::preconditioner::FlexiblePreconditioner;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use crate::core::traits::{MatVec, InnerProduct};
+#[cfg(feature = "logging")]
+use log::trace;
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
+use crate::solver::LinearSolver;
 
 /// Orthogonalization method for Arnoldi process in FGMRES.
 pub enum Orthog { Classical, Modified }
@@ -48,7 +53,10 @@ pub struct FgmresSolver<T> {
     pub residual_history: Vec<T>,
 }
 
-impl<T: num_traits::Float> FgmresSolver<T> {
+impl<T> FgmresSolver<T>
+where
+    T: num_traits::Float + Clone + Send + Sync + std::fmt::Debug + std::fmt::LowerExp,
+{
     /// Create a new FGMRES solver with given tolerance, max iterations, and restart.
     pub fn new(rtol: T, max_iters: usize, restart: usize) -> Self {
         let atol = num_traits::cast::<f64, T>(1e-12).unwrap();

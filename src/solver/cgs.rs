@@ -13,6 +13,10 @@ use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
+#[cfg(feature = "logging")]
+use log::trace;
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
 
 /// CGS solver struct, holding convergence parameters.
 ///
@@ -23,7 +27,9 @@ pub struct CgsSolver<T> {
     pub conv: Convergence<T>,
 }
 
-impl<T: num_traits::Float> CgsSolver<T> {
+impl<T> CgsSolver<T>
+where T: num_traits::Float + Clone + Send + Sync + std::fmt::Debug + std::fmt::LowerExp,
+{
     /// Create a new CGS solver with given tolerance and maximum iterations.
     ///
     /// # Arguments
@@ -48,7 +54,7 @@ where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
     V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign,
+    T: num_traits::Float + Clone + From<f64> + std::fmt::Debug + std::ops::AddAssign + std::ops::SubAssign + Send + Sync + std::fmt::LowerExp,
 {
     type Error = KError;
     type Scalar = T;
@@ -148,6 +154,95 @@ where
             rho = ip.dot(&r_tld, &r, comm);
         }
         *x = V::from(xk);
+        Ok(stats)
+    }
+
+    /// Solve using CGS with monitor callbacks and profiling.
+    fn solve_with_monitors(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, T) + Send + Sync>],
+    ) -> Result<SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::new("CGSSolve");
+        #[cfg(feature = "logging")]
+        trace!("Starting CGS solve with {} monitors", monitors.len());
+
+        let _ = pc;
+        let n = b.as_ref().len();
+        let mut xk = x.as_ref().to_vec();
+        let ip = ();
+        #[cfg(feature = "logging")]
+        let _matvec_guard = StageGuard::new("CGSMatVec");
+        let mut r = {
+            let mut tmp = V::from(vec![T::zero(); n]);
+            a.matvec(&V::from(xk.clone()), &mut tmp);
+            let vec = b.as_ref().iter().zip(tmp.as_ref()).map(|(&bi, &axi)| bi - axi).collect();
+            V::from(vec)
+        };
+        // Shadow residual for CGS normal equations
+        let r_tld = r.clone();
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::new("CGSNorm");
+        let res0 = ip.norm(&r, comm);
+        for m in monitors { m(0, res0); }
+        #[cfg(feature = "logging")]
+        trace!("CGS initial residual: {:.3e}", res0);
+
+        let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: crate::utils::convergence::ConvergedReason::Continued };
+        let mut rho = ip.dot(&r, &r, comm);
+        let mut rho_old = T::zero();
+        let mut u = r.clone();
+        let mut p = r.clone();
+        let mut q = V::from(vec![T::zero(); n]);
+        for i in 1..=self.conv.max_iters {
+            #[cfg(feature = "logging")]
+            let _iter_guard = StageGuard::new("CGSIteration");
+            if rho.abs() < T::epsilon() { break; }
+            if i == 1 {
+                p = u.clone();
+            } else {
+                #[cfg(feature = "logging")]
+                let _dot_guard = StageGuard::new("CGSDotProduct");
+                let beta = rho / rho_old;
+                let q_old = q.clone();
+                let p_old = p.clone();
+                for (uj, (rj, qj)) in u.as_mut().iter_mut().zip(r.as_ref().iter().zip(q_old.as_ref())) {
+                    *uj = *rj + beta * *qj;
+                }
+                for (pj, (uj, po)) in p.as_mut().iter_mut().zip(u.as_ref().iter().zip(p_old.as_ref())) {
+                    *pj = *uj + beta * *po;
+                }
+            }
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::new("CGSMatVec");
+            let mut v_tmp = V::from(vec![T::zero(); n]);
+            a.matvec(&p, &mut v_tmp);
+            let v = v_tmp;
+            #[cfg(feature = "logging")]
+            let _dot_guard = StageGuard::new("CGSDotProduct");
+            let alpha = rho / ip.dot(&r_tld, &v, comm);
+            for (xj, pj) in xk.iter_mut().zip(p.as_ref()) { *xj += alpha * *pj; }
+            for (rj, vj) in r.as_mut().iter_mut().zip(v.as_ref()) { *rj -= alpha * *vj; }
+            for m in monitors { m(i, ip.norm(&r, comm)); }
+            #[cfg(feature = "logging")]
+            trace!("CGS iteration {}: residual = {:.3e}", i, ip.norm(&r, comm));
+            let (reason, s) = self.conv.check(ip.norm(&r, comm), res0, i);
+            stats = s;
+            if reason != crate::utils::convergence::ConvergedReason::Continued {
+                *x = V::from(xk.clone());
+                return Ok(stats);
+            }
+            rho_old = rho;
+            rho = ip.dot(&r, &r, comm);
+        }
+        *x = V::from(xk);
+        #[cfg(feature = "logging")]
+        trace!("CGS did not converge after max iterations");
         Ok(stats)
     }
 }

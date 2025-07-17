@@ -18,6 +18,11 @@ use faer::linalg::solvers::{FullPivLu, Qr, SolveCore};
 use faer::{Mat, MatMut, Conj};
 use faer::traits::{ComplexField, RealField};
 
+#[cfg(feature = "logging")]
+use log::trace;
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
+
 /// LU solver using full pivoting from Faer.
 ///
 /// Stores the LU factorization for reuse (if desired).
@@ -52,7 +57,10 @@ impl<T: ComplexField + RealField> LuSolver<T> {
     }
 }
 
-impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<Mat<T>, Vec<T>> for LuSolver<T> {
+impl<T> LinearSolver<Mat<T>, Vec<T>> for LuSolver<T>
+where
+    T: ComplexField + RealField + Copy + PartialOrd + From<f64> + Send + Sync + std::fmt::Debug + std::fmt::LowerExp,
+{
     type Error = KError;
     type Scalar = T;
 
@@ -81,6 +89,46 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
             .unwrap()
             .solve_in_place_with_conj(Conj::No, x_mat);
         // For direct solvers, always converged in 1 iteration
+        Ok(crate::utils::convergence::SolveStats {
+            iterations: 1,
+            final_residual: T::zero(),
+            reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+        })
+    }
+    
+    /// Solve using LU with monitor callbacks and profiling.
+    fn solve_with_monitors(
+        &mut self,
+        a: &Mat<T>,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>,
+        b: &Vec<T>,
+        x: &mut Vec<T>,
+        _comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, T) + Send + Sync>],
+    ) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::new("LuSolve");
+        #[cfg(feature = "logging")]
+        trace!("Starting LU solve with {} monitors", monitors.len());
+        for (i, m) in monitors.iter().enumerate().take(1) {
+            m(i, T::zero());
+        }
+        let _ = pc;
+        #[cfg(feature = "logging")]
+        let _fact_guard = StageGuard::new("LuFactor");
+        let factor = FullPivLu::new(a.as_ref());
+        self.factor = Some(factor);
+        #[cfg(feature = "logging")]
+        let _matvec_guard = StageGuard::new("LuMatVec");
+        x.clone_from(b);
+        let n = x.len();
+        let x_mat = MatMut::from_column_major_slice_mut(x, n, 1);
+        self.factor.as_ref().unwrap().solve_in_place_with_conj(Conj::No, x_mat);
+        for (i, m) in monitors.iter().enumerate().skip(1).take(1) {
+            m(i, T::zero());
+        }
+        #[cfg(feature = "logging")]
+        trace!("LU solve completed");
         Ok(crate::utils::convergence::SolveStats {
             iterations: 1,
             final_residual: T::zero(),

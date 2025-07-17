@@ -49,6 +49,37 @@ pub trait LinearSolver<M, V> {
         x: &mut V,
         comm: &crate::parallel::UniverseComm
     ) -> Result<SolveStats<<Self as LinearSolver<M, V>>::Scalar>, Self::Error>;
+
+    /// Solve the linear system with iteration monitors.
+    ///
+    /// This method accepts a list of monitor callbacks that will be invoked at each iteration.
+    /// The default implementation just calls the regular solve method, ignoring monitors.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix (system operator)
+    /// * `pc` - Optional preconditioner
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    /// * `comm` - Communicator for parallel operations
+    /// * `monitors` - Callbacks to invoke at each iteration with (iteration, residual_norm)
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` with convergence information
+    /// * `Err(Self::Error)` on failure
+    fn solve_with_monitors(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        // Default implementation ignores monitors
+        let _ = monitors;
+        self.solve(a, pc, b, x, comm)
+    }
+
     /// Scalar type used by the solver (e.g., f32, f64)
     type Scalar: Copy + PartialOrd + From<f64>;
 }

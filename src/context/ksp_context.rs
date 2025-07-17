@@ -827,9 +827,11 @@ impl KspContext {
             #[cfg(feature = "logging")]
             trace!("Starting Krylov iteration with solver type: {:?}", self.solver_type);
 
-            // Use the Krylov solver
+            // Use the Krylov solver with monitors
             let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
-            let stats = solver.solve(a, self.pc.as_deref(), b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
+            let stats = solver.solve_with_monitors(a, self.pc.as_deref(), b, x, 
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                &self.monitors)?;
             
             #[cfg(feature = "logging")]
             trace!("Krylov solve completed: {} iterations, final residual: {:.3e}", 

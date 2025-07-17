@@ -24,6 +24,10 @@ use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{SolveStats, Convergence, ConvergedReason};
 use crate::error::KError;
+#[cfg(feature = "logging")]
+use log::trace;
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
 
 /// CGNR solver struct.
 ///
@@ -130,6 +134,93 @@ where
         }
         *x = V::from(xk);
         Ok(stats)
+    }
+
+    /// Solve the least-squares problem using CGNR (CG on the normal residual), with monitor callbacks and profiling.
+    fn solve_with_monitors(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, T) + Send + Sync>],
+    ) -> Result<SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::new("CGNRSolve");
+        #[cfg(feature = "logging")]
+        trace!("Starting CGNR solve with {} monitors", monitors.len());
+
+        let _ = pc; // CGNR does not use preconditioner (yet)
+        let n = b.as_ref().len();
+        let mut xk = x.as_ref().to_vec();
+        let ip = ();
+        let mut r = {
+            let mut tmp = V::from(vec![T::zero(); n]);
+            a.matvec(&V::from(xk.clone()), &mut tmp);
+            let r_vec = b.as_ref().iter().zip(tmp.as_ref()).map(|(&bi, &axi)| bi - axi).collect::<Vec<_>>();
+            V::from(r_vec)
+        };
+        let mut z = V::from(vec![T::zero(); n]);
+        a.matvec(&r, &mut z); // z = A^T r
+        let mut p = z.clone();
+        let mut rz = ip.dot(&z, &z, comm);
+        let res0 = ip.norm(&r, comm);
+        for monitor in monitors {
+            monitor(0, res0);
+        }
+        #[cfg(feature = "logging")]
+        trace!("CGNR initial residual: {:.3e}", res0);
+        let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
+
+        for i in 1..=self.conv.max_iters {
+            #[cfg(feature = "logging")]
+            let _iter_guard = StageGuard::new("CGNRIteration");
+            // Compute Ap = A p
+            let mut ap = V::from(vec![T::zero(); n]);
+            a.matvec(&p, &mut ap);
+            // Compute AtAp = A^T (A p)
+            let mut at_ap = V::from(vec![T::zero(); n]);
+            a.matvec(&ap, &mut at_ap);
+            let denom = ip.dot(&at_ap, &at_ap, comm);
+            if denom <= T::zero() {
+                #[cfg(feature = "logging")]
+                trace!("CGNR indefinite matrix detected at iter {}", i);
+                return Err(KError::IndefiniteMatrix);
+            }
+            let alpha = rz / denom;
+            for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
+                *xj = *xj + alpha * *pj;
+            }
+            for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
+                *rj = *rj - alpha * *apj;
+            }
+            a.matvec(&r, &mut z); // z = A^T r
+            let rz_new = ip.dot(&z, &z, comm);
+            let res_norm = ip.norm(&r, comm);
+            for monitor in monitors {
+                monitor(i, res_norm);
+            }
+            #[cfg(feature = "logging")]
+            trace!("CGNR iteration {}: residual = {:.3e}", i, res_norm);
+            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
+            stats = new_stats;
+            if reason != ConvergedReason::Continued {
+                *x = V::from(xk.clone());
+                return Ok(stats);
+            }
+            // Update search direction
+            let beta = rz_new / rz;
+            let p_old = p.clone();
+            for ((pj, zj), old_pj) in p.as_mut().iter_mut().zip(z.as_ref()).zip(p_old.as_ref()) {
+                *pj = *zj + beta * *old_pj;
+            }
+            rz = rz_new;
+        }
+        *x = V::from(xk);
+        #[cfg(feature = "logging")]
+        trace!("CGNR did not converge after max iterations");
+        Err(KError::SolveError("CGNR did not converge".to_string()))
     }
 }
 
