@@ -5,6 +5,7 @@ use faer::Mat;
 use rand::Rng;
 
 fn main() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     // Build a random SPD matrix: A = MᵀM + I
     let mut rng = rand::thread_rng();
@@ -22,11 +23,11 @@ fn main() {
 
     // LU solve
     let mut lus = LuSolver::new();
-    let stats_lu = lus.solve(&a, None, &b, &mut x).unwrap();
+    let stats_lu = lus.solve(&a, None, &b, &mut x, &comm).unwrap();
     println!("LU x = {:?}, stats = {:?}", x, stats_lu);
 
     // QR solve
     let mut qrs = QrSolver::new();
-    let stats_qr = qrs.solve(&a, None, &b, &mut x).unwrap();
+    let stats_qr = qrs.solve(&a, None, &b, &mut x, &comm).unwrap();
     println!("QR x = {:?}, stats = {:?}", x, stats_qr);
 }

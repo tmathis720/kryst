@@ -65,6 +65,7 @@ where
     /// * `_pc` - (Unused) Optional preconditioner (not supported in this implementation)
     /// * `b` - Right-hand side vector
     /// * `x` - On input: initial guess; on output: solution vector
+    /// * `comm` - Communicator for parallel operations
     ///
     /// # Returns
     /// * `Ok(SolveStats)` if converged or max iterations reached
@@ -73,7 +74,8 @@ where
              a: &M,
              _pc: Option<&dyn Preconditioner<M, V>>,
              b: &V,
-             x: &mut V) -> Result<SolveStats<T>, KError> {
+             x: &mut V,
+             comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
 
@@ -86,11 +88,11 @@ where
         let r_tld = r.clone();
 
         // scalars
-        let mut rho = ip.dot(&r, &r_tld);
+        let mut rho = ip.dot(&r, &r_tld, comm);
         if rho == T::zero() {
             return Ok(SolveStats {
                 iterations: 0,
-                final_residual: ip.norm(&r),
+                final_residual: ip.norm(&r, comm),
                 reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
             });
         }
@@ -115,7 +117,7 @@ where
         let mut d = V::from(vec![T::zero(); n]);
         let mut psi_old = T::zero();
         let mut eta_old = T::zero();
-        let tau = ip.norm(&r);
+        let tau = ip.norm(&r, comm);
         let res0 = tau;
         let mut stats = SolveStats {
             iterations: 0,
@@ -138,16 +140,16 @@ where
             v = v_tmp;
 
             // alpha = rho / <r_tld, v>
-            let sigma = ip.dot(&r_tld, &v);
+            let sigma = ip.dot(&r_tld, &v, comm);
             if sigma == T::zero() || !sigma.is_finite() {
-                stats.final_residual = ip.norm(&r);
+                stats.final_residual = ip.norm(&r, comm);
                 stats.iterations = k;
                 stats.reason = crate::utils::convergence::ConvergedReason::Continued;
                 return Ok(stats);
             }
             let alpha = rho / sigma;
             if alpha == T::zero() || !alpha.is_finite() {
-                stats.final_residual = ip.norm(&r);
+                stats.final_residual = ip.norm(&r, comm);
                 stats.iterations = k;
                 stats.reason = crate::utils::convergence::ConvergedReason::Continued;
                 return Ok(stats);
@@ -175,7 +177,7 @@ where
             for i in 0..n {
                 r.as_mut()[i] = r.as_ref()[i] - alpha * au.as_ref()[i];
             }
-            let dp = ip.norm(&r);
+            let dp = ip.norm(&r, comm);
             let tau_m0 = (dp * dpold).sqrt();
             let mut tau_local = tau_m0;
             // --- TFQMR two-step inner loop ---
@@ -183,7 +185,7 @@ where
                 let (norm_u_m, tau_for_m) = if m == 0 {
                     (dp, tau_m0) // For m=0, norm is delta, tau is tau_m0
                 } else {
-                    (ip.norm(&q), tau_local)
+                    (ip.norm(&q, comm), tau_local)
                 };
                 let u_m = if m == 0 { &u } else { &q };
 
@@ -228,7 +230,7 @@ where
 
             // 4) finish the outer update of r, rho, etc.
             r.clone_from(&u); // r = u
-            let rho_new = ip.dot(&r_tld, &r);
+            let rho_new = ip.dot(&r_tld, &r, comm);
             let beta = rho_new / rho;
             rho = rho_new;
             // w <- u + beta * (q + beta*w)
@@ -239,7 +241,7 @@ where
             dpold = dp; // update dpold for next outer iteration
         }
 
-        stats.final_residual = ip.norm(&r);
+        stats.final_residual = ip.norm(&r, comm);
         stats.iterations = self.conv.max_iters;
         Ok(stats)
     }
@@ -276,7 +278,7 @@ mod tests {
         };
         let mut x = vec![0.0; 2];
         let mut solver = TfqmrSolver::new(1e-10, 500);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-3;
         for (xi, xt) in x.iter().zip(x_true.iter()) {
             assert!((xi - xt).abs() < tol, "xi={:.3}, expected {:.3}", xi, xt);

@@ -145,7 +145,7 @@ fn finite_difference_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
 /// Demonstrates using a shell matrix with CG iterative solver
 fn shell_with_solver_demo() -> Result<(), Box<dyn std::error::Error>> {
     let n = 4;
-    
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     // Create a simple SPD matrix via shell: A = I + 0.1 * ones
     // This matrix has eigenvalues [1.4, 1, 1, 1] and is well-conditioned
     let shell_matrix = ShellMat::new_symmetric(
@@ -173,7 +173,7 @@ fn shell_with_solver_demo() -> Result<(), Box<dyn std::error::Error>> {
     // Solve with CG (since the matrix is SPD)
     let mut cg_solver = CgSolver::new(1e-10, 100);
     let mut x_solved = vec![0.0; n];
-    let stats = cg_solver.solve(&shell_matrix, None, &b, &mut x_solved)?;
+    let stats = cg_solver.solve(&shell_matrix, None, &b, &mut x_solved, &comm)?;
     
     println!("Solved solution: {:?}", x_solved);
     println!("Solver stats: reason={:?}, iterations={}, residual={:.2e}", 

@@ -118,7 +118,7 @@ where
     /// # Returns
     /// * `Ok(SolveStats)` if converged or max iterations reached
     /// * `Err(KError)` on error (e.g., indefinite matrix or preconditioner)
-    fn solve(&mut self, a: &M, pc: Option<&dyn Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
         let mut x_vec = x.as_ref().to_vec();
@@ -137,7 +137,7 @@ where
             z.clone_from(&r);
         }
         let mut p = z.clone();
-        let mut rz = ip.dot(&r, &z);
+        let mut rz = ip.dot(&r, &z, comm);
         let res0 = rz.abs().sqrt();
         let mut stats = SolveStats {
             iterations: 0,
@@ -146,9 +146,9 @@ where
         };
         // Choose norm for convergence check
         let dp = match self.norm_type {
-            CgNormType::Preconditioned => ip.dot(&z, &z),
-            CgNormType::Unpreconditioned => ip.dot(&r, &r),
-            CgNormType::Natural => ip.dot(&r, &z),
+            CgNormType::Preconditioned => ip.dot(&z, &z, comm),
+            CgNormType::Unpreconditioned => ip.dot(&r, &r, comm),
+            CgNormType::Natural => ip.dot(&r, &z, comm),
             CgNormType::None => T::zero(),
         };
         if let Some(ref mut monitor) = self.monitor {
@@ -167,15 +167,15 @@ where
                 }
                 p_dot_ap
             } else {
-                ip.dot(&p, &ap)
+                ip.dot(&p, &ap, comm)
             };
             // Indefinite-matrix detection
             if p_dot_ap <= T::zero() {
                 stats.iterations = i + 1;
                 stats.final_residual = match self.norm_type {
-                    CgNormType::Preconditioned => ip.dot(&z, &z).sqrt(),
-                    CgNormType::Unpreconditioned => ip.dot(&r, &r).sqrt(),
-                    CgNormType::Natural => ip.dot(&r, &z).abs().sqrt(),
+                    CgNormType::Preconditioned => ip.dot(&z, &z, comm).sqrt(),
+                    CgNormType::Unpreconditioned => ip.dot(&r, &r, comm).sqrt(),
+                    CgNormType::Natural => ip.dot(&r, &z, comm).abs().sqrt(),
                     CgNormType::None => T::zero(),
                 };
                 // stats.converged field removed in new SolveStats
@@ -196,12 +196,12 @@ where
             } else {
                 z.clone_from(&r);
             }
-            let rz_new = ip.dot(&r, &z);
+            let rz_new = ip.dot(&r, &z, comm);
             // Compute norm for convergence check
             let res_norm = match self.norm_type {
-                CgNormType::Preconditioned => ip.dot(&z, &z).sqrt(),
-                CgNormType::Unpreconditioned => ip.dot(&r, &r).sqrt(),
-                CgNormType::Natural => ip.dot(&r, &z).abs().sqrt(),
+                CgNormType::Preconditioned => ip.dot(&z, &z, comm).sqrt(),
+                CgNormType::Unpreconditioned => ip.dot(&r, &r, comm).sqrt(),
+                CgNormType::Natural => ip.dot(&r, &z, comm).abs().sqrt(),
                 CgNormType::None => T::zero(),
             };
             if let Some(ref mut monitor) = self.monitor {
@@ -276,8 +276,8 @@ mod tests {
         let mut solver_std = PcgSolver::new(1e-10, 20);
         let mut solver_single = PcgSolver::new(1e-10, 20).with_single_reduction(true);
         let pc = IdentityPC;
-        let _stats_std = solver_std.solve(&a, Some(&pc), &b, &mut x_std).unwrap();
-        let stats_single = solver_single.solve(&a, Some(&pc), &b, &mut x_single).unwrap();
+        let _stats_std = solver_std.solve(&a, Some(&pc), &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats_single = solver_single.solve(&a, Some(&pc), &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard PCG differ: {} vs {}", xi, xj);

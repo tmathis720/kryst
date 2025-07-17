@@ -73,6 +73,7 @@ where
         _pc: Option<&dyn Preconditioner<M, V>>,
         b: &V,
         x: &mut V,
+        comm: &crate::parallel::UniverseComm,
     ) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
@@ -94,16 +95,16 @@ where
         }
         // r_tld0 = arbitrary, use r0
         r_tld.clone_from(&r);
-        let norm_r0 = ip.norm(&r);
+        let norm_r0 = ip.norm(&r, comm);
         let mut stats = SolveStats {
             iterations: 0,
             final_residual: norm_r0,
             reason: crate::utils::convergence::ConvergedReason::Continued,
         };
-        let mut rho = ip.dot(&r_tld, &r);
+        let mut rho = ip.dot(&r_tld, &r, comm);
         if rho == T::zero() {
             *x = x_j;
-            stats.final_residual = ip.norm(&r);
+            stats.final_residual = ip.norm(&r, comm);
             stats.reason = crate::utils::convergence::ConvergedReason::ConvergedAtol;
             return Ok(stats);
         }
@@ -120,7 +121,7 @@ where
                 p_tld.clone_from(&r_tld);
             } else {
                 let rho_prev = rho;
-                rho = ip.dot(&r_tld, &r);
+                rho = ip.dot(&r_tld, &r, comm);
                 if rho == T::zero() {
                     break;
                 }
@@ -135,7 +136,7 @@ where
             a.matvec(&p, &mut v);
             // v_tld = A^T p_tld
             a.mattransvec(&p_tld, &mut v_tld);
-            let sigma = ip.dot(&p_tld, &v);
+            let sigma = ip.dot(&p_tld, &v, comm);
             if sigma == T::zero() {
                 break;
             }
@@ -146,8 +147,8 @@ where
             }
             // t = A s
             a.matvec(&s, &mut t);
-            let t_dot_s = ip.dot(&t, &s);
-            let t_dot_t = ip.dot(&t, &t);
+            let t_dot_s = ip.dot(&t, &s, comm);
+            let t_dot_t = ip.dot(&t, &t, comm);
             let omega = if t_dot_t != T::zero() { t_dot_s / t_dot_t } else { T::zero() };
             // x_{j+1} = x_j + alpha p + omega s
             for i in 0..n {
@@ -162,7 +163,7 @@ where
             for i in 0..n {
                 t.as_mut()[i] = b.as_ref()[i] - t.as_ref()[i];
             }
-            res_norm = ip.norm(&t);
+            res_norm = ip.norm(&t, comm);
             let (reason, s_stats) = self.conv.check(res_norm, norm_r0, j+1);
             stats = s_stats;
             if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
@@ -218,7 +219,7 @@ mod tests {
         let b = vec![3.0,6.0];
         let mut x = vec![0.0,0.0];
         let mut solver = QmrSolver::new(1e-10, 50);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         assert!((x[0]-1.0).abs() < 1e-4);
         assert!((x[1]-2.0).abs() < 1e-4);
         assert!(matches!(stats.reason,

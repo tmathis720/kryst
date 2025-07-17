@@ -217,7 +217,7 @@ impl Comm for UniverseComm {
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => {
                 // Split the MPI communicator and return a new UniverseComm
-                let sub = comm.world.split(color, key);
+                let sub = comm.world.split_by_color(color, key);
                 let sub_rank = sub.rank() as usize;
                 let sub_size = sub.size() as usize;
                 let new_comm = MpiComm { 

@@ -27,9 +27,6 @@ use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
-#[cfg(feature = "mpi")]
-use crate::parallel::Comm;
-
 /// BiCGStab solver struct
 ///
 /// Stores convergence parameters.

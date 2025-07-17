@@ -80,6 +80,7 @@ fn ill_cond(n: usize, kappa: f64) -> (Mat<f64>, Vec<f64>) {
 /// Ensures that the Jacobi preconditioner can be set up and applied, and that the solver runs without panic.
 #[test]
 fn cg_with_jacobi() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let (a, b) = ill_cond(5, 1e6);
     let mut pc = Jacobi::new();
     <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::setup(&mut pc, &a).unwrap();
@@ -89,7 +90,7 @@ fn cg_with_jacobi() {
     let r_in = b.clone();
     let mut r_out = vec![0.0; b.len()];
     <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::apply(&pc, kryst::preconditioner::PcSide::Left, &r_in, &mut r_out).unwrap();
-    let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // No stats to check; just ensure it runs without panic
 }
@@ -98,12 +99,13 @@ fn cg_with_jacobi() {
 /// Ensures that the ILU0 preconditioner can be set up and applied, and that the solver runs without panic.
 #[test]
 fn gmres_with_ilu0() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let (a, b) = ill_cond(5, 1e4);
     let mut pc = Ilu0::new();
     <Ilu0<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::setup(&mut pc, &a).unwrap();
     let mut solver = GmresSolver::new(4, 1e-6, 1000);
     let mut x = vec![0.0; 5];
-    let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // No stats to check; just ensure it runs without panic
 }
@@ -112,12 +114,13 @@ fn gmres_with_ilu0() {
 /// Checks that the solver converges with the preconditioner.
 #[test]
 fn pcg_with_jacobi() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let (a, b) = ill_cond(5, 1e6);
     let mut pc = Jacobi::new();
     <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::setup(&mut pc, &a).unwrap();
     let mut solver = kryst::solver::PcgSolver::new(1e-6, 1000);
     let mut x = vec![0.0; 5];
-    let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
+    let stats = solver.solve(&a, Some(&pc), &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
 }
 
@@ -125,13 +128,14 @@ fn pcg_with_jacobi() {
 /// Checks that the solver converges to the correct solution within the expected number of iterations.
 #[test]
 fn spd_jacobi_pcg_converges() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let (a, b, x_true) = spd_matrix(n);
     let mut pc = Jacobi::new();
     pc.setup(&a).unwrap();
     let mut solver = PcgSolver::new(1e-12, n);
     let mut x = vec![0.0; n];
-    let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
+    let stats = solver.solve(&a, Some(&pc), &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
     assert!(stats.iterations <= n);
@@ -141,11 +145,12 @@ fn spd_jacobi_pcg_converges() {
 /// Checks that the solver converges to the correct solution.
 #[test]
 fn spd_no_pc_cg_converges() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let (a, b, x_true) = spd_matrix(n);
     let mut solver = PcgSolver::new(1e-12, n);
     let mut x = vec![0.0; n];
-    let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
@@ -154,11 +159,12 @@ fn spd_no_pc_cg_converges() {
 /// Checks that the solver converges to the correct solution.
 #[test]
 fn nonsym_no_pc_gmresright_converges() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let (a, b, x_true) = nonsym_matrix(n);
     let mut solver = GmresSolver::new(10, 1e-12, 100);
     let mut x = vec![0.0; n];
-    let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
@@ -167,13 +173,14 @@ fn nonsym_no_pc_gmresright_converges() {
 /// Checks that the solver converges to the correct solution.
 #[test]
 fn nonsym_left_pc_gmresleft_converges() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let (a, b, x_true) = nonsym_matrix(n);
     let mut pc = Ilu0::new();
     pc.setup(&a).unwrap();
     let mut solver = GmresSolver::new(10, 1e-12, 100).with_preconditioning(Preconditioning::Left);
     let mut x = vec![0.0; n];
-    let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
+    let stats = solver.solve(&a, Some(&pc), &b, &mut x, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
 }

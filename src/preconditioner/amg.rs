@@ -795,9 +795,9 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
     let n = a.nrows();
     let max_agg_id = *aggregates.iter().max().unwrap();
     let coarse_n = max_agg_id + 1;
-    let mut p = Mat::<f64>::zeros(n, coarse_n);
     #[cfg(feature = "rayon")]
     {
+        let p = Mat::<f64>::zeros(n, coarse_n);
         use std::sync::Mutex;
         let p = Mutex::new(p);
         (0..n).into_par_iter().for_each(|i| {
@@ -805,16 +805,16 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
             let mut p_guard = p.lock().unwrap();
             p_guard[(i, agg_id)] = 1.0;
         });
-        let p = p.into_inner().unwrap();
-        return p;
+        p.into_inner().unwrap()
     }
     #[cfg(not(feature = "rayon"))]
     {
+        let mut p = Mat::<f64>::zeros(n, coarse_n);
         for (i, &agg_id) in aggregates.iter().enumerate() {
             p[(i, agg_id)] = 1.0;
         }
+        p
     }
-    p
 }
 
 #[cfg(test)]

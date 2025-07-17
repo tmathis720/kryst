@@ -23,8 +23,6 @@ use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
 
 /// Preconditioning modes for PCA-GMRES
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +105,8 @@ where
              a: &M,
              pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
              b: &V,
-             x: &mut V) -> Result<SolveStats<T>, KError> {
+             x: &mut V,
+             comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
         // Initial guess xk = 0
@@ -118,7 +117,7 @@ where
         let mut r0_vec = tmp.as_ref().iter().zip(b.as_ref())
             .map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
         let mut r0 = V::from(r0_vec);
-        let mut beta = ip.norm(&r0);
+        let mut beta = ip.norm(&r0, comm);
         let res0 = beta;
         let mut stats = SolveStats {
             iterations: 0,
@@ -165,36 +164,38 @@ where
                 let mut local_dot = vec![T::zero(); (j+1)*t];
                 for i in 0..=j {
                     for k in 0..t {
-                        local_dot[i*t + k] = ip.dot(&v_basis[i], &v_block[k]);
+                        local_dot[i*t + k] = ip.dot(&v_basis[i], &v_block[k], comm);
                     }
                 }
                 // Kick off a non-blocking all-reduce on local_dot → global_dot (if MPI enabled)
                 #[cfg(feature = "mpi")]
                 let global_dot = {
-                    use mpi::traits::*;
-                    use mpi::collective::SystemOperation;
-                    // TODO: Pass a properly initialized communicator (e.g., MpiComm) into the solver.
-                    // let world = ...;
-                    // For now, this is a placeholder and will not work as-is:
-                    let universe = mpi::initialize().unwrap();
-                    let world = universe.world();
-                    let mut req = world.immediate_all_reduce_into(&local_dot, &mut local_dot.clone(), &SystemOperation::sum());
-                    // do the local subtractions while communication proceeds:
-                    for i in 0..=j {
-                        for k in 0..t {
-                            let coeff = local_dot[i*t + k];
-                            let qi = v_basis[i].as_ref();
-                            v_block[k].as_mut().iter_mut()
-                                .zip(qi)
-                                .for_each(|(vk, &q)| *vk -= coeff * q);
+                    // Use proper communicator for MPI reductions
+                    if let UniverseComm::Mpi(mpi_comm) = comm {
+                        // For now, use blocking all-reduce until we implement non-blocking
+                        let mut global_dot = vec![T::zero(); (j+1)*t];
+                        for k in 0..(j+1)*t {
+                            global_dot[k] = T::from(mpi_comm.all_reduce_f64(local_dot[k].to_f64().unwrap_or(0.0))).unwrap();
                         }
+                        global_dot
+                    } else {
+                        local_dot // fallback to local computation
                     }
-                    let mut global_dot = vec![T::zero(); (j+1)*t];
-                    req.wait_into(&mut global_dot);
-                    global_dot
                 };
                 #[cfg(not(feature = "mpi"))]
                 let global_dot = local_dot;
+                
+                // Perform local orthogonalization during computation
+                for i in 0..=j {
+                    for k in 0..t {
+                        let coeff = global_dot[i*t + k];
+                        let qi = v_basis[i].as_ref();
+                        v_block[k].as_mut().iter_mut()
+                            .zip(qi)
+                            .for_each(|(vk, &q)| *vk -= coeff * q);
+                    }
+                }
+                
                 // write back the fully reduced coefficients:
                 for i in 0..=j {
                     for k in 0..t {
@@ -203,9 +204,9 @@ where
                 }
                 // Intra-block orthogonalization
                 for k in 0..t {
-                    let vk = &mut v_block[k];
+                    let _vk = &mut v_block[k];
                     for i in 0..k {
-                        let r_ij = ip.dot(&v_basis[j+i], &v_block[k]);
+                        let r_ij = ip.dot(&v_basis[j+i], &v_block[k], comm);
                         h[j+i][j+k] = r_ij;
                         let qji = v_basis[j+i].as_ref();
                         v_block[k].as_mut().iter_mut()
@@ -213,7 +214,7 @@ where
                           .for_each(|(vki, &qii)| *vki -= r_ij * qii);
                     }
                     // Normalize v_block[k]
-                    let norm_vk = ip.norm(&v_block[k]);
+                    let norm_vk = ip.norm(&v_block[k], comm);
                     h[j+k+1][j+k] = norm_vk;
                     let inv = T::one() / norm_vk;
                     v_block[k].as_mut().iter_mut().for_each(|vki| *vki *= inv);
@@ -291,7 +292,7 @@ where
             r0_vec = tmp.as_ref().iter().zip(b.as_ref())
                         .map(|(&ax, &bi)| bi - ax).collect();
             r0 = V::from(r0_vec.clone());
-            beta = ip.norm(&r0);
+            beta = ip.norm(&r0, comm);
             stats.final_residual = beta;
             if beta <= self.conv.rtol * res0 {
                 stats.reason = crate::utils::convergence::ConvergedReason::ConvergedRtol;
@@ -312,7 +313,6 @@ where
 mod tests {
     use super::*;
     use crate::core::traits::MatVec;
-    use crate::utils::convergence::Convergence;
 
     /// Simple dense matrix for testing
     #[derive(Clone)]
@@ -344,7 +344,7 @@ mod tests {
         a.matvec(&x_true, &mut b);
         let mut x = vec![0.0; 3];
         let mut solver = PcaGmresSolver::new(6, 2, 2, 1e-10, 30);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);

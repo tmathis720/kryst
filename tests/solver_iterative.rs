@@ -32,11 +32,12 @@ fn random_spd(n: usize) -> (faer::Mat<f64>, Vec<f64>) {
 /// - Solves with direct LU and compares the solutions elementwise.
 #[test]
 fn cg_vs_direct_on_spd() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let (a, b) = random_spd(n);
     let mut x_cg = vec![0.0; n];
     let mut solver = CgSolver::new(1e-8, 1000);
-    let stats = solver.solve(&a, None, &b, &mut x_cg).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x_cg, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // Direct solve using LU decomposition
     let mut x_direct = b.clone();
@@ -56,6 +57,7 @@ fn cg_vs_direct_on_spd() {
 /// - Solves with direct QR and compares the solutions elementwise.
 #[test]
 fn gmres_vs_direct_on_nonsymmetric() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let mut rng = rand::thread_rng();
     let data: Vec<f64> = (0..n*n).map(|_| rng.r#gen()).collect();
@@ -63,7 +65,7 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
     let mut x_gmres = vec![0.0; n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
-    let stats = solver.solve(&a, None, &b, &mut x_gmres).unwrap();
+    let stats = solver.solve(&a, None, &b, &mut x_gmres, &comm).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // Direct solve using QR decomposition
     let mut x_direct = b.clone();

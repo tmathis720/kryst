@@ -59,7 +59,7 @@ where
         self.local_blocks = self.subdomains.iter().map(|indices| {
             let a_sub: M = a.submatrix(indices);
             let mut ksp = solver_factory();
-            let _ = ksp.solve(&a_sub, None, &V::from(vec![T::zero(); indices.len()]), &mut V::from(vec![T::zero(); indices.len()]));
+            let _ = ksp.solve(&a_sub, None, &V::from(vec![T::zero(); indices.len()]), &mut V::from(vec![T::zero(); indices.len()]), &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
             (a_sub, Mutex::new(Box::new(ksp) as _))
         }).collect();
     }
@@ -92,7 +92,7 @@ where
                     let r_blk = V::from(indices.iter().map(|&i| r.as_ref()[i]).collect());
                     let mut x_blk = V::from(vec![T::zero(); indices.len()]);
                     let mut ksp = ksp_mutex.lock().unwrap();
-                    let _ = ksp.solve(a_sub, None, &r_blk, &mut x_blk);
+                    let _ = ksp.solve(a_sub, None, &r_blk, &mut x_blk, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
                     (indices.clone(), x_blk.as_ref().to_vec())
                 })
                 .collect();
@@ -112,7 +112,7 @@ where
                     let r_blk = V::from(indices.iter().map(|&i| r.as_ref()[i]).collect());
                     let mut x_blk = V::from(vec![T::zero(); indices.len()]);
                     let mut ksp = ksp_mutex.lock().unwrap();
-                    let _ = ksp.solve(a_sub, None, &r_blk, &mut x_blk);
+                    let _ = ksp.solve(a_sub, None, &r_blk, &mut x_blk, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
                     for (j, &gi) in indices.iter().enumerate() {
                         z.as_mut()[gi] = z.as_ref()[gi] + x_blk.as_ref()[j];
                     }

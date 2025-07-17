@@ -36,12 +36,13 @@ fn matvec_random_small() {
 /// the Euclidean norm (L2 norm) for two small vectors, comparing against manual calculations.
 #[test]
 fn dot_and_norm() {
+    let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let x = vec![1.0, 2.0, 3.0];
     let y = vec![4.0, -5.0, 6.0];
     let ip = ();
-    let dot = ip.dot(&x, &y);
+    let dot = ip.dot(&x, &y, &comm);
     assert_abs_diff_eq!(dot, 1.0 * 4.0 + 2.0 * (-5.0) + 3.0 * 6.0, epsilon = 1e-12);
-    let norm_x = ip.norm(&x);
+    let norm_x = ip.norm(&x, &comm);
     let expected_norm = ((1.0f64).powi(2) + 2.0f64.powi(2) + 3.0f64.powi(2)).sqrt();
     assert_abs_diff_eq!(norm_x, expected_norm, epsilon = 1e-12);
 }

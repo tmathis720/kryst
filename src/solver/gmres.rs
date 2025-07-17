@@ -76,6 +76,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         h: &mut [Vec<T>],
         j: usize,
         epsilon: T,
+        comm: &crate::parallel::UniverseComm,
     ) -> bool
     where
         M: MatVec<V>,
@@ -88,20 +89,20 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         a.matvec(&v_basis[j].clone(), &mut w);
         // Modified Gram-Schmidt orthogonalization
         for i in 0..=j {
-            h[i][j] = ip.dot(&w, &v_basis[i]);
+            h[i][j] = ip.dot(&w, &v_basis[i], comm);
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *wk = *wk - h[i][j] * *vik;
             }
         }
         // Iterative refinement (second orthogonalization)
         for i in 0..=j {
-            let tmp = ip.dot(&w, &v_basis[i]);
+            let tmp = ip.dot(&w, &v_basis[i], comm);
             h[i][j] = h[i][j] + tmp;
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *wk = *wk - tmp * *vik;
             }
         }
-        h[j + 1][j] = ip.norm(&w);
+        h[j + 1][j] = ip.norm(&w, comm);
         // Happy breakdown: if norm is very small, return true
         if h[j + 1][j].abs() < epsilon {
             return true;
@@ -120,6 +121,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         h: &mut [Vec<T>],
         j: usize,
         epsilon: T,
+        comm: &crate::parallel::UniverseComm,
     ) -> bool
     where
         M: MatVec<V>,
@@ -134,19 +136,19 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         pc.apply(crate::preconditioner::PcSide::Left, &w, &mut z).expect("preconditioner apply failed");
         // Modified Gram-Schmidt on z
         for i in 0..=j {
-            h[i][j] = ip.dot(&z, &v_basis[i]);
+            h[i][j] = ip.dot(&z, &v_basis[i], comm);
             for (zk, vik) in z.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *zk = *zk - h[i][j] * *vik;
             }
         }
         for i in 0..=j {
-            let tmp = ip.dot(&z, &v_basis[i]);
+            let tmp = ip.dot(&z, &v_basis[i], comm);
             h[i][j] = h[i][j] + tmp;
             for (zk, vik) in z.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *zk = *zk - tmp * *vik;
             }
         }
-        h[j + 1][j] = ip.norm(&z);
+        h[j + 1][j] = ip.norm(&z, comm);
         // Happy breakdown: if norm is very small, return true
         if h[j + 1][j].abs() < epsilon {
             return true;
@@ -220,7 +222,7 @@ where
     /// # Returns
     /// * `Ok(SolveStats)` if converged or max iterations reached
     /// * `Err(KError)` on error
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let n = b.as_ref().len();
         let ip = ();
         let mut xk = x.as_ref().to_vec();
@@ -231,7 +233,7 @@ where
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
             V::from(r_vec)
         };
-        let mut beta = ip.norm(&r0);
+        let mut beta = ip.norm(&r0, comm);
         let res0 = beta;
         let mut stats = SolveStats {
             iterations: 0,
@@ -260,7 +262,7 @@ where
                     // Right-preconditioning: Arnoldi on A M^{-1}, update x with M^{-1} v_basis
                     let mut z0 = V::from(vec![T::zero(); n]);
                     pc.apply(crate::preconditioner::PcSide::Right, &r0, &mut z0).expect("preconditioner apply failed");
-                    r0_norm = ip.norm(&z0);
+                    r0_norm = ip.norm(&z0, comm);
                     let v0 = z0.as_ref().iter().map(|&zi| zi / r0_norm).collect::<Vec<_>>();
                     v_basis.push(V::from(v0.clone()));
                     // z0' = M^{-1} v0
@@ -295,19 +297,19 @@ where
                         pc.apply(crate::preconditioner::PcSide::Left, &w, &mut z).expect("preconditioner apply failed");
                         // Modified Gram-Schmidt on z
                         for i in 0..=j {
-                            h[i][j] = ip.dot(&z, &z_basis[i]);
+                            h[i][j] = ip.dot(&z, &z_basis[i], comm);
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - h[i][j] * *zik;
                             }
                         }
                         for i in 0..=j {
-                            let tmp = ip.dot(&z, &z_basis[i]);
+                            let tmp = ip.dot(&z, &z_basis[i], comm);
                             h[i][j] = h[i][j] + tmp;
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - tmp * *zik;
                             }
                         }
-                        h[j + 1][j] = ip.norm(&z);
+                        h[j + 1][j] = ip.norm(&z, comm);
                         if h[j + 1][j].abs() < epsilon {
                             happy_breakdown = true;
                             break;
@@ -327,19 +329,19 @@ where
                         // Modified Gram-Schmidt on w2
                         let mut w2_ortho = w2.clone();
                         for i in 0..=j {
-                            h[i][j] = ip.dot(&w2_ortho, &v_basis[i]);
+                            h[i][j] = ip.dot(&w2_ortho, &v_basis[i], comm);
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - h[i][j] * *vik;
                             }
                         }
                         for i in 0..=j {
-                            let tmp = ip.dot(&w2_ortho, &v_basis[i]);
+                            let tmp = ip.dot(&w2_ortho, &v_basis[i], comm);
                             h[i][j] = h[i][j] + tmp;
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - tmp * *vik;
                             }
                         }
-                        h[j + 1][j] = ip.norm(&w2_ortho);
+                        h[j + 1][j] = ip.norm(&w2_ortho, comm);
                         if h[j + 1][j].abs() < epsilon {
                             happy_breakdown = true;
                             break;
@@ -352,7 +354,7 @@ where
                         z_basis.push(zj1);
                     }
                     _ => {
-                        happy_breakdown = Self::arnoldi(a, &ip, &mut v_basis, &mut h, j, epsilon);
+                        happy_breakdown = Self::arnoldi(a, &ip, &mut v_basis, &mut h, j, epsilon, comm);
                     }
                 }
                 Self::apply_givens_and_update_g(&mut h, &mut g, &mut cs, &mut sn, j, epsilon);
@@ -400,7 +402,7 @@ where
             a.matvec(&V::from(xk.clone()), &mut tmp);
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
             r0 = V::from(r_vec);
-            beta = ip.norm(&r0);
+            beta = ip.norm(&r0, comm);
             // Update stats with true residual
             stats.final_residual = beta;
             if beta < self.conv.rtol * res0 {
@@ -477,7 +479,7 @@ mod tests {
         };
         let mut x = vec![0.0; 4];
         let mut solver = GmresSolver::new(4, 1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
@@ -509,7 +511,7 @@ mod tests {
         pc.setup(&a).unwrap();
         let mut x = vec![0.0; 4];
         let mut solver = GmresSolver::new(4, 1e-10, 100);
-        let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
+        let stats = solver.solve(&a, Some(&pc), &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
@@ -541,7 +543,7 @@ mod tests {
         pc.setup(&a).unwrap();
         let mut x = vec![0.0; 4];
         let mut solver = GmresSolver::new(4, 1e-10, 100).with_preconditioning(Preconditioning::Right);
-        let _ = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
+        let _ = solver.solve(&a, Some(&pc), &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-2;
         // Check residual norm instead of per-component equality
         let mut ax = vec![0.0; 4];

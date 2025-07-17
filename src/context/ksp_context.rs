@@ -189,7 +189,7 @@ impl LuPreconditioner {
     
     /// Perform direct solve (for PREONLY usage).
     pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<(), KError> {
-        self.solver.solve(a, None, b, x)?;
+        self.solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
         Ok(())
     }
 }
@@ -225,7 +225,7 @@ impl QrPreconditioner {
     
     /// Perform direct solve (for PREONLY usage).
     pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<(), KError> {
-        self.solver.solve(a, None, b, x)?;
+        self.solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
         Ok(())
     }
 }
@@ -734,7 +734,7 @@ impl KspContext {
 
             // Use the Krylov solver
             let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
-            let stats = solver.solve(a, self.pc.as_deref(), b, x)?;
+            let stats = solver.solve(a, self.pc.as_deref(), b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
             
             // Apply custom convergence test if provided
             if let Some(ref custom_test) = self.custom_conv {
@@ -761,7 +761,7 @@ impl KspContext {
             Some(PcType::Lu) => {
                 // For LU, use the LuSolver directly
                 let mut lu_solver = LuSolver::new();
-                lu_solver.solve(a, None, b, x)?;
+                lu_solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
                 Ok(SolveStats {
                     iterations: 1,
                     final_residual: 0.0,
@@ -771,7 +771,7 @@ impl KspContext {
             Some(PcType::Qr) => {
                 // For QR, use the QrSolver directly
                 let mut qr_solver = crate::solver::direct_lu::QrSolver::new();
-                qr_solver.solve(a, None, b, x)?;
+                qr_solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
                 Ok(SolveStats {
                     iterations: 1,
                     final_residual: 0.0,
