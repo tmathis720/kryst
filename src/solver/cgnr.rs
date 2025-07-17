@@ -76,7 +76,7 @@ where
     /// * `x` - Initial guess (input/output)
     ///
     /// Returns convergence statistics and the solution vector.
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CGNR does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
@@ -91,8 +91,8 @@ where
         let mut z = V::from(vec![T::zero(); n]);
         a.matvec(&r, &mut z); // z = A^T r (for CGNR, A^T = A^T)
         let mut p = z.clone();
-        let mut rz = ip.dot(&z, &z);
-        let res0 = ip.norm(&r);
+        let mut rz = ip.dot(&z, &z, comm);
+        let res0 = ip.norm(&r, comm);
         let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
 
         for i in 1..=self.conv.max_iters {
@@ -103,7 +103,7 @@ where
             let mut at_ap = V::from(vec![T::zero(); n]);
             a.matvec(&ap, &mut at_ap);
             // Compute step size alpha
-            let alpha = rz / ip.dot(&at_ap, &at_ap);
+            let alpha = rz / ip.dot(&at_ap, &at_ap, comm);
             // Update x and r
             for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
                 *xj = *xj + alpha * *pj;
@@ -112,8 +112,8 @@ where
                 *rj = *rj - alpha * *apj;
             }
             a.matvec(&r, &mut z); // z = A^T r
-            let rz_new = ip.dot(&z, &z);
-            let res_norm = ip.norm(&r);
+            let rz_new = ip.dot(&z, &z, comm);
+            let res_norm = ip.norm(&r, comm);
             let (reason, new_stats) = self.conv.check(res_norm, res0, i);
             stats = new_stats;
             if reason != ConvergedReason::Continued {
@@ -152,7 +152,7 @@ where
     /// * `x` - Initial guess (input/output)
     ///
     /// Returns convergence statistics and the solution vector.
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CGNE does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
@@ -167,8 +167,8 @@ where
         let mut z = V::from(vec![T::zero(); n]);
         a.matvec(&r, &mut z); // z = A^T r (for CGNE, A^T = A^T)
         let mut p = z.clone();
-        let mut rz = ip.dot(&z, &z);
-        let res0 = ip.norm(&r);
+        let mut rz = ip.dot(&z, &z, comm);
+        let res0 = ip.norm(&r, comm);
         let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
 
         for i in 1..=self.conv.max_iters {
@@ -179,7 +179,7 @@ where
             let mut ap = V::from(vec![T::zero(); n]);
             a.matvec(&at_p, &mut ap);
             // Compute step size alpha
-            let alpha = rz / ip.dot(&ap, &ap);
+            let alpha = rz / ip.dot(&ap, &ap, comm);
             // Update x and r
             for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
                 *xj = *xj + alpha * *pj;
@@ -188,8 +188,8 @@ where
                 *rj = *rj - alpha * *at_pj;
             }
             a.matvec(&r, &mut z); // z = A^T r
-            let rz_new = ip.dot(&z, &z);
-            let res_norm = ip.norm(&r);
+            let rz_new = ip.dot(&z, &z, comm);
+            let res_norm = ip.norm(&r, comm);
             let (reason, new_stats) = self.conv.check(res_norm, res0, i);
             stats = new_stats;
             if reason != ConvergedReason::Continued {
@@ -235,7 +235,7 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0];
         let mut x = vec![0.0, 0.0];
         let mut solver = CgnrSolver::new(1e-10, 50);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let expected = vec![1.0, 2.0];
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -252,7 +252,7 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0];
         let mut x = vec![0.0, 0.0];
         let mut solver = CgneSolver::new(1e-10, 50);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let expected = vec![1.0, 2.0];
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(expected.iter()) {

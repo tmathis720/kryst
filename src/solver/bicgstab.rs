@@ -66,9 +66,10 @@ where
     /// * `pc` - Optional preconditioner (currently unused)
     /// * `b` - Right-hand side vector
     /// * `x` - Initial guess (input/output)
+    /// * `comm` - Communicator for parallel reductions
     ///
     /// Returns convergence statistics and the solution vector.
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let _ = pc; // BiCGStab does not use preconditioner (yet)
         let n = b.as_ref().len();
         let ip = ();
@@ -84,18 +85,7 @@ where
         let mut v = V::from(vec![T::zero(); n]);
         let mut p = r.clone(); // Properly initialize p = r
         // Compute initial residual norm
-        let res0 = {
-            #[cfg(feature = "mpi")]
-            {
-                let local_norm2 = ip.dot(&r, &r);
-                // TODO: Use comm.all_reduce for distributed norm when comm is available
-                local_norm2.sqrt()
-            }
-            #[cfg(not(feature = "mpi"))]
-            {
-                ip.norm(&r)
-            }
-        };
+        let res0 = ip.norm(&r, comm);
         let mut stats = SolveStats { 
             iterations: 0, 
             final_residual: res0, 
@@ -110,18 +100,7 @@ where
         }
         for i in 1..=self.conv.max_iters {
             // rho = <r_hat, r>
-            let rho = {
-                #[cfg(feature = "mpi")]
-                {
-                    let local_dot = ip.dot(&r_hat, &r);
-                    // TODO: Use comm.all_reduce for distributed dot when comm is available
-                    local_dot
-                }
-                #[cfg(not(feature = "mpi"))]
-                {
-                    ip.dot(&r_hat, &r)
-                }
-            };
+            let rho = ip.dot(&r_hat, &r, comm);
             if rho.abs() < T::epsilon() {
                 break; // breakdown
             }
@@ -154,18 +133,7 @@ where
             v = v_tmp;
             let alpha_num = rho;
             // alpha_den = <r_hat, v>
-            let alpha_den = {
-                #[cfg(feature = "mpi")]
-                {
-                    let local_dot = ip.dot(&r_hat, &v);
-                    // TODO: Use comm.all_reduce for distributed dot when comm is available
-                    local_dot
-                }
-                #[cfg(not(feature = "mpi"))]
-                {
-                    ip.dot(&r_hat, &v)
-                }
-            };
+            let alpha_den = ip.dot(&r_hat, &v, comm);
             if alpha_den.abs() < T::epsilon() {
                 break; // breakdown
             }
@@ -182,18 +150,7 @@ where
                 }
             };
             // Compute norm of s
-            let s_norm = {
-                #[cfg(feature = "mpi")]
-                {
-                    let local_norm2 = ip.dot(&s, &s);
-                    // TODO: Use comm.all_reduce for distributed norm when comm is available
-                    local_norm2.sqrt()
-                }
-                #[cfg(not(feature = "mpi"))]
-                {
-                    ip.norm(&s)
-                }
-            };
+            let s_norm = ip.norm(&s, comm);
             // Check convergence for s using new interface  
             let (s_reason, s_stats) = self.conv.check(s_norm, res0, i);
             if s_reason != ConvergedReason::Continued {
@@ -217,30 +174,8 @@ where
             let mut t = V::from(vec![T::zero(); n]);
             a.matvec(&s, &mut t);
             // omega = <t, s> / <t, t>
-            let omega_num = {
-                #[cfg(feature = "mpi")]
-                {
-                    let local_dot = ip.dot(&t, &s);
-                    // TODO: Use comm.all_reduce for distributed dot when comm is available
-                    local_dot
-                }
-                #[cfg(not(feature = "mpi"))]
-                {
-                    ip.dot(&t, &s)
-                }
-            };
-            let omega_den = {
-                #[cfg(feature = "mpi")]
-                {
-                    let local_dot = ip.dot(&t, &t);
-                    // TODO: Use comm.all_reduce for distributed dot when comm is available
-                    local_dot
-                }
-                #[cfg(not(feature = "mpi"))]
-                {
-                    ip.dot(&t, &t)
-                }
-            };
+            let omega_num = ip.dot(&t, &s, comm);
+            let omega_den = ip.dot(&t, &t, comm);
             if omega_den.abs() < T::epsilon() {
                 break; // breakdown
             }
@@ -274,18 +209,7 @@ where
             };
             r = r_new;
             // Compute norm of r
-            let r_norm = {
-                #[cfg(feature = "mpi")]
-                {
-                    let local_norm2 = ip.dot(&r, &r);
-                    // TODO: Use comm.all_reduce for distributed norm when comm is available
-                    local_norm2.sqrt()
-                }
-                #[cfg(not(feature = "mpi"))]
-                {
-                    ip.norm(&r)
-                }
-            };
+            let r_norm = ip.norm(&r, comm);
             // Check convergence using new interface
             let (r_reason, r_stats) = self.conv.check(r_norm, res0, i);
             stats = r_stats;
@@ -328,7 +252,7 @@ mod tests {
         let (a, b) = nonsym_3x3();
         let mut x = vec![0.0; 3];
         let mut solver = BiCgStabSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         eprintln!("BiCGStab stats: {{ reason: {:?}, iters: {}, final_res: {:e} }}", stats.reason, stats.iterations, stats.final_residual);
         // Compare to true solution
         let x_true = vec![1.0, 2.0, 3.0];

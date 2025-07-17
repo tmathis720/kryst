@@ -62,11 +62,12 @@ where
     /// * `pc` - (Unused) Optional preconditioner (not supported in this implementation)
     /// * `b` - Right-hand side vector
     /// * `x` - On input: initial guess; on output: solution vector
+    /// * `comm` - Communicator for parallel operations
     ///
     /// # Returns
     /// * `Ok(SolveStats)` if converged or max iterations reached
     /// * `Err(KError)` on error
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let _ = pc; // MINRES does not use preconditioner (yet)
         let n = b.as_ref().len();
         let ip = ();
@@ -79,7 +80,7 @@ where
         }
 
         // β₁ = ||r||₂ (initial residual norm)
-        let beta1 = ip.norm(&r);
+        let beta1 = ip.norm(&r, comm);
         if beta1 == T::zero() {
             // already exact
             *x = V::from(vec![T::zero(); n]);
@@ -128,13 +129,13 @@ where
             // --- Lanczos step ---
             let mut v_next = V::from(vec![T::zero(); n]);
             a.matvec(&v, &mut v_next);
-            alpha = ip.dot(&v, &v_next);
+            alpha = ip.dot(&v, &v_next, comm);
             for i in 0..n {
                 v_next.as_mut()[i] = v_next.as_ref()[i]
                     - alpha * v.as_ref()[i]
                     - beta * v_prev.as_ref()[i];
             }
-            beta_next = ip.norm(&v_next);
+            beta_next = ip.norm(&v_next, comm);
             // Breakdown check: if beta_next is zero, terminate early
             if beta_next == T::zero() {
                 println!("MINRES breakdown: beta_next == 0 at iter {j}");
@@ -186,7 +187,7 @@ where
             let mut r_true = V::from(vec![T::zero(); n]);
             a.matvec(&x_out, &mut r_true);
             for i in 0..n { r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i]; }
-            let r_true_norm = ip.norm(&r_true);
+            let r_true_norm = ip.norm(&r_true, comm);
             println!("MINRES iter {j}: alpha={:.4e}, beta={:.4e}, beta_next={:.4e}", alpha.to_f64().unwrap(), beta.to_f64().unwrap(), beta_next.to_f64().unwrap());
             println!("  rho_bar={:.4e}, rho={:.4e}, c={:.4e}, s={:.4e}", rho_bar.to_f64().unwrap(), rho.to_f64().unwrap(), c.to_f64().unwrap(), s.to_f64().unwrap());
             println!("  phi={:.4e}, phi_bar={:.4e}", phi.to_f64().unwrap(), phi_bar.to_f64().unwrap());

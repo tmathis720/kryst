@@ -124,6 +124,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         pc: Option<&mut dyn FlexiblePreconditioner<M, V>>,
         b: &V,
         x: &mut V,
+        comm: &crate::parallel::UniverseComm,
     ) -> Result<SolveStats<T>, KError>
     where
         T: From<f64>,
@@ -144,7 +145,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         for (ri, ai) in r.as_mut().iter_mut().zip(tmp.as_ref()) {
             *ri = *ri - *ai;
         }
-        let mut beta = ip.norm(&r);
+        let mut beta = ip.norm(&r, comm);
         if beta == T::zero() {
             return Ok(SolveStats {
                 iterations: 0,
@@ -233,7 +234,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 match self.orthog {
                     Orthog::Classical => {
                         for i in 0..=j {
-                            h_col[i] = ip.dot(&w, &v_basis[i]);
+                            h_col[i] = ip.dot(&w, &v_basis[i], comm);
                         }
                         for i in 0..=j {
                             for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
@@ -243,7 +244,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     }
                     Orthog::Modified => {
                         for i in 0..=j {
-                            h_col[i] = ip.dot(&w, &v_basis[i]);
+                            h_col[i] = ip.dot(&w, &v_basis[i], comm);
                         }
                         for i in 0..=j {
                             for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
@@ -252,7 +253,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                         }
                         // Iterative refinement: re-orthogonalize if needed
                         for i in 0..=j {
-                            let corr = ip.dot(&w, &v_basis[i]);
+                            let corr = ip.dot(&w, &v_basis[i], comm);
                             if corr.abs() > <T as From<f64>>::from(1e-10) {
                                 for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                     *wi = *wi - corr * *vi;
@@ -261,7 +262,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                         }
                     }
                 }
-                h[j+1][j] = ip.norm(&w);
+                h[j+1][j] = ip.norm(&w, comm);
                 for i in 0..=j { h[i][j] = h_col[i]; }
                 // Happy breakdown detection
                 let hapbnd = self.haptol * s[j].abs();
@@ -335,7 +336,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             for (ri, ai) in r_new.as_mut().iter_mut().zip(tmp.as_ref()) {
                 *ri = *ri - *ai;
             }
-            let res_norm = ip.norm(&r_new);
+            let res_norm = ip.norm(&r_new, comm);
             if res_norm < rtol || converged {
                 stats.final_residual = res_norm;
                 stats.iterations = total_iters;
@@ -389,6 +390,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         s: &mut [T],
         total_iters: &mut usize,
         stats: &mut SolveStats<T>,
+        comm: &crate::parallel::UniverseComm,
     ) -> Result<(usize, bool, T), KError>
     where
         T: From<f64>,
@@ -424,7 +426,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             match self.orthog {
                 Orthog::Classical => {
                     for i in 0..=j {
-                        h_col[i] = ip.dot(&w, &v_basis[i]);
+                        h_col[i] = ip.dot(&w, &v_basis[i], comm);
                     }
                     for i in 0..=j {
                         for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
@@ -434,7 +436,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 }
                 Orthog::Modified => {
                     for i in 0..=j {
-                        h_col[i] = ip.dot(&w, &v_basis[i]);
+                        h_col[i] = ip.dot(&w, &v_basis[i], comm);
                     }
                     for i in 0..=j {
                         for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
@@ -443,7 +445,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     }
                     // Iterative refinement: re-orthogonalize if needed
                     for i in 0..=j {
-                        let corr = ip.dot(&w, &v_basis[i]);
+                        let corr = ip.dot(&w, &v_basis[i], comm);
                         if corr.abs() > <T as From<f64>>::from(1e-10) {
                             for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *wi = *wi - corr * *vi;
@@ -452,7 +454,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     }
                 }
             }
-            h[j+1][j] = ip.norm(&w);
+            h[j+1][j] = ip.norm(&w, comm);
             for i in 0..=j { h[i][j] = h_col[i]; }
             // Happy breakdown detection
             let hapbnd = self.haptol * s[j].abs();
@@ -571,7 +573,7 @@ mod tests {
         };
         let mut x = vec![0.0; 2];
         let mut solver = FgmresSolver::new(1e-10, 100, 25);
-        let stats = solver.solve_flex(&a, Some(&mut flex_jacobi), &b, &mut x).unwrap();
+        let stats = solver.solve_flex(&a, Some(&mut flex_jacobi), &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-6;
         for (xi, xt) in x.iter().zip(x_true.iter()) {
             assert!((xi - xt).abs() < tol, "xi={:.6}, expected {:.6}", xi, xt);

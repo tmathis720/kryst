@@ -36,6 +36,7 @@ pub trait LinearSolver<M, V> {
     /// * `pc` - Optional preconditioner
     /// * `b` - Right-hand side vector
     /// * `x` - On input: initial guess; on output: solution vector
+    /// * `comm` - Communicator for parallel operations
     ///
     /// # Returns
     /// * `Ok(SolveStats)` with convergence information
@@ -45,7 +46,8 @@ pub trait LinearSolver<M, V> {
         a: &M,
         pc: Option<&dyn Preconditioner<M, V>>,
         b: &V,
-        x: &mut V
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm
     ) -> Result<SolveStats<<Self as LinearSolver<M, V>>::Scalar>, Self::Error>;
     /// Scalar type used by the solver (e.g., f32, f64)
     type Scalar: Copy + PartialOrd + From<f64>;

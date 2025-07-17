@@ -85,12 +85,7 @@ impl Comm for NoComm {
     fn all_reduce_f64(&self, local: f64) -> f64 { local }
     
     fn split(&self, _color: i32, _key: i32) -> UniverseComm { 
-        #[cfg(not(any(feature="mpi", feature="rayon")))]
-        return UniverseComm::Serial;
-        #[cfg(all(feature="rayon", not(feature="mpi")))]
-        return UniverseComm::Rayon(RayonComm::new());
-        #[cfg(feature="mpi")]
-        return UniverseComm::Mpi(MpiComm::new());
+        UniverseComm::NoComm(NoComm)
     }
 }
 
@@ -105,6 +100,7 @@ pub mod rayon_comm;
 pub use rayon_comm::RayonComm;
 
 pub enum UniverseComm {
+    NoComm(NoComm),
     #[cfg(feature="mpi")]
     Mpi(MpiComm),
     #[cfg(feature="rayon")]
@@ -117,6 +113,7 @@ impl Comm for UniverseComm {
     type Vec = Vec<f64>; // Default, can be made generic
     fn rank(&self) -> usize {
         match self {
+            UniverseComm::NoComm(comm) => comm.rank(),
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => comm.rank(),
             #[cfg(feature="rayon")]
@@ -127,6 +124,7 @@ impl Comm for UniverseComm {
     }
     fn size(&self) -> usize {
         match self {
+            UniverseComm::NoComm(comm) => comm.size(),
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => comm.size(),
             #[cfg(feature="rayon")]
@@ -137,6 +135,7 @@ impl Comm for UniverseComm {
     }
     fn barrier(&self) {
         match self {
+            UniverseComm::NoComm(comm) => comm.barrier(),
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => comm.barrier(),
             #[cfg(feature="rayon")]
@@ -148,6 +147,7 @@ impl Comm for UniverseComm {
     #[cfg(feature = "mpi")]
     fn scatter<T: Clone + Equivalence>(&self, global: &[T], out: &mut [T], root: usize) {
         match self {
+            UniverseComm::NoComm(comm) => comm.scatter(global, out, root),
             UniverseComm::Mpi(comm) => comm.scatter(global, out, root),
             _ => unreachable!(),
         }
@@ -155,6 +155,7 @@ impl Comm for UniverseComm {
     #[cfg(not(feature = "mpi"))]
     fn scatter<T: Clone>(&self, global: &[T], out: &mut [T], root: usize) {
         match self {
+            UniverseComm::NoComm(comm) => comm.scatter(global, out, root),
             #[cfg(feature="rayon")]
             UniverseComm::Rayon(comm) => comm.scatter(global, out, root),
             #[cfg(not(feature="rayon"))]
@@ -168,6 +169,7 @@ impl Comm for UniverseComm {
     #[cfg(feature = "mpi")]
     fn gather<T: Clone + Equivalence>(&self, local: &[T], out: &mut Vec<T>, root: usize) {
         match self {
+            UniverseComm::NoComm(comm) => comm.gather(local, out, root),
             UniverseComm::Mpi(comm) => comm.gather(local, out, root),
             _ => unreachable!(),
         }
@@ -175,6 +177,7 @@ impl Comm for UniverseComm {
     #[cfg(not(feature = "mpi"))]
     fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
         match self {
+            UniverseComm::NoComm(comm) => comm.gather(local, out, _root),
             #[cfg(feature="rayon")]
             UniverseComm::Rayon(comm) => comm.gather(local, out, _root),
             #[cfg(not(feature="rayon"))]
@@ -186,6 +189,7 @@ impl Comm for UniverseComm {
     }
     fn all_reduce(&self, x: f64) -> f64 {
         match self {
+            UniverseComm::NoComm(comm) => comm.all_reduce(x),
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => comm.all_reduce(x),
             #[cfg(feature="rayon")]
@@ -197,6 +201,7 @@ impl Comm for UniverseComm {
     
     fn all_reduce_f64(&self, local: f64) -> f64 {
         match self {
+            UniverseComm::NoComm(comm) => comm.all_reduce_f64(local),
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => comm.all_reduce_f64(local),
             #[cfg(feature="rayon")]
@@ -208,6 +213,7 @@ impl Comm for UniverseComm {
     
     fn split(&self, color: i32, key: i32) -> UniverseComm {
         match self {
+            UniverseComm::NoComm(comm) => comm.split(color, key),
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => {
                 // Split the MPI communicator and return a new UniverseComm

@@ -66,7 +66,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     ///
     /// # Returns
     /// * `Ok(SolveStats)` (always converged in 1 iteration)
-    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>, _comm: &crate::parallel::UniverseComm) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
         let _ = pc; // Direct solvers do not use preconditioner
         // Compute LU factorization (overwrites any previous factor)
         let factor = FullPivLu::new(a.as_ref());
@@ -119,7 +119,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     ///
     /// # Returns
     /// * `Ok(SolveStats)` (always converged in 1 iteration)
-    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>, _comm: &crate::parallel::UniverseComm) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
         let _ = pc; // Direct solvers do not use preconditioner
         // Compute QR factorization
         let factor = Qr::new(a.as_ref());
@@ -160,7 +160,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = LuSolver::<f64>::new();
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -184,7 +184,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = QrSolver::new();
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {

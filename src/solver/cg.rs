@@ -124,9 +124,10 @@ where
     /// * `pc` - Optional preconditioner (currently unused)
     /// * `b` - Right-hand side vector
     /// * `x` - Initial guess (input/output)
+    /// * `comm` - Communicator for parallel operations
     ///
     /// Returns convergence statistics and the solution vector.
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CG does not use preconditioner
         let n = b.as_ref().len();
         let mut x_vec = x.as_ref().to_vec();
@@ -139,7 +140,7 @@ where
             V::from(r_vec)
         };
         let mut p = r.clone();
-        let mut rsq = ip.dot(&r, &r);
+        let mut rsq = ip.dot(&r, &r, comm);
         let res0 = rsq.sqrt();
         let mut stats = SolveStats { 
             iterations: 0, 
@@ -148,9 +149,9 @@ where
         };
         // Choose norm for monitoring
         let dp = match self.norm_type {
-            CgNormType::Preconditioned => ip.dot(&r, &r),
-            CgNormType::Unpreconditioned => ip.dot(&r, &r),
-            CgNormType::Natural => ip.dot(&r, &p),
+            CgNormType::Preconditioned => ip.dot(&r, &r, comm),
+            CgNormType::Unpreconditioned => ip.dot(&r, &r, comm),
+            CgNormType::Natural => ip.dot(&r, &p, comm),
             CgNormType::None => T::zero(),
         };
         if let Some(ref mut monitor) = self.monitor {
@@ -180,12 +181,12 @@ where
                     p_dot_ap
                 }
             } else {
-                ip.dot(&p, &ap)
+                ip.dot(&p, &ap, comm)
             };
             let res_norm;
             // Indefinite-matrix detection
             if p_dot_ap <= T::zero() {
-                res_norm = ip.dot(&r, &r).sqrt();
+                res_norm = ip.dot(&r, &r, comm).sqrt();
                 stats.iterations = i;
                 stats.final_residual = res_norm;
                 stats.reason = ConvergedReason::DivergedDtol;
@@ -194,8 +195,8 @@ where
             let alpha = rsq / p_dot_ap;
             // Trust-region (Steihaug–Toint) logic
             if let Some(radius) = self.radius {
-                let p_norm = ip.dot(&p, &p).sqrt();
-                let x_norm = ip.dot(&V::from(x_vec.clone()), &V::from(x_vec.clone())).sqrt();
+                let p_norm = ip.dot(&p, &p, comm).sqrt();
+                let x_norm = ip.dot(&V::from(x_vec.clone()), &V::from(x_vec.clone()), comm).sqrt();
                 if x_norm + alpha.abs() * p_norm > radius {
                     let max_step = (radius - x_norm) / p_norm;
                     #[cfg(feature = "rayon")]
@@ -212,7 +213,7 @@ where
                         }
                     }
                     *x = V::from(x_vec.clone());
-                    let res_norm_tr = ip.dot(&r, &r).sqrt();
+                    let res_norm_tr = ip.dot(&r, &r, comm).sqrt();
                     stats.iterations = i;
                     stats.final_residual = res_norm_tr;
                     stats.reason = ConvergedReason::DivergedMaxIts;
@@ -239,11 +240,11 @@ where
                     *rj = *rj - alpha * *apj;
                 }
             }
-            let rsq_new = ip.dot(&r, &r);
+            let rsq_new = ip.dot(&r, &r, comm);
             res_norm = match self.norm_type {
                 CgNormType::Preconditioned => rsq_new.sqrt(),
                 CgNormType::Unpreconditioned => rsq_new.sqrt(),
-                CgNormType::Natural => ip.dot(&r, &p).abs().sqrt(),
+                CgNormType::Natural => ip.dot(&r, &p, comm).abs().sqrt(),
                 CgNormType::None => T::zero(),
             };
             // Objective function tracking (optional early stopping)
@@ -251,14 +252,14 @@ where
                 let obj = {
                     let mut ax = V::from(vec![T::zero(); n]);
                     a.matvec(&V::from(x_vec.clone()), &mut ax);
-                    let x_dot_ax = ip.dot(&V::from(x_vec.clone()), &ax);
-                    let x_dot_b = ip.dot(&V::from(x_vec.clone()), b);
+                    let x_dot_ax = ip.dot(&V::from(x_vec.clone()), &ax, comm);
+                    let x_dot_b = ip.dot(&V::from(x_vec.clone()), b, comm);
                     num_traits::cast::<f64, T>(0.5).unwrap() * x_dot_ax - x_dot_b
                 };
                 let res_norm_obj = match self.norm_type {
-                    CgNormType::Preconditioned => ip.dot(&r, &r).sqrt(),
+                    CgNormType::Preconditioned => ip.dot(&r, &r, comm).sqrt(),
                     CgNormType::Unpreconditioned => rsq_new.sqrt(),
-                    CgNormType::Natural => ip.dot(&r, &p).abs().sqrt(),
+                    CgNormType::Natural => ip.dot(&r, &p, comm).abs().sqrt(),
                     CgNormType::None => T::zero(),
                 };
                 if obj <= obj_target {
@@ -334,7 +335,7 @@ mod tests {
         let b = vec![1.0, 2.0];
         let mut x = vec![0.0, 0.0];
         let mut solver = CgSolver::new(1e-10, 20);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let expected = vec![0.09090909090909091, 0.6363636363636364];
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -365,7 +366,7 @@ mod tests {
         };
         let mut x = vec![0.0; 3];
         let mut solver = CgSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         let mut r_final = vec![0.0; 3];
         a.matvec(&x, &mut r_final);
@@ -387,8 +388,8 @@ mod tests {
         let mut x_single = vec![0.0, 0.0];
         let mut solver_std = CgSolver::new(1e-10, 20);
         let mut solver_single = CgSolver::new(1e-10, 20).with_single_reduction(true);
-        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std).unwrap();
-        let stats_single = solver_single.solve(&a, None, &b, &mut x_single).unwrap();
+        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);
@@ -422,8 +423,8 @@ mod tests {
         let mut x_single = vec![0.0; 3];
         let mut solver_std = CgSolver::new(1e-10, 100);
         let mut solver_single = CgSolver::new(1e-10, 100).with_single_reduction(true);
-        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std).unwrap();
-        let stats_single = solver_single.solve(&a, None, &b, &mut x_single).unwrap();
+        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-8;
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);

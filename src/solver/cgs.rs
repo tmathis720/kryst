@@ -64,7 +64,7 @@ where
     /// # Returns
     /// * `Ok(SolveStats)` if converged or max iterations reached
     /// * `Err(KError)` on error
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V) -> Result<SolveStats<T>, KError> {
+    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         let _ = pc; // CGS does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut xk = x.as_ref().to_vec();
@@ -80,9 +80,9 @@ where
         let mut p = r.clone(); // Search direction
         let mut q = V::from(vec![T::zero(); n]); // Auxiliary vector
         let mut u = V::from(vec![T::zero(); n]); // Auxiliary vector
-        let mut rho = ip.dot(&r_tld, &r); // BiCG-like scalar
+        let mut rho = ip.dot(&r_tld, &r, comm); // BiCG-like scalar
         let mut rho_old = T::zero();
-        let res0 = ip.norm(&r); // Initial residual norm
+        let res0 = ip.norm(&r, comm); // Initial residual norm
         let mut stats = SolveStats {
             iterations: 0,
             final_residual: res0,
@@ -116,7 +116,7 @@ where
             a.matvec(&p, &mut v_tmp);
             let v = v_tmp;
             // alpha = rho / (r_tld, v)
-            let alpha = rho / ip.dot(&r_tld, &v);
+            let alpha = rho / ip.dot(&r_tld, &v, comm);
             // q = u - alpha * v
             for (q_j, (u_j, v_j)) in q.as_mut().iter_mut().zip(u.as_ref().iter().zip(v.as_ref())) {
                 *q_j = *u_j - alpha * *v_j;
@@ -135,7 +135,7 @@ where
             for (rj, wj) in r.as_mut().iter_mut().zip(w.as_ref()) {
                 *rj = *rj - alpha * *wj;
             }
-            let res_norm = ip.norm(&r);
+            let res_norm = ip.norm(&r, comm);
             // Check convergence
             let (reason, s) = self.conv.check(res_norm, res0, i);
             stats = s.clone();
@@ -145,7 +145,7 @@ where
                 return Ok(stats);
             }
             rho_old = rho;
-            rho = ip.dot(&r_tld, &r);
+            rho = ip.dot(&r_tld, &r, comm);
         }
         *x = V::from(xk);
         Ok(stats)
@@ -194,7 +194,7 @@ mod tests {
         };
         let mut x = vec![0.0; 5];
         let mut solver = CgsSolver::new(1e-10, 200);
-        let stats = solver.solve(&a, None, &b, &mut x).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
         let tol = 1e-6;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() <= tol, "xi = {:.6}, expected = {:.6}", xi, ei);
