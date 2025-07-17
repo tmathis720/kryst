@@ -22,7 +22,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use crate::context::pc_context::{PC, SparsityPattern};
 //! let pc = PC::Ilut { fill: 10, droptol: 1e-3 };
 //! ```

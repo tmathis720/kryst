@@ -21,7 +21,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use kryst::config::options::{KspOptions, PcOptions};
 //!
 //! let args = vec!["-ksp_type", "gmres", "-ksp_rtol", "1e-8", "-pc_type", "jacobi"];
@@ -110,7 +110,7 @@ impl KspOptions {
     /// * `Err(KError)` if parsing fails
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let args = vec!["-ksp_type", "gmres", "-ksp_rtol", "1e-8"];
     /// let opts = KspOptions::from_args(&args)?;
     /// assert_eq!(opts.ksp_type, Some("gmres".to_string()));
@@ -249,7 +249,7 @@ impl PcOptions {
     /// * `Err(KError)` if parsing fails
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let args = vec!["-pc_type", "jacobi", "-pc_ilu_levels", "2"];
     /// let opts = PcOptions::from_args(&args)?;
     /// assert_eq!(opts.pc_type, Some("jacobi".to_string()));

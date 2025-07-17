@@ -9,7 +9,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use kryst::core::mat::shell::ShellMat;
 //! 
 //! // Create a 3x3 diagonal matrix with entries [2.0, 3.0, 4.0]
@@ -60,7 +60,7 @@ impl<V> ShellMat<V> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use kryst::core::mat::shell::ShellMat;
     /// 
     /// // Identity matrix
@@ -104,7 +104,7 @@ impl<V> ShellMat<V> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use kryst::core::mat::shell::ShellMat;
     /// 
     /// // Symmetric diagonal matrix

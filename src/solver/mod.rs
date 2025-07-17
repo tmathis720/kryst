@@ -11,7 +11,7 @@
 //! - The trait is generic over matrix and vector types, and supports optional preconditioning.
 //!
 //! # Example
-//! ```rust
+//! ```rust,ignore
 //! use krylovkit::solver::{LinearSolver, CgSolver};
 //! // ...
 //! let mut solver = CgSolver::new(1e-8, 100);

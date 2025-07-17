@@ -8,8 +8,9 @@
 //! # Overview
 //!
 //! The Chebyshev preconditioner uses a recurrence to apply the Chebyshev polynomial of degree `m` to a vector `r`:
-//!
+//!     ```ignore
 //!     z = p_m(A) r
+//!     ```
 //!
 //! where `A` is the system matrix, and `p_m` is the Chebyshev polynomial scaled to the spectrum [`alpha`, `beta`].
 //! The endpoints of the spectrum (smallest/largest eigenvalues) can be provided or estimated.

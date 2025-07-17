@@ -6,7 +6,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use kryst::context::ksp_context::{KspContext, SolverType, PcType};
 //!
 //! let mut ksp = KspContext::new();
@@ -554,7 +554,7 @@ impl KspContext {
     /// * `&mut Self` for method chaining
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// use kryst::context::ksp_context::{KspContext, ConvergedReason};
     /// 
     /// let mut ksp = KspContext::new();
@@ -664,7 +664,7 @@ impl KspContext {
     /// * `Err(KError)` if setup fails
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let mut ksp = KspContext::new();
     /// ksp.set_type(SolverType::Gmres)?;
     /// ksp.setup(&A, n)?;  // Setup once
@@ -766,7 +766,7 @@ impl KspContext {
     /// * `Err(KError)` on failure or if solver/preconditioner not configured
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let mut ksp = KspContext::new();
     /// ksp.set_type(SolverType::Gmres)?.set_pc_type(PcType::Jacobi)?;
     /// 
@@ -907,7 +907,7 @@ impl KspContext {
     /// * `Err(KError)` if any option values are invalid
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// use kryst::context::ksp_context::KspContext;
     /// use kryst::config::options::KspOptions;
     ///

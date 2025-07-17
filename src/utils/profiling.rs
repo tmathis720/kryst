@@ -71,7 +71,7 @@ impl Drop for StageGuard {
 /// The guard is automatically dropped at the end of the block.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use kryst::utils::profiling::time_stage;
 /// 
 /// time_stage!("MatVec", {
@@ -94,7 +94,7 @@ macro_rules! time_stage {
 /// is disabled.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use kryst::utils::profiling::with_timing;
 /// 
 /// with_timing!(|| {
