@@ -2,6 +2,8 @@
 use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
 use mpi::topology::{Communicator, Color};
+#[cfg(feature = "mpi")]
+use mpi::traits::*;
 
 /// Abstract communicator for reductions & splits
 pub trait Comm: Send + Sync + 'static {
@@ -223,6 +225,7 @@ impl Comm for UniverseComm {
                 let sub_rank = sub.rank() as usize;
                 let sub_size = sub.size() as usize;
                 let new_comm = MpiComm { 
+                    _universe: mpi::initialize().unwrap(), // Workaround for universe sharing
                     world: sub, 
                     rank: sub_rank, 
                     size: sub_size 

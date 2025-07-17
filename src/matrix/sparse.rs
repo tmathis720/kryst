@@ -55,15 +55,31 @@ impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> 
     }
     fn spmv(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), self.nrows());
+        assert_eq!(y.len(), SparseMatrix::nrows(self));
         let x_mat = faer::Mat::<T>::from_fn(self.ncols(), 1, |i, _| x[i]);
-        let mut y_mat = faer::Mat::<T>::zeros(self.nrows(), 1);
+        let mut y_mat = faer::Mat::<T>::zeros(SparseMatrix::nrows(self), 1);
         // Fallback: convert to dense and multiply (since sparse_dense_matmul expects CSC)
         let dense = self.inner.to_dense();
         y_mat.copy_from(&dense * &x_mat);
         for i in 0..y.len() {
             y[i] = y_mat[(i, 0)];
         }
+    }
+}
+
+// Implement MatVec trait for CsrMatrix to work with Kryst solvers
+use crate::core::traits::{MatVec, Indexing};
+
+impl<T: ComplexField + Copy + num_traits::One> MatVec<Vec<T>> for CsrMatrix<T> {
+    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+        self.spmv(x.as_slice(), y.as_mut_slice());
+    }
+}
+
+// Implement Indexing trait for CsrMatrix to work with preconditioners
+impl<T: ComplexField + Copy + num_traits::One> Indexing for CsrMatrix<T> {
+    fn nrows(&self) -> usize {
+        SparseMatrix::nrows(self)
     }
 }
 
@@ -102,7 +118,7 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero + Send + Sync> 
     /// Parallel SpMV using Rayon.
     pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), self.nrows());
+        assert_eq!(y.len(), SparseMatrix::nrows(self));
         let dense = self.inner.to_dense();
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = T::zero();

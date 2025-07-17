@@ -3,3 +3,4 @@
 pub mod convergence;
 pub mod coloring;
 pub mod profiling;
+pub mod matrix_market;
