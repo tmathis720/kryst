@@ -795,7 +795,7 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
     let n = a.nrows();
     let max_agg_id = *aggregates.iter().max().unwrap();
     let coarse_n = max_agg_id + 1;
-    let p = Mat::<f64>::zeros(n, coarse_n);
+    let mut p = Mat::<f64>::zeros(n, coarse_n);
     #[cfg(feature = "rayon")]
     {
         use std::sync::Mutex;

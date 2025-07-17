@@ -1,7 +1,8 @@
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
 
-pub trait Comm {
+/// Abstract communicator for reductions & splits
+pub trait Comm: Send + Sync + 'static {
     type Vec;
     fn rank(&self) -> usize;
     fn size(&self) -> usize;
@@ -14,11 +15,21 @@ pub trait Comm {
     fn gather<T: Clone + Equivalence>(&self, local: &[T], out: &mut Vec<T>, root: usize);
     #[cfg(not(feature = "mpi"))]
     fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, root: usize);
-    // New collective operations
-    fn all_reduce(&self, x: f64) -> f64;
+    
+    /// All‐reduce a scalar (sum) across ranks
+    fn all_reduce_f64(&self, local: f64) -> f64;
+    
+    /// Split this communicator into sub‐colors
+    fn split(&self, color: i32, key: i32) -> UniverseComm;
+    
+    /// Legacy all_reduce method for backward compatibility
+    fn all_reduce(&self, x: f64) -> f64 {
+        self.all_reduce_f64(x)
+    }
+    
     fn dot(&self, a: &[f64], b: &[f64]) -> f64 {
         let local = a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f64>();
-        self.all_reduce(local)
+        self.all_reduce_f64(local)
     }
     // Parallel/distributed matrix-vector product
     fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
@@ -31,6 +42,55 @@ pub trait Comm {
                 y[i] += a[(i, j)] * x[j];
             }
         }
+    }
+}
+
+/// Default no‐MPI/no‐parallel communicator for serial execution
+#[derive(Clone)]
+pub struct NoComm;
+
+impl Comm for NoComm {
+    type Vec = Vec<f64>;
+    
+    fn rank(&self) -> usize { 0 }
+    fn size(&self) -> usize { 1 }
+    fn barrier(&self) {}
+    
+    #[cfg(feature = "mpi")]
+    fn scatter<T: Clone + Equivalence>(&self, global: &[T], out: &mut [T], _root: usize) {
+        // For no-comm case, just copy from first elements
+        for (dst, src) in out.iter_mut().zip(global.iter()) {
+            *dst = src.clone();
+        }
+    }
+    #[cfg(not(feature = "mpi"))]
+    fn scatter<T: Clone>(&self, global: &[T], out: &mut [T], _root: usize) {
+        // For no-comm case, just copy from first elements
+        for (dst, src) in out.iter_mut().zip(global.iter()) {
+            *dst = src.clone();
+        }
+    }
+    
+    #[cfg(feature = "mpi")]
+    fn gather<T: Clone + Equivalence>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
+        out.clear();
+        out.extend_from_slice(local);
+    }
+    #[cfg(not(feature = "mpi"))]
+    fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
+        out.clear();
+        out.extend_from_slice(local);
+    }
+    
+    fn all_reduce_f64(&self, local: f64) -> f64 { local }
+    
+    fn split(&self, _color: i32, _key: i32) -> UniverseComm { 
+        #[cfg(not(any(feature="mpi", feature="rayon")))]
+        return UniverseComm::Serial;
+        #[cfg(all(feature="rayon", not(feature="mpi")))]
+        return UniverseComm::Rayon(RayonComm::new());
+        #[cfg(feature="mpi")]
+        return UniverseComm::Mpi(MpiComm::new());
     }
 }
 
@@ -98,8 +158,11 @@ impl Comm for UniverseComm {
             #[cfg(feature="rayon")]
             UniverseComm::Rayon(comm) => comm.scatter(global, out, root),
             #[cfg(not(feature="rayon"))]
-            UniverseComm::Serial => out.copy_from_slice(global),
-            _ => unreachable!(),
+            UniverseComm::Serial => {
+                for (dst, src) in out.iter_mut().zip(global.iter()) {
+                    *dst = src.clone();
+                }
+            },
         }
     }
     #[cfg(feature = "mpi")]
@@ -110,16 +173,15 @@ impl Comm for UniverseComm {
         }
     }
     #[cfg(not(feature = "mpi"))]
-    fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, root: usize) {
+    fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
         match self {
             #[cfg(feature="rayon")]
-            UniverseComm::Rayon(comm) => comm.gather(local, out, root),
+            UniverseComm::Rayon(comm) => comm.gather(local, out, _root),
             #[cfg(not(feature="rayon"))]
             UniverseComm::Serial => {
                 out.clear();
                 out.extend_from_slice(local);
             },
-            _ => unreachable!(),
         }
     }
     fn all_reduce(&self, x: f64) -> f64 {
@@ -130,6 +192,39 @@ impl Comm for UniverseComm {
             UniverseComm::Rayon(comm) => comm.all_reduce(x),
             #[cfg(not(any(feature="mpi", feature="rayon")))]
             UniverseComm::Serial => x,
+        }
+    }
+    
+    fn all_reduce_f64(&self, local: f64) -> f64 {
+        match self {
+            #[cfg(feature="mpi")]
+            UniverseComm::Mpi(comm) => comm.all_reduce_f64(local),
+            #[cfg(feature="rayon")]
+            UniverseComm::Rayon(comm) => comm.all_reduce_f64(local),
+            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            UniverseComm::Serial => local,
+        }
+    }
+    
+    fn split(&self, color: i32, key: i32) -> UniverseComm {
+        match self {
+            #[cfg(feature="mpi")]
+            UniverseComm::Mpi(comm) => {
+                // Split the MPI communicator and return a new UniverseComm
+                let sub = comm.world.split(color, key);
+                let sub_rank = sub.rank() as usize;
+                let sub_size = sub.size() as usize;
+                let new_comm = MpiComm { 
+                    world: sub, 
+                    rank: sub_rank, 
+                    size: sub_size 
+                };
+                UniverseComm::Mpi(new_comm)
+            },
+            #[cfg(feature="rayon")]
+            UniverseComm::Rayon(_comm) => UniverseComm::Rayon(RayonComm::new()),
+            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            UniverseComm::Serial => UniverseComm::Serial,
         }
     }
 }

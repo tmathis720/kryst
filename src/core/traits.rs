@@ -15,11 +15,15 @@ pub trait MatTransVec<V> {
 /// Inner products & norms.
 pub trait InnerProduct<V> {
     /// Associated scalar type.
-    type Scalar: Copy + PartialOrd + From<f64>;
-    /// Compute dot(x, y).
-    fn dot(&self, x: &V, y: &V) -> Self::Scalar;
-    /// Compute ‖x‖₂.
-    fn norm(&self, x: &V) -> Self::Scalar;
+    type Scalar: Copy + PartialOrd + From<f64> + Into<f64>;
+    /// Compute dot(x, y) with communicator support for parallel reductions.
+    fn dot(&self, x: &V, y: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar;
+    /// Compute ‖x‖₂ with communicator support for parallel reductions.
+    fn norm(&self, x: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar {
+        let local_sq = self.dot(x, x, comm);
+        let global_sq = comm.all_reduce_f64(local_sq.into());
+        (global_sq.sqrt()).into()
+    }
 }
 
 /// Uniform indexing into vectors (dense or sparse).

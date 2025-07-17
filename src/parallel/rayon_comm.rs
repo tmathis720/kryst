@@ -77,6 +77,16 @@ impl super::Comm for RayonComm {
         x // No-op for shared memory
     }
 
+    /// All‐reduce a scalar (sum) across ranks - new trait method
+    fn all_reduce_f64(&self, local: f64) -> f64 {
+        local // No-op for shared memory
+    }
+
+    /// Split this communicator into sub‐colors
+    fn split(&self, _color: i32, _key: i32) -> super::UniverseComm {
+        super::UniverseComm::Rayon(RayonComm::new()) // For shared memory, just return a new instance
+    }
+
     /// Parallel matrix-vector multiplication using Rayon.
     ///
     /// # Arguments

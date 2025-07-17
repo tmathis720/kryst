@@ -278,6 +278,8 @@ pub struct KspContext {
     setup_called: bool,
     /// Optional custom convergence test function
     custom_conv: Option<Box<dyn Fn(usize, f64, f64) -> ConvergedReason>>,
+    /// Communicator for parallel operations  
+    pub comm: Option<crate::parallel::UniverseComm>,
 }
 
 impl Workspace {
@@ -344,6 +346,7 @@ impl KspContext {
             work: None,
             setup_called: false,
             custom_conv: None,
+            comm: None,
         }
     }
 
@@ -607,6 +610,34 @@ impl KspContext {
     /// ksp.solve(&A, &b2, &mut x2)?;  // Reuses workspace
     /// ```
     pub fn setup(&mut self, a: &Mat<f64>, n: usize) -> Result<(), KError> {
+        // Use default communicator (no parallelism) if none specified
+        #[cfg(not(any(feature="mpi", feature="rayon")))]
+        let default_comm = crate::parallel::UniverseComm::Serial;
+        #[cfg(all(feature="rayon", not(feature="mpi")))]
+        let default_comm = crate::parallel::UniverseComm::Rayon(crate::parallel::RayonComm::new());
+        #[cfg(feature="mpi")]
+        let default_comm = crate::parallel::UniverseComm::Mpi(crate::parallel::MpiComm::new());
+        
+        self.setup_with_comm(a, n, default_comm)
+    }
+
+    /// Setup the KspContext with a matrix, problem size, and communicator for parallel operations.
+    ///
+    /// This prepares the preconditioner and allocates workspace for efficient repeated solves.
+    /// The communicator will be used for parallel reductions in dot products and norms.
+    ///
+    /// # Arguments
+    /// * `a` - The coefficient matrix
+    /// * `n` - The problem size (number of unknowns)
+    /// * `comm` - The communicator for parallel operations
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(KError)` if setup fails
+    pub fn setup_with_comm(&mut self, a: &Mat<f64>, n: usize, comm: crate::parallel::UniverseComm) -> Result<(), KError> {
+        // Store the communicator
+        self.comm = Some(comm);
+        
         // Setup preconditioner if present
         if let Some(ref mut pc) = self.pc {
             pc.setup(a)?;

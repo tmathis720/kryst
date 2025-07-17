@@ -120,6 +120,24 @@ impl super::Comm for MpiComm {
         y
     }
 
+    /// All‐reduce a scalar (sum) across ranks - new trait method
+    fn all_reduce_f64(&self, local: f64) -> f64 {
+        self.all_reduce(local)
+    }
+
+    /// Split this communicator into sub‐colors
+    fn split(&self, color: i32, key: i32) -> super::UniverseComm {
+        let sub = self.world.split(color, key);
+        let sub_rank = sub.rank() as usize;
+        let sub_size = sub.size() as usize;
+        let new_comm = MpiComm { 
+            world: sub, 
+            rank: sub_rank, 
+            size: sub_size 
+        };
+        super::UniverseComm::Mpi(new_comm)
+    }
+
     /// Parallel matrix-vector multiplication (currently serial, placeholder for distributed version).
     ///
     /// - `a`: The matrix (all rows available on all processes).

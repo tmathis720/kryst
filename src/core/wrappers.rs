@@ -84,46 +84,31 @@ impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
 /// Implements inner product and norm for vectors, with optional Rayon parallelism.
 ///
 /// If the `rayon` feature is enabled, uses parallel iterators for performance.
-impl<T: Float + From<f64> + Send + Sync> InnerProduct<Vec<T>> for () {
+impl<T: Float + From<f64> + Into<f64> + Send + Sync> InnerProduct<Vec<T>> for () {
     type Scalar = T;
-    /// Computes the dot product of two vectors: `x^T y`.
-    fn dot(&self, x: &Vec<T>, y: &Vec<T>) -> T {
+    /// Computes the dot product of two vectors: `x^T y` with parallel reduction.
+    fn dot(&self, x: &Vec<T>, y: &Vec<T>, comm: &impl crate::parallel::Comm) -> T {
         assert_eq!(x.len(), y.len(), "Vectors must have the same length");
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            x.as_slice()
-                .par_iter()
-                .zip(y.as_slice().par_iter())
-                .map(|(xi, yi)| *xi * *yi)
-                .reduce(|| T::zero(), |acc, v| acc + v)
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            x.iter()
-                .zip(y.iter())
-                .map(|(xi, yi)| *xi * *yi)
-                .fold(T::zero(), |acc, v| acc + v)
-        }
-    }
-    /// Computes the Euclidean norm of a vector: `||x||_2`.
-    fn norm(&self, x: &Vec<T>) -> T {
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            x.as_slice()
-                .par_iter()
-                .map(|xi| *xi * *xi)
-                .reduce(|| T::zero(), |acc, v| acc + v)
-                .sqrt()
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            x.iter()
-                .map(|xi| *xi * *xi)
-                .fold(T::zero(), |acc, v| acc + v)
-                .sqrt()
-        }
+        let local_dot = {
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                x.as_slice()
+                    .par_iter()
+                    .zip(y.as_slice().par_iter())
+                    .map(|(xi, yi)| *xi * *yi)
+                    .reduce(|| T::zero(), |acc, v| acc + v)
+            }
+            #[cfg(not(feature = "rayon"))]
+            {
+                x.iter()
+                    .zip(y.iter())
+                    .map(|(xi, yi)| *xi * *yi)
+                    .fold(T::zero(), |acc, v| acc + v)
+            }
+        };
+        let global_dot = comm.all_reduce_f64(local_dot.into());
+        global_dot.into()
     }
 }
 
