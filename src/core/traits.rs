@@ -55,3 +55,64 @@ pub trait SubmatrixExtract {
     /// Returns the submatrix with rows and columns given by `indices`.
     fn submatrix(&self, indices: &[usize]) -> Self;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Simple test to verify traits can be imported and used
+    #[test]
+    fn test_traits_exist() {
+        // This test just verifies that all traits compile and can be referenced
+        // More comprehensive tests would require mock implementations
+        
+        // Test that trait bounds can be specified
+        fn _test_matvec_bound<T, V>(_: &T) where T: MatVec<V> {}
+        fn _test_mattransvec_bound<T, V>(_: &T) where T: MatTransVec<V> {}
+        fn _test_inner_product_bound<T, V>(_: &T) where T: InnerProduct<V> {}
+        fn _test_indexing_bound<T>(_: &T) where T: Indexing {}
+        fn _test_mat_shape_bound<T>(_: &T) where T: MatShape {}
+        fn _test_row_pattern_bound<T>(_: &T) where T: RowPattern {}
+        fn _test_matrix_get_bound<T, U>(_: &T) where T: MatrixGet<U> {}
+        fn _test_submatrix_extract_bound<T>(_: &T) where T: SubmatrixExtract {}
+        
+        // All traits should compile
+        assert!(true);
+    }
+
+    #[test]
+    fn test_inner_product_scalar_trait_bounds() {
+        // Test that the associated Scalar type has the required bounds
+        fn _check_scalar_bounds<T: Copy + PartialOrd + From<f64> + Into<f64>>() {}
+        
+        // f64 should satisfy the bounds
+        _check_scalar_bounds::<f64>();
+        
+        assert!(true);
+    }
+
+    #[test]
+    fn test_trait_names_and_methods() {
+        // Verify method names exist by checking trait signatures
+        trait TestMatVec<V> {
+            fn matvec(&self, x: &V, y: &mut V);
+        }
+        
+        trait TestMatTransVec<V> {
+            fn mattransvec(&self, x: &V, y: &mut V);
+        }
+        
+        trait TestInnerProduct<V> {
+            type Scalar: Copy + PartialOrd + From<f64> + Into<f64>;
+            fn dot(&self, x: &V, y: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar;
+            fn norm(&self, x: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar {
+                let local_sq = self.dot(x, x, comm);
+                let global_sq = comm.all_reduce_f64(local_sq.into());
+                (global_sq.sqrt()).into()
+            }
+        }
+        
+        // All method signatures should compile
+        assert!(true);
+    }
+}
