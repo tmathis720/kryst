@@ -65,7 +65,7 @@ where
         Ok(())
     }
     /// Not implemented: use `apply_chebyshev` free function instead
-    fn apply(&self, _r: &V, _z: &mut V) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, _r: &V, _z: &mut V) -> Result<(), KError> {
         Err(KError::SolveError("Chebyshev preconditioner requires matrix argument; use apply_chebyshev free function.".to_string()))
     }
 }

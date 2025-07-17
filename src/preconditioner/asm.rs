@@ -71,9 +71,15 @@ where
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
     T: 'static + num_traits::Float + From<f64> + Send + Sync,
 {
+    /// Setup method required by Preconditioner trait
+    fn setup(&mut self, _a: &M) -> Result<(), KError> {
+        // This is a placeholder - actual setup should be done via the other setup method
+        Ok(())
+    }
+
     /// Apply `z = P^{-1} r` via overlapping block solves.
     /// Each block's result is summed into the global vector.
-    fn apply(&self, r: &V, z: &mut V) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &V, z: &mut V) -> Result<(), KError> {
         for zi in z.as_mut().iter_mut() { *zi = T::zero(); }
         #[cfg(feature = "rayon")]
         {
@@ -130,7 +136,7 @@ mod tests {
         asm.setup(&a, || LuSolver::<f64>::new());
         let r = vec![1.0, 2.0, 3.0, 4.0];
         let mut z = vec![0.0; 4];
-        asm.apply(&r, &mut z).unwrap();
+        asm.apply(crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
         // For identity, ASM should return the input
         assert_eq!(z, r);
     }

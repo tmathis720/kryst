@@ -50,14 +50,21 @@ pub struct FgmresSolver<T> {
 
 impl<T: num_traits::Float> FgmresSolver<T> {
     /// Create a new FGMRES solver with given tolerance, max iterations, and restart.
-    pub fn new(tol: T, max_iters: usize, restart: usize) -> Self {
+    pub fn new(rtol: T, max_iters: usize, restart: usize) -> Self {
+        let atol = num_traits::cast::<f64, T>(1e-12).unwrap();
+        let dtol = num_traits::cast::<f64, T>(1e3).unwrap();
         Self {
-            conv: Convergence { tol, max_iters },
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            },
             restart,
             delta_allocate: 10,
             preallocate: false,
             orthog: Orthog::Classical,
-            haptol: T::from(1e-12).unwrap(),
+            haptol: num_traits::cast::<f64, T>(1e-12).unwrap(),
             modify_pc: None,
             monitor: None,
             residual_history: Vec::new(),
@@ -119,6 +126,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         x: &mut V,
     ) -> Result<SolveStats<T>, KError>
     where
+        T: From<f64>,
         M: MatVec<V>,
         (): InnerProduct<V, Scalar = T>,
         V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone,
@@ -127,7 +135,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         let ip = ();
         let restart = self.restart;
         let max_iters = self.conv.max_iters;
-        let tol = self.conv.tol;
+        let rtol = self.conv.rtol;
 
         // Compute initial residual r = b - A x
         let mut r = b.clone();
@@ -138,7 +146,11 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         }
         let mut beta = ip.norm(&r);
         if beta == T::zero() {
-            return Ok(SolveStats { iterations: 0, final_residual: T::zero(), converged: true });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: T::zero(),
+                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+            });
         }
         // Allocate basis and Hessenberg storage
         let (mut v_basis, mut z_basis, mut h, mut cs, mut sn, mut s) = if self.preallocate {
@@ -168,7 +180,11 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         }
         let mut total_iters = 0;
         let res_norm = beta;
-        let mut stats = SolveStats { iterations: 0, final_residual: res_norm, converged: false };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res_norm,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
         let mut pc_mut = pc;
         #[allow(unused_labels)]
         'outer: while total_iters < max_iters {
@@ -237,7 +253,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                         // Iterative refinement: re-orthogonalize if needed
                         for i in 0..=j {
                             let corr = ip.dot(&w, &v_basis[i]);
-                            if corr.abs() > T::from(1e-10).unwrap() {
+                            if corr.abs() > <T as From<f64>>::from(1e-10) {
                                 for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                     *wi = *wi - corr * *vi;
                                 }
@@ -288,9 +304,10 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     monitor(total_iters, res_norm);
                 }
                 self.residual_history.push(res_norm);
-                let (stop, s_stats) = self.conv.check(res_norm, s[0], total_iters);
+                let (reason, s_stats) = self.conv.check(res_norm, s[0], total_iters);
                 stats = s_stats;
-                if stop {
+                if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                    || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                     stats.final_residual = res_norm;
                     stats.iterations = total_iters;
                     arnoldi_steps = j + 1; // Only j+1 Arnoldi steps performed
@@ -319,10 +336,14 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                 *ri = *ri - *ai;
             }
             let res_norm = ip.norm(&r_new);
-            if res_norm < tol || converged {
+            if res_norm < rtol || converged {
                 stats.final_residual = res_norm;
                 stats.iterations = total_iters;
-                stats.converged = true;
+                stats.reason = if res_norm < rtol {
+                    crate::utils::convergence::ConvergedReason::ConvergedRtol
+                } else {
+                    crate::utils::convergence::ConvergedReason::ConvergedAtol
+                };
                 break;
             }
             // Restart: set v_basis[0] = r_new / ||r_new||
@@ -370,6 +391,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         stats: &mut SolveStats<T>,
     ) -> Result<(usize, bool, T), KError>
     where
+        T: From<f64>,
         M: MatVec<V>,
         (): InnerProduct<V, Scalar = T>,
         V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone,
@@ -379,7 +401,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
         let ip = ();
         let restart = self.restart;
         let max_iters = self.conv.max_iters;
-        let _tol = self.conv.tol;
+        let _rtol = self.conv.rtol;
 
         let m = if self.preallocate { max_iters.min(restart) } else { restart.min(max_iters - *total_iters) };
         #[allow(unused_assignments)]
@@ -422,7 +444,7 @@ impl<T: num_traits::Float> FgmresSolver<T> {
                     // Iterative refinement: re-orthogonalize if needed
                     for i in 0..=j {
                         let corr = ip.dot(&w, &v_basis[i]);
-                        if corr.abs() > T::from(1e-10).unwrap() {
+                        if corr.abs() > <T as From<f64>>::from(1e-10) {
                             for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *wi = *wi - corr * *vi;
                             }
@@ -468,9 +490,10 @@ impl<T: num_traits::Float> FgmresSolver<T> {
             h[j+1][j] = T::zero();
             res_norm = s[j+1].abs();
             *total_iters += 1;
-            let (stop, s_stats) = self.conv.check(res_norm, s[0], *total_iters);
+            let (reason, s_stats) = self.conv.check(res_norm, s[0], *total_iters);
             *stats = s_stats;
-            if stop {
+            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                 stats.final_residual = res_norm;
                 stats.iterations = *total_iters;
                 arnoldi_steps = j + 1; // Only j+1 Arnoldi steps performed
@@ -510,8 +533,14 @@ mod tests {
         }
     }
     impl Preconditioner<Simple2, Vec<f64>> for Jacobi {
+        /// Setup the preconditioner with the given matrix
+        fn setup(&mut self, _a: &Simple2) -> Result<(), KError> {
+            // For this test case, the diagonal is already known
+            Ok(())
+        }
+        
         /// Apply Jacobi preconditioner: z = D^{-1} r
-        fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
             for (zi, (ri, &d)) in z.iter_mut().zip(r.iter().zip(self.inv_diag.iter())) {
                 *zi = *ri * d;
             }
@@ -524,7 +553,7 @@ mod tests {
     }
     impl<'a> FlexiblePreconditioner<Simple2, Vec<f64>> for FlexJacobi<'a> {
         fn apply(&mut self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
-            self.inner.apply(r, z)
+            self.inner.apply(crate::preconditioner::PcSide::Left, r, z)
         }
     }
 
@@ -547,6 +576,8 @@ mod tests {
         for (xi, xt) in x.iter().zip(x_true.iter()) {
             assert!((xi - xt).abs() < tol, "xi={:.6}, expected {:.6}", xi, xt);
         }
-        assert!(stats.converged, "FGMRES did not converge");
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol), "FGMRES did not report Converged reason");
     }
 }

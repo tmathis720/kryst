@@ -3,13 +3,66 @@
 //! This module defines the Preconditioner trait and includes implementations such as Jacobi, ILU, SOR, AMG, Additive Schwarz, and more.
 
 use crate::error::KError;
+use std::str::FromStr;
+
+/// Which side to apply M⁻¹ on in preconditioning.
+///
+/// For the linear system Ax = b with preconditioner M ≈ A:
+/// - Left: Solve M⁻¹Ax = M⁻¹b
+/// - Right: Solve AM⁻¹y = b, then x = M⁻¹y  
+/// - Symmetric: Apply both left and right preconditioning (M₁⁻¹AM₂⁻¹)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcSide {
+    /// Left preconditioning: M⁻¹Ax = M⁻¹b
+    Left,
+    /// Right preconditioning: AM⁻¹y = b, x = M⁻¹y
+    Right,
+    /// Symmetric preconditioning: M₁⁻¹AM₂⁻¹y = M₁⁻¹b, x = M₂⁻¹y
+    Symmetric,
+}
+
+impl FromStr for PcSide {
+    type Err = KError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "left" => Ok(PcSide::Left),
+            "right" => Ok(PcSide::Right),
+            "symmetric" => Ok(PcSide::Symmetric),
+            _ => Err(KError::UnrecognizedPcSide(s.to_string())),
+        }
+    }
+}
+
+impl Default for PcSide {
+    fn default() -> Self {
+        PcSide::Left
+    }
+}
 
 /// A preconditioner M ≈ A⁻¹.
 pub trait Preconditioner<M, V> {
-    /// Apply M⁻¹ to r, writing z = M⁻¹ r
-    fn apply(&self, r: &V, z: &mut V) -> Result<(), KError>;
-    /// Optionally: setup/factorize from A
-    fn setup(&mut self, _a: &M) -> Result<(), KError> { Ok(()) }
+    /// Build any factorization/hierarchy once from the system matrix.
+    ///
+    /// # Arguments
+    /// * `a` - System matrix to build preconditioner from
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful setup
+    /// * `Err(KError)` if setup fails
+    fn setup(&mut self, a: &M) -> Result<(), KError>;
+    
+    /// Apply M⁻¹ to input vector, writing result to output vector.
+    ///
+    /// # Arguments
+    /// * `side` - Which side to apply preconditioning (Left/Right/Symmetric)
+    /// * `x` - Input vector
+    /// * `y` - Output vector (will be overwritten)
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful application
+    /// * `Err(KError)` if application fails
+    fn apply(&self, side: PcSide, x: &V, y: &mut V) -> Result<(), KError>;
 }
 
 /// A preconditioner whose action M⁻¹ may change at every iteration.

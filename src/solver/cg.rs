@@ -23,7 +23,7 @@
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{Convergence, SolveStats};
+use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 use crate::error::KError;
 
 /// Norm type for CG convergence and monitoring.
@@ -47,11 +47,26 @@ pub struct CgSolver<T> {
     pub residual_history: Vec<T>,
 }
 
-impl<T: Copy + num_traits::Float> CgSolver<T> {
+impl<T: Copy + num_traits::Float + From<f64> + std::ops::Mul<Output = T>> CgSolver<T> {
     /// Create a new CG solver with the given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
+        let atol = <T as From<f64>>::from(1e-12);
+        let dtol = <T as From<f64>>::from(1e3);
         Self {
-            conv: Convergence { tol, max_iters },
+            conv: Convergence::new(tol, atol, dtol, max_iters),
+            norm_type: CgNormType::Unpreconditioned,
+            single_reduction: false,
+            radius: None,
+            obj_target: None,
+            monitor: None,
+            residual_history: Vec::new(),
+        }
+    }
+    
+    /// Create a new CG solver with full convergence criteria.
+    pub fn new_with_convergence(conv: Convergence<T>) -> Self {
+        Self {
+            conv,
             norm_type: CgNormType::Unpreconditioned,
             single_reduction: false,
             radius: None,
@@ -126,7 +141,11 @@ where
         let mut p = r.clone();
         let mut rsq = ip.dot(&r, &r);
         let res0 = rsq.sqrt();
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let mut stats = SolveStats { 
+            iterations: 0, 
+            final_residual: res0, 
+            reason: ConvergedReason::Continued 
+        };
         // Choose norm for monitoring
         let dp = match self.norm_type {
             CgNormType::Preconditioned => ip.dot(&r, &r),
@@ -169,7 +188,7 @@ where
                 res_norm = ip.dot(&r, &r).sqrt();
                 stats.iterations = i;
                 stats.final_residual = res_norm;
-                stats.converged = false;
+                stats.reason = ConvergedReason::DivergedDtol;
                 return Err(KError::IndefiniteMatrix);
             }
             let alpha = rsq / p_dot_ap;
@@ -196,7 +215,7 @@ where
                     let res_norm_tr = ip.dot(&r, &r).sqrt();
                     stats.iterations = i;
                     stats.final_residual = res_norm_tr;
-                    stats.converged = false;
+                    stats.reason = ConvergedReason::DivergedMaxIts;
                     return Ok(stats);
                 }
             }
@@ -246,7 +265,7 @@ where
                     *x = V::from(x_vec.clone());
                     stats.iterations = i;
                     stats.final_residual = res_norm_obj;
-                    stats.converged = true;
+                    stats.reason = ConvergedReason::ConvergedRtol;
                     return Ok(stats);
                 }
             }
@@ -254,16 +273,18 @@ where
             if rsq_new / rsq < T::zero() {
                 stats.iterations = i;
                 stats.final_residual = res_norm;
-                stats.converged = false;
+                stats.reason = ConvergedReason::DivergedDtol;
                 return Err(KError::IndefinitePreconditioner);
             }
             if let Some(ref mut monitor) = self.monitor {
                 monitor(i, res_norm);
             }
             self.residual_history.push(res_norm);
-            let (stop, s) = self.conv.check(res_norm, res0, i);
-            stats = s.clone();
-            if stop && s.converged {
+            
+            // Check convergence using new interface
+            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
+            stats = new_stats;
+            if reason != ConvergedReason::Continued {
                 *x = V::from(x_vec.clone());
                 return Ok(stats);
             }
@@ -319,7 +340,8 @@ mod tests {
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged, "CG did not converge");
+        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "CG did not converge: {:?}", stats.reason);
     }
 
     #[test]
@@ -352,7 +374,8 @@ mod tests {
         }
         let res_norm = r_final.iter().map(|&ri| ri*ri).sum::<f64>().sqrt();
         assert!(res_norm <= tol, "final residual = {:.6}, tol = {:.6}", res_norm, tol);
-        assert!(stats.converged, "CG did not converge");
+        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "CG did not converge: {:?}", stats.reason);
     }
 
     #[test]
@@ -370,7 +393,8 @@ mod tests {
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);
         }
-        assert!(stats_single.converged, "Single-reduction CG did not converge");
+        assert!(matches!(stats_single.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "Single-reduction CG did not converge: {:?}", stats_single.reason);
         // Also check against expected solution
         let expected = vec![0.09090909090909091, 0.6363636363636364];
         for (xi, ei) in x_single.iter().zip(expected.iter()) {
@@ -411,6 +435,7 @@ mod tests {
         }
         let res_norm = r_final.iter().map(|&ri| ri*ri).sum::<f64>().sqrt();
         assert!(res_norm <= tol, "final residual = {:.6}, tol = {:.6}", res_norm, tol);
-        assert!(stats_single.converged, "Single-reduction CG did not converge");
+        assert!(matches!(stats_single.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "Single-reduction CG did not converge: {:?}", stats_single.reason);
     }
 }

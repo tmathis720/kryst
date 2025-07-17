@@ -121,7 +121,7 @@ where
     ///
     /// Performs the specified number of forward and/or backward sweeps, depending on the `sym` flags.
     /// Each sweep updates the solution vector in-place using the SOR formula.
-    fn apply(&self, x: &V, y: &mut V) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, x: &V, y: &mut V) -> Result<(), KError> {
         let a = self.a.as_ref().expect("SOR not setup");
         let n = x.as_ref().len();
         y.as_mut().fill(T::zero());

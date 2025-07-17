@@ -19,7 +19,7 @@
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{Convergence, SolveStats};
+use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 use crate::error::KError;
 use num_traits::Float;
 
@@ -38,18 +38,25 @@ pub enum Preconditioning {
 pub struct GmresSolver<T> {
     /// Number of Arnoldi vectors before restart
     pub restart: usize,
-    /// Convergence criteria (tolerance and max iterations)
+    /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
     /// Preconditioning mode
     pub preconditioning: Preconditioning,
 }
 
-impl<T: Copy + Float> GmresSolver<T> {
+impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     /// Create a new GMRES solver with restart, tolerance, and max iterations.
-    pub fn new(restart: usize, tol: T, max_iters: usize) -> Self {
+    pub fn new(restart: usize, rtol: T, max_iters: usize) -> Self {
+        let atol = <T as From<f64>>::from(1e-12);
+        let dtol = <T as From<f64>>::from(1e3);
         Self {
             restart,
-            conv: Convergence { tol, max_iters },
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            },
             preconditioning: Preconditioning::Left, // default to left for backward compatibility
         }
     }
@@ -124,7 +131,7 @@ impl<T: Copy + Float> GmresSolver<T> {
         let mut w = V::from(vec![T::zero(); n]);
         a.matvec(&v_basis[j].clone(), &mut w);
         let mut z = V::from(vec![T::zero(); n]);
-        pc.apply(&w, &mut z).expect("preconditioner apply failed");
+        pc.apply(crate::preconditioner::PcSide::Left, &w, &mut z).expect("preconditioner apply failed");
         // Modified Gram-Schmidt on z
         for i in 0..=j {
             h[i][j] = ip.dot(&z, &v_basis[i]);
@@ -226,7 +233,11 @@ where
         };
         let mut beta = ip.norm(&r0);
         let res0 = beta;
-        let mut stats = SolveStats { iterations: 0, final_residual: beta, converged: false };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: beta,
+            reason: ConvergedReason::Continued,
+        };
 
         let n_outer = self.conv.max_iters.div_ceil(self.restart);
         let mut iteration = 0;
@@ -242,19 +253,19 @@ where
                     let v0 = r0.clone().as_ref().iter().map(|&ri| ri / r0_norm).collect::<Vec<_>>();
                     v_basis.push(V::from(v0.clone()));
                     let mut z0 = V::from(vec![T::zero(); n]);
-                    pc.apply(&V::from(v0), &mut z0).expect("preconditioner apply failed");
+                    pc.apply(crate::preconditioner::PcSide::Left, &V::from(v0), &mut z0).expect("preconditioner apply failed");
                     z_basis.push(z0);
                 }
                 (Preconditioning::Right, Some(pc)) => {
                     // Right-preconditioning: Arnoldi on A M^{-1}, update x with M^{-1} v_basis
                     let mut z0 = V::from(vec![T::zero(); n]);
-                    pc.apply(&r0, &mut z0).expect("preconditioner apply failed");
+                    pc.apply(crate::preconditioner::PcSide::Right, &r0, &mut z0).expect("preconditioner apply failed");
                     r0_norm = ip.norm(&z0);
                     let v0 = z0.as_ref().iter().map(|&zi| zi / r0_norm).collect::<Vec<_>>();
                     v_basis.push(V::from(v0.clone()));
                     // z0' = M^{-1} v0
                     let mut z0p = V::from(vec![T::zero(); n]);
-                    pc.apply(&V::from(v0), &mut z0p).expect("preconditioner apply failed");
+                    pc.apply(crate::preconditioner::PcSide::Right, &V::from(v0), &mut z0p).expect("preconditioner apply failed");
                     z_basis.push(z0p);
                     beta = r0_norm;
                 }
@@ -281,7 +292,7 @@ where
                         let mut w = V::from(vec![T::zero(); n]);
                         a.matvec(&v_basis[j], &mut w);
                         let mut z = V::from(vec![T::zero(); n]);
-                        pc.apply(&w, &mut z).expect("preconditioner apply failed");
+                        pc.apply(crate::preconditioner::PcSide::Left, &w, &mut z).expect("preconditioner apply failed");
                         // Modified Gram-Schmidt on z
                         for i in 0..=j {
                             h[i][j] = ip.dot(&z, &z_basis[i]);
@@ -309,7 +320,7 @@ where
                         // Arnoldi with right preconditioning: build v_basis for A M^{-1}, store z_basis = M^{-1} v_j for solution update
                         // w = M^{-1} v_j
                         let mut w = V::from(vec![T::zero(); n]);
-                        pc.apply(&v_basis[j], &mut w).expect("preconditioner apply failed");
+                        pc.apply(crate::preconditioner::PcSide::Right, &v_basis[j], &mut w).expect("preconditioner apply failed");
                         // w2 = A w
                         let mut w2 = V::from(vec![T::zero(); n]);
                         a.matvec(&w, &mut w2);
@@ -337,7 +348,7 @@ where
                         v_basis.push(vj1.clone());
                         // After vj1 is normalized, store z_{j+1} = M^{-1} v_{j+1}
                         let mut zj1 = V::from(vec![T::zero(); n]);
-                        pc.apply(&vj1, &mut zj1).expect("preconditioner apply failed");
+                        pc.apply(crate::preconditioner::PcSide::Right, &vj1, &mut zj1).expect("preconditioner apply failed");
                         z_basis.push(zj1);
                     }
                     _ => {
@@ -346,10 +357,10 @@ where
                 }
                 Self::apply_givens_and_update_g(&mut h, &mut g, &mut cs, &mut sn, j, epsilon);
                 let res_norm = g[j + 1].abs();
-                let (stop, s) = self.conv.check(res_norm, res0, iteration);
+                let (reason, s) = self.conv.check(res_norm, res0, iteration);
                 stats = s.clone();
                 m = j + 1;
-                if stop && s.converged || happy_breakdown {
+                if (reason == ConvergedReason::ConvergedRtol || reason == ConvergedReason::ConvergedAtol) || happy_breakdown {
                     break;
                 }
             }
@@ -392,8 +403,12 @@ where
             beta = ip.norm(&r0);
             // Update stats with true residual
             stats.final_residual = beta;
-            stats.converged = beta < self.conv.tol * res0;
-            if stats.converged || iteration >= self.conv.max_iters {
+            if beta < self.conv.rtol * res0 {
+                stats.reason = ConvergedReason::ConvergedRtol;
+                break;
+            }
+            if iteration >= self.conv.max_iters {
+                stats.reason = ConvergedReason::DivergedMaxIts;
                 break;
             }
         }
@@ -425,9 +440,14 @@ mod tests {
 
     // Implement Preconditioner for Jacobi<f64> for DenseMat, Vec<f64>
     impl crate::preconditioner::Preconditioner<DenseMat, Vec<f64>> for Jacobi<f64> {
-        fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
-            <Jacobi<f64> as crate::preconditioner::Preconditioner<faer::Mat<f64>, Vec<f64>>>::apply(self, r, z)
+        fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
+            // Apply diagonal scaling: z[i] = inv_diag[i] * r[i]
+            for i in 0..r.len() {
+                z[i] = self.inv_diag[i] * r[i];
+            }
+            Ok(())
         }
+        
         fn setup(&mut self, a: &DenseMat) -> Result<(), crate::error::KError> {
             let n = a.data.len();
             self.inv_diag = (0..n).map(|i| 1.0 / a.data[i][i]).collect();
@@ -462,7 +482,9 @@ mod tests {
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged, "GMRES did not converge");
+        assert!(matches!(stats.reason,
+            ConvergedReason::ConvergedRtol |
+            ConvergedReason::ConvergedAtol), "GMRES did not report Converged reason");
     }
 
     #[test]
@@ -492,7 +514,9 @@ mod tests {
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged, "GMRES+Jacobi did not converge");
+        assert!(matches!(stats.reason,
+            ConvergedReason::ConvergedRtol |
+            ConvergedReason::ConvergedAtol), "GMRES+Jacobi did not report Converged reason");
     }
 
     #[test]

@@ -88,9 +88,9 @@ fn cg_with_jacobi() {
     // wrap A and pc into a PCG solver if you have one, else manually:
     let r_in = b.clone();
     let mut r_out = vec![0.0; b.len()];
-    <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::apply(&pc, &r_in, &mut r_out).unwrap();
+    <Jacobi<f64> as Preconditioner<Mat<f64>, Vec<f64>>>::apply(&pc, kryst::preconditioner::PcSide::Left, &r_in, &mut r_out).unwrap();
     let stats = solver.solve(&a, None, &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // No stats to check; just ensure it runs without panic
 }
 
@@ -104,7 +104,7 @@ fn gmres_with_ilu0() {
     let mut solver = GmresSolver::new(4, 1e-6, 1000);
     let mut x = vec![0.0; 5];
     let stats = solver.solve(&a, None, &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // No stats to check; just ensure it runs without panic
 }
 
@@ -118,7 +118,7 @@ fn pcg_with_jacobi() {
     let mut solver = kryst::solver::PcgSolver::new(1e-6, 1000);
     let mut x = vec![0.0; 5];
     let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
 }
 
 /// Test: PCG with Jacobi preconditioner on a symmetric positive definite matrix.
@@ -132,7 +132,7 @@ fn spd_jacobi_pcg_converges() {
     let mut solver = PcgSolver::new(1e-12, n);
     let mut x = vec![0.0; n];
     let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
     assert!(stats.iterations <= n);
 }
@@ -146,7 +146,7 @@ fn spd_no_pc_cg_converges() {
     let mut solver = PcgSolver::new(1e-12, n);
     let mut x = vec![0.0; n];
     let stats = solver.solve(&a, None, &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
 
@@ -159,7 +159,7 @@ fn nonsym_no_pc_gmresright_converges() {
     let mut solver = GmresSolver::new(10, 1e-12, 100);
     let mut x = vec![0.0; n];
     let stats = solver.solve(&a, None, &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
 
@@ -174,7 +174,7 @@ fn nonsym_left_pc_gmresleft_converges() {
     let mut solver = GmresSolver::new(10, 1e-12, 100).with_preconditioning(Preconditioning::Left);
     let mut x = vec![0.0; n];
     let stats = solver.solve(&a, Some(&pc), &b, &mut x).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     assert!(rel_error(&x, &x_true) < 1e-10);
 }
 

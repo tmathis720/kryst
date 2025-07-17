@@ -118,7 +118,7 @@ where
     /// Apply ILUT preconditioner: solve Ly = r, then Uz = y.
     ///
     /// Forward substitution for L, then backward substitution for U.
-    fn apply(&self, r: &V, z: &mut V) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &V, z: &mut V) -> Result<(), KError> {
         let n = self.n;
         let r = r.as_ref();
         let z = z.as_mut();
@@ -190,7 +190,7 @@ mod tests {
         pc.setup(&a).unwrap();
         let r = vec![2.0f64, 3.0];
         let mut z = vec![0.0; 2];
-        Preconditioner::<Mat, Vec<f64>>::apply(&pc, &r, &mut z).unwrap();
+        Preconditioner::<Mat, Vec<f64>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
         assert!((z[0] - 2.0).abs() < 1e-12 && (z[1] - 3.0).abs() < 1e-12);
     }
 
@@ -206,7 +206,7 @@ mod tests {
         pc.setup(&a).unwrap();
         let r = vec![1.0f64, 2.0, 3.0];
         let mut z = vec![0.0; 3];
-        Preconditioner::<Mat, Vec<f64>>::apply(&pc, &r, &mut z).unwrap();
+        Preconditioner::<Mat, Vec<f64>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
         assert!(z.iter().all(|&zi| zi.is_finite()));
     }
 }

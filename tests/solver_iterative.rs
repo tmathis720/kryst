@@ -37,7 +37,7 @@ fn cg_vs_direct_on_spd() {
     let mut x_cg = vec![0.0; n];
     let mut solver = CgSolver::new(1e-8, 1000);
     let stats = solver.solve(&a, None, &b, &mut x_cg).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // Direct solve using LU decomposition
     let mut x_direct = b.clone();
     let lus = faer::linalg::solvers::FullPivLu::new(a.as_ref());
@@ -64,7 +64,7 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let mut x_gmres = vec![0.0; n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
     let stats = solver.solve(&a, None, &b, &mut x_gmres).unwrap();
-    assert!(stats.converged);
+    assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // Direct solve using QR decomposition
     let mut x_direct = b.clone();
     let qr = faer::linalg::solvers::Qr::new(a.as_ref());

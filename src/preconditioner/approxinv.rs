@@ -265,7 +265,7 @@ where
     /// Apply the SPAI preconditioner to a vector x, storing the result in y.
     ///
     /// Computes y = Mx, where M is the approximate inverse (stored in sparse row format).
-    fn apply(&self, x: &V, y: &mut V) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, x: &V, y: &mut V) -> Result<(), KError> {
         // Zero-out y
         for yi in y.as_mut().iter_mut() {
             *yi = T::zero();
@@ -406,7 +406,7 @@ mod tests {
         spai.setup(&a).unwrap();
         let x = vec![1.0, 2.0];
         let mut y = vec![0.0, 0.0];
-        spai.apply(&x, &mut y).unwrap();
+        spai.apply(crate::preconditioner::PcSide::Left, &x, &mut y).unwrap();
         // Compare to expected inverse * x using faer
         let a_inv = faer::Mat::<f64>::from_fn(2, 2, |i, j| {
             match (i, j) {
@@ -434,7 +434,7 @@ mod tests {
         spai.setup(&a).unwrap();
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let mut y = vec![0.0; 4];
-        spai.apply(&x, &mut y).unwrap();
+        spai.apply(crate::preconditioner::PcSide::Left, &x, &mut y).unwrap();
         assert_relative_eq!(x[0], y[0], epsilon = 1e-12);
         assert_relative_eq!(x[1], y[1], epsilon = 1e-12);
         assert_relative_eq!(x[2], y[2], epsilon = 1e-12);

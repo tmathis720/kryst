@@ -25,7 +25,7 @@ use faer::Mat;
 use crate::solver::{LinearSolver, CgSolver, GmresSolver, BiCgStabSolver, MinresSolver, 
                    TfqmrSolver, CgnrSolver, CgsSolver, QmrSolver, LuSolver, PcgSolver};
 use crate::preconditioner::{Preconditioner, Jacobi, Ilu0};
-use crate::utils::convergence::SolveStats;
+use crate::utils::convergence::{SolveStats, ConvergedReason};
 use crate::error::KError;
 
 /// Workspace for Krylov solver operations to enable buffer reuse.
@@ -90,6 +90,24 @@ pub enum PcType {
     Ilu0,
     /// No preconditioning
     None,
+    /// Incomplete LU factorization (generic)
+    Ilu,
+    /// Incomplete LU factorization with threshold
+    Ilut,
+    /// Incomplete LU factorization with partial pivoting
+    Ilup,
+    /// Block Jacobi preconditioner
+    BlockJacobi,
+    /// Successive Over-Relaxation (SOR) preconditioner
+    Sor,
+    /// Additive Schwarz Method (ASM) preconditioner
+    Asm,
+    /// Chebyshev preconditioner
+    Chebyshev,
+    /// Algebraic Multigrid (AMG) preconditioner
+    Amg,
+    /// Approximate inverse preconditioner
+    ApproxInverse,
 }
 
 impl FromStr for SolverType {
@@ -120,6 +138,15 @@ impl FromStr for PcType {
             "jacobi" => Ok(PcType::Jacobi),
             "ilu0" => Ok(PcType::Ilu0),
             "none" => Ok(PcType::None),
+            "ilu" => Ok(PcType::Ilu),
+            "ilut" => Ok(PcType::Ilut),
+            "ilup" => Ok(PcType::Ilup),
+            "blockjacobi" | "block_jacobi" | "bjacobi" => Ok(PcType::BlockJacobi),
+            "sor" => Ok(PcType::Sor),
+            "asm" => Ok(PcType::Asm),
+            "chebyshev" => Ok(PcType::Chebyshev),
+            "amg" => Ok(PcType::Amg),
+            "approxinverse" | "approx_inverse" => Ok(PcType::ApproxInverse),
             _ => Err(KError::UnrecognizedPcType(s.to_string())),
         }
     }
@@ -129,7 +156,11 @@ impl FromStr for PcType {
 pub struct NoOpPreconditioner;
 
 impl Preconditioner<Mat<f64>, Vec<f64>> for NoOpPreconditioner {
-    fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+    fn setup(&mut self, _a: &Mat<f64>) -> Result<(), KError> {
+        Ok(())
+    }
+
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         z.clone_from(r);
         Ok(())
     }
@@ -147,6 +178,8 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for NoOpPreconditioner {
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>>>,
     pc: Option<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>>,
+    /// Preconditioner side (Left/Right/Symmetric)
+    pub pc_side: crate::preconditioner::PcSide,
     /// Relative tolerance for convergence
     pub rtol: f64,
     /// Absolute tolerance for convergence  
@@ -161,6 +194,8 @@ pub struct KspContext {
     work: Option<Workspace>,
     /// Flag indicating if setup has been called
     setup_called: bool,
+    /// Optional custom convergence test function
+    custom_conv: Option<Box<dyn Fn(usize, f64, f64) -> ConvergedReason>>,
 }
 
 impl Workspace {
@@ -216,6 +251,7 @@ impl KspContext {
         Self {
             solver: None,
             pc: None,
+            pc_side: crate::preconditioner::PcSide::Left,
             rtol: 1e-6,
             atol: 1e-12,
             dtol: 1e3,
@@ -223,6 +259,7 @@ impl KspContext {
             restart: 50,
             work: None,
             setup_called: false,
+            custom_conv: None,
         }
     }
 
@@ -236,15 +273,42 @@ impl KspContext {
     /// * `Err(KError)` if the solver type is not supported
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
         let solver: Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>> = match solver_type {
-            SolverType::Cg => Box::new(CgSolver::new(self.rtol, self.maxits)),
-            SolverType::Pcg => Box::new(PcgSolver::new(self.rtol, self.maxits)),
-            SolverType::Gmres => Box::new(GmresSolver::new(self.restart, self.rtol, self.maxits)),
-            SolverType::BiCgStab => Box::new(BiCgStabSolver::new(self.rtol, self.maxits)),
-            SolverType::Cgs => Box::new(CgsSolver::new(self.rtol, self.maxits)),
-            SolverType::Qmr => Box::new(QmrSolver::new(self.rtol, self.maxits)),
-            SolverType::Tfqmr => Box::new(TfqmrSolver::new(self.rtol, self.maxits)),
-            SolverType::Minres => Box::new(MinresSolver::new(self.rtol, self.maxits)),
-            SolverType::Cgnr => Box::new(CgnrSolver::new(self.rtol, self.maxits)),
+            SolverType::Cg => {
+                let cg = CgSolver::new(self.rtol, self.maxits);
+                Box::new(cg)
+            },
+            SolverType::Pcg => {
+                let pcg = PcgSolver::new(self.rtol, self.maxits);
+                Box::new(pcg)
+            },
+            SolverType::Gmres => {
+                let gmres = GmresSolver::new(self.restart, self.rtol, self.maxits);
+                Box::new(gmres)
+            },
+            SolverType::BiCgStab => {
+                let bicgstab = BiCgStabSolver::new(self.rtol, self.maxits);
+                Box::new(bicgstab)
+            },
+            SolverType::Cgs => {
+                let cgs = CgsSolver::new(self.rtol, self.maxits);
+                Box::new(cgs)
+            },
+            SolverType::Qmr => {
+                let qmr = QmrSolver::new(self.rtol, self.maxits);
+                Box::new(qmr)
+            },
+            SolverType::Tfqmr => {
+                let tfqmr = TfqmrSolver::new(self.rtol, self.maxits);
+                Box::new(tfqmr)
+            },
+            SolverType::Minres => {
+                let minres = MinresSolver::new(self.rtol, self.maxits);
+                Box::new(minres)
+            },
+            SolverType::Cgnr => {
+                let cgnr = CgnrSolver::new(self.rtol, self.maxits);
+                Box::new(cgnr)
+            },
             SolverType::Preonly => Box::new(LuSolver::new()),
         };
         self.solver = Some(solver);
@@ -264,6 +328,11 @@ impl KspContext {
         self.set_type(solver_type)
     }
 
+    /// Set the solver type from a string.
+    ///
+    /// # Arguments
+    /// * `solver_name` - String name of the solver (e.g., "cg", "gmres")
+    ///
     /// Set the preconditioner type and create the appropriate preconditioner instance.
     ///
     /// # Arguments
@@ -277,6 +346,11 @@ impl KspContext {
             PcType::Jacobi => Box::new(Jacobi::new()),
             PcType::Ilu0 => Box::new(Ilu0::new()),
             PcType::None => Box::new(NoOpPreconditioner),
+            PcType::Ilu | PcType::Ilut | PcType::Ilup | PcType::BlockJacobi | 
+            PcType::Sor | PcType::Asm | PcType::Chebyshev | PcType::Amg | 
+            PcType::ApproxInverse => {
+                return Err(KError::UnrecognizedPcType(format!("{:?} preconditioner not yet implemented", pc_type)));
+            }
         };
         self.pc = Some(pc);
         Ok(self)
@@ -293,6 +367,32 @@ impl KspContext {
     pub fn set_pc_type_from_str(&mut self, pc_name: &str) -> Result<&mut Self, KError> {
         let pc_type = PcType::from_str(pc_name)?;
         self.set_pc_type(pc_type)
+    }
+
+    /// Set the preconditioner side (Left/Right/Symmetric).
+    ///
+    /// # Arguments
+    /// * `side` - The preconditioner side to use
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn set_pc_side(&mut self, side: crate::preconditioner::PcSide) -> &mut Self {
+        self.pc_side = side;
+        self
+    }
+
+    /// Set the preconditioner side from a string.
+    ///
+    /// # Arguments
+    /// * `side_name` - String name of the side ("left", "right", "symmetric")
+    ///
+    /// # Returns
+    /// * `Ok(&mut Self)` for method chaining on success
+    /// * `Err(KError)` if the side name is not recognized
+    pub fn set_pc_side_from_str(&mut self, side_name: &str) -> Result<&mut Self, KError> {
+        let side = crate::preconditioner::PcSide::from_str(side_name)?;
+        self.set_pc_side(side);
+        Ok(self)
     }
 
     /// Set convergence tolerances and iteration limits.
@@ -326,6 +426,62 @@ impl KspContext {
         self.work = None;
         self.setup_called = false;
         self
+    }
+
+    /// Set a custom convergence test function.
+    ///
+    /// This allows users to define their own convergence criteria beyond the standard
+    /// relative/absolute/divergence tolerance tests. The custom function will be called
+    /// with (iteration_count, residual_norm, rhs_norm) and should return a ConvergedReason.
+    ///
+    /// # Arguments
+    /// * `f` - Custom convergence test function with signature `Fn(usize, f64, f64) -> ConvergedReason`
+    ///   - First argument: current iteration count
+    ///   - Second argument: current residual norm ‖r‖  
+    ///   - Third argument: right-hand side norm ‖b‖
+    ///   - Return: ConvergedReason indicating whether to continue, converge, or diverge
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    ///
+    /// # Example
+    /// ```rust
+    /// use kryst::context::ksp_context::{KspContext, ConvergedReason};
+    /// 
+    /// let mut ksp = KspContext::new();
+    /// ksp.set_convergence_test(|iters, rnorm, bnorm| {
+    ///     if rnorm / bnorm < 1e-3 {
+    ///         ConvergedReason::ConvergedRtol
+    ///     } else if iters > 10 {
+    ///         ConvergedReason::DivergedMaxIts  
+    ///     } else {
+    ///         ConvergedReason::Continued
+    ///     }
+    /// });
+    /// ```
+    pub fn set_convergence_test<F>(&mut self, f: F) -> &mut Self
+    where 
+        F: Fn(usize, f64, f64) -> ConvergedReason + 'static
+    {
+        self.custom_conv = Some(Box::new(f));
+        self
+    }
+
+    /// Clear the custom convergence test and revert to default convergence criteria.
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn clear_convergence_test(&mut self) -> &mut Self {
+        self.custom_conv = None;
+        self
+    }
+
+    /// Check if a custom convergence test has been set.
+    ///
+    /// # Returns
+    /// * `true` if a custom convergence test is active, `false` otherwise
+    pub fn has_custom_convergence_test(&self) -> bool {
+        self.custom_conv.is_some()
     }
 
     /// Explicit setup phase: prepare preconditioner and allocate workspaces.
@@ -431,11 +587,24 @@ impl KspContext {
             }
         }
 
-        // Solve the system using cached workspace
-        // Note: The actual solver implementations would need to be modified to accept
-        // and use the workspace. For now, we use the existing solver interface.
+        // If custom convergence test is set, we need to wrap the solver
+        // For now, delegate to the solver but TODO: implement convergence wrapper
         let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
-        solver.solve(a, self.pc.as_deref(), b, x)
+        let stats = solver.solve(a, self.pc.as_deref(), b, x)?;
+        
+        // Apply custom convergence test if provided
+        if let Some(ref custom_test) = self.custom_conv {
+            let reason = custom_test(stats.iterations, stats.final_residual, b.iter().map(|x| x*x).sum::<f64>().sqrt());
+            // Create new stats with custom reason
+            let custom_stats = SolveStats {
+                iterations: stats.iterations,
+                final_residual: stats.final_residual,
+                reason,
+            };
+            Ok(custom_stats)
+        } else {
+            Ok(stats)
+        }
     }
 
     /// Configure the KSP context from parsed command-line options.

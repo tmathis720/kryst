@@ -49,7 +49,7 @@ fn test_sor_identity() {
     sor.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    sor.apply(&x, &mut y).unwrap();
+    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y).unwrap();
     // Output should match input exactly
     assert_relative_eq!(x.as_slice(), y.as_slice(), epsilon=1e-12);
 }
@@ -66,7 +66,7 @@ fn test_sor_tridiag_forward() {
     sor.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    sor.apply(&x, &mut y).unwrap();
+    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y).unwrap();
     // Compute expected SOR sweep (forward, in-place)
     let mut expected = vec![0.0; n];
     for i in 0..n {
@@ -92,7 +92,7 @@ fn test_ssor_tridiag() {
     sor.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    sor.apply(&x, &mut y).unwrap();
+    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y).unwrap();
     // All output values should be finite
     assert!(y.iter().all(|&v| (v as f64).is_finite()));
 }

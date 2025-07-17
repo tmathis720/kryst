@@ -22,10 +22,8 @@
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::SolveStats;
+use crate::utils::convergence::{SolveStats, Convergence, ConvergedReason};
 use crate::error::KError;
-
-use crate::utils::convergence::Convergence;
 
 /// CGNR solver struct.
 ///
@@ -41,17 +39,21 @@ pub struct CgneSolver<T> {
     pub conv: Convergence<T>,
 }
 
-impl<T: num_traits::Float> CgnrSolver<T> {
+impl<T: num_traits::Float + From<f64>> CgnrSolver<T> {
     /// Create a new CGNR solver with the given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = <T as From<f64>>::from(1e-12);
+        let dtol = <T as From<f64>>::from(1e3);
+        Self { conv: Convergence::new(rtol, atol, dtol, max_iters) }
     }
 }
 
-impl<T: num_traits::Float> CgneSolver<T> {
+impl<T: num_traits::Float + From<f64>> CgneSolver<T> {
     /// Create a new CGNE solver with the given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = <T as From<f64>>::from(1e-12);
+        let dtol = <T as From<f64>>::from(1e3);
+        Self { conv: Convergence::new(rtol, atol, dtol, max_iters) }
     }
 }
 
@@ -91,7 +93,7 @@ where
         let mut p = z.clone();
         let mut rz = ip.dot(&z, &z);
         let res0 = ip.norm(&r);
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
 
         for i in 1..=self.conv.max_iters {
             // Compute Ap = A p
@@ -112,9 +114,9 @@ where
             a.matvec(&r, &mut z); // z = A^T r
             let rz_new = ip.dot(&z, &z);
             let res_norm = ip.norm(&r);
-            let (stop, s) = self.conv.check(res_norm, res0, i);
-            stats = s.clone();
-            if stop && s.converged {
+            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
+            stats = new_stats;
+            if reason != ConvergedReason::Continued {
                 *x = V::from(xk.clone());
                 return Ok(stats);
             }
@@ -167,7 +169,7 @@ where
         let mut p = z.clone();
         let mut rz = ip.dot(&z, &z);
         let res0 = ip.norm(&r);
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
 
         for i in 1..=self.conv.max_iters {
             // Compute At_p = A p
@@ -188,9 +190,9 @@ where
             a.matvec(&r, &mut z); // z = A^T r
             let rz_new = ip.dot(&z, &z);
             let res_norm = ip.norm(&r);
-            let (stop, s) = self.conv.check(res_norm, res0, i);
-            stats = s.clone();
-            if stop && s.converged {
+            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
+            stats = new_stats;
+            if reason != ConvergedReason::Continued {
                 *x = V::from(xk.clone());
                 return Ok(stats);
             }
@@ -239,7 +241,8 @@ mod tests {
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged, "CGNR did not converge");
+        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "CGNR did not converge, reason: {:?}", stats.reason);
     }
 
     #[test]
@@ -255,6 +258,7 @@ mod tests {
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged, "CGNE did not converge");
+        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "CGNE did not converge, reason: {:?}", stats.reason);
     }
 }

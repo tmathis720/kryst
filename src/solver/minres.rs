@@ -25,14 +25,23 @@ use num_traits::Float;
 /// # Type Parameters
 /// * `T` - Scalar type (e.g., f32, f64)
 pub struct MinresSolver<T> {
-    /// Convergence criteria (tolerance and max iterations)
+    /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: Float> MinresSolver<T> {
     /// Create a new MINRES solver with given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = num_traits::cast::<f64, T>(1e-12).unwrap();
+        let dtol = num_traits::cast::<f64, T>(1e3).unwrap();
+        Self {
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            },
+        }
     }
 }
 
@@ -74,7 +83,11 @@ where
         if beta1 == T::zero() {
             // already exact
             *x = V::from(vec![T::zero(); n]);
-            return Ok(SolveStats { iterations: 0, final_residual: beta1, converged: true });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: beta1,
+                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+            });
         }
 
         // Saad Alg 7.4 initializations
@@ -108,7 +121,7 @@ where
         let mut stats = SolveStats {
             iterations: 0,
             final_residual: beta1,
-            converged: false,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
         };
 
         for j in 1..=self.conv.max_iters {
@@ -203,9 +216,10 @@ where
                 phi_min = phi_bar.abs();
                 x_best = x_out.clone();
             }
-            let (stop, sstat) = self.conv.check(phi_bar.abs(), beta1, j);
+            let (reason, sstat) = self.conv.check(phi_bar.abs(), beta1, j);
             stats = sstat.clone();
-            if stop && stats.converged {
+            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                 *x = x_best.clone();
                 stats.final_residual = phi_min;
                 return Ok(stats);
@@ -326,7 +340,9 @@ mod tests {
         }
         // Should converge in 1 or 2 iterations (allow up to 2)
         assert!(stats.iterations <= 2, "expected at most 2 MINRES iterations on I");
-        assert!(stats.converged, "should report convergence");
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol), "MINRES did not report Converged reason");
     }
 
     #[test]
@@ -371,6 +387,8 @@ mod tests {
             "MINRES failed to drive residual small: ||r|| = {:.3e}, tol = {:.3e}",
             res_norm, tol
         );
-        assert!(stats.converged, "MINRES did not report convergence");
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol), "MINRES did not report Converged reason");
     }
 }

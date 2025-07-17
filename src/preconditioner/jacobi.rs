@@ -74,8 +74,9 @@ where
 
     /// Apply the Jacobi preconditioner to a vector x, storing the result in y.
     ///
+    /// For Jacobi preconditioning, all sides (Left/Right/Symmetric) are equivalent.
     /// Computes y[i] = inv_diag[i] * x[i] for all i.
-    fn apply(&self, x: &V, y: &mut V) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, x: &V, y: &mut V) -> Result<(), KError> {
         let x_ref = x.as_ref();
         let y_mut = y.as_mut();
         #[cfg(feature = "rayon")]

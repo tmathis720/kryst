@@ -19,7 +19,7 @@ use crate::error::KError;
 /// # Type Parameters
 /// * `T` - Scalar type (e.g., f32, f64)
 pub struct CgsSolver<T> {
-    /// Convergence criteria (tolerance and max iterations)
+    /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
 }
 
@@ -27,10 +27,19 @@ impl<T: num_traits::Float> CgsSolver<T> {
     /// Create a new CGS solver with given tolerance and maximum iterations.
     ///
     /// # Arguments
-    /// * `tol` - Relative residual tolerance for convergence
+    /// * `rtol` - Relative residual tolerance for convergence
     /// * `max_iters` - Maximum number of iterations
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = num_traits::cast::<f64, T>(1e-12).unwrap();
+        let dtol = num_traits::cast::<f64, T>(1e3).unwrap();
+        Self {
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            },
+        }
     }
 }
 
@@ -74,7 +83,11 @@ where
         let mut rho = ip.dot(&r_tld, &r); // BiCG-like scalar
         let mut rho_old = T::zero();
         let res0 = ip.norm(&r); // Initial residual norm
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
         for i in 1..=self.conv.max_iters {
             // Check for breakdown (division by zero)
             if rho.abs() < T::epsilon() {
@@ -124,9 +137,10 @@ where
             }
             let res_norm = ip.norm(&r);
             // Check convergence
-            let (stop, s) = self.conv.check(res_norm, res0, i);
+            let (reason, s) = self.conv.check(res_norm, res0, i);
             stats = s.clone();
-            if stop && s.converged {
+            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                 *x = V::from(xk.clone());
                 return Ok(stats);
             }
@@ -185,6 +199,9 @@ mod tests {
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() <= tol, "xi = {:.6}, expected = {:.6}", xi, ei);
         }
-        assert!(stats.converged, "CGS did not converge");
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol),
+            "CGS did not report Converged reason");
     }
 }

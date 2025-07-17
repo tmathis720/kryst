@@ -23,7 +23,7 @@
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::error::KError;
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{Convergence, SolveStats};
+use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -40,10 +40,12 @@ where
     pub conv: Convergence<T>,
 }
 
-impl<T: num_traits::Float + Send + Sync> BiCgStabSolver<T> {
+impl<T: num_traits::Float + From<f64> + std::ops::Mul<Output = T> + Send + Sync> BiCgStabSolver<T> {
     /// Create a new BiCGStab solver with the given tolerance and maximum iterations.
     pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+        let atol = <T as From<f64>>::from(1e-12);
+        let dtol = <T as From<f64>>::from(1e3);
+        Self { conv: Convergence::new(tol, atol, dtol, max_iters) }
     }
 }
 
@@ -94,11 +96,17 @@ where
                 ip.norm(&r)
             }
         };
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
-        if res0 <= self.conv.tol {
+        let mut stats = SolveStats { 
+            iterations: 0, 
+            final_residual: res0, 
+            reason: ConvergedReason::Continued 
+        };
+        
+        // Check initial convergence using new interface
+        let (reason, initial_stats) = self.conv.check(res0, res0, 0);
+        if reason != ConvergedReason::Continued {
             *x = V::from(xk);
-            stats.converged = true;
-            return Ok(stats);
+            return Ok(initial_stats);
         }
         for i in 1..=self.conv.max_iters {
             // rho = <r_hat, r>
@@ -186,7 +194,9 @@ where
                     ip.norm(&s)
                 }
             };
-            if s_norm <= self.conv.tol {
+            // Check convergence for s using new interface  
+            let (s_reason, s_stats) = self.conv.check(s_norm, res0, i);
+            if s_reason != ConvergedReason::Continued {
                 // Early convergence: update x and return
                 #[cfg(feature = "rayon")]
                 {
@@ -201,8 +211,7 @@ where
                     }
                 }
                 *x = V::from(xk);
-                stats = SolveStats { iterations: i, final_residual: s_norm, converged: true };
-                return Ok(stats);
+                return Ok(s_stats);
             }
             // t = A s
             let mut t = V::from(vec![T::zero(); n]);
@@ -277,8 +286,10 @@ where
                     ip.norm(&r)
                 }
             };
-            stats = SolveStats { iterations: i, final_residual: r_norm, converged: r_norm <= self.conv.tol };
-            if r_norm <= self.conv.tol {
+            // Check convergence using new interface
+            let (r_reason, r_stats) = self.conv.check(r_norm, res0, i);
+            stats = r_stats;
+            if r_reason != ConvergedReason::Continued {
                 *x = V::from(xk);
                 return Ok(stats);
             }
@@ -318,12 +329,13 @@ mod tests {
         let mut x = vec![0.0; 3];
         let mut solver = BiCgStabSolver::new(1e-10, 100);
         let stats = solver.solve(&a, None, &b, &mut x).unwrap();
-        eprintln!("BiCGStab stats: {{ converged: {}, iters: {}, final_res: {:e} }}", stats.converged, stats.iterations, stats.final_residual);
+        eprintln!("BiCGStab stats: {{ reason: {:?}, iters: {}, final_res: {:e} }}", stats.reason, stats.iterations, stats.final_residual);
         // Compare to true solution
         let x_true = vec![1.0, 2.0, 3.0];
         for i in 0..3 {
             assert_abs_diff_eq!(x[i], x_true[i], epsilon = 1e-8);
         }
-        assert!(stats.converged, "BiCGStab did not converge: stats = {:?}", stats);
+        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
+                "BiCGStab did not converge: stats = {:?}", stats);
     }
 }

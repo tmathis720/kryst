@@ -26,14 +26,23 @@ use num_traits::Float;
 
 /// Quasi-Minimal Residual (QMR) method for nonsymmetric A
 pub struct QmrSolver<T> {
-    /// Convergence criteria (tolerance and max iterations)
+    /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: Float> QmrSolver<T> {
     /// Create a new QMR solver with given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = num_traits::cast(1e-12).unwrap_or(T::epsilon());
+        let dtol = num_traits::cast(1e3).unwrap_or(T::one());
+        Self {
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            }
+        }
     }
 }
 
@@ -86,12 +95,16 @@ where
         // r_tld0 = arbitrary, use r0
         r_tld.clone_from(&r);
         let norm_r0 = ip.norm(&r);
-        let mut stats = SolveStats { iterations: 0, final_residual: norm_r0, converged: false };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: norm_r0,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
         let mut rho = ip.dot(&r_tld, &r);
         if rho == T::zero() {
             *x = x_j;
             stats.final_residual = ip.norm(&r);
-            stats.converged = true;
+            stats.reason = crate::utils::convergence::ConvergedReason::ConvergedAtol;
             return Ok(stats);
         }
         #[allow(unused_assignments)]
@@ -150,12 +163,13 @@ where
                 t.as_mut()[i] = b.as_ref()[i] - t.as_ref()[i];
             }
             res_norm = ip.norm(&t);
-            let (stop, s_stats) = self.conv.check(res_norm, norm_r0, j+1);
+            let (reason, s_stats) = self.conv.check(res_norm, norm_r0, j+1);
             stats = s_stats;
-            if stop {
+            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                 *x = x_j.clone();
                 stats.final_residual = res_norm;
-                stats.converged = true;
+                stats.reason = reason;
                 return Ok(stats);
             }
         }
@@ -207,6 +221,8 @@ mod tests {
         let stats = solver.solve(&a, None, &b, &mut x).unwrap();
         assert!((x[0]-1.0).abs() < 1e-4);
         assert!((x[1]-2.0).abs() < 1e-4);
-        assert!(stats.converged);
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol), "QMR did not report Converged reason");
     }
 }

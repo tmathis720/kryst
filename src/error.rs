@@ -4,6 +4,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum KError {
+    #[error("breakdown or indefinite preconditioner detected (beta < 0)")]
+    DivergedIndefinitePC,
+    #[error("breakdown or indefinite situation detected (beta < 0 or other)")]
+    BreakdownOrIndefinite,
     #[error("factorization error: {0}")]
     FactorError(String),
     #[error("solve error: {0}")]
@@ -20,4 +24,6 @@ pub enum KError {
     UnrecognizedSolverType(String),
     #[error("unrecognized preconditioner type: {0}")]
     UnrecognizedPcType(String),
+    #[error("unrecognized preconditioner side: {0}")]
+    UnrecognizedPcSide(String),
 }

@@ -425,7 +425,7 @@ impl AMG {
 
 impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
     /// Apply the AMG preconditioner: z = M⁻¹ r.
-    fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         if self.levels.is_empty() {
             let diag_inv = AMG::extract_diagonal_inverse(&self.matrix);
             AMG::smooth_jacobi_parallel(&self.matrix, &diag_inv, r, z, 10);
@@ -795,7 +795,7 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
     let n = a.nrows();
     let max_agg_id = *aggregates.iter().max().unwrap();
     let coarse_n = max_agg_id + 1;
-    let mut p = Mat::<f64>::zeros(n, coarse_n);
+    let p = Mat::<f64>::zeros(n, coarse_n);
     #[cfg(feature = "rayon")]
     {
         use std::sync::Mutex;
@@ -837,7 +837,7 @@ mod tests {
         let coarsening_threshold = 0.1;
         let amg_preconditioner = AMG::new(&matrix, max_levels, coarsening_threshold);
 
-        amg_preconditioner.apply(&r, &mut z).unwrap();
+        amg_preconditioner.apply(crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
 
         let mut residual = vec![0.0; 3];
         matrix.matvec(&z, &mut residual);
@@ -863,7 +863,7 @@ mod tests {
         let coarsening_threshold = 0.1;
         let amg_preconditioner = AMG::new(&matrix, max_levels, coarsening_threshold);
 
-        amg_preconditioner.apply(&r, &mut z).unwrap();
+        amg_preconditioner.apply(crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
 
         let mut residual = vec![0.0; 4];
         matrix.matvec(&z, &mut residual);

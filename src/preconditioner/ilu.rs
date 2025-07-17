@@ -101,8 +101,9 @@ impl<T: Float + Send + Sync + ComplexField> Preconditioner<Mat<T>, Vec<T>> for I
 
     /// Apply the ILU(0) preconditioner to a vector x, storing the result in y.
     ///
+    /// For ILU preconditioning, all sides (Left/Right/Symmetric) are equivalent.
     /// Solves Ly1 = x (forward substitution), then Uy = y1 (backward substitution).
-    fn apply(&self, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
+    fn apply(&self, _side: crate::preconditioner::PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
         // Forward substitution: solve L y1 = x
         let mut y1 = x.clone();
         let n = x.len();

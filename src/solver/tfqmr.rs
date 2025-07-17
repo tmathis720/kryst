@@ -28,14 +28,23 @@ use num_traits::Float;
 /// # Type Parameters
 /// * `T` - Scalar type (e.g., f32, f64)
 pub struct TfqmrSolver<T: num_traits::FromPrimitive> {
-    /// Convergence criteria (tolerance and max iterations)
+    /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
 }
 
 impl<T: Float + num_traits::FromPrimitive> TfqmrSolver<T> {
     /// Create a new TFQMR solver with given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        Self { conv: Convergence { tol, max_iters } }
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = num_traits::cast(1e-12).unwrap_or(T::epsilon());
+        let dtol = num_traits::cast(1e3).unwrap_or(T::one());
+        Self {
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            }
+        }
     }
 }
 
@@ -79,7 +88,11 @@ where
         // scalars
         let mut rho = ip.dot(&r, &r_tld);
         if rho == T::zero() {
-            return Ok(SolveStats { iterations: 0, final_residual: ip.norm(&r), converged: true });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: ip.norm(&r),
+                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+            });
         }
         #[allow(unused_assignments)]
         let _alpha = T::zero();
@@ -87,7 +100,11 @@ where
         let _c = T::one();
         let _eta = T::zero();
         let res0 = rho;
-        let _stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let _stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
 
         // vectors
         #[allow(unused_assignments)]
@@ -100,9 +117,17 @@ where
         let mut eta_old = T::zero();
         let tau = ip.norm(&r);
         let res0 = tau;
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
         if tau == T::zero() {
-            return Ok(SolveStats { iterations: 0, final_residual: T::zero(), converged: true });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: T::zero(),
+                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+            });
         }
 
         let mut dpold = tau; // PETSc: dpold = initial residual norm
@@ -117,14 +142,14 @@ where
             if sigma == T::zero() || !sigma.is_finite() {
                 stats.final_residual = ip.norm(&r);
                 stats.iterations = k;
-                stats.converged = false;
+                stats.reason = crate::utils::convergence::ConvergedReason::Continued;
                 return Ok(stats);
             }
             let alpha = rho / sigma;
             if alpha == T::zero() || !alpha.is_finite() {
                 stats.final_residual = ip.norm(&r);
                 stats.iterations = k;
-                stats.converged = false;
+                stats.reason = crate::utils::convergence::ConvergedReason::Continued;
                 return Ok(stats);
             }
             // --- TFQMR update steps ---
@@ -184,15 +209,16 @@ where
 
                 // Residual estimate: dpest = sqrt(2*k + m + 2) * tau_for_m
                 let dpest = T::from_usize(2 * k + m + 2).unwrap().sqrt() * tau_for_m;
-                let (stop, s) = self.conv.check(dpest, res0, k);
+                let (reason, s) = self.conv.check(dpest, res0, k);
                 stats = s;
                 psi_old = psi;
                 eta_old = eta;
                 tau_local = tau_for_m * psi * c_m;
-                if stop {
+                if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                    || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                     stats.final_residual = dpest;
                     stats.iterations = k;
-                    stats.converged = true;
+                    stats.reason = reason;
                     return Ok(stats);
                 }
             }
@@ -255,6 +281,8 @@ mod tests {
         for (xi, xt) in x.iter().zip(x_true.iter()) {
             assert!((xi - xt).abs() < tol, "xi={:.3}, expected {:.3}", xi, xt);
         }
-        assert!(stats.converged, "TFQMR did not converge");
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol), "TFQMR did not report Converged reason");
     }
 }

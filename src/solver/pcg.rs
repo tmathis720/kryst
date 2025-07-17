@@ -29,7 +29,7 @@ pub enum CgNormType { Preconditioned, Unpreconditioned, Natural, None }
 /// # Type Parameters
 /// * `T` - Scalar type (e.g., f32, f64)
 pub struct PcgSolver<T> {
-    /// Convergence criteria (tolerance and max iterations)
+    /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
     /// Norm type for convergence and monitoring
     pub norm_type: CgNormType,
@@ -47,9 +47,16 @@ pub struct PcgSolver<T> {
 
 impl<T: Copy + num_traits::Float> PcgSolver<T> {
     /// Create a new PCG solver with given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
+    pub fn new(rtol: T, max_iters: usize) -> Self {
+        let atol = num_traits::cast(1e-12).unwrap_or(T::epsilon());
+        let dtol = num_traits::cast(1e3).unwrap_or(T::one());
         Self {
-            conv: Convergence { tol, max_iters },
+            conv: Convergence {
+                rtol,
+                atol,
+                dtol,
+                max_iters,
+            },
             norm_type: CgNormType::Unpreconditioned,
             single_reduction: false,
             radius: None,
@@ -125,14 +132,18 @@ where
         // Apply preconditioner: z = M^{-1} r
         let mut z = V::from(vec![T::zero(); n]);
         if let Some(pc) = pc {
-            pc.apply(&r, &mut z)?;
+            pc.apply(crate::preconditioner::PcSide::Left, &r, &mut z)?;
         } else {
             z.clone_from(&r);
         }
         let mut p = z.clone();
         let mut rz = ip.dot(&r, &z);
         let res0 = rz.abs().sqrt();
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, converged: false };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
         // Choose norm for convergence check
         let dp = match self.norm_type {
             CgNormType::Preconditioned => ip.dot(&z, &z),
@@ -167,7 +178,7 @@ where
                     CgNormType::Natural => ip.dot(&r, &z).abs().sqrt(),
                     CgNormType::None => T::zero(),
                 };
-                stats.converged = false;
+                // stats.converged field removed in new SolveStats
                 return Err(KError::IndefiniteMatrix);
             }
             let alpha = rz / p_dot_ap;
@@ -181,7 +192,7 @@ where
             }
             // Apply preconditioner: z = M^{-1} r
             if let Some(pc) = pc {
-                pc.apply(&r, &mut z)?;
+                pc.apply(crate::preconditioner::PcSide::Left, &r, &mut z)?;
             } else {
                 z.clone_from(&r);
             }
@@ -197,9 +208,10 @@ where
                 monitor(i+1, res_norm);
             }
             self.residual_history.push(res_norm);
-            let (stop, s) = self.conv.check(res_norm, res0, i+1);
+            let (reason, s) = self.conv.check(res_norm, res0, i+1);
             stats = s.clone();
-            if stop && s.converged {
+            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
                 *x = V::from(x_vec.clone());
                 return Ok(stats);
             }
@@ -208,7 +220,7 @@ where
             if beta < T::zero() {
                 stats.iterations = i + 1;
                 stats.final_residual = res_norm;
-                stats.converged = false;
+                stats.reason = crate::utils::convergence::ConvergedReason::DivergedDtol;
                 return Err(KError::IndefinitePreconditioner);
             }
             // Update search direction: p = z + beta * p
@@ -244,7 +256,11 @@ mod tests {
     /// Identity preconditioner for testing
     struct IdentityPC;
     impl Preconditioner<DenseMat, Vec<f64>> for IdentityPC {
-        fn apply(&self, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
+        fn setup(&mut self, _a: &DenseMat) -> Result<(), crate::error::KError> {
+            Ok(())
+        }
+        
+        fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
             z.copy_from_slice(r);
             Ok(())
         }
@@ -266,7 +282,9 @@ mod tests {
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard PCG differ: {} vs {}", xi, xj);
         }
-        assert!(stats_single.converged, "Single-reduction PCG did not converge");
+        assert!(matches!(stats_single.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedRtol |
+            crate::utils::convergence::ConvergedReason::ConvergedAtol), "Single-reduction PCG did not report Converged reason");
         // Also check against expected solution
         let expected = vec![0.09090909090909091, 0.6363636363636364];
         for (xi, ei) in x_single.iter().zip(expected.iter()) {

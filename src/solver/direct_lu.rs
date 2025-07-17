@@ -84,7 +84,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
         Ok(crate::utils::convergence::SolveStats {
             iterations: 1,
             final_residual: T::zero(),
-            converged: true,
+            reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
         })
     }
 }
@@ -130,7 +130,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
         Ok(crate::utils::convergence::SolveStats {
             iterations: 1,
             final_residual: T::zero(),
-            converged: true,
+            reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
         })
     }
 }
@@ -166,7 +166,9 @@ mod tests {
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!((f64::from(*xi) - f64::from(*ei)).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged);
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedAtol |
+            crate::utils::convergence::ConvergedReason::ConvergedRtol), "LU did not report Converged reason");
     }
 
     #[test]
@@ -188,6 +190,8 @@ mod tests {
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!((f64::from(*xi) - f64::from(*ei)).abs() < tol, "xi = {}, expected = {}", xi, ei);
         }
-        assert!(stats.converged);
+        assert!(matches!(stats.reason,
+            crate::utils::convergence::ConvergedReason::ConvergedAtol |
+            crate::utils::convergence::ConvergedReason::ConvergedRtol), "QR did not report Converged reason");
     }
 }

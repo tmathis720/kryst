@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match ksp.solve(&a, &b, &mut x) {
         Ok(stats) => {
             println!("Solution Results:");
-            println!("  Converged: {}", stats.converged);
+            println!("  Converged: {}", matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
             println!("  Iterations: {}", stats.iterations);
             println!("  Final residual norm: {:.2e}", stats.final_residual);
             println!("  Solution x: [{:.8}, {:.8}]", x[0], x[1]);
