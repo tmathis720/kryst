@@ -22,6 +22,10 @@ use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 use crate::error::KError;
 use num_traits::Float;
+#[cfg(feature = "logging")]
+use log::trace;
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
 
 /// Preconditioning mode for GMRES (none, left, or right)
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -86,23 +90,53 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     {
         let n = v_basis[0].as_ref().len();
         let mut w = V::from(vec![T::zero(); n]);
+        
+        #[cfg(feature = "logging")]
+        let _matvec_guard = StageGuard::enter("GmresMatVec");
         a.matvec(&v_basis[j].clone(), &mut w);
+        #[cfg(feature = "logging")]
+        drop(_matvec_guard);
+        
         // Modified Gram-Schmidt orthogonalization
         for i in 0..=j {
+            #[cfg(feature = "logging")]
+            let _dot_guard = StageGuard::enter("GmresDotProduct");
             h[i][j] = ip.dot(&w, &v_basis[i], comm);
+            #[cfg(feature = "logging")]
+            drop(_dot_guard);
+            
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("GmresAxpy");
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *wk = *wk - h[i][j] * *vik;
             }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
         }
         // Iterative refinement (second orthogonalization)
         for i in 0..=j {
+            #[cfg(feature = "logging")]
+            let _dot_guard = StageGuard::enter("GmresDotProduct");
             let tmp = ip.dot(&w, &v_basis[i], comm);
+            #[cfg(feature = "logging")]
+            drop(_dot_guard);
+            
             h[i][j] = h[i][j] + tmp;
+            
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("GmresAxpy");
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *wk = *wk - tmp * *vik;
             }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
         }
+        
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("GmresNorm");
         h[j + 1][j] = ip.norm(&w, comm);
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
         // Happy breakdown: if norm is very small, return true
         if h[j + 1][j].abs() < epsilon {
             return true;
@@ -206,7 +240,7 @@ where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
     V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64> + num_traits::ToPrimitive + num_traits::Zero + num_traits::FromPrimitive,
+    T: num_traits::Float + Clone + From<f64> + num_traits::ToPrimitive + num_traits::Zero + num_traits::FromPrimitive + Send + Sync + std::fmt::Debug + std::fmt::LowerExp,
 {
     type Error = KError;
     type Scalar = T;
@@ -223,17 +257,35 @@ where
     /// * `Ok(SolveStats)` if converged or max iterations reached
     /// * `Err(KError)` on error
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::enter("GmresSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting GMRES solve");
+
         let n = b.as_ref().len();
         let ip = ();
         let mut xk = x.as_ref().to_vec();
         // Compute initial residual r0 = b - A x
         let mut r0 = {
             let mut tmp = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("GmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
             V::from(r_vec)
         };
+        
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("GmresNorm");
         let mut beta = ip.norm(&r0, comm);
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
+        
         let res0 = beta;
         let mut stats = SolveStats {
             iterations: 0,
@@ -288,28 +340,65 @@ where
             let mut happy_breakdown = false;
             for j in 0..self.restart {
                 iteration += 1;
+                
+                #[cfg(feature = "logging")]
+                let _iter_guard = StageGuard::enter("GmresIteration");
+                
+                #[cfg(feature = "logging")]
+                trace!("GMRES iteration {}", iteration);
+                
                 match (self.preconditioning, pc) {
                     (Preconditioning::Left, Some(pc)) => {
                         // Arnoldi with left preconditioning: as before
                         let mut w = V::from(vec![T::zero(); n]);
+                        
+                        #[cfg(feature = "logging")]
+                        let _matvec_guard = StageGuard::enter("GmresMatVec");
                         a.matvec(&v_basis[j], &mut w);
+                        #[cfg(feature = "logging")]
+                        drop(_matvec_guard);
+                        
                         let mut z = V::from(vec![T::zero(); n]);
                         pc.apply(crate::preconditioner::PcSide::Left, &w, &mut z).expect("preconditioner apply failed");
                         // Modified Gram-Schmidt on z
                         for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
                             h[i][j] = ip.dot(&z, &z_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - h[i][j] * *zik;
                             }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
                         }
                         for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
                             let tmp = ip.dot(&z, &z_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
                             h[i][j] = h[i][j] + tmp;
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - tmp * *zik;
                             }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
                         }
+                        
+                        #[cfg(feature = "logging")]
+                        let _norm_guard = StageGuard::enter("GmresNorm");
                         h[j + 1][j] = ip.norm(&z, comm);
+                        #[cfg(feature = "logging")]
+                        drop(_norm_guard);
                         if h[j + 1][j].abs() < epsilon {
                             happy_breakdown = true;
                             break;
@@ -325,23 +414,54 @@ where
                         pc.apply(crate::preconditioner::PcSide::Right, &v_basis[j], &mut w).expect("preconditioner apply failed");
                         // w2 = A w
                         let mut w2 = V::from(vec![T::zero(); n]);
+                        
+                        #[cfg(feature = "logging")]
+                        let _matvec_guard = StageGuard::enter("GmresMatVec");
                         a.matvec(&w, &mut w2);
+                        #[cfg(feature = "logging")]
+                        drop(_matvec_guard);
+                        
                         // Modified Gram-Schmidt on w2
                         let mut w2_ortho = w2.clone();
                         for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
                             h[i][j] = ip.dot(&w2_ortho, &v_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - h[i][j] * *vik;
                             }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
                         }
                         for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
                             let tmp = ip.dot(&w2_ortho, &v_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
                             h[i][j] = h[i][j] + tmp;
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - tmp * *vik;
                             }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
                         }
+                        
+                        #[cfg(feature = "logging")]
+                        let _norm_guard = StageGuard::enter("GmresNorm");
                         h[j + 1][j] = ip.norm(&w2_ortho, comm);
+                        #[cfg(feature = "logging")]
+                        drop(_norm_guard);
+                        
                         if h[j + 1][j].abs() < epsilon {
                             happy_breakdown = true;
                             break;
@@ -359,6 +479,9 @@ where
                 }
                 Self::apply_givens_and_update_g(&mut h, &mut g, &mut cs, &mut sn, j, epsilon);
                 let res_norm = g[j + 1].abs();
+                
+                #[cfg(feature = "logging")]
+                trace!("GMRES iteration {}: residual = {:.3e}", iteration, res_norm.to_f64().unwrap_or(0.0));
                 let (reason, s) = self.conv.check(res_norm, res0, iteration);
                 stats = s.clone();
                 m = j + 1;
@@ -399,10 +522,22 @@ where
             }
             // Compute new residual
             let mut tmp = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("GmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
             r0 = V::from(r_vec);
+            
+            #[cfg(feature = "logging")]
+            let _norm_guard = StageGuard::enter("GmresNorm");
             beta = ip.norm(&r0, comm);
+            #[cfg(feature = "logging")]
+            drop(_norm_guard);
+            
             // Update stats with true residual
             stats.final_residual = beta;
             if beta < self.conv.rtol * res0 {
@@ -415,6 +550,325 @@ where
             }
         }
         *x = V::from(xk);
+        
+        #[cfg(feature = "logging")]
+        trace!("GMRES solve completed after {} iterations", stats.iterations);
+        
+        Ok(stats)
+    }
+
+    fn solve_with_monitors(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::enter("GmresSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting GMRES solve with {} monitors", monitors.len());
+
+        let n = b.as_ref().len();
+        let ip = ();
+        let mut xk = x.as_ref().to_vec();
+        // Compute initial residual r0 = b - A x
+        let mut r0 = {
+            let mut tmp = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("GmresMatVec");
+            a.matvec(&V::from(xk.clone()), &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
+            let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
+            V::from(r_vec)
+        };
+        
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("GmresNorm");
+        let mut beta = ip.norm(&r0, comm);
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
+        
+        let res0 = beta;
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: beta,
+            reason: ConvergedReason::Continued,
+        };
+
+        let n_outer = self.conv.max_iters.div_ceil(self.restart);
+        let mut iteration = 0;
+        let epsilon = num_traits::cast::<f64, T>(1e-14).unwrap();
+        for _ in 0..n_outer {
+            // Allocate Krylov and preconditioned bases
+            let mut v_basis: Vec<V> = Vec::with_capacity(self.restart + 1); // Krylov basis
+            let mut z_basis: Vec<V> = Vec::with_capacity(self.restart + 1); // Preconditioned basis (for right-preconditioning)
+            let mut r0_norm = beta;
+            match (self.preconditioning, pc) {
+                (Preconditioning::Left, Some(pc)) => {
+                    // Left-preconditioning: Arnoldi on M^{-1}A, update x with v_basis
+                    let v0 = r0.clone().as_ref().iter().map(|&ri| ri / r0_norm).collect::<Vec<_>>();
+                    v_basis.push(V::from(v0.clone()));
+                    let mut z0 = V::from(vec![T::zero(); n]);
+                    pc.apply(crate::preconditioner::PcSide::Left, &V::from(v0), &mut z0).expect("preconditioner apply failed");
+                    z_basis.push(z0);
+                }
+                (Preconditioning::Right, Some(pc)) => {
+                    // Right-preconditioning: Arnoldi on A M^{-1}, update x with M^{-1} v_basis
+                    let mut z0 = V::from(vec![T::zero(); n]);
+                    pc.apply(crate::preconditioner::PcSide::Right, &r0, &mut z0).expect("preconditioner apply failed");
+                    r0_norm = ip.norm(&z0, comm);
+                    let v0 = z0.as_ref().iter().map(|&zi| zi / r0_norm).collect::<Vec<_>>();
+                    v_basis.push(V::from(v0.clone()));
+                    // z0' = M^{-1} v0
+                    let mut z0p = V::from(vec![T::zero(); n]);
+                    pc.apply(crate::preconditioner::PcSide::Right, &V::from(v0), &mut z0p).expect("preconditioner apply failed");
+                    z_basis.push(z0p);
+                    beta = r0_norm;
+                }
+                _ => {
+                    // No preconditioning
+                    let v0 = r0.clone().as_ref().iter().map(|&ri| ri / r0_norm).collect::<Vec<_>>();
+                    v_basis.push(V::from(v0));
+                }
+            }
+            // Allocate Hessenberg matrix and Givens rotation storage
+            let mut h = vec![vec![T::zero(); self.restart]; self.restart + 1];
+            let mut g = vec![T::zero(); self.restart + 1];
+            g[0] = r0_norm;
+            let mut cs = vec![T::zero(); self.restart];
+            let mut sn = vec![T::zero(); self.restart];
+            let mut m = 0;
+            #[allow(unused_assignments)]
+            let mut happy_breakdown = false;
+            for j in 0..self.restart {
+                iteration += 1;
+                
+                #[cfg(feature = "logging")]
+                let _iter_guard = StageGuard::enter("GmresIteration");
+                
+                #[cfg(feature = "logging")]
+                trace!("GMRES iteration {}", iteration);
+                
+                match (self.preconditioning, pc) {
+                    (Preconditioning::Left, Some(pc)) => {
+                        // Arnoldi with left preconditioning: as before
+                        let mut w = V::from(vec![T::zero(); n]);
+                        
+                        #[cfg(feature = "logging")]
+                        let _matvec_guard = StageGuard::enter("GmresMatVec");
+                        a.matvec(&v_basis[j], &mut w);
+                        #[cfg(feature = "logging")]
+                        drop(_matvec_guard);
+                        
+                        let mut z = V::from(vec![T::zero(); n]);
+                        pc.apply(crate::preconditioner::PcSide::Left, &w, &mut z).expect("preconditioner apply failed");
+                        // Modified Gram-Schmidt on z
+                        for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            h[i][j] = ip.dot(&z, &z_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
+                                *zk = *zk - h[i][j] * *zik;
+                            }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
+                        }
+                        for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let tmp = ip.dot(&z, &z_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
+                            h[i][j] = h[i][j] + tmp;
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
+                                *zk = *zk - tmp * *zik;
+                            }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
+                        }
+                        
+                        #[cfg(feature = "logging")]
+                        let _norm_guard = StageGuard::enter("GmresNorm");
+                        h[j + 1][j] = ip.norm(&z, comm);
+                        #[cfg(feature = "logging")]
+                        drop(_norm_guard);
+                        if h[j + 1][j].abs() < epsilon {
+                            happy_breakdown = true;
+                            break;
+                        }
+                        let vj1 = V::from(z.as_ref().iter().map(|&zi| zi / h[j + 1][j]).collect::<Vec<_>>());
+                        v_basis.push(vj1.clone());
+                        z_basis.push(vj1);
+                    }
+                    (Preconditioning::Right, Some(pc)) => {
+                        // Arnoldi with right preconditioning: build v_basis for A M^{-1}, store z_basis = M^{-1} v_j for solution update
+                        // w = M^{-1} v_j
+                        let mut w = V::from(vec![T::zero(); n]);
+                        pc.apply(crate::preconditioner::PcSide::Right, &v_basis[j], &mut w).expect("preconditioner apply failed");
+                        // w2 = A w
+                        let mut w2 = V::from(vec![T::zero(); n]);
+                        
+                        #[cfg(feature = "logging")]
+                        let _matvec_guard = StageGuard::enter("GmresMatVec");
+                        a.matvec(&w, &mut w2);
+                        #[cfg(feature = "logging")]
+                        drop(_matvec_guard);
+                        
+                        // Modified Gram-Schmidt on w2
+                        let mut w2_ortho = w2.clone();
+                        for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            h[i][j] = ip.dot(&w2_ortho, &v_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
+                                *w2k = *w2k - h[i][j] * *vik;
+                            }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
+                        }
+                        for i in 0..=j {
+                            #[cfg(feature = "logging")]
+                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let tmp = ip.dot(&w2_ortho, &v_basis[i], comm);
+                            #[cfg(feature = "logging")]
+                            drop(_dot_guard);
+                            
+                            h[i][j] = h[i][j] + tmp;
+                            
+                            #[cfg(feature = "logging")]
+                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
+                                *w2k = *w2k - tmp * *vik;
+                            }
+                            #[cfg(feature = "logging")]
+                            drop(_axpy_guard);
+                        }
+                        
+                        #[cfg(feature = "logging")]
+                        let _norm_guard = StageGuard::enter("GmresNorm");
+                        h[j + 1][j] = ip.norm(&w2_ortho, comm);
+                        #[cfg(feature = "logging")]
+                        drop(_norm_guard);
+                        
+                        if h[j + 1][j].abs() < epsilon {
+                            happy_breakdown = true;
+                            break;
+                        }
+                        let vj1 = V::from(w2_ortho.as_ref().iter().map(|&zi| zi / h[j + 1][j]).collect::<Vec<_>>());
+                        v_basis.push(vj1.clone());
+                        // After vj1 is normalized, store z_{j+1} = M^{-1} v_{j+1}
+                        let mut zj1 = V::from(vec![T::zero(); n]);
+                        pc.apply(crate::preconditioner::PcSide::Right, &vj1, &mut zj1).expect("preconditioner apply failed");
+                        z_basis.push(zj1);
+                    }
+                    _ => {
+                        happy_breakdown = Self::arnoldi(a, &ip, &mut v_basis, &mut h, j, epsilon, comm);
+                    }
+                }
+                Self::apply_givens_and_update_g(&mut h, &mut g, &mut cs, &mut sn, j, epsilon);
+                let res_norm = g[j + 1].abs();
+                
+                #[cfg(feature = "logging")]
+                trace!("GMRES iteration {}: residual = {:.3e}", iteration, res_norm.to_f64().unwrap_or(0.0));
+
+                // Call monitors
+                for monitor in monitors {
+                    monitor(iteration, res_norm);
+                }
+                
+                let (reason, s) = self.conv.check(res_norm, res0, iteration);
+                stats = s.clone();
+                m = j + 1;
+                if (reason == ConvergedReason::ConvergedRtol || reason == ConvergedReason::ConvergedAtol) || happy_breakdown {
+                    break;
+                }
+            }
+            // Solve least-squares problem for y
+            let mut y = vec![T::zero(); m];
+            let h_upper: Vec<Vec<T>> = h.iter().take(m).map(|row| row[..m].to_vec()).collect();
+            let g_upper = &g[..m];
+            Self::back_substitution(&h_upper, g_upper, &mut y, m, epsilon);
+            // Update solution xk
+            match (self.preconditioning, pc) {
+                (Preconditioning::Left, Some(_)) => {
+                    // xk = xk + sum y[j] * v_basis[j]
+                    for j in 0..m {
+                        for (xk_i, vj_i) in xk.iter_mut().zip(v_basis[j].as_ref()) {
+                            *xk_i = *xk_i + y[j] * *vj_i;
+                        }
+                    }
+                }
+                (Preconditioning::Right, Some(_)) => {
+                    // xk = xk + sum y[j] * z_basis[j] (z_basis[j] = M^{-1} v_j)
+                    for j in 0..m {
+                        for (xk_i, zj_i) in xk.iter_mut().zip(z_basis[j].as_ref()) {
+                            *xk_i = *xk_i + y[j] * *zj_i;
+                        }
+                    }
+                }
+                _ => {
+                    for j in 0..m {
+                        for (xk_i, vj_i) in xk.iter_mut().zip(v_basis[j].as_ref()) {
+                            *xk_i = *xk_i + y[j] * *vj_i;
+                        }
+                    }
+                }
+            }
+            // Compute new residual
+            let mut tmp = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("GmresMatVec");
+            a.matvec(&V::from(xk.clone()), &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
+            let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
+            r0 = V::from(r_vec);
+            
+            #[cfg(feature = "logging")]
+            let _norm_guard = StageGuard::enter("GmresNorm");
+            beta = ip.norm(&r0, comm);
+            #[cfg(feature = "logging")]
+            drop(_norm_guard);
+            
+            // Update stats with true residual
+            stats.final_residual = beta;
+            if beta < self.conv.rtol * res0 {
+                stats.reason = ConvergedReason::ConvergedRtol;
+                break;
+            }
+            if iteration >= self.conv.max_iters {
+                stats.reason = ConvergedReason::DivergedMaxIts;
+                break;
+            }
+        }
+        *x = V::from(xk);
+        
+        #[cfg(feature = "logging")]
+        trace!("GMRES solve completed after {} iterations", stats.iterations);
+        
         Ok(stats)
     }
 }

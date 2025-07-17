@@ -21,6 +21,11 @@ use crate::preconditioner::Preconditioner;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 
+#[cfg(feature = "logging")]
+use log::trace;
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
+
 /// Norm type for PCG convergence and monitoring
 pub enum CgNormType { Preconditioned, Unpreconditioned, Natural, None }
 
@@ -101,8 +106,8 @@ impl<M, V, T> LinearSolver<M, V> for PcgSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
-    V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64>,
+    V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone + Send + Sync,
+    T: num_traits::Float + Clone + From<f64> + Send + Sync + std::fmt::Debug + std::fmt::LowerExp,
 {
     type Error = KError;
     type Scalar = T;
@@ -119,13 +124,25 @@ where
     /// * `Ok(SolveStats)` if converged or max iterations reached
     /// * `Err(KError)` on error (e.g., indefinite matrix or preconditioner)
     fn solve(&mut self, a: &M, pc: Option<&dyn Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::enter("PcgSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting PCG solve");
+
         let n = b.as_ref().len();
         let ip = ();
         let mut x_vec = x.as_ref().to_vec();
         // Compute initial residual r = b - A x
         let mut r = {
             let mut tmp = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("PcgMatVec");
             a.matvec(&V::from(x_vec.clone()), &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
             V::from(r_vec)
         };
@@ -137,7 +154,13 @@ where
             z.clone_from(&r);
         }
         let mut p = z.clone();
+        
+        #[cfg(feature = "logging")]
+        let _dot_guard = StageGuard::enter("PcgDotProduct");
         let mut rz = ip.dot(&r, &z, comm);
+        #[cfg(feature = "logging")]
+        drop(_dot_guard);
+        
         let res0 = rz.abs().sqrt();
         let mut stats = SolveStats {
             iterations: 0,
@@ -145,20 +168,36 @@ where
             reason: crate::utils::convergence::ConvergedReason::Continued,
         };
         // Choose norm for convergence check
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("PcgNorm");
         let dp = match self.norm_type {
             CgNormType::Preconditioned => ip.dot(&z, &z, comm),
             CgNormType::Unpreconditioned => ip.dot(&r, &r, comm),
             CgNormType::Natural => ip.dot(&r, &z, comm),
             CgNormType::None => T::zero(),
         };
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
         if let Some(ref mut monitor) = self.monitor {
             monitor(0, dp.sqrt());
         }
         self.residual_history.push(dp.sqrt());
         for i in 0..self.conv.max_iters {
+            #[cfg(feature = "logging")]
+            let _iter_guard = StageGuard::enter("PcgIteration");
+            
+            #[cfg(feature = "logging")]
+            trace!("PCG iteration {}", i + 1);
+            
             // Compute A p
             let mut ap = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("PcgMatVec");
             a.matvec(&p, &mut ap);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
             let p_dot_ap = if self.single_reduction {
                 // Fused dot product: p^T A p (before r/z update)
                 let mut p_dot_ap = T::zero();
@@ -167,7 +206,12 @@ where
                 }
                 p_dot_ap
             } else {
-                ip.dot(&p, &ap, comm)
+                #[cfg(feature = "logging")]
+                let _dot_guard = StageGuard::enter("PcgDotProduct");
+                let result = ip.dot(&p, &ap, comm);
+                #[cfg(feature = "logging")]
+                drop(_dot_guard);
+                result
             };
             // Indefinite-matrix detection
             if p_dot_ap <= T::zero() {
@@ -183,27 +227,49 @@ where
             }
             let alpha = rz / p_dot_ap;
             // Update solution: x = x + alpha * p
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("PcgAxpy");
             for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
                 *xj = *xj + alpha * *pj;
             }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+            
             // Update residual: r = r - alpha * A p
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("PcgAxpy");
             for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
                 *rj = *rj - alpha * *apj;
             }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
             // Apply preconditioner: z = M^{-1} r
             if let Some(pc) = pc {
                 pc.apply(crate::preconditioner::PcSide::Left, &r, &mut z)?;
             } else {
                 z.clone_from(&r);
             }
+            
+            #[cfg(feature = "logging")]
+            let _dot_guard = StageGuard::enter("PcgDotProduct");
             let rz_new = ip.dot(&r, &z, comm);
+            #[cfg(feature = "logging")]
+            drop(_dot_guard);
+            
             // Compute norm for convergence check
+            #[cfg(feature = "logging")]
+            let _norm_guard = StageGuard::enter("PcgNorm");
             let res_norm = match self.norm_type {
                 CgNormType::Preconditioned => ip.dot(&z, &z, comm).sqrt(),
                 CgNormType::Unpreconditioned => ip.dot(&r, &r, comm).sqrt(),
                 CgNormType::Natural => ip.dot(&r, &z, comm).abs().sqrt(),
                 CgNormType::None => T::zero(),
             };
+            #[cfg(feature = "logging")]
+            drop(_norm_guard);
+            
+            #[cfg(feature = "logging")]
+            trace!("PCG iteration {}: residual = {:.3e}", i + 1, res_norm.to_f64().unwrap_or(0.0));
             if let Some(ref mut monitor) = self.monitor {
                 monitor(i+1, res_norm);
             }
@@ -224,11 +290,227 @@ where
                 return Err(KError::IndefinitePreconditioner);
             }
             // Update search direction: p = z + beta * p
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("PcgAxpy");
             for (pj, zj) in p.as_mut().iter_mut().zip(z.as_ref()) {
                 *pj = *zj + beta * *pj;
             }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+            
             rz = rz_new;
         }
+        
+        #[cfg(feature = "logging")]
+        trace!("PCG solve completed after {} iterations", stats.iterations);
+        
+        *x = V::from(x_vec);
+        Ok(stats)
+    }
+
+    fn solve_with_monitors(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::enter("PcgSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting PCG solve with {} monitors", monitors.len());
+
+        let n = b.as_ref().len();
+        let ip = ();
+        let mut x_vec = x.as_ref().to_vec();
+        // Compute initial residual r = b - A x
+        let mut r = {
+            let mut tmp = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("PcgMatVec");
+            a.matvec(&V::from(x_vec.clone()), &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
+            let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
+            V::from(r_vec)
+        };
+        // Apply preconditioner: z = M^{-1} r
+        let mut z = V::from(vec![T::zero(); n]);
+        if let Some(pc) = pc {
+            pc.apply(crate::preconditioner::PcSide::Left, &r, &mut z)?;
+        } else {
+            z.clone_from(&r);
+        }
+        let mut p = z.clone();
+        
+        #[cfg(feature = "logging")]
+        let _dot_guard = StageGuard::enter("PcgDotProduct");
+        let mut rz = ip.dot(&r, &z, comm);
+        #[cfg(feature = "logging")]
+        drop(_dot_guard);
+        
+        let res0 = rz.abs().sqrt();
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
+        // Choose norm for convergence check
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("PcgNorm");
+        let dp = match self.norm_type {
+            CgNormType::Preconditioned => ip.dot(&z, &z, comm),
+            CgNormType::Unpreconditioned => ip.dot(&r, &r, comm),
+            CgNormType::Natural => ip.dot(&r, &z, comm),
+            CgNormType::None => T::zero(),
+        };
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
+        
+        // Call monitors for initial state
+        for monitor in monitors {
+            monitor(0, dp.sqrt());
+        }
+        
+        if let Some(ref mut monitor) = self.monitor {
+            monitor(0, dp.sqrt());
+        }
+        self.residual_history.push(dp.sqrt());
+        
+        for i in 0..self.conv.max_iters {
+            #[cfg(feature = "logging")]
+            let _iter_guard = StageGuard::enter("PcgIteration");
+            
+            #[cfg(feature = "logging")]
+            trace!("PCG iteration {}", i + 1);
+            
+            // Compute A p
+            let mut ap = V::from(vec![T::zero(); n]);
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("PcgMatVec");
+            a.matvec(&p, &mut ap);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
+            let p_dot_ap = if self.single_reduction {
+                // Fused dot product: p^T A p (before r/z update)
+                let mut p_dot_ap = T::zero();
+                for i in 0..n {
+                    p_dot_ap = p_dot_ap + p.as_ref()[i] * ap.as_ref()[i];
+                }
+                p_dot_ap
+            } else {
+                #[cfg(feature = "logging")]
+                let _dot_guard = StageGuard::enter("PcgDotProduct");
+                let result = ip.dot(&p, &ap, comm);
+                #[cfg(feature = "logging")]
+                drop(_dot_guard);
+                result
+            };
+            // Indefinite-matrix detection
+            if p_dot_ap <= T::zero() {
+                stats.iterations = i + 1;
+                stats.final_residual = match self.norm_type {
+                    CgNormType::Preconditioned => ip.dot(&z, &z, comm).sqrt(),
+                    CgNormType::Unpreconditioned => ip.dot(&r, &r, comm).sqrt(),
+                    CgNormType::Natural => ip.dot(&r, &z, comm).abs().sqrt(),
+                    CgNormType::None => T::zero(),
+                };
+                // stats.converged field removed in new SolveStats
+                return Err(KError::IndefiniteMatrix);
+            }
+            let alpha = rz / p_dot_ap;
+            // Update solution: x = x + alpha * p
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("PcgAxpy");
+            for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
+                *xj = *xj + alpha * *pj;
+            }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+            
+            // Update residual: r = r - alpha * A p
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("PcgAxpy");
+            for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
+                *rj = *rj - alpha * *apj;
+            }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+            
+            // Apply preconditioner: z = M^{-1} r
+            if let Some(pc) = pc {
+                pc.apply(crate::preconditioner::PcSide::Left, &r, &mut z)?;
+            } else {
+                z.clone_from(&r);
+            }
+            
+            #[cfg(feature = "logging")]
+            let _dot_guard = StageGuard::enter("PcgDotProduct");
+            let rz_new = ip.dot(&r, &z, comm);
+            #[cfg(feature = "logging")]
+            drop(_dot_guard);
+            
+            // Compute norm for convergence check
+            #[cfg(feature = "logging")]
+            let _norm_guard = StageGuard::enter("PcgNorm");
+            let res_norm = match self.norm_type {
+                CgNormType::Preconditioned => ip.dot(&z, &z, comm).sqrt(),
+                CgNormType::Unpreconditioned => ip.dot(&r, &r, comm).sqrt(),
+                CgNormType::Natural => ip.dot(&r, &z, comm).abs().sqrt(),
+                CgNormType::None => T::zero(),
+            };
+            #[cfg(feature = "logging")]
+            drop(_norm_guard);
+            
+            #[cfg(feature = "logging")]
+            trace!("PCG iteration {}: residual = {:.3e}", i + 1, res_norm.to_f64().unwrap_or(0.0));
+            
+            // Call monitors
+            for monitor in monitors {
+                monitor(i + 1, res_norm);
+            }
+            
+            if let Some(ref mut monitor) = self.monitor {
+                monitor(i+1, res_norm);
+            }
+            self.residual_history.push(res_norm);
+            let (reason, s) = self.conv.check(res_norm, res0, i+1);
+            stats = s.clone();
+            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
+                *x = V::from(x_vec.clone());
+                return Ok(stats);
+            }
+            let beta = rz_new / rz;
+            // Indefinite-preconditioner detection
+            if beta < T::zero() {
+                stats.iterations = i + 1;
+                stats.final_residual = res_norm;
+                stats.reason = crate::utils::convergence::ConvergedReason::DivergedDtol;
+                return Err(KError::IndefinitePreconditioner);
+            }
+            // Update search direction: p = z + beta * p
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("PcgAxpy");
+            for (pj, zj) in p.as_mut().iter_mut().zip(z.as_ref()) {
+                *pj = *zj + beta * *pj;
+            }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+            
+            rz = rz_new;
+        }
+        
+        #[cfg(feature = "logging")]
+        trace!("PCG solve completed after {} iterations", stats.iterations);
+        
         *x = V::from(x_vec);
         Ok(stats)
     }

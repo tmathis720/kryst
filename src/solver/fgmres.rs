@@ -368,7 +368,557 @@ where
         stats.iterations = total_iters;
         Ok(stats)
     }
+}
 
+impl<M, V, T> LinearSolver<M, V> for FgmresSolver<T>
+where
+    M: MatVec<V>,
+    (): InnerProduct<V, Scalar = T>,
+    V: AsRef<[T]> + AsMut<[T]> + From<Vec<T>> + Clone,
+    T: num_traits::Float + Clone + Send + Sync + std::fmt::Debug + std::fmt::LowerExp + From<f64>,
+{
+    type Error = KError;
+    type Scalar = T;
+
+    fn solve(
+        &mut self,
+        a: &M,
+        _pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm
+    ) -> Result<SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::enter("FgmresSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting FGMRES solve");
+
+        let n = b.as_ref().len();
+        let ip = ();
+        let restart = self.restart;
+        let max_iters = self.conv.max_iters;
+
+        // Compute initial residual r = b - A x
+        let mut r = b.clone();
+        let mut tmp = V::from(vec![T::zero(); n]);
+        
+        #[cfg(feature = "logging")]
+        let _matvec_guard = StageGuard::enter("FgmresMatVec");
+        a.matvec(x, &mut tmp);
+        #[cfg(feature = "logging")]
+        drop(_matvec_guard);
+        
+        for (ri, (bi, ai)) in r.as_mut().iter_mut().zip(b.as_ref().iter().zip(tmp.as_ref().iter())) {
+            *ri = *bi - *ai;
+        }
+        
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("FgmresNorm");
+        let mut beta = ip.norm(&r, comm);
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
+        
+        if beta == T::zero() {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: T::zero(),
+                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+            });
+        }
+
+        // Allocate basis and Hessenberg storage
+        let (mut v_basis, mut h, mut cs, mut sn, mut s) = if self.preallocate {
+            (
+                vec![V::from(vec![T::zero(); n]); max_iters + 1],
+                vec![vec![T::zero(); max_iters]; max_iters + 1],
+                vec![T::zero(); max_iters],
+                vec![T::zero(); max_iters],
+                vec![T::zero(); max_iters + 1],
+            )
+        } else {
+            (
+                vec![V::from(vec![T::zero(); n]); restart + 1],
+                vec![vec![T::zero(); restart]; restart + 1],
+                vec![T::zero(); restart],
+                vec![T::zero(); restart],
+                vec![T::zero(); restart + 1],
+            )
+        };
+
+        s[0] = beta;
+        for (vi, ri) in v_basis[0].as_mut().iter_mut().zip(r.as_ref().iter()) {
+            *vi = *ri / beta;
+        }
+
+        let mut total_iters = 0;
+        let mut res_norm = beta;
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res_norm,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
+
+        'outer: while total_iters < max_iters {
+            #[cfg(feature = "logging")]
+            let _iter_guard = StageGuard::enter("FgmresIteration");
+            
+            let m = if self.preallocate { 
+                max_iters.min(restart) 
+            } else { 
+                restart.min(max_iters - total_iters) 
+            };
+
+            // Arnoldi process
+            res_norm = s[0].abs();
+            let mut converged = false;
+            let mut arnoldi_steps = m;
+
+            'arnoldi: for j in 0..m {
+                #[cfg(feature = "logging")]
+                trace!("FGMRES Arnoldi step {}", j);
+                
+                // Matrix-vector product
+                let mut w = V::from(vec![T::zero(); n]);
+                
+                #[cfg(feature = "logging")]
+                let _matvec_guard = StageGuard::enter("FgmresMatVec");
+                a.matvec(&v_basis[j], &mut w);
+                #[cfg(feature = "logging")]
+                drop(_matvec_guard);
+
+                // Orthogonalization
+                let mut h_col = vec![T::zero(); j+2];
+                for i in 0..=j {
+                    #[cfg(feature = "logging")]
+                    let _dot_guard = StageGuard::enter("FgmresDotProduct");
+                    h_col[i] = ip.dot(&w, &v_basis[i], comm);
+                    #[cfg(feature = "logging")]
+                    drop(_dot_guard);
+                }
+
+                #[cfg(feature = "logging")]
+                let _axpy_guard = StageGuard::enter("FgmresAxpy");
+                for i in 0..=j {
+                    for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
+                        *wi = *wi - h_col[i] * *vi;
+                    }
+                }
+                #[cfg(feature = "logging")]
+                drop(_axpy_guard);
+
+                #[cfg(feature = "logging")]
+                let _norm_guard = StageGuard::enter("FgmresNorm");
+                h[j+1][j] = ip.norm(&w, comm);
+                #[cfg(feature = "logging")]
+                drop(_norm_guard);
+                
+                for i in 0..=j { 
+                    h[i][j] = h_col[i]; 
+                }
+
+                // Normalize and store new basis vector
+                if h[j+1][j] != T::zero() {
+                    let w_norm = h[j+1][j];
+                    for (v_next, wi) in v_basis[j+1].as_mut().iter_mut().zip(w.as_ref().iter()) {
+                        *v_next = *wi / w_norm;
+                    }
+                } else {
+                    for v_next in v_basis[j+1].as_mut().iter_mut() {
+                        *v_next = T::zero();
+                    }
+                }
+
+                // Apply previous Givens rotations
+                for i in 0..j {
+                    let temp = cs[i] * h[i][j] + sn[i] * h[i+1][j];
+                    h[i+1][j] = -sn[i] * h[i][j] + cs[i] * h[i+1][j];
+                    h[i][j] = temp;
+                }
+
+                // Compute new Givens rotation
+                let (c, s_) = {
+                    let h1 = h[j][j];
+                    let h2 = h[j+1][j];
+                    let denom = (h1*h1 + h2*h2).sqrt();
+                    if denom == T::zero() {
+                        (T::one(), T::zero())
+                    } else {
+                        (h1/denom, h2/denom)
+                    }
+                };
+                cs[j] = c;
+                sn[j] = s_;
+
+                let temp = c * s[j] + s_ * s[j+1];
+                s[j+1] = -s_ * s[j] + c * s[j+1];
+                s[j] = temp;
+                h[j][j] = c * h[j][j] + s_ * h[j+1][j];
+                h[j+1][j] = T::zero();
+
+                res_norm = s[j+1].abs();
+                total_iters += 1;
+
+                #[cfg(feature = "logging")]
+                trace!("FGMRES iteration {}: residual = {:.3e}", total_iters, res_norm.to_f64().unwrap_or(0.0));
+
+                // Per-iteration monitor and residual history
+                if let Some(ref mut monitor) = self.monitor {
+                    monitor(total_iters, res_norm);
+                }
+                self.residual_history.push(res_norm);
+
+                // Check convergence
+                let (reason, s_stats) = self.conv.check(res_norm, s[0], total_iters);
+                stats = s_stats;
+                if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                    || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
+                    stats.final_residual = res_norm;
+                    stats.iterations = total_iters;
+                    arnoldi_steps = j + 1;
+                    converged = true;
+                    break 'arnoldi;
+                }
+            }
+
+            // Back-substitute and update solution
+            let k = arnoldi_steps;
+            let mut y = vec![T::zero(); k];
+            for i in (0..k).rev() {
+                let mut sum = s[i];
+                for l in (i+1)..k {
+                    sum = sum - h[i][l] * y[l];
+                }
+                y[i] = sum / h[i][i];
+            }
+
+            // Update solution: x = x + sum y[i] * v_basis[i]
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("FgmresAxpy");
+            for (i, yi) in y.iter().enumerate() {
+                for (xi, vi) in x.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
+                    *xi = *xi + *yi * *vi;
+                }
+            }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+
+            if converged {
+                break 'outer;
+            }
+
+            // Restart: compute new residual
+            let mut r_new = b.clone();
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("FgmresMatVec");
+            a.matvec(x, &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
+            for (ri, (bi, ai)) in r_new.as_mut().iter_mut().zip(b.as_ref().iter().zip(tmp.as_ref().iter())) {
+                *ri = *bi - *ai;
+            }
+            
+            #[cfg(feature = "logging")]
+            let _norm_guard = StageGuard::enter("FgmresNorm");
+            beta = ip.norm(&r_new, comm);
+            #[cfg(feature = "logging")]
+            drop(_norm_guard);
+
+            // Set up for restart
+            for (vi, ri) in v_basis[0].as_mut().iter_mut().zip(r_new.as_ref().iter()) {
+                *vi = *ri / beta;
+            }
+            s.clear();
+            s.resize(restart + 1, T::zero());
+            s[0] = beta;
+        }
+
+        stats.final_residual = res_norm;
+        stats.iterations = total_iters;
+
+        #[cfg(feature = "logging")]
+        trace!("FGMRES solve completed after {} iterations", total_iters);
+
+        Ok(stats)
+    }
+
+    fn solve_with_monitors(
+        &mut self,
+        a: &M,
+        _pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::enter("FgmresSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting FGMRES solve with {} monitors", monitors.len());
+
+        let n = b.as_ref().len();
+        let ip = ();
+        let restart = self.restart;
+        let max_iters = self.conv.max_iters;
+
+        // Compute initial residual r = b - A x
+        let mut r = b.clone();
+        let mut tmp = V::from(vec![T::zero(); n]);
+        
+        #[cfg(feature = "logging")]
+        let _matvec_guard = StageGuard::enter("FgmresMatVec");
+        a.matvec(x, &mut tmp);
+        #[cfg(feature = "logging")]
+        drop(_matvec_guard);
+        
+        for (ri, (bi, ai)) in r.as_mut().iter_mut().zip(b.as_ref().iter().zip(tmp.as_ref().iter())) {
+            *ri = *bi - *ai;
+        }
+        
+        #[cfg(feature = "logging")]
+        let _norm_guard = StageGuard::enter("FgmresNorm");
+        let mut beta = ip.norm(&r, comm);
+        #[cfg(feature = "logging")]
+        drop(_norm_guard);
+        
+        if beta == T::zero() {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: T::zero(),
+                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
+            });
+        }
+
+        // Allocate basis and Hessenberg storage
+        let (mut v_basis, mut h, mut cs, mut sn, mut s) = if self.preallocate {
+            (
+                vec![V::from(vec![T::zero(); n]); max_iters + 1],
+                vec![vec![T::zero(); max_iters]; max_iters + 1],
+                vec![T::zero(); max_iters],
+                vec![T::zero(); max_iters],
+                vec![T::zero(); max_iters + 1],
+            )
+        } else {
+            (
+                vec![V::from(vec![T::zero(); n]); restart + 1],
+                vec![vec![T::zero(); restart]; restart + 1],
+                vec![T::zero(); restart],
+                vec![T::zero(); restart],
+                vec![T::zero(); restart + 1],
+            )
+        };
+
+        s[0] = beta;
+        for (vi, ri) in v_basis[0].as_mut().iter_mut().zip(r.as_ref().iter()) {
+            *vi = *ri / beta;
+        }
+
+        let mut total_iters = 0;
+        let mut res_norm = beta;
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res_norm,
+            reason: crate::utils::convergence::ConvergedReason::Continued,
+        };
+
+        'outer: while total_iters < max_iters {
+            #[cfg(feature = "logging")]
+            let _iter_guard = StageGuard::enter("FgmresIteration");
+            
+            let m = if self.preallocate { 
+                max_iters.min(restart) 
+            } else { 
+                restart.min(max_iters - total_iters) 
+            };
+
+            // Arnoldi process
+            res_norm = s[0].abs();
+            let mut converged = false;
+            let mut arnoldi_steps = m;
+
+            'arnoldi: for j in 0..m {
+                #[cfg(feature = "logging")]
+                trace!("FGMRES Arnoldi step {}", j);
+                
+                // Matrix-vector product
+                let mut w = V::from(vec![T::zero(); n]);
+                
+                #[cfg(feature = "logging")]
+                let _matvec_guard = StageGuard::enter("FgmresMatVec");
+                a.matvec(&v_basis[j], &mut w);
+                #[cfg(feature = "logging")]
+                drop(_matvec_guard);
+
+                // Orthogonalization
+                let mut h_col = vec![T::zero(); j+2];
+                for i in 0..=j {
+                    #[cfg(feature = "logging")]
+                    let _dot_guard = StageGuard::enter("FgmresDotProduct");
+                    h_col[i] = ip.dot(&w, &v_basis[i], comm);
+                    #[cfg(feature = "logging")]
+                    drop(_dot_guard);
+                }
+
+                #[cfg(feature = "logging")]
+                let _axpy_guard = StageGuard::enter("FgmresAxpy");
+                for i in 0..=j {
+                    for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
+                        *wi = *wi - h_col[i] * *vi;
+                    }
+                }
+                #[cfg(feature = "logging")]
+                drop(_axpy_guard);
+
+                #[cfg(feature = "logging")]
+                let _norm_guard = StageGuard::enter("FgmresNorm");
+                h[j+1][j] = ip.norm(&w, comm);
+                #[cfg(feature = "logging")]
+                drop(_norm_guard);
+                
+                for i in 0..=j { 
+                    h[i][j] = h_col[i]; 
+                }
+
+                // Normalize and store new basis vector
+                if h[j+1][j] != T::zero() {
+                    let w_norm = h[j+1][j];
+                    for (v_next, wi) in v_basis[j+1].as_mut().iter_mut().zip(w.as_ref().iter()) {
+                        *v_next = *wi / w_norm;
+                    }
+                } else {
+                    for v_next in v_basis[j+1].as_mut().iter_mut() {
+                        *v_next = T::zero();
+                    }
+                }
+
+                // Apply previous Givens rotations
+                for i in 0..j {
+                    let temp = cs[i] * h[i][j] + sn[i] * h[i+1][j];
+                    h[i+1][j] = -sn[i] * h[i][j] + cs[i] * h[i+1][j];
+                    h[i][j] = temp;
+                }
+
+                // Compute new Givens rotation
+                let (c, s_) = {
+                    let h1 = h[j][j];
+                    let h2 = h[j+1][j];
+                    let denom = (h1*h1 + h2*h2).sqrt();
+                    if denom == T::zero() {
+                        (T::one(), T::zero())
+                    } else {
+                        (h1/denom, h2/denom)
+                    }
+                };
+                cs[j] = c;
+                sn[j] = s_;
+
+                let temp = c * s[j] + s_ * s[j+1];
+                s[j+1] = -s_ * s[j] + c * s[j+1];
+                s[j] = temp;
+                h[j][j] = c * h[j][j] + s_ * h[j+1][j];
+                h[j+1][j] = T::zero();
+
+                res_norm = s[j+1].abs();
+                total_iters += 1;
+
+                #[cfg(feature = "logging")]
+                trace!("FGMRES iteration {}: residual = {:.3e}", total_iters, res_norm.to_f64().unwrap_or(0.0));
+
+                // Call monitors
+                for monitor in monitors {
+                    monitor(total_iters, res_norm);
+                }
+
+                // Per-iteration monitor and residual history
+                if let Some(ref mut monitor) = self.monitor {
+                    monitor(total_iters, res_norm);
+                }
+                self.residual_history.push(res_norm);
+
+                // Check convergence
+                let (reason, s_stats) = self.conv.check(res_norm, s[0], total_iters);
+                stats = s_stats;
+                if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
+                    || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
+                    stats.final_residual = res_norm;
+                    stats.iterations = total_iters;
+                    arnoldi_steps = j + 1;
+                    converged = true;
+                    break 'arnoldi;
+                }
+            }
+
+            // Back-substitute and update solution
+            let k = arnoldi_steps;
+            let mut y = vec![T::zero(); k];
+            for i in (0..k).rev() {
+                let mut sum = s[i];
+                for l in (i+1)..k {
+                    sum = sum - h[i][l] * y[l];
+                }
+                y[i] = sum / h[i][i];
+            }
+
+            // Update solution: x = x + sum y[i] * v_basis[i]
+            #[cfg(feature = "logging")]
+            let _axpy_guard = StageGuard::enter("FgmresAxpy");
+            for (i, yi) in y.iter().enumerate() {
+                for (xi, vi) in x.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
+                    *xi = *xi + *yi * *vi;
+                }
+            }
+            #[cfg(feature = "logging")]
+            drop(_axpy_guard);
+
+            if converged {
+                break 'outer;
+            }
+
+            // Restart: compute new residual
+            let mut r_new = b.clone();
+            
+            #[cfg(feature = "logging")]
+            let _matvec_guard = StageGuard::enter("FgmresMatVec");
+            a.matvec(x, &mut tmp);
+            #[cfg(feature = "logging")]
+            drop(_matvec_guard);
+            
+            for (ri, (bi, ai)) in r_new.as_mut().iter_mut().zip(b.as_ref().iter().zip(tmp.as_ref().iter())) {
+                *ri = *bi - *ai;
+            }
+            
+            #[cfg(feature = "logging")]
+            let _norm_guard = StageGuard::enter("FgmresNorm");
+            beta = ip.norm(&r_new, comm);
+            #[cfg(feature = "logging")]
+            drop(_norm_guard);
+
+            // Set up for restart
+            for (vi, ri) in v_basis[0].as_mut().iter_mut().zip(r_new.as_ref().iter()) {
+                *vi = *ri / beta;
+            }
+            s.clear();
+            s.resize(restart + 1, T::zero());
+            s[0] = beta;
+        }
+
+        stats.final_residual = res_norm;
+        stats.iterations = total_iters;
+
+        #[cfg(feature = "logging")]
+        trace!("FGMRES solve completed after {} iterations", total_iters);
+
+        Ok(stats)
+    }
+}
+
+impl<T> FgmresSolver<T>
+where
+    T: num_traits::Float + Clone + Send + Sync + std::fmt::Debug + std::fmt::LowerExp,
+{
     /// Build the solution x = x0 + sum y[i] * z_basis[i] from Arnoldi/QR results
     fn build_solution<V: AsRef<[T]> + AsMut<[T]> + Clone + From<Vec<T>>>(
         &self,
