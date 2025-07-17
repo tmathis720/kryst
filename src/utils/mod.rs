@@ -1,4 +1,5 @@
-//! Utility modules for logging, convergence checks, and graph coloring.
+//! Utility modules for logging, convergence checks, graph coloring, and profiling.
 
 pub mod convergence;
 pub mod coloring;
+pub mod profiling;

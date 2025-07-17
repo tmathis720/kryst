@@ -1,5 +1,7 @@
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
+#[cfg(feature = "mpi")]
+use mpi::topology::{Communicator, Color};
 
 /// Abstract communicator for reductions & splits
 pub trait Comm: Send + Sync + 'static {
@@ -217,7 +219,7 @@ impl Comm for UniverseComm {
             #[cfg(feature="mpi")]
             UniverseComm::Mpi(comm) => {
                 // Split the MPI communicator and return a new UniverseComm
-                let sub = comm.world.split_by_color(color, key);
+                let sub = comm.world.split_by_color_with_key(Color::with_value(color), key).expect("Failed to split communicator");
                 let sub_rank = sub.rank() as usize;
                 let sub_size = sub.size() as usize;
                 let new_comm = MpiComm { 

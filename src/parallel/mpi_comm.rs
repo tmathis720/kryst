@@ -25,7 +25,7 @@
 #[cfg(feature = "mpi")]
 use mpi::traits::*;
 #[cfg(feature = "mpi")]
-use mpi::topology::SimpleCommunicator;
+use mpi::topology::{SimpleCommunicator, Communicator, Color};
 
 /// MPI communicator wrapper for distributed parallelism.
 ///
@@ -127,7 +127,7 @@ impl super::Comm for MpiComm {
 
     /// Split this communicator into sub‐colors
     fn split(&self, color: i32, key: i32) -> super::UniverseComm {
-        let sub = self.world.split_by_color(color, key);
+        let sub = self.world.split_by_color_with_key(Color::with_value(color), key).expect("Failed to split communicator");
         let sub_rank = sub.rank() as usize;
         let sub_size = sub.size() as usize;
         let new_comm = MpiComm { 

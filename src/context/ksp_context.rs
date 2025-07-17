@@ -26,7 +26,11 @@ use crate::solver::{LinearSolver, CgSolver, GmresSolver, BiCgStabSolver, MinresS
                    TfqmrSolver, CgnrSolver, CgsSolver, QmrSolver, LuSolver, PcgSolver};
 use crate::preconditioner::{Preconditioner, Jacobi, Ilu0};
 use crate::utils::convergence::{SolveStats, ConvergedReason};
+use crate::utils::profiling::StageGuard;
 use crate::error::KError;
+
+#[cfg(feature = "logging")]
+use log::trace;
 
 /// Workspace for Krylov solver operations to enable buffer reuse.
 ///
@@ -280,6 +284,8 @@ pub struct KspContext {
     custom_conv: Option<Box<dyn Fn(usize, f64, f64) -> ConvergedReason>>,
     /// Communicator for parallel operations  
     pub comm: Option<crate::parallel::UniverseComm>,
+    /// Registered iteration monitors (callbacks for each iteration)
+    monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>>,
 }
 
 impl Workspace {
@@ -347,6 +353,7 @@ impl KspContext {
             setup_called: false,
             custom_conv: None,
             comm: None,
+            monitors: Vec::new(),
         }
     }
 
@@ -586,6 +593,61 @@ impl KspContext {
         self.custom_conv.is_some()
     }
 
+    /// Register a callback to be invoked at each iteration.
+    ///
+    /// The callback will be called with the current iteration number (0-based)
+    /// and the residual norm at that iteration.
+    ///
+    /// # Arguments
+    /// * `f` - Callback function with signature `Fn(usize, f64)`
+    ///   - First argument: current iteration number (starting from 0)
+    ///   - Second argument: current residual norm ‖r‖
+    ///
+    /// # Example
+    /// ```rust
+    /// use kryst::context::ksp_context::KspContext;
+    /// 
+    /// let mut ksp = KspContext::new();
+    /// ksp.add_monitor(|iter, resid| {
+    ///     println!("Iteration {}: residual = {:.3e}", iter, resid);
+    /// });
+    /// ```
+    pub fn add_monitor<F>(&mut self, f: F)
+    where
+        F: Fn(usize, f64) + Send + Sync + 'static,
+    {
+        self.monitors.push(Box::new(f));
+    }
+
+    /// Drop all registered monitors.
+    ///
+    /// This clears all iteration callbacks that were previously registered
+    /// with `add_monitor()`.
+    pub fn clear_monitors(&mut self) {
+        self.monitors.clear();
+    }
+
+    /// Get the number of registered monitors.
+    ///
+    /// # Returns
+    /// * The number of active iteration monitors
+    pub fn num_monitors(&self) -> usize {
+        self.monitors.len()
+    }
+
+    /// Invoke all registered monitors with the current iteration data.
+    ///
+    /// This method is called internally by solvers at each iteration.
+    /// 
+    /// # Arguments
+    /// * `iteration` - Current iteration number (0-based)
+    /// * `residual_norm` - Current residual norm
+    pub fn invoke_monitors(&self, iteration: usize, residual_norm: f64) {
+        for monitor in &self.monitors {
+            monitor(iteration, residual_norm);
+        }
+    }
+
     /// Explicit setup phase: prepare preconditioner and allocate workspaces.
     ///
     /// This method should be called once before solving, or after changing 
@@ -635,11 +697,19 @@ impl KspContext {
     /// * `Ok(())` on success
     /// * `Err(KError)` if setup fails
     pub fn setup_with_comm(&mut self, a: &Mat<f64>, n: usize, comm: crate::parallel::UniverseComm) -> Result<(), KError> {
+        let _setup_stage = StageGuard::new("KSPSetupWithComm");
+        
+        #[cfg(feature = "logging")]
+        trace!("Setting up KSP context with {} unknowns", n);
+        
         // Store the communicator
         self.comm = Some(comm);
         
         // Setup preconditioner if present
         if let Some(ref mut pc) = self.pc {
+            let _pc_setup_stage = StageGuard::new("PCSetup");
+            #[cfg(feature = "logging")]
+            trace!("Setting up preconditioner: {:?}", self.pc_type);
             pc.setup(a)?;
         }
 
@@ -647,14 +717,24 @@ impl KspContext {
         if let Some(ref work) = self.work {
             if work.is_compatible(n, self.restart) {
                 // Workspace is already compatible, no need to reallocate
+                #[cfg(feature = "logging")]
+                trace!("Reusing compatible workspace");
                 self.setup_called = true;
                 return Ok(());
             }
         }
 
         // Allocate new workspace
-        self.work = Some(Workspace::new(n, self.restart));
+        {
+            let _workspace_stage = StageGuard::new("WorkspaceAllocation");
+            #[cfg(feature = "logging")]
+            trace!("Allocating new workspace for {} unknowns, restart={}", n, self.restart);
+            self.work = Some(Workspace::new(n, self.restart));
+        }
+        
         self.setup_called = true;
+        #[cfg(feature = "logging")]
+        trace!("KSP setup completed successfully");
         Ok(())
     }
 
@@ -697,8 +777,15 @@ impl KspContext {
     /// let stats2 = ksp.solve(&A, &b2, &mut x2)?;
     /// ```
     pub fn solve(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
+        let _solve_stage = StageGuard::new("KSPSolve");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting KSP solve with {} unknowns", b.len());
+
         // Check if we're in PREONLY mode
         if let Some(SolverType::Preonly) = self.solver_type {
+            let _preonly_stage = StageGuard::new("KSPSolvePreonly");
+            
             // For PREONLY, bypass Krylov iteration and use the PC as a direct solver
             if self.pc.is_none() {
                 return Err(KError::SolveError("No preconditioner configured for PREONLY. Call set_pc_type() first.".to_string()));
@@ -706,6 +793,7 @@ impl KspContext {
 
             // Auto-setup preconditioner if needed
             if !self.setup_called {
+                let _setup_stage = StageGuard::new("KSPSetup");
                 self.setup(a, b.len())?;
             }
 
@@ -720,6 +808,9 @@ impl KspContext {
             // Auto-setup if needed
             let needs_setup = !self.setup_called || self.work.is_none();
             if needs_setup {
+                let _setup_stage = StageGuard::new("KSPSetup");
+                #[cfg(feature = "logging")]
+                trace!("Setting up KSP solver and preconditioner");
                 self.setup(a, b.len())?;
             }
 
@@ -732,9 +823,17 @@ impl KspContext {
                 }
             }
 
+            let _krylov_stage = StageGuard::new("KSPSolveKrylov");
+            #[cfg(feature = "logging")]
+            trace!("Starting Krylov iteration with solver type: {:?}", self.solver_type);
+
             // Use the Krylov solver
             let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
             let stats = solver.solve(a, self.pc.as_deref(), b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
+            
+            #[cfg(feature = "logging")]
+            trace!("Krylov solve completed: {} iterations, final residual: {:.3e}", 
+                   stats.iterations, stats.final_residual);
             
             // Apply custom convergence test if provided
             if let Some(ref custom_test) = self.custom_conv {

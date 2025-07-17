@@ -50,6 +50,7 @@ kryst = "0.6"
 default = ["rayon"]          # Shared-memory parallelism
 rayon = ["dep:rayon"]        # Rayon-based parallel execution  
 mpi = ["dep:mpi"]           # Distributed-memory parallelism via MPI
+logging = ["dep:log"]        # Iteration monitoring and profiling
 ```
 
 ## Quick Start
@@ -144,6 +145,85 @@ Run your program with PETSc-style options:
 
 # Flexible GMRES with ILUT preconditioning
 -ksp_type fgmres -pc_type ilut -pc_ilut_drop_tol 1e-4
+```
+
+## Monitoring and Profiling
+
+### Iteration Monitoring
+
+Register callbacks to track solver progress at each iteration:
+
+```rust
+use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+
+let mut ksp = KspContext::new();
+
+// Register a monitor to print iteration progress
+ksp.add_monitor(|iter, residual| {
+    println!("Iteration {}: residual = {:.3e}", iter, residual);
+});
+
+// Register multiple monitors for different purposes
+let max_residual = Arc::new(Mutex::new(0.0f64));
+let max_residual_clone = Arc::clone(&max_residual);
+
+ksp.add_monitor(move |_iter, residual| {
+    let mut max_res = max_residual_clone.lock().unwrap();
+    if residual > *max_res {
+        *max_res = residual;
+    }
+});
+
+ksp.set_type(SolverType::Gmres)?
+   .set_pc_type(PcType::Jacobi)?;
+
+let stats = ksp.solve(&A, &b, &mut x)?;
+```
+
+### Profiling and Logging
+
+Enable detailed timing information with the `logging` feature:
+
+```toml
+[dependencies]
+kryst = { version = "0.7", features = ["logging"] }
+```
+
+Run with environment variable to see detailed profiling:
+
+```bash
+# Trace-level logging shows detailed stage timing
+RUST_LOG=trace cargo run --features=logging
+
+# Debug-level shows major operations  
+RUST_LOG=debug cargo run --features=logging
+
+# Info-level shows high-level progress
+RUST_LOG=info cargo run --features=logging
+```
+
+Profiling output includes:
+- **KSPSetup**: Preconditioner setup and workspace allocation timing
+- **KSPSolve**: Complete solve time breakdown
+- **PCSetup**: Individual preconditioner setup timing  
+- **WorkspaceAllocation**: Memory allocation timing
+- **KSPSolveKrylov**: Core iteration timing
+
+### Monitor Management
+
+```rust
+// Check number of active monitors
+println!("Active monitors: {}", ksp.num_monitors());
+
+// Clear all monitors
+ksp.clear_monitors();
+
+// Add monitors conditionally
+if debug_mode {
+    ksp.add_monitor(|iter, residual| {
+        eprintln!("DEBUG: iter={}, res={:.2e}", iter, residual);
+    });
+}
 ```
 
 ## Solver Details

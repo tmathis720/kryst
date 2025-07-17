@@ -23,6 +23,7 @@ use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
+use crate::parallel::{UniverseComm, Comm};
 
 /// Preconditioning modes for PCA-GMRES
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +176,7 @@ where
                         // For now, use blocking all-reduce until we implement non-blocking
                         let mut global_dot = vec![T::zero(); (j+1)*t];
                         for k in 0..(j+1)*t {
-                            global_dot[k] = T::from(mpi_comm.all_reduce_f64(local_dot[k].to_f64().unwrap_or(0.0))).unwrap();
+                            global_dot[k] = <T as From<f64>>::from(mpi_comm.all_reduce(local_dot[k].to_f64().unwrap_or(0.0)));
                         }
                         global_dot
                     } else {
