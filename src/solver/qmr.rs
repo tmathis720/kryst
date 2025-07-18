@@ -81,7 +81,7 @@ where
         comm: &crate::parallel::UniverseComm,
     ) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("QmrSolve");
+        let _guard = StageGuard::new("QmrSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting QMR solve");
@@ -101,7 +101,7 @@ where
         let mut x_j = x.clone();
         // r0 = b - A x0
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("QmrMatVec");
+        let _matvec_guard = StageGuard::new("QmrMatVec");
         a.matvec(x, &mut r);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -113,7 +113,7 @@ where
         r_tld.clone_from(&r);
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("QmrNorm");
+        let _norm_guard = StageGuard::new("QmrNorm");
         let norm_r0 = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -125,7 +125,7 @@ where
         };
         
         #[cfg(feature = "logging")]
-        let _dot_guard = StageGuard::enter("QmrDotProduct");
+        let _dot_guard = StageGuard::new("QmrDotProduct");
         let mut rho = ip.dot(&r_tld, &r, comm);
         #[cfg(feature = "logging")]
         drop(_dot_guard);
@@ -133,7 +133,7 @@ where
             *x = x_j;
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("QmrNorm");
+            let _norm_guard = StageGuard::new("QmrNorm");
             stats.final_residual = ip.norm(&r, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -149,7 +149,7 @@ where
         let mut res_norm = norm_r0;
         for j in 0..self.conv.max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("QmrIteration");
+            let _iter_guard = StageGuard::new("QmrIteration");
             
             #[cfg(feature = "logging")]
             trace!("QMR iteration {}", j + 1);
@@ -161,7 +161,7 @@ where
                 let rho_prev = rho;
                 
                 #[cfg(feature = "logging")]
-                let _dot_guard = StageGuard::enter("QmrDotProduct");
+                let _dot_guard = StageGuard::new("QmrDotProduct");
                 rho = ip.dot(&r_tld, &r, comm);
                 #[cfg(feature = "logging")]
                 drop(_dot_guard);
@@ -172,7 +172,7 @@ where
                 beta = rho / rho_prev;
                 // Update search directions
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("QmrAxpy");
+                let _axpy_guard = StageGuard::new("QmrAxpy");
                 for i in 0..n {
                     p.as_mut()[i] = r.as_ref()[i] + beta * p.as_ref()[i];
                     p_tld.as_mut()[i] = r_tld.as_ref()[i] + beta * p_tld.as_ref()[i];
@@ -182,20 +182,20 @@ where
             }
             // v = A p
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("QmrMatVec");
+            let _matvec_guard = StageGuard::new("QmrMatVec");
             a.matvec(&p, &mut v);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             // v_tld = A^T p_tld
             #[cfg(feature = "logging")]
-            let _mattrans_guard = StageGuard::enter("QmrMatTransVec");
+            let _mattrans_guard = StageGuard::new("QmrMatTransVec");
             a.mattransvec(&p_tld, &mut v_tld);
             #[cfg(feature = "logging")]
             drop(_mattrans_guard);
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("QmrDotProduct");
+            let _dot_guard = StageGuard::new("QmrDotProduct");
             let sigma = ip.dot(&p_tld, &v, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
@@ -205,7 +205,7 @@ where
             let alpha = rho / sigma;
             // s = r - alpha v
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("QmrAxpy");
+            let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
                 s.as_mut()[i] = r.as_ref()[i] - alpha * v.as_ref()[i];
             }
@@ -214,13 +214,13 @@ where
             
             // t = A s
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("QmrMatVec");
+            let _matvec_guard = StageGuard::new("QmrMatVec");
             a.matvec(&s, &mut t);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("QmrDotProduct");
+            let _dot_guard = StageGuard::new("QmrDotProduct");
             let t_dot_s = ip.dot(&t, &s, comm);
             let t_dot_t = ip.dot(&t, &t, comm);
             #[cfg(feature = "logging")]
@@ -229,7 +229,7 @@ where
             let omega = if t_dot_t != T::zero() { t_dot_s / t_dot_t } else { T::zero() };
             // x_{j+1} = x_j + alpha p + omega s
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("QmrAxpy");
+            let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
                 x_j.as_mut()[i] = x_j.as_ref()[i] + alpha * p.as_ref()[i] + omega * s.as_ref()[i];
             }
@@ -238,7 +238,7 @@ where
             
             // r = s - omega t
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("QmrAxpy");
+            let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
                 r.as_mut()[i] = s.as_ref()[i] - omega * t.as_ref()[i];
             }
@@ -246,7 +246,7 @@ where
             drop(_axpy_guard);
             // Check convergence with true residual
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("QmrMatVec");
+            let _matvec_guard = StageGuard::new("QmrMatVec");
             a.matvec(&x_j, &mut t);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -256,7 +256,7 @@ where
             }
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("QmrNorm");
+            let _norm_guard = StageGuard::new("QmrNorm");
             res_norm = ip.norm(&t, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -293,7 +293,7 @@ where
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("QmrSolve");
+        let _guard = StageGuard::new("QmrSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting QMR solve with {} monitors", monitors.len());
@@ -313,7 +313,7 @@ where
         let mut x_j = x.clone();
         // r0 = b - A x0
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("QmrMatVec");
+        let _matvec_guard = StageGuard::new("QmrMatVec");
         a.matvec(x, &mut r);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -325,7 +325,7 @@ where
         r_tld.clone_from(&r);
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("QmrNorm");
+        let _norm_guard = StageGuard::new("QmrNorm");
         let norm_r0 = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -337,7 +337,7 @@ where
         };
         
         #[cfg(feature = "logging")]
-        let _dot_guard = StageGuard::enter("QmrDotProduct");
+        let _dot_guard = StageGuard::new("QmrDotProduct");
         let mut rho = ip.dot(&r_tld, &r, comm);
         #[cfg(feature = "logging")]
         drop(_dot_guard);
@@ -351,7 +351,7 @@ where
             *x = x_j;
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("QmrNorm");
+            let _norm_guard = StageGuard::new("QmrNorm");
             stats.final_residual = ip.norm(&r, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -367,7 +367,7 @@ where
         let mut res_norm = norm_r0;
         for j in 0..self.conv.max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("QmrIteration");
+            let _iter_guard = StageGuard::new("QmrIteration");
             
             #[cfg(feature = "logging")]
             trace!("QMR iteration {}", j + 1);
@@ -380,7 +380,7 @@ where
                 let rho_prev = rho;
                 
                 #[cfg(feature = "logging")]
-                let _dot_guard = StageGuard::enter("QmrDotProduct");
+                let _dot_guard = StageGuard::new("QmrDotProduct");
                 rho = ip.dot(&r_tld, &r, comm);
                 #[cfg(feature = "logging")]
                 drop(_dot_guard);
@@ -391,7 +391,7 @@ where
                 beta = rho / rho_prev;
                 // Update search directions
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("QmrAxpy");
+                let _axpy_guard = StageGuard::new("QmrAxpy");
                 for i in 0..n {
                     p.as_mut()[i] = r.as_ref()[i] + beta * p.as_ref()[i];
                     p_tld.as_mut()[i] = r_tld.as_ref()[i] + beta * p_tld.as_ref()[i];
@@ -401,20 +401,20 @@ where
             }
             // v = A p
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("QmrMatVec");
+            let _matvec_guard = StageGuard::new("QmrMatVec");
             a.matvec(&p, &mut v);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             // v_tld = A^T p_tld
             #[cfg(feature = "logging")]
-            let _mattrans_guard = StageGuard::enter("QmrMatTransVec");
+            let _mattrans_guard = StageGuard::new("QmrMatTransVec");
             a.mattransvec(&p_tld, &mut v_tld);
             #[cfg(feature = "logging")]
             drop(_mattrans_guard);
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("QmrDotProduct");
+            let _dot_guard = StageGuard::new("QmrDotProduct");
             let sigma = ip.dot(&p_tld, &v, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
@@ -425,7 +425,7 @@ where
             let alpha = rho / sigma;
             // s = r - alpha v
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("QmrAxpy");
+            let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
                 s.as_mut()[i] = r.as_ref()[i] - alpha * v.as_ref()[i];
             }
@@ -434,13 +434,13 @@ where
             
             // t = A s
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("QmrMatVec");
+            let _matvec_guard = StageGuard::new("QmrMatVec");
             a.matvec(&s, &mut t);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("QmrDotProduct");
+            let _dot_guard = StageGuard::new("QmrDotProduct");
             let t_dot_s = ip.dot(&t, &s, comm);
             let t_dot_t = ip.dot(&t, &t, comm);
             #[cfg(feature = "logging")]
@@ -449,7 +449,7 @@ where
             let omega = if t_dot_t != T::zero() { t_dot_s / t_dot_t } else { T::zero() };
             // x_{j+1} = x_j + alpha p + omega s
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("QmrAxpy");
+            let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
                 x_j.as_mut()[i] = x_j.as_ref()[i] + alpha * p.as_ref()[i] + omega * s.as_ref()[i];
             }
@@ -458,7 +458,7 @@ where
             
             // r = s - omega t
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("QmrAxpy");
+            let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
                 r.as_mut()[i] = s.as_ref()[i] - omega * t.as_ref()[i];
             }
@@ -467,7 +467,7 @@ where
             
             // Check convergence with true residual
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("QmrMatVec");
+            let _matvec_guard = StageGuard::new("QmrMatVec");
             a.matvec(&x_j, &mut t);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -477,7 +477,7 @@ where
             }
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("QmrNorm");
+            let _norm_guard = StageGuard::new("QmrNorm");
             res_norm = ip.norm(&t, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);

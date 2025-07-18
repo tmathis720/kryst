@@ -73,7 +73,7 @@ where
     /// * `Err(KError)` on error
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("MinresSolve");
+        let _guard = StageGuard::new("MinresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting MINRES solve");
@@ -86,7 +86,7 @@ where
         let mut r = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("MinresMatVec");
+        let _matvec_guard = StageGuard::new("MinresMatVec");
         a.matvec(x, &mut r);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -97,7 +97,7 @@ where
 
         // β₁ = ||r||₂ (initial residual norm)
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("MinresNorm");
+        let _norm_guard = StageGuard::new("MinresNorm");
         let beta1 = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -147,7 +147,7 @@ where
 
         for j in 1..=self.conv.max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("MinresIteration");
+            let _iter_guard = StageGuard::new("MinresIteration");
             
             #[cfg(feature = "logging")]
             trace!("MINRES iteration {}", j);
@@ -156,19 +156,19 @@ where
             let mut v_next = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("MinresMatVec");
+            let _matvec_guard = StageGuard::new("MinresMatVec");
             a.matvec(&v, &mut v_next);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("MinresDotProduct");
+            let _dot_guard = StageGuard::new("MinresDotProduct");
             alpha = ip.dot(&v, &v_next, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("MinresAxpy");
+            let _axpy_guard = StageGuard::new("MinresAxpy");
             for i in 0..n {
                 v_next.as_mut()[i] = v_next.as_ref()[i]
                     - alpha * v.as_ref()[i]
@@ -178,7 +178,7 @@ where
             drop(_axpy_guard);
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("MinresNorm");
+            let _norm_guard = StageGuard::new("MinresNorm");
             beta_next = ip.norm(&v_next, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -226,7 +226,7 @@ where
 
             // --- Solution update (Saad Alg 7.4) ---
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("MinresAxpy");
+            let _axpy_guard = StageGuard::new("MinresAxpy");
             for i in 0..n {
                 x_out.as_mut()[i] = x_out.as_ref()[i] + phi_next * w_new.as_ref()[i];
             }
@@ -237,7 +237,7 @@ where
             let mut r_true = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("MinresMatVec");
+            let _matvec_guard = StageGuard::new("MinresMatVec");
             a.matvec(&x_out, &mut r_true);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -245,7 +245,7 @@ where
             for i in 0..n { r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i]; }
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("MinresNorm");
+            let _norm_guard = StageGuard::new("MinresNorm");
             let r_true_norm = ip.norm(&r_true, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -314,7 +314,7 @@ where
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("MinresSolve");
+        let _guard = StageGuard::new("MinresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting MINRES solve with {} monitors", monitors.len());
@@ -327,7 +327,7 @@ where
         let mut r = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("MinresMatVec");
+        let _matvec_guard = StageGuard::new("MinresMatVec");
         a.matvec(x, &mut r);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -338,7 +338,7 @@ where
 
         // β₁ = ||r||₂ (initial residual norm)
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("MinresNorm");
+        let _norm_guard = StageGuard::new("MinresNorm");
         let beta1 = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -389,7 +389,7 @@ where
 
         for j in 1..=self.conv.max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("MinresIteration");
+            let _iter_guard = StageGuard::new("MinresIteration");
             
             #[cfg(feature = "logging")]
             trace!("MINRES iteration {}", j);
@@ -398,19 +398,19 @@ where
             let mut v_next = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("MinresMatVec");
+            let _matvec_guard = StageGuard::new("MinresMatVec");
             a.matvec(&v, &mut v_next);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("MinresDotProduct");
+            let _dot_guard = StageGuard::new("MinresDotProduct");
             alpha = ip.dot(&v, &v_next, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("MinresAxpy");
+            let _axpy_guard = StageGuard::new("MinresAxpy");
             for i in 0..n {
                 v_next.as_mut()[i] = v_next.as_ref()[i]
                     - alpha * v.as_ref()[i]
@@ -420,7 +420,7 @@ where
             drop(_axpy_guard);
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("MinresNorm");
+            let _norm_guard = StageGuard::new("MinresNorm");
             beta_next = ip.norm(&v_next, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -469,7 +469,7 @@ where
 
             // --- Solution update (Saad Alg 7.4) ---
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("MinresAxpy");
+            let _axpy_guard = StageGuard::new("MinresAxpy");
             for i in 0..n {
                 x_out.as_mut()[i] = x_out.as_ref()[i] + phi_next * w_new.as_ref()[i];
             }
@@ -480,7 +480,7 @@ where
             let mut r_true = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("MinresMatVec");
+            let _matvec_guard = StageGuard::new("MinresMatVec");
             a.matvec(&x_out, &mut r_true);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -488,7 +488,7 @@ where
             for i in 0..n { r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i]; }
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("MinresNorm");
+            let _norm_guard = StageGuard::new("MinresNorm");
             let r_true_norm = ip.norm(&r_true, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);

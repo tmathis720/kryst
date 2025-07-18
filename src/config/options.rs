@@ -49,6 +49,10 @@ pub struct KspOptions {
     pub restart: Option<usize>,
     /// Preconditioning side (left, right, symmetric)
     pub pc_side: Option<String>,
+    /// Matrix file path
+    pub matrix_file: Option<String>,
+    /// RHS file path
+    pub rhs_file: Option<String>,
 }
 
 /// PC (Preconditioner) configuration options from command-line arguments.
@@ -178,6 +182,20 @@ impl KspOptions {
                     opts.pc_side = Some(args[i + 1].to_string());
                     i += 2;
                 }
+                "-matrix" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -matrix".to_string()));
+                    }
+                    opts.matrix_file = Some(args[i + 1].to_string());
+                    i += 2;
+                }
+                "-rhs" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -rhs".to_string()));
+                    }
+                    opts.rhs_file = Some(args[i + 1].to_string());
+                    i += 2;
+                }
                 arg if arg.starts_with("-ksp_") => {
                     return Err(KError::SolveError(format!("Unrecognized KSP option: {}", arg)));
                 }
@@ -227,6 +245,12 @@ impl KspOptions {
         }
         if let Ok(val) = std::env::var("KRYST_KSP_PC_SIDE") {
             opts.pc_side = Some(val);
+        }
+        if let Ok(val) = std::env::var("KRYST_MATRIX_FILE") {
+            opts.matrix_file = Some(val);
+        }
+        if let Ok(val) = std::env::var("KRYST_RHS_FILE") {
+            opts.rhs_file = Some(val);
         }
         
         Ok(opts)
@@ -363,6 +387,11 @@ pub fn print_help() {
     println!("  -ksp_gmres_restart <int>   GMRES restart parameter (default: 50)");
     println!("  -ksp_pc_side <side>        Preconditioning side: left, right, symmetric (default: left)");
     println!();
+    println!("Problem Configuration:");
+    println!("  -matrix <path>             Matrix file path (Matrix Market format)");
+    println!("  -rhs <path>                RHS vector file path (Matrix Market format)");
+    println!();
+    println!();
     println!("PC (Preconditioner) Options:");
     println!("  -pc_type <pc>              Preconditioner type: jacobi, ilu0, none");
     println!("  -pc_ilu_levels <int>       ILU fill levels (default: 0)");
@@ -409,6 +438,8 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
     if cli_ksp_opts.maxits.is_some() { ksp_opts.maxits = cli_ksp_opts.maxits; }
     if cli_ksp_opts.restart.is_some() { ksp_opts.restart = cli_ksp_opts.restart; }
     if cli_ksp_opts.pc_side.is_some() { ksp_opts.pc_side = cli_ksp_opts.pc_side; }
+    if cli_ksp_opts.matrix_file.is_some() { ksp_opts.matrix_file = cli_ksp_opts.matrix_file; }
+    if cli_ksp_opts.rhs_file.is_some() { ksp_opts.rhs_file = cli_ksp_opts.rhs_file; }
     
     if cli_pc_opts.pc_type.is_some() { pc_opts.pc_type = cli_pc_opts.pc_type; }
     if cli_pc_opts.ilu_level.is_some() { pc_opts.ilu_level = cli_pc_opts.ilu_level; }

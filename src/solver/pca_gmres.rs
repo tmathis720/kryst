@@ -114,7 +114,7 @@ where
              x: &mut V,
              comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("PcaGmresSolve");
+        let _guard = StageGuard::new("PcaGmresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting PCA-GMRES solve");
@@ -127,7 +127,7 @@ where
         let mut tmp = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("PcaGmresMatVec");
+        let _matvec_guard = StageGuard::new("PcaGmresMatVec");
         a.matvec(&V::from(xk.clone()), &mut tmp);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -137,7 +137,7 @@ where
         let mut r0 = V::from(r0_vec);
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("PcaGmresNorm");
+        let _norm_guard = StageGuard::new("PcaGmresNorm");
         let mut beta = ip.norm(&r0, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -154,7 +154,7 @@ where
         let n_outer = (self.conv.max_iters + self.restart - 1) / self.restart;
         for _outer in 0..n_outer {
             #[cfg(feature = "logging")]
-            let _restart_guard = StageGuard::enter("PcaGmresRestart");
+            let _restart_guard = StageGuard::new("PcaGmresRestart");
             
             #[cfg(feature = "logging")]
             trace!("PCA-GMRES restart cycle {}", _outer + 1);
@@ -177,7 +177,7 @@ where
             let mut j = 0;
             while j < m {
                 #[cfg(feature = "logging")]
-                let _iter_guard = StageGuard::enter("PcaGmresIteration");
+                let _iter_guard = StageGuard::new("PcaGmresIteration");
                 
                 #[cfg(feature = "logging")]
                 trace!("PCA-GMRES iteration {}", iteration + 1);
@@ -187,7 +187,7 @@ where
                 let mut w = V::from(vec![T::zero(); n]);
                 
                 #[cfg(feature = "logging")]
-                let _matvec_guard = StageGuard::enter("PcaGmresMatVec");
+                let _matvec_guard = StageGuard::new("PcaGmresMatVec");
                 a.matvec(&v_basis[j], &mut w);
                 #[cfg(feature = "logging")]
                 drop(_matvec_guard);
@@ -205,7 +205,7 @@ where
                 let mut local_dot = vec![T::zero(); (j+1)*t];
                 
                 #[cfg(feature = "logging")]
-                let _dot_guard = StageGuard::enter("PcaGmresDotProduct");
+                let _dot_guard = StageGuard::new("PcaGmresDotProduct");
                 for i in 0..=j {
                     for k in 0..t {
                         local_dot[i*t + k] = ip.dot(&v_basis[i], &v_block[k], comm);
@@ -233,7 +233,7 @@ where
                 
                 // Perform local orthogonalization during computation
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("PcaGmresAxpy");
+                let _axpy_guard = StageGuard::new("PcaGmresAxpy");
                 for i in 0..=j {
                     for k in 0..t {
                         let coeff = global_dot[i*t + k];
@@ -257,7 +257,7 @@ where
                     let _vk = &mut v_block[k];
                     for i in 0..k {
                         #[cfg(feature = "logging")]
-                        let _dot_guard = StageGuard::enter("PcaGmresDotProduct");
+                        let _dot_guard = StageGuard::new("PcaGmresDotProduct");
                         let r_ij = ip.dot(&v_basis[j+i], &v_block[k], comm);
                         #[cfg(feature = "logging")]
                         drop(_dot_guard);
@@ -266,7 +266,7 @@ where
                         let qji = v_basis[j+i].as_ref();
                         
                         #[cfg(feature = "logging")]
-                        let _axpy_guard = StageGuard::enter("PcaGmresAxpy");
+                        let _axpy_guard = StageGuard::new("PcaGmresAxpy");
                         v_block[k].as_mut().iter_mut()
                           .zip(qji)
                           .for_each(|(vki, &qii)| *vki -= r_ij * qii);
@@ -275,7 +275,7 @@ where
                     }
                     // Normalize v_block[k]
                     #[cfg(feature = "logging")]
-                    let _norm_guard = StageGuard::enter("PcaGmresNorm");
+                    let _norm_guard = StageGuard::new("PcaGmresNorm");
                     let norm_vk = ip.norm(&v_block[k], comm);
                     #[cfg(feature = "logging")]
                     drop(_norm_guard);
@@ -349,7 +349,7 @@ where
 
             // 7) Update solution xk += Q[:,0..m_eff] * y
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("PcaGmresAxpy");
+            let _axpy_guard = StageGuard::new("PcaGmresAxpy");
             for i in 0..m_eff {
                 let coeff = y[i];
                 let qi = &v_basis[i];
@@ -362,7 +362,7 @@ where
 
             // 8) Compute new residual r0 = b - A xk
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("PcaGmresMatVec");
+            let _matvec_guard = StageGuard::new("PcaGmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -372,7 +372,7 @@ where
             r0 = V::from(r0_vec.clone());
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("PcaGmresNorm");
+            let _norm_guard = StageGuard::new("PcaGmresNorm");
             beta = ip.norm(&r0, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -405,7 +405,7 @@ where
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("PcaGmresSolve");
+        let _guard = StageGuard::new("PcaGmresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting PCA-GMRES solve with {} monitors", monitors.len());
@@ -418,7 +418,7 @@ where
         let mut tmp = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("PcaGmresMatVec");
+        let _matvec_guard = StageGuard::new("PcaGmresMatVec");
         a.matvec(&V::from(xk.clone()), &mut tmp);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -428,7 +428,7 @@ where
         let mut r0 = V::from(r0_vec);
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("PcaGmresNorm");
+        let _norm_guard = StageGuard::new("PcaGmresNorm");
         let mut beta = ip.norm(&r0, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -445,7 +445,7 @@ where
         let n_outer = (self.conv.max_iters + self.restart - 1) / self.restart;
         for _outer in 0..n_outer {
             #[cfg(feature = "logging")]
-            let _restart_guard = StageGuard::enter("PcaGmresRestart");
+            let _restart_guard = StageGuard::new("PcaGmresRestart");
             
             #[cfg(feature = "logging")]
             trace!("PCA-GMRES restart cycle {}", _outer + 1);
@@ -468,7 +468,7 @@ where
             let mut j = 0;
             while j < m {
                 #[cfg(feature = "logging")]
-                let _iter_guard = StageGuard::enter("PcaGmresIteration");
+                let _iter_guard = StageGuard::new("PcaGmresIteration");
                 
                 #[cfg(feature = "logging")]
                 trace!("PCA-GMRES iteration {}", iteration + 1);
@@ -478,7 +478,7 @@ where
                 let mut w = V::from(vec![T::zero(); n]);
                 
                 #[cfg(feature = "logging")]
-                let _matvec_guard = StageGuard::enter("PcaGmresMatVec");
+                let _matvec_guard = StageGuard::new("PcaGmresMatVec");
                 a.matvec(&v_basis[j], &mut w);
                 #[cfg(feature = "logging")]
                 drop(_matvec_guard);
@@ -496,7 +496,7 @@ where
                 let mut local_dot = vec![T::zero(); (j+1)*t];
                 
                 #[cfg(feature = "logging")]
-                let _dot_guard = StageGuard::enter("PcaGmresDotProduct");
+                let _dot_guard = StageGuard::new("PcaGmresDotProduct");
                 for i in 0..=j {
                     for k in 0..t {
                         local_dot[i*t + k] = ip.dot(&v_basis[i], &v_block[k], comm);
@@ -525,7 +525,7 @@ where
                 
                 // Perform local orthogonalization during computation
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("PcaGmresAxpy");
+                let _axpy_guard = StageGuard::new("PcaGmresAxpy");
                 for i in 0..=j {
                     for k in 0..t {
                         let coeff = global_dot[i*t + k];
@@ -549,7 +549,7 @@ where
                     let _vk = &mut v_block[k];
                     for i in 0..k {
                         #[cfg(feature = "logging")]
-                        let _dot_guard = StageGuard::enter("PcaGmresDotProduct");
+                        let _dot_guard = StageGuard::new("PcaGmresDotProduct");
                         let r_ij = ip.dot(&v_basis[j+i], &v_block[k], comm);
                         #[cfg(feature = "logging")]
                         drop(_dot_guard);
@@ -558,7 +558,7 @@ where
                         let qji = v_basis[j+i].as_ref();
                         
                         #[cfg(feature = "logging")]
-                        let _axpy_guard = StageGuard::enter("PcaGmresAxpy");
+                        let _axpy_guard = StageGuard::new("PcaGmresAxpy");
                         v_block[k].as_mut().iter_mut()
                           .zip(qji)
                           .for_each(|(vki, &qii)| *vki -= r_ij * qii);
@@ -567,7 +567,7 @@ where
                     }
                     // Normalize v_block[k]
                     #[cfg(feature = "logging")]
-                    let _norm_guard = StageGuard::enter("PcaGmresNorm");
+                    let _norm_guard = StageGuard::new("PcaGmresNorm");
                     let norm_vk = ip.norm(&v_block[k], comm);
                     #[cfg(feature = "logging")]
                     drop(_norm_guard);
@@ -646,7 +646,7 @@ where
 
             // 7) Update solution xk += Q[:,0..m_eff] * y
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("PcaGmresAxpy");
+            let _axpy_guard = StageGuard::new("PcaGmresAxpy");
             for i in 0..m_eff {
                 let coeff = y[i];
                 let qi = &v_basis[i];
@@ -659,7 +659,7 @@ where
 
             // 8) Compute new residual r0 = b - A xk
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("PcaGmresMatVec");
+            let _matvec_guard = StageGuard::new("PcaGmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -669,7 +669,7 @@ where
             r0 = V::from(r0_vec.clone());
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("PcaGmresNorm");
+            let _norm_guard = StageGuard::new("PcaGmresNorm");
             beta = ip.norm(&r0, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);

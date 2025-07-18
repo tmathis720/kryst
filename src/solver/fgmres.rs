@@ -389,7 +389,7 @@ where
         comm: &crate::parallel::UniverseComm
     ) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("FgmresSolve");
+        let _guard = StageGuard::new("FgmresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting FGMRES solve");
@@ -404,7 +404,7 @@ where
         let mut tmp = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("FgmresMatVec");
+        let _matvec_guard = StageGuard::new("FgmresMatVec");
         a.matvec(x, &mut tmp);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -414,7 +414,7 @@ where
         }
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("FgmresNorm");
+        let _norm_guard = StageGuard::new("FgmresNorm");
         let mut beta = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -461,7 +461,7 @@ where
 
         'outer: while total_iters < max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("FgmresIteration");
+            let _iter_guard = StageGuard::new("FgmresIteration");
             
             let m = if self.preallocate { 
                 max_iters.min(restart) 
@@ -482,7 +482,7 @@ where
                 let mut w = V::from(vec![T::zero(); n]);
                 
                 #[cfg(feature = "logging")]
-                let _matvec_guard = StageGuard::enter("FgmresMatVec");
+                let _matvec_guard = StageGuard::new("FgmresMatVec");
                 a.matvec(&v_basis[j], &mut w);
                 #[cfg(feature = "logging")]
                 drop(_matvec_guard);
@@ -491,14 +491,14 @@ where
                 let mut h_col = vec![T::zero(); j+2];
                 for i in 0..=j {
                     #[cfg(feature = "logging")]
-                    let _dot_guard = StageGuard::enter("FgmresDotProduct");
+                    let _dot_guard = StageGuard::new("FgmresDotProduct");
                     h_col[i] = ip.dot(&w, &v_basis[i], comm);
                     #[cfg(feature = "logging")]
                     drop(_dot_guard);
                 }
 
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("FgmresAxpy");
+                let _axpy_guard = StageGuard::new("FgmresAxpy");
                 for i in 0..=j {
                     for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
                         *wi = *wi - h_col[i] * *vi;
@@ -508,7 +508,7 @@ where
                 drop(_axpy_guard);
 
                 #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::enter("FgmresNorm");
+                let _norm_guard = StageGuard::new("FgmresNorm");
                 h[j+1][j] = ip.norm(&w, comm);
                 #[cfg(feature = "logging")]
                 drop(_norm_guard);
@@ -594,7 +594,7 @@ where
 
             // Update solution: x = x + sum y[i] * v_basis[i]
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("FgmresAxpy");
+            let _axpy_guard = StageGuard::new("FgmresAxpy");
             for (i, yi) in y.iter().enumerate() {
                 for (xi, vi) in x.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
                     *xi = *xi + *yi * *vi;
@@ -611,7 +611,7 @@ where
             let mut r_new = b.clone();
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("FgmresMatVec");
+            let _matvec_guard = StageGuard::new("FgmresMatVec");
             a.matvec(x, &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -621,7 +621,7 @@ where
             }
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("FgmresNorm");
+            let _norm_guard = StageGuard::new("FgmresNorm");
             beta = ip.norm(&r_new, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -654,7 +654,7 @@ where
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("FgmresSolve");
+        let _guard = StageGuard::new("FgmresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting FGMRES solve with {} monitors", monitors.len());
@@ -669,7 +669,7 @@ where
         let mut tmp = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("FgmresMatVec");
+        let _matvec_guard = StageGuard::new("FgmresMatVec");
         a.matvec(x, &mut tmp);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -679,7 +679,7 @@ where
         }
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("FgmresNorm");
+        let _norm_guard = StageGuard::new("FgmresNorm");
         let mut beta = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -726,7 +726,7 @@ where
 
         'outer: while total_iters < max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("FgmresIteration");
+            let _iter_guard = StageGuard::new("FgmresIteration");
             
             let m = if self.preallocate { 
                 max_iters.min(restart) 
@@ -747,7 +747,7 @@ where
                 let mut w = V::from(vec![T::zero(); n]);
                 
                 #[cfg(feature = "logging")]
-                let _matvec_guard = StageGuard::enter("FgmresMatVec");
+                let _matvec_guard = StageGuard::new("FgmresMatVec");
                 a.matvec(&v_basis[j], &mut w);
                 #[cfg(feature = "logging")]
                 drop(_matvec_guard);
@@ -756,14 +756,14 @@ where
                 let mut h_col = vec![T::zero(); j+2];
                 for i in 0..=j {
                     #[cfg(feature = "logging")]
-                    let _dot_guard = StageGuard::enter("FgmresDotProduct");
+                    let _dot_guard = StageGuard::new("FgmresDotProduct");
                     h_col[i] = ip.dot(&w, &v_basis[i], comm);
                     #[cfg(feature = "logging")]
                     drop(_dot_guard);
                 }
 
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("FgmresAxpy");
+                let _axpy_guard = StageGuard::new("FgmresAxpy");
                 for i in 0..=j {
                     for (wi, vi) in w.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
                         *wi = *wi - h_col[i] * *vi;
@@ -773,7 +773,7 @@ where
                 drop(_axpy_guard);
 
                 #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::enter("FgmresNorm");
+                let _norm_guard = StageGuard::new("FgmresNorm");
                 h[j+1][j] = ip.norm(&w, comm);
                 #[cfg(feature = "logging")]
                 drop(_norm_guard);
@@ -864,7 +864,7 @@ where
 
             // Update solution: x = x + sum y[i] * v_basis[i]
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("FgmresAxpy");
+            let _axpy_guard = StageGuard::new("FgmresAxpy");
             for (i, yi) in y.iter().enumerate() {
                 for (xi, vi) in x.as_mut().iter_mut().zip(v_basis[i].as_ref().iter()) {
                     *xi = *xi + *yi * *vi;
@@ -881,7 +881,7 @@ where
             let mut r_new = b.clone();
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("FgmresMatVec");
+            let _matvec_guard = StageGuard::new("FgmresMatVec");
             a.matvec(x, &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -891,7 +891,7 @@ where
             }
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("FgmresNorm");
+            let _norm_guard = StageGuard::new("FgmresNorm");
             beta = ip.norm(&r_new, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);

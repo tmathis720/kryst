@@ -92,7 +92,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         let mut w = V::from(vec![T::zero(); n]);
         
         #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::enter("GmresMatVec");
+        let _matvec_guard = StageGuard::new("GmresMatVec");
         a.matvec(&v_basis[j].clone(), &mut w);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
@@ -100,13 +100,13 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         // Modified Gram-Schmidt orthogonalization
         for i in 0..=j {
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("GmresDotProduct");
+            let _dot_guard = StageGuard::new("GmresDotProduct");
             h[i][j] = ip.dot(&w, &v_basis[i], comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("GmresAxpy");
+            let _axpy_guard = StageGuard::new("GmresAxpy");
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *wk = *wk - h[i][j] * *vik;
             }
@@ -116,7 +116,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         // Iterative refinement (second orthogonalization)
         for i in 0..=j {
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("GmresDotProduct");
+            let _dot_guard = StageGuard::new("GmresDotProduct");
             let tmp = ip.dot(&w, &v_basis[i], comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
@@ -124,7 +124,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
             h[i][j] = h[i][j] + tmp;
             
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("GmresAxpy");
+            let _axpy_guard = StageGuard::new("GmresAxpy");
             for (wk, vik) in w.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                 *wk = *wk - tmp * *vik;
             }
@@ -133,7 +133,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         }
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("GmresNorm");
+        let _norm_guard = StageGuard::new("GmresNorm");
         h[j + 1][j] = ip.norm(&w, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -258,7 +258,7 @@ where
     /// * `Err(KError)` on error
     fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("GmresSolve");
+        let _guard = StageGuard::new("GmresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting GMRES solve");
@@ -271,7 +271,7 @@ where
             let mut tmp = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("GmresMatVec");
+            let _matvec_guard = StageGuard::new("GmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -281,7 +281,7 @@ where
         };
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("GmresNorm");
+        let _norm_guard = StageGuard::new("GmresNorm");
         let mut beta = ip.norm(&r0, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -342,7 +342,7 @@ where
                 iteration += 1;
                 
                 #[cfg(feature = "logging")]
-                let _iter_guard = StageGuard::enter("GmresIteration");
+                let _iter_guard = StageGuard::new("GmresIteration");
                 
                 #[cfg(feature = "logging")]
                 trace!("GMRES iteration {}", iteration);
@@ -353,7 +353,7 @@ where
                         let mut w = V::from(vec![T::zero(); n]);
                         
                         #[cfg(feature = "logging")]
-                        let _matvec_guard = StageGuard::enter("GmresMatVec");
+                        let _matvec_guard = StageGuard::new("GmresMatVec");
                         a.matvec(&v_basis[j], &mut w);
                         #[cfg(feature = "logging")]
                         drop(_matvec_guard);
@@ -363,13 +363,13 @@ where
                         // Modified Gram-Schmidt on z
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             h[i][j] = ip.dot(&z, &z_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - h[i][j] * *zik;
                             }
@@ -378,7 +378,7 @@ where
                         }
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             let tmp = ip.dot(&z, &z_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
@@ -386,7 +386,7 @@ where
                             h[i][j] = h[i][j] + tmp;
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - tmp * *zik;
                             }
@@ -395,7 +395,7 @@ where
                         }
                         
                         #[cfg(feature = "logging")]
-                        let _norm_guard = StageGuard::enter("GmresNorm");
+                        let _norm_guard = StageGuard::new("GmresNorm");
                         h[j + 1][j] = ip.norm(&z, comm);
                         #[cfg(feature = "logging")]
                         drop(_norm_guard);
@@ -416,7 +416,7 @@ where
                         let mut w2 = V::from(vec![T::zero(); n]);
                         
                         #[cfg(feature = "logging")]
-                        let _matvec_guard = StageGuard::enter("GmresMatVec");
+                        let _matvec_guard = StageGuard::new("GmresMatVec");
                         a.matvec(&w, &mut w2);
                         #[cfg(feature = "logging")]
                         drop(_matvec_guard);
@@ -425,13 +425,13 @@ where
                         let mut w2_ortho = w2.clone();
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             h[i][j] = ip.dot(&w2_ortho, &v_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - h[i][j] * *vik;
                             }
@@ -440,7 +440,7 @@ where
                         }
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             let tmp = ip.dot(&w2_ortho, &v_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
@@ -448,7 +448,7 @@ where
                             h[i][j] = h[i][j] + tmp;
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - tmp * *vik;
                             }
@@ -457,7 +457,7 @@ where
                         }
                         
                         #[cfg(feature = "logging")]
-                        let _norm_guard = StageGuard::enter("GmresNorm");
+                        let _norm_guard = StageGuard::new("GmresNorm");
                         h[j + 1][j] = ip.norm(&w2_ortho, comm);
                         #[cfg(feature = "logging")]
                         drop(_norm_guard);
@@ -524,7 +524,7 @@ where
             let mut tmp = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("GmresMatVec");
+            let _matvec_guard = StageGuard::new("GmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -533,7 +533,7 @@ where
             r0 = V::from(r_vec);
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("GmresNorm");
+            let _norm_guard = StageGuard::new("GmresNorm");
             beta = ip.norm(&r0, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -567,7 +567,7 @@ where
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("GmresSolve");
+        let _guard = StageGuard::new("GmresSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting GMRES solve with {} monitors", monitors.len());
@@ -580,7 +580,7 @@ where
             let mut tmp = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("GmresMatVec");
+            let _matvec_guard = StageGuard::new("GmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -590,7 +590,7 @@ where
         };
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("GmresNorm");
+        let _norm_guard = StageGuard::new("GmresNorm");
         let mut beta = ip.norm(&r0, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -651,7 +651,7 @@ where
                 iteration += 1;
                 
                 #[cfg(feature = "logging")]
-                let _iter_guard = StageGuard::enter("GmresIteration");
+                let _iter_guard = StageGuard::new("GmresIteration");
                 
                 #[cfg(feature = "logging")]
                 trace!("GMRES iteration {}", iteration);
@@ -662,7 +662,7 @@ where
                         let mut w = V::from(vec![T::zero(); n]);
                         
                         #[cfg(feature = "logging")]
-                        let _matvec_guard = StageGuard::enter("GmresMatVec");
+                        let _matvec_guard = StageGuard::new("GmresMatVec");
                         a.matvec(&v_basis[j], &mut w);
                         #[cfg(feature = "logging")]
                         drop(_matvec_guard);
@@ -672,13 +672,13 @@ where
                         // Modified Gram-Schmidt on z
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             h[i][j] = ip.dot(&z, &z_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - h[i][j] * *zik;
                             }
@@ -687,7 +687,7 @@ where
                         }
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             let tmp = ip.dot(&z, &z_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
@@ -695,7 +695,7 @@ where
                             h[i][j] = h[i][j] + tmp;
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (zk, zik) in z.as_mut().iter_mut().zip(z_basis[i].as_ref()) {
                                 *zk = *zk - tmp * *zik;
                             }
@@ -704,7 +704,7 @@ where
                         }
                         
                         #[cfg(feature = "logging")]
-                        let _norm_guard = StageGuard::enter("GmresNorm");
+                        let _norm_guard = StageGuard::new("GmresNorm");
                         h[j + 1][j] = ip.norm(&z, comm);
                         #[cfg(feature = "logging")]
                         drop(_norm_guard);
@@ -725,7 +725,7 @@ where
                         let mut w2 = V::from(vec![T::zero(); n]);
                         
                         #[cfg(feature = "logging")]
-                        let _matvec_guard = StageGuard::enter("GmresMatVec");
+                        let _matvec_guard = StageGuard::new("GmresMatVec");
                         a.matvec(&w, &mut w2);
                         #[cfg(feature = "logging")]
                         drop(_matvec_guard);
@@ -734,13 +734,13 @@ where
                         let mut w2_ortho = w2.clone();
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             h[i][j] = ip.dot(&w2_ortho, &v_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - h[i][j] * *vik;
                             }
@@ -749,7 +749,7 @@ where
                         }
                         for i in 0..=j {
                             #[cfg(feature = "logging")]
-                            let _dot_guard = StageGuard::enter("GmresDotProduct");
+                            let _dot_guard = StageGuard::new("GmresDotProduct");
                             let tmp = ip.dot(&w2_ortho, &v_basis[i], comm);
                             #[cfg(feature = "logging")]
                             drop(_dot_guard);
@@ -757,7 +757,7 @@ where
                             h[i][j] = h[i][j] + tmp;
                             
                             #[cfg(feature = "logging")]
-                            let _axpy_guard = StageGuard::enter("GmresAxpy");
+                            let _axpy_guard = StageGuard::new("GmresAxpy");
                             for (w2k, vik) in w2_ortho.as_mut().iter_mut().zip(v_basis[i].as_ref()) {
                                 *w2k = *w2k - tmp * *vik;
                             }
@@ -766,7 +766,7 @@ where
                         }
                         
                         #[cfg(feature = "logging")]
-                        let _norm_guard = StageGuard::enter("GmresNorm");
+                        let _norm_guard = StageGuard::new("GmresNorm");
                         h[j + 1][j] = ip.norm(&w2_ortho, comm);
                         #[cfg(feature = "logging")]
                         drop(_norm_guard);
@@ -839,7 +839,7 @@ where
             let mut tmp = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("GmresMatVec");
+            let _matvec_guard = StageGuard::new("GmresMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -848,7 +848,7 @@ where
             r0 = V::from(r_vec);
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("GmresNorm");
+            let _norm_guard = StageGuard::new("GmresNorm");
             beta = ip.norm(&r0, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);

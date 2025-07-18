@@ -82,7 +82,7 @@ where
              x: &mut V,
              comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("TfqmrSolve");
+        let _guard = StageGuard::new("TfqmrSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting TFQMR solve");
@@ -100,13 +100,13 @@ where
 
         // scalars
         #[cfg(feature = "logging")]
-        let _dot_guard = StageGuard::enter("TfqmrDotProduct");
+        let _dot_guard = StageGuard::new("TfqmrDotProduct");
         let mut rho = ip.dot(&r, &r_tld, comm);
         #[cfg(feature = "logging")]
         drop(_dot_guard);
         if rho == T::zero() {
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("TfqmrNorm");
+            let _norm_guard = StageGuard::new("TfqmrNorm");
             let final_res = ip.norm(&r, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -140,7 +140,7 @@ where
         let mut eta_old = T::zero();
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("TfqmrNorm");
+        let _norm_guard = StageGuard::new("TfqmrNorm");
         let tau = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -162,7 +162,7 @@ where
         let mut dpold = tau; // PETSc: dpold = initial residual norm
         for k in 1..=self.conv.max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("TfqmrIteration");
+            let _iter_guard = StageGuard::new("TfqmrIteration");
             
             #[cfg(feature = "logging")]
             trace!("TFQMR iteration {}", k);
@@ -171,7 +171,7 @@ where
             let mut v_tmp = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("TfqmrMatVec");
+            let _matvec_guard = StageGuard::new("TfqmrMatVec");
             a.matvec(&y, &mut v_tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -180,13 +180,13 @@ where
 
             // alpha = rho / <r_tld, v>
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("TfqmrDotProduct");
+            let _dot_guard = StageGuard::new("TfqmrDotProduct");
             let sigma = ip.dot(&r_tld, &v, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             if sigma == T::zero() || !sigma.is_finite() {
                 #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::enter("TfqmrNorm");
+                let _norm_guard = StageGuard::new("TfqmrNorm");
                 stats.final_residual = ip.norm(&r, comm);
                 #[cfg(feature = "logging")]
                 drop(_norm_guard);
@@ -198,7 +198,7 @@ where
             let alpha = rho / sigma;
             if alpha == T::zero() || !alpha.is_finite() {
                 #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::enter("TfqmrNorm");
+                let _norm_guard = StageGuard::new("TfqmrNorm");
                 stats.final_residual = ip.norm(&r, comm);
                 #[cfg(feature = "logging")]
                 drop(_norm_guard);
@@ -210,7 +210,7 @@ where
             // --- TFQMR update steps ---
             // u = r - alpha * v
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for (ui, (ri, vi)) in u.as_mut().iter_mut().zip(r.as_ref().iter().zip(v.as_ref())) {
                 *ui = *ri - alpha * *vi;
             }
@@ -220,7 +220,7 @@ where
             // q = u - alpha * v
             let mut q = V::from(vec![T::zero(); n]);
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 q.as_mut()[i] = u.as_ref()[i] - alpha * v.as_ref()[i];
             }
@@ -230,7 +230,7 @@ where
             // --- PETSc/Saad: update the true residual before the two-step loop ---
             let mut t = V::from(vec![T::zero(); n]);
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 t.as_mut()[i] = u.as_ref()[i] + q.as_ref()[i];
             }
@@ -239,14 +239,14 @@ where
             
             let mut au = V::from(vec![T::zero(); n]);
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("TfqmrMatVec");
+            let _matvec_guard = StageGuard::new("TfqmrMatVec");
             a.matvec(&t, &mut au);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             // Optionally: if let Some(pc) = pc { pc.apply(&au, &mut au)?; }
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 r.as_mut()[i] = r.as_ref()[i] - alpha * au.as_ref()[i];
             }
@@ -254,7 +254,7 @@ where
             drop(_axpy_guard);
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("TfqmrNorm");
+            let _norm_guard = StageGuard::new("TfqmrNorm");
             let dp = ip.norm(&r, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -263,13 +263,13 @@ where
             // --- TFQMR two-step inner loop ---
             for m in 0..2 {
                 #[cfg(feature = "logging")]
-                let _substep_guard = StageGuard::enter("TfqmrSubstep");
+                let _substep_guard = StageGuard::new("TfqmrSubstep");
                 
                 let (norm_u_m, tau_for_m) = if m == 0 {
                     (dp, tau_m0) // For m=0, norm is delta, tau is tau_m0
                 } else {
                     #[cfg(feature = "logging")]
-                    let _norm_guard = StageGuard::enter("TfqmrNorm");
+                    let _norm_guard = StageGuard::new("TfqmrNorm");
                     let norm_q = ip.norm(&q, comm);
                     #[cfg(feature = "logging")]
                     drop(_norm_guard);
@@ -289,7 +289,7 @@ where
                     psi_old * psi_old * eta_old / alpha
                 };
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+                let _axpy_guard = StageGuard::new("TfqmrAxpy");
                 for i in 0..n {
                     d.as_mut()[i] = u_m.as_ref()[i] + cf * d.as_ref()[i];
                 }
@@ -298,7 +298,7 @@ where
 
                 // Update x on both substeps
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+                let _axpy_guard = StageGuard::new("TfqmrAxpy");
                 for i in 0..n {
                     x.as_mut()[i] = x.as_ref()[i] + eta * d.as_ref()[i];
                 }
@@ -332,7 +332,7 @@ where
             r.clone_from(&u); // r = u
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("TfqmrDotProduct");
+            let _dot_guard = StageGuard::new("TfqmrDotProduct");
             let rho_new = ip.dot(&r_tld, &r, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
@@ -341,7 +341,7 @@ where
             rho = rho_new;
             // w <- u + beta * (q + beta*w)
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 w.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * w.as_ref()[i]);
                 y.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * y.as_ref()[i]);
@@ -353,7 +353,7 @@ where
         }
 
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("TfqmrNorm");
+        let _norm_guard = StageGuard::new("TfqmrNorm");
         stats.final_residual = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -375,7 +375,7 @@ where
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::enter("TfqmrSolve");
+        let _guard = StageGuard::new("TfqmrSolve");
         
         #[cfg(feature = "logging")]
         trace!("Starting TFQMR solve with {} monitors", monitors.len());
@@ -393,14 +393,14 @@ where
 
         // scalars
         #[cfg(feature = "logging")]
-        let _dot_guard = StageGuard::enter("TfqmrDotProduct");
+        let _dot_guard = StageGuard::new("TfqmrDotProduct");
         let mut rho = ip.dot(&r, &r_tld, comm);
         #[cfg(feature = "logging")]
         drop(_dot_guard);
         
         if rho == T::zero() {
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("TfqmrNorm");
+            let _norm_guard = StageGuard::new("TfqmrNorm");
             let final_res = ip.norm(&r, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -434,7 +434,7 @@ where
         let mut eta_old = T::zero();
         
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("TfqmrNorm");
+        let _norm_guard = StageGuard::new("TfqmrNorm");
         let tau = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
@@ -461,7 +461,7 @@ where
         let mut dpold = tau; // PETSc: dpold = initial residual norm
         for k in 1..=self.conv.max_iters {
             #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::enter("TfqmrIteration");
+            let _iter_guard = StageGuard::new("TfqmrIteration");
             
             #[cfg(feature = "logging")]
             trace!("TFQMR iteration {}", k);
@@ -470,7 +470,7 @@ where
             let mut v_tmp = V::from(vec![T::zero(); n]);
             
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("TfqmrMatVec");
+            let _matvec_guard = StageGuard::new("TfqmrMatVec");
             a.matvec(&y, &mut v_tmp);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
@@ -479,14 +479,14 @@ where
 
             // alpha = rho / <r_tld, v>
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("TfqmrDotProduct");
+            let _dot_guard = StageGuard::new("TfqmrDotProduct");
             let sigma = ip.dot(&r_tld, &v, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             
             if sigma == T::zero() || !sigma.is_finite() {
                 #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::enter("TfqmrNorm");
+                let _norm_guard = StageGuard::new("TfqmrNorm");
                 stats.final_residual = ip.norm(&r, comm);
                 #[cfg(feature = "logging")]
                 drop(_norm_guard);
@@ -498,7 +498,7 @@ where
             let alpha = rho / sigma;
             if alpha == T::zero() || !alpha.is_finite() {
                 #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::enter("TfqmrNorm");
+                let _norm_guard = StageGuard::new("TfqmrNorm");
                 stats.final_residual = ip.norm(&r, comm);
                 #[cfg(feature = "logging")]
                 drop(_norm_guard);
@@ -510,7 +510,7 @@ where
             // --- TFQMR update steps ---
             // u = r - alpha * v
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for (ui, (ri, vi)) in u.as_mut().iter_mut().zip(r.as_ref().iter().zip(v.as_ref())) {
                 *ui = *ri - alpha * *vi;
             }
@@ -520,7 +520,7 @@ where
             // q = u - alpha * v
             let mut q = V::from(vec![T::zero(); n]);
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 q.as_mut()[i] = u.as_ref()[i] - alpha * v.as_ref()[i];
             }
@@ -530,7 +530,7 @@ where
             // --- PETSc/Saad: update the true residual before the two-step loop ---
             let mut t = V::from(vec![T::zero(); n]);
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 t.as_mut()[i] = u.as_ref()[i] + q.as_ref()[i];
             }
@@ -539,14 +539,14 @@ where
             
             let mut au = V::from(vec![T::zero(); n]);
             #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::enter("TfqmrMatVec");
+            let _matvec_guard = StageGuard::new("TfqmrMatVec");
             a.matvec(&t, &mut au);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             // Optionally: if let Some(pc) = pc { pc.apply(&au, &mut au)?; }
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 r.as_mut()[i] = r.as_ref()[i] - alpha * au.as_ref()[i];
             }
@@ -554,7 +554,7 @@ where
             drop(_axpy_guard);
             
             #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::enter("TfqmrNorm");
+            let _norm_guard = StageGuard::new("TfqmrNorm");
             let dp = ip.norm(&r, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
@@ -564,13 +564,13 @@ where
             // --- TFQMR two-step inner loop ---
             for m in 0..2 {
                 #[cfg(feature = "logging")]
-                let _substep_guard = StageGuard::enter("TfqmrSubstep");
+                let _substep_guard = StageGuard::new("TfqmrSubstep");
                 
                 let (norm_u_m, tau_for_m) = if m == 0 {
                     (dp, tau_m0) // For m=0, norm is delta, tau is tau_m0
                 } else {
                     #[cfg(feature = "logging")]
-                    let _norm_guard = StageGuard::enter("TfqmrNorm");
+                    let _norm_guard = StageGuard::new("TfqmrNorm");
                     let norm_q = ip.norm(&q, comm);
                     #[cfg(feature = "logging")]
                     drop(_norm_guard);
@@ -590,7 +590,7 @@ where
                     psi_old * psi_old * eta_old / alpha
                 };
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+                let _axpy_guard = StageGuard::new("TfqmrAxpy");
                 for i in 0..n {
                     d.as_mut()[i] = u_m.as_ref()[i] + cf * d.as_ref()[i];
                 }
@@ -599,7 +599,7 @@ where
 
                 // Update x on both substeps
                 #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+                let _axpy_guard = StageGuard::new("TfqmrAxpy");
                 for i in 0..n {
                     x.as_mut()[i] = x.as_ref()[i] + eta * d.as_ref()[i];
                 }
@@ -639,7 +639,7 @@ where
             r.clone_from(&u); // r = u
             
             #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::enter("TfqmrDotProduct");
+            let _dot_guard = StageGuard::new("TfqmrDotProduct");
             let rho_new = ip.dot(&r_tld, &r, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
@@ -648,7 +648,7 @@ where
             rho = rho_new;
             // w <- u + beta * (q + beta*w)
             #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::enter("TfqmrAxpy");
+            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
                 w.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * w.as_ref()[i]);
                 y.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * y.as_ref()[i]);
@@ -660,7 +660,7 @@ where
         }
 
         #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::enter("TfqmrNorm");
+        let _norm_guard = StageGuard::new("TfqmrNorm");
         stats.final_residual = ip.norm(&r, comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);

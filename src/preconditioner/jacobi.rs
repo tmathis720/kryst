@@ -55,7 +55,17 @@ where
         let mut diag = vec![T::zero(); n];
         let mut e = vec![T::zero(); n];
         let mut col = vec![T::zero(); n];
+        
+        // Add progress reporting for large matrices
+        if n > 1000 {
+            println!("Setting up Jacobi preconditioner for {}x{} matrix - this may take a moment...", n, n);
+        }
+        
         for i in 0..n {
+            if n > 1000 && i % 1000 == 0 {
+                println!("  Processing row {}/{}", i, n);
+            }
+            
             // Set e to the i-th unit vector
             e.iter_mut().for_each(|x| *x = T::zero());
             e[i] = T::one();

@@ -44,6 +44,11 @@ impl<T: ComplexField + Copy> CsrMatrix<T> {
         let inner = SparseRowMat::new(symbolic, values);
         Self { inner }
     }
+
+    /// Convert to dense faer::Mat for use with dense solvers.
+    pub fn to_dense(&self) -> faer::Mat<T> {
+        self.inner.to_dense()
+    }
 }
 
 impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> {

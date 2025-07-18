@@ -66,7 +66,7 @@ where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
     V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64>,
+    T: num_traits::Float + Clone + From<f64> + std::fmt::Debug,
 {
     type Error = KError;
     type Scalar = T;
@@ -170,7 +170,7 @@ where
             monitor(0, res0);
         }
         #[cfg(feature = "logging")]
-        trace!("CGNR initial residual: {:.3e}", res0);
+        trace!("CGNR initial residual: {:?}", res0);
         let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
 
         for i in 1..=self.conv.max_iters {
@@ -202,7 +202,7 @@ where
                 monitor(i, res_norm);
             }
             #[cfg(feature = "logging")]
-            trace!("CGNR iteration {}: residual = {:.3e}", i, res_norm);
+            trace!("CGNR iteration {}: residual = {:?}", i, res_norm);
             let (reason, new_stats) = self.conv.check(res_norm, res0, i);
             stats = new_stats;
             if reason != ConvergedReason::Continued {

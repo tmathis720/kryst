@@ -1,20 +1,35 @@
-//! Large-scale MPI example demonstrating Matrix Market I/O with Jacobi-preconditioned GMRES.
+//! Large-scale MPI example demonstrating Matrix Market I/O with configurable solvers and preconditioners.
 //!
 //! This example shows how to:
 //! 1. Read a large sparse matrix and RHS vector from Matrix Market files
 //! 2. Set up distributed parallel computation using MPI
-//! 3. Construct a Jacobi preconditioner for efficient sparse preconditioning
-//! 4. Solve the linear system using GMRES with Jacobi preconditioning
+//! 3. Use the unified KspContext for runtime solver and preconditioner selection
+//! 4. Solve the linear system using the configured iterative solver
 //! 5. Perform convergence analysis and write results
 //!
-//! Usage: cargo mpirun -n 4 --example mpi_amg_gmres_demo
+//! Usage: 
+//!   mpirun -n 4 ./target/debug/examples/mpi_amg_gmres_demo [options]
+//!   
+//! PETSc-style Options:
+//!   -ksp_type <solver>         Solver type (cg, pcg, gmres, bicgstab, cgs, qmr, tfqmr, minres, cgnr, preonly)
+//!   -pc_type <precond>         Preconditioner type (jacobi, ilu0, none, ilu, ilut, ilup, blockjacobi, sor, asm, chebyshev, amg, approxinverse, lu, qr)
+//!   -ksp_rtol <tol>            Relative tolerance [default: 1e-6]
+//!   -ksp_atol <tol>            Absolute tolerance [default: 1e-12]
+//!   -ksp_dtol <tol>            Divergence tolerance [default: 1e3]
+//!   -ksp_max_it <iters>        Maximum iterations [default: 1000]
+//!   -ksp_gmres_restart <n>     GMRES restart parameter [default: 50]
+//!   -ksp_pc_side <side>        Preconditioning side (left, right, symmetric) [default: left]
+//!   -matrix <path>             Matrix file path [default: examples/e05r0300/e05r0300.mtx]
+//!   -rhs <path>                RHS vector file path [default: examples/e05r0300/e05r0300_rhs1.mtx]
+//!   -help                      Show all available options
 
 use kryst::utils::matrix_market::{read_matrix_market, write_vector_market};
-use kryst::solver::{LinearSolver, GmresSolver};
-use kryst::preconditioner::{Jacobi, Preconditioner};
+use kryst::context::ksp_context::KspContext;
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{UniverseComm, Comm};
+use kryst::config::options::{parse_all_options};
 use std::time::Instant;
+use std::env;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -29,33 +44,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rank = comm.rank();
     let size = comm.size();
 
+    // Parse command line arguments using the existing options system
+    let args: Vec<String> = env::args().collect();
+    let (ksp_opts, pc_opts) = parse_all_options(&args)?;
+
+    // Create KspContext and configure from options
+    let mut ksp = KspContext::new();
+
+    // Set solver type (default: bicgstab if not specified)
+    let solver_type = ksp_opts.ksp_type.as_deref().unwrap_or("bicgstab");
+    ksp.set_type_from_str(solver_type)?;
+
+    // Set preconditioner type (default: jacobi if not specified)
+    let pc_type = pc_opts.pc_type.as_deref().unwrap_or("jacobi");
+    ksp.set_pc_type_from_str(pc_type)?;
+
+    // Set tolerances and iteration limits
+    let rtol = ksp_opts.rtol.unwrap_or(1e-6);
+    let atol = ksp_opts.atol.unwrap_or(1e-12);
+    let dtol = ksp_opts.dtol.unwrap_or(1e3);
+    let max_iters = ksp_opts.maxits.unwrap_or(1000);
+    ksp.set_tolerances(rtol, atol, dtol, max_iters);
+
+    // Set restart parameter for GMRES-type solvers
+    let restart = ksp_opts.restart.unwrap_or(50);
+    ksp.set_restart(restart);
+
+    // Set preconditioning side
+    if let Some(ref side_str) = ksp_opts.pc_side {
+        ksp.set_pc_side_from_str(side_str)?;
+    }
+
+    // Set up file paths
+    let matrix_file = ksp_opts.matrix_file.as_deref().unwrap_or("examples/e05r0300/e05r0300.mtx");
+    let rhs_file = ksp_opts.rhs_file.as_deref().unwrap_or("examples/e05r0300/e05r0300_rhs1.mtx");
+
     // Only rank 0 prints headers to avoid output clutter
     if rank == 0 {
-        println!("Kryst MPI AMG-GMRES Demo");
-        println!("========================");
+        println!("Kryst MPI Unified KSP Context Demo");
+        println!("===================================");
         println!("Running on {} MPI processes", size);
+        println!("Configuration:");
+        println!("  Solver: {}", solver_type);
+        println!("  Preconditioner: {}", pc_type);
+        println!("  Relative tolerance: {:.1e}", rtol);
+        println!("  Absolute tolerance: {:.1e}", atol);
+        println!("  Divergence tolerance: {:.1e}", dtol);
+        println!("  Max iterations: {}", max_iters);
+        if solver_type.contains("gmres") || solver_type == "fgmres" {
+            println!("  GMRES restart: {}", restart);
+        }
+        if let Some(ref side_str) = ksp_opts.pc_side {
+            println!("  PC side: {}", side_str);
+        }
+        println!("  Matrix file: {}", matrix_file);
+        println!("  RHS file: {}", rhs_file);
         println!();
     }
 
-    // Read the large sparse matrix (only rank 0 reads, then broadcasts)
+    // Read the sparse matrix (only rank 0 reads, then broadcasts)
     let start_io = Instant::now();
     
     let (matrix_data, rhs_data) = if rank == 0 {
-        println!("Reading matrix from examples/e30r1000/e30r1000.mtx...");
-        let matrix_data = read_matrix_market("examples/e30r1000/e30r1000.mtx")?;
+        println!("Reading matrix from {}...", matrix_file);
+        let matrix_data = read_matrix_market(matrix_file)?;
         println!("Matrix: {}x{} with {} non-zeros", 
                  matrix_data.rows, matrix_data.cols, matrix_data.values.len());
 
-        println!("Reading RHS from examples/e30r1000/e30r1000_rhs1.mtx...");
-        let rhs_data = read_matrix_market("examples/e30r1000/e30r1000_rhs1.mtx")?;
+        println!("Reading RHS from {}...", rhs_file);
+        let rhs_data = read_matrix_market(rhs_file)?;
         println!("RHS: {}x{} vector", rhs_data.rows, rhs_data.cols);
         
         (matrix_data, rhs_data)
     } else {
         // For this example, we'll have all processes read the data
         // In a real distributed implementation, you'd broadcast the data
-        let matrix_data = read_matrix_market("examples/e30r1000/e30r1000.mtx")?;
-        let rhs_data = read_matrix_market("examples/e30r1000/e30r1000_rhs1.mtx")?;
+        let matrix_data = read_matrix_market(matrix_file)?;
+        let rhs_data = read_matrix_market(rhs_file)?;
         (matrix_data, rhs_data)
     };
 
@@ -64,56 +129,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rhs = rhs_data.to_vector()?;
     let mut solution = vec![0.0; rhs.len()];
 
+    // Convert CSR matrix to dense faer::Mat for KspContext
+    let dense_matrix = matrix.to_dense();
+
     let io_time = start_io.elapsed();
     if rank == 0 {
         println!("I/O completed in {:.3}s", io_time.as_secs_f64());
-        println!("Matrix dimensions: {}x{}", matrix.nrows(), matrix.ncols());
+        println!("Matrix dimensions: {}x{}", matrix_data.rows, matrix_data.cols);
         println!("RHS length: {}", rhs.len());
         println!();
     }
 
     // Synchronize all processes before setup
-    comm.barrier();
-
-    // Set up Jacobi preconditioner
+    // Note: We cannot create a new MpiComm instance because MPI can only be initialized once
+    // Instead, we'll use barriers through the existing comm after we give it to KSP setup
+    // For now, skip this barrier since we'll have one after setup anyway
+    
+    // Set up the KSP context (preconditioner setup, etc.)
     let start_setup = Instant::now();
+    
     if rank == 0 {
-        println!("Setting up Jacobi preconditioner...");
+        println!("Setting up {} preconditioner and {} solver...", pc_type, solver_type);
     }
 
-    // Create Jacobi preconditioner - simple but effective for many problems
-    let mut jacobi = Jacobi::new();
-    // Setup with the matrix to extract diagonal
-    jacobi.setup(&matrix)?;
+    // Setup KSP with communicator
+    ksp.setup_with_comm(&dense_matrix, rhs.len(), comm)?;
 
     let setup_time = start_setup.elapsed();
     if rank == 0 {
-        println!("Jacobi setup completed in {:.3}s", setup_time.as_secs_f64());
-    }
-
-    // Set up GMRES solver with generous parameters for this large problem
-    let restart = 50;          // GMRES restart parameter
-    let rtol = 1e-8;          // Relative tolerance
-    let max_iters = 2000;     // Maximum iterations
-    let mut solver = GmresSolver::new(restart, rtol, max_iters);
-
-    if rank == 0 {
-        println!("Solver configuration:");
-        println!("  GMRES restart: {}", restart);
-        println!("  Relative tolerance: {:.1e}", rtol);
-        println!("  Maximum iterations: {}", max_iters);
+        println!("KSP setup completed in {:.3}s", setup_time.as_secs_f64());
         println!();
     }
 
-    comm.barrier();
-
-    // Solve the system
-    let start_solve = Instant::now();
-    if rank == 0 {
-        println!("Solving linear system with Jacobi-preconditioned GMRES...");
+    // Barrier before solving (using the KSP context's communicator)
+    if let Some(ref comm_ref) = ksp.comm {
+        comm_ref.barrier();
     }
 
-    let stats = solver.solve(&matrix, Some(&jacobi), &rhs, &mut solution, &comm)?;
+    // Solve the system using the unified KSP context
+    let start_solve = Instant::now();
+    if rank == 0 {
+        println!("Solving linear system with {}-preconditioned {}...", 
+                 pc_type, solver_type.to_uppercase());
+    }
+
+    let stats = ksp.solve(&dense_matrix, &rhs, &mut solution)?;
     
     let solve_time = start_solve.elapsed();
 
@@ -139,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Estimate performance metrics
         let nnz = matrix_data.values.len();
-        let dof = matrix.nrows();
+        let dof = matrix_data.rows;
         println!("Problem characteristics:");
         println!("  Degrees of freedom: {}", dof);
         println!("  Non-zeros: {}", nnz);
@@ -151,8 +211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Write solution (only rank 0)
     if rank == 0 {
-        println!("Writing solution to mpi_jacobi_solution.mtx...");
-        write_vector_market("mpi_jacobi_solution.mtx", &solution)?;
+        println!("Writing solution to mpi_ksp_solution.mtx...");
+        write_vector_market("mpi_ksp_solution.mtx", &solution)?;
     }
 
     // Display solution statistics
@@ -168,11 +228,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    // Verify the solution by computing residual
+    // Verify the solution by computing residual A*x - b
+    let mut ax = vec![0.0; rhs.len()];
+    matrix.spmv(&solution, &mut ax);
+    
     let mut residual = rhs.clone();
-    matrix.spmv(&solution, &mut residual);
-    for (r, &b) in residual.iter_mut().zip(rhs.iter()) {
-        *r = b - *r; // residual = b - A*x
+    for (r, &ax_val) in residual.iter_mut().zip(ax.iter()) {
+        *r = *r - ax_val; // residual = b - A*x
     }
     
     // Compute norms using parallel reduction
@@ -180,8 +242,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_rhs_sq = rhs.iter().map(|x| x * x).sum::<f64>();
     
     // All-reduce to get global norms
-    let global_residual_sq = comm.all_reduce_f64(local_residual_sq);
-    let global_rhs_sq = comm.all_reduce_f64(local_rhs_sq);
+    let (global_residual_sq, global_rhs_sq) = if let Some(ref comm_ref) = ksp.comm {
+        (comm_ref.all_reduce_f64(local_residual_sq), comm_ref.all_reduce_f64(local_rhs_sq))
+    } else {
+        (local_residual_sq, local_rhs_sq)
+    };
     
     let residual_norm = global_residual_sq.sqrt();
     let rhs_norm = global_rhs_sq.sqrt();
@@ -207,7 +272,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Final barrier to ensure all processes complete together
-    comm.barrier();
+    if let Some(ref comm_ref) = ksp.comm {
+        comm_ref.barrier();
+    }
 
     Ok(())
 }
