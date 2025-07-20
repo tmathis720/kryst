@@ -11,6 +11,15 @@ homepage = "https://github.com/tmathis720/kryst"
 readme = "README.md"
 categories = ["science", "mathematics", "algorithms"]
 keywords = ["krylov", "gmres", "linear-solver", "parallel", "mpi"]
+exclude = [
+    "examples/*/e*.mtx",
+    "references/*.pdf",
+    "target/*",
+    ".git/*",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+]
 
 [dependencies]
 faer = "0.22.6"

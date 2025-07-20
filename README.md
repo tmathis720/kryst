@@ -506,7 +506,7 @@ cargo run --example setup_reuse_demo
 # Convergence behavior analysis
 cargo run --example convergence_demo
 
-# Matrix market file I/O
+# Matrix market file I/O (auto-generates test data if files not found)
 cargo run --example matrix_market_demo
 
 # Iteration monitoring demonstration
@@ -516,6 +516,8 @@ cargo run --example monitor
 mpirun -n 4 cargo run --example mpi_parallel_demo --features mpi
 mpirun -n 2 cargo run --example mpi_amg_gmres_demo --features mpi
 ```
+
+**Note**: Large Matrix Market example files (*.mtx) are excluded from the published crate to stay within size limits. The `matrix_market_demo` example will auto-generate test data if the example files are not found. For the complete Matrix Market example files, clone the repository from GitHub.
 
 ### Command-line Examples
 ```bash

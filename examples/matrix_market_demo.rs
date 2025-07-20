@@ -19,15 +19,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Matrix Market I/O Example");
     println!("=========================");
 
-    // Read the sparse matrix
-    println!("Reading matrix from examples/e05r0000/e05r0000.mtx...");
-    let matrix_data = read_matrix_market("examples/e05r0000/e05r0000.mtx")?;
-    println!("Matrix: {}x{} with {} non-zeros", 
-             matrix_data.rows, matrix_data.cols, matrix_data.values.len());
-
-    // Read the right-hand side vector
-    println!("Reading RHS from examples/e05r0000/e05r0000_rhs1.mtx...");
-    let rhs_data = read_matrix_market("examples/e05r0000/e05r0000_rhs1.mtx")?;
+    // Try to read from example files, but generate test data if they don't exist
+    let (matrix_data, rhs_data) = match (
+        read_matrix_market("examples/e05r0000/e05r0000.mtx"),
+        read_matrix_market("examples/e05r0000/e05r0000_rhs1.mtx")
+    ) {
+        (Ok(matrix), Ok(rhs)) => {
+            println!("Reading matrix from examples/e05r0000/e05r0000.mtx...");
+            println!("Matrix: {}x{} with {} non-zeros", 
+                     matrix.rows, matrix.cols, matrix.values.len());
+            println!("Reading RHS from examples/e05r0000/e05r0000_rhs1.mtx...");
+            (matrix, rhs)
+        },
+        _ => {
+            println!("Example Matrix Market files not found, generating test data...");
+            // Generate a simple test matrix (5x5 tridiagonal)
+            let n = 5;
+            let mut matrix = kryst::utils::matrix_market::MatrixMarketData {
+                rows: n,
+                cols: n,
+                nonzeros: 2 * n - 1, // diagonal + off-diagonals
+                values: Vec::new(),
+                row_indices: Vec::new(),
+                col_indices: Vec::new(),
+                is_symmetric: true,
+                is_coordinate: true,
+            };
+            
+            // Create tridiagonal matrix: [2 -1 0 0 0; -1 2 -1 0 0; ...]
+            for i in 0..n {
+                // Diagonal
+                matrix.values.push(2.0);
+                matrix.row_indices.push(i);
+                matrix.col_indices.push(i);
+                
+                // Super-diagonal
+                if i < n - 1 {
+                    matrix.values.push(-1.0);
+                    matrix.row_indices.push(i);
+                    matrix.col_indices.push(i + 1);
+                }
+                
+                // Sub-diagonal (if not symmetric)
+                if !matrix.is_symmetric && i > 0 {
+                    matrix.values.push(-1.0);
+                    matrix.row_indices.push(i);
+                    matrix.col_indices.push(i - 1);
+                }
+            }
+            
+            let rhs = kryst::utils::matrix_market::MatrixMarketData {
+                rows: n,
+                cols: 1,
+                nonzeros: n,
+                values: vec![1.0; n],
+                row_indices: (0..n).collect(),
+                col_indices: vec![0; n],
+                is_symmetric: false,
+                is_coordinate: true,
+            };
+            
+            println!("Generated {}x{} tridiagonal matrix with {} non-zeros", 
+                     matrix.rows, matrix.cols, matrix.values.len());
+            (matrix, rhs)
+        }
+    };
     println!("RHS: {}x{} vector", rhs_data.rows, rhs_data.cols);
 
     // Convert to Kryst formats
