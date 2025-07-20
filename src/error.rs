@@ -26,6 +26,8 @@ pub enum KError {
     UnrecognizedPcType(String),
     #[error("unrecognized preconditioner side: {0}")]
     UnrecognizedPcSide(String),
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
 }
 
 #[cfg(test)]

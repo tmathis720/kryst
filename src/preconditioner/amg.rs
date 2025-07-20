@@ -71,6 +71,18 @@ impl AMG {
     /// * `max_levels` - Maximum number of coarsening levels
     /// * `base_threshold` - Base strength-of-connection threshold
     pub fn new(a: &Mat<f64>, max_levels: usize, base_threshold: f64) -> Self {
+        Self::with_smoothing(a, max_levels, base_threshold, 1, 1)
+    }
+
+    /// Construct a new AMG hierarchy from a matrix with custom smoothing parameters.
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `max_levels` - Maximum number of coarsening levels
+    /// * `base_threshold` - Base strength-of-connection threshold
+    /// * `nu_pre` - Number of pre-smoothing iterations
+    /// * `nu_post` - Number of post-smoothing iterations
+    pub fn with_smoothing(a: &Mat<f64>, max_levels: usize, base_threshold: f64, nu_pre: usize, nu_post: usize) -> Self {
         let mut levels = Vec::new();
         let mut current_matrix = a.clone();
         let mut current_diag = Self::extract_diagonal_inverse(&current_matrix);
@@ -112,8 +124,8 @@ impl AMG {
         });
         AMG {
             levels,
-            nu_pre: 1,
-            nu_post: 1,
+            nu_pre,
+            nu_post,
             matrix: a.clone(),
         }
     }

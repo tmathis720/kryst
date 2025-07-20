@@ -22,11 +22,13 @@
 
 use std::str::FromStr;
 use faer::Mat;
-use crate::solver::{LinearSolver, CgSolver, GmresSolver, BiCgStabSolver, MinresSolver, 
+use crate::solver::{LinearSolver, CgSolver, GmresSolver, FgmresSolver, BiCgStabSolver, MinresSolver, 
                    TfqmrSolver, CgnrSolver, CgsSolver, QmrSolver, LuSolver, PcgSolver};
-use crate::preconditioner::{Preconditioner, Jacobi, Ilu0};
+use crate::preconditioner::{Preconditioner, Jacobi, Ilu0, Ilutp};
+use crate::config::options::PcOptions;
 use crate::utils::convergence::{SolveStats, ConvergedReason};
 use crate::utils::profiling::StageGuard;
+use crate::utils::reordering::{preprocess_matrix, ReorderingMethod, ScalingMethod, MatrixPreprocessing};
 use crate::error::KError;
 
 #[cfg(feature = "logging")]
@@ -69,6 +71,8 @@ pub enum SolverType {
     Pcg,
     /// Generalized Minimal Residual (GMRES)
     Gmres,
+    /// Flexible Generalized Minimal Residual (FGMRES)
+    Fgmres,
     /// BiConjugate Gradient Stabilized (BiCGStab)
     BiCgStab,
     /// Conjugate Gradient Squared (CGS)
@@ -98,6 +102,8 @@ pub enum PcType {
     Ilu,
     /// Incomplete LU factorization with threshold
     Ilut,
+    /// Incomplete LU factorization with threshold and pivoting
+    Ilutp,
     /// Incomplete LU factorization with partial pivoting
     Ilup,
     /// Block Jacobi preconditioner
@@ -118,6 +124,19 @@ pub enum PcType {
     Qr,
 }
 
+/// Information for deferred preconditioner construction.
+///
+/// For matrix-dependent preconditioners (ASM, AMG, Chebyshev), we store the type
+/// and configuration options, then construct the actual preconditioner during setup()
+/// when we have access to the matrix.
+#[derive(Debug, Clone)]
+struct DeferredPcInfo {
+    /// Preconditioner type to construct
+    pc_type: PcType,
+    /// Configuration options (if any)
+    options: Option<PcOptions>,
+}
+
 impl FromStr for SolverType {
     type Err = KError;
 
@@ -126,6 +145,7 @@ impl FromStr for SolverType {
             "cg" => Ok(SolverType::Cg),
             "pcg" => Ok(SolverType::Pcg),
             "gmres" => Ok(SolverType::Gmres),
+            "fgmres" => Ok(SolverType::Fgmres),
             "bicgstab" => Ok(SolverType::BiCgStab),
             "cgs" => Ok(SolverType::Cgs),
             "qmr" => Ok(SolverType::Qmr),
@@ -148,6 +168,7 @@ impl FromStr for PcType {
             "none" => Ok(PcType::None),
             "ilu" => Ok(PcType::Ilu),
             "ilut" => Ok(PcType::Ilut),
+            "ilutp" => Ok(PcType::Ilutp),
             "ilup" => Ok(PcType::Ilup),
             "blockjacobi" | "block_jacobi" | "bjacobi" => Ok(PcType::BlockJacobi),
             "sor" => Ok(PcType::Sor),
@@ -260,12 +281,18 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for QrPreconditioner {
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>>>,
     pc: Option<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>>,
+    /// Deferred preconditioner construction info (for matrix-dependent PCs)
+    deferred_pc: Option<DeferredPcInfo>,
     /// Current solver type (for PREONLY handling)
     solver_type: Option<SolverType>,
     /// Current preconditioner type (for PREONLY handling)
     pc_type: Option<PcType>,
     /// Preconditioner side (Left/Right/Symmetric)
     pub pc_side: crate::preconditioner::PcSide,
+    /// Preconditioner options for advanced configuration
+    pc_options: Option<crate::config::options::PcOptions>,
+    /// Matrix preprocessing info (reordering + scaling)
+    preprocessing: Option<MatrixPreprocessing>,
     /// Relative tolerance for convergence
     pub rtol: f64,
     /// Absolute tolerance for convergence  
@@ -341,9 +368,12 @@ impl KspContext {
         Self {
             solver: None,
             pc: None,
+            deferred_pc: None,
             solver_type: None,
             pc_type: None,
             pc_side: crate::preconditioner::PcSide::Left,
+            pc_options: None,
+            preprocessing: None,
             rtol: 1e-6,
             atol: 1e-12,
             dtol: 1e3,
@@ -388,6 +418,10 @@ impl KspContext {
                     SolverType::Gmres => {
                         let gmres = GmresSolver::new(self.restart, self.rtol, self.maxits);
                         Box::new(gmres)
+                    },
+                    SolverType::Fgmres => {
+                        let fgmres = FgmresSolver::new(self.rtol, self.maxits, self.restart);
+                        Box::new(fgmres)
                     },
                     SolverType::BiCgStab => {
                         let bicgstab = BiCgStabSolver::new(self.rtol, self.maxits);
@@ -448,20 +482,56 @@ impl KspContext {
     /// * `Ok(&mut Self)` for method chaining on success
     /// * `Err(KError)` if the preconditioner type is not supported
     pub fn set_pc_type(&mut self, pc_type: PcType) -> Result<&mut Self, KError> {
-        let pc: Box<dyn Preconditioner<Mat<f64>, Vec<f64>>> = match pc_type {
-            PcType::Jacobi => Box::new(Jacobi::new()),
-            PcType::Ilu0 => Box::new(Ilu0::new()),
-            PcType::None => Box::new(NoOpPreconditioner),
-            PcType::Lu => Box::new(LuPreconditioner::new()),
-            PcType::Qr => Box::new(QrPreconditioner::new()),
+        // Clear any existing PC state
+        self.pc = None;
+        self.deferred_pc = None;
+        self.pc_type = Some(pc_type);
+
+        match pc_type {
+            // Matrix-independent preconditioners - construct immediately
+            PcType::Jacobi => {
+                self.pc = Some(Box::new(Jacobi::new()));
+            },
+            PcType::Ilu0 => {
+                self.pc = Some(Box::new(Ilu0::new()));
+            },
+            PcType::None => {
+                self.pc = Some(Box::new(NoOpPreconditioner));
+            },
+            PcType::Lu => {
+                self.pc = Some(Box::new(LuPreconditioner::new()));
+            },
+            PcType::Qr => {
+                self.pc = Some(Box::new(QrPreconditioner::new()));
+            },
+            PcType::Ilutp => {
+                // Get parameters from options if available
+                let ilutp = if let Some(ref opts) = self.pc_options {
+                    let max_fill = opts.ilut_max_fill.unwrap_or(10);
+                    let drop_tol = opts.drop_tol.unwrap_or(1e-4);
+                    let perm_tol = opts.ilut_perm_tol.unwrap_or(0.1);
+                    Ilutp::with_params(max_fill, drop_tol, perm_tol)
+                } else {
+                    Ilutp::new()
+                };
+                self.pc = Some(Box::new(ilutp));
+            },
+            
+            // Matrix-dependent preconditioners - defer until setup()
+            PcType::Asm | PcType::Chebyshev | PcType::Amg => {
+                self.deferred_pc = Some(DeferredPcInfo {
+                    pc_type,
+                    options: self.pc_options.clone(),
+                });
+            },
+            
+            // Not yet implemented preconditioners
             PcType::Ilu | PcType::Ilut | PcType::Ilup | PcType::BlockJacobi | 
-            PcType::Sor | PcType::Asm | PcType::Chebyshev | PcType::Amg | 
-            PcType::ApproxInverse => {
+            PcType::Sor | PcType::ApproxInverse => {
                 return Err(KError::UnrecognizedPcType(format!("{:?} preconditioner not yet implemented", pc_type)));
             }
-        };
-        self.pc = Some(pc);
-        self.pc_type = Some(pc_type); // Store the PC type for PREONLY handling
+        }
+        
         Ok(self)
     }
 
@@ -476,6 +546,18 @@ impl KspContext {
     pub fn set_pc_type_from_str(&mut self, pc_name: &str) -> Result<&mut Self, KError> {
         let pc_type = PcType::from_str(pc_name)?;
         self.set_pc_type(pc_type)
+    }
+
+    /// Set preconditioner options for advanced configuration.
+    ///
+    /// # Arguments
+    /// * `options` - Preconditioner options for ILUTP, reordering, etc.
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn set_pc_options(&mut self, options: crate::config::options::PcOptions) -> &mut Self {
+        self.pc_options = Some(options);
+        self
     }
 
     /// Set the preconditioner side (Left/Right/Symmetric).
@@ -705,12 +787,185 @@ impl KspContext {
         // Store the communicator
         self.comm = Some(comm);
         
+        // Apply matrix preprocessing (reordering + scaling) if specified
+        let processed_matrix = if let Some(ref pc_opts) = self.pc_options {
+            let reorder_method = match pc_opts.reorder.as_deref() {
+                Some("rcm") => ReorderingMethod::Rcm,
+                Some("cuthill_mckee") => ReorderingMethod::CuthillMckee,
+                Some("colamd") => ReorderingMethod::Colamd,
+                Some("amd") => ReorderingMethod::Amd,
+                Some("none") | None => ReorderingMethod::None,
+                Some(other) => {
+                    return Err(KError::SolveError(format!("Unknown reordering method: {}", other)));
+                }
+            };
+            
+            let scaling_method = match pc_opts.scaling.as_deref() {
+                Some("diagonal") => ScalingMethod::Diagonal,
+                Some("symmetric") => ScalingMethod::Symmetric,
+                Some("none") | None => ScalingMethod::None,
+                Some(other) => {
+                    return Err(KError::SolveError(format!("Unknown scaling method: {}", other)));
+                }
+            };
+            
+            if reorder_method != ReorderingMethod::None || scaling_method != ScalingMethod::None {
+                let _preprocessing_stage = StageGuard::new("MatrixPreprocessing");
+                #[cfg(feature = "logging")]
+                trace!("Applying matrix preprocessing: reorder={:?}, scaling={:?}", reorder_method, scaling_method);
+                
+                let (processed, preprocessing_info) = preprocess_matrix(a, reorder_method, scaling_method)?;
+                self.preprocessing = Some(preprocessing_info);
+                processed
+            } else {
+                self.preprocessing = Some(MatrixPreprocessing::identity(n));
+                a.clone()
+            }
+        } else {
+            self.preprocessing = Some(MatrixPreprocessing::identity(n));
+            a.clone()
+        };
+        
+        // Check for PC-chaining before deferred PC construction
+        if let Some(ref pc_opts) = self.pc_options {
+            if let Some(ref chain_str) = pc_opts.pc_chain {
+                let _pc_chain_stage = StageGuard::new("PCChainConstruction");
+                #[cfg(feature = "logging")]
+                trace!("Constructing PC chain: {}", chain_str);
+                
+                // Parse and construct PC chain
+                use crate::preconditioner::chain::PcChain;
+                let mut pc_chain = PcChain::new();
+                
+                // Parse the chain string (e.g., "jacobi,ilu0,chebyshev")
+                let pc_names = PcChain::parse_chain_string(chain_str);
+                
+                // Construct each preconditioner in the chain
+                for pc_name in pc_names {
+                    match pc_name.as_str() {
+                        "jacobi" => {
+                            let mut jacobi = crate::preconditioner::jacobi::Jacobi::new();
+                            jacobi.setup(&processed_matrix)?;
+                            pc_chain.add_preconditioner(Box::new(jacobi));
+                        },
+                        "ilu0" => {
+                            let mut ilu0 = crate::preconditioner::ilu::Ilu0::new();
+                            ilu0.setup(&processed_matrix)?;
+                            pc_chain.add_preconditioner(Box::new(ilu0));
+                        },
+                        "chebyshev" => {
+                            // Construct Chebyshev with default or configured parameters
+                            let degree = pc_opts.chebyshev_degree.unwrap_or(4);
+                            let (lambda_min, lambda_max) = if let (Some(min), Some(max)) = 
+                                (pc_opts.chebyshev_lambda_min, pc_opts.chebyshev_lambda_max) {
+                                (min, max)
+                            } else {
+                                use crate::preconditioner::chebyshev::ChebyshevPre;
+                                ChebyshevPre::estimate_eigenvalue_bounds(&processed_matrix, 50, 1e-6)
+                            };
+                            
+                            let mut cheb = crate::preconditioner::chebyshev::ChebyshevPre::new(
+                                processed_matrix.clone(), degree, lambda_min, lambda_max
+                            );
+                            cheb.setup(&processed_matrix)?;
+                            pc_chain.add_preconditioner(Box::new(cheb));
+                        },
+                        "amg" => {
+                            // Construct AMG with default or configured parameters
+                            let max_levels = pc_opts.amg_levels.unwrap_or(10);
+                            let threshold = pc_opts.amg_strength_threshold.unwrap_or(0.25);
+                            let nu_pre = pc_opts.amg_nu_pre.unwrap_or(1);
+                            let nu_post = pc_opts.amg_nu_post.unwrap_or(1);
+                            
+                            let mut amg = crate::preconditioner::amg::AMG::with_smoothing(
+                                &processed_matrix, max_levels, threshold, nu_pre, nu_post
+                            );
+                            amg.setup(&processed_matrix)?;
+                            pc_chain.add_preconditioner(Box::new(amg));
+                        },
+                        "none" => {
+                            let mut noop = NoOpPreconditioner;
+                            noop.setup(&processed_matrix)?;
+                            pc_chain.add_preconditioner(Box::new(noop));
+                        },
+                        other => {
+                            return Err(KError::SolveError(format!("Unknown preconditioner in chain: {}", other)));
+                        }
+                    }
+                }
+                
+                #[cfg(feature = "logging")]
+                trace!("Successfully created PC chain with {} preconditioners", pc_chain.len());
+                self.pc = Some(Box::new(pc_chain));
+                
+                // Skip regular preconditioner construction since we have a chain
+                return Ok(());
+            }
+        }
+        
+        // Handle deferred preconditioner construction (matrix-dependent PCs)
+        if let Some(deferred_info) = self.deferred_pc.take() {
+            let _pc_construction_stage = StageGuard::new("DeferredPCConstruction");
+            #[cfg(feature = "logging")]
+            trace!("Constructing deferred preconditioner: {:?}", deferred_info.pc_type);
+            
+            let pc: Box<dyn Preconditioner<Mat<f64>, Vec<f64>>> = match deferred_info.pc_type {
+                PcType::Asm => {
+                    // TODO: Implement ASM preconditioner construction with matrix
+                    return Err(KError::UnrecognizedPcType("ASM preconditioner construction not yet implemented".to_string()));
+                },
+                PcType::Chebyshev => {
+                    // Create ChebyshevPre preconditioner with matrix
+                    let options = deferred_info.options.as_ref();
+                    let degree = options.and_then(|opt| opt.chebyshev_degree).unwrap_or(4);
+                    
+                    let (lambda_min, lambda_max) = if let (Some(min), Some(max)) = 
+                        (options.and_then(|opt| opt.chebyshev_lambda_min), options.and_then(|opt| opt.chebyshev_lambda_max)) {
+                        (min, max)
+                    } else {
+                        // Estimate eigenvalue bounds
+                        use crate::preconditioner::chebyshev::ChebyshevPre;
+                        let (estimated_min, estimated_max) = ChebyshevPre::estimate_eigenvalue_bounds(&processed_matrix, 50, 1e-6);
+                        #[cfg(feature = "logging")]
+                        trace!("Estimated Chebyshev eigenvalue bounds: λ_min={:.6e}, λ_max={:.6e}", estimated_min, estimated_max);
+                        (estimated_min, estimated_max)
+                    };
+                    
+                    #[cfg(feature = "logging")]
+                    trace!("Creating Chebyshev preconditioner: degree={}, λ_min={:.6e}, λ_max={:.6e}", degree, lambda_min, lambda_max);
+                    
+                    Box::new(crate::preconditioner::chebyshev::ChebyshevPre::new(
+                        processed_matrix.clone(), degree, lambda_min, lambda_max
+                    ))
+                },
+                PcType::Amg => {
+                    // Create AMG preconditioner with matrix
+                    let options = deferred_info.options.as_ref();
+                    let max_levels = options.and_then(|opt| opt.amg_levels).unwrap_or(10);
+                    let threshold = options.and_then(|opt| opt.amg_strength_threshold).unwrap_or(0.25);
+                    let nu_pre = options.and_then(|opt| opt.amg_nu_pre).unwrap_or(1);
+                    let nu_post = options.and_then(|opt| opt.amg_nu_post).unwrap_or(1);
+                    
+                    #[cfg(feature = "logging")]
+                    trace!("Creating AMG preconditioner: max_levels={}, threshold={:.6e}, nu_pre={}, nu_post={}", 
+                           max_levels, threshold, nu_pre, nu_post);
+                    
+                    Box::new(crate::preconditioner::amg::AMG::with_smoothing(&processed_matrix, max_levels, threshold, nu_pre, nu_post))
+                },
+                _ => {
+                    return Err(KError::UnrecognizedPcType(format!("Unexpected deferred PC type: {:?}", deferred_info.pc_type)));
+                }
+            };
+            
+            self.pc = Some(pc);
+        }
+        
         // Setup preconditioner if present
         if let Some(ref mut pc) = self.pc {
             let _pc_setup_stage = StageGuard::new("PCSetup");
             #[cfg(feature = "logging")]
             trace!("Setting up preconditioner: {:?}", self.pc_type);
-            pc.setup(a)?;
+            pc.setup(&processed_matrix)?;
         }
 
         // Allocate or resize workspace if needed
@@ -749,6 +1004,13 @@ impl KspContext {
     pub fn invalidate_setup(&mut self) {
         self.work = None;
         self.setup_called = false;
+    }
+
+    /// Get the matrix preprocessing information applied during setup.
+    ///
+    /// Returns `None` if no preprocessing was applied or setup hasn't been called.
+    pub fn get_preprocessing(&self) -> Option<&MatrixPreprocessing> {
+        self.preprocessing.as_ref()
     }
 
     /// Solve the linear system Ax = b using the configured solver and preconditioner.

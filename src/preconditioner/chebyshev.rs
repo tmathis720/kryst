@@ -17,9 +17,9 @@
 //!
 //! # Usage
 //!
-//! - Create a `Chebyshev` struct with the desired degree and spectrum bounds.
+//! - Create a `ChebyshevPre` struct with the desired degree and spectrum bounds.
 //! - Use the `apply_chebyshev` free function to apply the polynomial filter to a vector.
-//! - The `Preconditioner` trait implementation for `Chebyshev` only provides a stub; use the free function for actual application.
+//! - The `Preconditioner` trait implementation provides full functionality.
 //!
 //! # References
 //!
@@ -29,8 +29,103 @@
 use crate::error::KError;
 use crate::preconditioner::Preconditioner;
 use crate::core::traits::MatVec;
+use faer::Mat;
 
 /// Chebyshev polynomial preconditioner struct
+///
+/// Stores the matrix, polynomial degree, and spectrum bounds.
+/// This is the Phase III enhanced version that works as a proper preconditioner.
+pub struct ChebyshevPre {
+    /// The system matrix (stored for apply operations)
+    matrix: Mat<f64>,
+    /// Degree of the Chebyshev polynomial
+    degree: usize,
+    /// Lower bound of the spectrum (smallest eigenvalue)
+    lambda_min: f64,
+    /// Upper bound of the spectrum (largest eigenvalue)
+    lambda_max: f64,
+}
+
+impl ChebyshevPre {
+    /// Create a new Chebyshev preconditioner
+    ///
+    /// # Arguments
+    /// * `matrix` - System matrix (cloned for storage)
+    /// * `degree` - Degree of the Chebyshev polynomial
+    /// * `lambda_min` - Lower bound of the spectrum
+    /// * `lambda_max` - Upper bound of the spectrum
+    pub fn new(matrix: Mat<f64>, degree: usize, lambda_min: f64, lambda_max: f64) -> Self {
+        Self { matrix, degree, lambda_min, lambda_max }
+    }
+
+    /// Estimate eigenvalue bounds using power iteration if not provided
+    ///
+    /// # Arguments
+    /// * `matrix` - System matrix
+    /// * `max_iters` - Maximum iterations for eigenvalue estimation
+    /// * `tol` - Tolerance for eigenvalue estimation
+    ///
+    /// Returns (lambda_min, lambda_max)
+    pub fn estimate_eigenvalue_bounds(matrix: &Mat<f64>, max_iters: usize, tol: f64) -> (f64, f64) {
+        let n = matrix.nrows();
+        if n == 0 {
+            return (1.0, 1.0);
+        }
+
+        // Estimate largest eigenvalue using power iteration
+        let mut v = vec![1.0 / (n as f64).sqrt(); n];
+        let mut av = vec![0.0; n];
+        let mut lambda_max = 1.0;
+
+        for _ in 0..max_iters {
+            // Apply matrix
+            matrix.matvec(&v, &mut av);
+            
+            // Rayleigh quotient
+            let new_lambda_max: f64 = v.iter().zip(av.iter()).map(|(&vi, &avi)| vi * avi).sum();
+            
+            if (new_lambda_max - lambda_max).abs() < tol * lambda_max.abs() {
+                lambda_max = new_lambda_max;
+                break;
+            }
+            lambda_max = new_lambda_max;
+            
+            // Normalize
+            let norm: f64 = av.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            if norm > 0.0 {
+                for i in 0..n {
+                    v[i] = av[i] / norm;
+                }
+            }
+        }
+
+        // Estimate smallest eigenvalue (very rough approximation)
+        // For SPD matrices, use a fraction of the largest eigenvalue
+        let lambda_min = lambda_max * 0.01; // Conservative estimate
+
+        (lambda_min, lambda_max)
+    }
+}
+
+impl Preconditioner<Mat<f64>, Vec<f64>> for ChebyshevPre {
+    /// Setup the Chebyshev preconditioner (stores matrix for later use)
+    fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
+        self.matrix = a.clone();
+        Ok(())
+    }
+
+    /// Apply Chebyshev polynomial preconditioner
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        if r.len() != z.len() {
+            return Err(KError::SolveError("Vector length mismatch".to_string()));
+        }
+        
+        apply_chebyshev(&self.matrix, r, z, self.lambda_min, self.lambda_max, self.degree);
+        Ok(())
+    }
+}
+
+/// Legacy Chebyshev struct for backward compatibility
 ///
 /// Stores the polynomial degree and optional spectrum bounds.
 pub struct Chebyshev<T> {

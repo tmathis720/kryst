@@ -68,6 +68,32 @@ pub struct PcOptions {
     pub ilut_drop_tol: Option<f64>,
     /// Maximum fill for ILUT
     pub ilut_max_fill: Option<usize>,
+    /// Pivot tolerance for ILUTP
+    pub ilut_perm_tol: Option<f64>,
+    /// Matrix reordering algorithm (colamd, amd, rcm, cuthill_mckee, none)
+    pub reorder: Option<String>,
+    /// Matrix scaling algorithm (diagonal, symmetric, none)
+    pub scaling: Option<String>,
+    /// Overlap layers for Additive Schwarz Method (ASM)
+    pub asm_overlap: Option<usize>,
+    /// Subdomain specification for ASM (default: automatic)
+    pub asm_subdomains: Option<Vec<usize>>,
+    /// Inner preconditioner type for ASM blocks
+    pub asm_inner_pc: Option<String>,
+    /// Minimum eigenvalue estimate for Chebyshev
+    pub chebyshev_lambda_min: Option<f64>,
+    /// Maximum eigenvalue estimate for Chebyshev
+    pub chebyshev_lambda_max: Option<f64>,
+    /// Number of AMG coarsening levels
+    pub amg_levels: Option<usize>,
+    /// Strength-of-connection threshold for AMG
+    pub amg_strength_threshold: Option<f64>,
+    /// Number of pre-smoothing iterations for AMG
+    pub amg_nu_pre: Option<usize>,
+    /// Number of post-smoothing iterations for AMG
+    pub amg_nu_post: Option<usize>,
+    /// Preconditioner chain specification (comma-separated list)
+    pub pc_chain: Option<String>,
     /// Relaxation factor ω for SSOR (legacy compatibility)
     pub omega: Option<f64>,
     /// Drop tolerance for ILU(p) (legacy compatibility)
@@ -326,6 +352,135 @@ impl PcOptions {
                         .map_err(|_| KError::SolveError(format!("Invalid ilut_max_fill value: {}", args[i + 1])))?);
                     i += 2;
                 }
+                "-pc_ilut_perm_tol" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_ilut_perm_tol".to_string()));
+                    }
+                    opts.ilut_perm_tol = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid ilut_perm_tol value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_reorder" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_reorder".to_string()));
+                    }
+                    let reorder_type = args[i + 1].to_lowercase();
+                    match reorder_type.as_str() {
+                        "none" | "colamd" | "amd" | "rcm" | "cuthill_mckee" => {
+                            opts.reorder = Some(reorder_type);
+                        }
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid reorder type: {}. Use 'none', 'colamd', 'amd', 'rcm', or 'cuthill_mckee'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_scaling" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_scaling".to_string()));
+                    }
+                    let scaling_type = args[i + 1].to_lowercase();
+                    match scaling_type.as_str() {
+                        "none" | "diagonal" | "symmetric" => {
+                            opts.scaling = Some(scaling_type);
+                        }
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid scaling type: {}. Use 'none', 'diagonal', or 'symmetric'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_asm_overlap" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_asm_overlap".to_string()));
+                    }
+                    opts.asm_overlap = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid asm_overlap value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_asm_subdomains" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_asm_subdomains".to_string()));
+                    }
+                    // Parse comma-separated list of subdomain indices
+                    let subdomains: Result<Vec<usize>, _> = args[i + 1]
+                        .split(',')
+                        .map(|s| s.trim().parse())
+                        .collect();
+                    opts.asm_subdomains = Some(subdomains
+                        .map_err(|_| KError::SolveError(format!("Invalid asm_subdomains value: {}. Use comma-separated indices like '0,1,2'", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_asm_inner_pc" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_asm_inner_pc".to_string()));
+                    }
+                    let inner_pc = args[i + 1].to_lowercase();
+                    match inner_pc.as_str() {
+                        "jacobi" | "ilu" | "ilut" | "ilutp" => {
+                            opts.asm_inner_pc = Some(inner_pc);
+                        }
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid asm_inner_pc type: {}. Use 'jacobi', 'ilu', 'ilut', or 'ilutp'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_chebyshev_lambda_min" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_chebyshev_lambda_min".to_string()));
+                    }
+                    opts.chebyshev_lambda_min = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid chebyshev_lambda_min value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_chebyshev_lambda_max" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_chebyshev_lambda_max".to_string()));
+                    }
+                    opts.chebyshev_lambda_max = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid chebyshev_lambda_max value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_amg_levels" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_amg_levels".to_string()));
+                    }
+                    opts.amg_levels = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid amg_levels value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_amg_strength_threshold" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_amg_strength_threshold".to_string()));
+                    }
+                    opts.amg_strength_threshold = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid amg_strength_threshold value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_amg_nu_pre" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_amg_nu_pre".to_string()));
+                    }
+                    opts.amg_nu_pre = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid amg_nu_pre value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_amg_nu_post" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_amg_nu_post".to_string()));
+                    }
+                    opts.amg_nu_post = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid amg_nu_post value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_chain" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_chain".to_string()));
+                    }
+                    opts.pc_chain = Some(args[i + 1].to_string());
+                    i += 2;
+                }
                 arg if arg.starts_with("-pc_") => {
                     return Err(KError::SolveError(format!("Unrecognized PC option: {}", arg)));
                 }
@@ -369,6 +524,21 @@ impl PcOptions {
             opts.ilut_max_fill = Some(val.parse()
                 .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILUT_MAX_FILL: {}", val)))?);
         }
+        if let Ok(val) = std::env::var("KRYST_PC_ILUT_PERM_TOL") {
+            opts.ilut_perm_tol = Some(val.parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILUT_PERM_TOL: {}", val)))?);
+        }
+        if let Ok(val) = std::env::var("KRYST_PC_REORDER") {
+            let reorder_type = val.to_lowercase();
+            match reorder_type.as_str() {
+                "none" | "colamd" | "amd" => {
+                    opts.reorder = Some(reorder_type);
+                }
+                _ => {
+                    return Err(KError::SolveError(format!("Invalid KRYST_PC_REORDER: {}. Use 'none', 'colamd', or 'amd'", val)));
+                }
+            }
+        }
         
         Ok(opts)
     }
@@ -379,7 +549,7 @@ pub fn print_help() {
     println!("Kryst Linear Solver Options:");
     println!();
     println!("KSP (Krylov Solver) Options:");
-    println!("  -ksp_type <solver>         Solver type: cg, pcg, gmres, bicgstab, cgs, qmr, tfqmr, minres, cgnr, preonly");
+    println!("  -ksp_type <solver>         Solver type: cg, pcg, gmres, fgmres, bicgstab, cgs, qmr, tfqmr, minres, cgnr, preonly");
     println!("  -ksp_rtol <float>          Relative convergence tolerance (default: 1e-6)");
     println!("  -ksp_atol <float>          Absolute convergence tolerance (default: 1e-12)");
     println!("  -ksp_dtol <float>          Divergence tolerance (default: 1e3)");

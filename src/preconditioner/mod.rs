@@ -79,9 +79,11 @@ pub mod sor;
 pub mod amg;
 pub mod asm;
 pub mod ilut;
+pub mod ilutp;
 pub mod ilup;
 pub mod chebyshev;
 pub mod approxinv;
+pub mod chain;
 
 // Re-exports for convenience
 pub use jacobi::Jacobi;
@@ -90,9 +92,11 @@ pub use ilu::Ilu0;
 pub use amg::AMG;
 pub use asm::AdditiveSchwarz;
 pub use ilut::Ilut;
+pub use ilutp::Ilutp;
 pub use ilup::Ilup;
-pub use chebyshev::Chebyshev;
+pub use chebyshev::{Chebyshev, ChebyshevPre};
 pub use approxinv::ApproxInv;
+pub use chain::PcChain;
 pub use self::sor::MatSorType;
 
 /// Unified preconditioner enum for all supported types.
