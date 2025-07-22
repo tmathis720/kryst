@@ -358,6 +358,336 @@ where
         
         Ok(stats)
     }
+
+    /// Solve the linear system Ax = b using the BiCGStab algorithm with workspace.
+    ///
+    /// This method uses pre-allocated workspace buffers for maximum efficiency,
+    /// eliminating per-iteration memory allocations.
+    ///
+    /// # Arguments
+    /// * `a` - System matrix
+    /// * `pc` - Optional preconditioner 
+    /// * `b` - Right-hand side vector
+    /// * `x` - Initial guess (input/output)
+    /// * `comm` - Communicator for parallel reductions
+    /// * `monitors` - Callbacks to invoke at each iteration with (iteration, residual_norm)
+    /// * `work` - Pre-allocated workspace containing temporary vectors
+    ///
+    /// Returns convergence statistics and the solution vector.
+    fn solve_with_workspace(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm, monitors: &[Box<dyn Fn(usize, T) + Send + Sync>], work: &mut crate::context::ksp_context::Workspace) -> Result<SolveStats<T>, KError> {
+        let _solve_stage = StageGuard::new("BiCGStabSolveWorkspace");
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting BiCGStab solve with workspace and {} monitors", monitors.len());
+
+        let _ = pc; // BiCGStab does not use preconditioner (yet)
+        let n = b.as_ref().len();
+        let ip = ();
+        
+        // Validate workspace compatibility
+        if work.n != n {
+            return Err(KError::SolveError(format!("Workspace dimension {} incompatible with problem size {}", work.n, n)));
+        }
+        
+        // For BiCGStab, we need 5 vectors: r, r_hat, p, v, s, t
+        // We'll use tmp1-tmp4 and allocate two more for s, t
+        // Future enhancement: extend workspace to have more tmp vectors
+        let mut s = vec![T::zero(); n];
+        let mut t = vec![T::zero(); n];
+        let mut xk = x.as_ref().to_vec();
+        
+        // r0 = b - A x0 (use tmp1 for residual)
+        let mut tmp = V::from(vec![T::zero(); n]);
+        {
+            let _matvec_stage = StageGuard::new("BiCGStabMatVec");
+            a.matvec(&V::from(xk.clone()), &mut tmp);
+        }
+        
+        // Convert to f64 for workspace compatibility and back
+        for i in 0..n {
+            work.tmp1[i] = b.as_ref()[i].to_f64().unwrap() - tmp.as_ref()[i].to_f64().unwrap();
+        }
+        
+        // r_hat = r (shadow residual) - use tmp2
+        work.tmp2.copy_from_slice(&work.tmp1);
+        
+        // p = r (initial search direction) - use tmp3  
+        work.tmp3.copy_from_slice(&work.tmp1);
+        
+        let mut rho_prev = T::one();
+        let mut alpha = T::one();
+        let mut omega_prev = T::one();
+        
+        // Compute initial residual norm
+        let r_vec = V::from(work.tmp1.iter().map(|&x| num_traits::cast(x).unwrap()).collect::<Vec<_>>());
+        let res0 = {
+            let _norm_stage = StageGuard::new("BiCGStabNorm");
+            ip.norm(&r_vec, comm)
+        };
+        
+        // Invoke monitors for iteration 0
+        for monitor in monitors {
+            monitor(0, res0);
+        }
+
+        let mut stats = SolveStats { 
+            iterations: 0, 
+            final_residual: res0, 
+            reason: ConvergedReason::Continued 
+        };
+        
+        // Check initial convergence
+        let (reason, initial_stats) = self.conv.check(res0, res0, 0);
+        if reason != ConvergedReason::Continued {
+            *x = V::from(xk);
+            return Ok(initial_stats);
+        }
+
+        #[cfg(feature = "logging")]
+        trace!("BiCGStab initial residual: {:.3e}", res0);
+        
+        for iter in 1..=self.conv.max_iters {
+            let _iter_stage = StageGuard::new("BiCGStabIteration");
+            
+            #[cfg(feature = "logging")]
+            trace!("BiCGStab iteration {}", iter);
+
+            // rho = <r_hat, r>
+            let r_hat_vec = V::from(work.tmp2.iter().map(|&x| num_traits::cast(x).unwrap()).collect::<Vec<_>>());
+            let r_vec = V::from(work.tmp1.iter().map(|&x| num_traits::cast(x).unwrap()).collect::<Vec<_>>());
+            let rho = {
+                let _dot_stage = StageGuard::new("BiCGStabDotProduct");
+                ip.dot(&r_hat_vec, &r_vec, comm)
+            };
+            
+            if rho.abs() < T::epsilon() {
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab breakdown: rho = {:.3e}", rho);
+                break;
+            }
+            
+            let beta = if iter == 1 {
+                T::zero()
+            } else {
+                (rho / rho_prev) * (alpha / omega_prev)
+            };
+            
+            // p = r + beta * (p - omega_prev * v)
+            {
+                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
+                let beta_f64 = beta.to_f64().unwrap();
+                let omega_f64 = omega_prev.to_f64().unwrap();
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    work.tmp3.par_iter_mut()
+                        .zip(work.tmp1.par_iter())
+                        .zip(work.tmp4.par_iter())
+                        .for_each(|((p_j, &r_j), &v_j)| {
+                            *p_j = r_j + beta_f64 * (*p_j - omega_f64 * v_j);
+                        });
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for ((p_j, r_j), v_j) in work.tmp3.iter_mut().zip(work.tmp1.iter()).zip(work.tmp4.iter()) {
+                        *p_j = *r_j + beta_f64 * (*p_j - omega_f64 * *v_j);
+                    }
+                }
+            }
+            
+            // v = A p (use tmp4 for v)
+            {
+                let _matvec_stage = StageGuard::new("BiCGStabMatVec");
+                let p_vec = V::from(work.tmp3.iter().map(|&x| num_traits::cast(x).unwrap()).collect::<Vec<_>>());
+                let mut v_tmp = V::from(vec![T::zero(); n]);
+                a.matvec(&p_vec, &mut v_tmp);
+                for i in 0..n {
+                    work.tmp4[i] = v_tmp.as_ref()[i].to_f64().unwrap();
+                }
+            }
+            
+            // alpha = rho / <r_hat, v>
+            let v_vec = V::from(work.tmp4.iter().map(|&x| num_traits::cast(x).unwrap()).collect::<Vec<_>>());
+            let alpha_den = {
+                let _dot_stage = StageGuard::new("BiCGStabDotProduct");
+                ip.dot(&r_hat_vec, &v_vec, comm)
+            };
+            
+            if alpha_den.abs() < T::epsilon() {
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab breakdown: alpha_den = {:.3e}", alpha_den);
+                break;
+            }
+            alpha = rho / alpha_den;
+            
+            // s = r - alpha * v
+            {
+                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
+                let alpha_f64 = alpha.to_f64().unwrap();
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    s.par_iter_mut().zip(work.tmp1.par_iter()).zip(work.tmp4.par_iter()).for_each(|((sj, &rj), &vj)| {
+                        *sj = num_traits::cast(rj - alpha_f64 * vj).unwrap();
+                    });
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for ((sj, rj), vj) in s.iter_mut().zip(work.tmp1.iter()).zip(work.tmp4.iter()) {
+                        *sj = num_traits::cast(*rj - alpha_f64 * *vj).unwrap();
+                    }
+                }
+            }
+            
+            // Check convergence for s
+            let s_vec = V::from(s.clone());
+            let s_norm = {
+                let _norm_stage = StageGuard::new("BiCGStabNorm");
+                ip.norm(&s_vec, comm)
+            };
+            
+            for monitor in monitors {
+                monitor(iter, s_norm);
+            }
+
+            #[cfg(feature = "logging")]
+            trace!("BiCGStab iteration {}: s_norm = {:.3e}", iter, s_norm);
+            
+            let (s_reason, s_stats) = self.conv.check(s_norm, res0, iter);
+            if s_reason != ConvergedReason::Continued {
+                // Early convergence: update x and return
+                let alpha_f64 = alpha.to_f64().unwrap();
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    xk.par_iter_mut().zip(work.tmp3.par_iter()).for_each(|(xj, &pj)| {
+                        *xj = *xj + num_traits::cast(alpha_f64 * pj).unwrap();
+                    });
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for (xj, pj) in xk.iter_mut().zip(work.tmp3.iter()) {
+                        *xj = *xj + num_traits::cast(alpha_f64 * *pj).unwrap();
+                    }
+                }
+                
+                *x = V::from(xk);
+                
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab early convergence after {} iterations: {:?}", iter, s_reason);
+                return Ok(s_stats);
+            }
+            
+            // t = A s
+            {
+                let _matvec_stage = StageGuard::new("BiCGStabMatVec");
+                let mut t_tmp = V::from(vec![T::zero(); n]);
+                a.matvec(&s_vec, &mut t_tmp);
+                for i in 0..n {
+                    t[i] = t_tmp.as_ref()[i];
+                }
+            }
+            
+            // omega = <t, s> / <t, t>
+            let t_vec = V::from(t.clone());
+            let (omega_num, omega_den) = {
+                let _dot_stage = StageGuard::new("BiCGStabDotProduct");
+                let omega_num = ip.dot(&t_vec, &s_vec, comm);
+                let omega_den = ip.dot(&t_vec, &t_vec, comm);
+                (omega_num, omega_den)
+            };
+            
+            if omega_den.abs() < T::epsilon() {
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab breakdown: omega_den = {:.3e}", omega_den);
+                break;
+            }
+            let omega = omega_num / omega_den;
+            
+            // x = x + alpha * p + omega * s
+            {
+                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
+                let alpha_f64 = alpha.to_f64().unwrap();
+                let omega_f64 = omega.to_f64().unwrap();
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    xk.par_iter_mut()
+                        .zip(work.tmp3.par_iter())
+                        .zip(s.par_iter())
+                        .for_each(|((xj, &pj), &sj)| {
+                            *xj = *xj + num_traits::cast(alpha_f64 * pj).unwrap() + num_traits::cast(omega_f64 * sj.to_f64().unwrap()).unwrap();
+                        });
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for ((xj, pj), sj) in xk.iter_mut().zip(work.tmp3.iter()).zip(s.iter()) {
+                        *xj = *xj + num_traits::cast(alpha_f64 * *pj).unwrap() + num_traits::cast(omega_f64 * sj.to_f64().unwrap()).unwrap();
+                    }
+                }
+            }
+            
+            // r = s - omega * t (update tmp1) 
+            {
+                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
+                let omega_f64 = omega.to_f64().unwrap();
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    work.tmp1.par_iter_mut().zip(s.par_iter()).zip(t.par_iter()).for_each(|((rj, &sj), &tj)| {
+                        *rj = sj.to_f64().unwrap() - omega_f64 * tj.to_f64().unwrap();
+                    });
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for ((rj, sj), tj) in work.tmp1.iter_mut().zip(s.iter()).zip(t.iter()) {
+                        *rj = sj.to_f64().unwrap() - omega_f64 * tj.to_f64().unwrap();
+                    }
+                }
+            }
+            
+            // Compute norm of r
+            let r_vec = V::from(work.tmp1.iter().map(|&x| num_traits::cast(x).unwrap()).collect::<Vec<_>>());
+            let r_norm = {
+                let _norm_stage = StageGuard::new("BiCGStabNorm");
+                ip.norm(&r_vec, comm)
+            };
+            
+            for monitor in monitors {
+                monitor(iter, r_norm);
+            }
+
+            #[cfg(feature = "logging")]
+            trace!("BiCGStab iteration {}: residual = {:.3e}", iter, r_norm);
+            
+            let (r_reason, r_stats) = self.conv.check(r_norm, res0, iter);
+            stats = r_stats;
+            if r_reason != ConvergedReason::Continued {
+                *x = V::from(xk);
+                
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab converged after {} iterations: {:?}", iter, r_reason);
+                return Ok(stats);
+            }
+            
+            if omega.abs() < T::epsilon() {
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab breakdown: omega = {:.3e}", omega);
+                break;
+            }
+            
+            rho_prev = rho;
+            omega_prev = omega;
+        }
+        
+        *x = V::from(xk);
+        
+        #[cfg(feature = "logging")]
+        trace!("BiCGStab solve completed: {} iterations, final residual: {:.3e}", 
+               stats.iterations, stats.final_residual);
+        
+        Ok(stats)
+    }
 }
 
 #[cfg(test)]

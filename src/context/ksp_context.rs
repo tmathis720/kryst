@@ -39,27 +39,31 @@ use log::trace;
 /// This struct contains all the working arrays needed by Krylov solvers,
 /// allocated once during setup and reused across multiple solves.
 #[derive(Debug)]
-struct Workspace {
+pub struct Workspace {
     /// Krylov basis vectors Q: size (restart+1) × n for GMRES
-    q: Vec<Vec<f64>>,
+    pub q: Vec<Vec<f64>>,
     /// Preconditioned basis vectors Z: size restart × n for FGMRES  
-    z: Vec<Vec<f64>>,
+    pub z: Vec<Vec<f64>>,
     /// Hessenberg matrix H: (restart+1) × restart for GMRES
-    h: Vec<Vec<f64>>,
+    pub h: Vec<Vec<f64>>,
     /// Givens rotation cosines for GMRES
-    cs: Vec<f64>,
+    pub cs: Vec<f64>,
     /// Givens rotation sines for GMRES
-    sn: Vec<f64>,
+    pub sn: Vec<f64>,
     /// Residual vector g in least-squares subproblem
-    g: Vec<f64>,
+    pub g: Vec<f64>,
     /// Temporary vector 1 for general use
-    tmp1: Vec<f64>,
+    pub tmp1: Vec<f64>,
     /// Temporary vector 2 for general use  
-    tmp2: Vec<f64>,
+    pub tmp2: Vec<f64>,
+    /// Temporary vector 3 for general use
+    pub tmp3: Vec<f64>,
+    /// Temporary vector 4 for general use
+    pub tmp4: Vec<f64>,
     /// Vector dimension (for validation)
-    n: usize,
+    pub n: usize,
     /// Current restart parameter (for validation)
-    restart: usize,
+    pub restart: usize,
 }
 
 /// All supported Krylov solver types.
@@ -351,6 +355,8 @@ impl Workspace {
             g: vec![0.0; maxv],
             tmp1: vec![0.0; n],
             tmp2: vec![0.0; n],
+            tmp3: vec![0.0; n],
+            tmp4: vec![0.0; n],
             n,
             restart,
         }
@@ -985,6 +991,15 @@ impl KspContext {
             #[cfg(feature = "logging")]
             trace!("Allocating new workspace for {} unknowns, restart={}", n, self.restart);
             self.work = Some(Workspace::new(n, self.restart));
+            
+            // Setup solver-specific workspace if needed
+            if let Some(ref mut solver) = self.solver {
+                if let Some(ref mut work) = self.work {
+                    solver.setup_workspace(work);
+                    #[cfg(feature = "logging")]
+                    trace!("Setup solver workspace");
+                }
+            }
         }
         
         self.setup_called = true;
@@ -1089,11 +1104,11 @@ impl KspContext {
             #[cfg(feature = "logging")]
             trace!("Starting Krylov iteration with solver type: {:?}", self.solver_type);
 
-            // Use the Krylov solver with monitors
+            // Use the Krylov solver with workspace
             let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
-            let stats = solver.solve_with_monitors(a, self.pc.as_deref(), b, x, 
+            let stats = solver.solve_with_workspace(a, self.pc.as_deref(), b, x, 
                 &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                &self.monitors)?;
+                &self.monitors, self.work.as_mut().unwrap())?;
             
             #[cfg(feature = "logging")]
             trace!("Krylov solve completed: {} iterations, final residual: {:.3e}", 

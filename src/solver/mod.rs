@@ -80,8 +80,46 @@ pub trait LinearSolver<M, V> {
         self.solve(a, pc, b, x, comm)
     }
 
+    /// Solve the linear system using pre-allocated workspace buffers.
+    ///
+    /// This method provides access to the unified workspace for maximum efficiency
+    /// by eliminating per-iteration allocations. Solvers should use workspace
+    /// buffers instead of allocating temporary vectors.
+    ///
+    /// # Arguments
+    /// * `a` - Matrix (system operator)
+    /// * `pc` - Optional preconditioner
+    /// * `b` - Right-hand side vector
+    /// * `x` - On input: initial guess; on output: solution vector
+    /// * `comm` - Communicator for parallel operations
+    /// * `monitors` - Callbacks to invoke at each iteration with (iteration, residual_norm)
+    /// * `work` - Pre-allocated workspace containing temporary vectors
+    ///
+    /// # Returns
+    /// * `Ok(SolveStats)` with convergence information
+    /// * `Err(Self::Error)` on failure
+    fn solve_with_workspace(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
+        _work: &mut crate::context::ksp_context::Workspace,
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        // Default implementation falls back to solve_with_monitors
+        self.solve_with_monitors(a, pc, b, x, comm, monitors)
+    }
+
     /// Scalar type used by the solver (e.g., f32, f64)
     type Scalar: Copy + PartialOrd + From<f64>;
+    
+    /// Setup workspace for the solver.
+    /// 
+    /// This method allows solvers to configure workspace buffers they need
+    /// and grab references to tmp1, tmp2, etc. from the unified workspace.
+    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
 }
 
 // Re-export all supported solver types for user convenience
