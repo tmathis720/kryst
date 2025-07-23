@@ -8,7 +8,8 @@
 //! - Iteration monitoring
 //! - Preconditioner integration
 
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use kryst::utils::convergence::{ConvergedReason};
 use faer::Mat;
 

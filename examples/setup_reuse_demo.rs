@@ -12,7 +12,8 @@
 
 use std::time::Instant;
 use faer::Mat;
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix

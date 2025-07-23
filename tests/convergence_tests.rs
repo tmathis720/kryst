@@ -1,8 +1,8 @@
 //! Tests for flexible convergence and divergence criteria
 
 use kryst::utils::convergence::{Convergence, ConvergedReason};
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
-
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_cuthill_mckee_reordering() {
         let a = create_test_matrix();
-        let (result, info) = preprocess_matrix(&a, ReorderingMethod::CuthillMckee, ScalingMethod::None).unwrap();
+        let (_result, info) = preprocess_matrix(&a, ReorderingMethod::CuthillMckee, ScalingMethod::None).unwrap();
         
         assert!(!info.is_identity);
         assert_eq!(info.permutation.len(), 4);
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn test_diagonal_scaling() {
         let a = create_test_matrix();
-        let (result, info) = preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::Diagonal).unwrap();
+        let (_result, info) = preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::Diagonal).unwrap();
         
         assert!(!info.is_identity);
         assert!(info.left_scaling.is_some());

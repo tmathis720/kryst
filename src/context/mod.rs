@@ -24,3 +24,4 @@
 pub mod ksp_context;
 pub use ksp_context::KspContext;
 pub mod pc_context;
+pub use pc_context::{PcType, PcFactory, DeferredPcInfo, NoOpPreconditioner, LuPreconditioner, QrPreconditioner, PC, SparsityPattern};

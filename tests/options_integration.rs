@@ -1,7 +1,7 @@
 //! Tests for the PETSc-style options parsing and integration.
 
 use kryst::config::options::{KspOptions, PcOptions, PcSide, parse_all_options};
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::KspContext;
 use kryst::error::KError;
 
 #[test]
@@ -180,7 +180,7 @@ fn test_solver_type_from_str() {
 #[test]
 fn test_pc_type_from_str() {
     use std::str::FromStr;
-    use kryst::context::ksp_context::PcType;
+    use kryst::context::pc_context::PcType;
     
     assert_eq!(PcType::from_str("jacobi").unwrap(), PcType::Jacobi);
     assert_eq!(PcType::from_str("JACOBI").unwrap(), PcType::Jacobi); // Case insensitive
@@ -198,7 +198,8 @@ fn test_pc_type_from_str() {
 
 #[test]
 fn test_preonly_configuration() {
-    use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+    use kryst::context::ksp_context::{KspContext, SolverType};
+    use kryst::context::pc_context::PcType;
     
     let mut ksp = KspContext::new();
     
@@ -213,7 +214,7 @@ fn test_preonly_configuration() {
 #[test]
 fn test_preonly_options_integration() {
     use kryst::config::options::{KspOptions, PcOptions};
-    use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+    use kryst::context::ksp_context::KspContext;
     
     let args = vec!["-ksp_type", "preonly", "-pc_type", "lu"];
     let ksp_opts = KspOptions::from_args(&args).unwrap();

@@ -8,7 +8,8 @@
 //! - Parameter tuning and automated optimization
 
 use kryst::context::KspContext;
-use kryst::context::ksp_context::{SolverType, PcType};
+use kryst::context::ksp_context::SolverType;
+use kryst::context::pc_context::PcType;
 use kryst::config::options::PcOptions;
 use kryst::utils::monitor::IterationMonitor;
 use kryst::utils::tuning::ParameterTuner;

@@ -6,7 +6,8 @@
 //! 3. Command-line parsing works for new ASM/Chebyshev/AMG options
 
 use kryst::{
-    context::ksp_context::{KspContext, SolverType, PcType},
+    context::ksp_context::{KspContext, SolverType},
+    context::pc_context::PcType,
     config::options::PcOptions,
 };
 use faer::Mat;

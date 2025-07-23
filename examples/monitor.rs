@@ -7,7 +7,8 @@
 //!
 //! Run with: RUST_LOG=trace cargo run --example monitor --features=logging
 
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use kryst::error::KError;
 use faer::Mat;
 use std::sync::{Arc, Mutex};

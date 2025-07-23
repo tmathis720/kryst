@@ -26,7 +26,7 @@
 
 use std::fs::File;
 use std::io::{Write, BufWriter};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use serde::{Serialize, Deserialize};
 
 /// Convergence statistics computed from iteration history.

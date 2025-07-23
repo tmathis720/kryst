@@ -24,7 +24,8 @@
 
 use crate::context::KspContext;
 use crate::config::options::PcOptions;
-use crate::context::ksp_context::{SolverType, PcType};
+use crate::context::ksp_context::SolverType;
+use crate::context::pc_context::PcType;
 use crate::utils::monitor::IterationMonitor;
 use crate::error::KError;
 use faer::Mat;

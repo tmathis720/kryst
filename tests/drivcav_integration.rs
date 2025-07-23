@@ -4,7 +4,8 @@
 //! matrix reordering, and KspContext integration.
 
 use kryst::config::options::PcOptions;
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use kryst::error::KError;
 use faer::Mat;
 

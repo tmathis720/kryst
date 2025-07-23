@@ -1,7 +1,8 @@
 //! Integration tests for PREONLY functionality.
 
 use kryst::config::options::{KspOptions, PcOptions};
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use faer::Mat;
 
 #[test]

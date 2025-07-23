@@ -1,6 +1,7 @@
 //! Tests for workspace reuse and explicit setup phase.
 
-use kryst::context::ksp_context::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use faer::Mat;
 
 #[test]
