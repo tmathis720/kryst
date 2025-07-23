@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Solving linear system with GMRES (no preconditioner)...");
 
     // Solve the system
-    let stats = solver.solve(&matrix, None, &rhs, &mut solution, &comm)?;
+    let stats = solver.solve(&matrix, None, &rhs, &mut solution, &comm, None, None)?;
     
     println!("Solution completed!");
     println!("Iterations: {}", stats.iterations);

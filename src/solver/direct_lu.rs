@@ -19,8 +19,6 @@ use faer::{Mat, MatMut, Conj};
 use faer::traits::{ComplexField, RealField};
 
 #[cfg(feature = "logging")]
-use log::trace;
-#[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 
 /// LU solver using full pivoting from Faer.
@@ -71,16 +69,44 @@ where
     /// * `pc` - (Unused) Preconditioner (not supported for direct solvers)
     /// * `b` - Right-hand side vector
     /// * `x` - On input: ignored; on output: solution vector
+    /// * `comm` - Communicator for parallel operations (unused for direct solvers)
+    /// * `monitors` - Optional callbacks to invoke at each iteration
+    /// * `work` - Optional workspace (unused for direct solvers)
     ///
     /// # Returns
     /// * `Ok(SolveStats)` (always converged in 1 iteration)
-    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>, _comm: &crate::parallel::UniverseComm) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    fn solve(
+        &mut self,
+        a: &Mat<T>,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>,
+        b: &Vec<T>,
+        x: &mut Vec<T>,
+        _comm: &crate::parallel::UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        _work: Option<&mut crate::context::ksp_context::Workspace>,
+    ) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::new("LuSolve");
+        
         let _ = pc; // Direct solvers do not use preconditioner
+        
+        // Call monitors at start if provided
+        if let Some(monitors) = monitors {
+            for monitor in monitors {
+                monitor(0, T::zero());
+            }
+        }
+        
+        #[cfg(feature = "logging")]
+        let _fact_guard = StageGuard::new("LuFactor");
+        
         // Compute LU factorization (overwrites any previous factor)
         let factor = FullPivLu::new(a.as_ref());
         self.factor = Some(factor);
+        
         // Copy b into x
         x.clone_from(b);
+        
         // Solve in-place: x = A^{-1} b
         let n = x.len();
         let x_mat = MatMut::from_column_major_slice_mut(x, n, 1);
@@ -88,47 +114,15 @@ where
             .as_ref()
             .unwrap()
             .solve_in_place_with_conj(Conj::No, x_mat);
+        
+        // Call monitors at end if provided
+        if let Some(monitors) = monitors {
+            for monitor in monitors {
+                monitor(1, T::zero());
+            }
+        }
+        
         // For direct solvers, always converged in 1 iteration
-        Ok(crate::utils::convergence::SolveStats {
-            iterations: 1,
-            final_residual: T::zero(),
-            reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
-        })
-    }
-    
-    /// Solve using LU with monitor callbacks and profiling.
-    fn solve_with_monitors(
-        &mut self,
-        a: &Mat<T>,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>,
-        b: &Vec<T>,
-        x: &mut Vec<T>,
-        _comm: &crate::parallel::UniverseComm,
-        monitors: &[Box<dyn Fn(usize, T) + Send + Sync>],
-    ) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("LuSolve");
-        #[cfg(feature = "logging")]
-        trace!("Starting LU solve with {} monitors", monitors.len());
-        for (i, m) in monitors.iter().enumerate().take(1) {
-            m(i, T::zero());
-        }
-        let _ = pc;
-        #[cfg(feature = "logging")]
-        let _fact_guard = StageGuard::new("LuFactor");
-        let factor = FullPivLu::new(a.as_ref());
-        self.factor = Some(factor);
-        #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::new("LuMatVec");
-        x.clone_from(b);
-        let n = x.len();
-        let x_mat = MatMut::from_column_major_slice_mut(x, n, 1);
-        self.factor.as_ref().unwrap().solve_in_place_with_conj(Conj::No, x_mat);
-        for (i, m) in monitors.iter().enumerate().skip(1).take(1) {
-            m(i, T::zero());
-        }
-        #[cfg(feature = "logging")]
-        trace!("LU solve completed");
         Ok(crate::utils::convergence::SolveStats {
             iterations: 1,
             final_residual: T::zero(),
@@ -164,17 +158,48 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     /// * `pc` - (Unused) Preconditioner (not supported for direct solvers)
     /// * `b` - Right-hand side vector
     /// * `x` - On input: ignored; on output: solution vector
+    /// * `comm` - Communicator for parallel operations (unused for direct solvers)
+    /// * `monitors` - Optional callbacks to invoke at each iteration
+    /// * `work` - Optional workspace (unused for direct solvers)
     ///
     /// # Returns
     /// * `Ok(SolveStats)` (always converged in 1 iteration)
-    fn solve(&mut self, a: &Mat<T>, pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>, b: &Vec<T>, x: &mut Vec<T>, _comm: &crate::parallel::UniverseComm) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    fn solve(
+        &mut self,
+        a: &Mat<T>,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>,
+        b: &Vec<T>,
+        x: &mut Vec<T>,
+        _comm: &crate::parallel::UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        _work: Option<&mut crate::context::ksp_context::Workspace>,
+    ) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::new("QrSolve");
+        
         let _ = pc; // Direct solvers do not use preconditioner
+        
+        // Call monitors at start if provided
+        if let Some(monitors) = monitors {
+            for monitor in monitors {
+                monitor(0, T::zero());
+            }
+        }
+        
         // Compute QR factorization
         let factor = Qr::new(a.as_ref());
         x.clone_from(b);
         let n = x.len();
         let x_mat = MatMut::from_column_major_slice_mut(x, n, 1);
         factor.solve_in_place_with_conj(Conj::No, x_mat);
+        
+        // Call monitors at end if provided
+        if let Some(monitors) = monitors {
+            for monitor in monitors {
+                monitor(1, T::zero());
+            }
+        }
+        
         Ok(crate::utils::convergence::SolveStats {
             iterations: 1,
             final_residual: T::zero(),
@@ -208,7 +233,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = LuSolver::<f64>::new();
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -232,7 +257,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = QrSolver::new();
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {

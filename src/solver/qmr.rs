@@ -49,6 +49,29 @@ impl<T: Float> QmrSolver<T> {
             }
         }
     }
+
+    /// Setup workspace for the QMR solver.
+    ///
+    /// Allocates temporary vectors needed for the QMR algorithm:
+    /// r, r_tld, p, p_tld, v, v_tld, s, t vectors.
+    pub fn setup_workspace(&mut self, work: &mut crate::context::ksp_context::Workspace, n: usize) {
+        work.n = n;
+        work.restart = 1; // QMR doesn't use restart like GMRES
+        
+        // Ensure we have enough temporary vectors for QMR (need 8 vectors total)
+        work.tmp1.resize(n, 0.0);
+        work.tmp2.resize(n, 0.0);
+        work.tmp3.resize(n, 0.0);
+        work.tmp4.resize(n, 0.0);
+        
+        // Use q vectors for additional workspace (r_tld, p, p_tld, v)
+        while work.q.len() < 4 {
+            work.q.push(vec![0.0; n]);
+        }
+        for q_vec in &mut work.q[..4] {
+            q_vec.resize(n, 0.0);
+        }
+    }
 }
 
 impl<M, V, T> LinearSolver<M, V> for QmrSolver<T>
@@ -63,11 +86,17 @@ where
 
     /// Solve the linear system Ax = b using the QMR algorithm.
     ///
+    /// This unified method handles all solve variants with optional monitoring,
+    /// profiling, and workspace for maximum efficiency.
+    ///
     /// # Arguments
     /// * `a` - Matrix implementing `MatVec` and `MatTransVec`
     /// * `_pc` - (Unused) Optional preconditioner (not supported in this implementation)
     /// * `b` - Right-hand side vector
     /// * `x` - On input: initial guess; on output: solution vector
+    /// * `comm` - Communicator for parallel reductions
+    /// * `monitors` - Optional callbacks to invoke at each iteration with (iteration, residual_norm)
+    /// * `work` - Optional pre-allocated workspace containing temporary vectors
     ///
     /// # Returns
     /// * `Ok(SolveStats)` if converged or max iterations reached
@@ -75,258 +104,68 @@ where
     fn solve(
         &mut self,
         a: &M,
-        _pc: Option<&dyn Preconditioner<M, V>>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-    ) -> Result<SolveStats<T>, KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("QmrSolve");
-        
-        #[cfg(feature = "logging")]
-        trace!("Starting QMR solve");
-
-        let n = b.as_ref().len();
-        let ip = ();
-        // Allocate all vectors needed for QMR
-        let mut r = V::from(vec![T::zero(); n]);
-        let mut r_tld = V::from(vec![T::zero(); n]);
-        let mut p = V::from(vec![T::zero(); n]);
-        let mut p_tld = V::from(vec![T::zero(); n]);
-        let mut v = V::from(vec![T::zero(); n]);
-        let mut v_tld = V::from(vec![T::zero(); n]);
-        let _d = V::from(vec![T::zero(); n]);
-        let mut s = V::from(vec![T::zero(); n]);
-        let mut t = V::from(vec![T::zero(); n]);
-        let mut x_j = x.clone();
-        // r0 = b - A x0
-        #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::new("QmrMatVec");
-        a.matvec(x, &mut r);
-        #[cfg(feature = "logging")]
-        drop(_matvec_guard);
-        
-        for i in 0..n {
-            r.as_mut()[i] = b.as_ref()[i] - r.as_ref()[i];
-        }
-        // r_tld0 = arbitrary, use r0
-        r_tld.clone_from(&r);
-        
-        #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::new("QmrNorm");
-        let norm_r0 = ip.norm(&r, comm);
-        #[cfg(feature = "logging")]
-        drop(_norm_guard);
-        
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: norm_r0,
-            reason: crate::utils::convergence::ConvergedReason::Continued,
-        };
-        
-        #[cfg(feature = "logging")]
-        let _dot_guard = StageGuard::new("QmrDotProduct");
-        let mut rho = ip.dot(&r_tld, &r, comm);
-        #[cfg(feature = "logging")]
-        drop(_dot_guard);
-        if rho == T::zero() {
-            *x = x_j;
-            
-            #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::new("QmrNorm");
-            stats.final_residual = ip.norm(&r, comm);
-            #[cfg(feature = "logging")]
-            drop(_norm_guard);
-            
-            stats.reason = crate::utils::convergence::ConvergedReason::ConvergedAtol;
-            return Ok(stats);
-        }
-        #[allow(unused_assignments)]
-        let mut beta = T::zero();
-        let _eta = T::zero();
-        let _theta = T::zero();
-        let _tau = norm_r0;
-        let mut res_norm = norm_r0;
-        for j in 0..self.conv.max_iters {
-            #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::new("QmrIteration");
-            
-            #[cfg(feature = "logging")]
-            trace!("QMR iteration {}", j + 1);
-            if j == 0 {
-                // First iteration: initialize p and p_tld
-                p.clone_from(&r);
-                p_tld.clone_from(&r_tld);
-            } else {
-                let rho_prev = rho;
-                
-                #[cfg(feature = "logging")]
-                let _dot_guard = StageGuard::new("QmrDotProduct");
-                rho = ip.dot(&r_tld, &r, comm);
-                #[cfg(feature = "logging")]
-                drop(_dot_guard);
-                
-                if rho == T::zero() {
-                    break;
-                }
-                beta = rho / rho_prev;
-                // Update search directions
-                #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::new("QmrAxpy");
-                for i in 0..n {
-                    p.as_mut()[i] = r.as_ref()[i] + beta * p.as_ref()[i];
-                    p_tld.as_mut()[i] = r_tld.as_ref()[i] + beta * p_tld.as_ref()[i];
-                }
-                #[cfg(feature = "logging")]
-                drop(_axpy_guard);
-            }
-            // v = A p
-            #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::new("QmrMatVec");
-            a.matvec(&p, &mut v);
-            #[cfg(feature = "logging")]
-            drop(_matvec_guard);
-            
-            // v_tld = A^T p_tld
-            #[cfg(feature = "logging")]
-            let _mattrans_guard = StageGuard::new("QmrMatTransVec");
-            a.mattransvec(&p_tld, &mut v_tld);
-            #[cfg(feature = "logging")]
-            drop(_mattrans_guard);
-            
-            #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::new("QmrDotProduct");
-            let sigma = ip.dot(&p_tld, &v, comm);
-            #[cfg(feature = "logging")]
-            drop(_dot_guard);
-            if sigma == T::zero() {
-                break;
-            }
-            let alpha = rho / sigma;
-            // s = r - alpha v
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("QmrAxpy");
-            for i in 0..n {
-                s.as_mut()[i] = r.as_ref()[i] - alpha * v.as_ref()[i];
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
-            
-            // t = A s
-            #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::new("QmrMatVec");
-            a.matvec(&s, &mut t);
-            #[cfg(feature = "logging")]
-            drop(_matvec_guard);
-            
-            #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::new("QmrDotProduct");
-            let t_dot_s = ip.dot(&t, &s, comm);
-            let t_dot_t = ip.dot(&t, &t, comm);
-            #[cfg(feature = "logging")]
-            drop(_dot_guard);
-            
-            let omega = if t_dot_t != T::zero() { t_dot_s / t_dot_t } else { T::zero() };
-            // x_{j+1} = x_j + alpha p + omega s
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("QmrAxpy");
-            for i in 0..n {
-                x_j.as_mut()[i] = x_j.as_ref()[i] + alpha * p.as_ref()[i] + omega * s.as_ref()[i];
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
-            
-            // r = s - omega t
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("QmrAxpy");
-            for i in 0..n {
-                r.as_mut()[i] = s.as_ref()[i] - omega * t.as_ref()[i];
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
-            // Check convergence with true residual
-            #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::new("QmrMatVec");
-            a.matvec(&x_j, &mut t);
-            #[cfg(feature = "logging")]
-            drop(_matvec_guard);
-            
-            for i in 0..n {
-                t.as_mut()[i] = b.as_ref()[i] - t.as_ref()[i];
-            }
-            
-            #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::new("QmrNorm");
-            res_norm = ip.norm(&t, comm);
-            #[cfg(feature = "logging")]
-            drop(_norm_guard);
-            
-            #[cfg(feature = "logging")]
-            trace!("QMR iteration {}: residual = {:.3e}", j + 1, res_norm.to_f64().unwrap_or(0.0));
-            
-            let (reason, s_stats) = self.conv.check(res_norm, norm_r0, j+1);
-            stats = s_stats;
-            if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
-                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
-                *x = x_j.clone();
-                stats.final_residual = res_norm;
-                stats.reason = reason;
-                return Ok(stats);
-            }
-        }
-        
-        #[cfg(feature = "logging")]
-        trace!("QMR solve completed after {} iterations", stats.iterations);
-        
-        *x = x_j;
-        stats.final_residual = res_norm;
-        Ok(stats)
-    }
-
-    fn solve_with_monitors(
-        &mut self,
-        a: &M,
         _pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
-        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
+        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        mut work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("QmrSolve");
         
+        let monitors = monitors.unwrap_or(&[]);
+        
+        // Only use monitors if monitoring is enabled at runtime
+        let use_monitors = crate::utils::profiling::is_monitoring_enabled() && !monitors.is_empty();
+        
         #[cfg(feature = "logging")]
-        trace!("Starting QMR solve with {} monitors", monitors.len());
+        trace!("Starting QMR solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
 
         let n = b.as_ref().len();
         let ip = ();
-        // Allocate all vectors needed for QMR
-        let mut r = V::from(vec![T::zero(); n]);
-        let mut r_tld = V::from(vec![T::zero(); n]);
-        let mut p = V::from(vec![T::zero(); n]);
-        let mut p_tld = V::from(vec![T::zero(); n]);
-        let mut v = V::from(vec![T::zero(); n]);
-        let mut v_tld = V::from(vec![T::zero(); n]);
-        let _d = V::from(vec![T::zero(); n]);
-        let mut s = V::from(vec![T::zero(); n]);
-        let mut t = V::from(vec![T::zero(); n]);
+        
+        // Get workspace vectors or allocate locally
+        // QMR needs 8 work vectors: r, r_tld, p, p_tld, v, v_tld, s, t
+        let (mut r, mut r_tld, mut p, mut p_tld, mut v, mut v_tld, mut s, mut t) = 
+            if let Some(workspace) = work.as_mut() {
+                // Use workspace buffers, converting from f64 to T
+                let r = workspace.tmp1.iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let r_tld = workspace.tmp2.iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let p = workspace.tmp3.iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let p_tld = workspace.tmp4.iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let v = workspace.q[0].iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let v_tld = workspace.q[1].iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let s = workspace.q[2].iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                let t = workspace.q[3].iter().map(|&x| <T as From<f64>>::from(x)).collect::<Vec<_>>();
+                (r, r_tld, p, p_tld, v, v_tld, s, t)
+            } else {
+                // Fallback to local allocation
+                (
+                    vec![T::zero(); n], vec![T::zero(); n], vec![T::zero(); n], vec![T::zero(); n],
+                    vec![T::zero(); n], vec![T::zero(); n], vec![T::zero(); n], vec![T::zero(); n]
+                )
+            };
+
         let mut x_j = x.clone();
+        
         // r0 = b - A x0
         #[cfg(feature = "logging")]
         let _matvec_guard = StageGuard::new("QmrMatVec");
-        a.matvec(x, &mut r);
+        a.matvec(x, &mut V::from(r.clone()));
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
         
         for i in 0..n {
-            r.as_mut()[i] = b.as_ref()[i] - r.as_ref()[i];
+            r[i] = b.as_ref()[i] - r[i];
         }
+        
         // r_tld0 = arbitrary, use r0
-        r_tld.clone_from(&r);
+        r_tld.copy_from_slice(&r);
         
         #[cfg(feature = "logging")]
         let _norm_guard = StageGuard::new("QmrNorm");
-        let norm_r0 = ip.norm(&r, comm);
+        let norm_r0 = ip.norm(&V::from(r.clone()), comm);
         #[cfg(feature = "logging")]
         drop(_norm_guard);
         
@@ -336,35 +175,36 @@ where
             reason: crate::utils::convergence::ConvergedReason::Continued,
         };
         
+        // Invoke monitors for iteration 0
+        if use_monitors {
+            for monitor in monitors {
+                monitor(0, norm_r0);
+            }
+        }
+        
         #[cfg(feature = "logging")]
         let _dot_guard = StageGuard::new("QmrDotProduct");
-        let mut rho = ip.dot(&r_tld, &r, comm);
+        let mut rho = ip.dot(&V::from(r_tld.clone()), &V::from(r.clone()), comm);
         #[cfg(feature = "logging")]
         drop(_dot_guard);
-        
-        // Call monitors for initial state
-        for monitor in monitors {
-            monitor(0, norm_r0);
-        }
         
         if rho == T::zero() {
             *x = x_j;
             
             #[cfg(feature = "logging")]
             let _norm_guard = StageGuard::new("QmrNorm");
-            stats.final_residual = ip.norm(&r, comm);
+            stats.final_residual = ip.norm(&V::from(r.clone()), comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
             
             stats.reason = crate::utils::convergence::ConvergedReason::ConvergedAtol;
             return Ok(stats);
         }
+        
         #[allow(unused_assignments)]
         let mut beta = T::zero();
-        let _eta = T::zero();
-        let _theta = T::zero();
-        let _tau = norm_r0;
         let mut res_norm = norm_r0;
+        
         for j in 0..self.conv.max_iters {
             #[cfg(feature = "logging")]
             let _iter_guard = StageGuard::new("QmrIteration");
@@ -374,14 +214,14 @@ where
             
             if j == 0 {
                 // First iteration: initialize p and p_tld
-                p.clone_from(&r);
-                p_tld.clone_from(&r_tld);
+                p.copy_from_slice(&r);
+                p_tld.copy_from_slice(&r_tld);
             } else {
                 let rho_prev = rho;
                 
                 #[cfg(feature = "logging")]
                 let _dot_guard = StageGuard::new("QmrDotProduct");
-                rho = ip.dot(&r_tld, &r, comm);
+                rho = ip.dot(&V::from(r_tld.clone()), &V::from(r.clone()), comm);
                 #[cfg(feature = "logging")]
                 drop(_dot_guard);
                 
@@ -389,33 +229,35 @@ where
                     break;
                 }
                 beta = rho / rho_prev;
+                
                 // Update search directions
                 #[cfg(feature = "logging")]
                 let _axpy_guard = StageGuard::new("QmrAxpy");
                 for i in 0..n {
-                    p.as_mut()[i] = r.as_ref()[i] + beta * p.as_ref()[i];
-                    p_tld.as_mut()[i] = r_tld.as_ref()[i] + beta * p_tld.as_ref()[i];
+                    p[i] = r[i] + beta * p[i];
+                    p_tld[i] = r_tld[i] + beta * p_tld[i];
                 }
                 #[cfg(feature = "logging")]
                 drop(_axpy_guard);
             }
+            
             // v = A p
             #[cfg(feature = "logging")]
             let _matvec_guard = StageGuard::new("QmrMatVec");
-            a.matvec(&p, &mut v);
+            a.matvec(&V::from(p.clone()), &mut V::from(v.clone()));
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             // v_tld = A^T p_tld
             #[cfg(feature = "logging")]
             let _mattrans_guard = StageGuard::new("QmrMatTransVec");
-            a.mattransvec(&p_tld, &mut v_tld);
+            a.mattransvec(&V::from(p_tld.clone()), &mut V::from(v_tld.clone()));
             #[cfg(feature = "logging")]
             drop(_mattrans_guard);
             
             #[cfg(feature = "logging")]
             let _dot_guard = StageGuard::new("QmrDotProduct");
-            let sigma = ip.dot(&p_tld, &v, comm);
+            let sigma = ip.dot(&V::from(p_tld.clone()), &V::from(v.clone()), comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             
@@ -423,11 +265,12 @@ where
                 break;
             }
             let alpha = rho / sigma;
+            
             // s = r - alpha v
             #[cfg(feature = "logging")]
             let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
-                s.as_mut()[i] = r.as_ref()[i] - alpha * v.as_ref()[i];
+                s[i] = r[i] - alpha * v[i];
             }
             #[cfg(feature = "logging")]
             drop(_axpy_guard);
@@ -435,23 +278,24 @@ where
             // t = A s
             #[cfg(feature = "logging")]
             let _matvec_guard = StageGuard::new("QmrMatVec");
-            a.matvec(&s, &mut t);
+            a.matvec(&V::from(s.clone()), &mut V::from(t.clone()));
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             #[cfg(feature = "logging")]
             let _dot_guard = StageGuard::new("QmrDotProduct");
-            let t_dot_s = ip.dot(&t, &s, comm);
-            let t_dot_t = ip.dot(&t, &t, comm);
+            let t_dot_s = ip.dot(&V::from(t.clone()), &V::from(s.clone()), comm);
+            let t_dot_t = ip.dot(&V::from(t.clone()), &V::from(t.clone()), comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
             
             let omega = if t_dot_t != T::zero() { t_dot_s / t_dot_t } else { T::zero() };
+            
             // x_{j+1} = x_j + alpha p + omega s
             #[cfg(feature = "logging")]
             let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
-                x_j.as_mut()[i] = x_j.as_ref()[i] + alpha * p.as_ref()[i] + omega * s.as_ref()[i];
+                x_j.as_mut()[i] = x_j.as_ref()[i] + alpha * p[i] + omega * s[i];
             }
             #[cfg(feature = "logging")]
             drop(_axpy_guard);
@@ -460,7 +304,7 @@ where
             #[cfg(feature = "logging")]
             let _axpy_guard = StageGuard::new("QmrAxpy");
             for i in 0..n {
-                r.as_mut()[i] = s.as_ref()[i] - omega * t.as_ref()[i];
+                r[i] = s[i] - omega * t[i];
             }
             #[cfg(feature = "logging")]
             drop(_axpy_guard);
@@ -468,26 +312,28 @@ where
             // Check convergence with true residual
             #[cfg(feature = "logging")]
             let _matvec_guard = StageGuard::new("QmrMatVec");
-            a.matvec(&x_j, &mut t);
+            a.matvec(&x_j, &mut V::from(t.clone()));
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
             
             for i in 0..n {
-                t.as_mut()[i] = b.as_ref()[i] - t.as_ref()[i];
+                t[i] = b.as_ref()[i] - t[i];
             }
             
             #[cfg(feature = "logging")]
             let _norm_guard = StageGuard::new("QmrNorm");
-            res_norm = ip.norm(&t, comm);
+            res_norm = ip.norm(&V::from(t.clone()), comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
             
             #[cfg(feature = "logging")]
             trace!("QMR iteration {}: residual = {:.3e}", j + 1, res_norm.to_f64().unwrap_or(0.0));
             
-            // Call monitors
-            for monitor in monitors {
-                monitor(j + 1, res_norm);
+            // Invoke monitors if enabled
+            if use_monitors {
+                for monitor in monitors {
+                    monitor(j + 1, res_norm);
+                }
             }
             
             let (reason, s_stats) = self.conv.check(res_norm, norm_r0, j+1);
@@ -549,7 +395,7 @@ mod tests {
         let b = vec![3.0,6.0];
         let mut x = vec![0.0,0.0];
         let mut solver = QmrSolver::new(1e-10, 50);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         assert!((x[0]-1.0).abs() < 1e-4);
         assert!((x[1]-2.0).abs() < 1e-4);
         assert!(matches!(stats.reason,
