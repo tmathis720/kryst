@@ -49,6 +49,11 @@ impl<T: ComplexField + Copy> CsrMatrix<T> {
     pub fn to_dense(&self) -> faer::Mat<T> {
         self.inner.to_dense()
     }
+    
+    /// Number of non-zero entries.
+    pub fn nnz(&self) -> usize {
+        self.inner.compute_nnz()
+    }
 }
 
 impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> {

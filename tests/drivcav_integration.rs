@@ -213,7 +213,7 @@ mod integration_benchmarks {
         
         // Note: For this simple test matrix, ILUTP may not always outperform Jacobi
         // The value of ILUTP becomes apparent with more complex, ill-conditioned matrices
-        println!("Both preconditioners converged successfully, demonstrating ILUTP integration");
+        // println!("Both preconditioners converged successfully, demonstrating ILUTP integration");
         
         Ok(())
     }

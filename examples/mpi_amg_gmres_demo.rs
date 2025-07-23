@@ -30,6 +30,7 @@ use kryst::parallel::{UniverseComm, Comm};
 use kryst::config::options::{parse_all_options};
 use std::time::Instant;
 use std::env;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -51,29 +52,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create KspContext and configure from options
     let mut ksp = KspContext::new();
 
-    // Set solver type (default: bicgstab if not specified)
-    let solver_type = ksp_opts.ksp_type.as_deref().unwrap_or("bicgstab");
+    // Set solver type (default: gmres - more robust for general problems)
+    let solver_type = ksp_opts.ksp_type.as_deref().unwrap_or("gmres");
     ksp.set_type_from_str(solver_type)?;
 
-    // Set preconditioner type (default: jacobi if not specified)
-    let pc_type = pc_opts.pc_type.as_deref().unwrap_or("jacobi");
+    // Set preconditioner type (default: ilu0 - more robust than jacobi)
+    let pc_type = pc_opts.pc_type.as_deref().unwrap_or("ilu0");
     ksp.set_pc_type_from_str(pc_type)?;
 
-    // Set tolerances and iteration limits
-    let rtol = ksp_opts.rtol.unwrap_or(1e-6);
+    // Set tolerances and iteration limits (more conservative defaults)
+    let rtol = ksp_opts.rtol.unwrap_or(1e-8);  // Tighter tolerance for better convergence
     let atol = ksp_opts.atol.unwrap_or(1e-12);
-    let dtol = ksp_opts.dtol.unwrap_or(1e3);
-    let max_iters = ksp_opts.maxits.unwrap_or(1000);
+    let dtol = ksp_opts.dtol.unwrap_or(1e5);   // More lenient divergence threshold
+    let max_iters = ksp_opts.maxits.unwrap_or(2000);  // More iterations for difficult problems
     ksp.set_tolerances(rtol, atol, dtol, max_iters);
 
-    // Set restart parameter for GMRES-type solvers
+    // Set restart parameter for GMRES-type solvers (larger restart for better convergence)
     let restart = ksp_opts.restart.unwrap_or(50);
     ksp.set_restart(restart);
 
-    // Set preconditioning side
-    if let Some(ref side_str) = ksp_opts.pc_side {
-        ksp.set_pc_side_from_str(side_str)?;
-    }
+    // Set preconditioning side (default to left preconditioning)
+    let pc_side = ksp_opts.pc_side.as_deref().unwrap_or("left");
+    ksp.set_pc_side_from_str(pc_side)?;
 
     // Set up file paths
     let matrix_file = ksp_opts.matrix_file.as_deref().unwrap_or("examples/e05r0300/e05r0300.mtx");
@@ -94,9 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if solver_type.contains("gmres") || solver_type == "fgmres" {
             println!("  GMRES restart: {}", restart);
         }
-        if let Some(ref side_str) = ksp_opts.pc_side {
-            println!("  PC side: {}", side_str);
-        }
+        println!("  PC side: {}", pc_side);
         println!("  Matrix file: {}", matrix_file);
         println!("  RHS file: {}", rhs_file);
         println!();
@@ -152,6 +150,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Setting up {} preconditioner and {} solver...", pc_type, solver_type);
     }
 
+    // Set up monitoring callback for convergence tracking
+    let monitor_data = Arc::new(Mutex::new(Vec::<(usize, f64)>::new()));
+    let monitor_data_clone = monitor_data.clone();
+    
+    let monitor = Box::new(move |iter: usize, residual: f64| {
+        if let Ok(mut data) = monitor_data_clone.lock() {
+            data.push((iter, residual));
+            // Print every 10th iteration for rank 0 to avoid spam
+            if rank == 0 && (iter == 0 || iter % 10 == 0 || residual < rtol) {
+                println!("    Iteration {:4}: residual = {:.6e}", iter, residual);
+            }
+        }
+    });
+
+    // Setup KSP with monitoring and workspace optimization
+    ksp.add_monitor(monitor);
+    
+    // Enable profiling if available
+    #[cfg(feature = "logging")]
+    {
+        env_logger::init();
+        if rank == 0 {
+            println!("Profiling enabled - detailed timing information will be logged");
+        }
+    }
+
     // Setup KSP with communicator
     ksp.setup_with_comm(&dense_matrix, rhs.len(), comm)?;
 
@@ -171,11 +195,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if rank == 0 {
         println!("Solving linear system with {}-preconditioned {}...", 
                  pc_type, solver_type.to_uppercase());
+        println!("Convergence history:");
     }
 
     let stats = ksp.solve(&dense_matrix, &rhs, &mut solution)?;
     
     let solve_time = start_solve.elapsed();
+
+    // Extract monitoring data for analysis
+    let convergence_history = if let Ok(data) = monitor_data.lock() {
+        data.clone()
+    } else {
+        Vec::new()
+    };
 
     // Print results (only rank 0)
     if rank == 0 {
@@ -186,6 +218,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Iterations: {}", stats.iterations);
         println!("Final residual: {:.2e}", stats.final_residual);
         println!("Convergence reason: {:?}", stats.reason);
+        
+        // Analyze convergence history
+        if !convergence_history.is_empty() {
+            let initial_residual = convergence_history[0].1;
+            let final_residual = convergence_history.last().unwrap().1;
+            let reduction_factor = final_residual / initial_residual;
+            
+            println!("Convergence analysis:");
+            println!("  Initial residual: {:.2e}", initial_residual);
+            println!("  Final residual: {:.2e}", final_residual);
+            println!("  Reduction factor: {:.2e}", reduction_factor);
+            
+            if convergence_history.len() > 1 {
+                let avg_reduction = reduction_factor.powf(1.0 / (convergence_history.len() - 1) as f64);
+                println!("  Average reduction per iteration: {:.3}", avg_reduction);
+            }
+        }
+        
         println!();
 
         // Performance metrics
@@ -200,12 +250,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Estimate performance metrics
         let nnz = matrix_data.values.len();
         let dof = matrix_data.rows;
+        let time_per_iter = if stats.iterations > 0 { 
+            solve_time.as_secs_f64() / stats.iterations as f64 
+        } else { 
+            0.0 
+        };
+        
         println!("Problem characteristics:");
         println!("  Degrees of freedom: {}", dof);
         println!("  Non-zeros: {}", nnz);
-        println!("  Fill factor: {:.2}", nnz as f64 / (dof * dof) as f64);
-        println!("  Time per iteration: {:.1}ms", 1000.0 * solve_time.as_secs_f64() / stats.iterations as f64);
+        println!("  Fill factor: {:.4}", nnz as f64 / (dof * dof) as f64);
+        println!("  Time per iteration: {:.1}ms", 1000.0 * time_per_iter);
         println!("  MPI processes: {}", size);
+        println!("  Solver efficiency: {:.0} DOF/s", dof as f64 / solve_time.as_secs_f64());
+        
         println!();
     }
 
