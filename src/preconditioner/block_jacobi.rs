@@ -55,7 +55,7 @@ impl BlockJacobi<f64> {
             let amat = crate::matrix::dense::DenseMatrix::from_raw(n, n, data);
             let mut lusolver = LuSolver::<f64>::new();
             // Factorize the block (dummy solve to trigger factorization)
-            let _ = LinearSolver::solve(&mut lusolver, &amat, None, &vec![0.0; n], &mut vec![0.0; n], &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
+            let _ = LinearSolver::solve(&mut lusolver, &amat, None, &vec![0.0; n], &mut vec![0.0; n], &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None);
             self.block_factors.push((block.clone(), lusolver));
         }
     }

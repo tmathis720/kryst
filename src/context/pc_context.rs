@@ -130,7 +130,7 @@ impl LuPreconditioner {
     
     /// Perform direct solve (for PREONLY usage).
     pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<(), KError> {
-        self.solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
+        self.solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None)?;
         Ok(())
     }
 }
@@ -166,7 +166,7 @@ impl QrPreconditioner {
     
     /// Perform direct solve (for PREONLY usage).
     pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<(), KError> {
-        self.solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
+        self.solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None)?;
         Ok(())
     }
 }

@@ -29,7 +29,16 @@ use crate::preconditioner::Preconditioner;
 ///
 pub trait LinearSolver<M, V> {
     type Error;
+    
+    /// Scalar type used by the solver (e.g., f32, f64)
+    type Scalar: Copy + PartialOrd + From<f64>;
+    
     /// Solve the linear system A·x = b, optionally with preconditioner M⁻¹, writing result into `x`.
+    ///
+    /// This unified method handles all solve variants:
+    /// - Monitors are called only if monitoring is enabled at runtime
+    /// - Profiling is performed only if profiling is enabled at runtime
+    /// - Workspace is used for efficiency when provided
     ///
     /// # Arguments
     /// * `a` - Matrix (system operator)
@@ -37,6 +46,8 @@ pub trait LinearSolver<M, V> {
     /// * `b` - Right-hand side vector
     /// * `x` - On input: initial guess; on output: solution vector
     /// * `comm` - Communicator for parallel operations
+    /// * `monitors` - Optional callbacks to invoke at each iteration with (iteration, residual_norm)
+    /// * `work` - Optional pre-allocated workspace containing temporary vectors
     ///
     /// # Returns
     /// * `Ok(SolveStats)` with convergence information
@@ -47,25 +58,30 @@ pub trait LinearSolver<M, V> {
         pc: Option<&dyn Preconditioner<M, V>>,
         b: &V,
         x: &mut V,
-        comm: &crate::parallel::UniverseComm
-    ) -> Result<SolveStats<<Self as LinearSolver<M, V>>::Scalar>, Self::Error>;
-
-    /// Solve the linear system with iteration monitors.
-    ///
-    /// This method accepts a list of monitor callbacks that will be invoked at each iteration.
-    /// The default implementation just calls the regular solve method, ignoring monitors.
-    ///
-    /// # Arguments
-    /// * `a` - Matrix (system operator)
-    /// * `pc` - Optional preconditioner
-    /// * `b` - Right-hand side vector
-    /// * `x` - On input: initial guess; on output: solution vector
-    /// * `comm` - Communicator for parallel operations
-    /// * `monitors` - Callbacks to invoke at each iteration with (iteration, residual_norm)
-    ///
-    /// # Returns
-    /// * `Ok(SolveStats)` with convergence information
-    /// * `Err(Self::Error)` on failure
+        comm: &crate::parallel::UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        work: Option<&mut crate::context::ksp_context::Workspace>,
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error>;
+    
+    /// Setup workspace for the solver.
+    /// 
+    /// This method allows solvers to configure workspace buffers they need
+    /// and grab references to tmp1, tmp2, etc. from the unified workspace.
+    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
+    
+    /// Convenience method for solving without monitors or workspace.
+    fn solve_simple(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        self.solve(a, pc, b, x, comm, None, None)
+    }
+    
+    /// Convenience method for solving with monitors but no workspace.
     fn solve_with_monitors(
         &mut self,
         a: &M,
@@ -73,31 +89,12 @@ pub trait LinearSolver<M, V> {
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
-        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]
+        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
-        // Default implementation ignores monitors
-        let _ = monitors;
-        self.solve(a, pc, b, x, comm)
+        self.solve(a, pc, b, x, comm, Some(monitors), None)
     }
-
-    /// Solve the linear system using pre-allocated workspace buffers.
-    ///
-    /// This method provides access to the unified workspace for maximum efficiency
-    /// by eliminating per-iteration allocations. Solvers should use workspace
-    /// buffers instead of allocating temporary vectors.
-    ///
-    /// # Arguments
-    /// * `a` - Matrix (system operator)
-    /// * `pc` - Optional preconditioner
-    /// * `b` - Right-hand side vector
-    /// * `x` - On input: initial guess; on output: solution vector
-    /// * `comm` - Communicator for parallel operations
-    /// * `monitors` - Callbacks to invoke at each iteration with (iteration, residual_norm)
-    /// * `work` - Pre-allocated workspace containing temporary vectors
-    ///
-    /// # Returns
-    /// * `Ok(SolveStats)` with convergence information
-    /// * `Err(Self::Error)` on failure
+    
+    /// Convenience method for solving with workspace but no monitors.
     fn solve_with_workspace(
         &mut self,
         a: &M,
@@ -105,21 +102,10 @@ pub trait LinearSolver<M, V> {
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
-        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
-        _work: &mut crate::context::ksp_context::Workspace,
+        work: &mut crate::context::ksp_context::Workspace,
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
-        // Default implementation falls back to solve_with_monitors
-        self.solve_with_monitors(a, pc, b, x, comm, monitors)
+        self.solve(a, pc, b, x, comm, None, Some(work))
     }
-
-    /// Scalar type used by the solver (e.g., f32, f64)
-    type Scalar: Copy + PartialOrd + From<f64>;
-    
-    /// Setup workspace for the solver.
-    /// 
-    /// This method allows solvers to configure workspace buffers they need
-    /// and grab references to tmp1, tmp2, etc. from the unified workspace.
-    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
 }
 
 // Re-export all supported solver types for user convenience

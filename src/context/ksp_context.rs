@@ -738,8 +738,9 @@ impl KspContext {
 
     /// Solve the linear system Ax = b using the configured solver and preconditioner.
     ///
-    /// This method uses cached workspaces from the setup phase for efficient repeated solves.
-    /// If setup has not been called, it will be called automatically.
+    /// This unified method always uses workspace for efficiency and supports optional
+    /// runtime-controlled monitoring and profiling. If setup has not been called, 
+    /// it will be called automatically.
     ///
     /// # Arguments
     /// * `a` - System matrix
@@ -790,7 +791,7 @@ impl KspContext {
                 return Err(KError::SolveError("No solver configured. Call set_type() first.".to_string()));
             }
 
-            // Auto-setup if needed
+            // Auto-setup if needed - this ensures workspace is always available
             let needs_setup = !self.setup_called || self.work.is_none();
             if needs_setup {
                 let _setup_stage = StageGuard::new("KSPSetup");
@@ -806,17 +807,35 @@ impl KspContext {
                         "Workspace incompatible with problem size. Call setup() or invalidate_setup().".to_string()
                     ));
                 }
+            } else {
+                return Err(KError::SolveError(
+                    "Workspace not available after setup. This is a bug.".to_string()
+                ));
             }
 
             let _krylov_stage = StageGuard::new("KSPSolveKrylov");
             #[cfg(feature = "logging")]
             trace!("Starting Krylov iteration with solver type: {:?}", self.solver_type);
 
-            // Use the Krylov solver with workspace
+            // Prepare monitors for runtime-controlled monitoring
+            let monitors_slice = if crate::utils::profiling::is_monitoring_enabled() && !self.monitors.is_empty() {
+                Some(self.monitors.as_slice())
+            } else {
+                None
+            };
+
+            // Use the unified solve method with workspace and optional monitors
             let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
-            let stats = solver.solve_with_workspace(a, self.pc.as_deref(), b, x, 
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                &self.monitors, self.work.as_mut().unwrap())?;
+            let comm = self.comm.as_ref().unwrap_or(&crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
+            let stats = solver.solve(
+                a, 
+                self.pc.as_deref(), 
+                b, 
+                x, 
+                comm,
+                monitors_slice,
+                Some(self.work.as_mut().unwrap()) // Always use workspace
+            )?;
             
             #[cfg(feature = "logging")]
             trace!("Krylov solve completed: {} iterations, final residual: {:.3e}", 
@@ -845,9 +864,10 @@ impl KspContext {
     fn apply_direct_solve(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
         match self.pc_type {
             Some(PcType::Lu) => {
-                // For LU, use the LuSolver directly
+                // For LU, use the LuSolver directly with the new API
                 let mut lu_solver = LuSolver::new();
-                lu_solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
+                let comm = self.comm.as_ref().unwrap_or(&crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
+                lu_solver.solve(a, None, b, x, comm, None, self.work.as_mut())?;
                 Ok(SolveStats {
                     iterations: 1,
                     final_residual: 0.0,
@@ -855,9 +875,10 @@ impl KspContext {
                 })
             },
             Some(PcType::Qr) => {
-                // For QR, use the QrSolver directly
+                // For QR, use the QrSolver directly with the new API
                 let mut qr_solver = crate::solver::direct_lu::QrSolver::new();
-                qr_solver.solve(a, None, b, x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm))?;
+                let comm = self.comm.as_ref().unwrap_or(&crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
+                qr_solver.solve(a, None, b, x, comm, None, self.work.as_mut())?;
                 Ok(SolveStats {
                     iterations: 1,
                     final_residual: 0.0,
@@ -955,6 +976,64 @@ impl KspContext {
         self.set_from_options(ksp_opts)?;
         
         Ok(self)
+    }
+    
+    /// Enable runtime profiling globally.
+    ///
+    /// When enabled, profiling guards will automatically time solver phases
+    /// like setup, matrix-vector products, preconditioner application, etc.
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn enable_profiling(&mut self) -> &mut Self {
+        crate::utils::profiling::enable_profiling();
+        self
+    }
+    
+    /// Disable runtime profiling globally.
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn disable_profiling(&mut self) -> &mut Self {
+        crate::utils::profiling::disable_profiling();
+        self
+    }
+    
+    /// Enable runtime monitoring globally.
+    ///
+    /// When enabled, registered monitors will be called during iterations
+    /// to track convergence progress, residual norms, etc.
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn enable_monitoring(&mut self) -> &mut Self {
+        crate::utils::profiling::enable_monitoring();
+        self
+    }
+    
+    /// Disable runtime monitoring globally.
+    ///
+    /// # Returns
+    /// * `&mut Self` for method chaining
+    pub fn disable_monitoring(&mut self) -> &mut Self {
+        crate::utils::profiling::disable_monitoring();
+        self
+    }
+    
+    /// Check if profiling is currently enabled.
+    ///
+    /// # Returns
+    /// * `true` if profiling is active, `false` otherwise
+    pub fn is_profiling_enabled(&self) -> bool {
+        crate::utils::profiling::is_profiling_enabled()
+    }
+    
+    /// Check if monitoring is currently enabled.
+    ///
+    /// # Returns
+    /// * `true` if monitoring is active, `false` otherwise
+    pub fn is_monitoring_enabled(&self) -> bool {
+        crate::utils::profiling::is_monitoring_enabled()
     }
 }
 

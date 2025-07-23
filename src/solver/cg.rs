@@ -25,10 +25,10 @@ use crate::core::traits::{InnerProduct, MatVec};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 use crate::error::KError;
+use crate::utils::profiling::StageGuard;
+
 #[cfg(feature = "logging")]
 use log::trace;
-#[cfg(feature = "logging")]
-use crate::utils::profiling::StageGuard;
 
 /// Norm type for CG convergence and monitoring.
 ///
@@ -123,34 +123,65 @@ where
 
     /// Solve the linear system Ax = b using the Conjugate Gradient algorithm.
     ///
+    /// This unified method handles all solve variants with optional monitoring,
+    /// profiling, and workspace for maximum efficiency.
+    ///
     /// # Arguments
     /// * `a` - System matrix
     /// * `pc` - Optional preconditioner (currently unused)
     /// * `b` - Right-hand side vector
     /// * `x` - Initial guess (input/output)
     /// * `comm` - Communicator for parallel operations
+    /// * `monitors` - Optional callbacks to invoke at each iteration with (iteration, residual_norm)
+    /// * `work` - Optional pre-allocated workspace containing temporary vectors
     ///
     /// Returns convergence statistics and the solution vector.
-    fn solve(&mut self, a: &M, pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>, b: &V, x: &mut V, comm: &crate::parallel::UniverseComm) -> Result<SolveStats<T>, KError> {
-        let _ = pc; // CG does not use preconditioner
+    fn solve(
+        &mut self,
+        a: &M,
+        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        b: &V,
+        x: &mut V,
+        comm: &crate::parallel::UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        work: Option<&mut crate::context::ksp_context::Workspace>,
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+        let _solve_stage = StageGuard::new("CGSolve");
+        
+        let monitors = monitors.unwrap_or(&[]);
+        
+        // Only use monitors if monitoring is enabled at runtime
+        let use_monitors = crate::utils::profiling::is_monitoring_enabled() && !monitors.is_empty();
+        
+        #[cfg(feature = "logging")]
+        trace!("Starting CG solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
+        #[cfg(feature = "logging")]
+        trace!("Starting CG solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
+
+        let _ = pc; // CG does not use preconditioner (yet)
         let n = b.as_ref().len();
         let mut x_vec = x.as_ref().to_vec();
         let ip = ();
+
         // Compute initial residual r = b - A x
         let mut r = {
+            let _matvec_stage = StageGuard::new("CGMatVec");
             let mut tmp = V::from(vec![T::zero(); n]);
             a.matvec(&V::from(x_vec.clone()), &mut tmp);
             let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
             V::from(r_vec)
         };
+        
         let mut p = r.clone();
         let mut rsq = ip.dot(&r, &r, comm);
         let res0 = rsq.sqrt();
+        
         let mut stats = SolveStats { 
             iterations: 0, 
             final_residual: res0, 
             reason: ConvergedReason::Continued 
         };
+        
         // Choose norm for monitoring
         let dp = match self.norm_type {
             CgNormType::Preconditioned => ip.dot(&r, &r, comm),
@@ -158,16 +189,39 @@ where
             CgNormType::Natural => ip.dot(&r, &p, comm),
             CgNormType::None => T::zero(),
         };
+        
+        // Invoke monitors for iteration 0
+        if use_monitors {
+            for monitor in monitors {
+                monitor(0, dp.sqrt());
+            }
+        }
+        
         if let Some(ref mut monitor) = self.monitor {
             monitor(0, dp.sqrt());
         }
         self.residual_history.push(dp.sqrt());
+
+        #[cfg(feature = "logging")]
+        trace!("CG initial residual: {:.3e}", res0);
+        
         for i in 1..=self.conv.max_iters {
+            let _iter_stage = StageGuard::new("CGIteration");
+            
+            #[cfg(feature = "logging")]
+            trace!("CG iteration {}", i);
+
             // Compute Ap = A p
-            let mut ap = V::from(vec![T::zero(); n]);
-            a.matvec(&p.clone(), &mut ap);
+            let ap = {
+                let _matvec_stage = StageGuard::new("CGMatVec");
+                let mut ap = V::from(vec![T::zero(); n]);
+                a.matvec(&p.clone(), &mut ap);
+                ap
+            };
+            
             // Compute p^T A p (or single-reduction variant)
             let p_dot_ap = if self.single_reduction {
+                let _dot_stage = StageGuard::new("CGDotProduct");
                 #[cfg(feature = "rayon")]
                 {
                     use rayon::prelude::*;
@@ -185,35 +239,45 @@ where
                     p_dot_ap
                 }
             } else {
+                let _dot_stage = StageGuard::new("CGDotProduct");
                 ip.dot(&p, &ap, comm)
             };
-            let res_norm;
+
             // Indefinite-matrix detection
             if p_dot_ap <= T::zero() {
-                res_norm = ip.dot(&r, &r, comm).sqrt();
+                let res_norm = ip.dot(&r, &r, comm).sqrt();
                 stats.iterations = i;
                 stats.final_residual = res_norm;
                 stats.reason = ConvergedReason::DivergedDtol;
+                
+                #[cfg(feature = "logging")]
+                trace!("CG indefinite matrix detected at iter {}", i);
                 return Err(KError::IndefiniteMatrix);
             }
+            
             let alpha = rsq / p_dot_ap;
+            
             // Trust-region (Steihaug–Toint) logic
             if let Some(radius) = self.radius {
+                let _norm_stage = StageGuard::new("CGNorm");
                 let p_norm = ip.dot(&p, &p, comm).sqrt();
                 let x_norm = ip.dot(&V::from(x_vec.clone()), &V::from(x_vec.clone()), comm).sqrt();
                 if x_norm + alpha.abs() * p_norm > radius {
                     let max_step = (radius - x_norm) / p_norm;
-                    #[cfg(feature = "rayon")]
                     {
-                        use rayon::prelude::*;
-                        x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
-                            *xj = *xj + max_step * pj;
-                        });
-                    }
-                    #[cfg(not(feature = "rayon"))]
-                    {
-                        for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                            *xj = *xj + max_step * *pj;
+                        let _axpy_stage = StageGuard::new("CGAxpy");
+                        #[cfg(feature = "rayon")]
+                        {
+                            use rayon::prelude::*;
+                            x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
+                                *xj = *xj + max_step * pj;
+                            });
+                        }
+                        #[cfg(not(feature = "rayon"))]
+                        {
+                            for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
+                                *xj = *xj + max_step * *pj;
+                            }
                         }
                     }
                     *x = V::from(x_vec.clone());
@@ -224,36 +288,47 @@ where
                     return Ok(stats);
                 }
             }
+            
             // Update x and r
-            #[cfg(feature = "rayon")]
             {
-                use rayon::prelude::*;
-                x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
-                    *xj = *xj + alpha * pj;
-                });
-                r.as_mut().par_iter_mut().zip(ap.as_ref().par_iter()).for_each(|(rj, &apj)| {
-                    *rj = *rj - alpha * apj;
-                });
-            }
-            #[cfg(not(feature = "rayon"))]
-            {
-                for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                    *xj = *xj + alpha * *pj;
+                let _axpy_stage = StageGuard::new("CGAxpy");
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
+                        *xj = *xj + alpha * pj;
+                    });
+                    r.as_mut().par_iter_mut().zip(ap.as_ref().par_iter()).for_each(|(rj, &apj)| {
+                        *rj = *rj - alpha * apj;
+                    });
                 }
-                for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
-                    *rj = *rj - alpha * *apj;
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
+                        *xj = *xj + alpha * *pj;
+                    }
+                    for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
+                        *rj = *rj - alpha * *apj;
+                    }
                 }
             }
-            let rsq_new = ip.dot(&r, &r, comm);
-            res_norm = match self.norm_type {
+            
+            let rsq_new = {
+                let _norm_stage = StageGuard::new("CGNorm");
+                ip.dot(&r, &r, comm)
+            };
+            
+            let res_norm = match self.norm_type {
                 CgNormType::Preconditioned => rsq_new.sqrt(),
                 CgNormType::Unpreconditioned => rsq_new.sqrt(),
                 CgNormType::Natural => ip.dot(&r, &p, comm).abs().sqrt(),
                 CgNormType::None => T::zero(),
             };
+            
             // Objective function tracking (optional early stopping)
             if let Some(obj_target) = self.obj_target {
                 let obj = {
+                    let _matvec_stage = StageGuard::new("CGMatVec");
                     let mut ax = V::from(vec![T::zero(); n]);
                     a.matvec(&V::from(x_vec.clone()), &mut ax);
                     let x_dot_ax = ip.dot(&V::from(x_vec.clone()), &ax, comm);
@@ -274,6 +349,7 @@ where
                     return Ok(stats);
                 }
             }
+            
             // Indefinite-beta detection
             if rsq_new / rsq < T::zero() {
                 stats.iterations = i;
@@ -281,124 +357,60 @@ where
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Err(KError::IndefinitePreconditioner);
             }
+            
+            // Invoke monitors for current iteration
+            if use_monitors {
+                for monitor in monitors {
+                    monitor(i, res_norm);
+                }
+            }
+            
             if let Some(ref mut monitor) = self.monitor {
                 monitor(i, res_norm);
             }
             self.residual_history.push(res_norm);
+
+            #[cfg(feature = "logging")]
+            trace!("CG iteration {}: residual = {:.3e}", i, res_norm);
             
             // Check convergence using new interface
             let (reason, new_stats) = self.conv.check(res_norm, res0, i);
             stats = new_stats;
             if reason != ConvergedReason::Continued {
                 *x = V::from(x_vec.clone());
+                
+                #[cfg(feature = "logging")]
+                trace!("CG converged after {} iterations: {:?}", i, reason);
                 return Ok(stats);
             }
+            
             let beta = rsq_new / rsq;
-            #[cfg(feature = "rayon")]
             {
-                use rayon::prelude::*;
-                p.as_mut().par_iter_mut().zip(r.as_ref().par_iter()).for_each(|(pj, &rj)| {
-                    *pj = rj + beta * *pj;
-                });
-            }
-            #[cfg(not(feature = "rayon"))]
-            {
-                for (pj, rj) in p.as_mut().iter_mut().zip(r.as_ref()) {
-                    *pj = *rj + beta * *pj;
+                let _axpy_stage = StageGuard::new("CGAxpy");
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    p.as_mut().par_iter_mut().zip(r.as_ref().par_iter()).for_each(|(pj, &rj)| {
+                        *pj = rj + beta * *pj;
+                    });
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for (pj, rj) in p.as_mut().iter_mut().zip(r.as_ref()) {
+                        *pj = *rj + beta * *pj;
+                    }
                 }
             }
             rsq = rsq_new;
         }
+        
         *x = V::from(x_vec);
+        
+        #[cfg(feature = "logging")]
+        trace!("CG solve completed: {} iterations, final residual: {:.3e}", 
+               stats.iterations, stats.final_residual);
+        
         Ok(stats)
-    }
-    /// Solve the linear system Ax = b using the Conjugate Gradient algorithm, with monitor callbacks and profiling.
-    fn solve_with_monitors(
-        &mut self,
-        a: &M,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        monitors: &[Box<dyn Fn(usize, T) + Send + Sync>],
-    ) -> Result<SolveStats<T>, KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("CGSolve");
-        #[cfg(feature = "logging")]
-        trace!("Starting CG solve with {} monitors", monitors.len());
-
-        let n = b.as_ref().len();
-        let mut x_vec = x.as_ref().to_vec();
-        let _ = pc; // CG does not use preconditioner
-        #[cfg(feature = "logging")]
-        let _matvec_guard = StageGuard::new("CGMatVec");
-        let mut tmp = V::from(vec![T::zero(); n]);
-        a.matvec(&V::from(x_vec.clone()), &mut tmp);
-        let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
-        let mut r = V::from(r_vec);
-        let mut p = r.clone();
-        #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::new("CGNorm");
-        let mut rsq = p.as_ref().iter().fold(T::zero(), |acc, &ri| acc + ri * ri);
-        let res0 = rsq.sqrt();
-        for monitor in monitors {
-            monitor(0, res0);
-        }
-        #[cfg(feature = "logging")]
-        trace!("CG initial residual: {:.3e}", res0);
-        for i in 1..=self.conv.max_iters {
-            #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::new("CGIteration");
-            #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::new("CGMatVec");
-            let mut ap = V::from(vec![T::zero(); n]);
-            a.matvec(&p.clone(), &mut ap);
-            #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::new("CGDotProduct");
-            let p_dot_ap = p.as_ref().iter().zip(ap.as_ref().iter()).fold(T::zero(), |acc, (&pi, &api)| acc + pi * api);
-            if p_dot_ap <= T::zero() {
-                #[cfg(feature = "logging")]
-                trace!("CG indefinite matrix detected at iter {}", i);
-                return Err(KError::IndefiniteMatrix);
-            }
-            let alpha = rsq / p_dot_ap;
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("CGAxpy");
-            for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                *xj = *xj + alpha * *pj;
-            }
-            for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
-                *rj = *rj - alpha * *apj;
-            }
-            #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::new("CGNorm");
-            let rsq_new = r.as_ref().iter().fold(T::zero(), |acc, &ri| acc + ri * ri);
-            let res_norm = rsq_new.sqrt();
-            for monitor in monitors {
-                monitor(i, res_norm);
-            }
-            #[cfg(feature = "logging")]
-            trace!("CG iteration {}: residual = {:.3e}", i, res_norm);
-            if res_norm < num_traits::cast::<f64, T>(1e-10).unwrap_or(T::zero()) {
-                *x = V::from(x_vec.clone());
-                #[cfg(feature = "logging")]
-                trace!("CG converged at iter {} with residual {:.3e}", i, res_norm);
-                return Ok(SolveStats {
-                    iterations: i,
-                    final_residual: res_norm,
-                    reason: ConvergedReason::ConvergedRtol,
-                });
-            }
-            let beta = rsq_new / rsq;
-            for (pj, rj) in p.as_mut().iter_mut().zip(r.as_ref()) {
-                *pj = *rj + beta * *pj;
-            }
-            rsq = rsq_new;
-        }
-        *x = V::from(x_vec);
-        #[cfg(feature = "logging")]
-        trace!("CG did not converge after max iterations");
-        Err(KError::SolveError("CG did not converge".to_string()))
     }
 }
 
@@ -427,7 +439,7 @@ mod tests {
         let b = vec![1.0, 2.0];
         let mut x = vec![0.0, 0.0];
         let mut solver = CgSolver::new(1e-10, 20);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let expected = vec![0.09090909090909091, 0.6363636363636364];
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -458,7 +470,7 @@ mod tests {
         };
         let mut x = vec![0.0; 3];
         let mut solver = CgSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let tol = 1e-8;
         let mut r_final = vec![0.0; 3];
         a.matvec(&x, &mut r_final);
@@ -480,8 +492,8 @@ mod tests {
         let mut x_single = vec![0.0, 0.0];
         let mut solver_std = CgSolver::new(1e-10, 20);
         let mut solver_single = CgSolver::new(1e-10, 20).with_single_reduction(true);
-        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
-        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let tol = 1e-8;
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);
@@ -515,8 +527,8 @@ mod tests {
         let mut x_single = vec![0.0; 3];
         let mut solver_std = CgSolver::new(1e-10, 100);
         let mut solver_single = CgSolver::new(1e-10, 100).with_single_reduction(true);
-        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
-        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm)).unwrap();
+        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let tol = 1e-8;
         for (xi, xj) in x_std.iter().zip(x_single.iter()) {
             assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);
