@@ -18,6 +18,8 @@ pub enum KError {
     IndefinitePreconditioner,
     #[error("zero pivot at row {0}")]
     ZeroPivot(usize),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
     #[error("unrecognized solver type: {0}")]

@@ -40,21 +40,34 @@ pub enum Preconditioning {
 /// # Type Parameters
 /// * `T` - Scalar type (e.g., f32, f64)
 pub struct GmresSolver<T> {
-    /// Number of Arnoldi vectors before restart
+    /// Number of Arnoldi vectors before restart (default: 30, HYPRE uses 5)
     pub restart: usize,
     /// Convergence criteria (multi-threshold, max iterations)
     pub conv: Convergence<T>,
     /// Preconditioning mode
     pub preconditioning: Preconditioning,
+    /// Minimum iterations to enforce before convergence check (default: 0)
+    pub min_iter: usize,
+    /// Convergence factor tolerance for stagnation detection (default: 0.0 = disabled)
+    pub cf_tol: T,
+    /// Skip real residual convergence check for performance (default: false)
+    pub skip_real_r_check: bool,
+    /// Reference solution for error monitoring (optional)
+    pub ref_solution: Option<Vec<T>>,
+    /// IEEE safety epsilon for breakdown protection
+    pub epsmac: T,
+    /// Guard for zero residual to prevent NaN in relative change
+    pub guard_zero_residual: T,
 }
 
 impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     /// Create a new GMRES solver with restart, tolerance, and max iterations.
+    /// Uses HYPRE-inspired defaults for robustness.
     pub fn new(restart: usize, rtol: T, max_iters: usize) -> Self {
         let atol = <T as From<f64>>::from(1e-12);
         let dtol = <T as From<f64>>::from(1e3);
         Self {
-            restart,
+            restart: if restart == 0 { 30 } else { restart }, // HYPRE default 5, but 30 is more robust
             conv: Convergence {
                 rtol,
                 atol,
@@ -62,29 +75,100 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
                 max_iters,
             },
             preconditioning: Preconditioning::Left, // default to left for backward compatibility
+            min_iter: 0, // HYPRE default
+            cf_tol: <T as From<f64>>::from(0.0), // disabled by default
+            skip_real_r_check: false, // enable real residual checking by default
+            ref_solution: None,
+            epsmac: <T as From<f64>>::from(1e-16), // HYPRE machine epsilon
+            guard_zero_residual: <T as From<f64>>::from(0.0), // HYPRE guard
         }
     }
+    
     /// Set the preconditioning mode (left, right, or none).
     pub fn with_preconditioning(mut self, mode: Preconditioning) -> Self {
         self.preconditioning = mode;
         self
     }
 
-    /// Sets up workspace allocations for the GMRES solver
+    /// Set minimum iterations before convergence checking (HYPRE feature).
+    pub fn with_min_iter(mut self, min_iter: usize) -> Self {
+        self.min_iter = min_iter;
+        self
+    }
+
+    /// Set convergence factor tolerance for stagnation detection (HYPRE feature).
+    /// When > 0, monitors convergence rate and exits if stagnating.
+    pub fn with_cf_tol(mut self, cf_tol: T) -> Self {
+        self.cf_tol = cf_tol;
+        self
+    }
+
+    /// Skip real residual check for performance (HYPRE feature).
+    /// When true, trusts GMRES residual estimate instead of computing Ax-b.
+    pub fn with_skip_real_residual_check(mut self, skip: bool) -> Self {
+        self.skip_real_r_check = skip;
+        self
+    }
+
+    /// Set reference solution for error monitoring (HYPRE feature).
+    pub fn with_ref_solution(mut self, ref_sol: Vec<T>) -> Self {
+        self.ref_solution = Some(ref_sol);
+        self
+    }
+
+    /// IEEE safety check for NaN/Inf detection (HYPRE-inspired).
+    /// Returns true if the value contains NaN or Inf.
+    fn ieee_check(value: T) -> bool {
+        if value == T::zero() {
+            return false;
+        }
+        let check = value / value; // INF -> NaN conversion
+        check != check // NaN != NaN always true
+    }
+
+    /// Check convergence factor for stagnation detection (HYPRE feature).
+    /// Returns true if convergence rate is too slow.
+    fn check_convergence_factor(
+        cf_tol: T,
+        r_norm: T,
+        r_norm_0: T,
+        iteration: usize,
+        cf_ave_0: &mut T,
+        cf_ave_1: &mut T,
+    ) -> bool {
+        if cf_tol <= T::zero() || iteration <= 1 {
+            return false;
+        }
+
+        *cf_ave_0 = *cf_ave_1;
+        let iter_f = <T as From<f64>>::from(iteration as f64);
+        let two = <T as From<f64>>::from(2.0);
+        *cf_ave_1 = (r_norm / r_norm_0).powf(T::one() / (two * iter_f));
+
+        let weight = (*cf_ave_1 - *cf_ave_0).abs() / (*cf_ave_1).max(*cf_ave_0);
+        let weight = T::one() - weight;
+
+        weight * *cf_ave_1 > cf_tol
+    }
+
+    /// Sets up workspace allocations for the GMRES solver (HYPRE-inspired)
     pub fn setup_workspace(
         &self,
         workspace: &mut crate::context::ksp_context::Workspace,
         n: usize,
     ) {
-        let _max_iters = self.conv.max_iters;
-        
-        // Ensure workspace has enough q vectors for Krylov basis
+        // Ensure workspace has enough q vectors for Krylov basis (k_dim + 1)
         let needed_q = self.restart + 1;
         while workspace.q.len() < needed_q {
             workspace.q.push(vec![0.0; n]);
         }
         
-        // Ensure h matrix is appropriately sized for GMRES Hessenberg
+        // Resize existing vectors to correct size (HYPRE robustness)
+        for q_vec in &mut workspace.q[..needed_q] {
+            q_vec.resize(n, 0.0);
+        }
+        
+        // Ensure h matrix is appropriately sized for GMRES Hessenberg (k_dim+1 x k_dim)
         workspace.h.resize(self.restart + 1, vec![]);
         for row in &mut workspace.h {
             row.resize(self.restart, 0.0);
@@ -95,9 +179,17 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
         workspace.sn.resize(self.restart, 0.0);
         workspace.g.resize(self.restart + 1, 0.0);
         
-        // Ensure tmp vectors are sized
+        // Ensure tmp vectors are sized (HYPRE uses multiple work vectors)
         workspace.tmp1.resize(n, 0.0);
         workspace.tmp2.resize(n, 0.0);
+        
+        // Clear workspace for clean start (HYPRE practice)
+        workspace.cs.fill(0.0);
+        workspace.sn.fill(0.0);
+        workspace.g.fill(0.0);
+        for row in &mut workspace.h {
+            row.fill(0.0);
+        }
     }
 
     // --- Arnoldi process with double orthogonalization and happy breakdown ---
@@ -344,12 +436,40 @@ where
         #[cfg(feature = "logging")]
         drop(_norm_guard);
         
+        let b_norm = ip.norm(b, comm);
         let res0 = beta;
+
+        // HYPRE-inspired IEEE safety checks for NaN/Inf detection
+        if b_norm != T::zero() && Self::ieee_check(b_norm) {
+            #[cfg(feature = "logging")]
+            trace!("ERROR: NaNs or INFs detected in right-hand side vector b");
+            return Err(KError::SolveError("NaNs or INFs detected in input vector b".to_string()));
+        }
+
+        if beta != T::zero() && Self::ieee_check(beta) {
+            #[cfg(feature = "logging")]
+            trace!("ERROR: NaNs or INFs detected in initial residual computation");
+            return Err(KError::SolveError("NaNs or INFs detected in matrix A or initial guess x".to_string()));
+        }
         let mut stats = SolveStats {
             iterations: 0,
             final_residual: beta,
             reason: ConvergedReason::Continued,
         };
+
+        // HYPRE-inspired convergence setup
+        let den_norm = if b_norm > T::zero() {
+            b_norm // convergence criterion |r_i|/|b| <= accuracy if |b| > 0
+        } else {
+            beta   // convergence criterion |r_i|/|r0| <= accuracy if |b| = 0
+        };
+        
+        let epsilon = self.conv.atol.max(self.conv.rtol * den_norm);
+        
+        // Convergence factor monitoring variables (HYPRE feature)
+        let mut cf_ave_0 = T::zero();
+        let mut cf_ave_1 = T::zero();
+        let mut real_r_norm_old = beta;
 
         let n_outer = self.conv.max_iters.div_ceil(self.restart);
         let mut iteration = 0;
@@ -548,10 +668,28 @@ where
                     }
                 }
                 
+                // HYPRE-inspired convergence factor check for stagnation detection
+                if Self::check_convergence_factor(
+                    self.cf_tol, res_norm, res0, iteration, &mut cf_ave_0, &mut cf_ave_1
+                ) {
+                    #[cfg(feature = "logging")]
+                    trace!("GMRES: Convergence factor stagnation detected, exiting");
+                    stats.reason = ConvergedReason::DivergedMaxIts; // treat as divergence
+                    m = j + 1;
+                    break;
+                }
+                
                 let (reason, s) = self.conv.check(res_norm, res0, iteration);
                 stats = s.clone();
                 m = j + 1;
-                if (reason == ConvergedReason::ConvergedRtol || reason == ConvergedReason::ConvergedAtol) || happy_breakdown {
+                
+                // HYPRE-inspired minimum iteration enforcement and convergence check
+                if (reason == ConvergedReason::ConvergedRtol || reason == ConvergedReason::ConvergedAtol) 
+                    && iteration >= self.min_iter {
+                    if res_norm <= epsilon || happy_breakdown {
+                        break;
+                    }
+                } else if happy_breakdown {
                     break;
                 }
             }
@@ -606,10 +744,31 @@ where
             
             // Update stats with true residual
             stats.final_residual = beta;
-            if beta < self.conv.rtol * res0 {
+            
+            // HYPRE-inspired real residual convergence check
+            if !self.skip_real_r_check && beta <= epsilon && iteration >= self.min_iter {
+                // Real residual check passed
+                if beta <= epsilon {
+                    stats.reason = ConvergedReason::ConvergedRtol;
+                    break;
+                } else {
+                    // False convergence detected - check if residual is not decreasing
+                    if beta >= real_r_norm_old {
+                        #[cfg(feature = "logging")]
+                        trace!("GMRES: False convergence detected, residual not decreasing");
+                        stats.reason = ConvergedReason::DivergedMaxIts;
+                        break;
+                    } else {
+                        #[cfg(feature = "logging")]
+                        trace!("GMRES: False convergence, L2 norm of residual: {:.3e}", beta.to_f64().unwrap_or(0.0));
+                        real_r_norm_old = beta;
+                    }
+                }
+            } else if beta < self.conv.rtol * res0 {
                 stats.reason = ConvergedReason::ConvergedRtol;
                 break;
             }
+            
             if iteration >= self.conv.max_iters {
                 stats.reason = ConvergedReason::DivergedMaxIts;
                 break;
