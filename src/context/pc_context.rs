@@ -59,6 +59,8 @@ pub enum PcType {
     Lu,
     /// Direct QR factorization solver (for PREONLY)
     Qr,
+    /// SuperLU_DIST distributed direct solver (for PREONLY)
+    SuperLuDist,
 }
 
 impl FromStr for PcType {
@@ -81,6 +83,7 @@ impl FromStr for PcType {
             "approxinverse" | "approx_inverse" => Ok(PcType::ApproxInverse),
             "lu" => Ok(PcType::Lu),
             "qr" => Ok(PcType::Qr),
+            "superlu_dist" | "superludist" | "slu_dist" => Ok(PcType::SuperLuDist),
             _ => Err(KError::UnrecognizedPcType(s.to_string())),
         }
     }
@@ -185,6 +188,90 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for QrPreconditioner {
     }
 }
 
+/// Wrapper for SuperLU_DIST to act as a preconditioner for PREONLY method.
+///
+/// This allows using distributed SuperLU_DIST as a "preconditioner" when
+/// KSP type is set to PREONLY. It handles the conversion between dense and sparse matrices.
+pub struct SuperLuDistPreconditioner {
+    solver: Option<crate::solver::SuperLuDistSolver>,
+    options: Option<crate::solver::superlu_dist::SuperLuDistOptions>,
+}
+
+impl SuperLuDistPreconditioner {
+    pub fn new() -> Self {
+        Self {
+            solver: None,
+            options: None,
+        }
+    }
+
+    pub fn with_options(options: crate::solver::superlu_dist::SuperLuDistOptions) -> Self {
+        Self {
+            solver: None,
+            options: Some(options),
+        }
+    }
+
+    /// Perform direct solve (for PREONLY usage).
+    pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>, comm: &crate::parallel::UniverseComm) -> Result<(), KError> {
+        // Convert dense matrix to sparse format for SuperLU_DIST
+        let sparse_matrix = self.dense_to_csr(a)?;
+
+        // Create solver if not already done
+        if self.solver.is_none() {
+            self.solver = Some(
+                if let Some(opts) = &self.options {
+                    crate::solver::SuperLuDistSolver::with_options(opts.clone())
+                } else {
+                    crate::solver::SuperLuDistSolver::new()
+                }
+            );
+        }
+
+        // Solve using SuperLU_DIST
+        if let Some(ref mut solver) = self.solver {
+            solver.solve(&sparse_matrix, None, b, x, comm, None, None)?;
+        }
+
+        Ok(())
+    }
+
+    /// Convert dense matrix to CSR sparse format
+    fn dense_to_csr(&self, dense: &Mat<f64>) -> Result<crate::matrix::sparse::CsrMatrix<f64>, KError> {
+        let (nrows, ncols) = (dense.nrows(), dense.ncols());
+        let mut row_ptr = vec![0];
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..nrows {
+            for j in 0..ncols {
+                let val = dense[(i, j)];
+                if val.abs() > 1e-15 { // Drop very small values
+                    col_idx.push(j);
+                    values.push(val);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        Ok(crate::matrix::sparse::CsrMatrix::from_csr(nrows, ncols, row_ptr, col_idx, values))
+    }
+}
+
+impl Preconditioner<Mat<f64>, Vec<f64>> for SuperLuDistPreconditioner {
+    fn setup(&mut self, _a: &Mat<f64>) -> Result<(), KError> {
+        // Setup is handled in the solve call for direct methods
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        // For direct methods used as preconditioners, this would typically
+        // not be called in PREONLY mode. But we provide a reasonable implementation.
+        z.clone_from(r);
+        Ok(())
+    }
+}
+
 /// Factory for constructing preconditioners based on PcType.
 pub struct PcFactory;
 
@@ -220,6 +307,31 @@ impl PcFactory {
             },
             PcType::Qr => {
                 Ok(Box::new(QrPreconditioner::new()))
+            },
+            PcType::SuperLuDist => {
+                // Create SuperLU_DIST preconditioner with options if available
+                if let Some(opts) = options {
+                    // Extract SuperLU_DIST specific options from PcOptions
+                    let mut slu_opts = crate::solver::superlu_dist::SuperLuDistOptions::default();
+                    
+                    // Map common options to SuperLU_DIST options
+                    if let Some(pivot_thresh) = opts.superlu_pivot_threshold {
+                        slu_opts.diagonal_pivot_threshold = pivot_thresh;
+                    }
+                    if let Some(replace_tiny) = opts.superlu_replace_tiny_pivots {
+                        slu_opts.replace_tiny_pivots = replace_tiny;
+                    }
+                    if let Some(print_level) = opts.superlu_print_level {
+                        slu_opts.print_level = print_level;
+                    }
+                    if let Some((prows, pcols)) = opts.superlu_process_grid {
+                        slu_opts.process_grid = Some((prows, pcols));
+                    }
+                    
+                    Ok(Box::new(SuperLuDistPreconditioner::with_options(slu_opts)))
+                } else {
+                    Ok(Box::new(SuperLuDistPreconditioner::new()))
+                }
             },
             PcType::Ilutp => {
                 // Get parameters from options if available
@@ -539,6 +651,7 @@ mod tests {
         assert!(PcFactory::create_preconditioner(PcType::None, None).is_ok());
         assert!(PcFactory::create_preconditioner(PcType::Lu, None).is_ok());
         assert!(PcFactory::create_preconditioner(PcType::Qr, None).is_ok());
+        assert!(PcFactory::create_preconditioner(PcType::SuperLuDist, None).is_ok());
         
         // Test matrix-dependent preconditioners fail without matrix
         assert!(PcFactory::create_preconditioner(PcType::Chebyshev, None).is_err());

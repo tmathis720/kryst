@@ -337,7 +337,7 @@ impl KspContext {
 
         match pc_type {
             // Matrix-independent preconditioners - construct immediately
-            PcType::Jacobi | PcType::Ilu0 | PcType::None | PcType::Lu | PcType::Qr | PcType::Ilutp => {
+            PcType::Jacobi | PcType::Ilu0 | PcType::None | PcType::Lu | PcType::Qr | PcType::Ilutp | PcType::SuperLuDist => {
                 self.pc = Some(PcFactory::create_preconditioner(pc_type, self.pc_options.as_ref())?);
             },
             

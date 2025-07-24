@@ -50,34 +50,47 @@ fn test_ilutp_environment_parsing() -> Result<(), KError> {
 
 #[test]
 fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
-    // Create a test matrix (5x5 diagonally dominant)
-    let mut matrix = Mat::zeros(5, 5);
-    for i in 0..5 {
-        matrix[(i, i)] = 10.0; // Strong diagonal
+    // Create a well-posed test matrix (8x8 symmetric positive definite)
+    let n = 8;
+    let mut matrix = Mat::zeros(n, n);
+    
+    // Create a simple symmetric positive definite matrix
+    // Using a scaled identity + symmetric matrix
+    for i in 0..n {
+        matrix[(i, i)] = 4.0;  // Strong diagonal dominance
         if i > 0 {
-            matrix[(i, i-1)] = -1.0;
-        }
-        if i < 4 {
-            matrix[(i, i+1)] = -1.0;
+            matrix[(i, i-1)] = -1.0;  
+            matrix[(i-1, i)] = -1.0;  // Ensure symmetry
         }
     }
     
-    // Create RHS vector
-    let b = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-    let mut x = vec![0.0; 5];
+    // Create a simple RHS that gives a known solution
+    // Let's use x = [1, 2, 3, 4, 5, 6, 7, 8] as our target solution
+    let exact_solution: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+    
+    // Compute b = A * exact_solution
+    let mut b = vec![0.0; n];
+    for i in 0..n {
+        for j in 0..n {
+            b[i] += matrix[(i, j)] * exact_solution[j];
+        }
+    }
+    
+    let mut x = vec![0.0; n];
     
     // Setup KspContext with ILUTP
     let mut ksp = KspContext::new();
     
-    // Set ILUTP preconditioner options
+    // Set ILUTP preconditioner options with reasonable parameters
     let pc_options = PcOptions {
         pc_type: Some("ilutp".to_string()),
-        ilut_max_fill: Some(5),
-        ilut_perm_tol: Some(0.1),
+        ilut_max_fill: Some(20),  // Allow sufficient fill
+        ilut_perm_tol: Some(0.1), // Reasonable permutation tolerance
         reorder: Some("none".to_string()),
         ..Default::default()
     };
     
+    // Use reasonable tolerances
     ksp.set_type(SolverType::Gmres)?
        .set_pc_type(PcType::Ilutp)?
        .set_pc_options(pc_options)
@@ -89,21 +102,42 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Verify convergence
     println!("ILUTP-GMRES converged in {} iterations", stats.iterations);
     assert!(stats.iterations > 0, "Should have performed at least one iteration");
-    assert!(stats.iterations < 50, "Should converge quickly for this well-conditioned problem");
+    assert!(stats.iterations < 50, "Should converge reasonably fast for this SPD problem");
     
-    // Verify solution quality by computing residual
+    // Verify solution quality by computing residual ||Ax - b||
     let mut residual = b.clone();
-    for i in 0..5 {
+    for i in 0..n {
         let mut ax_i = 0.0;
-        for j in 0..5 {
+        for j in 0..n {
             ax_i += matrix[(i, j)] * x[j];
         }
         residual[i] -= ax_i;
     }
     
     let residual_norm: f64 = residual.iter().map(|r| r * r).sum::<f64>().sqrt();
+    let rhs_norm: f64 = b.iter().map(|r| r * r).sum::<f64>().sqrt();
+    let relative_residual = residual_norm / rhs_norm;
+    
     println!("Final residual norm: {:.2e}", residual_norm);
-    assert!(residual_norm < 1e-6, "Solution should be accurate");
+    println!("Relative residual: {:.2e}", relative_residual);
+    
+    // Check that we achieved reasonable accuracy
+    assert!(relative_residual < 1e-6, "Relative residual should be small: got {:.2e}", relative_residual);
+    
+    // Verify solution accuracy against known exact solution
+    let mut solution_error = 0.0;
+    for i in 0..n {
+        solution_error += (x[i] - exact_solution[i]).powi(2);
+    }
+    solution_error = solution_error.sqrt();
+    let exact_norm: f64 = exact_solution.iter().map(|s| s * s).sum::<f64>().sqrt();
+    let relative_error = solution_error / exact_norm;
+    
+    println!("Solution error norm: {:.2e}", solution_error);
+    println!("Relative solution error: {:.2e}", relative_error);
+    
+    // Since we constructed b = A*x_exact, the solution should be very accurate
+    assert!(relative_error < 1e-6, "Solution should be accurate for this constructed problem: got {:.2e}", relative_error);
     
     Ok(())
 }

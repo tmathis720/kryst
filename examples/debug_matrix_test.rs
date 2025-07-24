@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Matrix nnz: {}", matrix.nnz());
     println!("RHS size: {}", rhs.len());
     
-    if matrix.nrows() > 1000 {
+    if matrix.nrows() > 2500 {
         println!("Matrix too large for quick test, skipping solve...");
         return Ok(());
     }

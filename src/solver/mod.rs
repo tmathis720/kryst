@@ -144,3 +144,6 @@ pub use fgmres::FgmresSolver;
 
 pub mod pca_gmres;
 pub use pca_gmres::PcaGmresSolver;
+
+pub mod superlu_dist;
+pub use superlu_dist::SuperLuDistSolver;

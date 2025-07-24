@@ -35,20 +35,21 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 
 #### Advanced Preconditioners
 - **Chebyshev**: Enhanced polynomial preconditioning with eigenvalue estimation
-- **AMG**: Algebraic Multigrid with configurable smoothing parameters
+- **AMG**: Algebraic Multigrid with configurable smoothing parameters  
 - **ASM**: Additive Schwarz Method (domain decomposition)
 - **Approximate Inverse**: SPAI-type approximate inverse preconditioners
 
-#### Composite Preconditioning (Phase III)
-- **PC-Chaining**: Sequential application of multiple preconditioners
-- **Enhanced Chebyshev**: Matrix-aware polynomial preconditioning with automatic eigenvalue bounds
-- **Smoothed AMG**: Configurable pre- and post-smoothing parameters
+#### Composite Preconditioning
+- **PC-Chaining**: Sequential application of multiple preconditioners via `pc_chain` option
+- **Enhanced Chebyshev**: Matrix-aware polynomial preconditioning with automatic eigenvalue estimation
+- **Smoothed AMG**: Configurable pre- and post-smoothing parameters (`amg_nu_pre`, `amg_nu_post`)
 
-### Monitoring & Automation (Phase IV)
-- **Iteration Monitoring**: Real-time convergence tracking and analysis
-- **Parameter Tuning**: Automated optimization with grid search
-- **Data Export**: CSV/JSON output for external analysis
-- **Performance Metrics**: Time-based optimization with configurable timeouts
+### Monitoring & Automation
+
+- **Iteration Monitoring**: Real-time convergence tracking with `IterationMonitor`
+- **Parameter Tuning**: Automated optimization with `ParameterTuner` and grid search  
+- **Data Export**: CSV output for convergence analysis with `enable_csv_logging()`
+- **Performance Metrics**: Comprehensive timing and convergence rate analysis
 
 ### Architecture
 - **PETSc-style API**: Unified KSP context for runtime solver selection
@@ -81,7 +82,8 @@ logging = ["dep:log"]          # Iteration monitoring and profiling
 ### Basic Usage with KspContext (Recommended)
 
 ```rust
-use kryst::{KspContext, SolverType, PcType};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use faer::Mat;
 
 // Create a 100x100 test system
@@ -109,7 +111,8 @@ println!("Converged in {} iterations with residual {:.2e}",
 ### Advanced Features: Composite Preconditioning
 
 ```rust
-use kryst::{KspContext, SolverType, PcOptions};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::config::options::PcOptions;
 
 let mut ksp = KspContext::new();
 ksp.set_type(SolverType::Cg).unwrap();
@@ -127,7 +130,9 @@ let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
 ### Enhanced AMG with Smoothing
 
 ```rust
-use kryst::{KspContext, SolverType, PcType, PcOptions};
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
+use kryst::config::options::PcOptions;
 
 let mut ksp = KspContext::new();
 ksp.set_type(SolverType::Gmres).unwrap()
@@ -169,7 +174,8 @@ println!("Best configuration: {:?}", best_config);
 ### Command-line Interface (PETSc-style)
 
 ```rust
-use kryst::{parse_all_options, KspContext};
+use kryst::config::options::{parse_all_options, KspOptions, PcOptions};
+use kryst::context::ksp_context::KspContext;
 
 // Parse command-line options
 let args: Vec<String> = std::env::args().collect();
@@ -221,7 +227,7 @@ Run your program with PETSc-style options:
 - `-pc_ilut_drop_tol <float>` - ILUT drop tolerance (default: 1e-3)
 - `-pc_ilut_max_fill <int>` - ILUT maximum fill per row (default: 10)
 
-#### Enhanced Preconditioner Options (Phase III)
+#### Enhanced Preconditioner Options
 - `-pc_type chebyshev` - Enhanced Chebyshev with eigenvalue estimation
 - `-chebyshev_degree <int>` - Polynomial degree (default: 3)
 - `-pc_type amg` - Algebraic multigrid with smoothing control
@@ -233,9 +239,13 @@ Run your program with PETSc-style options:
 #### Composite Preconditioning Options
 - `-pc_chain <string>` - Sequential preconditioner chain (e.g., "jacobi,chebyshev")
 - `-pc_type asm` - Additive Schwarz Method
-- `-pc_type approxinverse` - Approximate inverse preconditioner
+- `-pc_type approxinv` - Approximate inverse preconditioner
 
-#### Domain Decomposition Options
+#### Direct Solver Options
+- `-pc_type lu` - Direct LU factorization via SuperLU
+- `-pc_type qr` - Direct QR factorization
+
+#### Domain Decomposition Options  
 - `-asm_overlap <int>` - ASM subdomain overlap (default: 1)
 - `-asm_type <type>` - ASM variant: `restrict`, `interpolate`, `basic`
 
@@ -262,59 +272,77 @@ Run your program with PETSc-style options:
 
 ## Monitoring and Automation
 
-### Iteration Monitoring (Phase IV)
+### Iteration Monitoring
 
 Track solver convergence with real-time monitoring:
 
 ```rust
-use kryst::{IterationMonitor, KspContext, SolverType, PcType};
+use kryst::utils::monitor::IterationMonitor;
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // Create and configure monitor
 let mut monitor = IterationMonitor::new();
+monitor.enable_csv_logging("convergence_history.csv").unwrap();
 
-// Configure solver
+// Configure solver with monitoring callback
+let monitor_ref = Arc::new(Mutex::new(monitor));
+let monitor_clone = Arc::clone(&monitor_ref);
+
 let mut ksp = KspContext::new();
 ksp.set_type(SolverType::Gmres).unwrap()
    .set_pc_type(PcType::Jacobi).unwrap();
+
+// Add monitoring callback
+ksp.add_monitor(move |iter, residual| {
+    if let Ok(mut mon) = monitor_clone.lock() {
+        mon.record_iteration(iter, residual, None);
+    }
+});
 
 // Solve with monitoring
 ksp.setup(&matrix, n).unwrap();
 let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
 
-// Record iteration data (integrate with solver callbacks in practice)
-for i in 0..stats.iterations {
-    let residual = /* get residual norm */;
-    monitor.record_iteration(i as u32, residual);
-}
-
 // Analyze convergence
-let stats = monitor.get_statistics();
-println!("Mean convergence rate: {:.4}", stats.mean_convergence_rate);
-println!("Convergence variance: {:.4}", stats.convergence_variance);
-
-// Export data for analysis
-monitor.write_to_csv("convergence_history.csv").unwrap();
+if let Ok(mon) = monitor_ref.lock() {
+    let convergence_stats = mon.get_statistics();
+    println!("Total iterations: {}", convergence_stats.total_iterations);
+    println!("Average convergence rate: {:.4}", convergence_stats.avg_convergence_rate);
+    println!("Final residual: {:.2e}", convergence_stats.final_residual);
+    
+    // Check for convergence issues
+    if mon.recent_convergence_rate(5).unwrap_or(1.0) > 0.9 {
+        println!("Warning: Slow convergence detected");
+    }
+}
 ```
 
-### Automated Parameter Tuning (Phase IV)
+### Automated Parameter Tuning
 
 Optimize solver/preconditioner combinations automatically:
 
 ```rust
-use kryst::{ParameterTuner, SolverType, PcType};
+use kryst::utils::tuning::{ParameterTuner, ParameterConfig};
+use kryst::context::ksp_context::SolverType;
+use kryst::context::pc_context::PcType;
 use std::time::Duration;
 
 let mut tuner = ParameterTuner::new();
 
 // Configure search space
-tuner.set_solver_types(vec![SolverType::Cg, SolverType::Gmres, SolverType::BiCgStab]);
-tuner.set_pc_types(vec![PcType::Jacobi, PcType::Chebyshev, PcType::Amg]);
-tuner.set_tolerances(vec![1e-6, 1e-8, 1e-10]);
-tuner.set_max_config_time(Duration::from_secs(60));
+tuner.set_solver_types(vec![SolverType::Cg, SolverType::Gmres, SolverType::BiCgStab])
+     .set_pc_types(vec![PcType::Jacobi, PcType::Chebyshev, PcType::Amg])
+     .set_tolerances(vec![1e-6, 1e-8, 1e-10])
+     .set_max_config_time(Duration::from_secs(60));
 
 // Add PC-chain configurations for composite preconditioning
-tuner.add_pc_chain_config("jacobi,chebyshev");
-tuner.add_pc_chain_config("sor,amg");
+tuner.add_pc_chains(vec![
+    "jacobi,chebyshev".to_string(),
+    "jacobi,ilu0".to_string(),
+]);
 
 // Run automated tuning
 let (best_config, all_results) = tuner.tune_parameters(&matrix, &rhs, 10).unwrap();
@@ -322,30 +350,46 @@ let (best_config, all_results) = tuner.tune_parameters(&matrix, &rhs, 10).unwrap
 println!("Best configuration found:");
 println!("  Solver: {:?}", best_config.solver_type);
 println!("  Preconditioner: {:?}", best_config.pc_type);
-println!("  Tolerance: {:.2e}", best_config.tolerance);
+println!("  Tolerance: {:.2e}", best_config.rtol);
 if let Some(chain) = &best_config.pc_chain {
     println!("  PC Chain: {}", chain);
 }
+println!("  Converged: {}", all_results.iter().find(|r| r.config.solver_type == best_config.solver_type).unwrap().converged);
 
 // Export results for further analysis
-tuner.export_results(&all_results, "tuning_results.json").unwrap();
+tuner.export_results("tuning_results.txt").unwrap();
+let summary = tuner.get_summary();
+println!("Success rate: {:.1}%", summary.get("convergence_rate").unwrap_or(&0.0) * 100.0);
 ```
 
 ### Advanced Monitoring Features
 
 ```rust
-// Detect convergence stagnation
-if monitor.detect_stagnation(10, 1e-2) {
-    println!("Warning: Convergence appears to have stagnated");
-}
+use kryst::utils::monitor::IterationMonitor;
+use std::time::Duration;
 
-// Get convergence rate analysis
-let rate_analysis = monitor.analyze_convergence_rate();
-match rate_analysis {
-    Some((rate, r_squared)) => {
-        println!("Linear convergence rate: {:.4} (R²: {:.4})", rate, r_squared);
-    }
-    None => println!("Insufficient data for convergence analysis"),
+let mut monitor = IterationMonitor::new();
+monitor.start_solve();
+
+// Record some iterations
+monitor.record_iteration(0, 1.0, None);
+monitor.record_iteration(1, 0.5, Some(Duration::from_millis(10)));
+monitor.record_iteration(2, 0.25, Some(Duration::from_millis(12)));
+
+// Mark convergence
+monitor.mark_converged("Relative tolerance achieved");
+
+// Get detailed statistics
+let stats = monitor.get_statistics();
+println!("Convergence statistics:");
+println!("  Total iterations: {}", stats.total_iterations);
+println!("  Average convergence rate: {:.4}", stats.avg_convergence_rate);
+println!("  Best convergence rate: {:.4}", stats.best_convergence_rate);
+println!("  Average iteration time: {:.3}ms", stats.avg_iteration_time.as_secs_f64() * 1000.0);
+
+// Check recent convergence behavior
+if let Some(recent_rate) = monitor.recent_convergence_rate(3) {
+    println!("Recent convergence rate (last 3 iterations): {:.4}", recent_rate);
 }
 
 // Set up real-time monitoring callbacks
@@ -353,9 +397,9 @@ let mut ksp = KspContext::new();
 ksp.add_monitor(|iter, residual| {
     println!("Iteration {}: residual = {:.3e}", iter, residual);
     
-    // Custom termination criteria
-    if iter > 100 && residual < 1e-10 {
-        // Could trigger early termination
+    // Custom monitoring logic
+    if iter > 0 && iter % 10 == 0 {
+        println!("  Checkpoint: {} iterations completed", iter);
     }
 });
 ```
@@ -426,20 +470,80 @@ Profiling output includes:
 
 ### Advanced Preconditioners
 
-#### Enhanced Chebyshev (Phase III)
+#### Enhanced Chebyshev
+
+Enhanced polynomial preconditioning implementation based on eigenvalue estimation:
+
+```rust
+use kryst::preconditioner::chebyshev::Chebyshev;
+use kryst::config::options::PcOptions;
+
+// Enhanced Chebyshev with automatic eigenvalue estimation
+let mut pc_opts = PcOptions::default();
+pc_opts.chebyshev_degree = Some(6);  // Higher degree for better approximation
+// Lambda bounds are estimated automatically via power iteration
+ksp.set_pc_options(pc_opts);
+```
+
+Features:
 - **Matrix-aware**: Automatic eigenvalue bound estimation using power iteration
-- **Configurable Degree**: Polynomial degree optimization
+- **Configurable Degree**: Polynomial degree optimization (default: 3, range: 1-20)
 - **Storage Efficient**: Reuses matrix storage for eigenvalue computation
+- **Robust**: Handles near-singular matrices with adaptive bounds
 
-#### Enhanced AMG (Phase III)
+#### Enhanced AMG
+
+Advanced Algebraic Multigrid with configurable smoothing:
+
+```rust
+use kryst::preconditioner::amg::Amg;
+use kryst::config::options::PcOptions;
+
+// Enhanced AMG with smoothing control
+let mut pc_opts = PcOptions::default();
+pc_opts.amg_levels = Some(5);              // Multigrid levels
+pc_opts.amg_strength_threshold = Some(0.5); // Strong connection threshold  
+pc_opts.amg_nu_pre = Some(2);              // Pre-smoothing steps
+pc_opts.amg_nu_post = Some(1);             // Post-smoothing steps
+ksp.set_pc_options(pc_opts);
+```
+
+Features:
 - **Smoothed Multigrid**: Configurable pre- and post-smoothing parameters
-- **Adaptive Coarsening**: Automatic grid hierarchy construction
-- **Strength Threshold**: Customizable strong connection criteria
+- **Adaptive Coarsening**: Automatic grid hierarchy construction based on strength
+- **Strength Threshold**: Customizable strong connection criteria (default: 0.25)
+- **Flexible Smoothing**: Separate control of pre/post smoothing iterations
 
-#### Composite Preconditioning (Phase III)
-- **PC-Chaining**: Sequential application of multiple preconditioners
-- **Flexible Combinations**: Mix any preconditioner types (e.g., "jacobi,amg,chebyshev")
+#### Composite Preconditioning
+
+PC-chaining allows sequential application of multiple preconditioners:
+
+```rust
+use kryst::config::options::PcOptions;
+
+// Example 1: Jacobi + Chebyshev combination
+let mut pc_opts = PcOptions::default();
+pc_opts.pc_chain = Some("jacobi,chebyshev".to_string());
+pc_opts.chebyshev_degree = Some(4);
+ksp.set_pc_options(pc_opts);
+
+// Example 2: Multi-stage preconditioning
+let mut pc_opts = PcOptions::default(); 
+pc_opts.pc_chain = Some("jacobi,ilu0,chebyshev".to_string());
+ksp.set_pc_options(pc_opts);
+
+// Example 3: Domain decomposition + multigrid
+let mut pc_opts = PcOptions::default();
+pc_opts.pc_chain = Some("asm,amg".to_string());
+pc_opts.amg_nu_pre = Some(1);
+ksp.set_pc_options(pc_opts);
+```
+
+Features:
+- **Flexible Combinations**: Mix any preconditioner types in sequence
 - **Automatic Setup**: Transparent handling of composite preconditioner construction
+- **Parameter Inheritance**: Specialized parameters apply to respective stages
+- **Performance Tuning**: Optimize combinations via `ParameterTuner`
 
 ### Domain Decomposition
 - **ASM**: Additive Schwarz Method with configurable overlap
@@ -497,8 +601,8 @@ cargo run --example options_demo -- -ksp_type gmres -pc_type jacobi -ksp_rtol 1e
 # Direct solver usage
 cargo run --example dense_direct
 
-# Setup and workspace reuse patterns
-cargo run --example setup_reuse_demo
+# Matrix market file demonstration
+cargo run --example matrix_market_demo
 ```
 
 ### Advanced Feature Examples  
@@ -506,18 +610,17 @@ cargo run --example setup_reuse_demo
 # Convergence behavior analysis
 cargo run --example convergence_demo
 
-# Matrix market file I/O (auto-generates test data if files not found)
-cargo run --example matrix_market_demo
+# Iteration monitoring demonstration  
+cargo run --example monitor -- --features=logging
 
-# Iteration monitoring demonstration
-cargo run --example monitor
+# HYPRE-style ILU demonstration
+cargo run --example hypre_ilu_demo
 
 # MPI parallel examples (requires MPI)
 mpirun -n 4 cargo run --example mpi_parallel_demo --features mpi
-mpirun -n 2 cargo run --example mpi_amg_gmres_demo --features mpi
 ```
 
-**Note**: Large Matrix Market example files (*.mtx) are excluded from the published crate to stay within size limits. The `matrix_market_demo` example will auto-generate test data if the example files are not found. For the complete Matrix Market example files, clone the repository from GitHub.
+**Note**: Matrix Market example files (*.mtx) are excluded from the published crate to stay within size limits. The `matrix_market_demo` example will auto-generate test data if example files are not found.
 
 ### Command-line Examples
 ```bash
@@ -714,10 +817,10 @@ cargo test --release
 ```
 
 ### Test Coverage
-- **Unit Tests**: 148+ individual component tests
-- **Integration Tests**: End-to-end solver and preconditioner validation
+- **Unit Tests**: 200+ individual component tests across solvers, preconditioners, and utilities
+- **Integration Tests**: End-to-end validation including monitor integration and parameter tuning
 - **Options Tests**: CLI parsing and configuration validation
-- **Phase Tests**: Advanced feature validation (PC-chaining, monitoring, tuning)
+- **Feature Tests**: Advanced functionality validation (PC-chaining, monitoring, tuning)
 - **Performance Tests**: Benchmark validation and regression testing
 
 ## Migration Guide
@@ -743,6 +846,21 @@ ksp.set_pc_type(PcType::Chebyshev).unwrap();
 let mut pc_opts = PcOptions::default();
 pc_opts.chebyshev_degree = Some(6);
 ksp.set_pc_options(pc_opts);
+```
+
+**New Monitoring Capabilities:**
+```rust
+// Add iteration monitoring
+use kryst::utils::monitor::IterationMonitor;
+let mut monitor = IterationMonitor::new();
+ksp.add_monitor(|iter, residual| {
+    println!("Iteration {}: {:.2e}", iter, residual);
+});
+
+// Add automated parameter tuning
+use kryst::utils::tuning::ParameterTuner;
+let mut tuner = ParameterTuner::new();
+let (best_config, _) = tuner.tune_parameters(&matrix, &rhs, 5).unwrap();
 ```
 
 ## License

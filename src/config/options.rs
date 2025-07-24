@@ -20,7 +20,7 @@
 //! - `-ksp_guard_zero_residual <float>` - Guard for zero residual to prevent NaN (GMRES)
 //!
 //! ## PC (Preconditioner) Options
-//! - `-pc_type <pc>` - Preconditioner type (jacobi, ilu0, ilu, ilut, none, amg, asm, chebyshev)
+//! - `-pc_type <pc>` - Preconditioner type (jacobi, ilu0, ilu, ilut, none, amg, asm, chebyshev, lu, qr, superlu_dist)
 //! - `-pc_ilu_levels <int>` - ILU fill levels (legacy)
 //! - `-pc_ilu_type <type>` - ILU factorization type (ilu0, iluk, ilut, milu0, etc.)
 //! - `-pc_ilu_level_of_fill <int>` - Level of fill for ILU(k)
@@ -187,6 +187,24 @@ pub struct PcOptions {
     pub ilu_optimize_workspace: Option<bool>,
     /// ILU pivot threshold for stability
     pub ilu_pivot_threshold: Option<f64>,
+    
+    // SuperLU_DIST Configuration Options
+    /// SuperLU_DIST diagonal pivot threshold (0.0 to 1.0)
+    pub superlu_pivot_threshold: Option<f64>,
+    /// Whether to replace tiny pivots in SuperLU_DIST
+    pub superlu_replace_tiny_pivots: Option<bool>,
+    /// SuperLU_DIST print level (0=none, 1=basic, 2=detailed)
+    pub superlu_print_level: Option<u8>,
+    /// SuperLU_DIST process grid dimensions (rows, cols)
+    pub superlu_process_grid: Option<(usize, usize)>,
+    /// SuperLU_DIST column permutation strategy
+    pub superlu_column_permutation: Option<String>,
+    /// SuperLU_DIST row permutation strategy
+    pub superlu_row_permutation: Option<String>,
+    /// SuperLU_DIST iterative refinement method
+    pub superlu_iterative_refinement: Option<String>,
+    /// Whether to use static pivoting in SuperLU_DIST
+    pub superlu_static_pivoting: Option<bool>,
 }
 
 /// Preconditioning side specification.
@@ -977,6 +995,82 @@ impl PcOptions {
                         .map_err(|_| KError::SolveError(format!("Invalid ilu_pivot_threshold value: {}", args[i + 1])))?);
                     i += 2;
                 }
+                "-pc_superlu_pivot_threshold" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_pivot_threshold".to_string()));
+                    }
+                    opts.superlu_pivot_threshold = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_pivot_threshold value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_process_grid" => {
+                    if i + 2 >= args.len() {
+                        return Err(KError::SolveError("Missing values for -pc_superlu_process_grid (requires rows and cols)".to_string()));
+                    }
+                    let rows = args[i + 1].parse::<usize>()
+                        .map_err(|_| KError::SolveError(format!("Invalid process grid rows value: {}", args[i + 1])))?;
+                    let cols = args[i + 2].parse::<usize>()
+                        .map_err(|_| KError::SolveError(format!("Invalid process grid cols value: {}", args[i + 2])))?;
+                    opts.superlu_process_grid = Some((rows, cols));
+                    i += 3;
+                }
+                "-pc_superlu_print_level" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_print_level".to_string()));
+                    }
+                    opts.superlu_print_level = Some(args[i + 1].parse::<u8>()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_print_level value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_replace_tiny_pivot" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_replace_tiny_pivot".to_string()));
+                    }
+                    let value = args[i + 1].to_lowercase();
+                    match value.as_str() {
+                        "true" | "1" | "yes" | "on" => opts.superlu_replace_tiny_pivots = Some(true),
+                        "false" | "0" | "no" | "off" => opts.superlu_replace_tiny_pivots = Some(false),
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid superlu_replace_tiny_pivot value: {}. Use 'true', 'false', '1', '0', 'yes', 'no', 'on', or 'off'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_superlu_iterative_refinement" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_iterative_refinement".to_string()));
+                    }
+                    opts.superlu_iterative_refinement = Some(args[i + 1].to_string());
+                    i += 2;
+                }
+                "-pc_superlu_column_permutation" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_column_permutation".to_string()));
+                    }
+                    opts.superlu_column_permutation = Some(args[i + 1].to_string());
+                    i += 2;
+                }
+                "-pc_superlu_row_permutation" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_row_permutation".to_string()));
+                    }
+                    opts.superlu_row_permutation = Some(args[i + 1].to_string());
+                    i += 2;
+                }
+                "-pc_superlu_static_pivoting" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_static_pivoting".to_string()));
+                    }
+                    let value = args[i + 1].to_lowercase();
+                    match value.as_str() {
+                        "true" | "1" | "yes" | "on" => opts.superlu_static_pivoting = Some(true),
+                        "false" | "0" | "no" | "off" => opts.superlu_static_pivoting = Some(false),
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid superlu_static_pivoting value: {}. Use 'true', 'false', '1', '0', 'yes', 'no', 'on', or 'off'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
                 arg if arg.starts_with("-pc_") => {
                     return Err(KError::SolveError(format!("Unrecognized PC option: {}", arg)));
                 }
@@ -1065,7 +1159,7 @@ pub fn print_help() {
     println!("  -rhs <path>                RHS vector file path (Matrix Market format)");
     println!();
     println!("PC (Preconditioner) Options:");
-    println!("  -pc_type <pc>              Preconditioner type: jacobi, ilu0, none, amg, asm, chebyshev");
+    println!("  -pc_type <pc>              Preconditioner type: jacobi, ilu0, none, amg, asm, chebyshev, lu, qr, superlu_dist");
     println!("  -pc_ilu_levels <int>       ILU fill levels (default: 0)");
     println!("  -pc_chebyshev_degree <int> Chebyshev polynomial degree (default: 3)");
     println!("  -pc_ilut_drop_tol <float>  ILUT drop tolerance (default: 1e-3)");
@@ -1127,6 +1221,16 @@ pub fn print_help() {
     println!("  -pc_ilu_optimize_workspace <bool>      Enable ILU workspace optimization (true/false)");
     println!("  -pc_ilu_pivot_threshold <float>        ILU pivot threshold for stability (default: 1e-12)");
     println!();
+    println!("SuperLU_DIST (Distributed Direct Solver) Preconditioner Options:");
+    println!("  -pc_superlu_pivot_threshold <float>    SuperLU_DIST diagonal pivot threshold (0.0-1.0)");
+    println!("  -pc_superlu_print_level <int>          SuperLU_DIST print level: 0=none, 1=basic, 2=detailed");
+    println!("  -pc_superlu_process_grid <rows> <cols> SuperLU_DIST process grid dimensions");
+    println!("  -pc_superlu_replace_tiny_pivot <bool>  Replace tiny pivots in SuperLU_DIST (true/false)");
+    println!("  -pc_superlu_iterative_refinement <str> SuperLU_DIST iterative refinement method");
+    println!("  -pc_superlu_column_permutation <str>   SuperLU_DIST column permutation strategy");
+    println!("  -pc_superlu_row_permutation <str>      SuperLU_DIST row permutation strategy");
+    println!("  -pc_superlu_static_pivoting <bool>     Use static pivoting in SuperLU_DIST (true/false)");
+    println!();
     println!("Examples:");
     println!("  -ksp_type gmres -ksp_rtol 1e-8 -pc_type jacobi");
     println!("  -ksp_type cg -ksp_max_it 500 -pc_type ilu0 -pc_ilu_levels 2");
@@ -1134,6 +1238,7 @@ pub fn print_help() {
     println!("  -ksp_type gmres -pc_type asm -pc_asm_overlap 2 -pc_asm_inner_pc ilu");
     println!("  -ksp_type cg -pc_type ilu -pc_ilu_type ilut -pc_ilu_tolerance 1e-4 -pc_ilu_triangular_solve iterative");
     println!("  -ksp_type gmres -pc_type ilu -pc_ilu_type iluk -pc_ilu_level_of_fill 3 -pc_ilu_reordering_type rcm");
+    println!("  -ksp_type preonly -pc_type superlu_dist -pc_superlu_pivot_threshold 0.1 -pc_superlu_process_grid 2 2");
 }
 
 /// Check if help is requested in the arguments.

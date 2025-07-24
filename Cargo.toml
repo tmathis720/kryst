@@ -1,6 +1,6 @@
 [package]
 name = "kryst"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 description = "Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with shared and distributed memory parallelism."
 license = "MIT"
@@ -40,7 +40,7 @@ criterion = "0.4"
 env_logger = "0.11"
 
 [features]
-default = ["rayon","logging"]
+default = []
 rayon = ["dep:rayon", "dep:num_cpus"]
 mpi = ["dep:mpi"]
 logging = ["dep:log"]
