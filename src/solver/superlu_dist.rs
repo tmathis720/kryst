@@ -1577,12 +1577,417 @@ impl SuperLuDistData {
     }
 }
 
+/// Iterative refinement configuration
+#[derive(Debug, Clone)]
+pub struct RefinementConfig {
+    /// Maximum number of refinement iterations
+    pub max_iterations: usize,
+    /// Convergence tolerance for residual norm
+    pub tolerance: f64,
+    /// Relative tolerance (relative to initial residual)
+    pub relative_tolerance: f64,
+    /// Minimum improvement factor to continue refinement
+    pub min_improvement_factor: f64,
+}
+
+impl Default for RefinementConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 5,
+            tolerance: 1e-12,
+            relative_tolerance: 1e-6,
+            min_improvement_factor: 0.9,
+        }
+    }
+}
+
+/// Residual computation method for distributed matrices
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidualMethod {
+    /// Standard residual: r = b - A*x
+    Standard,
+    /// Scaled residual: r = (b - A*x) / ||b||
+    Scaled,
+    /// Component-wise scaled: r_i = (b_i - (A*x)_i) / max(|b_i|, |(A*x)_i|)
+    ComponentWise,
+}
+
+/// Iterative refinement engine for SuperLU_DIST
+#[derive(Debug)]
+pub struct RefinementEngine {
+    /// Refinement configuration
+    config: RefinementConfig,
+    /// Residual computation method
+    residual_method: ResidualMethod,
+    /// Workspace for residual computation
+    residual_workspace: Vec<f64>,
+    /// Workspace for correction vector
+    correction_workspace: Vec<f64>,
+    /// Workspace for matrix-vector product
+    matvec_workspace: Vec<f64>,
+    /// Statistics from last refinement
+    last_stats: Option<RefinementStats>,
+}
+
+/// Statistics from iterative refinement
+#[derive(Debug, Clone)]
+pub struct RefinementStats {
+    /// Number of refinement iterations performed
+    pub iterations: usize,
+    /// Initial residual norm
+    pub initial_residual_norm: f64,
+    /// Final residual norm
+    pub final_residual_norm: f64,
+    /// Residual norms at each iteration
+    pub residual_history: Vec<f64>,
+    /// Whether refinement converged
+    pub converged: bool,
+    /// Convergence reason
+    pub convergence_reason: RefinementConvergence,
+    /// Total time spent in refinement
+    pub refinement_time: f64,
+}
+
+/// Convergence reasons for iterative refinement
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefinementConvergence {
+    /// Converged to absolute tolerance
+    AbsoluteTolerance,
+    /// Converged to relative tolerance
+    RelativeTolerance,
+    /// Reached maximum iterations
+    MaxIterations,
+    /// Stagnation detected (insufficient improvement)
+    Stagnation,
+    /// Divergence detected
+    Divergence,
+}
+
+impl RefinementEngine {
+    /// Create new iterative refinement engine
+    pub fn new(config: RefinementConfig, residual_method: ResidualMethod) -> Self {
+        Self {
+            config,
+            residual_method,
+            residual_workspace: Vec::new(),
+            correction_workspace: Vec::new(),
+            matvec_workspace: Vec::new(),
+            last_stats: None,
+        }
+    }
+
+    /// Create with default configuration
+    pub fn with_defaults() -> Self {
+        Self::new(RefinementConfig::default(), ResidualMethod::Standard)
+    }
+
+    /// Setup workspace for given problem size
+    pub fn setup_workspace(&mut self, n: usize) {
+        self.residual_workspace.resize(n, 0.0);
+        self.correction_workspace.resize(n, 0.0);
+        self.matvec_workspace.resize(n, 0.0);
+    }
+
+    /// Perform iterative refinement on the solution
+    pub fn refine_solution(
+        &mut self,
+        matrix: &CsrMatrix<f64>,
+        rhs: &[f64],
+        solution: &mut [f64],
+        superlu_data: &SuperLuDistData,
+        comm: &UniverseComm,
+    ) -> Result<RefinementStats, KError> {
+        let n = solution.len();
+        if n != rhs.len() {
+            return Err(KError::InvalidInput("Solution and RHS dimension mismatch".to_string()));
+        }
+
+        self.setup_workspace(n);
+        
+        let start_time = std::time::Instant::now();
+        let mut stats = RefinementStats {
+            iterations: 0,
+            initial_residual_norm: 0.0,
+            final_residual_norm: 0.0,
+            residual_history: Vec::new(),
+            converged: false,
+            convergence_reason: RefinementConvergence::MaxIterations,
+            refinement_time: 0.0,
+        };
+
+        // Clone workspace vectors to avoid borrowing conflicts
+        let mut residual_workspace = self.residual_workspace.clone();
+        let mut correction_workspace = self.correction_workspace.clone();
+        let mut matvec_workspace = self.matvec_workspace.clone();
+
+        // Compute initial residual: r = b - A*x
+        Self::compute_residual_static(
+            matrix, 
+            rhs, 
+            solution, 
+            &mut residual_workspace, 
+            &mut matvec_workspace,
+            self.residual_method,
+            comm
+        )?;
+        
+        let initial_residual_norm = Self::compute_residual_norm_static(&residual_workspace, comm)?;
+        stats.initial_residual_norm = initial_residual_norm;
+        stats.final_residual_norm = initial_residual_norm;
+        stats.residual_history.push(initial_residual_norm);
+
+        // Check if already converged
+        if self.check_convergence(initial_residual_norm, initial_residual_norm, 0) {
+            stats.converged = true;
+            stats.convergence_reason = RefinementConvergence::AbsoluteTolerance;
+            stats.refinement_time = start_time.elapsed().as_secs_f64();
+            self.last_stats = Some(stats.clone());
+            return Ok(stats);
+        }
+
+        // Refinement loop
+        let mut previous_residual_norm = initial_residual_norm;
+        
+        for iter in 0..self.config.max_iterations {
+            stats.iterations = iter + 1;
+
+            // Solve correction equation: A * dx = r
+            Self::solve_correction_static(
+                &residual_workspace,
+                &mut correction_workspace,
+                superlu_data,
+                comm,
+            )?;
+
+            // Update solution: x += dx
+            for i in 0..n {
+                solution[i] += correction_workspace[i];
+            }
+
+            // Compute new residual: r = b - A*x
+            Self::compute_residual_static(
+                matrix, 
+                rhs, 
+                solution, 
+                &mut residual_workspace, 
+                &mut matvec_workspace,
+                self.residual_method,
+                comm
+            )?;
+            
+            let residual_norm = Self::compute_residual_norm_static(&residual_workspace, comm)?;
+            stats.final_residual_norm = residual_norm;
+            stats.residual_history.push(residual_norm);
+
+            // Check convergence
+            if self.check_convergence(residual_norm, initial_residual_norm, iter + 1) {
+                stats.converged = true;
+                stats.convergence_reason = if residual_norm <= self.config.tolerance {
+                    RefinementConvergence::AbsoluteTolerance
+                } else {
+                    RefinementConvergence::RelativeTolerance
+                };
+                break;
+            }
+
+            // Check for stagnation
+            let improvement_factor = residual_norm / previous_residual_norm;
+            if improvement_factor > self.config.min_improvement_factor {
+                stats.convergence_reason = RefinementConvergence::Stagnation;
+                break;
+            }
+
+            // Check for divergence
+            if residual_norm > initial_residual_norm * 10.0 {
+                stats.convergence_reason = RefinementConvergence::Divergence;
+                break;
+            }
+
+            previous_residual_norm = residual_norm;
+        }
+
+        stats.refinement_time = start_time.elapsed().as_secs_f64();
+        self.last_stats = Some(stats.clone());
+        Ok(stats)
+    }
+
+    /// Compute residual r = b - A*x using distributed sparse matrix-vector product (static version)
+    fn compute_residual_static(
+        matrix: &CsrMatrix<f64>,
+        rhs: &[f64],
+        solution: &[f64],
+        residual: &mut [f64],
+        matvec_workspace: &mut [f64],
+        residual_method: ResidualMethod,
+        comm: &UniverseComm,
+    ) -> Result<(), KError> {
+        // Initialize residual with RHS
+        residual.copy_from_slice(rhs);
+
+        // Compute A*x and subtract from residual
+        Self::distributed_sparse_matvec_static(matrix, solution, matvec_workspace, comm)?;
+        
+        // r = b - A*x
+        for i in 0..residual.len() {
+            residual[i] -= matvec_workspace[i];
+        }
+
+        // Apply residual method scaling if needed
+        match residual_method {
+            ResidualMethod::Standard => {
+                // No scaling needed
+            }
+            ResidualMethod::Scaled => {
+                let rhs_norm = Self::compute_vector_norm_static(rhs, comm)?;
+                if rhs_norm > 0.0 {
+                    for r in residual.iter_mut() {
+                        *r /= rhs_norm;
+                    }
+                }
+            }
+            ResidualMethod::ComponentWise => {
+                for i in 0..residual.len() {
+                    let scale = f64::max(rhs[i].abs(), matvec_workspace[i].abs());
+                    if scale > 0.0 {
+                        residual[i] /= scale;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Perform distributed sparse matrix-vector product (static version)
+    fn distributed_sparse_matvec_static(
+        matrix: &CsrMatrix<f64>,
+        x: &[f64],
+        y: &mut [f64],
+        _comm: &UniverseComm,
+    ) -> Result<(), KError> {
+        // For now, perform local matrix-vector product
+        // In a full MPI implementation, this would handle communication
+        // for distributed vector components
+        
+        let row_ptrs = matrix.row_ptrs();
+        let col_indices = matrix.col_indices();
+        let values = matrix.values();
+        
+        y.fill(0.0);
+        
+        for i in 0..matrix.nrows() {
+            for idx in row_ptrs[i]..row_ptrs[i + 1] {
+                let j = col_indices[idx];
+                let val = values[idx];
+                y[i] += val * x[j];
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Solve correction equation A * dx = r using existing factorization (static version)
+    fn solve_correction_static(
+        residual: &[f64],
+        correction: &mut [f64],
+        superlu_data: &SuperLuDistData,
+        comm: &UniverseComm,
+    ) -> Result<(), KError> {
+        // Use the existing triangular solve infrastructure
+        let numeric_factor = superlu_data.numeric_factor.as_ref()
+            .ok_or_else(|| KError::SolveError("Numeric factorization not available".to_string()))?;
+
+        // Copy residual to correction as initial guess
+        correction.copy_from_slice(residual);
+        
+        // Create temporary vector for intermediate result
+        let mut temp_result = correction.to_vec();
+        
+        // Use the existing distributed triangular solve methods
+        // Forward solve: L * y = r
+        DistributedTriangularSolver::forward_solve(
+            residual,
+            &mut temp_result,
+            numeric_factor,
+            &superlu_data.distribution,
+            comm,
+            CommPattern::PointToPoint,
+            false,
+        )?;
+        
+        // Backward solve: U * dx = y  
+        DistributedTriangularSolver::backward_solve(
+            &temp_result,
+            correction,
+            numeric_factor,
+            &superlu_data.distribution,
+            comm,
+            CommPattern::PointToPoint,
+            false,
+        )?;
+        
+        Ok(())
+    }
+
+    /// Compute norm of residual vector (distributed) (static version)
+    fn compute_residual_norm_static(residual: &[f64], _comm: &UniverseComm) -> Result<f64, KError> {
+        // Compute local norm
+        let local_norm_sq: f64 = residual.iter().map(|x| x * x).sum();
+        
+        // In full MPI implementation, would use allreduce to sum across processes
+        // For now, just return local norm
+        Ok(local_norm_sq.sqrt())
+    }
+
+    /// Compute norm of a vector (distributed) (static version)
+    fn compute_vector_norm_static(vector: &[f64], _comm: &UniverseComm) -> Result<f64, KError> {
+        let local_norm_sq: f64 = vector.iter().map(|x| x * x).sum();
+        Ok(local_norm_sq.sqrt())
+    }
+
+    /// Check convergence criteria
+    fn check_convergence(&self, current_norm: f64, initial_norm: f64, iteration: usize) -> bool {
+        if iteration == 0 {
+            return false; // Never converge on first iteration
+        }
+        
+        // Absolute tolerance check
+        if current_norm <= self.config.tolerance {
+            return true;
+        }
+        
+        // Relative tolerance check
+        if initial_norm > 0.0 && current_norm / initial_norm <= self.config.relative_tolerance {
+            return true;
+        }
+        
+        false
+    }
+
+    /// Get statistics from last refinement
+    pub fn last_stats(&self) -> Option<&RefinementStats> {
+        self.last_stats.as_ref()
+    }
+
+    /// Update configuration
+    pub fn set_config(&mut self, config: RefinementConfig) {
+        self.config = config;
+    }
+
+    /// Update residual method
+    pub fn set_residual_method(&mut self, method: ResidualMethod) {
+        self.residual_method = method;
+    }
+}
+
 /// SuperLU_DIST distributed direct solver
 pub struct SuperLuDistSolver {
     /// Solver options
     options: SuperLuDistOptions,
     /// Internal SuperLU_DIST data (None until first setup)
     data: Option<SuperLuDistData>,
+    /// Iterative refinement engine
+    refinement_engine: Option<RefinementEngine>,
 }
 
 impl SuperLuDistSolver {
@@ -1591,6 +1996,7 @@ impl SuperLuDistSolver {
         Self {
             options: SuperLuDistOptions::default(),
             data: None,
+            refinement_engine: None,
         }
     }
 
@@ -1599,6 +2005,7 @@ impl SuperLuDistSolver {
         Self {
             options,
             data: None,
+            refinement_engine: None,
         }
     }
 
@@ -1666,6 +2073,43 @@ impl SuperLuDistSolver {
     /// Get a reference to the current options
     pub fn options(&self) -> &SuperLuDistOptions {
         &self.options
+    }
+
+    /// Enable iterative refinement with default configuration
+    pub fn enable_iterative_refinement(&mut self) -> &mut Self {
+        self.refinement_engine = Some(RefinementEngine::with_defaults());
+        self
+    }
+
+    /// Configure iterative refinement with custom settings
+    pub fn set_refinement_config(&mut self, config: RefinementConfig) -> &mut Self {
+        if let Some(ref mut engine) = self.refinement_engine {
+            engine.set_config(config);
+        } else {
+            self.refinement_engine = Some(RefinementEngine::new(config, ResidualMethod::Standard));
+        }
+        self
+    }
+
+    /// Set the residual computation method for iterative refinement
+    pub fn set_residual_method(&mut self, method: ResidualMethod) -> &mut Self {
+        if let Some(ref mut engine) = self.refinement_engine {
+            engine.set_residual_method(method);
+        } else {
+            self.refinement_engine = Some(RefinementEngine::new(RefinementConfig::default(), method));
+        }
+        self
+    }
+
+    /// Disable iterative refinement
+    pub fn disable_iterative_refinement(&mut self) -> &mut Self {
+        self.refinement_engine = None;
+        self
+    }
+
+    /// Get refinement statistics from the last solve (if available)
+    pub fn refinement_stats(&self) -> Option<&RefinementStats> {
+        self.refinement_engine.as_ref().and_then(|engine| engine.last_stats())
     }
 
     /// Setup the SuperLU_DIST factorization for the given matrix
@@ -2005,7 +2449,7 @@ impl SuperLuDistSolver {
     ///
     /// This corresponds to the HYPRE `hypre_SLUDistSolve` function.
     fn solve_factored(
-        &self,
+        &mut self,
         b: &Vec<f64>,
         x: &mut Vec<f64>,
         comm: &UniverseComm,
@@ -2083,9 +2527,29 @@ impl SuperLuDistSolver {
         }
         x.copy_from_slice(&permuted_x);
 
-        // Apply iterative refinement if requested
+        // Apply iterative refinement if requested and engine is available
         if !matches!(self.options.iterative_refinement, IterativeRefinement::NoRefine) {
-            self.iterative_refinement(b, x, comm)?;
+            if let Some(ref mut engine) = self.refinement_engine {
+                // Get the original matrix for residual computation
+                let data = self.data.as_ref().unwrap();
+                let local_matrix = data.local_matrix.as_ref()
+                    .ok_or_else(|| KError::SolveError("Local matrix not available for refinement".to_string()))?;
+                
+                // Perform iterative refinement
+                let _refinement_stats = engine.refine_solution(
+                    local_matrix,
+                    b,
+                    x,
+                    data,
+                    comm,
+                )?;
+                
+                #[cfg(feature = "logging")]
+                if let Some(stats) = engine.last_stats() {
+                    log::info!("Iterative refinement completed: {} iterations, final residual: {:.2e}", 
+                              stats.iterations, stats.final_residual_norm);
+                }
+            }
         }
 
         #[cfg(feature = "logging")]
@@ -2094,29 +2558,10 @@ impl SuperLuDistSolver {
         Ok(())
     }
 
-    /// Iterative refinement for improved accuracy
-    fn iterative_refinement(
-        &self,
-        _b: &Vec<f64>,
-        _x: &mut Vec<f64>,
-        _comm: &UniverseComm,
-    ) -> Result<(), KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("SuperLuDistRefinement");
-
-        // Placeholder for iterative refinement
-        // In a real implementation, this would:
-        // 1. Compute residual r = b - A*x
-        // 2. Solve A*dx = r for correction
-        // 3. Update x = x + dx
-        // 4. Repeat until convergence or max iterations
-
-        Ok(())
-    }
-
     /// Destroy the factorization and free memory
     pub fn destroy(&mut self) {
         self.data = None;
+        self.refinement_engine = None;
     }
 }
 
@@ -2859,5 +3304,240 @@ mod tests {
         
         // Factorization should be reused
         assert!(solver.data.is_some());
+    }
+
+    #[test]
+    fn test_refinement_config() {
+        let config = RefinementConfig {
+            max_iterations: 10,
+            tolerance: 1e-14,
+            relative_tolerance: 1e-8,
+            min_improvement_factor: 0.8,
+        };
+        
+        let mut solver = SuperLuDistSolver::new();
+        solver.set_refinement_config(config.clone());
+        
+        assert!(solver.refinement_engine.is_some());
+        if let Some(ref engine) = solver.refinement_engine {
+            assert_eq!(engine.config.max_iterations, 10);
+            assert_eq!(engine.config.tolerance, 1e-14);
+            assert_eq!(engine.config.relative_tolerance, 1e-8);
+            assert_eq!(engine.config.min_improvement_factor, 0.8);
+        }
+    }
+
+    #[test]
+    fn test_refinement_methods() {
+        let mut solver = SuperLuDistSolver::new();
+        
+        // Test enabling refinement
+        solver.enable_iterative_refinement();
+        assert!(solver.refinement_engine.is_some());
+        
+        // Test setting residual method
+        solver.set_residual_method(ResidualMethod::Scaled);
+        if let Some(ref engine) = solver.refinement_engine {
+            assert_eq!(engine.residual_method, ResidualMethod::Scaled);
+        }
+        
+        // Test disabling refinement
+        solver.disable_iterative_refinement();
+        assert!(solver.refinement_engine.is_none());
+    }
+
+    #[test]
+    fn test_refinement_engine_creation() {
+        let config = RefinementConfig::default();
+        let engine = RefinementEngine::new(config, ResidualMethod::ComponentWise);
+        
+        assert_eq!(engine.residual_method, ResidualMethod::ComponentWise);
+        assert!(engine.last_stats.is_none());
+    }
+
+    #[test]
+    fn test_refinement_convergence_criteria() {
+        let mut engine = RefinementEngine::with_defaults();
+        
+        // Test absolute tolerance convergence
+        assert!(engine.check_convergence(1e-13, 1e-6, 1));
+        
+        // Test relative tolerance convergence
+        assert!(engine.check_convergence(1e-7, 1e-1, 1));
+        
+        // Test no convergence
+        assert!(!engine.check_convergence(1e-4, 1e-6, 1));
+        
+        // Test first iteration never converges
+        assert!(!engine.check_convergence(1e-13, 1e-6, 0));
+    }
+
+    #[test]
+    fn test_distributed_sparse_matvec() {
+        let matrix = CsrMatrix::from_csr(
+            3, 3,
+            vec![0, 2, 4, 6],
+            vec![0, 1, 1, 2, 0, 2],
+            vec![2.0, 1.0, 3.0, 1.0, 1.0, 4.0],
+        );
+        
+        let x = vec![1.0, 2.0, 3.0];
+        let mut y = vec![0.0; 3];
+        
+        let comm = UniverseComm::NoComm(NoComm);
+        
+        RefinementEngine::distributed_sparse_matvec_static(&matrix, &x, &mut y, &comm).unwrap();
+        
+        // Expected: [2*1 + 1*2, 3*2 + 1*3, 1*1 + 4*3] = [4, 9, 13]
+        assert_eq!(y, vec![4.0, 9.0, 13.0]);
+    }
+
+    #[test]
+    fn test_refinement_stats() {
+        let stats = RefinementStats {
+            iterations: 3,
+            initial_residual_norm: 1e-3,
+            final_residual_norm: 1e-12,
+            residual_history: vec![1e-3, 1e-6, 1e-9, 1e-12],
+            converged: true,
+            convergence_reason: RefinementConvergence::AbsoluteTolerance,
+            refinement_time: 0.001,
+        };
+        
+        assert_eq!(stats.iterations, 3);
+        assert!(stats.converged);
+        assert_eq!(stats.residual_history.len(), 4);
+        assert!(matches!(stats.convergence_reason, RefinementConvergence::AbsoluteTolerance));
+    }
+
+    #[test]
+    fn test_residual_methods() {
+        // Test all residual method variants
+        assert_eq!(ResidualMethod::Standard, ResidualMethod::Standard);
+        assert_ne!(ResidualMethod::Standard, ResidualMethod::Scaled);
+        assert_ne!(ResidualMethod::Scaled, ResidualMethod::ComponentWise);
+    }
+
+    #[test]
+    fn test_refinement_workspace_setup() {
+        let mut engine = RefinementEngine::with_defaults();
+        let n = 100;
+        
+        engine.setup_workspace(n);
+        
+        assert_eq!(engine.residual_workspace.len(), n);
+        assert_eq!(engine.correction_workspace.len(), n);
+        assert_eq!(engine.matvec_workspace.len(), n);
+    }
+
+    #[test]
+    fn test_vector_norm_computation() {
+        let comm = UniverseComm::NoComm(NoComm);
+        
+        let vector = vec![3.0, 4.0, 0.0];
+        let norm = RefinementEngine::compute_vector_norm_static(&vector, &comm).unwrap();
+        
+        // Expected norm: sqrt(9 + 16 + 0) = 5.0
+        assert!((norm - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_refinement_convergence_variants() {
+        // Test all convergence reason variants
+        let reasons = [
+            RefinementConvergence::AbsoluteTolerance,
+            RefinementConvergence::RelativeTolerance,
+            RefinementConvergence::MaxIterations,
+            RefinementConvergence::Stagnation,
+            RefinementConvergence::Divergence,
+        ];
+        
+        for (i, reason1) in reasons.iter().enumerate() {
+            for (j, reason2) in reasons.iter().enumerate() {
+                if i == j {
+                    assert_eq!(reason1, reason2);
+                } else {
+                    assert_ne!(reason1, reason2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_iterative_refinement_integration() {
+        // Test complete integration with solver and refinement
+        let _matrix = CsrMatrix::from_csr(
+            3, 3,
+            vec![0, 2, 4, 6],
+            vec![0, 1, 1, 2, 0, 2],
+            vec![2.0, 1.0, 3.0, 1.0, 1.0, 4.0],
+        );
+        
+        let _b = vec![6.0, 8.0, 10.0];
+        let _x = vec![0.0; 3];
+        
+        // Create solver with iterative refinement enabled
+        let mut solver = SuperLuDistSolver::new();
+        solver.enable_iterative_refinement();
+        
+        // Configure refinement settings
+        let config = RefinementConfig {
+            max_iterations: 3,
+            tolerance: 1e-10,
+            relative_tolerance: 1e-8,
+            min_improvement_factor: 0.9,
+        };
+        solver.set_refinement_config(config);
+        solver.set_residual_method(ResidualMethod::Standard);
+        
+        let _comm = UniverseComm::NoComm(NoComm);
+        
+        // Since we don't have full matrix factorization in the test environment,
+        // just verify that refinement engine is properly configured
+        assert!(solver.refinement_engine.is_some());
+        
+        if let Some(ref engine) = solver.refinement_engine {
+            assert_eq!(engine.config.max_iterations, 3);
+            assert_eq!(engine.config.tolerance, 1e-10);
+            assert_eq!(engine.residual_method, ResidualMethod::Standard);
+        }
+        
+        // Test that refinement stats are initially None
+        assert!(solver.refinement_stats().is_none());
+    }
+
+    #[test] 
+    fn test_refinement_residual_scaling() {
+        // Test different residual scaling methods
+        let matrix = CsrMatrix::from_csr(
+            2, 2,
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![1.0, 1.0],
+        );
+        
+        let rhs = vec![2.0, 3.0];
+        let solution = vec![1.0, 1.0];
+        let mut residual = vec![0.0; 2];
+        let mut matvec_workspace = vec![0.0; 2];
+        let comm = UniverseComm::NoComm(NoComm);
+        
+        // Test standard residual
+        RefinementEngine::compute_residual_static(
+            &matrix, &rhs, &solution, &mut residual, &mut matvec_workspace,
+            ResidualMethod::Standard, &comm
+        ).unwrap();
+        // Expected: rhs - matrix*solution = [2,3] - [1,1] = [1,2]
+        assert_eq!(residual, vec![1.0, 2.0]);
+        
+        // Test scaled residual
+        RefinementEngine::compute_residual_static(
+            &matrix, &rhs, &solution, &mut residual, &mut matvec_workspace,
+            ResidualMethod::Scaled, &comm
+        ).unwrap();
+        // Should be scaled by ||rhs|| = sqrt(4+9) = sqrt(13)
+        let rhs_norm = (4.0 + 9.0_f64).sqrt();
+        assert!((residual[0] - 1.0/rhs_norm).abs() < 1e-10);
+        assert!((residual[1] - 2.0/rhs_norm).abs() < 1e-10);
     }
 }
