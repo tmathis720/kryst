@@ -137,8 +137,8 @@ fn get_available_matrices() -> Vec<MatrixInfo> {
     vec![
         MatrixInfo {
             name: "fidapm11".to_string(),
-            matrix_file: "examples/mtx/fidap005.mtx".to_string(),
-            rhs_file: "examples/mtx/fidap005_rhs1.mtx".to_string(),
+            matrix_file: "examples/mtx/fidapm11.mtx".to_string(),
+            rhs_file: "examples/mtx/fidapm11_rhs1.mtx".to_string(),
             description: "FIDAP model (structural, 22,294 x 22,294, 623,554 nnz)".to_string(),
         },
         MatrixInfo {
