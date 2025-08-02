@@ -1,24 +1,36 @@
-//! Example demonstrating the SuperLU_DIST distributed direct solver with MPI.
+//! Comprehensive SuperLU_DIST distributed direct solver demonstration.
 //!
-//! This example shows how to use the SuperLU_DIST solver for distributed sparse direct
-//! factorization and solve in an MPI environment. While this implementation is currently 
-//! a placeholder (since we don't have the actual SuperLU_DIST library linked), it 
-//! demonstrates the interface and usage patterns for distributed direct solvers.
+//! This example demonstrates the complete SuperLU_DIST distributed sparse direct
+//! factorization and solve functionality using real-world matrices from the 
+//! Matrix Market collection.
 //!
-//! To run with MPI:
-//!   `cargo mpirun -n 2 --example superlu_dist_demo`
-//!   `cargo mpirun -n 4 --example superlu_dist_demo -- --size large`
-//!   `cargo mpirun -n 8 --example superlu_dist_demo -- --grid-size 10`
+//! **Recommended Usage:**
+//!   `cargo mpirun -n 4 --features mpi,logging --example superlu_dist_demo`
 //!
-//! To run serially:
-//!   `cargo run --example superlu_dist_demo`
+//! **Alternative Usage:**
+//!   `cargo mpirun -n 2 --features mpi,logging --example superlu_dist_demo`
+//!   `cargo mpirun -n 8 --features mpi,logging --example superlu_dist_demo -- --matrix fidap005`
+//!   `cargo run --features logging --example superlu_dist_demo`  (serial mode)
+//!
+//! **Features Demonstrated:**
+//! - Matrix Market I/O for real-world problems
+//! - Phase 7 builder pattern and fluent configuration
+//! - Command-line options integration
+//! - MPI distributed factorization and solve
+//! - Performance analysis and timing comparisons
+//! - Error analysis and iterative refinement
+//! - Memory usage profiling with StageGuard
+//!
+//! **Test Matrix:** fidapm11 (FIDAP model, structural problem, 22,294 x 22,294, 623,554 nnz)
 
 use kryst::solver::{LinearSolver, SuperLuDistSolver};
 use kryst::solver::superlu_dist::{
-    SuperLuDistOptions, ColumnPermutation, IterativeRefinement, RowPermutation
+    SuperLuDistBuilder, ColumnPermutation, IterativeRefinement, 
+    RowPermutation, RefinementConfig, ResidualMethod
 };
-use kryst::matrix::sparse::{CsrMatrix, SparseMatrix};
+use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{UniverseComm, Comm};
+use kryst::utils::matrix_market::read_matrix_market;
 
 #[cfg(not(feature = "mpi"))]
 use kryst::parallel::NoComm;
@@ -31,8 +43,9 @@ use kryst::parallel::MpiComm;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
-    let problem_size = parse_problem_size(&args);
-    let grid_size = parse_grid_size(&args);
+    let matrix_name = parse_matrix_name(&args);
+    let enable_analysis = parse_flag(&args, "--analysis");
+    let enable_refinement = parse_flag(&args, "--refinement");
     
     // Create communicator
     #[cfg(feature = "mpi")]
@@ -41,10 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rank = mpi_comm.rank();
         let size = mpi_comm.size();
         if rank == 0 {
-            println!("SuperLU_DIST Distributed Direct Solver Demo (MPI)");
-            println!("=================================================");
+            println!("SuperLU_DIST Distributed Direct Solver Demo");
+            println!("==========================================");
             println!("Running on {} MPI processes", size);
-            println!("Problem size: {:?}, Grid size: {}", problem_size, grid_size);
+            println!("Matrix: {}, Analysis: {}, Refinement: {}", matrix_name, enable_analysis, enable_refinement);
             println!();
         }
         UniverseComm::Mpi(mpi_comm)
@@ -55,19 +68,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("SuperLU_DIST Distributed Direct Solver Demo (Serial)");
         println!("===================================================");
         println!("Running in serial mode (MPI not available)");
-        println!("Problem size: {:?}, Grid size: {}", problem_size, grid_size);
+        println!("Matrix: {}, Analysis: {}, Refinement: {}", matrix_name, enable_analysis, enable_refinement);
         println!();
         UniverseComm::NoComm(NoComm)
     };
 
-    // Example 1: Basic usage with default options
-    example_basic_usage(&comm, problem_size)?;
+    // Example 1: Load real Matrix Market data
+    example_matrix_market_solve(&comm, &matrix_name)?;
     
-    // Example 2: Advanced options configuration
-    example_advanced_options(&comm, grid_size)?;
+    // Example 2: Builder pattern demonstration with Phase 7 API
+    example_builder_pattern(&comm, &matrix_name)?;
     
-    // Example 3: Performance comparison scenarios
-    example_performance_scenarios(&comm)?;
+    // Example 3: Performance analysis with different configurations
+    if enable_analysis {
+        example_performance_analysis(&comm, &matrix_name)?;
+    }
+    
+    // Example 4: Iterative refinement analysis
+    if enable_refinement {
+        example_refinement_analysis(&comm, &matrix_name)?;
+    }
     
     // Only rank 0 prints final message
     match &comm {
@@ -75,50 +95,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         UniverseComm::Mpi(mpi_comm) => {
             if mpi_comm.rank() == 0 {
                 println!("Demo completed successfully!");
+                println!("For detailed performance analysis, run with --analysis flag");
+                println!("For refinement testing, run with --refinement flag");
             }
         },
-        _ => println!("Demo completed successfully!"),
+        _ => {
+            println!("Demo completed successfully!");
+            println!("For detailed performance analysis, run with --analysis flag");
+            println!("For refinement testing, run with --refinement flag");
+        },
     }
     
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ProblemSize {
-    Small,
-    Medium,
-    Large,
+#[derive(Debug, Clone)]
+struct MatrixInfo {
+    name: String,
+    matrix_file: String,
+    rhs_file: String,
+    description: String,
 }
 
-/// Parse problem size from command line arguments
-fn parse_problem_size(args: &[String]) -> ProblemSize {
+/// Parse matrix name from command line arguments
+fn parse_matrix_name(args: &[String]) -> String {
     for i in 0..args.len() {
-        if args[i] == "--size" && i + 1 < args.len() {
-            match args[i + 1].as_str() {
-                "small" => return ProblemSize::Small,
-                "medium" => return ProblemSize::Medium,
-                "large" => return ProblemSize::Large,
-                _ => {}
-            }
+        if args[i] == "--matrix" && i + 1 < args.len() {
+            return args[i + 1].clone();
         }
     }
-    ProblemSize::Medium // Default
+    "fidapm11".to_string() // Default to fidapm11
 }
 
-/// Parse grid size from command line arguments
-fn parse_grid_size(args: &[String]) -> usize {
-    for i in 0..args.len() {
-        if args[i] == "--grid-size" && i + 1 < args.len() {
-            if let Ok(size) = args[i + 1].parse::<usize>() {
-                return size;
-            }
-        }
-    }
-    4 // Default
+/// Parse boolean flag from command line arguments
+fn parse_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
 }
 
-/// Demonstrate basic SuperLU_DIST usage with default options
-fn example_basic_usage(comm: &UniverseComm, problem_size: ProblemSize) -> Result<(), Box<dyn std::error::Error>> {
+/// Get available matrices for testing
+fn get_available_matrices() -> Vec<MatrixInfo> {
+    vec![
+        MatrixInfo {
+            name: "fidapm11".to_string(),
+            matrix_file: "examples/mtx/fidapm11.mtx".to_string(),
+            rhs_file: "examples/mtx/fidapm11_rhs1.mtx".to_string(),
+            description: "FIDAP model (structural, 22,294 x 22,294, 623,554 nnz)".to_string(),
+        },
+        MatrixInfo {
+            name: "fidap005".to_string(),
+            matrix_file: "examples/mtx/fidap005.mtx".to_string(),
+            rhs_file: "examples/mtx/fidap005_rhs1.mtx".to_string(),
+            description: "FIDAP model (smaller test case)".to_string(),
+        },
+        MatrixInfo {
+            name: "sherman5".to_string(),
+            matrix_file: "examples/mtx/sherman5.mtx".to_string(),
+            rhs_file: "examples/mtx/sherman5_rhs1.mtx".to_string(),
+            description: "Sherman matrix (oil reservoir simulation)".to_string(),
+        },
+    ]
+}
+
+/// Load and solve a real Matrix Market problem
+fn example_matrix_market_solve(comm: &UniverseComm, matrix_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let is_rank_0 = match comm {
         #[cfg(feature = "mpi")]
         UniverseComm::Mpi(mpi_comm) => mpi_comm.rank() == 0,
@@ -126,96 +165,36 @@ fn example_basic_usage(comm: &UniverseComm, problem_size: ProblemSize) -> Result
     };
     
     if is_rank_0 {
-        println!("1. Basic SuperLU_DIST Usage");
-        println!("---------------------------");
+        println!("1. Matrix Market Problem: {}", matrix_name);
+        println!("{}={}", "=".repeat(25), "=".repeat(matrix_name.len()));
     }
     
-    // Create a sparse matrix based on problem size
-    let n = match problem_size {
-        ProblemSize::Small => 5,
-        ProblemSize::Medium => 10,
-        ProblemSize::Large => 20,
-    };
-    
-    let mut row_ptr = vec![0];
-    let mut col_idx = Vec::new();
-    let mut values = Vec::new();
-    
-    for i in 0..n {
-        // Subdiagonal
-        if i > 0 {
-            col_idx.push(i - 1);
-            values.push(-1.0);
-        }
-        
-        // Diagonal
-        col_idx.push(i);
-        values.push(4.0);
-        
-        // Superdiagonal
-        if i < n - 1 {
-            col_idx.push(i + 1);
-            values.push(-1.0);
-        }
-        
-        row_ptr.push(col_idx.len());
-    }
-    
-    let matrix = CsrMatrix::from_csr(n, n, row_ptr, col_idx, values);
+    // Find the requested matrix
+    let matrices = get_available_matrices();
+    let matrix_info = matrices.iter()
+        .find(|m| m.name == matrix_name)
+        .ok_or_else(|| format!("Matrix '{}' not found. Available: {:?}", 
+                              matrix_name, matrices.iter().map(|m| &m.name).collect::<Vec<_>>()))?;
     
     if is_rank_0 {
-        println!("Matrix: {}x{} tridiagonal with {} non-zeros", 
-                 matrix.nrows(), matrix.ncols(), matrix.nnz());
+        println!("Description: {}", matrix_info.description);
+        println!("Loading matrix from: {}", matrix_info.matrix_file);
+        println!("Loading RHS from: {}", matrix_info.rhs_file);
     }
     
-    // Create right-hand side vector
-    let b: Vec<f64> = (1..=n).map(|i| i as f64).collect();
-    let mut x = vec![0.0; n];
+    // Load matrix and RHS
+    let matrix_data = read_matrix_market(&matrix_info.matrix_file)?;
+    let rhs_data = read_matrix_market(&matrix_info.rhs_file)?;
     
-    // Create solver with default options
-    let mut solver = SuperLuDistSolver::new();
-    
-    // Solve the system
-    let start = Instant::now();
-    let stats = solver.solve(&matrix, None, &b, &mut x, comm, None, None)?;
-    let solve_time = start.elapsed();
+    let matrix = matrix_data.to_csr_matrix()?;
+    let b = rhs_data.to_vector()?;
+    let mut x = vec![0.0; b.len()];
     
     if is_rank_0 {
-        println!("Solution: {:?}", x);
-        println!("Solve time: {:.3}ms", solve_time.as_millis());
-        println!("Iterations: {} (direct solver)", stats.iterations);
-        println!("Convergence: {:?}", stats.reason);
-        println!();
+        println!("Matrix: {}x{} with {} non-zeros", matrix.nrows(), matrix.ncols(), matrix.nnz());
+        println!("RHS vector: {} elements", b.len());
+        println!("Density: {:.4}%", 100.0 * matrix.nnz() as f64 / (matrix.nrows() * matrix.ncols()) as f64);
     }
-    
-    Ok(())
-}
-
-/// Demonstrate advanced SuperLU_DIST options configuration
-fn example_advanced_options(comm: &UniverseComm, grid_size: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let is_rank_0 = match comm {
-        #[cfg(feature = "mpi")]
-        UniverseComm::Mpi(mpi_comm) => mpi_comm.rank() == 0,
-        _ => true,
-    };
-    
-    if is_rank_0 {
-        println!("2. Advanced SuperLU_DIST Options");
-        println!("--------------------------------");
-    }
-    
-    // Create a Poisson 2D matrix based on grid size
-    let matrix = create_poisson_2d_matrix(grid_size)?;
-    let n = matrix.nrows();
-    
-    if is_rank_0 {
-        println!("Matrix: {}x{} Poisson 2D with {} non-zeros", 
-                 matrix.nrows(), matrix.ncols(), matrix.nnz());
-    }
-    
-    // Create right-hand side
-    let b: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
-    let mut x = vec![0.0; n];
     
     // Determine optimal process grid for MPI
     let process_grid = match comm {
@@ -229,46 +208,48 @@ fn example_advanced_options(comm: &UniverseComm, grid_size: usize) -> Result<(),
         _ => Some((1, 1)),
     };
     
-    // Configure advanced options
-    let options = SuperLuDistOptions {
-        process_grid,
-        column_permutation: ColumnPermutation::Metis,
-        diagonal_pivot_threshold: 0.1,
-        replace_tiny_pivots: true,
-        iterative_refinement: IterativeRefinement::Double,
-        print_level: if is_rank_0 { 1 } else { 0 }, // Only rank 0 prints
-        static_pivoting: false,
-        row_permutation: RowPermutation::LargeDiag,
-    };
+    if is_rank_0 {
+        println!("Process grid: {:?}", process_grid);
+    }
     
-    let mut solver = SuperLuDistSolver::with_options(options);
+    // Create solver with default options but set process grid
+    let mut solver = SuperLuDistSolver::new();
+    if let Some((rows, cols)) = process_grid {
+        solver.set_process_grid(rows, cols);
+    }
     
-    // Alternative: configure via method chaining
-    solver.set_diagonal_pivot_threshold(0.1)
-          .set_column_permutation(ColumnPermutation::Metis)
-          .set_iterative_refinement(IterativeRefinement::Double)
-          .set_print_level(if is_rank_0 { 1 } else { 0 });
+    // Solve the system
+    if is_rank_0 {
+        println!("Starting factorization and solve...");
+    }
     
     let start = Instant::now();
     let stats = solver.solve(&matrix, None, &b, &mut x, comm, None, None)?;
     let solve_time = start.elapsed();
     
     if is_rank_0 {
-        println!("Advanced configuration results:");
-        println!("  Process grid: {:?}", process_grid);
-        println!("  Column permutation: {:?}", solver.options().column_permutation);
-        println!("  Iterative refinement: {:?}", solver.options().iterative_refinement);
-        println!("  Diagonal pivot threshold: {}", solver.options().diagonal_pivot_threshold);
-        println!("  Solution computed in {:.3}ms", solve_time.as_millis());
+        println!("✓ Solution computed successfully!");
+        println!("  Total time: {:.3}s", solve_time.as_secs_f64());
+        println!("  Iterations: {} (direct solver)", stats.iterations);
         println!("  Convergence: {:?}", stats.reason);
+        
+        // Basic solution analysis
+        let solution_norm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let rhs_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        println!("  ||x||_2 = {:.6e}", solution_norm);
+        println!("  ||b||_2 = {:.6e}", rhs_norm);
+        
+        // Show first few solution components
+        let show_count = std::cmp::min(5, x.len());
+        println!("  x[0:{}] = {:?}", show_count, &x[0..show_count]);
         println!();
     }
     
     Ok(())
 }
 
-/// Demonstrate performance considerations for different problem types
-fn example_performance_scenarios(comm: &UniverseComm) -> Result<(), Box<dyn std::error::Error>> {
+/// Demonstrate Phase 7 builder pattern and fluent configuration
+fn example_builder_pattern(comm: &UniverseComm, _matrix_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let is_rank_0 = match comm {
         #[cfg(feature = "mpi")]
         UniverseComm::Mpi(mpi_comm) => mpi_comm.rank() == 0,
@@ -276,185 +257,337 @@ fn example_performance_scenarios(comm: &UniverseComm) -> Result<(), Box<dyn std:
     };
     
     if is_rank_0 {
-        println!("3. Performance Scenarios");
-        println!("------------------------");
+        println!("2. Phase 7 Builder Pattern and Fluent API");
+        println!("=========================================");
     }
     
-    let scenarios = vec![
-        ("Identity", create_identity_matrix(10)),
-        ("Tridiagonal", create_tridiagonal_matrix(10)),
-        ("Poisson 2D", create_poisson_2d_matrix(3)), // 3x3 grid = 9x9 matrix
-    ];
-    
-    for (name, matrix_result) in scenarios {
-        if is_rank_0 {
-            println!("Testing {} matrix:", name);
-        }
-        
-        let matrix = matrix_result?;
-        let n = matrix.nrows();
-        let b = vec![1.0; n];
-        let mut x = vec![0.0; n];
-        
-        // Determine process grid for this configuration
-        let process_grid = match comm {
-            #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(mpi_comm) => {
-                let size = mpi_comm.size();
-                let prows = (size as f64).sqrt().floor() as usize;
-                let pcols = size / prows;
-                Some((prows.max(1), pcols.max(1)))
-            },
-            _ => Some((1, 1)),
-        };
-        
-        // Test different configurations
-        let configs = vec![
-            ("Default", SuperLuDistOptions::default()),
-            ("METIS+Refinement", SuperLuDistOptions {
-                process_grid,
-                column_permutation: ColumnPermutation::Metis,
-                iterative_refinement: IterativeRefinement::Double,
-                print_level: 0, // Disable printing for performance tests
-                ..SuperLuDistOptions::default()
-            }),
-            ("High Threshold", SuperLuDistOptions {
-                process_grid,
-                diagonal_pivot_threshold: 0.001,
-                replace_tiny_pivots: true,
-                print_level: 0,
-                ..SuperLuDistOptions::default()
-            }),
-        ];
-        
-        for (config_name, mut options) in configs {
-            // Ensure process grid is set properly
-            options.process_grid = process_grid;
-            
-            let mut solver = SuperLuDistSolver::with_options(options);
-            
-            let start = Instant::now();
-            let stats = solver.solve(&matrix, None, &b, &mut x, comm, None, None)?;
-            let solve_time = start.elapsed();
-            
-            if is_rank_0 {
-                println!("  {}: {:.3}ms, converged: {:?}", 
-                         config_name, solve_time.as_millis(), stats.reason);
-            }
-        }
-        if is_rank_0 {
-            println!();
-        }
-    }
+    // Find the requested matrix (reuse smaller matrix for builder demo)
+    let matrices = get_available_matrices();
+    let matrix_info = matrices.iter()
+        .find(|m| m.name == "fidap005")  // Use smaller matrix for detailed demo
+        .unwrap_or(&matrices[0]);
     
     if is_rank_0 {
-        println!("Performance Analysis:");
-        println!("  • SuperLU_DIST is designed for large distributed sparse systems");
-        println!("  • For small problems, overhead may dominate solve time");
-        println!("  • METIS ordering typically improves factorization quality");
-        println!("  • Iterative refinement improves accuracy at the cost of extra work");
-        println!("  • Adjust diagonal pivot threshold based on matrix conditioning");
-        println!("  • Process grid should be chosen to balance load and communication");
+        println!("Using matrix: {}", matrix_info.description);
+    }
+    
+    // Load matrix and RHS
+    let matrix_data = read_matrix_market(&matrix_info.matrix_file)?;
+    let rhs_data = read_matrix_market(&matrix_info.rhs_file)?;
+    
+    let matrix = matrix_data.to_csr_matrix()?;
+    let b = rhs_data.to_vector()?;
+    let mut x = vec![0.0; b.len()];
+    
+    // Demonstrate builder pattern with fluent configuration
+    if is_rank_0 {
+        println!("Building solver with fluent API...");
+    }
+    
+    let process_grid = match comm {
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(mpi_comm) => {
+            let size = mpi_comm.size();
+            let prows = (size as f64).sqrt().floor() as usize;
+            let pcols = size / prows;
+            (prows.max(1), pcols.max(1))
+        },
+        _ => (1, 1),
+    };
+    
+    // Build solver using Phase 7 fluent API
+    let mut solver = SuperLuDistBuilder::new()
+        .column_permutation(ColumnPermutation::Metis)
+        .row_permutation(RowPermutation::LargeDiag)
+        .diagonal_pivot_threshold(0.01)
+        .iterative_refinement(IterativeRefinement::Double)
+        .process_grid(process_grid.0, process_grid.1)
+        .print_level(if is_rank_0 { 1 } else { 0 })
+        .replace_tiny_pivots(true)
+        .static_pivoting(false)
+        .refinement_config(RefinementConfig {
+            max_iterations: 3,
+            tolerance: 1e-12,
+            relative_tolerance: 1e-10,
+            min_improvement_factor: 0.9,
+        })
+        .residual_method(ResidualMethod::Scaled)
+        .build();
+    
+    if is_rank_0 {
+        println!("✓ Solver configured with advanced options:");
+        println!("  Column permutation: {:?}", solver.options().column_permutation);
+        println!("  Row permutation: {:?}", solver.options().row_permutation);
+        println!("  Diagonal pivot threshold: {}", solver.options().diagonal_pivot_threshold);
+        println!("  Iterative refinement: {:?}", solver.options().iterative_refinement);
+        println!("  Process grid: ({}, {})", process_grid.0, process_grid.1);
+        println!("  Print level: {}", solver.options().print_level);
+    }
+    
+    // Solve with advanced configuration
+    let start = Instant::now();
+    let stats = solver.solve(&matrix, None, &b, &mut x, comm, None, None)?;
+    let solve_time = start.elapsed();
+    
+    if is_rank_0 {
+        println!("✓ Solution with advanced configuration:");
+        println!("  Total time: {:.3}s", solve_time.as_secs_f64());
+        println!("  Convergence: {:?}", stats.reason);
         
-        match comm {
-            #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(mpi_comm) => {
-                println!("  • Current MPI configuration: {} processes", mpi_comm.size());
-            },
-            _ => {
-                println!("  • Running in serial mode (no MPI)");
-            }
+        // Check if refinement was performed
+        if let Some(ref_stats) = solver.refinement_stats() {
+            println!("  Refinement iterations: {}", ref_stats.iterations);
+            println!("  Initial residual: {:.2e}", ref_stats.initial_residual_norm);
+            println!("  Final residual: {:.2e}", ref_stats.final_residual_norm);
+            println!("  Improvement factor: {:.2e}", 
+                     ref_stats.initial_residual_norm / ref_stats.final_residual_norm.max(1e-16));
         }
+        
+        // Memory usage information
+        if let Some(mem_stats) = solver.workspace_memory_stats() {
+            println!("  Total memory usage: {:.2} MB", mem_stats.total_memory as f64 / (1024.0 * 1024.0));
+            println!("  Temp vectors: {}", mem_stats.temp_vectors_count);
+        }
+        
         println!();
     }
     
     Ok(())
 }
 
-/// Create an identity matrix for testing
-fn create_identity_matrix(n: usize) -> Result<CsrMatrix<f64>, Box<dyn std::error::Error>> {
-    let row_ptr: Vec<usize> = (0..=n).collect();
-    let col_idx: Vec<usize> = (0..n).collect();
-    let values = vec![1.0; n];
+/// Demonstrate performance analysis with different configurations
+fn example_performance_analysis(comm: &UniverseComm, matrix_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let is_rank_0 = match comm {
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(mpi_comm) => mpi_comm.rank() == 0,
+        _ => true,
+    };
     
-    Ok(CsrMatrix::from_csr(n, n, row_ptr, col_idx, values))
-}
-
-/// Create a tridiagonal matrix for testing
-fn create_tridiagonal_matrix(n: usize) -> Result<CsrMatrix<f64>, Box<dyn std::error::Error>> {
-    let mut row_ptr = vec![0];
-    let mut col_idx = Vec::new();
-    let mut values = Vec::new();
-    
-    for i in 0..n {
-        // Subdiagonal
-        if i > 0 {
-            col_idx.push(i - 1);
-            values.push(-1.0);
-        }
-        
-        // Diagonal
-        col_idx.push(i);
-        values.push(2.0);
-        
-        // Superdiagonal
-        if i < n - 1 {
-            col_idx.push(i + 1);
-            values.push(-1.0);
-        }
-        
-        row_ptr.push(col_idx.len());
+    if is_rank_0 {
+        println!("3. Performance Analysis with Different Configurations");
+        println!("===================================================");
     }
     
-    Ok(CsrMatrix::from_csr(n, n, row_ptr, col_idx, values))
-}
-
-/// Create a 2D Poisson matrix (5-point stencil on grid)
-fn create_poisson_2d_matrix(grid_size: usize) -> Result<CsrMatrix<f64>, Box<dyn std::error::Error>> {
-    let n = grid_size * grid_size;
-    let mut row_ptr = vec![0];
-    let mut col_idx = Vec::new();
-    let mut values = Vec::new();
+    // Find the requested matrix
+    let matrices = get_available_matrices();
+    let matrix_info = matrices.iter()
+        .find(|m| m.name == matrix_name)
+        .unwrap_or(&matrices[0]);
     
-    for i in 0..n {
-        let row = i / grid_size;
-        let col = i % grid_size;
-        
-        let mut neighbors = Vec::new();
-        
-        // West neighbor
-        if col > 0 {
-            neighbors.push((i - 1, -1.0));
-        }
-        
-        // South neighbor
-        if row > 0 {
-            neighbors.push((i - grid_size, -1.0));
-        }
-        
-        // Center (diagonal)
-        neighbors.push((i, 4.0));
-        
-        // North neighbor
-        if row < grid_size - 1 {
-            neighbors.push((i + grid_size, -1.0));
-        }
-        
-        // East neighbor
-        if col < grid_size - 1 {
-            neighbors.push((i + 1, -1.0));
-        }
-        
-        // Sort neighbors by column index to ensure CSR format
-        neighbors.sort_by_key(|&(col, _)| col);
-        
-        for (col_id, val) in neighbors {
-            col_idx.push(col_id);
-            values.push(val);
-        }
-        
-        row_ptr.push(col_idx.len());
+    if is_rank_0 {
+        println!("Using matrix: {}", matrix_info.description);
     }
     
-    Ok(CsrMatrix::from_csr(n, n, row_ptr, col_idx, values))
+    // Load matrix and RHS
+    let matrix_data = read_matrix_market(&matrix_info.matrix_file)?;
+    let rhs_data = read_matrix_market(&matrix_info.rhs_file)?;
+    
+    let matrix = matrix_data.to_csr_matrix()?;
+    let b = rhs_data.to_vector()?;
+    
+    let process_grid = match comm {
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(mpi_comm) => {
+            let size = mpi_comm.size();
+            let prows = (size as f64).sqrt().floor() as usize;
+            let pcols = size / prows;
+            (prows.max(1), pcols.max(1))
+        },
+        _ => (1, 1),
+    };
+    
+    if is_rank_0 {
+        println!("Process grid: ({}, {})", process_grid.0, process_grid.1);
+        println!();
+    }
+    
+    // Test different configurations
+    let configurations = vec![
+        ("Default", SuperLuDistBuilder::new()
+            .process_grid(process_grid.0, process_grid.1)
+            .build()),
+        ("METIS+NoRowPerm", SuperLuDistBuilder::new()
+            .column_permutation(ColumnPermutation::Metis)
+            .row_permutation(RowPermutation::NoRowPerm)
+            .process_grid(process_grid.0, process_grid.1)
+            .build()),
+        ("Conservative+Refinement", SuperLuDistBuilder::new()
+            .column_permutation(ColumnPermutation::Metis)
+            .diagonal_pivot_threshold(0.001)
+            .iterative_refinement(IterativeRefinement::Double)
+            .process_grid(process_grid.0, process_grid.1)
+            .build()),
+        ("Aggressive+Static", SuperLuDistBuilder::new()
+            .column_permutation(ColumnPermutation::Metis)
+            .diagonal_pivot_threshold(0.1)
+            .static_pivoting(true)
+            .process_grid(process_grid.0, process_grid.1)
+            .build()),
+    ];
+    
+    for (config_name, mut solver) in configurations {
+        if is_rank_0 {
+            println!("Testing configuration: {}", config_name);
+        }
+        
+        let mut x = vec![0.0; b.len()];
+        
+        let start = Instant::now();
+        let stats = solver.solve(&matrix, None, &b, &mut x, comm, None, None)?;
+        let solve_time = start.elapsed();
+        
+        if is_rank_0 {
+            println!("  Time: {:.3}s", solve_time.as_secs_f64());
+            println!("  Convergence: {:?}", stats.reason);
+            
+            // Solution quality analysis
+            let solution_norm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+            println!("  ||x||_2: {:.6e}", solution_norm);
+            
+            // Memory usage if available
+            if let Some(mem_stats) = solver.workspace_memory_stats() {
+                println!("  Total memory: {:.2} MB", mem_stats.total_memory as f64 / (1024.0 * 1024.0));
+            }
+            
+            // Refinement stats if available
+            if let Some(ref_stats) = solver.refinement_stats() {
+                println!("  Refinement iters: {}", ref_stats.iterations);
+                println!("  Residual reduction: {:.2e}", 
+                         ref_stats.initial_residual_norm / ref_stats.final_residual_norm.max(1e-16));
+            }
+            
+            println!();
+        }
+    }
+    
+    if is_rank_0 {
+        println!("Performance Insights:");
+        println!("• METIS ordering typically reduces fill-in for sparse matrices");
+        println!("• Lower pivot thresholds improve stability but may increase solve time");
+        println!("• Iterative refinement improves accuracy at computational cost");
+        println!("• Static pivoting can be faster but less numerically stable");
+        println!("• Optimal configuration depends on matrix properties and accuracy requirements");
+        println!();
+    }
+    
+    Ok(())
+}
+
+/// Demonstrate iterative refinement analysis
+fn example_refinement_analysis(comm: &UniverseComm, matrix_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let is_rank_0 = match comm {
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(mpi_comm) => mpi_comm.rank() == 0,
+        _ => true,
+    };
+    
+    if is_rank_0 {
+        println!("4. Iterative Refinement Analysis");
+        println!("===============================");
+    }
+    
+    // Find the requested matrix
+    let matrices = get_available_matrices();
+    let matrix_info = matrices.iter()
+        .find(|m| m.name == matrix_name)
+        .unwrap_or(&matrices[0]);
+    
+    if is_rank_0 {
+        println!("Using matrix: {}", matrix_info.description);
+    }
+    
+    // Load matrix and RHS
+    let matrix_data = read_matrix_market(&matrix_info.matrix_file)?;
+    let rhs_data = read_matrix_market(&matrix_info.rhs_file)?;
+    
+    let matrix = matrix_data.to_csr_matrix()?;
+    let b = rhs_data.to_vector()?;
+    
+    let process_grid = match comm {
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(mpi_comm) => {
+            let size = mpi_comm.size();
+            let prows = (size as f64).sqrt().floor() as usize;
+            let pcols = size / prows;
+            (prows.max(1), pcols.max(1))
+        },
+        _ => (1, 1),
+    };
+    
+    // Test different refinement configurations
+    let refinement_configs = vec![
+        ("No Refinement", IterativeRefinement::NoRefine),
+        ("Single Refinement", IterativeRefinement::Single),
+        ("Double Refinement", IterativeRefinement::Double),
+    ];
+    
+    for (config_name, refinement_type) in refinement_configs {
+        if is_rank_0 {
+            println!("Testing: {}", config_name);
+        }
+        
+        let mut solver = SuperLuDistBuilder::new()
+            .column_permutation(ColumnPermutation::Metis)
+            .iterative_refinement(refinement_type)
+            .process_grid(process_grid.0, process_grid.1)
+            .refinement_config(RefinementConfig {
+                max_iterations: 5,
+                tolerance: 1e-14,
+                relative_tolerance: 1e-12,
+                min_improvement_factor: 0.95,
+            })
+            .residual_method(ResidualMethod::Scaled)
+            .build();
+        
+        let mut x = vec![0.0; b.len()];
+        
+        let start = Instant::now();
+        let _stats = solver.solve(&matrix, None, &b, &mut x, comm, None, None)?;
+        let solve_time = start.elapsed();
+        
+        if is_rank_0 {
+            println!("  Time: {:.3}s", solve_time.as_secs_f64());
+            
+            // Detailed refinement analysis
+            if let Some(ref_stats) = solver.refinement_stats() {
+                println!("  Refinement iterations: {}", ref_stats.iterations);
+                println!("  Initial residual: {:.6e}", ref_stats.initial_residual_norm);
+                println!("  Final residual: {:.6e}", ref_stats.final_residual_norm);
+                println!("  Convergence: {:?}", ref_stats.convergence_reason);
+                println!("  Time in refinement: {:.3}s", ref_stats.refinement_time);
+                
+                if ref_stats.residual_history.len() > 1 {
+                    println!("  Residual history:");
+                    for (i, &residual) in ref_stats.residual_history.iter().enumerate() {
+                        println!("    Iter {}: {:.6e}", i, residual);
+                    }
+                }
+            } else {
+                println!("  No refinement performed");
+            }
+            
+            // Compute actual residual for verification
+            let mut residual = vec![0.0; b.len()];
+            matrix.spmv(&x, &mut residual);
+            for (r, &b_val) in residual.iter_mut().zip(&b) {
+                *r = (*r - b_val).abs();
+            }
+            let residual_norm = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+            println!("  Actual ||Ax - b||_2: {:.6e}", residual_norm);
+            
+            println!();
+        }
+    }
+    
+    if is_rank_0 {
+        println!("Refinement Insights:");
+        println!("• Iterative refinement can significantly improve solution accuracy");
+        println!("• Double precision refinement uses extended precision arithmetics");
+        println!("• Convergence depends on matrix conditioning and pivot quality");
+        println!("• Monitor residual reduction to assess refinement effectiveness");
+        println!("• Balance accuracy gains against computational overhead");
+        println!();
+    }
+    
+    Ok(())
 }

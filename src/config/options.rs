@@ -205,6 +205,24 @@ pub struct PcOptions {
     pub superlu_iterative_refinement: Option<String>,
     /// Whether to use static pivoting in SuperLU_DIST
     pub superlu_static_pivoting: Option<bool>,
+    /// SuperLU_DIST panel size for local dense factorization
+    pub superlu_panel_size: Option<usize>,
+    /// Enable 3D communication-avoiding factorization
+    pub superlu_enable_3d_factorization: Option<bool>,
+    /// 3D process grid depth
+    pub superlu_process_grid_3d_depth: Option<usize>,
+    /// Memory trade-off factor for 3D algorithm
+    pub superlu_memory_tradeoff_factor: Option<f64>,
+    /// Maximum number of panels to process concurrently
+    pub superlu_max_concurrent_panels: Option<usize>,
+    /// Enable asynchronous panel updates
+    pub superlu_async_panel_updates: Option<bool>,
+    /// Workspace memory limit in MB
+    pub superlu_workspace_memory_limit: Option<usize>,
+    /// Enable aggressive memory reuse for better performance
+    pub superlu_aggressive_memory_reuse: Option<bool>,
+    /// Workspace preallocation strategy
+    pub superlu_preallocation_strategy: Option<String>,
 }
 
 /// Preconditioning side specification.
@@ -1071,6 +1089,103 @@ impl PcOptions {
                     }
                     i += 2;
                 }
+                "-pc_superlu_panel_size" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_panel_size".to_string()));
+                    }
+                    opts.superlu_panel_size = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_panel_size value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_enable_3d_factorization" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_enable_3d_factorization".to_string()));
+                    }
+                    let value = args[i + 1].to_lowercase();
+                    match value.as_str() {
+                        "true" | "1" | "yes" | "on" => opts.superlu_enable_3d_factorization = Some(true),
+                        "false" | "0" | "no" | "off" => opts.superlu_enable_3d_factorization = Some(false),
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid superlu_enable_3d_factorization value: {}. Use 'true', 'false', '1', '0', 'yes', 'no', 'on', or 'off'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_superlu_process_grid_3d_depth" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_process_grid_3d_depth".to_string()));
+                    }
+                    opts.superlu_process_grid_3d_depth = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_process_grid_3d_depth value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_memory_tradeoff_factor" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_memory_tradeoff_factor".to_string()));
+                    }
+                    opts.superlu_memory_tradeoff_factor = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_memory_tradeoff_factor value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_max_concurrent_panels" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_max_concurrent_panels".to_string()));
+                    }
+                    opts.superlu_max_concurrent_panels = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_max_concurrent_panels value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_async_panel_updates" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_async_panel_updates".to_string()));
+                    }
+                    let value = args[i + 1].to_lowercase();
+                    match value.as_str() {
+                        "true" | "1" | "yes" | "on" => opts.superlu_async_panel_updates = Some(true),
+                        "false" | "0" | "no" | "off" => opts.superlu_async_panel_updates = Some(false),
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid superlu_async_panel_updates value: {}. Use 'true', 'false', '1', '0', 'yes', 'no', 'on', or 'off'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_superlu_workspace_memory_limit" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_workspace_memory_limit".to_string()));
+                    }
+                    opts.superlu_workspace_memory_limit = Some(args[i + 1].parse()
+                        .map_err(|_| KError::SolveError(format!("Invalid superlu_workspace_memory_limit value: {}", args[i + 1])))?);
+                    i += 2;
+                }
+                "-pc_superlu_aggressive_memory_reuse" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_aggressive_memory_reuse".to_string()));
+                    }
+                    let value = args[i + 1].to_lowercase();
+                    match value.as_str() {
+                        "true" | "1" | "yes" | "on" => opts.superlu_aggressive_memory_reuse = Some(true),
+                        "false" | "0" | "no" | "off" => opts.superlu_aggressive_memory_reuse = Some(false),
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid superlu_aggressive_memory_reuse value: {}. Use 'true', 'false', '1', '0', 'yes', 'no', 'on', or 'off'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
+                "-pc_superlu_preallocation_strategy" => {
+                    if i + 1 >= args.len() {
+                        return Err(KError::SolveError("Missing value for -pc_superlu_preallocation_strategy".to_string()));
+                    }
+                    let strategy = args[i + 1].to_lowercase();
+                    match strategy.as_str() {
+                        "none" | "matrix_size" | "process_grid" | "block_size" | "full" => {
+                            opts.superlu_preallocation_strategy = Some(strategy);
+                        }
+                        _ => {
+                            return Err(KError::SolveError(format!("Invalid superlu_preallocation_strategy: {}. Use 'none', 'matrix_size', 'process_grid', 'block_size', or 'full'", args[i + 1])));
+                        }
+                    }
+                    i += 2;
+                }
                 arg if arg.starts_with("-pc_") => {
                     return Err(KError::SolveError(format!("Unrecognized PC option: {}", arg)));
                 }
@@ -1230,6 +1345,15 @@ pub fn print_help() {
     println!("  -pc_superlu_column_permutation <str>   SuperLU_DIST column permutation strategy");
     println!("  -pc_superlu_row_permutation <str>      SuperLU_DIST row permutation strategy");
     println!("  -pc_superlu_static_pivoting <bool>     Use static pivoting in SuperLU_DIST (true/false)");
+    println!("  -pc_superlu_panel_size <int>           SuperLU_DIST panel size for local dense factorization");
+    println!("  -pc_superlu_enable_3d_factorization <bool>  Enable 3D communication-avoiding factorization");
+    println!("  -pc_superlu_process_grid_3d_depth <int>     3D process grid depth");
+    println!("  -pc_superlu_memory_tradeoff_factor <float> Memory trade-off factor for 3D algorithm");
+    println!("  -pc_superlu_max_concurrent_panels <int>    Maximum number of panels to process concurrently");
+    println!("  -pc_superlu_async_panel_updates <bool>     Enable asynchronous panel updates");
+    println!("  -pc_superlu_workspace_memory_limit <int>   Workspace memory limit in MB");
+    println!("  -pc_superlu_aggressive_memory_reuse <bool> Enable aggressive memory reuse");
+    println!("  -pc_superlu_preallocation_strategy <str>   Workspace preallocation strategy (none, matrix_size, process_grid, block_size, full)");
     println!();
     println!("Examples:");
     println!("  -ksp_type gmres -ksp_rtol 1e-8 -pc_type jacobi");

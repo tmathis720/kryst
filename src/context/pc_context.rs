@@ -212,6 +212,28 @@ impl SuperLuDistPreconditioner {
         }
     }
 
+    /// Set workspace memory limit
+    pub fn set_workspace_memory_limit(&mut self, limit_mb: usize) {
+        if let Some(ref mut solver) = self.solver {
+            solver.set_workspace_memory_limit(limit_mb);
+        }
+        // Note: Workspace config will be applied when solver is created
+    }
+
+    /// Set aggressive memory reuse
+    pub fn set_aggressive_memory_reuse(&mut self, enable: bool) {
+        if let Some(ref mut solver) = self.solver {
+            solver.set_aggressive_memory_reuse(enable);
+        }
+    }
+
+    /// Set preallocation strategy
+    pub fn set_preallocation_strategy(&mut self, strategy: crate::solver::superlu_dist::PreallocationStrategy) {
+        if let Some(ref mut solver) = self.solver {
+            solver.set_preallocation_strategy(strategy);
+        }
+    }
+
     /// Perform direct solve (for PREONLY usage).
     pub fn solve_direct(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>, comm: &crate::parallel::UniverseComm) -> Result<(), KError> {
         // Convert dense matrix to sparse format for SuperLU_DIST
@@ -327,8 +349,86 @@ impl PcFactory {
                     if let Some((prows, pcols)) = opts.superlu_process_grid {
                         slu_opts.process_grid = Some((prows, pcols));
                     }
+                    if let Some(static_pivoting) = opts.superlu_static_pivoting {
+                        slu_opts.static_pivoting = static_pivoting;
+                    }
+                    if let Some(panel_size) = opts.superlu_panel_size {
+                        slu_opts.panel_size = Some(panel_size);
+                    }
+                    if let Some(enable_3d) = opts.superlu_enable_3d_factorization {
+                        slu_opts.enable_3d_factorization = enable_3d;
+                    }
+                    if let Some(depth) = opts.superlu_process_grid_3d_depth {
+                        slu_opts.process_grid_3d_depth = Some(depth);
+                    }
+                    if let Some(factor) = opts.superlu_memory_tradeoff_factor {
+                        slu_opts.memory_tradeoff_factor = factor;
+                    }
+                    if let Some(max_panels) = opts.superlu_max_concurrent_panels {
+                        slu_opts.max_concurrent_panels = max_panels;
+                    }
+                    if let Some(async_updates) = opts.superlu_async_panel_updates {
+                        slu_opts.async_panel_updates = async_updates;
+                    }
                     
-                    Ok(Box::new(SuperLuDistPreconditioner::with_options(slu_opts)))
+                    // Map string options to enums
+                    if let Some(ref col_perm) = opts.superlu_column_permutation {
+                        use crate::solver::superlu_dist::ColumnPermutation;
+                        slu_opts.column_permutation = match col_perm.to_lowercase().as_str() {
+                            "natural" => ColumnPermutation::Natural,
+                            "mmd" | "mmd_ata" => ColumnPermutation::MmdAta,
+                            "metis" => ColumnPermutation::Metis,
+                            "parmetis" => ColumnPermutation::ParMetis,
+                            "user" => ColumnPermutation::User,
+                            _ => ColumnPermutation::Metis, // Default fallback
+                        };
+                    }
+                    
+                    if let Some(ref row_perm) = opts.superlu_row_permutation {
+                        use crate::solver::superlu_dist::RowPermutation;
+                        slu_opts.row_permutation = match row_perm.to_lowercase().as_str() {
+                            "no_row_perm" | "none" => RowPermutation::NoRowPerm,
+                            "large_diag" | "largediag" => RowPermutation::LargeDiag,
+                            "user" => RowPermutation::User,
+                            _ => RowPermutation::LargeDiag, // Default fallback
+                        };
+                    }
+                    
+                    if let Some(ref iter_refine) = opts.superlu_iterative_refinement {
+                        use crate::solver::superlu_dist::IterativeRefinement;
+                        slu_opts.iterative_refinement = match iter_refine.to_lowercase().as_str() {
+                            "no_refine" | "none" => IterativeRefinement::NoRefine,
+                            "single" => IterativeRefinement::Single,
+                            "double" => IterativeRefinement::Double,
+                            "extra" => IterativeRefinement::Extra,
+                            _ => IterativeRefinement::Double, // Default fallback
+                        };
+                    }
+                    
+                    // Create SuperLU_DIST preconditioner with workspace configuration
+                    let mut preconditioner = SuperLuDistPreconditioner::with_options(slu_opts);
+                    
+                    // Configure workspace options if provided
+                    if let Some(memory_limit) = opts.superlu_workspace_memory_limit {
+                        preconditioner.set_workspace_memory_limit(memory_limit);
+                    }
+                    if let Some(aggressive_reuse) = opts.superlu_aggressive_memory_reuse {
+                        preconditioner.set_aggressive_memory_reuse(aggressive_reuse);
+                    }
+                    if let Some(ref strategy) = opts.superlu_preallocation_strategy {
+                        use crate::solver::superlu_dist::PreallocationStrategy;
+                        let strategy_enum = match strategy.to_lowercase().as_str() {
+                            "none" => PreallocationStrategy::None,
+                            "matrix_size" => PreallocationStrategy::MatrixSize,
+                            "process_grid" => PreallocationStrategy::ProcessGrid,
+                            "block_size" => PreallocationStrategy::BlockSize,
+                            "full" => PreallocationStrategy::Full,
+                            _ => PreallocationStrategy::MatrixSize, // Default fallback
+                        };
+                        preconditioner.set_preallocation_strategy(strategy_enum);
+                    }
+                    
+                    Ok(Box::new(preconditioner))
                 } else {
                     Ok(Box::new(SuperLuDistPreconditioner::new()))
                 }

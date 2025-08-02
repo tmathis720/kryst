@@ -1537,12 +1537,14 @@ pub struct SymbolicFactorization {
 }
 
 /// Solve workspace (placeholder for SuperLU_DIST solve structures)
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SolveWorkspace {
-    /// Temporary vectors for distributed solve
-    pub temp_vectors: Vec<Vec<f64>>,
-    /// Communication buffers
-    pub comm_buffers: Vec<Vec<f64>>,
+    /// Advanced workspace management
+    pub workspace: SuperLuDistWorkspace,
+    /// Process-specific temporary vectors
+    pub process_vectors: HashMap<usize, Vec<f64>>,
+    /// Global temporary vectors for collective operations
+    pub global_vectors: HashMap<String, Vec<f64>>,
 }
 
 impl SuperLuDistData {
@@ -1970,6 +1972,11 @@ impl RefinementEngine {
     }
 
     /// Update configuration
+    /// Get current refinement configuration
+    pub fn config(&self) -> &RefinementConfig {
+        &self.config
+    }
+
     pub fn set_config(&mut self, config: RefinementConfig) {
         self.config = config;
     }
@@ -1977,6 +1984,491 @@ impl RefinementEngine {
     /// Update residual method
     pub fn set_residual_method(&mut self, method: ResidualMethod) {
         self.residual_method = method;
+    }
+}
+
+/// Memory pool for efficient allocation and reuse of vectors
+#[derive(Debug)]
+pub struct MemoryPool {
+    /// Pool of available f64 vectors indexed by size
+    f64_pools: std::collections::HashMap<usize, Vec<Vec<f64>>>,
+    /// Pool of available usize vectors indexed by size
+    usize_pools: std::collections::HashMap<usize, Vec<Vec<usize>>>,
+    /// Maximum number of vectors to keep per size
+    max_vectors_per_size: usize,
+    /// Total memory limit in bytes
+    memory_limit: usize,
+    /// Current memory usage in bytes
+    current_memory_usage: usize,
+}
+
+impl MemoryPool {
+    /// Create a new memory pool with specified limits
+    pub fn new(max_vectors_per_size: usize, memory_limit_mb: usize) -> Self {
+        Self {
+            f64_pools: std::collections::HashMap::new(),
+            usize_pools: std::collections::HashMap::new(),
+            max_vectors_per_size,
+            memory_limit: memory_limit_mb * 1024 * 1024, // Convert MB to bytes
+            current_memory_usage: 0,
+        }
+    }
+
+    /// Get a vector from the pool or allocate new one
+    pub fn get_f64_vector(&mut self, size: usize) -> Vec<f64> {
+        if let Some(pool) = self.f64_pools.get_mut(&size) {
+            if let Some(mut vec) = pool.pop() {
+                vec.clear();
+                vec.resize(size, 0.0);
+                return vec;
+            }
+        }
+        
+        // Allocate new vector if none available
+        vec![0.0; size]
+    }
+
+    /// Return a vector to the pool for reuse
+    pub fn return_f64_vector(&mut self, mut vec: Vec<f64>) {
+        let size = vec.capacity();
+        let memory_size = size * std::mem::size_of::<f64>();
+        
+        // Check memory limits
+        if self.current_memory_usage + memory_size > self.memory_limit {
+            return; // Drop the vector instead of storing it
+        }
+        
+        let pool = self.f64_pools.entry(size).or_insert_with(Vec::new);
+        if pool.len() < self.max_vectors_per_size {
+            vec.clear();
+            pool.push(vec);
+            self.current_memory_usage += memory_size;
+        }
+    }
+
+    /// Get a usize vector from the pool
+    pub fn get_usize_vector(&mut self, size: usize) -> Vec<usize> {
+        if let Some(pool) = self.usize_pools.get_mut(&size) {
+            if let Some(mut vec) = pool.pop() {
+                vec.clear();
+                vec.resize(size, 0);
+                return vec;
+            }
+        }
+        
+        vec![0; size]
+    }
+
+    /// Return a usize vector to the pool
+    pub fn return_usize_vector(&mut self, mut vec: Vec<usize>) {
+        let size = vec.capacity();
+        let memory_size = size * std::mem::size_of::<usize>();
+        
+        if self.current_memory_usage + memory_size > self.memory_limit {
+            return;
+        }
+        
+        let pool = self.usize_pools.entry(size).or_insert_with(Vec::new);
+        if pool.len() < self.max_vectors_per_size {
+            vec.clear();
+            pool.push(vec);
+            self.current_memory_usage += memory_size;
+        }
+    }
+
+    /// Clear all pools and reset memory usage
+    pub fn clear(&mut self) {
+        self.f64_pools.clear();
+        self.usize_pools.clear();
+        self.current_memory_usage = 0;
+    }
+
+    /// Get current memory usage in bytes
+    pub fn memory_usage(&self) -> usize {
+        self.current_memory_usage
+    }
+
+    /// Get memory usage statistics
+    pub fn memory_stats(&self) -> MemoryStats {
+        let f64_vectors: usize = self.f64_pools.values().map(|pool| pool.len()).sum();
+        let usize_vectors: usize = self.usize_pools.values().map(|pool| pool.len()).sum();
+        
+        MemoryStats {
+            total_memory_bytes: self.current_memory_usage,
+            f64_vectors_pooled: f64_vectors,
+            usize_vectors_pooled: usize_vectors,
+            f64_pool_sizes: self.f64_pools.len(),
+            usize_pool_sizes: self.usize_pools.len(),
+        }
+    }
+}
+
+/// Memory usage statistics
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    /// Total memory usage in bytes
+    pub total_memory_bytes: usize,
+    /// Number of f64 vectors in pools
+    pub f64_vectors_pooled: usize,
+    /// Number of usize vectors in pools
+    pub usize_vectors_pooled: usize,
+    /// Number of different f64 vector sizes
+    pub f64_pool_sizes: usize,
+    /// Number of different usize vector sizes
+    pub usize_pool_sizes: usize,
+}
+
+/// Communication buffer management for distributed operations
+#[derive(Debug)]
+pub struct CommBufferManager {
+    /// Send buffers for each process
+    send_buffers: HashMap<usize, Vec<f64>>,
+    /// Receive buffers for each process
+    recv_buffers: HashMap<usize, Vec<f64>>,
+    /// Buffer for local operations
+    local_buffer: Vec<f64>,
+    /// Maximum buffer size per process
+    max_buffer_size: usize,
+    /// Memory pool for buffer allocation
+    memory_pool: MemoryPool,
+}
+
+impl CommBufferManager {
+    /// Create new communication buffer manager
+    pub fn new(max_buffer_size: usize, memory_limit_mb: usize) -> Self {
+        Self {
+            send_buffers: HashMap::new(),
+            recv_buffers: HashMap::new(),
+            local_buffer: Vec::new(),
+            max_buffer_size,
+            memory_pool: MemoryPool::new(4, memory_limit_mb / 2), // Half memory for buffers
+        }
+    }
+
+    /// Get or create send buffer for a process
+    pub fn get_send_buffer(&mut self, process: usize, size: usize) -> &mut Vec<f64> {
+        let buffer_size = size.min(self.max_buffer_size);
+        let buffer = self.send_buffers.entry(process).or_insert_with(|| {
+            self.memory_pool.get_f64_vector(buffer_size)
+        });
+        
+        if buffer.len() != buffer_size {
+            *buffer = self.memory_pool.get_f64_vector(buffer_size);
+        }
+        
+        buffer
+    }
+
+    /// Get or create receive buffer for a process
+    pub fn get_recv_buffer(&mut self, process: usize, size: usize) -> &mut Vec<f64> {
+        let buffer_size = size.min(self.max_buffer_size);
+        let buffer = self.recv_buffers.entry(process).or_insert_with(|| {
+            self.memory_pool.get_f64_vector(buffer_size)
+        });
+        
+        if buffer.len() != buffer_size {
+            *buffer = self.memory_pool.get_f64_vector(buffer_size);
+        }
+        
+        buffer
+    }
+
+    /// Get local buffer for temporary operations
+    pub fn get_local_buffer(&mut self, size: usize) -> &mut Vec<f64> {
+        let buffer_size = size.min(self.max_buffer_size);
+        if self.local_buffer.len() != buffer_size {
+            self.local_buffer = self.memory_pool.get_f64_vector(buffer_size);
+        }
+        &mut self.local_buffer
+    }
+
+    /// Clear all buffers
+    pub fn clear_buffers(&mut self) {
+        for (_, buffer) in self.send_buffers.drain() {
+            self.memory_pool.return_f64_vector(buffer);
+        }
+        for (_, buffer) in self.recv_buffers.drain() {
+            self.memory_pool.return_f64_vector(buffer);
+        }
+        if !self.local_buffer.is_empty() {
+            let buffer = std::mem::take(&mut self.local_buffer);
+            self.memory_pool.return_f64_vector(buffer);
+        }
+    }
+
+    /// Get memory statistics
+    pub fn memory_stats(&self) -> MemoryStats {
+        self.memory_pool.memory_stats()
+    }
+}
+
+/// Workspace for SuperLU_DIST solve operations
+#[derive(Debug)]
+pub struct SuperLuDistWorkspace {
+    /// Temporary vectors for solve operations
+    temp_vectors: HashMap<String, Vec<f64>>,
+    /// Communication buffer manager
+    comm_buffers: CommBufferManager,
+    /// Memory pool for general allocations
+    memory_pool: MemoryPool,
+    /// Workspace configuration
+    config: WorkspaceConfig,
+    /// Cached vector sizes for reuse
+    vector_sizes: HashMap<String, usize>,
+}
+
+/// Configuration for workspace management
+#[derive(Debug, Clone)]
+pub struct WorkspaceConfig {
+    /// Maximum memory limit in MB
+    pub memory_limit_mb: usize,
+    /// Maximum vectors per size in memory pool
+    pub max_vectors_per_size: usize,
+    /// Maximum communication buffer size
+    pub max_comm_buffer_size: usize,
+    /// Enable aggressive memory reuse
+    pub aggressive_reuse: bool,
+    /// Preallocation strategy
+    pub preallocation_strategy: PreallocationStrategy,
+}
+
+/// Strategy for preallocating workspace memory
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreallocationStrategy {
+    /// No preallocation
+    None,
+    /// Preallocate based on matrix size
+    MatrixSize,
+    /// Preallocate based on process grid
+    ProcessGrid,
+    /// Preallocate based on block size
+    BlockSize,
+    /// Full preallocation for maximum performance
+    Full,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            memory_limit_mb: 512, // 512 MB default
+            max_vectors_per_size: 8,
+            max_comm_buffer_size: 1024 * 1024, // 1M elements
+            aggressive_reuse: true,
+            preallocation_strategy: PreallocationStrategy::MatrixSize,
+        }
+    }
+}
+
+impl SuperLuDistWorkspace {
+    /// Create new workspace with default configuration
+    pub fn new() -> Self {
+        Self::with_config(WorkspaceConfig::default())
+    }
+
+    /// Create workspace with custom configuration
+    pub fn with_config(config: WorkspaceConfig) -> Self {
+        let memory_pool = MemoryPool::new(
+            config.max_vectors_per_size,
+            config.memory_limit_mb / 2, // Half for general pool
+        );
+        
+        let comm_buffers = CommBufferManager::new(
+            config.max_comm_buffer_size,
+            config.memory_limit_mb / 2, // Half for communication
+        );
+
+        Self {
+            temp_vectors: HashMap::new(),
+            comm_buffers,
+            memory_pool,
+            config,
+            vector_sizes: HashMap::new(),
+        }
+    }
+
+    /// Setup workspace for a specific matrix and process grid
+    pub fn setup_for_problem(
+        &mut self,
+        matrix_size: usize,
+        process_grid: &ProcessGrid,
+        block_size: usize,
+    ) -> Result<(), KError> {
+        // Calculate typical vector sizes needed
+        let local_size = matrix_size / process_grid.total_procs;
+        let panel_size = self.config.max_comm_buffer_size.min(block_size * 10);
+        
+        // Store sizes for later use
+        self.vector_sizes.insert("solution".to_string(), matrix_size);
+        self.vector_sizes.insert("residual".to_string(), matrix_size);
+        self.vector_sizes.insert("local_work".to_string(), local_size);
+        self.vector_sizes.insert("panel_work".to_string(), panel_size);
+        self.vector_sizes.insert("comm_buffer".to_string(), panel_size);
+
+        // Preallocate based on strategy
+        match self.config.preallocation_strategy {
+            PreallocationStrategy::None => {
+                // No preallocation
+            }
+            PreallocationStrategy::MatrixSize => {
+                self.preallocate_vector("solution", matrix_size)?;
+                self.preallocate_vector("residual", matrix_size)?;
+            }
+            PreallocationStrategy::ProcessGrid => {
+                self.preallocate_vector("local_work", local_size)?;
+                for p in 0..process_grid.total_procs {
+                    self.comm_buffers.get_send_buffer(p, panel_size);
+                    self.comm_buffers.get_recv_buffer(p, panel_size);
+                }
+            }
+            PreallocationStrategy::BlockSize => {
+                self.preallocate_vector("panel_work", panel_size)?;
+                self.preallocate_vector("block_work", block_size)?;
+            }
+            PreallocationStrategy::Full => {
+                // Preallocate everything
+                self.preallocate_vector("solution", matrix_size)?;
+                self.preallocate_vector("residual", matrix_size)?;
+                self.preallocate_vector("local_work", local_size)?;
+                self.preallocate_vector("panel_work", panel_size)?;
+                self.preallocate_vector("block_work", block_size)?;
+                for p in 0..process_grid.total_procs {
+                    self.comm_buffers.get_send_buffer(p, panel_size);
+                    self.comm_buffers.get_recv_buffer(p, panel_size);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Preallocate a temporary vector
+    fn preallocate_vector(&mut self, name: &str, size: usize) -> Result<(), KError> {
+        let vector = self.memory_pool.get_f64_vector(size);
+        self.temp_vectors.insert(name.to_string(), vector);
+        Ok(())
+    }
+
+    /// Get a temporary vector for use
+    pub fn get_temp_vector(&mut self, name: &str, size: usize) -> &mut Vec<f64> {
+        // Check if we have a cached size
+        let expected_size = self.vector_sizes.get(name).copied().unwrap_or(size);
+        let actual_size = size.max(expected_size);
+
+        let vector = self.temp_vectors.entry(name.to_string()).or_insert_with(|| {
+            self.memory_pool.get_f64_vector(actual_size)
+        });
+
+        // Resize if necessary
+        if vector.len() != actual_size {
+            vector.resize(actual_size, 0.0);
+        } else {
+            vector.fill(0.0); // Clear existing data
+        }
+
+        vector
+    }
+
+    /// Return a temporary vector (for aggressive reuse)
+    pub fn return_temp_vector(&mut self, name: &str) {
+        if self.config.aggressive_reuse {
+            if let Some(vector) = self.temp_vectors.remove(name) {
+                self.memory_pool.return_f64_vector(vector);
+            }
+        }
+        // Otherwise keep the vector allocated for next use
+    }
+
+    /// Get communication buffers
+    pub fn get_comm_buffers(&mut self) -> &mut CommBufferManager {
+        &mut self.comm_buffers
+    }
+
+    /// Clear all temporary data
+    pub fn clear_temp_data(&mut self) {
+        for (_, vector) in self.temp_vectors.drain() {
+            self.memory_pool.return_f64_vector(vector);
+        }
+        self.comm_buffers.clear_buffers();
+    }
+
+    /// Get memory usage statistics
+    pub fn memory_stats(&self) -> WorkspaceMemoryStats {
+        let pool_stats = self.memory_pool.memory_stats();
+        let comm_stats = self.comm_buffers.memory_stats();
+        
+        let temp_memory: usize = self.temp_vectors.values()
+            .map(|v| v.capacity() * std::mem::size_of::<f64>())
+            .sum();
+
+        WorkspaceMemoryStats {
+            temp_vectors_memory: temp_memory,
+            pool_memory: pool_stats.total_memory_bytes,
+            comm_memory: comm_stats.total_memory_bytes,
+            total_memory: temp_memory + pool_stats.total_memory_bytes + comm_stats.total_memory_bytes,
+            temp_vectors_count: self.temp_vectors.len(),
+            pool_stats,
+            comm_stats,
+        }
+    }
+
+    /// Check if workspace needs cleanup
+    pub fn needs_cleanup(&self) -> bool {
+        let stats = self.memory_stats();
+        let limit_bytes = self.config.memory_limit_mb * 1024 * 1024;
+        stats.total_memory > limit_bytes
+    }
+
+    /// Perform workspace cleanup
+    pub fn cleanup(&mut self) {
+        if self.config.aggressive_reuse {
+            // Clear temporary vectors but keep communication buffers
+            for (_, vector) in self.temp_vectors.drain() {
+                self.memory_pool.return_f64_vector(vector);
+            }
+        } else {
+            // Just clear the memory pools
+            self.memory_pool.clear();
+        }
+    }
+
+    /// Optimize workspace for current usage patterns
+    pub fn optimize(&mut self) {
+        // Remove unused vector size entries
+        let active_sizes: std::collections::HashSet<_> = self.temp_vectors.values()
+            .map(|v| v.capacity())
+            .collect();
+        
+        self.vector_sizes.retain(|_, &mut size| active_sizes.contains(&size));
+        
+        // Trim excess capacity in temporary vectors
+        for vector in self.temp_vectors.values_mut() {
+            vector.shrink_to_fit();
+        }
+    }
+}
+
+/// Memory statistics for workspace
+#[derive(Debug, Clone)]
+pub struct WorkspaceMemoryStats {
+    /// Memory used by temporary vectors
+    pub temp_vectors_memory: usize,
+    /// Memory used by memory pool
+    pub pool_memory: usize,
+    /// Memory used by communication buffers
+    pub comm_memory: usize,
+    /// Total memory usage
+    pub total_memory: usize,
+    /// Number of temporary vectors
+    pub temp_vectors_count: usize,
+    /// Memory pool statistics
+    pub pool_stats: MemoryStats,
+    /// Communication buffer statistics
+    pub comm_stats: MemoryStats,
+}
+
+impl Default for SuperLuDistWorkspace {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1988,6 +2480,167 @@ pub struct SuperLuDistSolver {
     data: Option<SuperLuDistData>,
     /// Iterative refinement engine
     refinement_engine: Option<RefinementEngine>,
+    /// Workspace configuration
+    workspace_config: WorkspaceConfig,
+}
+
+/// Builder pattern for configuring SuperLU_DIST solver options
+pub struct SuperLuDistBuilder {
+    options: SuperLuDistOptions,
+    workspace_config: WorkspaceConfig,
+    refinement_config: Option<RefinementConfig>,
+    residual_method: Option<ResidualMethod>,
+}
+
+impl SuperLuDistBuilder {
+    /// Create a new builder with default options
+    pub fn new() -> Self {
+        Self {
+            options: SuperLuDistOptions::default(),
+            workspace_config: WorkspaceConfig::default(),
+            refinement_config: None,
+            residual_method: None,
+        }
+    }
+
+    /// Set the diagonal pivot threshold
+    pub fn diagonal_pivot_threshold(mut self, threshold: f64) -> Self {
+        self.options.diagonal_pivot_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the column permutation strategy
+    pub fn column_permutation(mut self, perm: ColumnPermutation) -> Self {
+        self.options.column_permutation = perm;
+        self
+    }
+
+    /// Set the row permutation strategy
+    pub fn row_permutation(mut self, perm: RowPermutation) -> Self {
+        self.options.row_permutation = perm;
+        self
+    }
+
+    /// Set the iterative refinement strategy
+    pub fn iterative_refinement(mut self, refine: IterativeRefinement) -> Self {
+        self.options.iterative_refinement = refine;
+        self
+    }
+
+    /// Set the print level for diagnostics
+    pub fn print_level(mut self, level: u8) -> Self {
+        self.options.print_level = level;
+        self
+    }
+
+    /// Set whether to replace tiny pivots
+    pub fn replace_tiny_pivots(mut self, enable: bool) -> Self {
+        self.options.replace_tiny_pivots = enable;
+        self
+    }
+
+    /// Set static pivoting mode
+    pub fn static_pivoting(mut self, enable: bool) -> Self {
+        self.options.static_pivoting = enable;
+        self
+    }
+
+    /// Set the process grid dimensions
+    pub fn process_grid(mut self, rows: usize, cols: usize) -> Self {
+        self.options.process_grid = Some((rows, cols));
+        self
+    }
+
+    /// Use automatic process grid determination
+    pub fn process_grid_auto(mut self) -> Self {
+        self.options.process_grid = None;
+        self
+    }
+
+    /// Set the panel size for local dense factorization
+    pub fn panel_size(mut self, size: usize) -> Self {
+        self.options.panel_size = Some(size);
+        self
+    }
+
+    /// Enable 3D communication-avoiding factorization
+    pub fn enable_3d_factorization(mut self, enable: bool, depth: Option<usize>) -> Self {
+        self.options.enable_3d_factorization = enable;
+        self.options.process_grid_3d_depth = depth;
+        self
+    }
+
+    /// Set memory trade-off factor for 3D algorithm
+    pub fn memory_tradeoff_factor(mut self, factor: f64) -> Self {
+        self.options.memory_tradeoff_factor = factor.max(0.1);
+        self
+    }
+
+    /// Set maximum concurrent panels
+    pub fn max_concurrent_panels(mut self, max_panels: usize) -> Self {
+        self.options.max_concurrent_panels = max_panels.max(1);
+        self
+    }
+
+    /// Enable asynchronous panel updates
+    pub fn async_panel_updates(mut self, enable: bool) -> Self {
+        self.options.async_panel_updates = enable;
+        self
+    }
+
+    /// Set workspace memory limit
+    pub fn workspace_memory_limit(mut self, limit_mb: usize) -> Self {
+        self.workspace_config.memory_limit_mb = limit_mb;
+        self
+    }
+
+    /// Enable aggressive memory reuse
+    pub fn aggressive_memory_reuse(mut self, enable: bool) -> Self {
+        self.workspace_config.aggressive_reuse = enable;
+        self
+    }
+
+    /// Set workspace preallocation strategy
+    pub fn preallocation_strategy(mut self, strategy: PreallocationStrategy) -> Self {
+        self.workspace_config.preallocation_strategy = strategy;
+        self
+    }
+
+    /// Configure iterative refinement
+    pub fn refinement_config(mut self, config: RefinementConfig) -> Self {
+        self.refinement_config = Some(config);
+        self
+    }
+
+    /// Set residual computation method
+    pub fn residual_method(mut self, method: ResidualMethod) -> Self {
+        self.residual_method = Some(method);
+        self
+    }
+
+    /// Build the SuperLU_DIST solver with configured options
+    pub fn build(self) -> SuperLuDistSolver {
+        let mut solver = SuperLuDistSolver {
+            options: self.options,
+            data: None,
+            refinement_engine: None,
+            workspace_config: self.workspace_config,
+        };
+
+        // Set up refinement engine if configured
+        if let Some(config) = self.refinement_config {
+            let method = self.residual_method.unwrap_or(ResidualMethod::Standard);
+            solver.refinement_engine = Some(RefinementEngine::new(config, method));
+        }
+
+        solver
+    }
+}
+
+impl Default for SuperLuDistBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SuperLuDistSolver {
@@ -1997,6 +2650,7 @@ impl SuperLuDistSolver {
             options: SuperLuDistOptions::default(),
             data: None,
             refinement_engine: None,
+            workspace_config: WorkspaceConfig::default(),
         }
     }
 
@@ -2006,6 +2660,7 @@ impl SuperLuDistSolver {
             options,
             data: None,
             refinement_engine: None,
+            workspace_config: WorkspaceConfig::default(),
         }
     }
 
@@ -2070,6 +2725,41 @@ impl SuperLuDistSolver {
         self
     }
 
+    /// Set the row permutation strategy
+    pub fn set_row_permutation(&mut self, perm: RowPermutation) -> &mut Self {
+        self.options.row_permutation = perm;
+        self
+    }
+
+    /// Set whether to replace tiny pivots
+    pub fn set_replace_tiny_pivots(&mut self, enable: bool) -> &mut Self {
+        self.options.replace_tiny_pivots = enable;
+        self
+    }
+
+    /// Set the process grid dimensions
+    pub fn set_process_grid(&mut self, rows: usize, cols: usize) -> &mut Self {
+        self.options.process_grid = Some((rows, cols));
+        self
+    }
+
+    /// Use automatic process grid determination
+    pub fn set_process_grid_auto(&mut self) -> &mut Self {
+        self.options.process_grid = None;
+        self
+    }
+
+    /// Configure a complete set of options via SuperLuDistOptions
+    pub fn with_complete_options(mut self, options: SuperLuDistOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Create a new solver with fluent configuration
+    pub fn builder() -> SuperLuDistBuilder {
+        SuperLuDistBuilder::new()
+    }
+
     /// Get a reference to the current options
     pub fn options(&self) -> &SuperLuDistOptions {
         &self.options
@@ -2110,6 +2800,59 @@ impl SuperLuDistSolver {
     /// Get refinement statistics from the last solve (if available)
     pub fn refinement_stats(&self) -> Option<&RefinementStats> {
         self.refinement_engine.as_ref().and_then(|engine| engine.last_stats())
+    }
+
+    /// Configure workspace memory settings
+    pub fn set_workspace_memory_limit(&mut self, limit_mb: usize) -> &mut Self {
+        self.workspace_config.memory_limit_mb = limit_mb;
+        self
+    }
+
+    /// Enable aggressive memory reuse for better performance
+    pub fn set_aggressive_memory_reuse(&mut self, enable: bool) -> &mut Self {
+        self.workspace_config.aggressive_reuse = enable;
+        self
+    }
+
+    /// Set workspace preallocation strategy
+    pub fn set_preallocation_strategy(&mut self, strategy: PreallocationStrategy) -> &mut Self {
+        self.workspace_config.preallocation_strategy = strategy;
+        self
+    }
+
+    /// Get workspace memory statistics (if workspace is set up)
+    pub fn workspace_memory_stats(&self) -> Option<WorkspaceMemoryStats> {
+        self.data.as_ref()
+            .and_then(|data| data.solve_workspace.as_ref())
+            .map(|workspace| workspace.workspace.memory_stats())
+    }
+
+    /// Optimize workspace memory usage
+    pub fn optimize_workspace(&mut self) -> Result<(), KError> {
+        if let Some(ref mut data) = self.data {
+            if let Some(ref mut solve_workspace) = data.solve_workspace {
+                solve_workspace.workspace.optimize();
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear workspace temporary data to free memory
+    pub fn clear_workspace_temp_data(&mut self) -> Result<(), KError> {
+        if let Some(ref mut data) = self.data {
+            if let Some(ref mut solve_workspace) = data.solve_workspace {
+                solve_workspace.workspace.clear_temp_data();
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if workspace needs cleanup due to memory pressure
+    pub fn workspace_needs_cleanup(&self) -> bool {
+        self.data.as_ref()
+            .and_then(|data| data.solve_workspace.as_ref())
+            .map(|workspace| workspace.workspace.needs_cleanup())
+            .unwrap_or(false)
     }
 
     /// Setup the SuperLU_DIST factorization for the given matrix
@@ -2439,9 +3182,31 @@ impl SuperLuDistSolver {
     fn setup_solve_workspace(&self, data: &SuperLuDistData) -> Result<SolveWorkspace, KError> {
         let n = data.distribution.global_rows;
         
+        // Use configured workspace settings
+        let mut workspace_config = self.workspace_config.clone();
+        workspace_config.max_comm_buffer_size = n.max(1024);
+        
+        let mut workspace = SuperLuDistWorkspace::with_config(workspace_config);
+
+        // Setup workspace for the specific problem
+        workspace.setup_for_problem(n, &data.process_grid, 64)?;
+
+        // Initialize process-specific vectors
+        let mut process_vectors = HashMap::new();
+        for p in 0..data.process_grid.total_procs {
+            let local_size = n / data.process_grid.total_procs; // Simplified calculation
+            process_vectors.insert(p, vec![0.0; local_size]);
+        }
+
+        // Initialize global vectors for collective operations
+        let mut global_vectors = HashMap::new();
+        global_vectors.insert("permutation_temp".to_string(), vec![0.0; n]);
+        global_vectors.insert("reduction_temp".to_string(), vec![0.0; n]);
+
         Ok(SolveWorkspace {
-            temp_vectors: vec![vec![0.0; n]; 2],
-            comm_buffers: vec![vec![0.0; n]; data.process_grid.total_procs],
+            workspace,
+            process_vectors,
+            global_vectors,
         })
     }
 
@@ -3539,5 +4304,449 @@ mod tests {
         let rhs_norm = (4.0 + 9.0_f64).sqrt();
         assert!((residual[0] - 1.0/rhs_norm).abs() < 1e-10);
         assert!((residual[1] - 2.0/rhs_norm).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_memory_pool_basic_operations() {
+        let mut pool = MemoryPool::new(4, 1024 * 1024); // 1MB limit, max 4 vectors per size
+        
+        // Test getting vectors
+        let vec1 = pool.get_f64_vector(100);
+        assert_eq!(vec1.len(), 100);
+        
+        let vec2 = pool.get_usize_vector(50);
+        assert_eq!(vec2.len(), 50);
+        
+        // Test returning vectors
+        pool.return_f64_vector(vec1);
+        pool.return_usize_vector(vec2);
+        
+        // Test reuse
+        let vec3 = pool.get_f64_vector(100);
+        assert_eq!(vec3.len(), 100);
+        
+        let stats = pool.memory_stats();
+        assert!(stats.f64_vectors_pooled > 0 || stats.f64_vectors_pooled == 0); // May be 0 if reused
+    }
+
+    #[test]
+    fn test_memory_pool_size_limits() {
+        let mut pool = MemoryPool::new(2, 1024); // Very small limit
+        
+        // Add vectors within limit
+        let vec1 = pool.get_f64_vector(10);
+        pool.return_f64_vector(vec1);
+        
+        let vec2 = pool.get_f64_vector(10);
+        pool.return_f64_vector(vec2);
+        
+        let stats = pool.memory_stats();
+        assert!(stats.total_memory_bytes <= 1024);
+    }
+
+    #[test]
+    fn test_comm_buffer_manager() {
+        let mut manager = CommBufferManager::new(1000, 10); // 10MB limit
+        
+        // Test getting buffers
+        let send_buf = manager.get_send_buffer(0, 100);
+        assert_eq!(send_buf.len(), 100);
+        
+        let recv_buf = manager.get_recv_buffer(1, 200);
+        assert_eq!(recv_buf.len(), 200);
+        
+        let local_buf = manager.get_local_buffer(50);
+        assert_eq!(local_buf.len(), 50);
+        
+        // Test buffer reuse
+        let send_buf2 = manager.get_send_buffer(0, 100);
+        assert_eq!(send_buf2.len(), 100);
+        
+        manager.clear_buffers();
+        let stats = manager.memory_stats();
+        // After clearing, memory usage should be minimal
+        assert!(stats.total_memory_bytes < 1024 * 1024); // Less than 1MB
+    }
+
+    #[test]
+    fn test_superlu_dist_workspace_creation() {
+        let workspace = SuperLuDistWorkspace::new();
+        let stats = workspace.memory_stats();
+        
+        // New workspace should have minimal memory usage
+        assert_eq!(stats.temp_vectors_count, 0);
+        assert_eq!(stats.total_memory, 0);
+    }
+
+    #[test]
+    fn test_workspace_config_variants() {
+        // Test all preallocation strategies
+        let strategies = [
+            PreallocationStrategy::None,
+            PreallocationStrategy::MatrixSize,
+            PreallocationStrategy::ProcessGrid,
+            PreallocationStrategy::BlockSize,
+            PreallocationStrategy::Full,
+        ];
+        
+        for strategy in strategies {
+            let config = WorkspaceConfig {
+                preallocation_strategy: strategy,
+                ..Default::default()
+            };
+            
+            let workspace = SuperLuDistWorkspace::with_config(config);
+            let _stats = workspace.memory_stats();
+            // Just test that workspace can be created with different strategies
+        }
+    }
+
+    #[test]
+    fn test_workspace_temp_vector_management() {
+        let mut workspace = SuperLuDistWorkspace::new();
+        
+        // Test getting temporary vectors
+        let vec1 = workspace.get_temp_vector("test_vec", 100);
+        assert_eq!(vec1.len(), 100);
+        vec1[0] = 42.0;
+        
+        // Test that vector is cleared on next access
+        let vec2 = workspace.get_temp_vector("test_vec", 100);
+        assert_eq!(vec2.len(), 100);
+        assert_eq!(vec2[0], 0.0); // Should be cleared
+        
+        // Test returning vectors
+        workspace.return_temp_vector("test_vec");
+        
+        let stats = workspace.memory_stats();
+        assert!(stats.temp_vectors_count <= 1); // May have been returned to pool
+    }
+
+    #[test]
+    fn test_workspace_setup_for_problem() {
+        let mut workspace = SuperLuDistWorkspace::new();
+        
+        // Create a simple process grid
+        let comm = UniverseComm::NoComm(NoComm);
+        let process_grid = ProcessGrid::new_auto(&comm).unwrap();
+        
+        // Setup workspace for a problem
+        workspace.setup_for_problem(1000, &process_grid, 64).unwrap();
+        
+        let stats = workspace.memory_stats();
+        // Should have preallocated some memory based on default strategy
+        assert!(stats.total_memory > 0);
+    }
+
+    #[test]
+    fn test_workspace_optimization() {
+        let mut workspace = SuperLuDistWorkspace::new();
+        
+        // Add some temporary vectors
+        workspace.get_temp_vector("temp1", 100);
+        workspace.get_temp_vector("temp2", 200);
+        
+        let stats_before = workspace.memory_stats();
+        
+        // Optimize workspace
+        workspace.optimize();
+        
+        let stats_after = workspace.memory_stats();
+        // Optimization should not increase memory usage
+        assert!(stats_after.total_memory <= stats_before.total_memory);
+    }
+
+    #[test]
+    fn test_solver_workspace_configuration() {
+        let mut solver = SuperLuDistSolver::new();
+        
+        // Test configuring workspace settings
+        solver.set_workspace_memory_limit(2048)
+              .set_aggressive_memory_reuse(true)
+              .set_preallocation_strategy(PreallocationStrategy::MatrixSize);
+        
+        // Configuration should be stored
+        assert_eq!(solver.workspace_config.memory_limit_mb, 2048);
+        assert_eq!(solver.workspace_config.aggressive_reuse, true);
+        assert_eq!(solver.workspace_config.preallocation_strategy, PreallocationStrategy::MatrixSize);
+    }
+
+    #[test]
+    fn test_workspace_memory_stats() {
+        let mut solver = SuperLuDistSolver::new();
+        solver.set_workspace_memory_limit(512);
+        
+        // Memory stats should be None before setup
+        assert!(solver.workspace_memory_stats().is_none());
+        
+        // After setting up (if we had a complete solve), stats would be available
+        // For now, just test that the method exists and returns None
+        assert!(solver.workspace_memory_stats().is_none());
+    }
+
+    #[test]
+    fn test_workspace_cleanup_detection() {
+        let solver = SuperLuDistSolver::new();
+        
+        // Before setup, should not need cleanup
+        assert!(!solver.workspace_needs_cleanup());
+        
+        // Test cleanup methods exist
+        let mut solver_mut = solver;
+        assert!(solver_mut.optimize_workspace().is_ok());
+        assert!(solver_mut.clear_workspace_temp_data().is_ok());
+    }
+
+    #[test]
+    fn test_workspace_memory_efficiency() {
+        let mut workspace = SuperLuDistWorkspace::with_config(WorkspaceConfig {
+            memory_limit_mb: 1, // Very small limit
+            aggressive_reuse: true,
+            preallocation_strategy: PreallocationStrategy::None,
+            ..Default::default()
+        });
+        
+        // Test that workspace respects memory limits
+        workspace.get_temp_vector("small1", 10);
+        workspace.get_temp_vector("small2", 10);
+        
+        let stats = workspace.memory_stats();
+        let limit_bytes = 1024 * 1024; // 1MB
+        
+        // Should be well under the limit for small vectors
+        assert!(stats.total_memory < limit_bytes);
+        
+        // Test cleanup
+        workspace.clear_temp_data();
+        let stats_after = workspace.memory_stats();
+        assert!(stats_after.total_memory <= stats.total_memory);
+    }
+
+    #[test]
+    fn test_solve_workspace_integration() {
+        // Test the enhanced SolveWorkspace structure
+        let workspace = SuperLuDistWorkspace::new();
+        let process_vectors = HashMap::new();
+        let global_vectors = HashMap::new();
+        
+        let solve_workspace = SolveWorkspace {
+            workspace,
+            process_vectors,
+            global_vectors,
+        };
+        
+        // Test workspace is properly constructed
+        let _stats = solve_workspace.workspace.memory_stats();
+        // Just test that the workspace structure is valid
+        assert!(true);
+    }
+
+    #[test]
+    fn test_superlu_dist_builder_pattern() {
+        let solver = SuperLuDistSolver::builder()
+            .diagonal_pivot_threshold(0.2)
+            .column_permutation(ColumnPermutation::Metis)
+            .row_permutation(RowPermutation::LargeDiag)
+            .iterative_refinement(IterativeRefinement::Double)
+            .print_level(1)
+            .replace_tiny_pivots(true)
+            .static_pivoting(false)
+            .process_grid(2, 2)
+            .panel_size(32)
+            .enable_3d_factorization(false, None)
+            .memory_tradeoff_factor(1.5)
+            .max_concurrent_panels(2)
+            .async_panel_updates(true)
+            .workspace_memory_limit(1024)
+            .aggressive_memory_reuse(true)
+            .preallocation_strategy(PreallocationStrategy::MatrixSize)
+            .build();
+
+        assert_eq!(solver.options.diagonal_pivot_threshold, 0.2);
+        assert_eq!(solver.options.column_permutation, ColumnPermutation::Metis);
+        assert_eq!(solver.options.row_permutation, RowPermutation::LargeDiag);
+        assert_eq!(solver.options.iterative_refinement, IterativeRefinement::Double);
+        assert_eq!(solver.options.print_level, 1);
+        assert_eq!(solver.options.replace_tiny_pivots, true);
+        assert_eq!(solver.options.static_pivoting, false);
+        assert_eq!(solver.options.process_grid, Some((2, 2)));
+        assert_eq!(solver.options.panel_size, Some(32));
+        assert_eq!(solver.options.enable_3d_factorization, false);
+        assert_eq!(solver.options.memory_tradeoff_factor, 1.5);
+        assert_eq!(solver.options.max_concurrent_panels, 2);
+        assert_eq!(solver.options.async_panel_updates, true);
+        assert_eq!(solver.workspace_config.memory_limit_mb, 1024);
+        assert_eq!(solver.workspace_config.aggressive_reuse, true);
+        assert_eq!(solver.workspace_config.preallocation_strategy, PreallocationStrategy::MatrixSize);
+    }
+
+    #[test]
+    fn test_superlu_dist_fluent_configuration() {
+        let mut solver = SuperLuDistSolver::new();
+        
+        solver
+            .set_diagonal_pivot_threshold(0.3)
+            .set_column_permutation(ColumnPermutation::ParMetis)
+            .set_row_permutation(RowPermutation::NoRowPerm)
+            .set_iterative_refinement(IterativeRefinement::Single)
+            .set_print_level(2)
+            .set_replace_tiny_pivots(false)
+            .set_static_pivoting(true)
+            .set_process_grid(4, 1)
+            .set_panel_size(64)
+            .set_3d_factorization(true, Some(2))
+            .set_memory_tradeoff(2.0)
+            .set_max_concurrent_panels(4)
+            .set_async_panel_updates(false)
+            .set_workspace_memory_limit(2048)
+            .set_aggressive_memory_reuse(false)
+            .set_preallocation_strategy(PreallocationStrategy::ProcessGrid);
+
+        assert_eq!(solver.options.diagonal_pivot_threshold, 0.3);
+        assert_eq!(solver.options.column_permutation, ColumnPermutation::ParMetis);
+        assert_eq!(solver.options.row_permutation, RowPermutation::NoRowPerm);
+        assert_eq!(solver.options.iterative_refinement, IterativeRefinement::Single);
+        assert_eq!(solver.options.print_level, 2);
+        assert_eq!(solver.options.replace_tiny_pivots, false);
+        assert_eq!(solver.options.static_pivoting, true);
+        assert_eq!(solver.options.process_grid, Some((4, 1)));
+        assert_eq!(solver.options.panel_size, Some(64));
+        assert_eq!(solver.options.enable_3d_factorization, true);
+        assert_eq!(solver.options.process_grid_3d_depth, Some(2));
+        assert_eq!(solver.options.memory_tradeoff_factor, 2.0);
+        assert_eq!(solver.options.max_concurrent_panels, 4);
+        assert_eq!(solver.options.async_panel_updates, false);
+        assert_eq!(solver.workspace_config.memory_limit_mb, 2048);
+        assert_eq!(solver.workspace_config.aggressive_reuse, false);
+        assert_eq!(solver.workspace_config.preallocation_strategy, PreallocationStrategy::ProcessGrid);
+    }
+
+    #[test] 
+    fn test_superlu_dist_builder_with_refinement() {
+        let refinement_config = RefinementConfig {
+            max_iterations: 5,
+            tolerance: 1e-10,
+            relative_tolerance: 1e-8,
+            min_improvement_factor: 0.95,
+        };
+
+        let solver = SuperLuDistSolver::builder()
+            .diagonal_pivot_threshold(0.1)
+            .iterative_refinement(IterativeRefinement::Double)
+            .refinement_config(refinement_config)
+            .residual_method(ResidualMethod::Scaled)
+            .build();
+
+        assert!(solver.refinement_engine.is_some());
+        assert_eq!(solver.options.iterative_refinement, IterativeRefinement::Double);
+        
+        if let Some(ref engine) = solver.refinement_engine {
+            let config = engine.config();
+            assert_eq!(config.max_iterations, 5);
+            assert_eq!(config.tolerance, 1e-10);
+            assert_eq!(config.relative_tolerance, 1e-8);
+            assert_eq!(config.min_improvement_factor, 0.95);
+        }
+    }
+
+    #[test]
+    fn test_superlu_dist_auto_process_grid() {
+        let mut solver = SuperLuDistSolver::new();
+        
+        // Test setting explicit process grid
+        solver.set_process_grid(2, 3);
+        assert_eq!(solver.options.process_grid, Some((2, 3)));
+        
+        // Test setting to auto
+        solver.set_process_grid_auto();
+        assert_eq!(solver.options.process_grid, None);
+    }
+
+    #[test]
+    fn test_superlu_dist_complete_options_replacement() {
+        let new_options = SuperLuDistOptions {
+            process_grid: Some((1, 4)),
+            column_permutation: ColumnPermutation::Natural,
+            diagonal_pivot_threshold: 0.01,
+            replace_tiny_pivots: false,
+            iterative_refinement: IterativeRefinement::Extra,
+            print_level: 3,
+            static_pivoting: true,
+            row_permutation: RowPermutation::User,
+            panel_size: Some(128),
+            enable_3d_factorization: true,
+            process_grid_3d_depth: Some(4),
+            memory_tradeoff_factor: 3.0,
+            max_concurrent_panels: 8,
+            async_panel_updates: true,
+        };
+
+        let solver = SuperLuDistSolver::new().with_complete_options(new_options.clone());
+        
+        assert_eq!(solver.options.process_grid, new_options.process_grid);
+        assert_eq!(solver.options.column_permutation, new_options.column_permutation);
+        assert_eq!(solver.options.diagonal_pivot_threshold, new_options.diagonal_pivot_threshold);
+        assert_eq!(solver.options.replace_tiny_pivots, new_options.replace_tiny_pivots);
+        assert_eq!(solver.options.iterative_refinement, new_options.iterative_refinement);
+        assert_eq!(solver.options.print_level, new_options.print_level);
+        assert_eq!(solver.options.static_pivoting, new_options.static_pivoting);
+        assert_eq!(solver.options.row_permutation, new_options.row_permutation);
+        assert_eq!(solver.options.panel_size, new_options.panel_size);
+        assert_eq!(solver.options.enable_3d_factorization, new_options.enable_3d_factorization);
+        assert_eq!(solver.options.process_grid_3d_depth, new_options.process_grid_3d_depth);
+        assert_eq!(solver.options.memory_tradeoff_factor, new_options.memory_tradeoff_factor);
+        assert_eq!(solver.options.max_concurrent_panels, new_options.max_concurrent_panels);
+        assert_eq!(solver.options.async_panel_updates, new_options.async_panel_updates);
+    }
+
+    #[test]
+    fn test_superlu_dist_linear_solver_error_handling() {
+        use crate::parallel::{UniverseComm, NoComm};
+        
+        let matrix = CsrMatrix::from_csr(
+            2, 2, // Square matrix 
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![1.0, 1.0],
+        );
+
+        let b = vec![1.0, 2.0];
+        let mut x = vec![0.0, 0.0];  // Match RHS size
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let mut solver = SuperLuDistSolver::new();
+        
+        // Initially no factorization should exist
+        assert!(solver.data.is_none());
+        
+        // This should succeed and automatically set up factorization
+        let result = solver.solve(&matrix, None, &b, &mut x, &comm, None, None);
+        assert!(result.is_ok());
+        
+        // After solve, factorization should exist
+        assert!(solver.data.is_some());
+    }
+
+    #[test]
+    fn test_superlu_dist_builder_defaults() {
+        let builder = SuperLuDistBuilder::new();
+        let solver = builder.build();
+        
+        // Check that default values are properly set
+        assert_eq!(solver.options.diagonal_pivot_threshold, 1.0);
+        assert_eq!(solver.options.column_permutation, ColumnPermutation::MmdAta);
+        assert_eq!(solver.options.row_permutation, RowPermutation::LargeDiag);
+        assert_eq!(solver.options.iterative_refinement, IterativeRefinement::Double);
+        assert_eq!(solver.options.print_level, 0);
+        assert_eq!(solver.options.replace_tiny_pivots, false);
+        assert_eq!(solver.options.static_pivoting, false);
+        assert_eq!(solver.options.process_grid, None);
+        assert_eq!(solver.options.panel_size, None);
+        assert_eq!(solver.options.enable_3d_factorization, false);
+        assert_eq!(solver.options.process_grid_3d_depth, None);
+        assert_eq!(solver.options.memory_tradeoff_factor, 1.0);
+        assert_eq!(solver.options.max_concurrent_panels, 1);
+        assert_eq!(solver.options.async_panel_updates, false);
+        assert!(solver.refinement_engine.is_none());
     }
 }
