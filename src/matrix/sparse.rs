@@ -23,7 +23,7 @@ pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,
 }
 
-impl<T: ComplexField + Copy> CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::Zero> CsrMatrix<T> {
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
     pub fn from_csr(
         nrows: usize,
@@ -32,7 +32,7 @@ impl<T: ComplexField + Copy> CsrMatrix<T> {
         col_idx: Vec<usize>,
         values: Vec<T>,
     ) -> Self {
-        // Build symbolic structure; second argument `None` means “no separate row_nnz”:
+        // Build symbolic structure; second argument `None` means "no separate row_nnz":
         let symbolic = SymbolicSparseRowMat::new_checked(
             nrows,
             ncols,
@@ -53,6 +53,58 @@ impl<T: ComplexField + Copy> CsrMatrix<T> {
     /// Number of non-zero entries.
     pub fn nnz(&self) -> usize {
         self.inner.compute_nnz()
+    }
+    
+    /// Access to row pointers (indices into col_indices and values arrays)
+    /// Note: This is a simplified implementation using dense conversion
+    pub fn row_ptrs(&self) -> Vec<usize> {
+        // For now, we'll reconstruct CSR from dense (inefficient but works)
+        let dense = self.to_dense();
+        let mut row_ptrs = vec![0];
+        let mut nnz = 0;
+        
+        for i in 0..self.inner.nrows() {
+            for j in 0..self.inner.ncols() {
+                if dense[(i, j)] != T::zero() {
+                    nnz += 1;
+                }
+            }
+            row_ptrs.push(nnz);
+        }
+        row_ptrs
+    }
+    
+    /// Access to column indices array
+    /// Note: This is a simplified implementation using dense conversion
+    pub fn col_indices(&self) -> Vec<usize> {
+        let dense = self.to_dense();
+        let mut col_indices = Vec::new();
+        
+        for i in 0..self.inner.nrows() {
+            for j in 0..self.inner.ncols() {
+                if dense[(i, j)] != T::zero() {
+                    col_indices.push(j);
+                }
+            }
+        }
+        col_indices
+    }
+    
+    /// Access to values array
+    /// Note: This is a simplified implementation using dense conversion
+    pub fn values(&self) -> Vec<T> {
+        let dense = self.to_dense();
+        let mut values = Vec::new();
+        
+        for i in 0..self.inner.nrows() {
+            for j in 0..self.inner.ncols() {
+                let val = dense[(i, j)];
+                if val != T::zero() {
+                    values.push(val);
+                }
+            }
+        }
+        values
     }
 }
 
