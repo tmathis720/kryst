@@ -23,7 +23,7 @@ pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,
 }
 
-impl<T: ComplexField + Copy + num_traits::Zero> CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> CsrMatrix<T> {
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
     pub fn from_csr(
         nrows: usize,
@@ -45,14 +45,104 @@ impl<T: ComplexField + Copy + num_traits::Zero> CsrMatrix<T> {
         Self { inner }
     }
 
+    /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
+    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self 
+    where T: PartialOrd + std::ops::Neg<Output = T>
+    {
+        let nrows = dense.nrows();
+        let ncols = dense.ncols();
+        let mut row_ptr = vec![0];
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+        
+        for i in 0..nrows {
+            for j in 0..ncols {
+                let val = dense[(i, j)];
+                // Use comparison with tolerance
+                if val > drop_tol || val < -drop_tol {
+                    col_idx.push(j);
+                    values.push(val);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+        
+        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
+    }
+
+    /// Create an identity matrix of size n x n
+    pub fn identity(n: usize) -> Self 
+    where T: num_traits::One
+    {
+        let row_ptr: Vec<usize> = (0..=n).collect();
+        let col_idx: Vec<usize> = (0..n).collect();
+        let values: Vec<T> = vec![T::one(); n];
+        
+        Self::from_csr(n, n, row_ptr, col_idx, values)
+    }
+
     /// Convert to dense faer::Mat for use with dense solvers.
     pub fn to_dense(&self) -> faer::Mat<T> {
         self.inner.to_dense()
     }
-    
-    /// Number of non-zero entries.
+
+    /// Get matrix dimensions
+    pub fn nrows(&self) -> usize {
+        self.inner.nrows()
+    }
+
+    pub fn ncols(&self) -> usize {
+        self.inner.ncols()
+    }
+
+    /// Get number of nonzeros  
     pub fn nnz(&self) -> usize {
         self.inner.compute_nnz()
+    }
+
+    /// Extract diagonal as a vector
+    pub fn diagonal(&self) -> Vec<T> {
+        let n = self.nrows().min(self.ncols());
+        let mut diag = vec![T::zero(); n];
+        
+        for i in 0..n {
+            let row_start = self.inner.row_ptr()[i];
+            let row_end = self.inner.row_ptr()[i + 1];
+            
+            for idx in row_start..row_end {
+                if self.inner.col_idx()[idx] == i {
+                    diag[i] = self.inner.val()[idx];
+                    break;
+                }
+            }
+        }
+        
+        diag
+    }
+
+    /// Sparse matrix-vector product: y = alpha * A * x + beta * y
+    pub fn spmv_scaled(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::KError> {
+        if x.len() != self.ncols() || y.len() != self.nrows() {
+            return Err(crate::KError::InvalidInput(format!(
+                "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len()={}",
+                self.nrows(), self.ncols(), x.len(), y.len()
+            )));
+        }
+
+        for i in 0..self.nrows() {
+            let row_start = self.inner.row_ptr()[i];
+            let row_end = self.inner.row_ptr()[i + 1];
+            
+            let mut sum = T::zero();
+            for idx in row_start..row_end {
+                let j = self.inner.col_idx()[idx];
+                sum = sum + self.inner.val()[idx] * x[j];
+            }
+            
+            y[i] = alpha * sum + beta * y[i];
+        }
+        
+        Ok(())
     }
     
     /// Access to row pointers (indices into col_indices and values arrays)
@@ -108,7 +198,7 @@ impl<T: ComplexField + Copy + num_traits::Zero> CsrMatrix<T> {
     }
 }
 
-impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SparseMatrix<T> for CsrMatrix<T> {
     fn nrows(&self) -> usize {
         self.inner.nrows()
     }
@@ -116,15 +206,20 @@ impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> 
         self.inner.ncols()
     }
     fn spmv(&self, x: &[T], y: &mut [T]) {
-        assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), SparseMatrix::nrows(self));
-        let x_mat = faer::Mat::<T>::from_fn(self.ncols(), 1, |i, _| x[i]);
-        let mut y_mat = faer::Mat::<T>::zeros(SparseMatrix::nrows(self), 1);
-        // Fallback: convert to dense and multiply (since sparse_dense_matmul expects CSC)
-        let dense = self.inner.to_dense();
-        y_mat.copy_from(&dense * &x_mat);
+        // Simple implementation using direct sparse matrix-vector product
+        // Reset y to zero
         for i in 0..y.len() {
-            y[i] = y_mat[(i, 0)];
+            y[i] = T::zero();
+        }
+        
+        // Sparse matrix-vector multiplication
+        for i in 0..self.inner.nrows() {
+            let row_start = self.inner.row_ptr()[i];
+            let row_end = self.inner.row_ptr()[i + 1];
+            for idx in row_start..row_end {
+                let j = self.inner.col_idx()[idx];
+                y[i] = y[i] + self.inner.val()[idx] * x[j];
+            }
         }
     }
 }
@@ -132,14 +227,15 @@ impl<T: ComplexField + Copy + num_traits::One> SparseMatrix<T> for CsrMatrix<T> 
 // Implement MatVec trait for CsrMatrix to work with Kryst solvers
 use crate::core::traits::{MatVec, Indexing};
 
-impl<T: ComplexField + Copy + num_traits::One> MatVec<Vec<T>> for CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + PartialOrd> MatVec<Vec<T>> for CsrMatrix<T> {
     fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        self.spmv(x.as_slice(), y.as_mut_slice());
+        // Use our 4-parameter spmv_scaled method
+        let _ = self.spmv_scaled(T::one(), x.as_slice(), T::zero(), y.as_mut_slice());
     }
 }
 
 // Implement Indexing trait for CsrMatrix to work with preconditioners
-impl<T: ComplexField + Copy + num_traits::One> Indexing for CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> Indexing for CsrMatrix<T> {
     fn nrows(&self) -> usize {
         SparseMatrix::nrows(self)
     }
@@ -147,7 +243,7 @@ impl<T: ComplexField + Copy + num_traits::One> Indexing for CsrMatrix<T> {
 
 use crate::core::traits::SubmatrixExtract;
 
-impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SubmatrixExtract for CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::Zero + num_traits::One + PartialEq + PartialOrd> SubmatrixExtract for CsrMatrix<T> {
     fn submatrix(&self, indices: &[usize]) -> Self {
         let dense = self.inner.to_dense();
         let n = indices.len();
@@ -202,7 +298,7 @@ mod tests {
         let m = CsrMatrix::from_csr(3, 3, vec![0,1,2,3], vec![0,1,2], vec![1.0,1.0,1.0]);
         let x = vec![2.0, 3.0, 5.0];
         let mut y = vec![0.0; 3];
-        m.spmv(&x, &mut y);
+        m.spmv_scaled(1.0, &x, 0.0, &mut y).unwrap();
         assert_eq!(y, x);
     }
 
@@ -217,7 +313,7 @@ mod tests {
         );
         let x = vec![1.0, 1.0, 1.0];
         let mut y = vec![0.0; 2];
-        m.spmv(&x, &mut y);
+        m.spmv_scaled(1.0, &x, 0.0, &mut y).unwrap();
         assert_eq!(y, vec![3.0, 7.0]);
     }
 }
