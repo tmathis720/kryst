@@ -2418,6 +2418,14 @@ impl RefinementEngine {
                 
                 Ok(local_norm_sq.sqrt())
             }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_rayon_comm) => {
+                // Rayon parallel case - return local norm (no reduction needed for shared memory)
+                #[cfg(feature = "logging")]
+                log::debug!("Computing residual norm in Rayon context: {}", local_norm_sq.sqrt());
+                
+                Ok(local_norm_sq.sqrt())
+            }
         }
     }
 
@@ -2444,6 +2452,14 @@ impl RefinementEngine {
                 
                 #[cfg(feature = "logging")]
                 log::warn!("MPI reduction not implemented - using local vector norm only");
+                
+                Ok(local_norm_sq.sqrt())
+            }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_rayon_comm) => {
+                // Rayon parallel case - return local norm (no reduction needed for shared memory)
+                #[cfg(feature = "logging")]
+                log::debug!("Computing vector norm in Rayon context: {}", local_norm_sq.sqrt());
                 
                 Ok(local_norm_sq.sqrt())
             }

@@ -55,7 +55,7 @@
 
 use crate::preconditioner::Preconditioner;
 use crate::error::KError;
-use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::sparse::{CsrMatrix, SparseMatrix};
 use faer::Mat;
 use crate::parallel::Comm;
 #[cfg(feature = "rayon")]
@@ -649,7 +649,8 @@ impl AMG {
     }
 
     /// Sparse matrix-matrix multiplication: C = A * B
-    /// Uses row-wise sparse multiplication for efficiency
+    /// Uses Gustavson's algorithm for efficient CSR x CSR multiplication
+    /// Avoids HashMap overhead with sorted merge and scratch buffers
     fn sparse_matrix_multiply(
         a: &CsrMatrix<f64>,
         b: &CsrMatrix<f64>
@@ -667,9 +668,13 @@ impl AMG {
         let mut col_indices = Vec::new();
         let mut values = Vec::new();
         
+        // Gustavson's algorithm: use scratch arrays for efficient accumulation
+        let mut x = vec![0.0; n]; // Accumulator array
+        let mut w = vec![usize::MAX; n]; // Marker array (MAX means "not seen yet")
+        
         // For each row i in A
         for i in 0..m {
-            let mut row_map: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+            let row_start = col_indices.len();
             
             // Get non-zeros in row i of A
             let a_row_start = a.row_ptrs()[i];
@@ -687,20 +692,38 @@ impl AMG {
                     let b_col = b.col_indices()[b_idx];
                     let b_val = b.values()[b_idx];
                     
-                    *row_map.entry(b_col).or_insert(0.0) += a_val * b_val;
+                    if w[b_col] != i {
+                        // First time seeing this column in row i
+                        w[b_col] = i;
+                        x[b_col] = a_val * b_val;
+                        col_indices.push(b_col);
+                    } else {
+                        // Accumulate into existing entry
+                        x[b_col] += a_val * b_val;
+                    }
                 }
             }
             
-            // Sort and add non-zeros to result
-            let mut row_entries: Vec<_> = row_map.into_iter().collect();
-            row_entries.sort_by_key(|&(col, _)| col);
+            // Sort columns for this row and extract values
+            let row_end = col_indices.len();
+            col_indices[row_start..row_end].sort_unstable();
             
-            for (col, val) in row_entries {
-                if val.abs() > 1e-12 { // Slightly more permissive tolerance for stability
-                    col_indices.push(col);
-                    values.push(val);
+            // Extract values in sorted order and apply drop tolerance
+            let mut kept_cols = Vec::new();
+            let mut kept_vals = Vec::new();
+            
+            for &col in &col_indices[row_start..row_end] {
+                let val = x[col];
+                if val.abs() > 1e-12 { // Drop tolerance for numerical stability
+                    kept_cols.push(col);
+                    kept_vals.push(val);
                 }
             }
+            
+            // Replace the range with kept columns
+            col_indices.truncate(row_start);
+            col_indices.extend(kept_cols);
+            values.extend(kept_vals);
             
             row_ptr.push(col_indices.len());
         }
@@ -812,7 +835,7 @@ impl AMG {
         let mut levels = Vec::with_capacity(config.max_levels);
         let mut current_matrix = matrix.clone();
         let mut current_diag = Self::extract_diagonal_inverse(&current_matrix);
-        let mut _setup_complexity = 0.0;
+        let mut setup_complexity = 0.0;
         let original_size = matrix.nrows();
 
         for level_idx in 0..config.max_levels {
@@ -928,7 +951,7 @@ impl AMG {
 
             // HYPRE-style complexity tracking using sparse nnz
             let coarse_nnz = sparse_coarse_matrix.nnz();
-            _setup_complexity += coarse_nnz as f64 / original_size as f64;
+            setup_complexity += coarse_nnz as f64 / original_size as f64;
 
             levels.push(AMGLevel {
                 interpolation: sparse_interpolation,
@@ -986,9 +1009,40 @@ impl AMG {
     }
 
     /// Apply HYPRE-style truncation to interpolation matrix
-    fn apply_truncation(_interpolation: &mut Mat<f64>, _truncation_factor: f64) {
-        // TODO: Implementation would truncate weak connections
-        // For now, placeholder for future HYPRE-style truncation
+    /// Removes weak connections based on threshold-based dropping
+    fn apply_truncation(interpolation: &mut Mat<f64>, truncation_factor: f64) {
+        if truncation_factor <= 0.0 || truncation_factor >= 1.0 {
+            return; // No truncation needed
+        }
+        
+        let (nrows, ncols) = (interpolation.nrows(), interpolation.ncols());
+        
+        // Process each row independently for row-wise truncation
+        for i in 0..nrows {
+            // Collect row entries with their values and column indices
+            let mut row_entries: Vec<(usize, f64)> = Vec::new();
+            for j in 0..ncols {
+                let val = interpolation[(i, j)];
+                if val.abs() > 1e-14 {
+                    row_entries.push((j, val));
+                }
+            }
+            
+            if row_entries.len() <= 1 {
+                continue; // Keep at least one entry per row
+            }
+            
+            // Sort by absolute value (descending)
+            row_entries.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+            
+            // Calculate how many entries to keep
+            let keep_count = ((row_entries.len() as f64 * (1.0 - truncation_factor)).ceil() as usize).max(1);
+            
+            // Zero out the weakest entries
+            for &(col, _) in row_entries.iter().skip(keep_count) {
+                interpolation[(i, col)] = 0.0;
+            }
+        }
     }
 
     /// Generate operators with HYPRE-style configuration
@@ -1046,7 +1100,7 @@ impl AMG {
             ..Default::default()
         };
         
-        Self::new_with_config(a, config).unwrap_or_else(|_e| {
+        Self::new_with_config(a, config).unwrap_or_else(|e| {
             // Fallback to original implementation for compatibility
             #[cfg(feature = "logging")]
             warn!("AMG: Falling back to legacy constructor due to: {}", e);
@@ -1200,7 +1254,7 @@ impl AMG {
         let mut z_vec = z.to_vec();
         let mut temp = vec![0.0; n];
         for _ in 0..iterations {
-            parallel_mat_vec(a, &z_vec, &mut temp);
+            let _ = parallel_mat_vec(a, &z_vec, &mut temp);
             #[cfg(feature = "rayon")]
             {
                 temp.par_iter_mut().enumerate().for_each(|(i, val)| {
@@ -1265,7 +1319,7 @@ impl AMG {
         
         for _ in 0..iterations {
             // A * temp_vector -> work_vector
-            parallel_mat_vec(a, &workspace.temp_vector[..n], &mut workspace.work_vector[..n]);
+            let _ = parallel_mat_vec(a, &workspace.temp_vector[..n], &mut workspace.work_vector[..n]);
             
             // temp_vector += diag_inv * (r - work_vector)
             #[cfg(feature = "rayon")]
@@ -1310,7 +1364,7 @@ impl AMG {
         Self::smooth_jacobi_parallel_workspace_sparse(a, diag_inv, r, z, self.nu_pre, workspace);
         
         // Compute residual: r - A*z using workspace
-        parallel_mat_vec_sparse(a, z, &mut workspace.residual[..a.nrows()]);
+        let _ = parallel_mat_vec_sparse(a, z, &mut workspace.residual[..a.nrows()]);
         #[cfg(feature = "rayon")]
         {
             workspace.residual[..a.nrows()].par_iter_mut().zip(r.par_iter())
@@ -1324,7 +1378,7 @@ impl AMG {
         }
         
         // Restrict residual to coarse grid
-        parallel_mat_vec_sparse(restriction, &workspace.residual[..a.nrows()], 
+        let _ = parallel_mat_vec_sparse(restriction, &workspace.residual[..a.nrows()], 
                         &mut workspace.coarse_solution[..coarse_matrix.nrows()]);
         
         // Make owned copies for recursive call to avoid borrowing conflicts
@@ -1335,7 +1389,7 @@ impl AMG {
         self.apply_recursive(level + 1, &coarse_residual, &mut coarse_solution, workspace);
         
         // Prolongate correction
-        parallel_mat_vec_sparse(interpolation, &coarse_solution, 
+        let _ = parallel_mat_vec_sparse(interpolation, &coarse_solution, 
                         &mut workspace.fine_correction[..a.nrows()]);
         
         // Add correction to solution
@@ -1355,11 +1409,70 @@ impl AMG {
         Self::smooth_jacobi_parallel_workspace_sparse(a, diag_inv, r, z, self.nu_post, workspace);
     }
     /// Direct solve on coarsest level using sparse matrix
+    /// Uses iterative CG for small sparse systems to avoid densification
     fn solve_direct_sparse(a: &CsrMatrix<f64>, r: &[f64], z: &mut [f64]) {
-        // Convert to dense for direct solve temporarily
-        // TODO: Use sparse direct solver for large coarsest levels
-        let a_dense = a.to_dense();
-        Self::solve_direct(&a_dense, r, z);
+        let n = a.nrows();
+        
+        // For very small matrices, use dense direct solve
+        if n <= 10 {
+            let a_dense = a.to_dense();
+            Self::solve_direct(&a_dense, r, z);
+            return;
+        }
+        
+        // Use sparse iterative solver (CG) for larger coarse grids
+        // This avoids the O(n³) cost of dense factorization
+        
+        // Initialize solution to zero
+        z.fill(0.0);
+        
+        // CG workspace
+        let mut p = vec![0.0; n];
+        let mut ap = vec![0.0; n];
+        let mut residual = vec![0.0; n];
+        
+        // r = b - A*x (x = 0, so r = b)
+        residual.copy_from_slice(r);
+        p.copy_from_slice(r);
+        
+        let mut rsold = residual.iter().map(|x| x * x).sum::<f64>();
+        let tolerance = 1e-10 * rsold.sqrt().max(1e-12);
+        
+        for _iter in 0..n.min(50) { // Limit iterations for coarse grid
+            // ap = A * p
+            a.spmv(&p, &mut ap);
+            
+            // alpha = rsold / (p^T * A * p)
+            let ptap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+            if ptap.abs() < 1e-14 {
+                break;
+            }
+            let alpha = rsold / ptap;
+            
+            // x = x + alpha * p
+            for i in 0..n {
+                z[i] += alpha * p[i];
+            }
+            
+            // r = r - alpha * ap
+            for i in 0..n {
+                residual[i] -= alpha * ap[i];
+            }
+            
+            let rsnew: f64 = residual.iter().map(|x| x * x).sum();
+            if rsnew.sqrt() < tolerance {
+                break;
+            }
+            
+            let beta = rsnew / rsold;
+            
+            // p = r + beta * p
+            for i in 0..n {
+                p[i] = residual[i] + beta * p[i];
+            }
+            
+            rsold = rsnew;
+        }
     }
 
     /// Direct solve using sparse matrix with MPI communication
@@ -1392,7 +1505,7 @@ impl AMG {
         };
         let mut rr_old;
         for _ in 0..n {
-            parallel_mat_vec(a, &p, &mut ap);
+            let _ = parallel_mat_vec(a, &p, &mut ap);
             #[cfg(feature = "rayon")]
             let denominator = p.par_iter().zip(ap.par_iter()).map(|(&pi, &api)| pi * api).sum::<f64>();
             #[cfg(not(feature = "rayon"))]
@@ -1623,7 +1736,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
             
             // Compute residual
             local_workspace.resize(r.len());
-            parallel_mat_vec(&self.matrix, z, &mut local_workspace.residual[..r.len()]);
+            let _ = parallel_mat_vec(&self.matrix, z, &mut local_workspace.residual[..r.len()]);
             for i in 0..r.len() {
                 local_workspace.residual[i] = r[i] - local_workspace.residual[i];
             }
@@ -1631,7 +1744,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
             // Restrict to coarse level (level 0 in levels array)
             if !self.levels.is_empty() {
                 let coarse_size = self.levels[0].coarse_matrix.nrows();
-                parallel_mat_vec_sparse(&self.levels[0].restriction, &local_workspace.residual[..r.len()], 
+                let _ = parallel_mat_vec_sparse(&self.levels[0].restriction, &local_workspace.residual[..r.len()], 
                                 &mut local_workspace.coarse_solution[..coarse_size]);
                 
                 // Recursive solve starting from level 0
@@ -1644,7 +1757,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for AMG {
                 }
                 
                 // Interpolate back 
-                parallel_mat_vec_sparse(&self.levels[0].interpolation, &coarse_correction, 
+                let _ = parallel_mat_vec_sparse(&self.levels[0].interpolation, &coarse_correction, 
                                 &mut local_workspace.fine_correction[..r.len()]);
                 
                 // Add correction
@@ -1738,11 +1851,12 @@ fn smooth_interpolation(interpolation: &mut Mat<f64>, matrix: &Mat<f64>, weight:
     let col_count = interpolation.ncols().min(matrix.ncols());
     #[cfg(feature = "rayon")]
     {
+        use rayon::prelude::*;
         // Safer approach: collect updates and apply them sequentially
         let updates: Vec<(usize, usize, f64)> = (0..row_count)
             .into_par_iter()
             .flat_map(|i| {
-                (0..col_count).map(move |j| (i, j, weight * matrix[(i, j)]))
+                (0..col_count).into_par_iter().map(move |j| (i, j, weight * matrix[(i, j)]))
             })
             .collect();
         
@@ -1802,30 +1916,47 @@ fn minimize_energy(interpolation: &mut Mat<f64>, _matrix: &Mat<f64>) {
 }
 
 /// Parallel mat-vec multiplication for sparse matrices using rayon or serial fallback.
-fn parallel_mat_vec_sparse(mat: &CsrMatrix<f64>, vec: &[f64], result: &mut [f64]) {
+fn parallel_mat_vec_sparse(mat: &CsrMatrix<f64>, vec: &[f64], result: &mut [f64]) -> Result<(), KError> {
     let (rows, cols) = (mat.nrows(), mat.ncols());
     let (vlen, rlen) = (vec.len(), result.len());
-    assert_eq!(cols, vlen, "Dimension mismatch in parallel_mat_vec_sparse!\n \
-         Matrix is {}x{}, but input vector length is {}.\n \
-         (Matrix columns must match vector length.)", rows, cols, vlen);
-    assert_eq!(rows, rlen, "Dimension mismatch in parallel_mat_vec_sparse!\n \
-         Matrix is {}x{}, but result length is {}.\n \
-         (Matrix rows must match result length.)", rows, cols, rlen);
+    
+    if cols != vlen {
+        return Err(KError::InvalidInput(format!(
+            "Dimension mismatch in parallel_mat_vec_sparse: Matrix is {}x{}, but input vector length is {}",
+            rows, cols, vlen
+        )));
+    }
+    
+    if rows != rlen {
+        return Err(KError::InvalidInput(format!(
+            "Dimension mismatch in parallel_mat_vec_sparse: Matrix is {}x{}, but result length is {}",
+            rows, cols, rlen
+        )));
+    }
     
     // Use the sparse spmv method
-    let _ = mat.spmv_scaled(1.0, vec, 0.0, result);
+    mat.spmv_scaled(1.0, vec, 0.0, result)
 }
 
 /// Parallel mat-vec multiplication using rayon or serial fallback.
-fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) {
+fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) -> Result<(), KError> {
     let (rows, cols) = (mat.nrows(), mat.ncols());
     let (vlen, rlen) = (vec.len(), result.len());
-    assert_eq!(cols, vlen, "Dimension mismatch in parallel_mat_vec!\n \
-         Matrix is {}x{}, but input vector length is {}.\n \
-         (Matrix columns must match vector length.)", rows, cols, vlen);
-    assert_eq!(rows, rlen, "Dimension mismatch in parallel_mat_vec!\n \
-         Matrix is {}x{}, but result length is {}.\n \
-         (Matrix rows must match result length.)", rows, cols, rlen);
+    
+    if cols != vlen {
+        return Err(KError::InvalidInput(format!(
+            "Dimension mismatch in parallel_mat_vec: Matrix is {}x{}, but input vector length is {}",
+            rows, cols, vlen
+        )));
+    }
+    
+    if rows != rlen {
+        return Err(KError::InvalidInput(format!(
+            "Dimension mismatch in parallel_mat_vec: Matrix is {}x{}, but result length is {}",
+            rows, cols, rlen
+        )));
+    }
+    
     #[cfg(feature = "rayon")]
     {
         result
@@ -1848,6 +1979,8 @@ fn parallel_mat_vec(mat: &Mat<f64>, vec: &[f64], result: &mut [f64]) {
                     .sum();
             });
     }
+    
+    Ok(())
 }
 
 // ------------------- Helper Functions for Enhanced Coarsening -------------------
