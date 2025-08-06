@@ -55,6 +55,21 @@ impl MpiComm {
         let size     = world.size() as usize;
         MpiComm { _universe: universe, world, rank, size }
     }
+
+    /// Attempts to initialize MPI and construct a new `MpiComm` instance.
+    ///
+    /// Returns `None` if MPI initialization fails (e.g., MPI not available or test environment).
+    /// This provides a graceful fallback for environments where MPI may not be properly configured.
+    pub fn try_new() -> Option<Self> {
+        // Use std::panic::catch_unwind to handle potential panics during MPI initialization
+        std::panic::catch_unwind(|| {
+            let universe = mpi::initialize().unwrap();
+            let world = universe.world();
+            let rank = world.rank() as usize;
+            let size = world.size() as usize;
+            MpiComm { _universe: universe, world, rank, size }
+        }).ok()
+    }
 }
 
 #[cfg(feature = "mpi")]

@@ -581,7 +581,20 @@ impl KspContext {
         #[cfg(all(feature="rayon", not(feature="mpi")))]
         let default_comm = crate::parallel::UniverseComm::Rayon(crate::parallel::RayonComm::new());
         #[cfg(feature="mpi")]
-        let default_comm = crate::parallel::UniverseComm::Mpi(crate::parallel::MpiComm::new());
+        let default_comm = match crate::parallel::MpiComm::try_new() {
+            Some(mpi_comm) => crate::parallel::UniverseComm::Mpi(mpi_comm),
+            None => {
+                // Fallback to Rayon if available, otherwise Serial
+                #[cfg(feature="rayon")]
+                {
+                    crate::parallel::UniverseComm::Rayon(crate::parallel::RayonComm::new())
+                }
+                #[cfg(not(feature="rayon"))]
+                {
+                    crate::parallel::UniverseComm::Serial
+                }
+            }
+        };
         
         self.setup_with_comm(a, n, default_comm)
     }
