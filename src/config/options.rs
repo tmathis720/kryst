@@ -9,7 +9,7 @@
 use std::str::FromStr;
 use crate::error::KError;
 
-use crate::config::options_core::{parse_as, Arity, Registry, Sink, Spec, ValueKind, is_help_requested, expand_options_files};
+use crate::config::options_core::{parse_as, Sink, Spec, expand_options_files};
 use crate::config::registry::registry;
 
 /// KSP (Krylov Solver) options.

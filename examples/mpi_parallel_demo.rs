@@ -148,8 +148,8 @@ fn example_ksp_with_comm() -> Result<(), Box<dyn std::error::Error>> {
         if i < n-1 { a[(i, i+1)] = -1.0; }  // Super-diagonal
     }
     
-    let b = vec![1.0; n];
-    let mut x = vec![0.0; n];
+    let _b = vec![1.0; n];
+    let _x = vec![0.0; n];
     
     // Create communicator
     #[cfg(not(any(feature="mpi", feature="rayon")))]

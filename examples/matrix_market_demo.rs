@@ -15,7 +15,7 @@
 
 use kryst::utils::matrix_market::read_matrix_market;
 use kryst::context::ksp_context::KspContext;
-use kryst::matrix::sparse::{SparseMatrix, CsrMatrix};
+use kryst::matrix::sparse::CsrMatrix;
 use std::time::Instant;
 
 /// Analyze matrix properties and provide diagnostics

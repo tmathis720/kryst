@@ -4,7 +4,6 @@
 
 use kryst::utils::matrix_market::read_matrix_market;
 use kryst::context::ksp_context::KspContext;
-use kryst::matrix::sparse::{SparseMatrix, CsrMatrix};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     for matrix_name in test_matrices {
         let matrix_path = format!("../mtx/{}.mtx", matrix_name);
-        let rhs_path = format!("../mtx/{}_rhs1.mtx", matrix_name);
+        let _rhs_path = format!("../mtx/{}_rhs1.mtx", matrix_name);
 
         match read_matrix_market(&matrix_path) {
             Ok(matrix_data) => {

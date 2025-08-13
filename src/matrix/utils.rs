@@ -8,7 +8,7 @@ use crate::matrix::sparse::CsrMatrix;
 use faer::Mat;
 
 #[cfg(feature = "rayon")]
-use rayon::iter::{IntoParallelIterator, ParallelIterator, IndexedParallelIterator, IntoParallelRefMutIterator};
+use rayon::iter::{ParallelIterator, IndexedParallelIterator, IntoParallelRefMutIterator};
 
 /// Matrix analysis helper function that computes basic properties
 /// 

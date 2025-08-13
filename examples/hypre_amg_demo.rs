@@ -5,7 +5,7 @@ use kryst::error::KError;
 use faer::Mat;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🏗️  HYPRE-Inspired AMG Preconditioner Demo");
+    println!("    HYPRE-Inspired AMG Preconditioner Demo");
     println!("==========================================\n");
 
     // Create test problems of varying difficulty
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     demo_configuration_builder()?;
     demo_safety_features()?;
 
-    println!("✅ All AMG demos completed successfully!");
+    println!("  All AMG demos completed successfully!");
     Ok(())
 }
 
@@ -98,7 +98,7 @@ fn create_anisotropic_matrix(nx: usize, ny: usize, anisotropy: f64) -> Mat<f64> 
 
 /// Demonstrate AMG on symmetric positive definite problems
 fn demo_symmetric_positive_definite() -> Result<(), KError> {
-    println!("📊 Testing AMG on Symmetric Positive Definite Problem");
+    println!("Testing AMG on Symmetric Positive Definite Problem");
     println!("-----------------------------------------------------");
 
     // Create a 2D Laplacian matrix (5x5 grid)
@@ -108,8 +108,8 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
     println!("Matrix size: {}x{}", matrix.nrows(), matrix.ncols());
     
     // Test default AMG configuration
-    let amg_default = AMG::new(&matrix, 10, 0.25);
-    println!("✅ Default AMG construction successful");
+    let _amg_default = AMG::new(&matrix, 10, 0.25);
+    println!("  Default AMG construction successful");
     
     // Test HYPRE-inspired configuration
     let amg_hypre = AMGBuilder::new()
@@ -122,16 +122,16 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
         .enable_logging()
         .build(&matrix)?;
     
-    println!("✅ HYPRE-style AMG construction successful");
+    println!("  HYPRE-style AMG construction successful");
     
     // Test preconditioning with correct API
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
     
     amg_hypre.apply(PcSide::Left, &x, &mut y)?;
-    println!("✅ AMG preconditioning applied successfully");
+    println!("  AMG preconditioning applied successfully");
     
-    println!("📈 Preconditioning effect:");
+    println!("   Preconditioning effect:");
     println!("   Input norm:  {:.6}", x.iter().map(|v| v * v).sum::<f64>().sqrt());
     println!("   Output norm: {:.6}", y.iter().map(|v| v * v).sum::<f64>().sqrt());
     
@@ -141,7 +141,7 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
 
 /// Demonstrate AMG on anisotropic problems
 fn demo_anisotropic_problem() -> Result<(), KError> {
-    println!("🔄 Testing AMG on Anisotropic Problem");
+    println!("   Testing AMG on Anisotropic Problem");
     println!("-------------------------------------");
 
     // Create anisotropic problem (4x4 grid)
@@ -158,14 +158,14 @@ fn demo_anisotropic_problem() -> Result<(), KError> {
     ];
     
     for (name, strategy) in &strategies {
-        let amg = AMGBuilder::new()
+        let _amg = AMGBuilder::new()
             .max_levels(5)
             .strong_threshold(0.5) // Higher threshold for anisotropic problems
             .coarsening_type(*strategy)
             .interpolation_type(InterpType::Extended)
             .build(&matrix)?;
         
-        println!("✅ {} coarsening strategy successful", name);
+        println!("  {} coarsening strategy successful", name);
     }
     
     println!();
@@ -174,7 +174,7 @@ fn demo_anisotropic_problem() -> Result<(), KError> {
 
 /// Demonstrate the configuration builder pattern
 fn demo_configuration_builder() -> Result<(), KError> {
-    println!("⚙️  Testing AMG Configuration Builder");
+    println!("    Testing AMG Configuration Builder");
     println!("------------------------------------");
 
     let n = 9;
@@ -214,8 +214,8 @@ fn demo_configuration_builder() -> Result<(), KError> {
     
     for (name, builder) in configs {
         match builder.build(&matrix) {
-            Ok(_amg) => println!("✅ {} configuration successful", name),
-            Err(e) => println!("❌ {} configuration failed: {}", name, e),
+            Ok(_amg) => println!("  {} configuration successful", name),
+            Err(e) => println!("   {} configuration failed: {}", name, e),
         }
     }
     
@@ -225,21 +225,21 @@ fn demo_configuration_builder() -> Result<(), KError> {
 
 /// Demonstrate safety features and error handling
 fn demo_safety_features() -> Result<(), KError> {
-    println!("🛡️  Testing AMG Safety Features");
+    println!("    Testing AMG Safety Features");
     println!("-------------------------------");
 
     // Test empty matrix handling
     let empty_matrix = Mat::zeros(0, 0);
     match AMGBuilder::new().build(&empty_matrix) {
-        Ok(_) => println!("❌ Empty matrix should have failed"),
-        Err(_) => println!("✅ Empty matrix correctly rejected"),
+        Ok(_) => println!("   Empty matrix should have failed"),
+        Err(_) => println!("  Empty matrix correctly rejected"),
     }
     
     // Test non-square matrix handling
     let non_square = Mat::zeros(3, 4);
     match AMGBuilder::new().build(&non_square) {
-        Ok(_) => println!("❌ Non-square matrix should have failed"),
-        Err(_) => println!("✅ Non-square matrix correctly rejected"),
+        Ok(_) => println!("   Non-square matrix should have failed"),
+        Err(_) => println!("  Non-square matrix correctly rejected"),
     }
     
     // Test invalid configuration
@@ -247,16 +247,16 @@ fn demo_safety_features() -> Result<(), KError> {
     match AMGBuilder::new()
         .max_levels(0) // Invalid!
         .build(&valid_matrix) {
-        Ok(_) => println!("❌ Invalid config should have failed"),
-        Err(_) => println!("✅ Invalid configuration correctly rejected"),
+        Ok(_) => println!("   Invalid config should have failed"),
+        Err(_) => println!("  Invalid configuration correctly rejected"),
     }
     
     // Test invalid strong threshold
     match AMGBuilder::new()
         .strong_threshold(1.5) // Invalid!
         .build(&valid_matrix) {
-        Ok(_) => println!("❌ Invalid threshold should have failed"),
-        Err(_) => println!("✅ Invalid threshold correctly rejected"),
+        Ok(_) => println!("   Invalid threshold should have failed"),
+        Err(_) => println!("  Invalid threshold correctly rejected"),
     }
     
     // Test matrix with NaN (if IEEE checks enabled)
@@ -274,13 +274,13 @@ fn demo_safety_features() -> Result<(), KError> {
         .enable_logging()
         .build(&valid_matrix)?;
     
-    println!("✅ Robust AMG with safety checks successful");
+    println!("  Robust AMG with safety checks successful");
     
     // Test preconditioning operation
     let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let mut y = vec![0.0; 5];
     robust_amg.apply(PcSide::Left, &x, &mut y)?;
-    println!("✅ Safe preconditioning operation completed");
+    println!("  Safe preconditioning operation completed");
     
     println!();
     Ok(())

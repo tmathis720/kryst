@@ -38,7 +38,7 @@
 
 use kryst::utils::matrix_market::read_matrix_market;
 use kryst::context::ksp_context::KspContext;
-use kryst::matrix::sparse::{SparseMatrix, CsrMatrix};
+use kryst::matrix::sparse::CsrMatrix;
 use std::time::Instant;
 
 /// Matrix-specific optimal solver configurations based on benchmark results

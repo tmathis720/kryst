@@ -19,7 +19,7 @@
 
 use crate::core::traits::{Indexing, InnerProduct, MatTransVec, MatVec};
 use faer::{Mat, MatRef};
-use num_traits::{Float, FromPrimitive};
+use num_traits::Float;
 
 /// Implements matrix-vector multiplication for `faer::Mat`.
 ///

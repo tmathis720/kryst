@@ -155,7 +155,7 @@ pub trait Sink {
 /// Expand `-options_file <path>` occurrences (PETSc-style).
 /// Lines starting with `#` are comments. Splits by ASCII whitespace.
 /// Returns a flattened argv vector (no recursion limit, but file includes are not re-expanded inside files).
-pub fn expand_options_files(mut args: Vec<String>) -> Result<Vec<String>, KError> {
+pub fn expand_options_files(args: Vec<String>) -> Result<Vec<String>, KError> {
     let mut out = Vec::<String>::new();
     let mut i = 0usize;
     while i < args.len() {
@@ -188,7 +188,7 @@ fn read_options_file(path: &Path) -> Result<Vec<String>, KError> {
 // bounded Levenshtein for suggestions
 fn nearest<'a>(needle: &str, hay: &[&'a str]) -> Option<&'a str> {
     fn dist(a: &str, b: &str) -> usize {
-        let (m, n) = (a.len(), b.len());
+        let (_m, n) = (a.len(), b.len());
         let mut prev = (0..=n).collect::<Vec<_>>();
         for (i, ca) in a.chars().enumerate() {
             let mut curr = vec![i + 1];
