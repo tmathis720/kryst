@@ -9,7 +9,7 @@ fn main() {
     }
     
     // Check if help is requested
-    if kryst::is_help_requested(&args) {
+    if kryst::config::options_core::is_help_requested(&args) {
         kryst::print_help();
     }
 }
