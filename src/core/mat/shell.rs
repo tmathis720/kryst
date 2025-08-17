@@ -34,19 +34,19 @@
 //! ```
 
 use crate::core::traits::{MatVec, MatTransVec, MatShape};
-
+use std::marker::PhantomData;
 /// A "shell" matrix: user-supplied callbacks for A·x and Aᵀ·x
 ///
 /// `ShellMat` provides a matrix-free interface where matrix operations are defined
 /// by user-provided closures. This allows for efficient representation of matrices
 /// that don't need to be stored explicitly.
 pub struct ShellMat<V> {
-    /// Dimension of the (square) operator
     pub dim: usize,
-    /// Matrix-vector multiplication: y = A·x
     mult: Box<dyn Fn(&V, &mut V) + Send + Sync>,
-    /// Matrix-transpose-vector multiplication: y = Aᵀ·x  
     mult_trans: Box<dyn Fn(&V, &mut V) + Send + Sync>,
+    // Makes the dependency on V explicit without requiring V: Send/Sync.
+    // Using `fn(&V)` (not `V`) avoids imposing Send/Sync bounds on V.
+    _marker: PhantomData<fn(&V)>,
 }
 
 impl<V> ShellMat<V> {
@@ -91,6 +91,7 @@ impl<V> ShellMat<V> {
             dim,
             mult: Box::new(mult),
             mult_trans: Box::new(mult_trans),
+            _marker: PhantomData,
         }
     }
 
@@ -123,11 +124,11 @@ impl<V> ShellMat<V> {
     where
         F: Fn(&V, &mut V) + Send + Sync + 'static + Clone,
     {
-        let mult_clone = mult.clone();
         ShellMat {
             dim,
-            mult: Box::new(mult),
-            mult_trans: Box::new(mult_clone),
+            mult: Box::new(mult.clone()),
+            mult_trans: Box::new(mult),
+            _marker: PhantomData,
         }
     }
 
@@ -168,10 +169,6 @@ impl<V> MatShape for ShellMat<V> {
         self.dim
     }
 }
-
-// Implementing Send and Sync for ShellMat
-unsafe impl<V> Send for ShellMat<V> {}
-unsafe impl<V> Sync for ShellMat<V> {}
 
 #[cfg(test)]
 mod tests {

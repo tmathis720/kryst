@@ -147,7 +147,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
     
     /// Access to row pointers (indices into col_indices and values arrays)
     /// Note: This is a simplified implementation using dense conversion
-    pub fn row_ptrs(&self) -> Vec<usize> {
+    pub fn to_row_ptr_vec(&self) -> Vec<usize> {
         // For now, we'll reconstruct CSR from dense (inefficient but works)
         let dense = self.to_dense();
         let mut row_ptrs = vec![0];
@@ -166,7 +166,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
     
     /// Access to column indices array
     /// Note: This is a simplified implementation using dense conversion
-    pub fn col_indices(&self) -> Vec<usize> {
+    pub fn to_col_idx_vec(&self) -> Vec<usize> {
         let dense = self.to_dense();
         let mut col_indices = Vec::new();
         
@@ -182,7 +182,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
     
     /// Access to values array
     /// Note: This is a simplified implementation using dense conversion
-    pub fn values(&self) -> Vec<T> {
+    pub fn to_values_vec(&self) -> Vec<T> {
         let dense = self.to_dense();
         let mut values = Vec::new();
         
@@ -195,6 +195,24 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
             }
         }
         values
+    }
+
+        /// Borrow the CSR row pointer array (length = nrows + 1).
+    #[inline]
+    pub fn row_ptr(&self) -> &[usize] {
+        self.inner.row_ptr()
+    }
+
+    /// Borrow the CSR column index array (length = nnz).
+    #[inline]
+    pub fn col_idx(&self) -> &[usize] {
+        self.inner.col_idx()
+    }
+
+    /// Borrow the CSR value array (length = nnz).
+    #[inline]
+    pub fn values(&self) -> &[T] {
+        self.inner.val()
     }
 }
 

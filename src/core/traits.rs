@@ -153,17 +153,74 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
         Ok(())
     }
     
-    fn mat_vec_trans(&self, _alpha: f64, _x: &[f64], _beta: f64, _y: &mut [f64]) -> Result<(), crate::KError> {
+    fn mat_vec_trans(
+        &self,
+        alpha: f64,
+        x: &[f64],
+        beta: f64,
+        y: &mut [f64],
+    ) -> Result<(), crate::KError> {
         use crate::matrix::sparse::SparseMatrix;
-        if _x.len() != SparseMatrix::nrows(self) || _y.len() != SparseMatrix::ncols(self) {
-            return Err(crate::KError::InvalidInput("Matrix-vector dimension mismatch".to_string()));
+
+        // Dimension checks: x is in R^{m}, y in R^{n} for A^T (A is m×n)
+        if x.len() != SparseMatrix::nrows(self) || y.len() != SparseMatrix::ncols(self) {
+            return Err(crate::KError::InvalidInput(
+                "Matrix-vector dimension mismatch".to_string(),
+            ));
         }
-        
-        // TODO: This is a simplified fallback for transpose. In a real implementation,
-        // we'd want proper CSC format or efficient transpose operations.
-        // For now, return an error indicating this needs implementation
-        Err(crate::KError::NotImplemented("Sparse matrix transpose operations not yet implemented".to_string()))
+
+        // Quick exits
+        if alpha == 0.0 {
+            // y = beta * y
+            if beta == 0.0 {
+                for v in y.iter_mut() {
+                    *v = 0.0;
+                }
+            } else {
+                for v in y.iter_mut() {
+                    *v *= beta;
+                }
+            }
+            return Ok(());
+        }
+
+        // Scale y by beta (or zero) up front
+        if beta == 0.0 {
+            for v in y.iter_mut() {
+                *v = 0.0;
+            }
+        } else if beta != 1.0 {
+            for v in y.iter_mut() {
+                *v *= beta;
+            }
+        }
+        // If beta == 1.0, leave y as-is and accumulate into it.
+
+        // Access CSR structure. These accessor names assume your CSR exposes them.
+        // If your type uses different getters, adjust accordingly.
+        let row_ptr = self.row_ptr();   // &[usize] of length m+1
+        let col_idx = self.col_idx();   // &[usize] of length nnz
+        let values  = self.values();    // &[f64]   of length nnz
+
+        // y_j += alpha * a_ij * x_i  for all nonzeros a_ij
+        let m = SparseMatrix::nrows(self);
+        for i in 0..m {
+            let xi = x[i];
+            if xi == 0.0 {
+                continue;
+            }
+            let start = row_ptr[i];
+            let end = row_ptr[i + 1];
+            // SAFETY: bounds guaranteed by CSR invariants
+            for k in start..end {
+                let j = col_idx[k];
+                y[j] += alpha * values[k] * xi;
+            }
+        }
+
+        Ok(())
     }
+
     
     fn nrows(&self) -> usize { 
         use crate::matrix::sparse::SparseMatrix;

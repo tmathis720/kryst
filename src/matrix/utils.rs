@@ -122,20 +122,20 @@ pub fn sparse_matrix_multiply(
         let row_start = col_indices.len();
         
         // Get non-zeros in row i of A
-        let a_row_start = a.row_ptrs()[i];
-        let a_row_end = a.row_ptrs()[i + 1];
+        let a_row_start = a.to_row_ptr_vec()[i];
+        let a_row_end = a.to_row_ptr_vec()[i + 1];
         
         for a_idx in a_row_start..a_row_end {
-            let a_col = a.col_indices()[a_idx];
-            let a_val = a.values()[a_idx];
+            let a_col = a.to_col_idx_vec()[a_idx];
+            let a_val = a.to_values_vec()[a_idx];
             
             // For each non-zero A[i,k], add A[i,k] * B[k,:] to result row
-            let b_row_start = b.row_ptrs()[a_col];
-            let b_row_end = b.row_ptrs()[a_col + 1];
+            let b_row_start = b.to_row_ptr_vec()[a_col];
+            let b_row_end = b.to_row_ptr_vec()[a_col + 1];
             
             for b_idx in b_row_start..b_row_end {
-                let b_col = b.col_indices()[b_idx];
-                let b_val = b.values()[b_idx];
+                let b_col = b.to_col_idx_vec()[b_idx];
+                let b_val = b.to_values_vec()[b_idx];
                 
                 if w[b_col] != i {
                     // First time seeing this column in row i

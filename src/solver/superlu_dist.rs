@@ -342,9 +342,9 @@ impl Panel {
         let height = row_indices.len();
         let mut data = vec![0.0; width * height];
         
-        let row_ptrs = matrix.row_ptrs();
-        let col_indices = matrix.col_indices();
-        let values = matrix.values();
+        let row_ptrs = matrix.to_row_ptr_vec();
+        let col_indices = matrix.to_col_idx_vec();
+        let values = matrix.to_values_vec();
         
         // Extract dense panel from sparse matrix
         for (local_row, &global_row) in row_indices.iter().enumerate() {
@@ -1305,8 +1305,8 @@ impl Graph {
         let mut adj = vec![Vec::new(); n];
         
         // Get matrix pattern
-        let row_ptrs = matrix.row_ptrs();
-        let col_indices = matrix.col_indices();
+        let row_ptrs = matrix.to_row_ptr_vec();
+        let col_indices = matrix.to_col_idx_vec();
         
         // Add edges from A
         for i in 0..n {
@@ -1624,8 +1624,8 @@ impl OrderingAlgorithms {
         let n = matrix.nrows();
         let mut adj = vec![std::collections::BTreeSet::new(); n];
         
-        let row_ptrs = matrix.row_ptrs();
-        let col_indices = matrix.col_indices();
+        let row_ptrs = matrix.to_row_ptr_vec();
+        let col_indices = matrix.to_col_idx_vec();
         
         // Add edges from A (i -> j if A[i,j] != 0)
         for i in 0..n {
@@ -1801,8 +1801,8 @@ impl SymbolicFactorizer {
         let mut reach_set = Vec::new();
         
         // Create permuted matrix access
-        let row_ptrs = matrix.row_ptrs();
-        let col_indices = matrix.col_indices();
+        let row_ptrs = matrix.to_row_ptr_vec();
+        let col_indices = matrix.to_col_idx_vec();
         
         // Process columns in elimination order
         for k in 0..n {
@@ -1841,8 +1841,8 @@ impl SymbolicFactorizer {
         let mut parent = vec![n; n];  // n means no parent
         let mut ancestor = vec![0; n];
         
-        let row_ptrs = matrix.row_ptrs();
-        let col_indices = matrix.col_indices();
+        let row_ptrs = matrix.to_row_ptr_vec();
+        let col_indices = matrix.to_col_idx_vec();
         
         // Process columns in order
         for k in 0..n {
@@ -2320,9 +2320,9 @@ impl RefinementEngine {
         // In a full MPI implementation, this would handle communication
         // for distributed vector components
         
-        let row_ptrs = matrix.row_ptrs();
-        let col_indices = matrix.col_indices();
-        let values = matrix.values();
+        let row_ptrs = matrix.to_row_ptr_vec();
+        let col_indices = matrix.to_col_idx_vec();
+        let values = matrix.to_values_vec();
         
         y.fill(0.0);
         
@@ -3486,15 +3486,15 @@ impl SuperLuDistSolver {
         for global_row in 0..global_matrix.nrows() {
             if let Some(_local_row) = distribution.global_to_local_row(global_row) {
                 // Get the row data from global matrix
-                let row_start = global_matrix.row_ptrs()[global_row];
-                let row_end = global_matrix.row_ptrs()[global_row + 1];
+                let row_start = global_matrix.to_row_ptr_vec()[global_row];
+                let row_end = global_matrix.to_row_ptr_vec()[global_row + 1];
                 
                 // Extract columns that belong to this process
                 for idx in row_start..row_end {
-                    let global_col = global_matrix.col_indices()[idx];
+                    let global_col = global_matrix.to_col_idx_vec()[idx];
                     if let Some(local_col) = distribution.global_to_local_col(global_col) {
                         local_col_indices.push(local_col);
-                        local_values.push(global_matrix.values()[idx]);
+                        local_values.push(global_matrix.to_values_vec()[idx]);
                         nnz_count += 1;
                     }
                 }
@@ -3626,11 +3626,11 @@ impl SuperLuDistSolver {
             // Extract rows that have nonzeros in this panel's columns
             let mut panel_rows = Vec::new();
             for i in 0..matrix.nrows() {
-                let row_start = matrix.row_ptrs()[i];
-                let row_end = matrix.row_ptrs()[i + 1];
+                let row_start = matrix.to_row_ptr_vec()[i];
+                let row_end = matrix.to_row_ptr_vec()[i + 1];
                 
                 for idx in row_start..row_end {
-                    let col = matrix.col_indices()[idx];
+                    let col = matrix.to_col_idx_vec()[idx];
                     if col >= panel_start && col < panel_end {
                         panel_rows.push(i);
                         break;
