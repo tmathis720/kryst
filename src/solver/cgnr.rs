@@ -61,7 +61,7 @@ impl<T: num_traits::Float + From<f64>> CgneSolver<T> {
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for CgnrSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for CgnrSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

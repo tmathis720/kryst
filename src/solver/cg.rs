@@ -111,7 +111,7 @@ impl<T: Copy + num_traits::Float + From<f64> + std::ops::Mul<Output = T>> CgSolv
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for CgSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for CgSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

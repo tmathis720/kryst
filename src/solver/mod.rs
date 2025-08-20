@@ -27,7 +27,7 @@ use crate::preconditioner::Preconditioner;
 /// * `M` - Matrix type
 /// * `V` - Vector type
 ///
-pub trait LinearSolver<M, V> {
+pub trait LinearSolver<M: ?Sized, V> {
     type Error;
     
     /// Scalar type used by the solver (e.g., f32, f64)
@@ -77,7 +77,10 @@ pub trait LinearSolver<M, V> {
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error>
+    where
+        Self: Sized,
+    {
         self.solve(a, pc, b, x, comm, None, None)
     }
     
@@ -90,7 +93,10 @@ pub trait LinearSolver<M, V> {
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
         monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error>
+    where
+        Self: Sized,
+    {
         self.solve(a, pc, b, x, comm, Some(monitors), None)
     }
     
@@ -103,7 +109,10 @@ pub trait LinearSolver<M, V> {
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
         work: &mut crate::context::ksp_context::Workspace,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
+    ) -> Result<SolveStats<Self::Scalar>, Self::Error>
+    where
+        Self: Sized,
+    {
         self.solve(a, pc, b, x, comm, None, Some(work))
     }
 }

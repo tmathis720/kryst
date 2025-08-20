@@ -41,7 +41,7 @@ impl Default for PcSide {
 }
 
 /// A preconditioner M ≈ A⁻¹.
-pub trait Preconditioner<M, V> {
+pub trait Preconditioner<M: ?Sized, V> {
     /// Build any factorization/hierarchy once from the system matrix.
     ///
     /// # Arguments
@@ -66,7 +66,7 @@ pub trait Preconditioner<M, V> {
 }
 
 /// A preconditioner whose action M⁻¹ may change at every iteration.
-pub trait FlexiblePreconditioner<M, V> {
+pub trait FlexiblePreconditioner<M: ?Sized, V> {
     /// Given the current residual `r`, produce `z ≈ Mₖ⁻¹ r`.
     fn apply(&mut self, r: &V, z: &mut V) -> Result<(), crate::error::KError>;
 }

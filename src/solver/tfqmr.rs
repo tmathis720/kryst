@@ -53,7 +53,7 @@ impl<T: Float + num_traits::FromPrimitive> TfqmrSolver<T> {
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for TfqmrSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for TfqmrSolver<T>
 where
     M: MatVec<V> + Send + Sync,
     (): InnerProduct<V, Scalar = T>,

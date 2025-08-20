@@ -147,7 +147,7 @@ where
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for FgmresSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for FgmresSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

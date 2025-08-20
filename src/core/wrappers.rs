@@ -21,22 +21,6 @@ use crate::core::traits::{Indexing, InnerProduct, MatTransVec, MatVec};
 use faer::{Mat, MatRef};
 use num_traits::Float;
 
-/// Implements matrix-vector multiplication for `faer::Mat`.
-///
-/// Computes `y = A * x` where `A` is a dense matrix, `x` and `y` are vectors.
-impl<T: Float> MatVec<Vec<T>> for Mat<T> {
-    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        assert_eq!(self.nrows(), y.len(), "Output vector y has incorrect length");
-        assert_eq!(self.ncols(), x.len(), "Input vector x has incorrect length");
-        for i in 0..self.nrows() {
-            y[i] = T::zero();
-            for j in 0..self.ncols() {
-                y[i] = y[i] + self[(i, j)] * x[j];
-            }
-        }
-    }
-}
-
 /// Implements matrix-vector multiplication for a matrix reference (`faer::MatRef`).
 impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
     fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
@@ -46,22 +30,6 @@ impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
             y[i] = T::zero();
             for j in 0..self.ncols() {
                 y[i] = y[i] + self[(i, j)] * x[j];
-            }
-        }
-    }
-}
-
-/// Implements matrix-transpose-vector multiplication for `faer::Mat`.
-///
-/// Computes `y = A^T * x` where `A` is a dense matrix, `x` and `y` are vectors.
-impl<T: Float> MatTransVec<Vec<T>> for Mat<T> {
-    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        assert_eq!(self.ncols(), y.len(), "Output vector y has incorrect length");
-        assert_eq!(self.nrows(), x.len(), "Input vector x has incorrect length");
-        for j in 0..self.ncols() {
-            y[j] = T::zero();
-            for i in 0..self.nrows() {
-                y[j] = y[j] + self[(i, j)] * x[i];
             }
         }
     }

@@ -73,7 +73,7 @@ impl<T: Float> MinresSolver<T> {
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for MinresSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for MinresSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

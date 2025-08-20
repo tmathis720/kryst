@@ -195,7 +195,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     // --- Arnoldi process with double orthogonalization and happy breakdown ---
     /// Perform one step of the Arnoldi process (no preconditioning).
     /// Returns true if happy breakdown is detected.
-    fn arnoldi<M, V>(
+    fn arnoldi<M: ?Sized, V>(
         a: &M,
         ip: &(),
         v_basis: &mut Vec<V>,
@@ -269,7 +269,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     }
     #[allow(dead_code)]
     /// Arnoldi process with preconditioning (for advanced use)
-    fn arnoldi_with_pc<M, V>(
+    fn arnoldi_with_pc<M: ?Sized, V>(
         a: &M,
         pc: &dyn crate::preconditioner::Preconditioner<M, V>,
         ip: &(),
@@ -357,7 +357,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for GmresSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for GmresSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,
