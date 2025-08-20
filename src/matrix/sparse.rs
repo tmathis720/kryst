@@ -19,6 +19,7 @@ use faer::traits::ComplexField;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
 /// CSR matrix wrapper for Faer sparse matrices.
+#[derive(Clone)]
 pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,
 }

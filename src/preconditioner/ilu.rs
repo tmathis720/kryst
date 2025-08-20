@@ -450,7 +450,7 @@ impl<T: Clone> IluWorkspace<T> {
     }
 
     /// Get temporary workspace for triangular solve operations (zero-allocation)
-    pub fn get_temp_workspace(&self) -> std::cell::RefMut<Vec<T>> {
+    pub fn get_temp_workspace(&self) -> std::cell::RefMut<'_, Vec<T>> {
         self.temp1.borrow_mut()
     }
 }
