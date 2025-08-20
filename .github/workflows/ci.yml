@@ -1,41 +1,116 @@
-name: Rust CI
+name: CI
 
 on:
   push:
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  test:
+  build-and-unit-tests:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - name: Cache cargo registry
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry
-      - name: Cache cargo index
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git
-      - name: Cache build
-        uses: actions/cache@v3
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build
-      - name: Run tests
-        run: cargo test --all --verbose
 
-  bench:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, nightly]
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (no MPI needed here)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            git \
+            curl \
+            wget \
+            clang \
+            gfortran \
+            libopenblas-dev \
+            liblapack-dev \
+            python3 python3-pip python3-venv
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          profile: minimal
+          components: clippy, rustfmt
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run rustfmt
+        run: cargo fmt -- --check
+
+      - name: Run cargo unit tests
+        run: cargo test --all --verbose -- --nocapture --skip mpi
+
+  mpi-tests:
+    runs-on: ubuntu-latest
+    needs: build-and-unit-tests  # Only run MPI tests if build+unit tests succeed
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (with MPI)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            git \
+            curl \
+            wget \
+            clang \
+            gfortran \
+            libopenmpi-dev \
+            openmpi-bin \
+            openmpi-common \
+            libopenblas-dev \
+            liblapack-dev \
+            python3 python3-pip python3-venv
+
+      - name: Set up Rust (stable only for MPI tests)
+        uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-      - run: cargo bench -- --ignored
+          profile: minimal
+          components: clippy, rustfmt
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --verbose --all-features
+
+      - name: Run MPI tests (4 processes)
+        run: |
+          echo "[CI] Running MPI-enabled tests with 4 processes..."
+          mpirun -np 4 cargo test --all-features -- --nocapture --ignored
