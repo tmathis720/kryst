@@ -70,7 +70,7 @@ use crate::error::KError;
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{SolveStats, ConvergedReason};
 use crate::parallel::{UniverseComm, Comm};
-use crate::matrix::sparse::{CsrMatrix, SparseMatrix};
+use crate::matrix::sparse::CsrMatrix;
 use std::collections::HashMap;
 use faer::MatMut;
 
