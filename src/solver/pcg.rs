@@ -74,7 +74,7 @@ impl<T: Copy + num_traits::Float> PcgSolver<T> {
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for PcgSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for PcgSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

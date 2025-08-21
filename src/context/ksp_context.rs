@@ -23,6 +23,7 @@
 
 use std::str::FromStr;
 use faer::Mat;
+use crate::matrix::op::LinOp;
 use crate::solver::{LinearSolver, CgSolver, GmresSolver, FgmresSolver, BiCgStabSolver, MinresSolver, 
                    TfqmrSolver, CgnrSolver, CgsSolver, QmrSolver, LuSolver, PcgSolver};
 use crate::preconditioner::Preconditioner;
@@ -66,6 +67,8 @@ pub struct Workspace {
     /// Current restart parameter (for validation)
     pub restart: usize,
 }
+
+// Adapter to view a Mat-based preconditioner as operating on a LinOp.
 
 /// All supported Krylov solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,8 +128,8 @@ impl FromStr for SolverType {
 /// 1. `setup()` - Prepare preconditioner and allocate workspaces
 /// 2. `solve()` - Solve linear systems efficiently using cached data
 pub struct KspContext {
-    solver: Option<Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>>>,
-    pc: Option<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>>,
+    solver: Option<Box<dyn LinearSolver<dyn LinOp<S = f64>, Vec<f64>, Scalar = f64, Error = KError>>>,
+    pc: Option<Box<dyn Preconditioner<dyn LinOp<S = f64>, Vec<f64>>>>,
     /// Deferred preconditioner construction info (for matrix-dependent PCs)
     deferred_pc: Option<DeferredPcInfo>,
     /// Current solver type (for PREONLY handling)
@@ -254,7 +257,7 @@ impl KspContext {
             },
             _ => {
                 // Create the appropriate Krylov solver
-                let solver: Box<dyn LinearSolver<Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>> = match solver_type {
+                let solver: Box<dyn LinearSolver<dyn LinOp<S = f64>, Vec<f64>, Scalar = f64, Error = KError>> = match solver_type {
                     SolverType::Cg => {
                         let cg = CgSolver::new(self.rtol, self.maxits);
                         Box::new(cg)
@@ -574,7 +577,7 @@ impl KspContext {
     /// ksp.solve(&A, &b1, &mut x1)?;  // Fast solve
     /// ksp.solve(&A, &b2, &mut x2)?;  // Reuses workspace
     /// ```
-    pub fn setup(&mut self, a: &Mat<f64>, n: usize) -> Result<(), KError> {
+    pub fn setup(&mut self, a: &dyn LinOp<S = f64>, n: usize) -> Result<(), KError> {
         // Use default communicator (no parallelism) if none specified
         #[cfg(not(any(feature="mpi", feature="rayon")))]
         let default_comm = crate::parallel::UniverseComm::Serial;
@@ -599,15 +602,21 @@ impl KspContext {
     /// # Returns
     /// * `Ok(())` on success
     /// * `Err(KError)` if setup fails
-    pub fn setup_with_comm(&mut self, a: &Mat<f64>, n: usize, comm: crate::parallel::UniverseComm) -> Result<(), KError> {
+    pub fn setup_with_comm(&mut self, a: &dyn LinOp<S = f64>, n: usize, comm: crate::parallel::UniverseComm) -> Result<(), KError> {
         let _setup_stage = StageGuard::new("KSPSetupWithComm");
-        
+
         #[cfg(feature = "logging")]
         trace!("Setting up KSP context with {} unknowns", n);
-        
+
         // Store the communicator
         self.comm = Some(comm);
-        
+
+        // Currently, setup requires access to the underlying faer::Mat for preprocessing
+        let a_mat = a
+            .as_any()
+            .downcast_ref::<Mat<f64>>()
+            .ok_or_else(|| KError::InvalidInput("KSP setup requires faer::Mat<f64>".to_string()))?;
+
         // Apply matrix preprocessing (reordering + scaling) if specified
         let processed_matrix = if let Some(ref pc_opts) = self.pc_options {
             let reorder_method = match pc_opts.reorder.as_deref() {
@@ -635,16 +644,16 @@ impl KspContext {
                 #[cfg(feature = "logging")]
                 trace!("Applying matrix preprocessing: reorder={:?}, scaling={:?}", reorder_method, scaling_method);
                 
-                let (processed, preprocessing_info) = preprocess_matrix(a, reorder_method, scaling_method)?;
+                let (processed, preprocessing_info) = preprocess_matrix(a_mat, reorder_method, scaling_method)?;
                 self.preprocessing = Some(preprocessing_info);
                 processed
             } else {
                 self.preprocessing = Some(MatrixPreprocessing::identity(n));
-                a.clone()
+                a_mat.clone()
             }
         } else {
             self.preprocessing = Some(MatrixPreprocessing::identity(n));
-            a.clone()
+            a_mat.clone()
         };
         
         // Check for PC-chaining before deferred PC construction
@@ -762,7 +771,7 @@ impl KspContext {
     /// // Subsequent solves reuse workspace  
     /// let stats2 = ksp.solve(&A, &b2, &mut x2)?;
     /// ```
-    pub fn solve(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
+    pub fn solve(&mut self, a: &dyn LinOp<S = f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
         let _solve_stage = StageGuard::new("KSPSolve");
         
         #[cfg(feature = "logging")]
@@ -827,11 +836,12 @@ impl KspContext {
             // Use the unified solve method with workspace and optional monitors
             let solver = self.solver.as_mut().unwrap(); // Safe because we checked above
             let comm = self.comm.as_ref().unwrap_or(&crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
+
             let stats = solver.solve(
-                a, 
-                self.pc.as_deref(), 
-                b, 
-                x, 
+                a,
+                self.pc.as_deref(),
+                b,
+                x,
                 comm,
                 monitors_slice,
                 Some(self.work.as_mut().unwrap()) // Always use workspace
@@ -861,13 +871,18 @@ impl KspContext {
     /// 
     /// This method handles the direct solve by using the stored pc_type to
     /// determine which direct solver to use and calling it appropriately.
-    fn apply_direct_solve(&mut self, a: &Mat<f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
+    fn apply_direct_solve(&mut self, a: &dyn LinOp<S = f64>, b: &Vec<f64>, x: &mut Vec<f64>) -> Result<SolveStats<f64>, KError> {
+        let a_mat = a
+            .as_any()
+            .downcast_ref::<Mat<f64>>()
+            .ok_or_else(|| KError::InvalidInput("PREONLY direct solve requires faer::Mat<f64>".to_string()))?;
+
         match self.pc_type {
             Some(PcType::Lu) => {
                 // For LU, use the LuSolver directly with the new API
                 let mut lu_solver = LuSolver::new();
                 let comm = self.comm.as_ref().unwrap_or(&crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
-                lu_solver.solve(a, None, b, x, comm, None, self.work.as_mut())?;
+                lu_solver.solve(a_mat, None, b, x, comm, None, self.work.as_mut())?;
                 Ok(SolveStats {
                     iterations: 1,
                     final_residual: 0.0,
@@ -878,7 +893,7 @@ impl KspContext {
                 // For QR, use the QrSolver directly with the new API
                 let mut qr_solver = crate::solver::direct_lu::QrSolver::new();
                 let comm = self.comm.as_ref().unwrap_or(&crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm));
-                qr_solver.solve(a, None, b, x, comm, None, self.work.as_mut())?;
+                qr_solver.solve(a_mat, None, b, x, comm, None, self.work.as_mut())?;
                 Ok(SolveStats {
                     iterations: 1,
                     final_residual: 0.0,

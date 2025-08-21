@@ -22,9 +22,10 @@
 use std::str::FromStr;
 use faer::Mat;
 use crate::preconditioner::{Preconditioner, PcSide};
-use crate::solver::{LuSolver, direct_lu::QrSolver, LinearSolver}; 
+use crate::solver::{LuSolver, direct_lu::QrSolver, LinearSolver};
 use crate::config::options::PcOptions;
 use crate::error::KError;
+use crate::matrix::op::LinOp;
 
 /// All supported preconditioner types for runtime selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +114,29 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for NoOpPreconditioner {
     fn apply(&self, _side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         z.clone_from(r);
         Ok(())
+    }
+}
+
+// Wrapper that adapts Mat-based preconditioners to LinOp interface.
+struct MatOpPreconditioner {
+    inner: Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>,
+}
+
+impl MatOpPreconditioner {
+    fn new(inner: Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>) -> Self { Self { inner } }
+}
+
+impl Preconditioner<dyn LinOp<S = f64>, Vec<f64>> for MatOpPreconditioner {
+    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let mat = a
+            .as_any()
+            .downcast_ref::<Mat<f64>>()
+            .ok_or_else(|| KError::InvalidInput("expected faer::Mat".to_string()))?;
+        self.inner.setup(mat)
+    }
+
+    fn apply(&self, side: PcSide, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<(), KError> {
+        self.inner.apply(side, x, y)
     }
 }
 
@@ -310,25 +334,25 @@ impl PcFactory {
     pub fn create_preconditioner(
         pc_type: PcType, 
         options: Option<&PcOptions>
-    ) -> Result<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>, KError> {
+    ) -> Result<Box<dyn Preconditioner<dyn LinOp<S = f64>, Vec<f64>>>, KError> {
         use crate::preconditioner::{Jacobi, Ilu0, Ilutp};
         
         match pc_type {
             // Matrix-independent preconditioners - construct immediately
             PcType::Jacobi => {
-                Ok(Box::new(Jacobi::new()))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(Jacobi::new()))))
             },
             PcType::Ilu0 => {
-                Ok(Box::new(Ilu0::new()))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(Ilu0::new()))))
             },
             PcType::None => {
-                Ok(Box::new(NoOpPreconditioner))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(NoOpPreconditioner))))
             },
             PcType::Lu => {
-                Ok(Box::new(LuPreconditioner::new()))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(LuPreconditioner::new()))))
             },
             PcType::Qr => {
-                Ok(Box::new(QrPreconditioner::new()))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(QrPreconditioner::new()))))
             },
             PcType::SuperLuDist => {
                 // Create SuperLU_DIST preconditioner with options if available
@@ -428,9 +452,9 @@ impl PcFactory {
                         preconditioner.set_preallocation_strategy(strategy_enum);
                     }
                     
-                    Ok(Box::new(preconditioner))
+                    Ok(Box::new(MatOpPreconditioner::new(Box::new(preconditioner))))
                 } else {
-                    Ok(Box::new(SuperLuDistPreconditioner::new()))
+                    Ok(Box::new(MatOpPreconditioner::new(Box::new(SuperLuDistPreconditioner::new()))))
                 }
             },
             PcType::Ilutp => {
@@ -443,7 +467,7 @@ impl PcFactory {
                 } else {
                     Ilutp::new()
                 };
-                Ok(Box::new(ilutp))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(ilutp))))
             },
             
             // Matrix-dependent preconditioners cannot be constructed without a matrix
@@ -494,7 +518,7 @@ impl PcFactory {
     pub fn construct_deferred_preconditioner(
         deferred_info: DeferredPcInfo,
         matrix: &Mat<f64>
-    ) -> Result<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>, KError> {
+    ) -> Result<Box<dyn Preconditioner<dyn LinOp<S = f64>, Vec<f64>>>, KError> {
         #[cfg(feature = "logging")]
         log::trace!("Constructing deferred preconditioner: {:?}", deferred_info.pc_type);
         
@@ -523,9 +547,9 @@ impl PcFactory {
                 #[cfg(feature = "logging")]
                 log::trace!("Creating Chebyshev preconditioner: degree={}, λ_min={:.6e}, λ_max={:.6e}", degree, lambda_min, lambda_max);
                 
-                Ok(Box::new(crate::preconditioner::chebyshev::ChebyshevPre::new(
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(crate::preconditioner::chebyshev::ChebyshevPre::new(
                     matrix.clone(), degree, lambda_min, lambda_max
-                )))
+                )))))
             },
             PcType::Amg => {
                 // Create AMG preconditioner with matrix
@@ -539,7 +563,7 @@ impl PcFactory {
                 log::trace!("Creating AMG preconditioner: max_levels={}, threshold={:.6e}, nu_pre={}, nu_post={}", 
                        max_levels, threshold, nu_pre, nu_post);
                 
-                Ok(Box::new(crate::preconditioner::amg::AMG::with_smoothing(matrix, max_levels, threshold, nu_pre, nu_post)))
+                Ok(Box::new(MatOpPreconditioner::new(Box::new(crate::preconditioner::amg::AMG::with_smoothing(matrix, max_levels, threshold, nu_pre, nu_post)))))
             },
             _ => {
                 Err(KError::UnrecognizedPcType(format!("Unexpected deferred PC type: {:?}", deferred_info.pc_type)))
@@ -561,7 +585,7 @@ impl PcFactory {
         chain_str: &str,
         matrix: &Mat<f64>,
         options: Option<&PcOptions>
-    ) -> Result<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>, KError> {
+    ) -> Result<Box<dyn Preconditioner<dyn LinOp<S = f64>, Vec<f64>>>, KError> {
         #[cfg(feature = "logging")]
         log::trace!("Constructing PC chain: {}", chain_str);
         
@@ -628,7 +652,7 @@ impl PcFactory {
         
         #[cfg(feature = "logging")]
         log::trace!("Successfully created PC chain with {} preconditioners", pc_chain.len());
-        Ok(Box::new(pc_chain))
+        Ok(Box::new(MatOpPreconditioner::new(Box::new(pc_chain))))
     }
 }
 

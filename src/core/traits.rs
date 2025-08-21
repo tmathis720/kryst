@@ -12,6 +12,30 @@ pub trait MatTransVec<V> {
     fn mattransvec(&self, x: &V, y: &mut V);
 }
 
+// Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
+use crate::matrix::op::LinOp;
+use faer::traits::ComplexField;
+
+impl<T, L> MatVec<Vec<T>> for L
+where
+    L: LinOp<S = T> + ?Sized,
+    T: ComplexField,
+{
+    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+        LinOp::matvec(self, &x[..], &mut y[..]);
+    }
+}
+
+impl<T, L> MatTransVec<Vec<T>> for L
+where
+    L: LinOp<S = T> + ?Sized,
+    T: ComplexField,
+{
+    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+        LinOp::matvec_t(self, &x[..], &mut y[..]);
+    }
+}
+
 /// Inner products & norms.
 pub trait InnerProduct<V> {
     /// Associated scalar type.

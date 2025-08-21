@@ -244,14 +244,7 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SparseMatrix<T
 }
 
 // Implement MatVec trait for CsrMatrix to work with Kryst solvers
-use crate::core::traits::{MatVec, Indexing};
-
-impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + PartialOrd> MatVec<Vec<T>> for CsrMatrix<T> {
-    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        // Use our 4-parameter spmv_scaled method
-        let _ = self.spmv_scaled(T::one(), x.as_slice(), T::zero(), y.as_mut_slice());
-    }
-}
+use crate::core::traits::Indexing;
 
 // Implement Indexing trait for CsrMatrix to work with preconditioners
 impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> Indexing for CsrMatrix<T> {

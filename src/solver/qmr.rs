@@ -74,9 +74,9 @@ impl<T: Float> QmrSolver<T> {
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for QmrSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for QmrSolver<T>
 where
-    M: 'static + MatVec<V> + MatTransVec<V> + std::fmt::Debug + Send + Sync,
+    M: 'static + MatVec<V> + MatTransVec<V> + Send + Sync,
     (): InnerProduct<V, Scalar = T>,
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
     T: Float + From<f64> + std::fmt::Debug + Sum + Send + Sync + std::fmt::LowerExp,

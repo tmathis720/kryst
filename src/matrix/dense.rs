@@ -18,8 +18,8 @@ pub trait DenseMatrix<T>: MatVec<Vec<T>> + Indexing {
     fn from_raw(nrows: usize, ncols: usize, data: Vec<T>) -> Self;
 }
 
-impl<T: Copy + num_traits::Float> DenseMatrix<T> for Mat<T> {
-    fn from_raw(nrows: usize, ncols: usize, data: Vec<T>) -> Self {
+impl DenseMatrix<f64> for Mat<f64> {
+    fn from_raw(nrows: usize, ncols: usize, data: Vec<f64>) -> Self {
         Mat::from_fn(nrows, ncols, |i, j| data[j * nrows + i])
     }
 }

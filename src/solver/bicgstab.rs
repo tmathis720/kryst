@@ -50,7 +50,7 @@ impl<T: num_traits::Float + From<f64> + std::ops::Mul<Output = T> + Send + Sync>
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for BiCgStabSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for BiCgStabSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

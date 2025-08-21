@@ -49,7 +49,7 @@ where T: num_traits::Float + Clone + Send + Sync + std::fmt::Debug + std::fmt::L
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for CgsSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for CgsSolver<T>
 where
     M: MatVec<V>,
     (): InnerProduct<V, Scalar = T>,

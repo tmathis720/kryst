@@ -138,7 +138,7 @@ impl<T: num_traits::Float + Send + Sync + From<f64> + std::ops::SubAssign + std:
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for PcaGmresSolver<T>
+impl<M: ?Sized, V, T> LinearSolver<M, V> for PcaGmresSolver<T>
 where
     M: MatVec<V> + Sync,
     (): InnerProduct<V, Scalar = T>,
