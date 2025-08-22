@@ -65,7 +65,7 @@ fn test_monitor_with_solver() -> Result<(), KError> {
     // Track residuals seen by monitor
     let residuals = Arc::new(Mutex::new(Vec::new()));
     let residuals_clone = Arc::clone(&residuals);
-    
+
     let mut ksp = KspContext::new();
     
     // Register a monitor to collect residuals
@@ -74,10 +74,14 @@ fn test_monitor_with_solver() -> Result<(), KError> {
         res_vec.push((iter, residual));
     });
     
-    ksp.set_type(SolverType::Preonly)?
-        .set_pc_type(PcType::Lu)?;
-    
-    let _stats = ksp.solve(&a, &b, &mut x)?;
+    ksp.set_type(SolverType::Cg)?
+        .set_pc_type(PcType::None, None)?;
+
+    use kryst::matrix::op::LinOp;
+    let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a);
+    ksp.set_operators(amat, None);
+
+    let _stats = ksp.solve(&b, &mut x)?;
     
     // For PREONLY, monitors might not be called since it's a direct solver
     // This is expected behavior

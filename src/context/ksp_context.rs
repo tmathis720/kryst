@@ -50,6 +50,7 @@ pub struct KspContext {
     pmat: Option<Arc<dyn LinOp<S = f64>>>,
     work: Option<Workspace>,
     setup_called: bool,
+    monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>>,
     pub rtol: f64,
     pub atol: f64,
     pub dtol: f64,
@@ -67,6 +68,7 @@ impl KspContext {
             pmat: None,
             work: None,
             setup_called: false,
+            monitors: Vec::new(),
             rtol: 1e-6,
             atol: 1e-12,
             dtol: 1e3,
@@ -163,18 +165,75 @@ impl KspContext {
             .solver
             .as_mut()
             .ok_or_else(|| KError::SolveError("No solver".into()))?;
+        let monitors = if self.monitors.is_empty() {
+            None
+        } else {
+            Some(self.monitors.as_slice())
+        };
         solver.solve(
             amat.as_ref(),
             self.pc.as_deref(),
             b,
             x,
             &UniverseComm::NoComm(crate::parallel::NoComm),
-            None,
+            monitors,
             self.work.as_mut(),
         )
     }
 
     fn invalidate_setup(&mut self) {
         self.setup_called = false;
+    }
+
+    /// Add an iteration monitor callback.
+    pub fn add_monitor<F>(&mut self, f: F)
+    where
+        F: Fn(usize, f64) + Send + Sync + 'static,
+    {
+        self.monitors.push(Box::new(f));
+    }
+
+    /// Return the number of registered monitors.
+    pub fn num_monitors(&self) -> usize {
+        self.monitors.len()
+    }
+
+    /// Clear all registered monitors.
+    pub fn clear_monitors(&mut self) {
+        self.monitors.clear();
+    }
+
+    /// Invoke all monitors with the provided iteration and residual.
+    pub fn invoke_monitors(&self, iter: usize, residual: f64) {
+        for m in &self.monitors {
+            m(iter, residual);
+        }
+    }
+
+    /// Set solver tolerances and maximum iterations.
+    pub fn set_tolerances(
+        &mut self,
+        rtol: f64,
+        atol: f64,
+        dtol: f64,
+        maxits: usize,
+    ) -> &mut Self {
+        self.rtol = rtol;
+        self.atol = atol;
+        self.dtol = dtol;
+        self.maxits = maxits;
+        self.invalidate_setup();
+        self
+    }
+
+    /// Query whether setup has been performed.
+    pub fn is_setup(&self) -> bool {
+        self.setup_called
+    }
+
+    /// Set the GMRES restart parameter.
+    pub fn set_restart(&mut self, restart: usize) {
+        self.restart = restart;
+        self.invalidate_setup();
     }
 }
