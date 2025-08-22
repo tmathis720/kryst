@@ -6,4 +6,3 @@ pub mod reordering;
 pub mod profiling;
 pub mod matrix_market;
 pub mod monitor;
-pub mod tuning;
