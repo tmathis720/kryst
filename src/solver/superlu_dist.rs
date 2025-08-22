@@ -4080,6 +4080,32 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
     }
 }
 
+/// Convenience wrapper to perform a direct SuperLU_DIST solve.
+#[cfg(feature = "superlu_dist")]
+pub fn solve(
+    a: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    comm: &UniverseComm,
+) -> Result<(), KError> {
+    let mut solver = SuperLuDistSolver::new();
+    let mut x_vec = x.to_vec();
+    let b_vec = b.to_vec();
+    solver.solve(a, None, &b_vec, &mut x_vec, comm, None, None)?;
+    x.copy_from_slice(&x_vec);
+    Ok(())
+}
+
+#[cfg(not(feature = "superlu_dist"))]
+pub fn solve(
+    _a: &crate::matrix::sparse::CsrMatrix<f64>,
+    _b: &[f64],
+    _x: &mut [f64],
+    _comm: &UniverseComm,
+) -> Result<(), KError> {
+    Err(KError::SolveError("superlu_dist feature not enabled".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
