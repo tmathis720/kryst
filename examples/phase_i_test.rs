@@ -11,13 +11,14 @@ use kryst::{
     config::options::PcOptions,
 };
 use faer::Mat;
+use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 1: FGMRES solver selection
     println!("=== Test 1: FGMRES solver selection ===");
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Fgmres)?;
-    println!("✓ FGMRES solver set successfully");
+    ksp.set_type(SolverType::Gmres)?;
+    println!("✓ Gmres solver set successfully");
 
     // Test 2: Command-line parsing for new ASM options
     println!("\n=== Test 2: ASM command-line parsing ===");
@@ -56,12 +57,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 5: Deferred PC construction (should fail with "not yet implemented")
     println!("\n=== Test 5: Deferred PC construction ===");
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Fgmres)?
-       .set_pc_type(PcType::Asm)?
-       .set_pc_options(pc_opts);
+    ksp.set_type(SolverType::Gmres)?
+       .set_pc_type(PcType::Asm, Some(&pc_opts))?;
     
     // Create a small test matrix
-    let a = Mat::from_fn(2, 2, |i, j| {
+    let a = Arc::new(Mat::from_fn(2, 2, |i, j| {
         match (i, j) {
             (0, 0) => 4.0,
             (0, 1) => 1.0,
@@ -69,10 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (1, 1) => 3.0,
             _ => 0.0,
         }
-    });
+    }));
     
     // This should fail with "not yet implemented" but not crash
-    match ksp.setup(&a, 2) {
+    ksp.set_operators(a.clone(), None);
+    match ksp.setup() {
         Err(e) => println!("✓ Deferred PC construction failed as expected: {}", e),
         Ok(_) => println!("✗ Unexpected success - should have failed with 'not yet implemented'"),
     }
@@ -80,10 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 6: Matrix-independent PC should still work
     println!("\n=== Test 6: Matrix-independent PC (ILUTP) ===");
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Fgmres)?
-       .set_pc_type(PcType::Ilutp)?;
-    
-    match ksp.setup(&a, 2) {
+    ksp.set_type(SolverType::Gmres)?
+       .set_pc_type(PcType::Ilutp, None)?;
+    ksp.set_operators(a.clone(), None);
+
+    match ksp.setup() {
         Ok(_) => println!("✓ ILUTP setup successful"),
         Err(e) => println!("✗ ILUTP setup failed: {}", e),
     }
