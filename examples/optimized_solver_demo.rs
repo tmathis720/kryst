@@ -37,9 +37,12 @@
 //! - Without ILU: 17,000+ iterations, very slow
 
 use kryst::utils::matrix_market::read_matrix_market;
-use kryst::context::ksp_context::KspContext;
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use kryst::matrix::sparse::CsrMatrix;
 use std::time::Instant;
+use std::sync::Arc;
+use std::str::FromStr;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 struct OptimalConfig {
@@ -126,14 +129,20 @@ fn test_optimal_solver(
     let dense_matrix = matrix.to_dense();
     let rhs_vec = rhs.to_vec();
     
-    // Try primary configuration
-    let mut ksp = KspContext::new();
-    ksp.set_type_from_str(config.solver)?
-       .set_pc_type_from_str(config.preconditioner)?
-       .set_tolerances(1e-6, 1e-12, 1e3, 1000); // Reasonable tolerance and iteration limit
-    
-    let start = Instant::now();
-    let result = ksp.solve(&dense_matrix, &rhs_vec, &mut solution);
+     // Try primary configuration
+     let mut ksp = KspContext::new();
+     let st = SolverType::from_str(config.solver)?;
+     let pct = PcType::from_str(config.preconditioner)?;
+     ksp.set_type(st)?
+         .set_pc_type(pct, None)?
+         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+
+     // provide operator and prepare workspace
+     ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+     ksp.setup()?;
+
+     let start = Instant::now();
+     let result = ksp.solve(&rhs_vec, &mut solution);
     let solve_time = start.elapsed().as_secs_f64();
     
     match result {
@@ -149,12 +158,16 @@ fn test_optimal_solver(
             let mut solution_fallback = vec![0.0; rhs.len()];
             
             let mut ksp_fallback = KspContext::new();
-            ksp_fallback.set_type_from_str(config.fallback_solver)?
-                       .set_pc_type_from_str(config.fallback_pc)?
+            let st_fb = SolverType::from_str(config.fallback_solver)?;
+            let pc_fb = PcType::from_str(config.fallback_pc)?;
+            ksp_fallback.set_type(st_fb)?
+                       .set_pc_type(pc_fb, None)?
                        .set_tolerances(1e-6, 1e-12, 1e3, 1000);
-            
+            ksp_fallback.set_operators(Arc::new(dense_matrix.clone()), None);
+            ksp_fallback.setup()?;
+
             let start_fallback = Instant::now();
-            let stats_fallback = ksp_fallback.solve(&dense_matrix, &rhs_vec, &mut solution_fallback)?;
+            let stats_fallback = ksp_fallback.solve(&rhs_vec, &mut solution_fallback)?;
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
             
             let converged = stats_fallback.final_residual < 1e-6;

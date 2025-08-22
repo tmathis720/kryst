@@ -14,9 +14,12 @@
 //! - ILU preconditioners can be unstable due to poor factorization quality
 
 use kryst::utils::matrix_market::read_matrix_market;
-use kryst::context::ksp_context::KspContext;
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use kryst::matrix::sparse::CsrMatrix;
 use std::time::Instant;
+use std::sync::Arc;
+use std::str::FromStr;
 
 /// Analyze matrix properties and provide diagnostics
 fn analyze_matrix(matrix: &CsrMatrix<f64>) -> (f64, bool) {
@@ -62,13 +65,20 @@ fn test_solver_config(
     let rhs_vec = rhs.to_vec();
     
     // Create and configure KSP context
-    let mut ksp = KspContext::new();
-    ksp.set_type_from_str(solver_name)?
-       .set_pc_type_from_str(pc_name)?
-       .set_tolerances(1e-6, 1e-12, 1e3, 1000);
-    
-    let start = Instant::now();
-    let stats = ksp.solve(&dense_matrix, &rhs_vec, &mut solution)?;
+     let mut ksp = KspContext::new();
+     // map string names to enums
+     let st = SolverType::from_str(solver_name)?;
+     let pct = PcType::from_str(pc_name)?;
+     ksp.set_type(st)?
+         .set_pc_type(pct, None)?
+         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+
+     // provide operator and prepare workspace
+     ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+     ksp.setup()?;
+
+     let start = Instant::now();
+     let stats = ksp.solve(&rhs_vec, &mut solution)?;
     let solve_time = start.elapsed().as_secs_f64();
     
     let converged = stats.final_residual < 1e-6;
@@ -85,24 +95,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================================");
     println!();
 
-    // Test multiple matrix files, focusing on driven cavity problems
-    let test_matrices = vec![
-        ("examples/e05r0000/e05r0000.mtx", "examples/e05r0000/e05r0000_rhs1.mtx", "Driven cavity (Re=0)"),
-        ("examples/e05r0300/e05r0300.mtx", "examples/e05r0300/e05r0300_rhs1.mtx", "Driven cavity (Re=300)"),
-        ("examples/e30r0000/e30r0000.mtx", "examples/e30r0000/e30r0000_rhs1.mtx", "Driven cavity 30x30 (Re=0)"),
-        ("examples/e30r1000/e30r1000.mtx", "examples/e30r1000/e30r1000_rhs1.mtx", "Driven cavity 30x30 (Re=1000)"),
+    // Test multiple matrix files, focusing on driven cavity problems.
+    // Resolve paths relative to the crate so the example is robust to CWD.
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let raw_list = vec![
+        ("e05r0000/e05r0000.mtx", "e05r0000/e05r0000_rhs1.mtx", "Driven cavity (Re=0)"),
+        ("e05r0300/e05r0300.mtx", "e05r0300/e05r0300_rhs1.mtx", "Driven cavity (Re=300)"),
+        ("e30r0000/e30r0000.mtx", "e30r0000/e30r0000_rhs1.mtx", "Driven cavity 30x30 (Re=0)"),
+        ("e30r1000/e30r1000.mtx", "e30r1000/e30r1000_rhs1.mtx", "Driven cavity 30x30 (Re=1000)"),
     ];
 
-    for (matrix_path, rhs_path, description) in test_matrices {
+    for (mat_rel, rhs_rel, description) in raw_list {
+        let matrix_path = base.join("examples").join("").join(mat_rel);
+        let rhs_path = base.join("examples").join("").join(rhs_rel);
+        let matrix_path_s = matrix_path.to_str().unwrap();
+        let rhs_path_s = rhs_path.to_str().unwrap();
+
         println!("Testing: {}", description);
-        println!("Matrix: {}", matrix_path);
-        println!("RHS: {}", rhs_path);
-        
+        println!("Matrix: {}", matrix_path_s);
+        println!("RHS: {}", rhs_path_s);
+
         // Try to read the matrix and RHS
-        let (matrix_data, rhs_data) = match (
-            read_matrix_market(matrix_path),
-            read_matrix_market(rhs_path)
-        ) {
+        let (matrix_data, rhs_data) = match (read_matrix_market(matrix_path_s), read_matrix_market(rhs_path_s)) {
             (Ok(matrix), Ok(rhs)) => (matrix, rhs),
             _ => {
                 println!("⚠ Files not found, skipping {}", description);

@@ -3,43 +3,47 @@
 //! This is a minimal test to identify why the optimized demo is hanging.
 
 use kryst::utils::matrix_market::read_matrix_market;
-use kryst::context::ksp_context::KspContext;
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::context::pc_context::PcType;
 use std::time::Instant;
+use std::sync::Arc;
+use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Debug Matrix Market Test");
     println!("========================");
 
-    // Check sizes of different matrices
-    let test_matrices = vec![
-        "fidap001", "fidap002", "fidap005", "add20", "e05r0100"
-    ];
-    
-    for matrix_name in test_matrices {
-        let matrix_path = format!("../mtx/{}.mtx", matrix_name);
-        let _rhs_path = format!("../mtx/{}_rhs1.mtx", matrix_name);
+    // Check sizes of different matrices (paths resolved relative to crate dir so the example
+    // works regardless of the current working directory when the binary is run).
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let test_matrices = vec!["fidap001", "fidap002", "fidap005", "add20", "e05r0100"];
 
-        match read_matrix_market(&matrix_path) {
+    for matrix_name in test_matrices {
+        let matrix_path = base_dir.join("examples").join("mtx").join(format!("{}.mtx", matrix_name));
+        let _rhs_path = base_dir.join("examples").join("mtx").join(format!("{}_rhs1.mtx", matrix_name));
+
+    let matrix_path_str = matrix_path.to_str().unwrap();
+    match read_matrix_market(matrix_path_str) {
             Ok(matrix_data) => {
                 let matrix = matrix_data.to_csr_matrix()?;
                 println!("{}: {}x{} matrix, {} nnz", matrix_name, matrix.nrows(), matrix.ncols(), matrix.nnz());
-            },
+            }
             Err(_) => {
-                println!("{}: Failed to load", matrix_name);
+                println!("{}: Failed to load ({})", matrix_name, matrix_path_str);
             }
         }
     }
     
     // Now test with the smallest matrix (likely add20 or fidap001)
-    let matrix_path = "examples/mtx/add20.mtx";
-    let rhs_path = "examples/mtx/add20_rhs1.mtx";
-    
+    let matrix_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("mtx").join("add20.mtx");
+    let rhs_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("mtx").join("add20_rhs1.mtx");
+
     println!("\nTesting with add20 matrix:");
-    println!("Loading matrix: {}", matrix_path);
-    let matrix_data = read_matrix_market(matrix_path)?;
-    
-    println!("Loading RHS: {}", rhs_path);
-    let rhs_data = read_matrix_market(rhs_path)?;
+    println!("Loading matrix: {}", matrix_path.display());
+    let matrix_data = read_matrix_market(matrix_path.to_str().unwrap())?;
+
+    println!("Loading RHS: {}", rhs_path.display());
+    let rhs_data = read_matrix_market(rhs_path.to_str().unwrap())?;
     
     println!("Converting to CSR format...");
     let matrix = matrix_data.to_csr_matrix()?;
@@ -60,15 +64,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
     let rhs_vec = rhs.to_vec();
     
-    println!("Setting up KSP context...");
-    let mut ksp = KspContext::new();
-    ksp.set_type_from_str("cg")?  // Try CG instead of GMRES
-       .set_pc_type_from_str("none")?
-       .set_tolerances(1e-6, 1e-12, 1e3, 50); // Very low iteration limit
-    
-    println!("Starting solve...");
-    let start = Instant::now();
-    let result = ksp.solve(&dense_matrix, &rhs_vec, &mut solution);
+     println!("Setting up KSP context...");
+     let mut ksp = KspContext::new();
+     ksp.set_type(SolverType::Cg)? // Try CG instead of GMRES
+         .set_pc_type(PcType::None, None)?
+         .set_tolerances(1e-6, 1e-12, 1e3, 50); // Very low iteration limit
+
+     // Provide the operator and prepare workspace
+     ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+     ksp.setup()?;
+
+     println!("Starting solve...");
+     let start = Instant::now();
+     let result = ksp.solve(&rhs_vec, &mut solution);
     let solve_time = start.elapsed().as_secs_f64();
     
     match result {

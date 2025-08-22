@@ -15,6 +15,7 @@ use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::utils::convergence::ConvergedReason;
+use std::sync::Arc;
 
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
@@ -46,11 +47,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut ksp1 = KspContext::new();
     ksp1.set_type(SolverType::Cg)?
-        .set_pc_type(PcType::Jacobi)?
+        .set_pc_type(PcType::Jacobi, None)?
         .set_tolerances(1e-8, 1e-12, 1e3, 1000);
 
+    // Provide the operator and prepare workspace
+    ksp1.set_operators(Arc::new(a.clone()), None);
+    ksp1.setup()?;
+
     let mut x1 = vec![0.0; n];
-    let stats1 = ksp1.solve(&a, &b, &mut x1)?;
+    let stats1 = ksp1.solve(&b, &mut x1)?;
 
     println!("Default criteria result:");
     println!("  Reason: {:?}", stats1.reason);
@@ -64,28 +69,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Example 2: Custom Convergence Test - Early Stopping");
     println!("---------------------------------------------------");
 
+    // Example 2: Use an iteration monitor to observe convergence progress.
+    // Note: monitors cannot currently force solver termination; they only observe.
+    println!("Example 2: Iteration monitor (observes residuals)");
+    println!("-----------------------------------------------");
+
     let mut ksp2 = KspContext::new();
     ksp2.set_type(SolverType::Cg)?
-        .set_pc_type(PcType::Jacobi)?;
-
-    // Custom test: stop early if we get "good enough" convergence
-    ksp2.set_convergence_test(|iters, rnorm, bnorm| {
-        let rel_res = rnorm / bnorm;
-        if rel_res < 1e-4 {
-            println!("  Custom: Early convergence at iteration {} (rel_res = {:.2e})", iters, rel_res);
-            ConvergedReason::ConvergedRtol
-        } else if iters >= 20 {
-            println!("  Custom: Stopping at iteration limit {}", iters);
-            ConvergedReason::DivergedMaxIts
-        } else {
-            ConvergedReason::Continued
+        .set_pc_type(PcType::Jacobi, None)?
+        .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+    ksp2.set_operators(Arc::new(a.clone()), None);
+    // Add a simple monitor that prints iteration and residual every iteration
+    ksp2.add_monitor(|iter, residual| {
+        if iter % 5 == 0 || iter < 3 {
+            println!("    monitor: iter={} residual={:.2e}", iter, residual);
         }
     });
+    ksp2.setup()?;
 
     let mut x2 = vec![0.0; n];
-    let stats2 = ksp2.solve(&a, &b, &mut x2)?;
+    let stats2 = ksp2.solve(&b, &mut x2)?;
 
-    println!("Custom early stopping result:");
+    println!("Monitor example result:");
     println!("  Reason: {:?}", stats2.reason);
     println!("  Iterations: {}", stats2.iterations);
     println!("  Final residual: {:.2e}", stats2.final_residual);
@@ -97,42 +102,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Example 3: Custom Convergence Test - Stagnation Detection");
     println!("---------------------------------------------------------");
 
+    // Example 3: Show effect of disabling preconditioner and loosening tolerances.
+    println!("Example 3: No preconditioner and different tolerances");
+    println!("--------------------------------------------------");
+
     let mut ksp3 = KspContext::new();
     ksp3.set_type(SolverType::Cg)?
-        .set_pc_type(PcType::None)?;
-
-    // Custom test: detect when convergence stagnates
-    use std::cell::Cell;
-    let stagnation_threshold = 1e-2; // If relative improvement < 1%
-
-    ksp3.set_convergence_test({
-        let prev_residual = Cell::new(f64::INFINITY);
-        move |iters, rnorm, bnorm| {
-            let rel_res = rnorm / bnorm;
-            if rel_res < 1e-6 {
-                ConvergedReason::ConvergedRtol
-            } else if iters > 5 {
-                let prev = prev_residual.get();
-                let improvement = (prev - rnorm) / prev;
-                if improvement < stagnation_threshold {
-                    println!("  Custom: Stagnation detected at iteration {} (improvement = {:.1e})", 
-                             iters, improvement);
-                    ConvergedReason::DivergedDtol  // Using dtol to indicate stagnation
-                } else {
-                    prev_residual.set(rnorm);
-                    ConvergedReason::Continued
-                }
-            } else {
-                prev_residual.set(rnorm);
-                ConvergedReason::Continued
-            }
-        }
-    });
+        .set_pc_type(PcType::None, None)?
+        .set_tolerances(1e-4, 1e-12, 1e3, 1000);
+    ksp3.set_operators(Arc::new(a.clone()), None);
+    ksp3.setup()?;
 
     let mut x3 = vec![0.0; n];
-    let stats3 = ksp3.solve(&a, &b, &mut x3)?;
+    let stats3 = ksp3.solve(&b, &mut x3)?;
 
-    println!("Stagnation detection result:");
+    println!("No-PC example result:");
     println!("  Reason: {:?}", stats3.reason);
     println!("  Iterations: {}", stats3.iterations);
     println!("  Final residual: {:.2e}", stats3.final_residual);
@@ -155,11 +139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, rtol, atol, dtol, maxits) in test_cases {
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Cg)?
-           .set_pc_type(PcType::None)?
+           .set_pc_type(PcType::None, None)?
            .set_tolerances(rtol, atol, dtol, maxits);
+        ksp.set_operators(Arc::new(a.clone()), None);
+        ksp.setup()?;
 
         let mut x = vec![0.0; n];
-        let stats = ksp.solve(&a, &b, &mut x)?;
+        let stats = ksp.solve(&b, &mut x)?;
 
         println!("  {}: {:?} ({} iters, res = {:.2e})", 
                  name, stats.reason, stats.iterations, stats.final_residual);
@@ -172,23 +158,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Example 5: Clearing Custom Convergence Test");
     println!("-------------------------------------------");
 
+    // Example 5: Demonstrate clearing monitors
+    println!("Example 5: Clearing monitors");
+    println!("----------------------------");
     let mut ksp5 = KspContext::new();
     ksp5.set_type(SolverType::Cg)?
-        .set_pc_type(PcType::Jacobi)?
+        .set_pc_type(PcType::Jacobi, None)?
         .set_tolerances(1e-8, 1e-12, 1e3, 1000);
-
-    // Set a custom test
-    ksp5.set_convergence_test(|_iters, _rnorm, _bnorm| {
-        ConvergedReason::DivergedMaxIts  // Always diverge (for demo)
+    ksp5.set_operators(Arc::new(a.clone()), None);
+    ksp5.add_monitor(|iter, residual| {
+        println!("    monitor (before clear): iter={} residual={:.2e}", iter, residual);
     });
-
-    // Clear it and use default
-    ksp5.clear_convergence_test();
+    // Clear monitors and show that none are invoked
+    ksp5.clear_monitors();
+    ksp5.setup()?;
 
     let mut x5 = vec![0.0; n];
-    let stats5 = ksp5.solve(&a, &b, &mut x5)?;
+    let stats5 = ksp5.solve(&b, &mut x5)?;
 
-    println!("After clearing custom test (should converge normally):");
+    println!("After clearing monitors (no monitor output expected):");
     println!("  Reason: {:?}", stats5.reason);
     println!("  Iterations: {}", stats5.iterations);
     println!("  Final residual: {:.2e}", stats5.final_residual);

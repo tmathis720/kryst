@@ -1,6 +1,7 @@
 // Example: Solve a random SPD system using LU and QR direct solvers from kryst.
 
-use kryst::solver::{LuSolver, QrSolver, LinearSolver};
+use kryst::solver::{LuSolver, QrSolver};
+use kryst::solver::legacy::LinearSolver;
 use faer::Mat;
 use rand::Rng;
 

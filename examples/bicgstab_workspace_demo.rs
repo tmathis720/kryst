@@ -10,6 +10,7 @@
 
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
+use std::sync::Arc;
 use kryst::utils::convergence::{ConvergedReason};
 use faer::Mat;
 
@@ -70,7 +71,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut x = vec![0.0; n]; // Zero initial guess
-    let stats = ksp.solve(&a, &b, &mut x)?;
+    // Register the operator then solve
+    ksp.set_operators(Arc::new(a.clone()), None);
+    let stats = ksp.solve(&b, &mut x)?;
     
     println!("BiCGStab Results:");
     println!("  Converged: {:?}", stats.reason);
@@ -88,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mut ksp2 = KspContext::new();
     ksp2.set_type(SolverType::BiCgStab)?
-        .set_pc_type(PcType::Jacobi)?
+        .set_pc_type(PcType::Jacobi, None)?
         .set_tolerances(1e-8, 1e-12, 1e3, 100);
 
     ksp2.add_monitor(move |iter, residual| {
@@ -98,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut x2 = vec![0.0; n];
-    let stats2 = ksp2.solve(&a, &b, &mut x2)?;
+    ksp2.set_operators(Arc::new(a.clone()), None);
+    let stats2 = ksp2.solve(&b, &mut x2)?;
     
     println!("BiCGStab + Jacobi Results:");
     println!("  Converged: {:?}", stats2.reason);
@@ -117,8 +121,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ksp3.set_type(SolverType::BiCgStab)?
         .set_tolerances(1e-6, 1e-12, 1e3, 50);
 
-    // Setup once
-    ksp3.setup(&a, n)?;
+    // Assign operator and setup once
+    ksp3.set_operators(Arc::new(a.clone()), None);
+    ksp3.setup()?;
     println!("Workspace setup completed");
 
     // Solve multiple right-hand sides using the same workspace
@@ -132,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         
         let mut x_i = vec![0.0; n];
-        let stats_i = ksp3.solve(&a, &b_i, &mut x_i)?;
+    let stats_i = ksp3.solve(&b_i, &mut x_i)?;
         println!("    Iterations: {}, Final residual: {:.3e}", 
                stats_i.iterations, stats_i.final_residual);
     }
@@ -141,24 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Test 4: Custom Convergence Test ---");
     
     let mut ksp4 = KspContext::new();
+    // Note: custom convergence-test hooks were removed from the KspContext API.
+    // We emulate a custom stopping criterion by tightening tolerances here.
     ksp4.set_type(SolverType::BiCgStab)?
-        .set_tolerances(1e-8, 1e-12, 1e3, 100);
-
-    // Set custom convergence test: stop when residual drops by factor of 1000
-    ksp4.set_convergence_test(|iter, residual, rhs_norm| {
-        if residual / rhs_norm < 1e-3 {
-            println!("    Custom convergence: relative residual {:.3e} at iteration {}", 
-                   residual / rhs_norm, iter);
-            ConvergedReason::ConvergedRtol
-        } else if iter > 50 {
-            ConvergedReason::DivergedMaxIts
-        } else {
-            ConvergedReason::Continued
-        }
-    });
+        .set_tolerances(1e-11, 1e-12, 1e3, 100);
+    ksp4.set_operators(Arc::new(a.clone()), None);
 
     let mut x4 = vec![0.0; n];
-    let stats4 = ksp4.solve(&a, &b, &mut x4)?;
+    let stats4 = ksp4.solve(&b, &mut x4)?;
     
     println!("Custom convergence results:");
     println!("  Converged: {:?}", stats4.reason);

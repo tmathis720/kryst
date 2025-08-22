@@ -3,8 +3,8 @@
 // This program demonstrates that BiCGStab now uses workspace buffers
 // instead of allocating temporary vectors on each iteration.
 
-use kryst::context::KspContext;
-use kryst::context::ksp_context::SolverType;
+use kryst::context::ksp_context::{KspContext, SolverType};
+use std::sync::Arc;
 use faer::prelude::*;
 
 fn create_test_matrix(n: usize) -> (Mat<f64>, Col<f64>, Col<f64>) {
@@ -65,9 +65,12 @@ fn workspace_size_analysis() -> Result<(), Box<dyn std::error::Error>> {
         
         // Solve using workspace
         let mut x: Vec<f64> = vec![0.0; n];
-        println!("  Solving with workspace BiCGStab...");
-        let b_vec: Vec<f64> = b.as_ref().iter().copied().collect();
-        let stats = ksp.solve(&a, &b_vec, &mut x)?;
+    println!("  Solving with workspace BiCGStab...");
+    let b_vec: Vec<f64> = b.as_ref().iter().copied().collect();
+    // Set the operator and solve
+    ksp.set_operators(Arc::new(a.clone()), None);
+    ksp.setup()?;
+    let stats = ksp.solve(&b_vec, &mut x)?;
         
         // Verify solution accuracy
         let x_col = Col::from_fn(n, |i| x[i]);
@@ -111,10 +114,14 @@ fn workspace_reuse_demonstration() -> Result<(), Box<dyn std::error::Error>> {
     let n = 100;
     let (a, _, _) = create_test_matrix(n);
     
-    // Set up solver once
-    let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::BiCgStab)?
-       .set_tolerances(1e-6, 1e-12, 1e3, 50);
+     // Set up solver once
+     let mut ksp = KspContext::new();
+     ksp.set_type(SolverType::BiCgStab)?
+         .set_tolerances(1e-6, 1e-12, 1e3, 50);
+
+     // Assign operator once and prepare workspace for reuse
+     ksp.set_operators(Arc::new(a.clone()), None);
+     ksp.setup()?;
     
     println!("Solving multiple systems with different RHS vectors...");
     println!("(Workspace allocated once, reused for all solves)\n");
@@ -126,7 +133,7 @@ fn workspace_reuse_demonstration() -> Result<(), Box<dyn std::error::Error>> {
         let b_vec: Vec<f64> = b.as_ref().iter().copied().collect();
         
         // Solve reusing the same workspace
-        let stats = ksp.solve(&a, &b_vec, &mut x)?;
+    let stats = ksp.solve(&b_vec, &mut x)?;
         
         println!("RHS #{}: {} iterations, final residual: {:.3e}", 
                 rhs_id, stats.iterations, stats.final_residual);
