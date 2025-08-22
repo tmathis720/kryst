@@ -3,21 +3,21 @@
 //! This module contains generic matrix operations, analysis functions, and
 //! utilities that are useful beyond just the AMG preconditioner.
 
-use crate::KError;
 use crate::matrix::sparse::CsrMatrix;
+use crate::KError;
 use faer::Mat;
 
 #[cfg(feature = "rayon")]
-use rayon::iter::{ParallelIterator, IndexedParallelIterator, IntoParallelRefMutIterator};
+use rayon::prelude::*;
 
 /// Matrix analysis helper function that computes basic properties
-/// 
+///
 /// Returns (nnz, diagonal_dominance, diagonal_sum)
 pub fn analyze_matrix_properties(matrix: &Mat<f64>) -> (usize, f64, f64) {
     let mut nnz = 0;
     let mut diagonal_sum = 0.0;
     let mut off_diagonal_sum = 0.0;
-    
+
     for i in 0..matrix.nrows() {
         for j in 0..matrix.ncols() {
             let val = matrix[(i, j)];
@@ -31,13 +31,13 @@ pub fn analyze_matrix_properties(matrix: &Mat<f64>) -> (usize, f64, f64) {
             }
         }
     }
-    
+
     let diagonal_dominance = if off_diagonal_sum > 0.0 {
         diagonal_sum / off_diagonal_sum
     } else {
         f64::INFINITY
     };
-    
+
     (nnz, diagonal_dominance, diagonal_sum)
 }
 
@@ -60,14 +60,16 @@ pub fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
         for j in 0..matrix.ncols() {
             let val = matrix[(i, j)];
             if val.is_nan() {
-                return Err(KError::InvalidInput(
-                    format!("NaN detected at position ({}, {})", i, j)
-                ));
+                return Err(KError::InvalidInput(format!(
+                    "NaN detected at position ({}, {})",
+                    i, j
+                )));
             }
             if val.is_infinite() {
-                return Err(KError::InvalidInput(
-                    format!("Infinite value detected at position ({}, {})", i, j)
-                ));
+                return Err(KError::InvalidInput(format!(
+                    "Infinite value detected at position ({}, {})",
+                    i, j
+                )));
             }
         }
     }
@@ -93,148 +95,161 @@ pub fn to_sparse_with_tolerance(matrix: &Mat<f64>, drop_tol: f64) -> CsrMatrix<f
     CsrMatrix::from_dense(matrix, drop_tol)
 }
 
-/// Sparse matrix-matrix multiplication: C = A * B
-/// Uses Gustavson's algorithm for efficient CSR x CSR multiplication
-/// Avoids HashMap overhead with sorted merge and scratch buffers
-pub fn sparse_matrix_multiply(
+/// Sparse C = A * B using Gustavson's algorithm on CSR arrays.
+/// Returns a CSR with sorted columns per row and optional dropping.
+///
+/// `drop_tol`: entries with |v| <= drop_tol are removed.
+pub fn spgemm_with_drop_tol(
     a: &CsrMatrix<f64>,
-    b: &CsrMatrix<f64>
+    b: &CsrMatrix<f64>,
+    drop_tol: f64,
 ) -> Result<CsrMatrix<f64>, KError> {
     if a.ncols() != b.nrows() {
         return Err(KError::InvalidInput(format!(
-            "Matrix dimension mismatch: A is {}x{}, B is {}x{}",
-            a.nrows(), a.ncols(), b.nrows(), b.ncols()
+            "spgemm: dimension mismatch A is {}x{}, B is {}x{}",
+            a.nrows(),
+            a.ncols(),
+            b.nrows(),
+            b.ncols()
         )));
     }
-    
+
     let m = a.nrows();
     let n = b.ncols();
-    let mut row_ptr = vec![0];
-    let mut col_indices = Vec::new();
-    let mut values = Vec::new();
-    
-    // Gustavson's algorithm: use scratch arrays for efficient accumulation
-    let mut x = vec![0.0; n]; // Accumulator array
-    let mut w = vec![usize::MAX; n]; // Marker array (MAX means "not seen yet")
-    
-    // For each row i in A
+
+    let ap = a.row_ptr();
+    let aj = a.col_idx();
+    let av = a.values();
+
+    let bp = b.row_ptr();
+    let bj = b.col_idx();
+    let bv = b.values();
+
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    row_ptr.push(0usize);
+    let mut cols: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+
+    // Marker and accumulator per column of C's row.
+    // `mark[j] == i` means column j is present in row i's structure.
+    let mut mark = vec![usize::MAX; n];
+    let mut acc = vec![0.0f64; n];
+
     for i in 0..m {
-        let row_start = col_indices.len();
-        
-        // Get non-zeros in row i of A
-        let a_row_start = a.to_row_ptr_vec()[i];
-        let a_row_end = a.to_row_ptr_vec()[i + 1];
-        
-        for a_idx in a_row_start..a_row_end {
-            let a_col = a.to_col_idx_vec()[a_idx];
-            let a_val = a.to_values_vec()[a_idx];
-            
-            // For each non-zero A[i,k], add A[i,k] * B[k,:] to result row
-            let b_row_start = b.to_row_ptr_vec()[a_col];
-            let b_row_end = b.to_row_ptr_vec()[a_col + 1];
-            
-            for b_idx in b_row_start..b_row_end {
-                let b_col = b.to_col_idx_vec()[b_idx];
-                let b_val = b.to_values_vec()[b_idx];
-                
-                if w[b_col] != i {
-                    // First time seeing this column in row i
-                    w[b_col] = i;
-                    x[b_col] = a_val * b_val;
-                    col_indices.push(b_col);
+        let row_head = cols.len();
+
+        // Row i of A
+        for kk in ap[i]..ap[i + 1] {
+            let k = aj[kk];
+            let aik = av[kk];
+
+            // Row k of B (since B is CSR, this is B[k,:])
+            for jj in bp[k]..bp[k + 1] {
+                let j = bj[jj];
+                let inc = aik * bv[jj];
+
+                if mark[j] != i {
+                    mark[j] = i;
+                    acc[j] = inc;
+                    cols.push(j);
                 } else {
-                    // Accumulate into existing entry
-                    x[b_col] += a_val * b_val;
+                    acc[j] += inc;
                 }
             }
         }
-        
-        // Sort columns for this row and extract values
-        let row_end = col_indices.len();
-        col_indices[row_start..row_end].sort_unstable();
-        
-        // Extract values in sorted order and apply drop tolerance
-        let mut kept_cols = Vec::new();
-        let mut kept_vals = Vec::new();
-        
-        for &col in &col_indices[row_start..row_end] {
-            let val = x[col];
-            if val.abs() > 1e-12 { // Drop tolerance for numerical stability
-                kept_cols.push(col);
-                kept_vals.push(val);
+
+        // Sort column indices in this row's slice
+        let row_tail = cols.len();
+        cols[row_head..row_tail].sort_unstable();
+
+        // Compact in-place while pushing values to `vals`
+        let mut write = row_head;
+        for read in row_head..row_tail {
+            let j = cols[read];
+            let v = acc[j];
+
+            // reset accumulator for the next row
+            acc[j] = 0.0;
+            // clear mark to avoid long-lived marks (optional; not strictly required)
+            mark[j] = usize::MAX;
+
+            if v.abs() > drop_tol {
+                cols[write] = j;
+                vals.push(v);
+                write += 1;
             }
+            // else: drop this column
         }
-        
-        // Replace the range with kept columns
-        col_indices.truncate(row_start);
-        col_indices.extend(kept_cols);
-        values.extend(kept_vals);
-        
-        row_ptr.push(col_indices.len());
+
+        // Remove dropped columns from `cols`
+        cols.truncate(write);
+
+        row_ptr.push(vals.len());
     }
-    
-    Ok(CsrMatrix::from_csr(m, n, row_ptr, col_indices, values))
+
+    Ok(CsrMatrix::from_csr(m, n, row_ptr, cols, vals))
 }
 
-/// Sparse Galerkin product: C = R * A * P (all sparse)
-/// This replaces the O(n³) dense triple matrix product with O(nnz) sparse operations
+/// Convenience wrapper with a default numerical drop tolerance.
+#[inline]
+pub fn spgemm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, KError> {
+    spgemm_with_drop_tol(a, b, 1e-12)
+}
+
+/// Sparse Galerkin product: C = R * A * P
+/// with all inputs CSR, via two SpGEMMs.
 pub fn sparse_galerkin_product(
-    restriction: &CsrMatrix<f64>,
-    matrix: &CsrMatrix<f64>, 
-    interpolation: &CsrMatrix<f64>
+    restriction: &CsrMatrix<f64>,   // R
+    matrix: &CsrMatrix<f64>,        // A
+    interpolation: &CsrMatrix<f64>, // P
 ) -> Result<CsrMatrix<f64>, KError> {
-    // Implement true sparse triple product: R * A * P
-    // This is the key optimization that makes AMG scalable
-    
-    // Step 1: Compute A * P (sparse matrix-matrix multiply)
-    let ap = sparse_matrix_multiply(matrix, interpolation)?;
-    
-    // Step 2: Compute R * (A * P) (sparse matrix-matrix multiply)  
-    let coarse_matrix = sparse_matrix_multiply(restriction, &ap)?;
-    
-    Ok(coarse_matrix)
+    // Step 1: T = A * P
+    let ap = spgemm(matrix, interpolation)?;
+    // Step 2: C = R * T
+    spgemm(restriction, &ap)
 }
 
 /// Apply HYPRE-style truncation to interpolation matrix
 /// Removes weak connections based on threshold-based dropping
-/// 
+///
 /// This function performs row-wise truncation of the interpolation operator,
 /// keeping only the strongest connections to improve operator complexity.
 pub fn apply_truncation(interpolation: &mut Mat<f64>, truncation_factor: f64) {
     if truncation_factor <= 0.0 || truncation_factor >= 1.0 {
         return; // Invalid truncation factor
     }
-    
+
     let nrows = interpolation.nrows();
     let ncols = interpolation.ncols();
-    
+
     for i in 0..nrows {
         // Collect (magnitude, column, original_value) tuples for this row
         let mut row_entries: Vec<(f64, usize, f64)> = Vec::new();
-        
+
         for j in 0..ncols {
             let val = interpolation[(i, j)];
             if val.abs() > 1e-15 {
                 row_entries.push((val.abs(), j, val));
             }
         }
-        
+
         if row_entries.is_empty() {
             continue;
         }
-        
+
         // Sort by magnitude (largest first)
         row_entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        
+
         // Determine how many entries to keep
-        let max_row_nnz = ((row_entries.len() as f64) * (1.0 - truncation_factor)).max(1.0) as usize;
+        let max_row_nnz =
+            ((row_entries.len() as f64) * (1.0 - truncation_factor)).max(1.0) as usize;
         let keep_count = max_row_nnz.min(row_entries.len());
-        
+
         // Zero out all entries first
         for j in 0..ncols {
             interpolation[(i, j)] = 0.0;
         }
-        
+
         // Keep only the strongest entries with their original values
         for k in 0..keep_count {
             let (_magnitude, j, original_val) = row_entries[k];
@@ -249,13 +264,16 @@ pub fn parallel_mat_vec(a: &Mat<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KE
     if x.len() != a.ncols() || y.len() != a.nrows() {
         return Err(KError::InvalidInput(format!(
             "Dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
-            a.nrows(), a.ncols(), x.len(), y.len()
+            a.nrows(),
+            a.ncols(),
+            x.len(),
+            y.len()
         )));
     }
 
     let _rows = a.nrows();
     let cols = a.ncols();
-    
+
     #[cfg(feature = "rayon")]
     {
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
@@ -268,7 +286,7 @@ pub fn parallel_mat_vec(a: &Mat<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KE
             *yi = (0..cols).map(|j| a[(i, j)] * x[j]).sum();
         }
     }
-    
+
     Ok(())
 }
 
@@ -296,24 +314,24 @@ pub fn count_nnz(matrix: &Mat<f64>) -> usize {
 pub fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
     let n = a.nrows();
     let mut anisotropy = vec![1.0; n];
-    
+
     for i in 0..n {
         let diag = a[(i, i)].abs();
         if diag < 1e-14 {
             anisotropy[i] = f64::INFINITY;
             continue;
         }
-        
+
         let mut max_off_diag = 0.0f64;
         for j in 0..n {
             if i != j {
                 max_off_diag = max_off_diag.max(a[(i, j)].abs());
             }
         }
-        
+
         anisotropy[i] = max_off_diag / diag;
     }
-    
+
     anisotropy
 }
 
@@ -323,7 +341,7 @@ pub fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
 pub fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
     let anisotropy = compute_anisotropy(a);
     let avg_anisotropy = anisotropy.iter().sum::<f64>() / anisotropy.len() as f64;
-    
+
     // Scale threshold based on anisotropy: higher anisotropy -> lower threshold
     let scaling_factor = (1.0 + avg_anisotropy.log10()).max(0.5).min(2.0);
     base_threshold * scaling_factor
@@ -332,6 +350,7 @@ pub fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::sparse::CsrMatrix;
     use faer::Mat;
 
     #[test]
@@ -345,9 +364,9 @@ mod tests {
                 0.0
             }
         });
-        
+
         let (nnz, diag_dominance, diag_sum) = analyze_matrix_properties(&matrix);
-        
+
         assert_eq!(nnz, 5); // 3 diagonal + 2 off-diagonal
         assert!((diag_sum - 6.0).abs() < 1e-12); // 3 * 2.0
         assert!(diag_dominance > 1.0); // Should be diagonally dominant
@@ -355,27 +374,21 @@ mod tests {
 
     #[test]
     fn test_extract_diagonal_inverse() {
-        let matrix = Mat::from_fn(3, 3, |i, j| {
-            if i == j {
-                (i + 1) as f64
-            } else {
-                0.0
-            }
-        });
-        
+        let matrix = Mat::from_fn(3, 3, |i, j| if i == j { (i + 1) as f64 } else { 0.0 });
+
         let diag_inv = extract_diagonal_inverse(&matrix);
-        
+
         assert_eq!(diag_inv.len(), 3);
         assert!((diag_inv[0] - 1.0).abs() < 1e-12);
         assert!((diag_inv[1] - 0.5).abs() < 1e-12);
-        assert!((diag_inv[2] - 1.0/3.0).abs() < 1e-12);
+        assert!((diag_inv[2] - 1.0 / 3.0).abs() < 1e-12);
     }
 
     #[test]
     fn test_check_ieee_values() {
         let good_matrix = Mat::from_fn(2, 2, |i, j| (i + j) as f64);
         assert!(check_ieee_values(&good_matrix).is_ok());
-        
+
         let bad_matrix = Mat::from_fn(2, 2, |i, j| {
             if i == 0 && j == 0 {
                 f64::NAN
@@ -384,5 +397,66 @@ mod tests {
             }
         });
         assert!(check_ieee_values(&bad_matrix).is_err());
+    }
+
+    #[test]
+    fn spgemm_identity_left() {
+        let i3 = CsrMatrix::from_csr(3, 3, vec![0, 1, 2, 3], vec![0, 1, 2], vec![1.0, 1.0, 1.0]);
+        // A = [[1,2,0],[0,3,4],[0,0,5]]
+        let a = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 4, 5],
+            vec![0, 1, 1, 2, 2],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        );
+        let c = spgemm(&i3, &a).unwrap();
+        assert_eq!(c.row_ptr(), a.row_ptr());
+        assert_eq!(c.col_idx(), a.col_idx());
+        assert_eq!(c.values(), a.values());
+    }
+
+    #[test]
+    fn spgemm_simple() {
+        // A: 2x3 [[1,2,0],[0,3,4]]
+        let a = CsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 2, 4],
+            vec![0, 1, 1, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+        );
+        // B: 3x2 [[5,0],[0,6],[7,8]]
+        let b = CsrMatrix::from_csr(
+            3,
+            2,
+            vec![0, 1, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![5.0, 6.0, 7.0, 8.0],
+        );
+        // A*B should be:
+        // row0: [1*5 + 2*0 + 0*7, 1*0 + 2*6 + 0*8] = [5, 12]
+        // row1: [0*5 + 3*0 + 4*7, 0*0 + 3*6 + 4*8] = [28, 50]
+        let c = spgemm(&a, &b).unwrap();
+        assert_eq!(c.row_ptr(), &[0, 2, 4]);
+        assert_eq!(c.col_idx(), &[0, 1, 0, 1]);
+        assert_eq!(c.values(), &[5.0, 12.0, 28.0, 50.0]);
+    }
+
+    #[test]
+    fn galerkin_triple() {
+        // R = I, so RAP = A
+        let i3 = CsrMatrix::from_csr(3, 3, vec![0, 1, 2, 3], vec![0, 1, 2], vec![1.0, 1.0, 1.0]);
+        let a = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 4, 5],
+            vec![0, 1, 1, 2, 2],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        );
+        let c = sparse_galerkin_product(&i3, &a, &i3).unwrap();
+        assert_eq!(c.row_ptr(), a.row_ptr());
+        assert_eq!(c.col_idx(), a.col_idx());
+        assert_eq!(c.values(), a.values());
     }
 }

@@ -57,6 +57,8 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Trait-based Design**: Extensible for custom matrices and preconditioners
 - **Memory Efficiency**: In-place operations and configurable workspace management
 - **High Performance**: Optimized inner kernels with SIMD and parallelization
+- **CSR utilities**: zero-copy `row_ptr`/`col_idx`/`values` access and sparse
+  kernels (`spgemm`, CSR Galerkin triple product)
 
 ## Installation
 
