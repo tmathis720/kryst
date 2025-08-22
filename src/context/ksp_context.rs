@@ -4,7 +4,7 @@ use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, PcReusePolicy};
-use crate::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter};
+use crate::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter, PcgSolver};
 use crate::utils::convergence::{SolveStats, ConvergedReason};
 use std::sync::Arc;
 use std::str::FromStr;
@@ -41,6 +41,7 @@ pub enum SolverType {
     Cg,
     Gmres,
     BiCgStab,
+    Pcg,
     Preonly,
 }
 
@@ -52,6 +53,7 @@ impl FromStr for SolverType {
             "cg" => Ok(SolverType::Cg),
             "gmres" => Ok(SolverType::Gmres),
             "bicgstab" => Ok(SolverType::BiCgStab),
+            "pcg" => Ok(SolverType::Pcg),
             "preonly" => Ok(SolverType::Preonly),
             other => Err(KError::UnrecognizedSolverType(other.to_string())),
         }
@@ -117,6 +119,7 @@ impl KspContext {
             SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(
                 BiCgStabSolver::new(self.rtol, self.maxits),
             ))),
+            SolverType::Pcg => Some(Box::new(PcgSolver::new(self.rtol, self.maxits))),
             SolverType::Preonly => None,
         };
         self.invalidate_setup();
