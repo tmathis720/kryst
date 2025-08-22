@@ -162,6 +162,8 @@ pub use cg::CgSolver;
 
 pub mod gmres;
 pub use gmres::GmresSolver;
+pub mod bicgstab;
+pub use bicgstab::BiCgStabSolver;
 pub mod direct_lu;
 pub use direct_lu::{LuSolver, QrSolver};
 
