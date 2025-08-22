@@ -3,6 +3,7 @@
 //! This module defines the Preconditioner trait and includes implementations such as Jacobi, ILU, SOR, AMG, Additive Schwarz, and more.
 
 use crate::error::KError;
+use faer::Mat;
 use std::str::FromStr;
 
 /// Which side to apply M⁻¹ on in preconditioning.
@@ -40,35 +41,25 @@ impl Default for PcSide {
     }
 }
 
-/// A preconditioner M ≈ A⁻¹.
-pub trait Preconditioner<M: ?Sized, V> {
+/// Object-safe preconditioner operating on `f64` slices and [`LinOp`] matrices.
+pub trait Preconditioner: Send + Sync {
     /// Build any factorization/hierarchy once from the system matrix.
-    ///
-    /// # Arguments
-    /// * `a` - System matrix to build preconditioner from
-    ///
-    /// # Returns
-    /// * `Ok(())` on successful setup
-    /// * `Err(KError)` if setup fails
-    fn setup(&mut self, a: &M) -> Result<(), KError>;
-    
-    /// Apply M⁻¹ to input vector, writing result to output vector.
-    ///
-    /// # Arguments
-    /// * `side` - Which side to apply preconditioning (Left/Right/Symmetric)
-    /// * `x` - Input vector
-    /// * `y` - Output vector (will be overwritten)
-    ///
-    /// # Returns
-    /// * `Ok(())` on successful application
-    /// * `Err(KError)` if application fails
-    fn apply(&self, side: PcSide, x: &V, y: &mut V) -> Result<(), KError>;
+    fn setup(
+        &mut self,
+        a: &dyn crate::matrix::op::LinOp<S = f64>,
+    ) -> Result<(), KError>;
+
+    /// Apply M⁻¹ to input vector, writing result to output slice.
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 }
 
-/// A preconditioner whose action M⁻¹ may change at every iteration.
-pub trait FlexiblePreconditioner<M: ?Sized, V> {
-    /// Given the current residual `r`, produce `z ≈ Mₖ⁻¹ r`.
-    fn apply(&mut self, r: &V, z: &mut V) -> Result<(), crate::error::KError>;
+/// Internal trait for preconditioners that operate directly on dense matrices.
+pub trait PreconditionerMat: Send + Sync {
+    /// Set up the preconditioner from a dense matrix.
+    fn setup_mat(&mut self, a: &Mat<f64>) -> Result<(), KError>;
+
+    /// Apply M⁻¹ to input slice.
+    fn apply_vec(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 }
 
 // Submodules for various preconditioners
