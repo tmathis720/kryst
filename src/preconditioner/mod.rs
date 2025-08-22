@@ -5,6 +5,7 @@
 use crate::error::KError;
 use faer::Mat;
 use std::str::FromStr;
+use crate::matrix::op::LinOp;
 
 /// Which side to apply M⁻¹ on in preconditioning.
 ///
@@ -77,6 +78,38 @@ pub mod legacy {
     pub trait FlexiblePreconditioner<M: ?Sized, V> {
         fn setup(&mut self, a: &M) -> Result<(), KError>;
         fn apply(&mut self, r: &V, z: &mut V) -> Result<(), KError>;
+    }
+}
+
+/// Adapter that wraps a legacy matrix-based preconditioner and exposes the new
+/// object-safe [`Preconditioner`] interface.
+pub struct LegacyOpPreconditioner {
+    /// Inner legacy preconditioner operating on dense matrices and vectors.
+    inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>,
+}
+
+impl LegacyOpPreconditioner {
+    /// Create a new adapter from a boxed legacy preconditioner.
+    pub fn new(inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>) -> Self {
+        Self { inner }
+    }
+}
+
+impl Preconditioner for LegacyOpPreconditioner {
+    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let m = a
+            .as_any()
+            .downcast_ref::<Mat<f64>>()
+            .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64>".into()))?;
+        self.inner.setup(m)
+    }
+
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        let x_vec = x.to_vec();
+        let mut y_vec = vec![0.0; y.len()];
+        self.inner.apply(side, &x_vec, &mut y_vec)?;
+        y.copy_from_slice(&y_vec);
+        Ok(())
     }
 }
 
