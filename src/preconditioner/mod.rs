@@ -55,18 +55,42 @@ impl PcReusePolicy {
 }
 
 /// Object-safe preconditioner operating on `f64` slices and [`LinOp`] matrices.
+///
+/// Preconditioners may optionally implement [`direct_solve`], allowing the
+/// preconditioner to act as a stand-alone direct solver (e.g. LU, QR). Only
+/// implementations that are true direct methods should override it.
+///
+/// Contract for [`direct_solve`]:
+/// * return `Ok(true)` and fill `x` when the system is solved successfully,
+/// * return `Ok(false)` if no direct solve is supported, and
+/// * return `Err(..)` if an attempted direct solve fails.
+///
+/// The `op` passed will typically be the same matrix that [`setup`] was called
+/// with. `&mut self` is taken to permit use of cached factors or workspace. The
+/// default implementation simply returns `Ok(false)` so existing preconditioners
+/// remain unaffected.
 pub trait Preconditioner: Send + Sync {
     /// Build any factorization/hierarchy once from the system matrix.
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
+
+    /// Apply M⁻¹ to input vector, writing result to output slice.
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
+
+    /// Try to solve `op * x = b` completely.
+    fn direct_solve(
+        &mut self,
+        _op: &dyn LinOp<S = f64>,
+        _b: &[f64],
+        _x: &mut [f64],
+    ) -> Result<bool, KError> {
+        Ok(false)
+    }
 
     fn update_values(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.setup(a)
     }
 
     fn supports_numeric_update(&self) -> bool { false }
-
-    /// Apply M⁻¹ to input vector, writing result to output slice.
-    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 }
 
 /// Internal trait for preconditioners that operate directly on dense matrices.
@@ -142,6 +166,7 @@ pub mod ilup;
 pub mod chebyshev;
 pub mod approxinv;
 pub mod chain;
+pub mod direct;
 
 // Re-exports for convenience
 pub use jacobi::Jacobi;
@@ -155,7 +180,33 @@ pub use ilup::Ilup;
 pub use chebyshev::{Chebyshev, ChebyshevPre};
 pub use approxinv::ApproxInv;
 pub use chain::PcChain;
+pub use direct::LuPc;
 pub use self::sor::MatSorType;
 
 /// Unified preconditioner enum for all supported types.
 pub use crate::context::pc_context::{PC, SparsityPattern};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    struct Dummy;
+
+    impl Preconditioner for Dummy {
+        fn setup(&mut self, _pmat: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
+
+        fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+            z.copy_from_slice(r);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_direct_solve_is_false() {
+        let mut pc = Dummy;
+        let a = Mat::<f64>::zeros(1, 1);
+        let mut x = [0.0];
+        assert_eq!(pc.direct_solve(&a, &[1.0], &mut x).unwrap(), false);
+    }
+}
