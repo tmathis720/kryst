@@ -1,107 +1,45 @@
-// Jacobi preconditioner implementation
-//
-// This module implements the Jacobi (diagonal) preconditioner, which uses the inverse of the diagonal
-// of the system matrix as a simple preconditioner for iterative solvers. The Jacobi preconditioner is
-// effective for diagonally dominant matrices and is often used as a baseline or smoother in multigrid methods.
-//
-// # Overview
-//
-// The Jacobi preconditioner approximates the inverse of the matrix A by the inverse of its diagonal D:
-//     M⁻¹ ≈ D⁻¹
-//
-// # Usage
-//
-// - Create a `Jacobi` preconditioner with `new()` or `default()`.
-// - Call `setup` with the system matrix to extract the diagonal and compute its inverse.
-// - Use `apply` to apply the preconditioner to a vector.
+//! Jacobi preconditioner implementation.
+//!
+//! This monomorphic version operates on `f64` values and dense [`faer::Mat`] matrices.
 
-use crate::preconditioner::Preconditioner;
-use crate::core::traits::{MatVec, Indexing};
 use crate::error::KError;
-use num_traits::Float;
+use crate::preconditioner::{PcSide, PreconditionerMat};
+use faer::Mat;
 
-/// Jacobi preconditioner: M⁻¹ = D⁻¹
-///
-/// Stores the inverse of the diagonal of the system matrix.
-pub struct Jacobi<T> {
-    /// Inverse of the diagonal entries of the matrix
-    pub(crate) inv_diag: Vec<T>,
+/// Jacobi preconditioner: stores the inverse of the diagonal of the matrix.
+pub struct Jacobi {
+    /// Inverse diagonal entries.
+    pub(crate) diag_inv: Vec<f64>,
 }
 
-impl<T: Float> Jacobi<T> {
-    /// Create a new Jacobi preconditioner with empty state; user must call `setup`.
+impl Jacobi {
+    /// Create an empty Jacobi preconditioner. Call [`setup_mat`] before use.
     pub fn new() -> Self {
-        Self { inv_diag: Vec::new() }
+        Self { diag_inv: Vec::new() }
     }
-}
 
-impl<T: num_traits::Float> Default for Jacobi<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<M, V, T> Preconditioner<M, V> for Jacobi<T>
-where
-    M: MatVec<V> + Indexing,
-    V: AsRef<[T]> + AsMut<[T]> + From<Vec<T>>,
-    T: Float + Send + Sync,
-{
-    /// Setup the Jacobi preconditioner by extracting and inverting the diagonal of the matrix.
-    ///
-    /// For each row i, computes the diagonal entry by applying the matrix to the i-th unit vector.
-    fn setup(&mut self, a: &M) -> Result<(), KError> {
+    fn build_from_dense(&mut self, a: &Mat<f64>) -> Result<(), KError> {
         let n = a.nrows();
-        let mut diag = vec![T::zero(); n];
-        let mut e = vec![T::zero(); n];
-        let mut col = vec![T::zero(); n];
-        
-        // Add progress reporting for large matrices
-        if n > 1000 {
-            println!("Setting up Jacobi preconditioner for {}x{} matrix - this may take a moment...", n, n);
-        }
-        
+        self.diag_inv.resize(n, 0.0);
         for i in 0..n {
-            if n > 1000 && i % 1000 == 0 {
-                println!("  Processing row {}/{}", i, n);
-            }
-            
-            // Set e to the i-th unit vector
-            e.iter_mut().for_each(|x| *x = T::zero());
-            e[i] = T::one();
-            let e_v = V::from(e.clone());
-            let mut col_v = V::from(col.clone());
-            a.matvec(&e_v, &mut col_v);
-            col = col_v.as_ref().to_vec();
-            diag[i] = col[i];
-        }
-        // Compute inverse diagonal, handling zeros safely
-        self.inv_diag = diag.into_iter()
-            .map(|d| if d != T::zero() { T::one() / d } else { T::zero() })
-            .collect();
-        Ok(())
-    }
-
-    /// Apply the Jacobi preconditioner to a vector x, storing the result in y.
-    ///
-    /// For Jacobi preconditioning, all sides (Left/Right/Symmetric) are equivalent.
-    /// Computes y[i] = inv_diag[i] * x[i] for all i.
-    fn apply(&self, _side: crate::preconditioner::PcSide, x: &V, y: &mut V) -> Result<(), KError> {
-        let x_ref = x.as_ref();
-        let y_mut = y.as_mut();
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            y_mut.par_iter_mut().enumerate().for_each(|(i, yval)| {
-                *yval = self.inv_diag[i] * x_ref[i];
-            });
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            for i in 0..x_ref.len() {
-                y_mut[i] = self.inv_diag[i] * x_ref[i];
-            }
+            let val = a[(i, i)];
+            self.diag_inv[i] = if val != 0.0 { 1.0 / val } else { 0.0 };
         }
         Ok(())
     }
 }
+
+impl PreconditionerMat for Jacobi {
+    fn setup_mat(&mut self, a: &Mat<f64>) -> Result<(), KError> {
+        self.build_from_dense(a)
+    }
+
+    fn apply_vec(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+        assert_eq!(r.len(), z.len());
+        for ((zi, di), ri) in z.iter_mut().zip(self.diag_inv.iter()).zip(r.iter()) {
+            *zi = di * ri;
+        }
+        Ok(())
+    }
+}
+
