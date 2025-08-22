@@ -3897,7 +3897,7 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
     fn solve(
         &mut self,
         a: &CsrMatrix<f64>,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<CsrMatrix<f64>, Vec<f64>>>,
+        pc: Option<&(dyn crate::preconditioner::Preconditioner<CsrMatrix<f64>, Vec<f64>> + '_)>,
         b: &Vec<f64>,
         x: &mut Vec<f64>,
         comm: &crate::parallel::UniverseComm,

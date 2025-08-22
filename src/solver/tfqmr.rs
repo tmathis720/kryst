@@ -79,7 +79,7 @@ where
     /// * `Err(KError)` on error
     fn solve(&mut self,
              a: &M,
-             _pc: Option<&dyn Preconditioner<M, V>>,
+            _pc: Option<&(dyn Preconditioner<M, V> + '_)>,
              b: &V,
              x: &mut V,
              comm: &crate::parallel::UniverseComm,

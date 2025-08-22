@@ -271,7 +271,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     /// Arnoldi process with preconditioning (for advanced use)
     fn arnoldi_with_pc<M: ?Sized, V>(
         a: &M,
-        pc: &dyn crate::preconditioner::Preconditioner<M, V>,
+        pc: &(dyn crate::preconditioner::Preconditioner<M, V> + '_),
         ip: &(),
         v_basis: &mut Vec<V>,
         h: &mut [Vec<T>],
@@ -384,7 +384,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
