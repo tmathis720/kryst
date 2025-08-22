@@ -3,9 +3,10 @@
 //! This module defines the Preconditioner trait and includes implementations such as Jacobi, ILU, SOR, AMG, Additive Schwarz, and more.
 
 use crate::error::KError;
+use crate::matrix::op::LinOp;
+use crate::parallel::UniverseComm;
 use faer::Mat;
 use std::str::FromStr;
-use crate::matrix::op::LinOp;
 
 /// Which side to apply M⁻¹ on in preconditioning.
 ///
@@ -58,17 +59,8 @@ impl PcReusePolicy {
 ///
 /// Preconditioners may optionally implement [`direct_solve`], allowing the
 /// preconditioner to act as a stand-alone direct solver (e.g. LU, QR). Only
-/// implementations that are true direct methods should override it.
-///
-/// Contract for [`direct_solve`]:
-/// * return `Ok(true)` and fill `x` when the system is solved successfully,
-/// * return `Ok(false)` if no direct solve is supported, and
-/// * return `Err(..)` if an attempted direct solve fails.
-///
-/// The `op` passed will typically be the same matrix that [`setup`] was called
-/// with. `&mut self` is taken to permit use of cached factors or workspace. The
-/// default implementation simply returns `Ok(false)` so existing preconditioners
-/// remain unaffected.
+/// implementations that are true direct methods should override it. The default
+/// implementation returns an error indicating direct solves are unsupported.
 pub trait Preconditioner: Send + Sync {
     /// Build any factorization/hierarchy once from the system matrix.
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
@@ -76,14 +68,17 @@ pub trait Preconditioner: Send + Sync {
     /// Apply M⁻¹ to input vector, writing result to output slice.
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 
-    /// Try to solve `op * x = b` completely.
+    /// Solve `op * x = b` directly when supported.
     fn direct_solve(
         &mut self,
         _op: &dyn LinOp<S = f64>,
         _b: &[f64],
         _x: &mut [f64],
-    ) -> Result<bool, KError> {
-        Ok(false)
+        _comm: &UniverseComm,
+    ) -> Result<(), KError> {
+        Err(KError::SolveError(
+            "direct_solve not supported by this preconditioner".into(),
+        ))
     }
 
     fn update_values(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
@@ -203,10 +198,11 @@ mod tests {
     }
 
     #[test]
-    fn default_direct_solve_is_false() {
+    fn default_direct_solve_errors() {
         let mut pc = Dummy;
         let a = Mat::<f64>::zeros(1, 1);
         let mut x = [0.0];
-        assert_eq!(pc.direct_solve(&a, &[1.0], &mut x).unwrap(), false);
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        assert!(pc.direct_solve(&a, &[1.0], &mut x, &comm).is_err());
     }
 }

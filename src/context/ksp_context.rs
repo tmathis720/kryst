@@ -61,13 +61,13 @@ impl FromStr for SolverType {
 /// Minimal KSP context holding solver, preconditioner, and operators.
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Error = KError>>>,
+    solver_type: Option<SolverType>,
     pc: Option<Box<dyn Preconditioner>>,
     amat: Option<Arc<dyn LinOp<S = f64>>>,
     pmat: Option<Arc<dyn LinOp<S = f64>>>,
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>>,
-    solver_type: SolverType,
     pub rtol: f64,
     pub atol: f64,
     pub dtol: f64,
@@ -83,13 +83,13 @@ impl KspContext {
     pub fn new() -> Self {
         Self {
             solver: None,
+            solver_type: None,
             pc: None,
             amat: None,
             pmat: None,
             work: None,
             setup_called: false,
             monitors: Vec::new(),
-            solver_type: SolverType::Gmres,
             rtol: 1e-6,
             atol: 1e-12,
             dtol: 1e3,
@@ -103,7 +103,7 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        self.solver_type = solver_type;
+        self.solver_type = Some(solver_type);
         self.solver = match solver_type {
             SolverType::Cg => Some(Box::new(MatSolverAdapter::new(CgSolver::new(
                 self.rtol,
@@ -301,12 +301,7 @@ impl KspContext {
         if !self.setup_called {
             self.setup()?;
         }
-        let amat = self
-            .amat
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
-
-        if self.solver_type == SolverType::Preonly {
+        if matches!(self.solver_type, Some(SolverType::Preonly)) {
             let pmat = self
                 .pmat
                 .as_ref()
@@ -316,21 +311,26 @@ impl KspContext {
                 .as_mut()
                 .ok_or_else(|| {
                     KError::SolveError(
-                        "PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into(),
+                        "PREONLY requires a direct preconditioner: use -pc_type {lu|qr|superludist}".into(),
                     )
                 })?;
-            return match pc.direct_solve(pmat.as_ref(), b, x)? {
-                true => Ok(SolveStats {
-                    iterations: 1,
-                    final_residual: 0.0,
-                    reason: ConvergedReason::ConvergedAtol,
-                }),
-                false => Err(KError::SolveError(
-                    "Selected PC does not implement direct_solve; choose LU/QR/SuperLU_DIST"
-                        .into(),
-                )),
-            };
+            pc.direct_solve(
+                pmat.as_ref(),
+                b,
+                x,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+            )?;
+            return Ok(SolveStats {
+                iterations: 1,
+                final_residual: 0.0,
+                reason: ConvergedReason::ConvergedAtol,
+            });
         }
+
+        let amat = self
+            .amat
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
 
         let solver = self
             .solver

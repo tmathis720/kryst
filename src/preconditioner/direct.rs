@@ -1,5 +1,6 @@
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::legacy::LinearSolver;
 use crate::solver::{LuSolver, QrSolver};
@@ -39,7 +40,8 @@ impl Preconditioner for LuPc {
         op: &dyn LinOp<S = f64>,
         b: &[f64],
         x: &mut [f64],
-    ) -> Result<bool, KError> {
+        comm: &UniverseComm,
+    ) -> Result<(), KError> {
         let m: &Mat<f64> = op.as_any().downcast_ref::<Mat<f64>>().ok_or_else(|| {
             KError::InvalidInput("LU direct_solve requires faer::Mat<f64>".into())
         })?;
@@ -47,17 +49,9 @@ impl Preconditioner for LuPc {
         let mut lu = LuSolver::new();
         let b_vec = b.to_vec();
         let mut x_vec = vec![0.0; x.len()];
-        lu.solve(
-            m,
-            None,
-            &b_vec,
-            &mut x_vec,
-            &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-            None,
-            None,
-        )?;
+        lu.solve(m, None, &b_vec, &mut x_vec, comm, None, None)?;
         x.copy_from_slice(&x_vec);
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -87,7 +81,8 @@ impl Preconditioner for QrPc {
         op: &dyn LinOp<S = f64>,
         b: &[f64],
         x: &mut [f64],
-    ) -> Result<bool, KError> {
+        comm: &UniverseComm,
+    ) -> Result<(), KError> {
         let m: &Mat<f64> = op.as_any().downcast_ref::<Mat<f64>>().ok_or_else(|| {
             KError::InvalidInput("QR direct_solve requires faer::Mat<f64>".into())
         })?;
@@ -95,17 +90,9 @@ impl Preconditioner for QrPc {
         let mut qr = QrSolver::new();
         let b_vec = b.to_vec();
         let mut x_vec = vec![0.0; x.len()];
-        qr.solve(
-            m,
-            None,
-            &b_vec,
-            &mut x_vec,
-            &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-            None,
-            None,
-        )?;
+        qr.solve(m, None, &b_vec, &mut x_vec, comm, None, None)?;
         x.copy_from_slice(&x_vec);
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -138,7 +125,8 @@ impl Preconditioner for SuperLuDistPc {
         op: &dyn LinOp<S = f64>,
         b: &[f64],
         x: &mut [f64],
-    ) -> Result<bool, KError> {
+        comm: &UniverseComm,
+    ) -> Result<(), KError> {
         #[cfg(not(feature = "superlu_dist"))]
         {
             return Err(KError::SolveError(
@@ -155,17 +143,9 @@ impl Preconditioner for SuperLuDistPc {
             let mut slu = SuperLuDistSolver::new();
             let b_vec = b.to_vec();
             let mut x_vec = vec![0.0; x.len()];
-            slu.solve(
-                a,
-                None,
-                &b_vec,
-                &mut x_vec,
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                None,
-                None,
-            )?;
+            slu.solve(a, None, &b_vec, &mut x_vec, comm, None, None)?;
             x.copy_from_slice(&x_vec);
-            Ok(true)
+            Ok(())
         }
     }
 }
