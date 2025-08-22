@@ -43,3 +43,15 @@ impl PreconditionerMat for Jacobi {
     }
 }
 
+// Provide legacy trait implementation for components still using the generic
+// preconditioner interface.
+impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacobi {
+    fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
+        self.setup_mat(a)
+    }
+
+    fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        self.apply_vec(side, r.as_slice(), z.as_mut_slice())
+    }
+}
+
