@@ -12,11 +12,24 @@ use crate::utils::convergence::{SolveStats};
 pub struct Workspace {
     pub tmp1: Vec<f64>,
     pub tmp2: Vec<f64>,
+    pub q: Vec<Vec<f64>>,
+    pub h: Vec<Vec<f64>>,
+    pub cs: Vec<f64>,
+    pub sn: Vec<f64>,
+    pub g: Vec<f64>,
 }
 
 impl Workspace {
     pub fn new(n: usize) -> Self {
-        Self { tmp1: vec![0.0; n], tmp2: vec![0.0; n] }
+        Self {
+            tmp1: vec![0.0; n],
+            tmp2: vec![0.0; n],
+            q: Vec::new(),
+            h: Vec::new(),
+            cs: Vec::new(),
+            sn: Vec::new(),
+            g: Vec::new(),
+        }
     }
 }
 
@@ -51,7 +64,7 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        let solver: Box<dyn LinearSolver> = match solver_type {
+        let solver: Box<dyn LinearSolver<Error = KError>> = match solver_type {
             SolverType::Cg => Box::new(MatSolverAdapter::new(CgSolver::new(self.rtol, self.maxits))),
             SolverType::Gmres => Box::new(MatSolverAdapter::new(GmresSolver::new(self.restart, self.rtol, self.maxits))),
             SolverType::Preonly => return Err(KError::SolveError("Preonly solver not available".into())),

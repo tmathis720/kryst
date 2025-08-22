@@ -787,6 +787,7 @@ where
 mod tests {
     use super::*;
     use crate::core::traits::MatVec;
+    use crate::error::KError;
     use crate::preconditioner::legacy::Preconditioner;
     use crate::preconditioner::Jacobi;
 
@@ -805,18 +806,17 @@ mod tests {
     }
 
     // Implement Preconditioner for Jacobi<f64> for DenseMat, Vec<f64>
-    impl crate::preconditioner::legacy::Preconditioner<DenseMat, Vec<f64>> for Jacobi<f64> {
-        fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
-            // Apply diagonal scaling: z[i] = inv_diag[i] * r[i]
+    impl crate::preconditioner::legacy::Preconditioner<DenseMat, Vec<f64>> for Jacobi {
+        fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
             for i in 0..r.len() {
-                z[i] = self.inv_diag[i] * r[i];
+                z[i] = self.diag_inv[i] * r[i];
             }
             Ok(())
         }
-        
-        fn setup(&mut self, a: &DenseMat) -> Result<(), crate::error::KError> {
+
+        fn setup(&mut self, a: &DenseMat) -> Result<(), KError> {
             let n = a.data.len();
-            self.inv_diag = (0..n).map(|i| 1.0 / a.data[i][i]).collect();
+            self.diag_inv = (0..n).map(|i| 1.0 / a.data[i][i]).collect();
             Ok(())
         }
     }

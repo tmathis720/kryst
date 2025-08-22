@@ -68,17 +68,18 @@ pub mod legacy {
     use crate::error::KError;
 
     /// Generic preconditioner operating on matrix and vector types.
-    pub trait Preconditioner<M: ?Sized, V>: Send {
+    pub trait Preconditioner<M: ?Sized, V> {
         fn setup(&mut self, a: &M) -> Result<(), KError>;
         fn apply(&self, side: PcSide, r: &V, z: &mut V) -> Result<(), KError>;
     }
 
     /// Flexible preconditioner for FGMRES-style solvers.
-    pub trait FlexiblePreconditioner<M: ?Sized, V>: Send {
+    pub trait FlexiblePreconditioner<M: ?Sized, V> {
         fn setup(&mut self, a: &M) -> Result<(), KError>;
         fn apply(&mut self, r: &V, z: &mut V) -> Result<(), KError>;
     }
 }
+
 
 // Submodules for various preconditioners
 pub mod block_jacobi;

@@ -47,7 +47,7 @@ pub struct CgSolver<T> {
     pub single_reduction: bool,
     pub radius: Option<T>,
     pub obj_target: Option<T>,
-    pub monitor: Option<Box<dyn FnMut(usize, T)>>,
+    pub monitor: Option<Box<dyn FnMut(usize, T) + Send + Sync>>,
     pub residual_history: Vec<T>,
 }
 
@@ -101,7 +101,7 @@ impl<T: Copy + num_traits::Float + From<f64> + std::ops::Mul<Output = T>> CgSolv
     }
     /// Set a monitor callback for residuals.
     pub fn with_monitor<F>(mut self, f: F) -> Self
-    where F: FnMut(usize, T) + 'static {
+    where F: FnMut(usize, T) + Send + Sync + 'static {
         self.monitor = Some(Box::new(f));
         self
     }
