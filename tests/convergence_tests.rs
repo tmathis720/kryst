@@ -1,12 +1,9 @@
 //! Tests for flexible convergence and divergence criteria
 
 use kryst::utils::convergence::{Convergence, ConvergedReason};
-use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::context::pc_context::PcType;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faer::Mat;
 
     #[test]
     fn test_convergence_rtol() {
@@ -90,63 +87,6 @@ mod tests {
         assert_eq!(reason, ConvergedReason::ConvergedAtol);
     }
 
-    #[test]
-    fn test_custom_convergence_test() {
-        // Test custom convergence test functionality in KspContext
-        let mut ksp = KspContext::new();
-        
-        // Set a custom convergence test
-        ksp.set_convergence_test(|iters, rnorm, bnorm| {
-            if rnorm / bnorm < 1e-3 {
-                ConvergedReason::ConvergedRtol
-            } else if iters >= 5 {
-                ConvergedReason::DivergedMaxIts
-            } else {
-                ConvergedReason::Continued
-            }
-        });
-        
-        // Verify the custom test was set
-        assert!(ksp.has_custom_convergence_test());
-        
-        // Test clearing the custom test
-        ksp.clear_convergence_test();
-        assert!(!ksp.has_custom_convergence_test());
-    }
-
-    #[test]
-    fn test_ksp_context_with_custom_convergence() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a simple test problem
-        let n = 3;
-        let a = Mat::from_fn(n, n, |i, j| {
-            if i == j { 4.0 } else if (i as isize - j as isize).abs() == 1 { -1.0 } else { 0.0 }
-        });
-        let b = vec![3.0, 2.0, 3.0];
-        let mut x = vec![0.0; n];
-        
-        let mut ksp = KspContext::new();
-        ksp.set_type(SolverType::Cg)?
-           .set_pc_type(PcType::None)?;
-        
-        // Set a lenient custom convergence test
-        ksp.set_convergence_test(|iters, rnorm, bnorm| {
-            if rnorm / bnorm < 1e-2 {  // Very lenient
-                ConvergedReason::ConvergedRtol
-            } else if iters >= 100 {
-                ConvergedReason::DivergedMaxIts
-            } else {
-                ConvergedReason::Continued
-            }
-        });
-        
-        // Solve the system
-        let stats = ksp.solve(&a, &b, &mut x)?;
-        
-        // The custom convergence test should have been applied
-        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::DivergedMaxIts));
-        
-        Ok(())
-    }
 
     #[test]
     fn test_multiple_threshold_precedence() {

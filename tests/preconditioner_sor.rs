@@ -10,7 +10,8 @@
 //! The tests use the `faer` crate for matrix construction and `approx` for floating-point comparisons.
 
 use approx::assert_relative_eq;
-use kryst::preconditioner::{Sor, MatSorType, Preconditioner};
+use kryst::preconditioner::{Sor, MatSorType};
+use kryst::preconditioner::legacy::Preconditioner;
 use faer::Mat;
 
 /// Constructs a tridiagonal matrix of size `n` with subdiagonal `a`, diagonal `b`, and superdiagonal `c`.
@@ -76,7 +77,7 @@ fn test_sor_tridiag_forward() {
     }
     // Compare each entry with a tight tolerance
     for i in 0..n {
-        assert!((y[i] - expected[i]).abs() < 1e-12_f64, "SOR mismatch at i={}: got {}, expected {}", i, y[i], expected[i]);
+        assert!((y[i] - expected[i]).abs() < 1e-12, "SOR mismatch at i={}: got {}, expected {}", i, y[i], expected[i]);
     }
 }
 
