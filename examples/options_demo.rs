@@ -85,7 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     
     // Solve the system
-    match ksp.solve(&a, &b, &mut x) {
+    ksp.set_operators(a.clone(), None);
+    match ksp.solve(&b, &mut x) {
         Ok(stats) => {
             println!("Solution Results:");
             println!("  Converged: {}", matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     r[i] -= a[(i, j)] * x[j];
                 }
             }
-            let residual_norm = (r[0]*r[0] + r[1]*r[1]).sqrt();
+            let residual_norm: f64 = (r[0]*r[0] + r[1]*r[1]).sqrt();
             println!("  Verification residual: {:.2e}", residual_norm);
             
             if residual_norm < 1e-10 {
