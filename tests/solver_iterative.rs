@@ -7,7 +7,8 @@
 
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
-use kryst::solver::{CgSolver, GmresSolver, LinearSolver};
+use kryst::solver::{CgSolver, GmresSolver};
+use kryst::solver::legacy::LinearSolver;
 use rand::Rng;
 use approx::assert_abs_diff_eq;
 
