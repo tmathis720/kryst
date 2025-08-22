@@ -67,7 +67,7 @@ pub struct KspContext {
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>>,
-    solver_type: SolverType,
+    solver_type: Option<SolverType>,
     pub rtol: f64,
     pub atol: f64,
     pub dtol: f64,
@@ -89,7 +89,7 @@ impl KspContext {
             work: None,
             setup_called: false,
             monitors: Vec::new(),
-            solver_type: SolverType::Gmres,
+            solver_type: None,
             rtol: 1e-6,
             atol: 1e-12,
             dtol: 1e3,
@@ -103,7 +103,7 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        self.solver_type = solver_type;
+        self.solver_type = Some(solver_type);
         self.solver = match solver_type {
             SolverType::Cg => Some(Box::new(MatSolverAdapter::new(CgSolver::new(
                 self.rtol,
@@ -306,7 +306,7 @@ impl KspContext {
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
 
-        if self.solver_type == SolverType::Preonly {
+        if matches!(self.solver_type, Some(SolverType::Preonly)) {
             let pmat = self
                 .pmat
                 .as_ref()
@@ -319,17 +319,17 @@ impl KspContext {
                         "PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into(),
                     )
                 })?;
-            return match pc.direct_solve(pmat.as_ref(), b, x)? {
-                true => Ok(SolveStats {
-                    iterations: 1,
-                    final_residual: 0.0,
-                    reason: ConvergedReason::ConvergedAtol,
-                }),
-                false => Err(KError::SolveError(
-                    "Selected PC does not implement direct_solve; choose LU/QR/SuperLU_DIST"
-                        .into(),
-                )),
-            };
+            pc.direct_solve(
+                pmat.as_ref(),
+                b,
+                x,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+            )?;
+            return Ok(SolveStats {
+                iterations: 1,
+                final_residual: 0.0,
+                reason: ConvergedReason::ConvergedAtol,
+            });
         }
 
         let solver = self

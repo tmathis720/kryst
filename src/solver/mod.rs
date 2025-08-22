@@ -166,4 +166,8 @@ pub mod bicgstab;
 pub use bicgstab::BiCgStabSolver;
 pub mod direct_lu;
 pub use direct_lu::{LuSolver, QrSolver};
+pub mod dense_lu;
+pub mod dense_qr;
+pub mod superlu_dist;
+pub use superlu_dist::SuperLuDistSolver;
 
