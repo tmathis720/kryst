@@ -21,7 +21,7 @@ impl AsFormat for CsrMatrix<f64> {
 impl AsFormat for Mat<f64> {
     fn to_csr_cached(&self, drop_tol: f64) -> Arc<CsrMatrix<f64>> {
         let base_ptr = self as *const Mat<f64> as usize;
-        let structure_id = LinOp::structure_id(self);
+        let structure_id = LinOp::structure_id(self).0;
         let key = key_from_ptr(base_ptr, structure_id, drop_tol);
         if let Some(existing) = {
             let cache = CSR_CACHE.lock().unwrap();

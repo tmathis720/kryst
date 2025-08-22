@@ -114,7 +114,7 @@ impl PcFactory {
         _options: Option<&PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         match pc_type {
-            PcType::Jacobi => Ok(Box::new(MatOpPreconditioner::new(Box::new(Jacobi::new())))),
+            PcType::Jacobi => Ok(Box::new(Jacobi::new())),
             PcType::Ilut => {
                 let ilut = Ilut::new(0, 0.0);
                 Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilut))))

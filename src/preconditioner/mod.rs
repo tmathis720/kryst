@@ -42,13 +42,28 @@ impl Default for PcSide {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum PcReusePolicy {
+    Never,
+    ReuseNumeric,
+    Auto,
+}
+impl PcReusePolicy {
+    pub fn allow_numeric(self) -> bool {
+        matches!(self, PcReusePolicy::ReuseNumeric | PcReusePolicy::Auto)
+    }
+}
+
 /// Object-safe preconditioner operating on `f64` slices and [`LinOp`] matrices.
 pub trait Preconditioner: Send + Sync {
     /// Build any factorization/hierarchy once from the system matrix.
-    fn setup(
-        &mut self,
-        a: &dyn crate::matrix::op::LinOp<S = f64>,
-    ) -> Result<(), KError>;
+    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
+
+    fn update_values(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        self.setup(a)
+    }
+
+    fn supports_numeric_update(&self) -> bool { false }
 
     /// Apply M⁻¹ to input vector, writing result to output slice.
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;

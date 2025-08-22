@@ -106,6 +106,7 @@ pub struct PcOptions {
     pub superlu_workspace_memory_limit: Option<usize>,
     pub superlu_aggressive_memory_reuse: Option<bool>,
     pub superlu_preallocation_strategy: Option<String>,
+    pub reuse_policy: Option<String>,
 }
 
 /// Side enum kept as-is.
@@ -248,6 +249,7 @@ impl Sink for PcOptions {
             "pc_superlu_max_concurrent_panels" => set_opt!(&mut self.superlu_max_concurrent_panels, parse_as::<usize>(v, spec)?),
             "pc_superlu_workspace_memory_limit" => set_opt!(&mut self.superlu_workspace_memory_limit, parse_as::<usize>(v, spec)?),
             "pc_superlu_preallocation_strategy" => set_opt!(&mut self.superlu_preallocation_strategy, v.to_lowercase()),
+            "pc_reuse_policy" => set_opt!(&mut self.reuse_policy, v.to_string()),
             "options_file" => Ok(()), // consumed earlier
             _ => Err(KError::SolveError(format!("Unknown PC key: {}", spec.key))),
         }

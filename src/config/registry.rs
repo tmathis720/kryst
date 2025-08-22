@@ -58,6 +58,7 @@ pub static SPECS: &[Spec] = &[
     Spec { flag: "-pc_amg_ieee_checks",      key: "pc_amg_ieee_checks",      arity: Arity::Zero, kind: ValueKind::Bool, doc: "enable IEEE checks" },
     Spec { flag: "-pc_amg_optimize_workspace", key: "pc_amg_optimize_workspace", arity: Arity::Zero, kind: ValueKind::Bool, doc: "optimize workspace" },
     Spec { flag: "-pc_chain",                key: "pc_chain",                arity: Arity::One, kind: ValueKind::Str,   doc: "comma-separated chain" },
+    Spec { flag: "-pc_reuse_policy",        key: "pc_reuse_policy",        arity: Arity::One, kind: ValueKind::Str,   doc: "never|reuse_numeric|auto" },
 
     // ILU block
     Spec { flag: "-pc_ilu_type",             key: "pc_ilu_type",             arity: Arity::One, kind: ValueKind::Str,   doc: "ilu0|iluk|ilut|..." },

@@ -185,6 +185,12 @@ impl<
     pub fn values(&self) -> &[T] {
         self.inner.val()
     }
+
+    /// Mutably borrow the CSR value array (length = nnz).
+    #[inline]
+    pub fn values_mut(&mut self) -> &mut [T] {
+        self.inner.val_mut()
+    }
 }
 
 impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SparseMatrix<T> for CsrMatrix<T> {
