@@ -5,7 +5,7 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, PcReusePolicy};
 use crate::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter};
-use crate::utils::convergence::SolveStats;
+use crate::utils::convergence::{SolveStats, ConvergedReason};
 use std::sync::Arc;
 use std::str::FromStr;
 
@@ -67,6 +67,7 @@ pub struct KspContext {
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>>,
+    solver_type: SolverType,
     pub rtol: f64,
     pub atol: f64,
     pub dtol: f64,
@@ -88,6 +89,7 @@ impl KspContext {
             work: None,
             setup_called: false,
             monitors: Vec::new(),
+            solver_type: SolverType::Gmres,
             rtol: 1e-6,
             atol: 1e-12,
             dtol: 1e3,
@@ -101,25 +103,29 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        let solver: Box<dyn LinearSolver<Error = KError>> = match solver_type {
-            SolverType::Cg => {
-                Box::new(MatSolverAdapter::new(CgSolver::new(self.rtol, self.maxits)))
-            }
-            SolverType::Gmres => Box::new(MatSolverAdapter::new(GmresSolver::new(
+        self.solver_type = solver_type;
+        self.solver = match solver_type {
+            SolverType::Cg => Some(Box::new(MatSolverAdapter::new(CgSolver::new(
+                self.rtol,
+                self.maxits,
+            )))),
+            SolverType::Gmres => Some(Box::new(MatSolverAdapter::new(GmresSolver::new(
                 self.restart,
                 self.rtol,
                 self.maxits,
+            )))),
+            SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(
+                BiCgStabSolver::new(self.rtol, self.maxits),
             ))),
-            SolverType::BiCgStab => {
-                Box::new(MatSolverAdapter::new(BiCgStabSolver::new(self.rtol, self.maxits)))
-            }
-            SolverType::Preonly => {
-                return Err(KError::SolveError("Preonly solver not available".into()))
-            }
+            SolverType::Preonly => None,
         };
-        self.solver = Some(solver);
         self.invalidate_setup();
         Ok(self)
+    }
+
+    pub fn set_type_from_str(&mut self, solver_type: &str) -> Result<&mut Self, KError> {
+        let st = SolverType::from_str(solver_type)?;
+        self.set_type(st)
     }
 
     pub fn set_pc_type(
@@ -130,6 +136,14 @@ impl KspContext {
         self.pc = Some(PcFactory::create_preconditioner(pc_type, opts)?);
         self.invalidate_setup();
         Ok(self)
+    }
+
+    pub fn set_pc_type_from_str(
+        &mut self,
+        pc_type: &str,
+    ) -> Result<&mut Self, KError> {
+        let pct = PcType::from_str(pc_type)?;
+        self.set_pc_type(pct, None)
     }
 
     /// Configure the KSP context using parsed KSP options.
@@ -291,6 +305,33 @@ impl KspContext {
             .amat
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
+
+        if self.solver_type == SolverType::Preonly {
+            let pmat = self
+                .pmat
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("Pmat not set".into()))?;
+            let pc = self
+                .pc
+                .as_mut()
+                .ok_or_else(|| {
+                    KError::SolveError(
+                        "PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into(),
+                    )
+                })?;
+            return match pc.direct_solve(pmat.as_ref(), b, x)? {
+                true => Ok(SolveStats {
+                    iterations: 1,
+                    final_residual: 0.0,
+                    reason: ConvergedReason::ConvergedAtol,
+                }),
+                false => Err(KError::SolveError(
+                    "Selected PC does not implement direct_solve; choose LU/QR/SuperLU_DIST"
+                        .into(),
+                )),
+            };
+        }
+
         let solver = self
             .solver
             .as_mut()

@@ -180,7 +180,7 @@ pub use ilup::Ilup;
 pub use chebyshev::{Chebyshev, ChebyshevPre};
 pub use approxinv::ApproxInv;
 pub use chain::PcChain;
-pub use direct::LuPc;
+pub use direct::{LuPc, QrPc, SuperLuDistPc};
 pub use self::sor::MatSorType;
 
 /// Unified preconditioner enum for all supported types.
