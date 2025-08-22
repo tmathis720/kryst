@@ -2276,6 +2276,7 @@ fn construct_prolongation(a: &Mat<f64>, aggregates: &[usize]) -> Mat<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::utils;
     use faer::mat;
 
     #[test]
@@ -2380,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_matrix_multiply() {
+    fn test_spgemm() {
         // Test sparse matrix multiplication with simple matrices
         // A = [[2, 1], [0, 3]], B = [[1, 0], [1, 2]]
         // Expected: A*B = [[3, 2], [3, 6]]
@@ -2401,7 +2402,7 @@ mod tests {
             vec![1.0, 1.0, 2.0], // values
         );
 
-        let result = utils::sparse_matrix_multiply(&a, &b).unwrap();
+        let result = utils::spgemm(&a, &b).unwrap();
         let result_dense = result.to_dense();
 
         // Check expected values

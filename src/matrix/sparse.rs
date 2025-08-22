@@ -11,20 +11,34 @@ pub trait SparseMatrix<T> {
 }
 
 use faer::sparse::{
-    SymbolicSparseRowMat,    // owning symbolic CSR alias
-    SparseRowMat,            // owning numeric CSR alias
+    SparseRowMat, // owning numeric CSR alias
     //CreationError,           // error type for builders
+    SymbolicSparseRowMat, // owning symbolic CSR alias
 };
 use faer::traits::ComplexField;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
 /// CSR matrix wrapper for Faer sparse matrices.
+///
+/// Use [`row_ptr`], [`col_idx`], and [`values`] to access the raw CSR
+/// structure without incurring dense conversions. Sparse matrix products are
+/// available through [`crate::matrix::utils::spgemm`] and
+/// [`crate::matrix::utils::spgemm_with_drop_tol`]; the Galerkin triple product
+/// composes these CSR kernels directly.
 #[derive(Clone)]
 pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,
 }
 
-impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> CsrMatrix<T> {
+impl<
+        T: ComplexField
+            + Copy
+            + num_traits::Zero
+            + PartialOrd
+            + std::ops::Add<Output = T>
+            + std::ops::Mul<Output = T>,
+    > CsrMatrix<T>
+{
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
     pub fn from_csr(
         nrows: usize,
@@ -35,10 +49,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
     ) -> Self {
         // Build symbolic structure; second argument `None` means "no separate row_nnz":
         let symbolic = SymbolicSparseRowMat::new_checked(
-            nrows,
-            ncols,
-            row_ptr,
-            None,      // optional row_nnz: Option<Vec<usize>>
+            nrows, ncols, row_ptr, None, // optional row_nnz: Option<Vec<usize>>
             col_idx,
         );
         // Attach the numerical values:
@@ -47,15 +58,16 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
     }
 
     /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
-    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self 
-    where T: PartialOrd + std::ops::Neg<Output = T>
+    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self
+    where
+        T: PartialOrd + std::ops::Neg<Output = T>,
     {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
         let mut col_idx = Vec::new();
         let mut values = Vec::new();
-        
+
         for i in 0..nrows {
             for j in 0..ncols {
                 let val = dense[(i, j)];
@@ -67,18 +79,19 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
             }
             row_ptr.push(col_idx.len());
         }
-        
+
         Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
     }
 
     /// Create an identity matrix of size n x n
-    pub fn identity(n: usize) -> Self 
-    where T: num_traits::One
+    pub fn identity(n: usize) -> Self
+    where
+        T: num_traits::One,
     {
         let row_ptr: Vec<usize> = (0..=n).collect();
         let col_idx: Vec<usize> = (0..n).collect();
         let values: Vec<T> = vec![T::one(); n];
-        
+
         Self::from_csr(n, n, row_ptr, col_idx, values)
     }
 
@@ -105,11 +118,11 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
     pub fn diagonal(&self) -> Vec<T> {
         let n = self.nrows().min(self.ncols());
         let mut diag = vec![T::zero(); n];
-        
+
         for i in 0..n {
             let row_start = self.inner.row_ptr()[i];
             let row_end = self.inner.row_ptr()[i + 1];
-            
+
             for idx in row_start..row_end {
                 if self.inner.col_idx()[idx] == i {
                     diag[i] = self.inner.val()[idx];
@@ -117,88 +130,45 @@ impl<T: ComplexField + Copy + num_traits::Zero + PartialOrd + std::ops::Add<Outp
                 }
             }
         }
-        
+
         diag
     }
 
     /// Sparse matrix-vector product: y = alpha * A * x + beta * y
-    pub fn spmv_scaled(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::KError> {
+    pub fn spmv_scaled(
+        &self,
+        alpha: T,
+        x: &[T],
+        beta: T,
+        y: &mut [T],
+    ) -> Result<(), crate::KError> {
         if x.len() != self.ncols() || y.len() != self.nrows() {
             return Err(crate::KError::InvalidInput(format!(
                 "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len()={}",
-                self.nrows(), self.ncols(), x.len(), y.len()
+                self.nrows(),
+                self.ncols(),
+                x.len(),
+                y.len()
             )));
         }
 
         for i in 0..self.nrows() {
             let row_start = self.inner.row_ptr()[i];
             let row_end = self.inner.row_ptr()[i + 1];
-            
+
             let mut sum = T::zero();
             for idx in row_start..row_end {
                 let j = self.inner.col_idx()[idx];
                 sum = sum + self.inner.val()[idx] * x[j];
             }
-            
+
             y[i] = alpha * sum + beta * y[i];
         }
-        
+
         Ok(())
     }
-    
-    /// Access to row pointers (indices into col_indices and values arrays)
-    /// Note: This is a simplified implementation using dense conversion
-    pub fn to_row_ptr_vec(&self) -> Vec<usize> {
-        // For now, we'll reconstruct CSR from dense (inefficient but works)
-        let dense = self.to_dense();
-        let mut row_ptrs = vec![0];
-        let mut nnz = 0;
-        
-        for i in 0..self.inner.nrows() {
-            for j in 0..self.inner.ncols() {
-                if dense[(i, j)] != T::zero() {
-                    nnz += 1;
-                }
-            }
-            row_ptrs.push(nnz);
-        }
-        row_ptrs
-    }
-    
-    /// Access to column indices array
-    /// Note: This is a simplified implementation using dense conversion
-    pub fn to_col_idx_vec(&self) -> Vec<usize> {
-        let dense = self.to_dense();
-        let mut col_indices = Vec::new();
-        
-        for i in 0..self.inner.nrows() {
-            for j in 0..self.inner.ncols() {
-                if dense[(i, j)] != T::zero() {
-                    col_indices.push(j);
-                }
-            }
-        }
-        col_indices
-    }
-    
-    /// Access to values array
-    /// Note: This is a simplified implementation using dense conversion
-    pub fn to_values_vec(&self) -> Vec<T> {
-        let dense = self.to_dense();
-        let mut values = Vec::new();
-        
-        for i in 0..self.inner.nrows() {
-            for j in 0..self.inner.ncols() {
-                let val = dense[(i, j)];
-                if val != T::zero() {
-                    values.push(val);
-                }
-            }
-        }
-        values
-    }
 
-        /// Borrow the CSR row pointer array (length = nrows + 1).
+    /// Borrow the CSR row pointer array (length = nrows + 1).
     #[inline]
     pub fn row_ptr(&self) -> &[usize] {
         self.inner.row_ptr()
@@ -230,7 +200,7 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SparseMatrix<T
         for i in 0..y.len() {
             y[i] = T::zero();
         }
-        
+
         // Sparse matrix-vector multiplication
         for i in 0..self.inner.nrows() {
             let row_start = self.inner.row_ptr()[i];
@@ -255,7 +225,9 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> Indexing for C
 
 use crate::core::traits::SubmatrixExtract;
 
-impl<T: ComplexField + Copy + num_traits::Zero + num_traits::One + PartialEq + PartialOrd> SubmatrixExtract for CsrMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::Zero + num_traits::One + PartialEq + PartialOrd>
+    SubmatrixExtract for CsrMatrix<T>
+{
     fn submatrix(&self, indices: &[usize]) -> Self {
         let dense = self.inner.to_dense();
         let n = indices.len();
@@ -280,20 +252,33 @@ impl<T: ComplexField + Copy + num_traits::Zero + num_traits::One + PartialEq + P
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
-#[cfg(feature = "rayon")]
-use rayon::iter::IntoParallelRefMutIterator;
 
 #[cfg(feature = "rayon")]
-impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero + Send + Sync> CsrMatrix<T> {
-    /// Parallel SpMV using Rayon.
+impl<T> CsrMatrix<T>
+where
+    T: ComplexField
+        + Copy
+        + num_traits::Zero
+        + PartialOrd
+        + Send
+        + Sync
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+{
+    /// Parallel SpMV using CSR structure directly.
     pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), SparseMatrix::nrows(self));
-        let dense = self.inner.to_dense();
+        assert_eq!(y.len(), self.nrows());
+        let rp = self.row_ptr();
+        let cj = self.col_idx();
+        let vv = self.values();
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = T::zero();
-            for j in 0..self.ncols() {
-                sum = sum + dense[(i, j)] * x[j];
+            let rs = rp[i];
+            let re = rp[i + 1];
+            for p in rs..re {
+                let j = cj[p];
+                sum = sum + vv[p] * x[j];
             }
             *yi = sum;
         });
@@ -307,7 +292,7 @@ mod tests {
     #[test]
     fn identity_spmv() {
         // 3×3 identity in CSR: row_ptr=[0,1,2,3], col_idx=[0,1,2], vals=[1,1,1]
-        let m = CsrMatrix::from_csr(3, 3, vec![0,1,2,3], vec![0,1,2], vec![1.0,1.0,1.0]);
+        let m = CsrMatrix::from_csr(3, 3, vec![0, 1, 2, 3], vec![0, 1, 2], vec![1.0, 1.0, 1.0]);
         let x = vec![2.0, 3.0, 5.0];
         let mut y = vec![0.0; 3];
         m.spmv_scaled(1.0, &x, 0.0, &mut y).unwrap();
@@ -318,10 +303,11 @@ mod tests {
     fn simple_pattern() {
         // 2×3 matrix [[1,2,0],[0,3,4]]
         let m = CsrMatrix::from_csr(
-            2, 3,
-            vec![0,2,4],
-            vec![0,1,1,2],
-            vec![1.0,2.0,3.0,4.0],
+            2,
+            3,
+            vec![0, 2, 4],
+            vec![0, 1, 1, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
         );
         let x = vec![1.0, 1.0, 1.0];
         let mut y = vec![0.0; 2];
