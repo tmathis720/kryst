@@ -1,9 +1,15 @@
-use std::{any::Any, hash::{Hash, Hasher}};
+use std::any::Any;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use faer::traits::ComplexField;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StructureId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ValuesId(pub u64);
+
 /// Format-agnostic linear operator.
-pub trait LinOp: Send + Sync {
-    /// Scalar type.
+pub trait LinOp: Send + Sync + Any {
     type S: ComplexField;
 
     /// Dimensions (rows, cols).
@@ -17,21 +23,100 @@ pub trait LinOp: Send + Sync {
         unimplemented!("transpose/adjoint not provided for this operator");
     }
 
-    /// Lightweight identifiers for structure/value changes.
-    fn structure_id(&self) -> u64 { 0 }
-    fn values_id(&self) -> u64 { 0 }
-
     /// Downcast hook for specialized solvers/preconditioners.
     fn as_any(&self) -> &dyn Any;
+
+    /// Changes when the nonzero pattern / shape changes.
+    /// Default 0 -> unknown; higher layers may fall back to pointer identity.
+    fn structure_id(&self) -> StructureId { StructureId(0) }
+
+    /// Changes when only numerical values change.
+    /// Default 0 -> unknown.
+    fn values_id(&self) -> ValuesId { ValuesId(0) }
 }
 
-// --- Dense adapter -------------------------------------------------------
+/// Simple bumpable counters for LinOp implementors/wrappers.
+#[derive(Default)]
+pub struct ChangeIds {
+    pub sid: AtomicU64,
+    pub vid: AtomicU64,
+}
+impl ChangeIds {
+    pub fn structure_id(&self) -> StructureId {
+        StructureId(self.sid.load(Ordering::Relaxed))
+    }
+    pub fn values_id(&self) -> ValuesId {
+        ValuesId(self.vid.load(Ordering::Relaxed))
+    }
+    pub fn bump_structure(&self) {
+        self.sid.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn bump_values(&self) {
+        self.vid.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// --- Optional wrappers for dense and CSR matrices -------------------------
 use faer::Mat;
+use crate::matrix::sparse::CsrMatrix;
+
+pub struct DenseOp {
+    mat: Arc<Mat<f64>>,
+    ids: ChangeIds,
+}
+impl DenseOp {
+    pub fn new(mat: Arc<Mat<f64>>) -> Self {
+        let ids = ChangeIds::default();
+        ids.bump_structure();
+        ids.bump_values();
+        Self { mat, ids }
+    }
+    pub fn mark_structure_changed(&self) { self.ids.bump_structure(); }
+    pub fn mark_values_changed(&self) { self.ids.bump_values(); }
+    pub fn inner(&self) -> &Mat<f64> { &self.mat }
+}
+impl LinOp for DenseOp {
+    type S = f64;
+    fn dims(&self) -> (usize, usize) { (self.mat.nrows(), self.mat.ncols()) }
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        let _ = crate::matrix::utils::parallel_mat_vec(&self.mat, x, y);
+    }
+    fn as_any(&self) -> &dyn Any { &*self.mat }
+    fn structure_id(&self) -> StructureId { self.ids.structure_id() }
+    fn values_id(&self) -> ValuesId { self.ids.values_id() }
+}
+
+pub struct CsrOp {
+    csr: Arc<CsrMatrix<f64>>,
+    ids: ChangeIds,
+}
+impl CsrOp {
+    pub fn new(csr: Arc<CsrMatrix<f64>>) -> Self {
+        let ids = ChangeIds::default();
+        ids.bump_structure();
+        ids.bump_values();
+        Self { csr, ids }
+    }
+    pub fn mark_structure_changed(&self) { self.ids.bump_structure(); }
+    pub fn mark_values_changed(&self) { self.ids.bump_values(); }
+    pub fn inner(&self) -> &CsrMatrix<f64> { &self.csr }
+}
+impl LinOp for CsrOp {
+    type S = f64;
+    fn dims(&self) -> (usize, usize) { (self.csr.nrows(), self.csr.ncols()) }
+    fn matvec(&self, x: &[f64], y: &mut [f64]) { self.csr.spmv(x, y); }
+    fn as_any(&self) -> &dyn Any { &*self.csr }
+    fn structure_id(&self) -> StructureId { self.ids.structure_id() }
+    fn values_id(&self) -> ValuesId { self.ids.values_id() }
+}
+
+// --- Direct adapters ------------------------------------------------------
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 impl LinOp for Mat<f64> {
     type S = f64;
-
     fn dims(&self) -> (usize, usize) { (self.nrows(), self.ncols()) }
-
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
@@ -43,32 +128,39 @@ impl LinOp for Mat<f64> {
             y[i] = sum;
         }
     }
-
-    fn structure_id(&self) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+    fn matvec_t(&self, x: &[f64], y: &mut [f64]) {
+        // simple dense transpose matvec
+        assert_eq!(x.len(), self.nrows());
+        assert_eq!(y.len(), self.ncols());
+        for j in 0..self.ncols() {
+            let mut sum = 0.0;
+            for i in 0..self.nrows() {
+                sum += self[(i, j)] * x[i];
+            }
+            y[j] = sum;
+        }
+    }
+    fn as_any(&self) -> &dyn Any { self }
+    fn structure_id(&self) -> StructureId {
+        let mut h = DefaultHasher::new();
         self.nrows().hash(&mut h);
         self.ncols().hash(&mut h);
-        h.finish()
+        StructureId(h.finish())
     }
-
-    fn as_any(&self) -> &dyn Any { self }
+    fn values_id(&self) -> ValuesId { ValuesId(0) }
 }
 
-// --- CSR adapter ---------------------------------------------------------
-use crate::matrix::sparse::{CsrMatrix, SparseMatrix};
+use crate::matrix::sparse::SparseMatrix;
 impl LinOp for CsrMatrix<f64> {
     type S = f64;
-
     fn dims(&self) -> (usize, usize) { (self.nrows(), self.ncols()) }
-
     fn matvec(&self, x: &[f64], y: &mut [f64]) { self.spmv(x, y); }
-
-    fn structure_id(&self) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+    fn as_any(&self) -> &dyn Any { self }
+    fn structure_id(&self) -> StructureId {
+        let mut h = DefaultHasher::new();
         self.row_ptr().hash(&mut h);
         self.col_idx().hash(&mut h);
-        h.finish()
+        StructureId(h.finish())
     }
-
-    fn as_any(&self) -> &dyn Any { self }
+    fn values_id(&self) -> ValuesId { ValuesId(0) }
 }

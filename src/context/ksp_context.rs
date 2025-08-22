@@ -1,9 +1,9 @@
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
-use crate::matrix::op::LinOp;
+use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcSide, Preconditioner, PcReusePolicy};
 use crate::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter};
 use crate::utils::convergence::SolveStats;
 use std::sync::Arc;
@@ -73,6 +73,9 @@ pub struct KspContext {
     pub maxits: usize,
     pub restart: usize,
     pub pc_side: PcSide,
+    pc_reuse: PcReusePolicy,
+    last_pc_sid: Option<StructureId>,
+    last_pc_vid: Option<ValuesId>,
 }
 
 impl KspContext {
@@ -91,6 +94,9 @@ impl KspContext {
             maxits: 1000,
             restart: 30,
             pc_side: PcSide::Left,
+            pc_reuse: PcReusePolicy::Auto,
+            last_pc_sid: None,
+            last_pc_vid: None,
         }
     }
 
@@ -165,6 +171,14 @@ impl KspContext {
             let pct = PcType::from_str(pct)?;
             self.set_pc_type(pct, Some(pc_opts))?;
         }
+        if let Some(ref pol) = pc_opts.reuse_policy {
+            let pol = match pol.as_str() {
+                "never" => PcReusePolicy::Never,
+                "reuse_numeric" => PcReusePolicy::ReuseNumeric,
+                _ => PcReusePolicy::Auto,
+            };
+            self.set_pc_reuse_policy(pol);
+        }
         if let Some(ref side) = ksp_opts.pc_side {
             self.pc_side = PcSide::from_str(side)?;
         }
@@ -183,19 +197,71 @@ impl KspContext {
         self
     }
 
+    pub fn set_pc_reuse_policy(&mut self, policy: PcReusePolicy) -> &mut Self {
+        self.pc_reuse = policy;
+        self
+    }
+
+    fn reset_pc_ids(&mut self) {
+        self.last_pc_sid = None;
+        self.last_pc_vid = None;
+    }
+
+    pub fn last_pc_sid(&self) -> Option<StructureId> { self.last_pc_sid }
+    pub fn last_pc_vid(&self) -> Option<ValuesId> { self.last_pc_vid }
+
     /// Prepare preconditioner and workspace.
     pub fn setup(&mut self) -> Result<(), KError> {
-        let amat = self
-            .amat
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
         let pmat = self
             .pmat
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("Pmat not set".into()))?;
+        let amat = self
+            .amat
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
+
+        let sid = {
+            let id = pmat.structure_id();
+            if id.0 != 0 {
+                id
+            } else {
+                StructureId(Arc::as_ptr(pmat) as *const () as usize as u64)
+            }
+        };
+        let vid = pmat.values_id();
+
+        if self.pc.is_none() {
+            // no factory hook here; assume pc set elsewhere
+            self.last_pc_sid = None;
+            self.last_pc_vid = None;
+        }
 
         if let Some(pc) = self.pc.as_mut() {
-            pc.setup(pmat.as_ref())?;
+            match self.last_pc_sid {
+                None => {
+                    pc.setup(pmat.as_ref())?;
+                    self.last_pc_sid = Some(sid);
+                    self.last_pc_vid = Some(vid);
+                }
+                Some(old_sid) if old_sid != sid => {
+                    pc.setup(pmat.as_ref())?;
+                    self.last_pc_sid = Some(sid);
+                    self.last_pc_vid = Some(vid);
+                }
+                Some(_old_sid) => {
+                    if self.last_pc_vid != Some(vid)
+                        && self.pc_reuse.allow_numeric()
+                        && pc.supports_numeric_update()
+                    {
+                        pc.update_values(pmat.as_ref())?;
+                        self.last_pc_vid = Some(vid);
+                    } else if self.last_pc_vid != Some(vid) {
+                        pc.setup(pmat.as_ref())?;
+                        self.last_pc_vid = Some(vid);
+                    }
+                }
+            }
         }
 
         let (m, _) = amat.dims();
@@ -247,6 +313,7 @@ impl KspContext {
 
     fn invalidate_setup(&mut self) {
         self.setup_called = false;
+        self.reset_pc_ids();
     }
 
     /// Add an iteration monitor callback.
