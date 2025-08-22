@@ -11,8 +11,9 @@
 //! - Reference solution monitoring capabilities
 
 use kryst::solver::gmres::{GmresSolver, Preconditioning};
-use kryst::solver::LinearSolver;
-use kryst::preconditioner::{Jacobi, Preconditioner};
+use kryst::solver::legacy::LinearSolver;
+use kryst::preconditioner::Jacobi;
+use kryst::preconditioner::legacy::Preconditioner;
 use kryst::core::traits::{MatVec, Indexing};
 use kryst::parallel::UniverseComm;
 

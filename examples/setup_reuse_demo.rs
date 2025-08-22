@@ -11,6 +11,7 @@
 //! ```
 
 use std::time::Instant;
+use std::sync::Arc;
 use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
@@ -38,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_solves = 5;  // Number of right-hand sides to solve
 
     // Create the system matrix (represents a discrete Laplacian)
-    let a = create_test_matrix(n);
+    let a = Arc::new(create_test_matrix(n));
     println!("Created {}×{} tridiagonal system matrix", n, n);
 
     // Create multiple right-hand side vectors
@@ -57,16 +58,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--------------------------------------");
 
     let mut ksp_auto = KspContext::new();
-    ksp_auto.set_type(SolverType::Cg)?
-           .set_pc_type(PcType::Jacobi)?
-           .set_tolerances(1e-8, 1e-12, 1e3, 1000);
+    ksp_auto
+        .set_type(SolverType::Cg)?
+        .set_pc_type(PcType::Jacobi, None)?
+        .set_tolerances(1e-8, 1e-12, 1e3, 1000)
+        .set_operators(a.clone(), None);
 
     let start_auto = Instant::now();
     for (i, b) in rhs_vectors.iter().enumerate() {
         let mut x = vec![0.0; n];
         
         // Each solve may trigger setup overhead
-        let stats = ksp_auto.solve(&a, b, &mut x)?;
+        let stats = ksp_auto.solve(b, &mut x)?;
         
         println!("  Solve {}: {} iterations, residual = {:.2e}", 
                  i + 1, stats.iterations, stats.final_residual);
@@ -82,13 +85,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("------------------------------------------");
 
     let mut ksp_explicit = KspContext::new();
-    ksp_explicit.set_type(SolverType::Cg)?
-               .set_pc_type(PcType::Jacobi)?
-               .set_tolerances(1e-8, 1e-12, 1e3, 1000);
+    ksp_explicit
+        .set_type(SolverType::Cg)?
+        .set_pc_type(PcType::Jacobi, None)?
+        .set_tolerances(1e-8, 1e-12, 1e3, 1000)
+        .set_operators(a.clone(), None);
 
     // Explicit setup phase (done once)
     let setup_start = Instant::now();
-    ksp_explicit.setup(&a, n)?;
+    ksp_explicit.setup()?;
     let setup_time = setup_start.elapsed();
     println!("  Setup time: {:.3} ms", setup_time.as_secs_f64() * 1000.0);
     println!("  Setup status: {}", ksp_explicit.is_setup());
@@ -99,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut x = vec![0.0; n];
         
         // This solve reuses the preconditioner and workspace
-        let stats = ksp_explicit.solve(&a, b, &mut x)?;
+        let stats = ksp_explicit.solve(b, &mut x)?;
         
         println!("  Solve {}: {} iterations, residual = {:.2e}", 
                  i + 1, stats.iterations, stats.final_residual);
@@ -135,11 +140,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--------------------");
 
     let mut ksp_mgmt = KspContext::new();
-    ksp_mgmt.set_type(SolverType::Gmres)?
-           .set_pc_type(PcType::None)?;
+    ksp_mgmt
+        .set_type(SolverType::Gmres)?
+        .set_pc_type(PcType::None, None)?
+        .set_operators(a.clone(), None);
 
     // Initial setup
-    ksp_mgmt.setup(&a, n)?;
+    ksp_mgmt.setup()?;
     println!("Initial setup: {}", ksp_mgmt.is_setup());
 
     // Change restart parameter (invalidates workspace)
@@ -147,12 +154,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("After changing restart: {}", ksp_mgmt.is_setup());
 
     // Re-setup with new parameters
-    ksp_mgmt.setup(&a, n)?;
+    ksp_mgmt.setup()?;
     println!("After re-setup: {}", ksp_mgmt.is_setup());
-
-    // Manual invalidation
-    ksp_mgmt.invalidate_setup();
-    println!("After manual invalidation: {}", ksp_mgmt.is_setup());
     println!();
 
     println!("Demo completed successfully!");
@@ -161,7 +164,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1. Use explicit setup() for repeated solves with the same matrix");
     println!("2. Workspace is automatically allocated and reused");
     println!("3. Changing solver parameters invalidates workspace");
-    println!("4. Use invalidate_setup() when matrix structure changes");
 
     Ok(())
 }
