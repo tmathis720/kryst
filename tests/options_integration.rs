@@ -190,9 +190,8 @@ fn test_preonly_configuration() {
 
     let mut ksp = KspContext::new();
 
-    // Configure PREONLY with LU preconditioner and expect failure
-    assert!(ksp.set_type(SolverType::Preonly).is_err());
-    // Preonly solver is not available, so we don't attempt further configuration
+    // PREONLY should now be accepted
+    ksp.set_type(SolverType::Preonly).unwrap();
 }
 
 #[test]
@@ -203,7 +202,8 @@ fn test_preonly_options_integration() {
     let args = vec!["-ksp_type", "preonly", "-pc_type", "lu"];
     let ksp_opts = KspOptions::from_args(&args).unwrap();
     let pc_opts = PcOptions::from_args(&args).unwrap();
-    
+
     let mut ksp = KspContext::new();
-    assert!(ksp.set_from_all_options(&ksp_opts, &pc_opts).is_err());
+    // PREONLY with LU should configure successfully
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
 }

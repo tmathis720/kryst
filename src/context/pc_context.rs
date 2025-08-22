@@ -12,6 +12,9 @@ use crate::preconditioner::{
     Sor,
     MatSorType,
     ChebyshevPre,
+    LuPc,
+    QrPc,
+    SuperLuDistPc,
 };
 use crate::matrix::op::LinOp;
 use faer::Mat;
@@ -136,6 +139,9 @@ impl PcFactory {
                 Ok(Box::new(LegacyOpPreconditioner::new(Box::new(pre))))
             }
             PcType::None => Ok(Box::new(NoOpPreconditioner)),
+            PcType::Lu => Ok(Box::new(LuPc::new())),
+            PcType::Qr => Ok(Box::new(QrPc::new())),
+            PcType::SuperLuDist => Ok(Box::new(SuperLuDistPc::new())),
             _ => Err(KError::UnrecognizedPcType(format!("{:?} not implemented", pc_type))),
         }
     }
