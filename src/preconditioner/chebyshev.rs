@@ -27,7 +27,7 @@
 //! - https://en.wikipedia.org/wiki/Chebyshev_polynomials
 
 use crate::error::KError;
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::core::traits::MatVec;
 use faer::Mat;
 

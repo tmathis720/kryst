@@ -43,6 +43,11 @@ pub struct MpiComm {
 }
 
 #[cfg(feature = "mpi")]
+unsafe impl Send for MpiComm {}
+#[cfg(feature = "mpi")]
+unsafe impl Sync for MpiComm {}
+
+#[cfg(feature = "mpi")]
 impl MpiComm {
     /// Initializes MPI and constructs a new `MpiComm` instance.
     ///

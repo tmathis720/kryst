@@ -16,8 +16,8 @@
 //! - Freund, R. W., & Nachtigal, N. M. (1991). A transpose-free quasi-minimal residual algorithm for non-Hermitian linear systems. SIAM J. Sci. Stat. Comput.
 //! - https://en.wikipedia.org/wiki/Quasi-minimal_residual_method
 
-use crate::solver::LinearSolver;
-use crate::preconditioner::Preconditioner;
+use crate::solver::legacy::LinearSolver;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::core::traits::{MatVec, InnerProduct};
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;

@@ -10,7 +10,7 @@
 //! - https://en.wikipedia.org/wiki/Conjugate_gradient_squared_method
 
 use crate::core::traits::{InnerProduct, MatVec};
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 #[cfg(feature = "logging")]
@@ -74,7 +74,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

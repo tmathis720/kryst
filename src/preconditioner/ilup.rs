@@ -21,7 +21,7 @@
 
 use crate::core::traits::MatShape;
 use crate::error::KError;
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 
 /// Sparse row structure for storing L/U factors.
 ///

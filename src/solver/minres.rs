@@ -14,7 +14,7 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.4
 //! - https://en.wikipedia.org/wiki/MINRES
 
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::core::traits::{MatVec, InnerProduct};
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
@@ -100,7 +100,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

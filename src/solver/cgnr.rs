@@ -21,7 +21,7 @@
 //! - https://en.wikipedia.org/wiki/Conjugate_gradient_method#The_normal_equations
 
 use crate::core::traits::{InnerProduct, MatVec};
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{SolveStats, Convergence, ConvergedReason};
 use crate::error::KError;
 #[cfg(feature = "logging")]
@@ -86,7 +86,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
@@ -286,7 +286,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

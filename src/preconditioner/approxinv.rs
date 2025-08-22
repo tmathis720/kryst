@@ -28,7 +28,7 @@
 use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::preconditioner::SparsityPattern;
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use num_traits::Float;
 use std::any::TypeId;
 use faer::prelude::SolveLstsq;
@@ -331,7 +331,7 @@ fn get_row_pattern<M: 'static>(a: &M) -> Option<&dyn crate::core::traits::RowPat
 mod tests {
     use super::*;
     use crate::core::traits::MatVec;
-    use crate::preconditioner::Preconditioner;
+    use crate::preconditioner::legacy::Preconditioner;
     use approx::assert_relative_eq;
 
     /// Simple dense matrix for testing

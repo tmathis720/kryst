@@ -14,7 +14,7 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §9.4
 //! - https://en.wikipedia.org/wiki/Generalized_minimal_residual_method
 
-use crate::preconditioner::FlexiblePreconditioner;
+use crate::preconditioner::legacy::FlexiblePreconditioner;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use crate::core::traits::{MatVec, InnerProduct};
@@ -22,7 +22,7 @@ use crate::core::traits::{MatVec, InnerProduct};
 use log::trace;
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 
 /// Orthogonalization method for Arnoldi process in FGMRES.
 pub enum Orthog { Classical, Modified }
@@ -160,7 +160,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        _pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        _pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

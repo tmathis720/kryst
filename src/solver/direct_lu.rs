@@ -13,7 +13,7 @@
 //! - Golub & Van Loan, Matrix Computations
 
 use crate::error::KError;
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use faer::linalg::solvers::{FullPivLu, Qr, SolveCore};
 use faer::{Mat, MatMut, Conj};
 use faer::traits::{ComplexField, RealField};
@@ -78,7 +78,7 @@ where
     fn solve(
         &mut self,
         a: &Mat<T>,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<T>, Vec<T>> + '_)>,
         b: &Vec<T>,
         x: &mut Vec<T>,
         _comm: &crate::parallel::UniverseComm,
@@ -167,7 +167,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     fn solve(
         &mut self,
         a: &Mat<T>,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<T>, Vec<T>> + '_)>,
         b: &Vec<T>,
         x: &mut Vec<T>,
         _comm: &crate::parallel::UniverseComm,
@@ -218,7 +218,7 @@ impl Default for QrSolver {
 mod tests {
     use super::*;
     use faer::{Mat};
-    use crate::solver::LinearSolver;
+    use crate::solver::legacy::LinearSolver;
 
     #[test]
     fn lu_solver_solves_dense_system() {

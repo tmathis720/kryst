@@ -57,7 +57,7 @@ use crate::error::KError;
 use crate::matrix::sparse::{CsrMatrix, SparseMatrix};
 use crate::matrix::utils;
 use crate::parallel::Comm;
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use faer::Mat;
 #[cfg(feature = "logging")]
 use log::{debug, info, trace, warn};
