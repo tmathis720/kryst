@@ -1,22 +1,11 @@
 use crate::config::options::PcOptions;
 use crate::error::KError;
-use crate::preconditioner::{
-    Preconditioner,
-    PreconditionerMat,
-    PcSide,
-    jacobi::Jacobi,
-    LegacyOpPreconditioner,
-    Ilut,
-    Ilutp,
-    Ilup,
-    Sor,
-    MatSorType,
-    ChebyshevPre,
-    LuPc,
-    QrPc,
-    SuperLuDistPc,
-};
 use crate::matrix::op::LinOp;
+use crate::preconditioner::direct::{LuPc, QrPc, SuperLuDistPc};
+use crate::preconditioner::{
+    jacobi::Jacobi, ChebyshevPre, Ilup, Ilut, Ilutp, LegacyOpPreconditioner, MatSorType, PcSide,
+    Preconditioner, PreconditionerMat, Sor,
+};
 use faer::Mat;
 use std::str::FromStr;
 
@@ -78,7 +67,9 @@ pub struct DeferredPcInfo {
 pub struct NoOpPreconditioner;
 
 impl Preconditioner for NoOpPreconditioner {
-    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
+    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        Ok(())
+    }
     fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
         z.copy_from_slice(r);
         Ok(())
@@ -91,7 +82,9 @@ struct MatOpPreconditioner {
 }
 
 impl MatOpPreconditioner {
-    fn new(inner: Box<dyn PreconditionerMat>) -> Self { Self { inner } }
+    fn new(inner: Box<dyn PreconditionerMat>) -> Self {
+        Self { inner }
+    }
 }
 
 impl Preconditioner for MatOpPreconditioner {
@@ -131,7 +124,8 @@ impl PcFactory {
                 Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))))
             }
             PcType::Sor => {
-                let sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::APPLY_LOWER, 0.0);
+                let sor =
+                    Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::APPLY_LOWER, 0.0);
                 Ok(Box::new(LegacyOpPreconditioner::new(Box::new(sor))))
             }
             PcType::Chebyshev => {
@@ -141,8 +135,16 @@ impl PcFactory {
             PcType::None => Ok(Box::new(NoOpPreconditioner)),
             PcType::Lu => Ok(Box::new(LuPc::new())),
             PcType::Qr => Ok(Box::new(QrPc::new())),
+            #[cfg(feature = "superlu_dist")]
             PcType::SuperLuDist => Ok(Box::new(SuperLuDistPc::new())),
-            _ => Err(KError::UnrecognizedPcType(format!("{:?} not implemented", pc_type))),
+            #[cfg(not(feature = "superlu_dist"))]
+            PcType::SuperLuDist => Err(KError::SolveError(
+                "superlu_dist feature not enabled".into(),
+            )),
+            other => Err(KError::UnrecognizedPcType(format!(
+                "{:?} not implemented",
+                other
+            ))),
         }
     }
 
@@ -160,7 +162,9 @@ impl PcFactory {
         _info: DeferredPcInfo,
         _matrix: &Mat<f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
-        Err(KError::SolveError("deferred preconditioners not supported".into()))
+        Err(KError::SolveError(
+            "deferred preconditioners not supported".into(),
+        ))
     }
 
     pub fn create_pc_chain(
@@ -181,3 +185,31 @@ pub enum SparsityPattern {
 
 /// Placeholder type for API compatibility.
 pub type PC = ();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preconditioner::Preconditioner;
+    use std::str::FromStr;
+
+    #[test]
+    fn factory_builds_lu_qr() {
+        let lu = PcFactory::create_preconditioner(PcType::from_str("lu").unwrap(), None).unwrap();
+        let qr = PcFactory::create_preconditioner(PcType::from_str("qr").unwrap(), None).unwrap();
+
+        fn _is_pc(_p: &Box<dyn Preconditioner>) {}
+        _is_pc(&lu);
+        _is_pc(&qr);
+    }
+
+    #[test]
+    fn factory_builds_superludist_or_errors_by_feature() {
+        let r = PcFactory::create_preconditioner(PcType::from_str("superludist").unwrap(), None);
+
+        #[cfg(feature = "superlu_dist")]
+        assert!(r.is_ok());
+
+        #[cfg(not(feature = "superlu_dist"))]
+        assert!(r.is_err());
+    }
+}
