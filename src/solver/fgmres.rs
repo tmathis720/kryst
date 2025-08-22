@@ -160,7 +160,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        _pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        _pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
@@ -532,7 +532,7 @@ where
     fn cycle<M, V>(
         &mut self,
         a: &M,
-        mut pc: Option<&mut dyn FlexiblePreconditioner<M, V>>,
+        mut pc: Option<&mut (dyn FlexiblePreconditioner<M, V> + '_)>,
         b: &V,
         #[allow(unused_variables)] _x: &mut V,
         v_basis: &mut [V],

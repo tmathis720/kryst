@@ -104,7 +104,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        _pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        _pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

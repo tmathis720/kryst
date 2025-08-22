@@ -165,7 +165,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<M, V>>,
+        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

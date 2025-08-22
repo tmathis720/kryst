@@ -78,7 +78,7 @@ where
     fn solve(
         &mut self,
         a: &Mat<T>,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>,
+        pc: Option<&(dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>> + '_)>,
         b: &Vec<T>,
         x: &mut Vec<T>,
         _comm: &crate::parallel::UniverseComm,
@@ -167,7 +167,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
     fn solve(
         &mut self,
         a: &Mat<T>,
-        pc: Option<&dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>>>,
+        pc: Option<&(dyn crate::preconditioner::Preconditioner<Mat<T>, Vec<T>> + '_)>,
         b: &Vec<T>,
         x: &mut Vec<T>,
         _comm: &crate::parallel::UniverseComm,

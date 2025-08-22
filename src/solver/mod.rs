@@ -55,7 +55,7 @@ pub trait LinearSolver<M: ?Sized, V> {
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&dyn Preconditioner<M, V>>,
+        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
@@ -73,7 +73,7 @@ pub trait LinearSolver<M: ?Sized, V> {
     fn solve_simple(
         &mut self,
         a: &M,
-        pc: Option<&dyn Preconditioner<M, V>>,
+        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
@@ -88,7 +88,7 @@ pub trait LinearSolver<M: ?Sized, V> {
     fn solve_with_monitors(
         &mut self,
         a: &M,
-        pc: Option<&dyn Preconditioner<M, V>>,
+        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
@@ -104,7 +104,7 @@ pub trait LinearSolver<M: ?Sized, V> {
     fn solve_with_workspace(
         &mut self,
         a: &M,
-        pc: Option<&dyn Preconditioner<M, V>>,
+        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
