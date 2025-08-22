@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, hash::{Hash, Hasher}};
 use faer::traits::ComplexField;
 
 /// Format-agnostic linear operator.
@@ -44,6 +44,13 @@ impl LinOp for Mat<f64> {
         }
     }
 
+    fn structure_id(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.nrows().hash(&mut h);
+        self.ncols().hash(&mut h);
+        h.finish()
+    }
+
     fn as_any(&self) -> &dyn Any { self }
 }
 
@@ -55,6 +62,13 @@ impl LinOp for CsrMatrix<f64> {
     fn dims(&self) -> (usize, usize) { (self.nrows(), self.ncols()) }
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) { self.spmv(x, y); }
+
+    fn structure_id(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.row_ptr().hash(&mut h);
+        self.col_idx().hash(&mut h);
+        h.finish()
+    }
 
     fn as_any(&self) -> &dyn Any { self }
 }

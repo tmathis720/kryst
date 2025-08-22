@@ -13,7 +13,7 @@
 
 use kryst::core::mat::shell::ShellMat;
 use kryst::core::traits::MatVec;
-use kryst::solver::{LinearSolver, CgSolver};
+use kryst::solver::{legacy::LinearSolver, CgSolver};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Kryst Shell Matrix Demo");
