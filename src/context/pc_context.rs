@@ -1,6 +1,18 @@
 use crate::config::options::PcOptions;
 use crate::error::KError;
-use crate::preconditioner::{Preconditioner, PreconditionerMat, PcSide, jacobi::Jacobi};
+use crate::preconditioner::{
+    Preconditioner,
+    PreconditionerMat,
+    PcSide,
+    jacobi::Jacobi,
+    LegacyOpPreconditioner,
+    Ilut,
+    Ilutp,
+    Ilup,
+    Sor,
+    MatSorType,
+    ChebyshevPre,
+};
 use crate::matrix::op::LinOp;
 use faer::Mat;
 
@@ -76,6 +88,26 @@ impl PcFactory {
     ) -> Result<Box<dyn Preconditioner>, KError> {
         match pc_type {
             PcType::Jacobi => Ok(Box::new(MatOpPreconditioner::new(Box::new(Jacobi::new())))),
+            PcType::Ilut => {
+                let ilut = Ilut::new(0, 0.0);
+                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilut))))
+            }
+            PcType::Ilutp => {
+                let ilutp = Ilutp::new();
+                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilutp))))
+            }
+            PcType::Ilup => {
+                let ilup = Ilup::new(0);
+                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))))
+            }
+            PcType::Sor => {
+                let sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::APPLY_LOWER, 0.0);
+                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(sor))))
+            }
+            PcType::Chebyshev => {
+                let pre = ChebyshevPre::new(Mat::zeros(0, 0), 0, 1.0, 1.0);
+                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(pre))))
+            }
             PcType::None => Ok(Box::new(NoOpPreconditioner)),
             _ => Err(KError::UnrecognizedPcType(format!("{:?} not implemented", pc_type))),
         }
