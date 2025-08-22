@@ -1,12 +1,13 @@
-use crate::config::options::PcOptions;
+use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::{CgSolver, GmresSolver, LinearSolver, MatSolverAdapter};
+use crate::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter};
 use crate::utils::convergence::SolveStats;
 use std::sync::Arc;
+use std::str::FromStr;
 
 /// Workspace placeholder reused by solvers.
 #[derive(Debug)]
@@ -39,7 +40,22 @@ impl Workspace {
 pub enum SolverType {
     Cg,
     Gmres,
+    BiCgStab,
     Preonly,
+}
+
+impl FromStr for SolverType {
+    type Err = KError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cg" => Ok(SolverType::Cg),
+            "gmres" => Ok(SolverType::Gmres),
+            "bicgstab" => Ok(SolverType::BiCgStab),
+            "preonly" => Ok(SolverType::Preonly),
+            other => Err(KError::UnrecognizedSolverType(other.to_string())),
+        }
+    }
 }
 
 /// Minimal KSP context holding solver, preconditioner, and operators.
@@ -88,6 +104,9 @@ impl KspContext {
                 self.rtol,
                 self.maxits,
             ))),
+            SolverType::BiCgStab => {
+                Box::new(MatSolverAdapter::new(BiCgStabSolver::new(self.rtol, self.maxits)))
+            }
             SolverType::Preonly => {
                 return Err(KError::SolveError("Preonly solver not available".into()))
             }
@@ -104,6 +123,51 @@ impl KspContext {
     ) -> Result<&mut Self, KError> {
         self.pc = Some(PcFactory::create_preconditioner(pc_type, opts)?);
         self.invalidate_setup();
+        Ok(self)
+    }
+
+    /// Configure the KSP context using parsed KSP options.
+    pub fn set_from_options(&mut self, opts: &KspOptions) -> Result<&mut Self, KError> {
+        if let Some(ref t) = opts.ksp_type {
+            let st = SolverType::from_str(t)?;
+            self.set_type(st)?;
+        }
+        if let Some(rtol) = opts.rtol {
+            self.rtol = rtol;
+        }
+        if let Some(atol) = opts.atol {
+            self.atol = atol;
+        }
+        if let Some(dtol) = opts.dtol {
+            self.dtol = dtol;
+        }
+        if let Some(maxits) = opts.maxits {
+            self.maxits = maxits;
+        }
+        if let Some(restart) = opts.restart {
+            self.restart = restart;
+        }
+        if let Some(ref side) = opts.pc_side {
+            self.pc_side = PcSide::from_str(side)?;
+        }
+        self.invalidate_setup();
+        Ok(self)
+    }
+
+    /// Configure both KSP and PC from their respective option sets.
+    pub fn set_from_all_options(
+        &mut self,
+        ksp_opts: &KspOptions,
+        pc_opts: &PcOptions,
+    ) -> Result<&mut Self, KError> {
+        self.set_from_options(ksp_opts)?;
+        if let Some(ref pct) = pc_opts.pc_type {
+            let pct = PcType::from_str(pct)?;
+            self.set_pc_type(pct, Some(pc_opts))?;
+        }
+        if let Some(ref side) = ksp_opts.pc_side {
+            self.pc_side = PcSide::from_str(side)?;
+        }
         Ok(self)
     }
 

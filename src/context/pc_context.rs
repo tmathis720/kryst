@@ -15,6 +15,7 @@ use crate::preconditioner::{
 };
 use crate::matrix::op::LinOp;
 use faer::Mat;
+use std::str::FromStr;
 
 /// Supported preconditioner types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,32 @@ pub enum PcType {
     Lu,
     Qr,
     SuperLuDist,
+}
+
+impl FromStr for PcType {
+    type Err = KError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "jacobi" => Ok(PcType::Jacobi),
+            "ilu0" => Ok(PcType::Ilu0),
+            "none" => Ok(PcType::None),
+            "ilu" => Ok(PcType::Ilu),
+            "ilut" => Ok(PcType::Ilut),
+            "ilutp" => Ok(PcType::Ilutp),
+            "ilup" => Ok(PcType::Ilup),
+            "block_jacobi" => Ok(PcType::BlockJacobi),
+            "sor" => Ok(PcType::Sor),
+            "asm" => Ok(PcType::Asm),
+            "chebyshev" => Ok(PcType::Chebyshev),
+            "amg" => Ok(PcType::Amg),
+            "approxinv" | "approxinverse" => Ok(PcType::ApproxInverse),
+            "lu" => Ok(PcType::Lu),
+            "qr" => Ok(PcType::Qr),
+            "superludist" => Ok(PcType::SuperLuDist),
+            other => Err(KError::UnrecognizedPcType(other.to_string())),
+        }
+    }
 }
 
 /// Placeholder for deferred preconditioner construction info.
