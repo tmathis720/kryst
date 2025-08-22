@@ -21,7 +21,7 @@
 use std::marker::PhantomData;
 use std::fmt;
 use bitflags::bitflags;
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::core::traits::{MatVec, Indexing};
 use crate::error::KError;
 use num_traits::Float;

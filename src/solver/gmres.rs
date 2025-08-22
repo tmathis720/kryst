@@ -18,7 +18,7 @@
 //! - https://en.wikipedia.org/wiki/Generalized_minimal_residual_method
 
 use crate::core::traits::{InnerProduct, MatVec};
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 use crate::error::KError;
 use num_traits::Float;
@@ -271,7 +271,7 @@ impl<T: Copy + Float + From<f64> + std::ops::Mul<Output = T>> GmresSolver<T> {
     /// Arnoldi process with preconditioning (for advanced use)
     fn arnoldi_with_pc<M: ?Sized, V>(
         a: &M,
-        pc: &(dyn crate::preconditioner::Preconditioner<M, V> + '_),
+        pc: &(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_),
         ip: &(),
         v_basis: &mut Vec<V>,
         h: &mut [Vec<T>],
@@ -384,7 +384,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,
@@ -787,7 +787,7 @@ where
 mod tests {
     use super::*;
     use crate::core::traits::MatVec;
-    use crate::preconditioner::Preconditioner;
+    use crate::preconditioner::legacy::Preconditioner;
     use crate::preconditioner::Jacobi;
 
     /// Simple dense matrix for testing
@@ -805,7 +805,7 @@ mod tests {
     }
 
     // Implement Preconditioner for Jacobi<f64> for DenseMat, Vec<f64>
-    impl crate::preconditioner::Preconditioner<DenseMat, Vec<f64>> for Jacobi<f64> {
+    impl crate::preconditioner::legacy::Preconditioner<DenseMat, Vec<f64>> for Jacobi<f64> {
         fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), crate::error::KError> {
             // Apply diagonal scaling: z[i] = inv_diag[i] * r[i]
             for i in 0..r.len() {

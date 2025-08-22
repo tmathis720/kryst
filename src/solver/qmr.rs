@@ -17,9 +17,9 @@
 
 use std::iter::Sum;
 
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::core::traits::{MatVec, InnerProduct, MatTransVec};
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use num_traits::Float;
@@ -104,7 +104,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        _pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        _pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

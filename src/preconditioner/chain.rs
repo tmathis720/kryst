@@ -18,7 +18,7 @@
 //! ```
 
 use crate::error::KError;
-use crate::preconditioner::{Preconditioner, PcSide};
+use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use faer::Mat;
 
 /// Preconditioner chain that applies multiple preconditioners in sequence.

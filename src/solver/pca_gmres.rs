@@ -20,7 +20,7 @@
 //! - https://github.com/berkeleylab/SLATE/blob/develop/src/ca_gmres.cc
 
 use crate::core::traits::{InnerProduct, MatVec};
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
 use crate::parallel::UniverseComm;
@@ -165,7 +165,7 @@ where
     fn solve(
         &mut self,
         a: &M,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<M, V> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
         comm: &crate::parallel::UniverseComm,

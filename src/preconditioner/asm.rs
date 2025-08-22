@@ -3,8 +3,8 @@
 //! Based on Saad, and inspired by PETSc's PCASM. Supports Rayon in shared memory and MPI for distributed vectors.
 
 use crate::core::traits::MatVec;
-use crate::solver::LinearSolver;
-use crate::preconditioner::Preconditioner;
+use crate::solver::legacy::LinearSolver;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::error::KError;
 use std::sync::Mutex;
 #[cfg(feature = "rayon")]

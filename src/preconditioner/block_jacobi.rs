@@ -14,7 +14,7 @@
 
 use crate::core::traits::{RowPattern, MatrixGet};
 use crate::solver::direct_lu::{LuSolver};
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 
 /// Block-Jacobi preconditioner
 ///

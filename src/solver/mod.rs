@@ -1,123 +1,162 @@
-//! Krylov and direct solver interfaces and implementations.
-//!
-//! This module provides a unified interface for both direct and iterative linear solvers, as well as
-//! re-exports for all supported solver types. The `LinearSolver` trait defines a common API for
-//! solving linear systems Ax = b, optionally with a preconditioner. All solvers return convergence
-//! statistics via `SolveStats`.
-//!
-//! # Usage
-//! - Implementations include CG, GMRES, BiCGStab, MINRES, QMR, FGMRES, and direct LU/QR solvers.
-//! - All solvers are accessible via their respective types (e.g., `CgSolver`, `GmresSolver`, etc.).
-//! - The trait is generic over matrix and vector types, and supports optional preconditioning.
-//!
-//! # Example
-//! ```rust,ignore
-//! use krylovkit::solver::{LinearSolver, CgSolver};
-//! // ...
-//! let mut solver = CgSolver::new(1e-8, 100);
-//! let stats = solver.solve(&a, None, &b, &mut x)?;
-//! ```
+//! Solver traits and adapters.
 
+use crate::matrix::op::LinOp;
+use crate::preconditioner::{Preconditioner, PcSide};
 use crate::utils::convergence::SolveStats;
-use crate::preconditioner::Preconditioner;
+use crate::context::ksp_context::Workspace;
+use crate::parallel::UniverseComm;
+use crate::error::KError;
 
-/// Common interface for any direct or iterative linear solver.
-///
-/// # Type Parameters
-/// * `M` - Matrix type
-/// * `V` - Vector type
-///
-pub trait LinearSolver<M: ?Sized, V> {
+/// Object-safe linear solver operating on `f64` slices and [`LinOp`] operators.
+pub trait LinearSolver: Send {
     type Error;
-    
-    /// Scalar type used by the solver (e.g., f32, f64)
-    type Scalar: Copy + PartialOrd + From<f64>;
-    
-    /// Solve the linear system A·x = b, optionally with preconditioner M⁻¹, writing result into `x`.
-    ///
-    /// This unified method handles all solve variants:
-    /// - Monitors are called only if monitoring is enabled at runtime
-    /// - Profiling is performed only if profiling is enabled at runtime
-    /// - Workspace is used for efficiency when provided
-    ///
-    /// # Arguments
-    /// * `a` - Matrix (system operator)
-    /// * `pc` - Optional preconditioner
-    /// * `b` - Right-hand side vector
-    /// * `x` - On input: initial guess; on output: solution vector
-    /// * `comm` - Communicator for parallel operations
-    /// * `monitors` - Optional callbacks to invoke at each iteration with (iteration, residual_norm)
-    /// * `work` - Optional pre-allocated workspace containing temporary vectors
-    ///
-    /// # Returns
-    /// * `Ok(SolveStats)` with convergence information
-    /// * `Err(Self::Error)` on failure
+
+    /// Allow solver to configure workspace buffers.
+    fn setup_workspace(&mut self, _work: &mut Workspace) {}
+
+    /// Solve `a * x = b` optionally using a preconditioner.
     fn solve(
         &mut self,
-        a: &M,
-        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
-        work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error>;
-    
-    /// Setup workspace for the solver.
-    /// 
-    /// This method allows solvers to configure workspace buffers they need
-    /// and grab references to tmp1, tmp2, etc. from the unified workspace.
-    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
-    
-    /// Convenience method for solving without monitors or workspace.
-    fn solve_simple(
-        &mut self,
-        a: &M,
-        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error>
-    where
-        Self: Sized,
-    {
-        self.solve(a, pc, b, x, comm, None, None)
-    }
-    
-    /// Convenience method for solving with monitors but no workspace.
-    fn solve_with_monitors(
-        &mut self,
-        a: &M,
-        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error>
-    where
-        Self: Sized,
-    {
-        self.solve(a, pc, b, x, comm, Some(monitors), None)
-    }
-    
-    /// Convenience method for solving with workspace but no monitors.
-    fn solve_with_workspace(
-        &mut self,
-        a: &M,
-        pc: Option<&(dyn Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        work: &mut crate::context::ksp_context::Workspace,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error>
-    where
-        Self: Sized,
-    {
-        self.solve(a, pc, b, x, comm, None, Some(work))
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error>;
+}
+
+/// Legacy generic solver trait retained for existing implementations.
+pub mod legacy {
+    use crate::preconditioner::legacy::Preconditioner;
+    use crate::utils::convergence::SolveStats;
+
+    pub trait LinearSolver<M: ?Sized, V> {
+        type Error;
+        type Scalar: Copy + PartialOrd + From<f64>;
+
+        fn solve(
+            &mut self,
+            a: &M,
+            pc: Option<&(dyn Preconditioner<M, V> + '_)>,
+            b: &V,
+            x: &mut V,
+            comm: &crate::parallel::UniverseComm,
+            monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+            work: Option<&mut crate::context::ksp_context::Workspace>,
+        ) -> Result<SolveStats<Self::Scalar>, Self::Error>;
+
+        fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
+
+        fn solve_simple(
+            &mut self,
+            a: &M,
+            pc: Option<&(dyn Preconditioner<M, V> + '_)>,
+            b: &V,
+            x: &mut V,
+            comm: &crate::parallel::UniverseComm,
+        ) -> Result<SolveStats<Self::Scalar>, Self::Error>
+        where
+            Self: Sized,
+        {
+            self.solve(a, pc, b, x, comm, None, None)
+        }
+
+        fn solve_with_monitors(
+            &mut self,
+            a: &M,
+            pc: Option<&(dyn Preconditioner<M, V> + '_)>,
+            b: &V,
+            x: &mut V,
+            comm: &crate::parallel::UniverseComm,
+            monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
+        ) -> Result<SolveStats<Self::Scalar>, Self::Error>
+        where
+            Self: Sized,
+        {
+            self.solve(a, pc, b, x, comm, Some(monitors), None)
+        }
+
+        fn solve_with_workspace(
+            &mut self,
+            a: &M,
+            pc: Option<&(dyn Preconditioner<M, V> + '_)>,
+            b: &V,
+            x: &mut V,
+            comm: &crate::parallel::UniverseComm,
+            work: &mut crate::context::ksp_context::Workspace,
+        ) -> Result<SolveStats<Self::Scalar>, Self::Error>
+        where
+            Self: Sized,
+        {
+            self.solve(a, pc, b, x, comm, None, Some(work))
+        }
     }
 }
 
-// Re-export all supported solver types for user convenience
+/// Adapter allowing legacy matrix-based solvers to be used with the new
+/// object-safe [`LinearSolver`] trait.
+pub struct MatSolverAdapter<S> {
+    inner: S,
+}
+
+impl<S> MatSolverAdapter<S> {
+    pub fn new(inner: S) -> Self {
+        Self { inner }
+    }
+}
+
+struct MatPcAdapter<'a> {
+    inner: &'a dyn Preconditioner,
+}
+
+impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>> for MatPcAdapter<'a> {
+    fn setup(&mut self, _a: &faer::Mat<f64>) -> Result<(), KError> { Ok(()) }
+    fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+        self.inner.apply(side, r.as_slice(), z.as_mut_slice())
+    }
+}
+
+impl<S> LinearSolver for MatSolverAdapter<S>
+where
+    S: legacy::LinearSolver<faer::Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>,
+{
+    type Error = KError;
+
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        self.inner.setup_workspace(work);
+    }
+
+    fn solve(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
+        let mat = a
+            .as_any()
+            .downcast_ref::<faer::Mat<f64>>()
+            .ok_or_else(|| KError::InvalidInput("solver requires faer::Mat<f64>".into()))?;
+        let mut x_vec = x.to_vec();
+        let b_vec = b.to_vec();
+        let pc_adapter = pc.map(|p| MatPcAdapter { inner: p });
+        let pc_ref = pc_adapter
+            .as_ref()
+            .map(|p| p as &dyn crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>);
+        let stats = self
+            .inner
+            .solve(mat, pc_ref, &b_vec, &mut x_vec, comm, monitors, work)?;
+        x.copy_from_slice(&x_vec);
+        Ok(stats)
+    }
+}
+
+// Re-export solver implementations
 pub mod direct_lu;
 pub use direct_lu::{LuSolver, QrSolver};
 
@@ -156,3 +195,4 @@ pub use pca_gmres::PcaGmresSolver;
 
 pub mod superlu_dist;
 pub use superlu_dist::SuperLuDistSolver;
+

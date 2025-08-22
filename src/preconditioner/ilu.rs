@@ -70,7 +70,7 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
-use crate::preconditioner::{Preconditioner, PcSide};
+use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use crate::error::KError;
 use crate::matrix::utils;
 use crate::matrix::sparse::CsrMatrix;
@@ -1399,7 +1399,7 @@ mod tests {
         });
 
         let mut ilu = Ilu::new();
-        use crate::preconditioner::Preconditioner;
+        use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
 
@@ -1426,7 +1426,7 @@ mod tests {
         config.perturbation_factor = 1e-10;
         
         let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
-        use crate::preconditioner::Preconditioner;
+        use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
         assert!(ilu.get_stats().num_zero_pivots > 0);
@@ -1472,7 +1472,7 @@ mod tests {
         config.upper_jacobi_iters = 2;
         
         let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
-        use crate::preconditioner::Preconditioner;
+        use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
     }
@@ -1519,7 +1519,7 @@ mod tests {
             .build::<f64>()
             .unwrap();
             
-        use crate::preconditioner::Preconditioner;
+        use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
         
@@ -1559,7 +1559,7 @@ mod tests {
             .build::<f64>()
             .unwrap();
 
-        use crate::preconditioner::Preconditioner;
+        use crate::preconditioner::legacy::Preconditioner;
         
         let serial_result = ilu_serial.setup(&matrix);
         assert!(serial_result.is_ok());

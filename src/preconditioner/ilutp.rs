@@ -7,7 +7,7 @@
 //! The algorithm follows the approach described in Saad's "Iterative Methods for
 //! Sparse Linear Systems" with modifications for numerical stability.
 
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::error::KError;
 use faer::Mat;
 use std::cmp::Ordering;

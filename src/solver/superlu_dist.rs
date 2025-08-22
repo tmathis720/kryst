@@ -67,7 +67,7 @@
 //! - PETSc MATSUPERLU_DIST implementation
 
 use crate::error::KError;
-use crate::solver::LinearSolver;
+use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{SolveStats, ConvergedReason};
 use crate::parallel::{UniverseComm, Comm};
 use crate::matrix::sparse::CsrMatrix;
@@ -3897,7 +3897,7 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
     fn solve(
         &mut self,
         a: &CsrMatrix<f64>,
-        pc: Option<&(dyn crate::preconditioner::Preconditioner<CsrMatrix<f64>, Vec<f64>> + '_)>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<CsrMatrix<f64>, Vec<f64>> + '_)>,
         b: &Vec<f64>,
         x: &mut Vec<f64>,
         comm: &crate::parallel::UniverseComm,

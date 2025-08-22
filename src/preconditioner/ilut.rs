@@ -20,7 +20,7 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
 
 use crate::error::KError;
-use crate::preconditioner::Preconditioner;
+use crate::preconditioner::legacy::Preconditioner;
 use crate::core::traits::MatShape;
 
 /// Sparse row structure for storing L/U factors.
