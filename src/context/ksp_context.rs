@@ -6,7 +6,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcgSolver, QmrSolver,
+    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcgSolver, QmrSolver, TfqmrSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -51,6 +51,7 @@ pub enum SolverType {
     Minres,
     PcaGmres,
     Qmr,
+    Tfqmr,
     Preonly,
 }
 
@@ -69,6 +70,7 @@ impl FromStr for SolverType {
             "minres" => Ok(SolverType::Minres),
             "pca_gmres" | "pcagmres" => Ok(SolverType::PcaGmres),
             "qmr" => Ok(SolverType::Qmr),
+            "tfqmr" => Ok(SolverType::Tfqmr),
             "preonly" => Ok(SolverType::Preonly),
             other => Err(KError::UnrecognizedSolverType(other.to_string())),
         }
@@ -149,6 +151,7 @@ impl KspContext {
                 Box::new(s)
             }
             SolverType::Qmr => Box::new(crate::solver::QmrSolver::new(self.rtol, self.maxits)),
+            SolverType::Tfqmr => Box::new(crate::solver::TfqmrSolver::new(self.rtol, self.maxits)),
             SolverType::Preonly => {
                 return Err(KError::SolveError("Preonly solver not available".into()));
             }
