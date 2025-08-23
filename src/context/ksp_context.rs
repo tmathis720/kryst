@@ -2,7 +2,7 @@ use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType, DeferredPcInfo};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
@@ -136,7 +136,7 @@ impl KspContext {
         let solver: Box<dyn LinearSolver<Error = KError>> = match solver_type {
             SolverType::Cg => Box::new(
                 CgSolver::new(self.rtol, self.maxits)
-                    .with_norm(crate::solver::cg::CgNormType::Unpreconditioned),
+                    .with_norm(crate::solver::cg::CgNormType::Preconditioned),
             ),
             SolverType::Cgnr => Box::new(CgnrSolver::new(self.rtol, self.maxits)),
             SolverType::Gmres => Box::new(GmresSolver::new(
@@ -150,7 +150,10 @@ impl KspContext {
                 self.maxits,
             ))),
             SolverType::Cgs => Box::new(CgsSolver::new(self.rtol, self.maxits)),
-            SolverType::Pcg => Box::new(PcgSolver::new(self.rtol, self.maxits)),
+            SolverType::Pcg => Box::new(
+                PcgSolver::new(self.rtol, self.maxits)
+                    .with_norm(crate::solver::pcg::CgNormType::Preconditioned),
+            ),
             SolverType::Minres => Box::new(MatSolverAdapter::new(MinresSolver::new(
                 self.rtol,
                 self.maxits,
@@ -469,35 +472,48 @@ impl KspContext {
             Some(self.monitors.as_slice())
         };
         let comm = amat.comm();
-        let pc = self.pc.as_mut().map(|b| b.as_mut() as &mut dyn Preconditioner);
+        let mut pc = self.pc.as_mut().map(|b| b.as_mut() as &mut dyn Preconditioner);
         let solver = self
             .solver
             .as_mut()
             .ok_or_else(|| KError::SolveError("No solver".into()))?;
 
-        if let Some(fgmres) = solver.as_any_mut().downcast_mut::<crate::solver::FgmresSolver>() {
-            return fgmres.solve_flexible(
+        // Some solvers (e.g. FGMRES) require a mutable preconditioner and have
+        // a specialised entry point. Handle this before computing the final
+        // residual below.
+        let mut stats = if let Some(fgmres) = solver.as_any_mut().downcast_mut::<crate::solver::FgmresSolver>() {
+            fgmres.solve_flexible(
                 amat.as_ref(),
-                pc,
+                pc.as_deref_mut(),
                 b,
                 x,
                 self.pc_side,
                 &comm,
                 monitors,
                 self.work.as_mut(),
-            );
-        }
+            )?
+        } else {
+            solver.solve(
+                amat.as_ref(),
+                pc.map(|p| p as &dyn Preconditioner),
+                b,
+                x,
+                self.pc_side,
+                &comm,
+                monitors,
+                self.work.as_mut(),
+            )?
+        };
 
-        solver.solve(
-            amat.as_ref(),
-            pc.map(|p| p as &dyn Preconditioner),
-            b,
-            x,
-            self.pc_side,
-            &comm,
-            monitors,
-            self.work.as_mut(),
-        )
+        // Compute true residual r = b - A x and use its norm for reporting
+        let mut residual = vec![0.0f64; b.len()];
+        amat.matvec(x, &mut residual);
+        for (ri, &bi) in residual.iter_mut().zip(b.iter()) {
+            *ri = bi - *ri;
+        }
+        let res_sq = comm.dot(&residual, &residual);
+        stats.final_residual = res_sq.sqrt();
+        Ok(stats)
     }
 
     fn invalidate_setup(&mut self) {
