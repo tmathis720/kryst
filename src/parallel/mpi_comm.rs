@@ -26,6 +26,8 @@
 use mpi::traits::*;
 #[cfg(feature = "mpi")]
 use mpi::topology::{SimpleCommunicator, Communicator, Color};
+#[cfg(feature = "mpi")]
+use std::sync::Arc;
 
 /// MPI communicator wrapper for distributed parallelism.
 ///
@@ -151,12 +153,12 @@ impl super::Comm for MpiComm {
     fn split(&self, color: i32, key: i32) -> super::UniverseComm {
         // For now, we'll return a simplified implementation that doesn't actually split
         // A proper implementation would need to handle universe sharing differently
-        super::UniverseComm::Mpi(MpiComm {
+        super::UniverseComm::Mpi(Arc::new(MpiComm {
             _universe: mpi::initialize().unwrap(), // This is a workaround
             world: self.world.duplicate(),
             rank: self.rank,
             size: self.size,
-        })
+        }))
     }
 
     /// Parallel matrix-vector multiplication (currently serial, placeholder for distributed version).

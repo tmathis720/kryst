@@ -1,6 +1,7 @@
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
+use crate::parallel::{UniverseComm, NoComm};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +42,11 @@ pub trait LinOp: Send + Sync + Any {
     /// Default 0 -> unknown.
     fn values_id(&self) -> ValuesId {
         ValuesId(0)
+    }
+
+    /// The communicator that owns this operator. Defaults to serial `NoComm`.
+    fn comm(&self) -> UniverseComm {
+        UniverseComm::NoComm(NoComm)
     }
 }
 

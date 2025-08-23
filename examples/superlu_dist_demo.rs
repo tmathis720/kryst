@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!();
         }
-        UniverseComm::Mpi(mpi_comm)
+        UniverseComm::Mpi(std::sync::Arc::new(mpi_comm))
     };
 
     #[cfg(not(feature = "mpi"))]

@@ -9,10 +9,13 @@
 //! Non-flexible solvers continue to invoke [`Preconditioner::apply`].
 //! The default `apply_mut` simply forwards to `apply`, so existing
 //! implementations remain unchanged unless they opt in to mutation.
+//!
+//! Preconditioners obtain the parallel communicator from the operator via
+//! [`LinOp::comm()`], eliminating the need to thread communicator handles
+//! through solver interfaces.
 
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::parallel::UniverseComm;
 use faer::Mat;
 use std::str::FromStr;
 
@@ -99,7 +102,6 @@ pub trait Preconditioner: Send + Sync {
         _op: &dyn LinOp<S = f64>,
         _b: &[f64],
         _x: &mut [f64],
-        _comm: &UniverseComm,
     ) -> Result<(), KError> {
         Err(KError::SolveError(
             "direct_solve not supported by this preconditioner".into(),
@@ -243,7 +245,7 @@ mod tests {
         let mut pc = Dummy;
         let a = Mat::<f64>::zeros(1, 1);
         let mut x = [0.0];
-        let err = pc.direct_solve(&a, &[1.0], &mut x, &UniverseComm::NoComm(crate::parallel::NoComm)).unwrap_err();
+        let err = pc.direct_solve(&a, &[1.0], &mut x).unwrap_err();
         match err {
             KError::SolveError(msg) => assert!(msg.contains("direct_solve not supported")),
             _ => panic!("unexpected error variant"),

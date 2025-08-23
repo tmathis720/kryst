@@ -1,7 +1,6 @@
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::parallel::UniverseComm;
 use faer::Mat;
 
 pub struct QrPc;
@@ -30,7 +29,6 @@ impl Preconditioner for QrPc {
         pmat: &dyn LinOp<S = f64>,
         b: &[f64],
         x: &mut [f64],
-        _comm: &UniverseComm,
     ) -> Result<(), KError> {
         let a = pmat
             .as_any()
