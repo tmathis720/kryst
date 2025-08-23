@@ -7,10 +7,7 @@
 
 use faer::Mat;
 use kryst::LinearSolver;
-use kryst::preconditioner::legacy::Preconditioner;
-use kryst::preconditioner::{Ilu0, Jacobi, PcSide};
-use kryst::solver::gmres::Preconditioning;
-use kryst::solver::legacy::LinearSolver as LegacyLinearSolver;
+use kryst::preconditioner::{Ilu0, Jacobi, PcSide, Preconditioner};
 use kryst::solver::{CgSolver, GmresSolver};
 
 /// Construct a symmetric positive definite (SPD) tridiagonal matrix of size `n`.
@@ -94,7 +91,7 @@ fn cg_with_jacobi() {
     let mut r_out = vec![0.0; b.len()];
     pc.apply(PcSide::Left, &r_in, &mut r_out).unwrap();
     let stats = solver
-        .solve(&a, None, &b, &mut x, &comm, None, None)
+        .solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,
@@ -115,7 +112,7 @@ fn gmres_with_ilu0() {
     let mut solver = GmresSolver::new(4, 1e-6, 1000);
     let mut x = vec![0.0; 5];
     let stats = solver
-        .solve(&a, None, &b, &mut x, &comm, None, None)
+        .solve(&a, Some(&pc), &b, &mut x, PcSide::Left, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,
@@ -137,7 +134,7 @@ fn spd_jacobi_pcg_converges() {
     let mut solver = CgSolver::new(1e-12, n);
     let mut x = vec![0.0; n];
     let stats = solver
-        .solve(&a, Some(&pc), &b, &mut x, &comm, None, None)
+        .solve(&a, Some(&pc), &b, &mut x, PcSide::Left, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,
@@ -158,7 +155,7 @@ fn spd_no_pc_cg_converges() {
     let mut solver = CgSolver::new(1e-12, n);
     let mut x = vec![0.0; n];
     let stats = solver
-        .solve(&a, None, &b, &mut x, &comm, None, None)
+        .solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,
@@ -178,7 +175,7 @@ fn nonsym_no_pc_gmresright_converges() {
     let mut solver = GmresSolver::new(10, 1e-12, 100);
     let mut x = vec![0.0; n];
     let stats = solver
-        .solve(&a, None, &b, &mut x, &comm, None, None)
+        .solve(&a, None, &b, &mut x, PcSide::Right, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,
@@ -197,10 +194,10 @@ fn nonsym_left_pc_gmresleft_converges() {
     let (a, b, x_true) = nonsym_matrix(n);
     let mut pc = Ilu0::new();
     pc.setup(&a).unwrap();
-    let mut solver = GmresSolver::new(10, 1e-12, 100).with_preconditioning(Preconditioning::Left);
+    let mut solver = GmresSolver::new(10, 1e-12, 100);
     let mut x = vec![0.0; n];
     let stats = solver
-        .solve(&a, Some(&pc), &b, &mut x, &comm, None, None)
+        .solve(&a, Some(&pc), &b, &mut x, PcSide::Left, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,
