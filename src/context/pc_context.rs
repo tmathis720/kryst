@@ -246,27 +246,81 @@ impl PcFactory {
         pc_type: PcType,
         options: Option<PcOptions>,
     ) -> Result<DeferredPcInfo, KError> {
-        Err(KError::UnrecognizedPcType(format!(
-            "{:?} deferred construction not supported",
-            pc_type
-        )))
+        Ok(DeferredPcInfo { pc_type, options })
     }
 
     pub fn construct_deferred_preconditioner(
-        _info: DeferredPcInfo,
-        _matrix: &Mat<f64>,
+        info: DeferredPcInfo,
+        matrix: &Mat<f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
-        Err(KError::SolveError(
-            "deferred preconditioners not supported".into(),
-        ))
+        match info.pc_type {
+            PcType::Amg => {
+                Err(KError::NotImplemented("AMG not yet implemented".into()))
+            }
+            PcType::Asm => {
+                Err(KError::NotImplemented("ASM not yet implemented".into()))
+            }
+            _ => Self::create_preconditioner(info.pc_type, info.options.as_ref()),
+        }
+    }
+
+    pub fn create_pc_chain_from_str(
+        chain: &str,
+        opts: Option<&PcOptions>,
+    ) -> Result<Vec<DeferredPcInfo>, KError> {
+        let mut specs = Vec::new();
+        for token in chain.split("->").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let pct = PcType::from_str(token)?;
+            let stage_opts = opts.cloned();
+            specs.push(DeferredPcInfo { pc_type: pct, options: stage_opts });
+        }
+        if specs.is_empty() {
+            return Err(KError::InvalidInput("empty PC chain".into()));
+        }
+        Ok(specs)
+    }
+
+    pub fn construct_deferred_pc_chain(
+        specs: Vec<DeferredPcInfo>,
+        matrix: &Mat<f64>,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        use crate::preconditioner::chain::PcChain;
+
+        let mut stages: Vec<Box<dyn Preconditioner>> = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let stage = Self::construct_deferred_preconditioner(spec, matrix)?;
+            stages.push(stage);
+        }
+        Ok(Box::new(PcChain::new(stages)))
     }
 
     pub fn create_pc_chain(
-        _chain: &str,
-        _matrix: &Mat<f64>,
-        _opts: Option<PcOptions>,
+        chain: &str,
+        matrix: &Mat<f64>,
+        opts: Option<PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
-        Err(KError::SolveError("PC chaining not supported".into()))
+        let specs = Self::create_pc_chain_from_str(chain, opts.as_ref())?;
+        Self::construct_deferred_pc_chain(specs, matrix)
+    }
+
+    pub fn create_deferred_pc_chain_from_options(
+        chain_opts: &[PcOptions],
+    ) -> Result<Vec<DeferredPcInfo>, KError> {
+        let mut specs = Vec::with_capacity(chain_opts.len());
+        for co in chain_opts {
+            let pct = if let Some(ref s) = co.pc_type {
+                PcType::from_str(s)?
+            } else {
+                return Err(KError::InvalidInput(
+                    "PcOptions in chain missing pc_type".into(),
+                ));
+            };
+            specs.push(DeferredPcInfo { pc_type: pct, options: Some(co.clone()) });
+        }
+        if specs.is_empty() {
+            return Err(KError::InvalidInput("empty PcOptions.chain".into()));
+        }
+        Ok(specs)
     }
 }
 

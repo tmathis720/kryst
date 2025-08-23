@@ -1,5 +1,5 @@
 use crate::config::options::{KspOptions, PcOptions};
-use crate::context::pc_context::{PcFactory, PcType};
+use crate::context::pc_context::{PcFactory, PcType, DeferredPcInfo};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
@@ -81,6 +81,8 @@ impl FromStr for SolverType {
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Error = KError>>>,
     pc: Option<Box<dyn Preconditioner>>,
+    pub(crate) pending_pc: Option<DeferredPcInfo>,
+    pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
     amat: Option<Arc<dyn LinOp<S = f64>>>,
     pmat: Option<Arc<dyn LinOp<S = f64>>>,
     work: Option<Workspace>,
@@ -103,6 +105,8 @@ impl KspContext {
         Self {
             solver: None,
             pc: None,
+            pending_pc: None,
+            pending_chain: None,
             amat: None,
             pmat: None,
             work: None,
@@ -171,7 +175,19 @@ impl KspContext {
         pc_type: PcType,
         opts: Option<&PcOptions>,
     ) -> Result<&mut Self, KError> {
-        self.pc = Some(PcFactory::create_preconditioner(pc_type, opts)?);
+        match PcFactory::create_preconditioner(pc_type, opts) {
+            Ok(pc) => {
+                self.pc = Some(pc);
+                self.pending_pc = None;
+                self.pending_chain = None;
+            }
+            Err(_) => {
+                let spec = PcFactory::create_deferred_pc(pc_type, opts.cloned())?;
+                self.pc = None;
+                self.pending_pc = Some(spec);
+                self.pending_chain = None;
+            }
+        }
         self.invalidate_setup();
         Ok(self)
     }
@@ -258,6 +274,13 @@ impl KspContext {
         if let Some(ref side) = ksp_opts.pc_side {
             self.pc_side = PcSide::from_str(side)?;
         }
+        if let Some(ref chain_opts) = pc_opts.chain {
+            let specs = PcFactory::create_deferred_pc_chain_from_options(chain_opts)?;
+            self.pc = None;
+            self.pending_pc = None;
+            self.pending_chain = Some(specs);
+            self.invalidate_setup();
+        }
         Ok(self)
     }
 
@@ -312,6 +335,24 @@ impl KspContext {
             .amat
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
+
+        if self.pc.is_none() {
+            if let Some(specs) = self.pending_chain.take() {
+                let m = pmat
+                    .as_any()
+                    .downcast_ref::<faer::Mat<f64>>()
+                    .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64> for chain construction".into()))?;
+                let chain = PcFactory::construct_deferred_pc_chain(specs, m)?;
+                self.pc = Some(chain);
+            } else if let Some(spec) = self.pending_pc.take() {
+                let m = pmat
+                    .as_any()
+                    .downcast_ref::<faer::Mat<f64>>()
+                    .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64> for PC construction".into()))?;
+                let pc = PcFactory::construct_deferred_preconditioner(spec, m)?;
+                self.pc = Some(pc);
+            }
+        }
 
         let sid = {
             let id = pmat.structure_id();
