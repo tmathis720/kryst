@@ -10,50 +10,30 @@
 //! - Better default values and workspace management
 //! - Reference solution monitoring capabilities
 
+use faer::mat;
+use kryst::core::traits::MatVec;
+use kryst::parallel::UniverseComm;
+use kryst::preconditioner::legacy::Preconditioner;
+use kryst::preconditioner::Jacobi;
 use kryst::solver::gmres::{GmresSolver, Preconditioning};
 use kryst::solver::legacy::LinearSolver;
-use kryst::preconditioner::Jacobi;
-use kryst::preconditioner::legacy::Preconditioner;
-use kryst::core::traits::{MatVec, Indexing};
-use kryst::parallel::UniverseComm;
-
-/// Simple dense matrix for demonstration
-#[derive(Clone)]
-struct DenseMat {
-    data: Vec<Vec<f64>>,
-}
-
-impl MatVec<Vec<f64>> for DenseMat {
-    fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
-        for (i, row) in self.data.iter().enumerate() {
-            y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
-        }
-    }
-}
-
-impl Indexing for DenseMat {
-    fn nrows(&self) -> usize {
-        self.data.len()
-    }
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== HYPRE-Inspired GMRES Improvements Demo ===\n");
 
     // Create a well-conditioned non-symmetric system
-    let a = DenseMat {
-        data: vec![
-            vec![4.0, 1.0, 0.0, 0.0],
-            vec![1.0, 3.0, 1.0, 0.0], 
-            vec![0.0, 1.0, 2.0, 1.0],
-            vec![0.0, 0.0, 1.0, 3.0],
-        ]
-    };
-    
+    let a = mat![
+        [4.0, 1.0, 0.0, 0.0],
+        [1.0, 3.0, 1.0, 0.0],
+        [0.0, 1.0, 2.0, 1.0],
+        [0.0, 0.0, 1.0, 3.0],
+    ];
+    let a_ref = a.as_ref();
+
     let x_true = vec![1.0, 2.0, 3.0, 4.0];
     let b = {
         let mut b = vec![0.0; 4];
-        a.matvec(&x_true, &mut b);
+        a_ref.matvec(&x_true, &mut b);
         b
     };
 
@@ -65,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mut x1 = vec![0.0; 4];
     let mut solver1 = GmresSolver::new(30, 1e-10, 100);
-    let stats1 = solver1.solve(&a, None, &b, &mut x1, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
+    let stats1 = solver1.solve(&a_ref, None, &b, &mut x1, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
     
     println!("   Result: {} iterations, residual: {:.2e}", stats1.iterations, stats1.final_residual);
     println!("   Converged: {:?}", stats1.reason);
@@ -78,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut x2 = vec![0.0; 4];
     let mut solver2 = GmresSolver::new(30, 1e-10, 100)
         .with_min_iter(5);
-    let stats2 = solver2.solve(&a, None, &b, &mut x2, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
+    let stats2 = solver2.solve(&a_ref, None, &b, &mut x2, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
     
     println!("   Result: {} iterations, residual: {:.2e}", stats2.iterations, stats2.final_residual);
     println!("   Converged: {:?}", stats2.reason);
@@ -92,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut x3 = vec![0.0; 4];
     let mut solver3 = GmresSolver::new(30, 1e-10, 100)
         .with_cf_tol(0.9);
-    let stats3 = solver3.solve(&a, None, &b, &mut x3, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
+    let stats3 = solver3.solve(&a_ref, None, &b, &mut x3, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
     
     println!("   Result: {} iterations, residual: {:.2e}", stats3.iterations, stats3.final_residual);
     println!("   Converged: {:?}", stats3.reason);
@@ -105,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut x4 = vec![0.0; 4];
     let mut solver4 = GmresSolver::new(30, 1e-10, 100)
         .with_ref_solution(x_true.clone());
-    let stats4 = solver4.solve(&a, None, &b, &mut x4, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
+    let stats4 = solver4.solve(&a_ref, None, &b, &mut x4, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
     
     println!("   Result: {} iterations, residual: {:.2e}", stats4.iterations, stats4.final_residual);
     println!("   Solution error: {:.2e}", 
@@ -117,15 +97,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mut pc = Jacobi::new();
     pc.setup(&a)?;
-    
+
     let mut x5 = vec![0.0; 4];
     let mut solver5 = GmresSolver::new(30, 1e-10, 100)
         .with_preconditioning(Preconditioning::Left)
         .with_min_iter(2)
         .with_cf_tol(0.95)
         .with_ref_solution(x_true.clone());
-    
-    let stats5 = solver5.solve(&a, Some(&pc), &b, &mut x5, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
+
+    let stats5 = solver5.solve(&a_ref, Some(&pc), &b, &mut x5, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None)?;
     
     println!("   Result: {} iterations, residual: {:.2e}", stats5.iterations, stats5.final_residual);
     println!("   Solution error: {:.2e}", 
@@ -142,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut x6 = vec![0.0; 4];
     let mut solver6 = GmresSolver::new(30, 1e-10, 100);
     
-    match solver6.solve(&a, None, &bad_b, &mut x6, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None) {
+    match solver6.solve(&a_ref, None, &bad_b, &mut x6, &UniverseComm::NoComm(kryst::parallel::NoComm), None, None) {
         Ok(_) => println!("   Unexpected: solver should have detected NaN"),
         Err(e) => println!("   ✓ IEEE safety check caught: {}", e),
     }
