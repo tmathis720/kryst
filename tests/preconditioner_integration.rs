@@ -8,7 +8,8 @@
 use kryst::preconditioner::{Jacobi, Ilu0, PcSide};
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::solver::{CgSolver, GmresSolver};
-use kryst::solver::legacy::LinearSolver;
+use kryst::LinearSolver;
+use kryst::solver::legacy::LinearSolver as LegacyLinearSolver;
 use kryst::solver::gmres::Preconditioning;
 use faer::Mat;
 
