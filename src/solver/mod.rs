@@ -196,6 +196,8 @@ pub use superlu_dist::SuperLuDistSolver;
 
 pub mod qmr;
 pub use qmr::QmrSolver;
+pub mod tfqmr;
+pub use tfqmr::TfqmrSolver;
 
 pub mod pca_gmres;
 pub use pca_gmres::{PcaGmresSolver, PcaPcMode};

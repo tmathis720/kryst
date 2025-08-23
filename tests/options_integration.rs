@@ -182,6 +182,7 @@ fn test_solver_type_from_str() {
         SolverType::from_str("bicgstab").unwrap(),
         SolverType::BiCgStab
     );
+    assert_eq!(SolverType::from_str("tfqmr").unwrap(), SolverType::Tfqmr);
     assert_eq!(
         SolverType::from_str("preonly").unwrap(),
         SolverType::Preonly

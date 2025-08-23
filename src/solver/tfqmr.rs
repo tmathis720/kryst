@@ -1,436 +1,435 @@
-//! TFQMR solver (Saad §7.4)
-//!
-//! This module implements the Transpose-free Quasi-Minimal Residual (TFQMR) algorithm for solving
-//! large, sparse, nonsymmetric linear systems Ax = b. TFQMR is a variant of QMR that avoids explicit
-//! use of the transpose of A, making it suitable for problems where A^T is unavailable or expensive.
-//! The implementation follows Saad's description and includes detailed debug output for each iteration.
-//!
-//! # Features
-//! - Handles general nonsymmetric systems
-//! - No explicit use of A^T (transpose-free)
-//! - No preconditioning in this implementation
-//! - Tracks true and estimated residuals for convergence
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.4
-//! - Freund, R. W., & Nachtigal, N. M. (1991). A transpose-free quasi-minimal residual algorithm for non-Hermitian linear systems. SIAM J. Sci. Stat. Comput.
-//! - https://en.wikipedia.org/wiki/Quasi-minimal_residual_method
-
-use crate::solver::legacy::LinearSolver;
-use crate::preconditioner::legacy::Preconditioner;
-use crate::core::traits::{MatVec, InnerProduct};
-use crate::utils::convergence::{Convergence, SolveStats};
+use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use num_traits::Float;
+use crate::matrix::op::LinOp;
+use crate::parallel::UniverseComm;
+use crate::preconditioner::{PcSide, Preconditioner};
+use crate::solver::LinearSolver;
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use std::any::Any;
 
-#[cfg(feature = "logging")]
-use log::trace;
-#[cfg(feature = "logging")]
-use crate::utils::profiling::StageGuard;
-
-/// TFQMR (Transpose-Free Quasi-Minimal Residual) solver struct.
-///
-/// # Type Parameters
-/// * `T` - Scalar type (e.g., f32, f64)
-pub struct TfqmrSolver<T: num_traits::FromPrimitive> {
-    /// Convergence criteria (multi-threshold, max iterations)
-    pub conv: Convergence<T>,
+pub struct TfqmrSolver {
+    pub conv: Convergence<f64>,
+    pub resid_recalc_every: usize,
+    pub breakdown_eps: f64,
 }
 
-impl<T: Float + num_traits::FromPrimitive> TfqmrSolver<T> {
-    /// Create a new TFQMR solver with given tolerance and maximum iterations.
-    pub fn new(rtol: T, max_iters: usize) -> Self {
-        let atol = num_traits::cast(1e-12).unwrap_or(T::epsilon());
-        let dtol = num_traits::cast(1e3).unwrap_or(T::one());
+impl TfqmrSolver {
+    pub fn new(rtol: f64, max_iters: usize) -> Self {
         Self {
             conv: Convergence {
                 rtol,
-                atol,
-                dtol,
+                atol: 1e-12,
+                dtol: 1e3,
                 max_iters,
+            },
+            resid_recalc_every: 20,
+            breakdown_eps: 1e-30,
+        }
+    }
+
+    fn setup_tfqmr_workspace(work: &mut Workspace, n: usize) {
+        if work.tmp1.len() != n {
+            work.tmp1.resize(n, 0.0);
+        }
+        if work.tmp2.len() != n {
+            work.tmp2.resize(n, 0.0);
+        }
+        while work.q.len() < 6 {
+            work.q.push(vec![0.0; n]);
+        }
+        for v in &mut work.q[..6] {
+            if v.len() != n {
+                v.resize(n, 0.0);
             }
         }
     }
 }
 
-impl<M: ?Sized, V, T> LinearSolver<M, V> for TfqmrSolver<T>
-where
-    M: MatVec<V> + Send + Sync,
-    (): InnerProduct<V, Scalar = T>,
-    V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
-    T: Float + From<f64> + num_traits::FromPrimitive + std::fmt::Debug + Send + Sync + std::fmt::LowerExp,
-{
+impl LinearSolver for TfqmrSolver {
     type Error = KError;
-    type Scalar = T;
 
-    /// Solve the linear system Ax = b using the TFQMR algorithm.
-    ///
-    /// # Arguments
-    /// * `a` - Matrix implementing `MatVec`
-    /// * `_pc` - (Unused) Optional preconditioner (not supported in this implementation)
-    /// * `b` - Right-hand side vector
-    /// * `x` - On input: initial guess; on output: solution vector
-    /// * `comm` - Communicator for parallel operations
-    /// * `monitors` - Optional monitors for iteration callbacks
-    /// * `_work` - Optional workspace (not used in current implementation)
-    ///
-    /// # Returns
-    /// * `Ok(SolveStats)` if converged or max iterations reached
-    /// * `Err(KError)` on error
-    fn solve(&mut self,
-             a: &M,
-            _pc: Option<&(dyn Preconditioner<M, V> + '_)>,
-             b: &V,
-             x: &mut V,
-             comm: &crate::parallel::UniverseComm,
-             monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
-             _work: Option<&mut crate::context::ksp_context::Workspace>) -> Result<SolveStats<T>, KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("TfqmrSolve");
-        
-        #[cfg(feature = "logging")]
-        trace!("Starting TFQMR solve");
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
-        let n = b.as_ref().len();
-        let ip = ();
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        let n = work.tmp1.len();
+        TfqmrSolver::setup_tfqmr_workspace(work, n);
+    }
 
-        // x0 = 0 (initial guess)
-        *x = V::from(vec![T::zero(); n]);
-
-        // r0 = b - A x0 = b
-        let mut r = b.clone();
-        // choose r_tld = r (can also pick random)
-        let r_tld = r.clone();
-
-        // scalars
-        #[cfg(feature = "logging")]
-        let _dot_guard = StageGuard::new("TfqmrDotProduct");
-        let mut rho = ip.dot(&r, &r_tld, comm);
-        #[cfg(feature = "logging")]
-        drop(_dot_guard);
-        if rho == T::zero() {
-            #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::new("TfqmrNorm");
-            let final_res = ip.norm(&r, comm);
-            #[cfg(feature = "logging")]
-            drop(_norm_guard);
-            
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: final_res,
-                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
-            });
+    fn solve(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        _comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        let (m, n) = a.dims();
+        if m != n {
+            return Err(KError::InvalidInput("TFQMR requires square A".into()));
         }
-        #[allow(unused_assignments)]
-        let _alpha = T::zero();
-        let _theta = T::zero();
-        let _c = T::one();
-        let _eta = T::zero();
-        let res0 = rho;
-        let _stats = SolveStats {
-            iterations: 0,
-            final_residual: res0,
-            reason: crate::utils::convergence::ConvergedReason::Continued,
-        };
+        if b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput("TFQMR size mismatch".into()));
+        }
+        let mons: &[Box<dyn Fn(usize, f64) + Send + Sync>] = monitors.unwrap_or(&[]);
 
-        // vectors
-        #[allow(unused_assignments)]
-        let mut v = V::from(vec![T::zero(); n]);
-        let mut w = r.clone();     // w = r0
-        let mut y = r.clone();     // y = r0
-        let mut u = V::from(vec![T::zero(); n]);
-        let mut d = V::from(vec![T::zero(); n]);
-        let mut psi_old = T::zero();
-        let mut eta_old = T::zero();
-        
-        #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::new("TfqmrNorm");
-        let tau = ip.norm(&r, comm);
-        #[cfg(feature = "logging")]
-        drop(_norm_guard);
-        
-        let res0 = tau;
+        let w = work.ok_or_else(|| {
+            KError::InvalidInput("TFQMR requires a Workspace; call via KSP".into())
+        })?;
+        TfqmrSolver::setup_tfqmr_workspace(w, n);
+
+        let (r, Au) = (&mut w.tmp1, &mut w.tmp2);
+        let (u_slice, rest) = w.q.split_at_mut(1);
+        let (v_slice, rest) = rest.split_at_mut(1);
+        let (wv_slice, rest) = rest.split_at_mut(1);
+        let (yv_slice, rest) = rest.split_at_mut(1);
+        let (d_slice, rest) = rest.split_at_mut(1);
+        let (qv_slice, _) = rest.split_at_mut(1);
+        let (u, v, wv, yv, d, qv) = (
+            &mut u_slice[0][..],
+            &mut v_slice[0][..],
+            &mut wv_slice[0][..],
+            &mut yv_slice[0][..],
+            &mut d_slice[0][..],
+            &mut qv_slice[0][..],
+        );
+
+        a.matvec(x, r);
+        for i in 0..n {
+            r[i] = b[i] - r[i];
+        }
+        if let Some(pc) = pc {
+            let rin = r.clone();
+            pc.apply(PcSide::Left, &rin, r)?;
+        }
+
+        let r_tld = r.clone();
+        let mut rho = dot(&r_tld, r);
+        let res0 = norm2(r);
         let mut stats = SolveStats {
             iterations: 0,
             final_residual: res0,
-            reason: crate::utils::convergence::ConvergedReason::Continued,
+            reason: ConvergedReason::Continued,
         };
-        if tau == T::zero() {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: T::zero(),
-                reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
-            });
+        for m in mons {
+            m(0, res0);
         }
 
-        // Call monitors for initial state if provided
-        if let Some(monitors) = monitors {
-            for monitor in monitors {
-                monitor(0, tau);
-            }
+        if res0 <= self.conv.atol.max(self.conv.rtol * res0.max(1e-300)) {
+            stats.reason = ConvergedReason::ConvergedAtol;
+            return Ok(stats);
+        }
+        if !rho.is_finite() || rho.abs() < self.breakdown_eps {
+            stats.reason = ConvergedReason::DivergedDtol;
+            return Ok(stats);
         }
 
-        let mut dpold = tau; // PETSc: dpold = initial residual norm
+        yv.clone_from_slice(r);
+        wv.clone_from_slice(r);
+        d.fill(0.0);
+        let mut theta_prev = 0.0;
+        let mut eta_prev = 0.0;
+        let mut dpold = res0;
+        let mut true_res = res0;
+
         for k in 1..=self.conv.max_iters {
-            #[cfg(feature = "logging")]
-            let _iter_guard = StageGuard::new("TfqmrIteration");
-            
-            #[cfg(feature = "logging")]
-            trace!("TFQMR iteration {}", k);
-            
-            // v = A * y
-            let mut v_tmp = V::from(vec![T::zero(); n]);
-            
-            #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::new("TfqmrMatVec");
-            a.matvec(&y, &mut v_tmp);
-            #[cfg(feature = "logging")]
-            drop(_matvec_guard);
-            
-            v = v_tmp;
+            v.fill(0.0);
+            a.matvec(yv, v);
+            if let Some(pc) = pc {
+                let vin = v.to_vec();
+                pc.apply(PcSide::Left, &vin, v)?;
+            }
 
-            // alpha = rho / <r_tld, v>
-            #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::new("TfqmrDotProduct");
-            let sigma = ip.dot(&r_tld, &v, comm);
-            #[cfg(feature = "logging")]
-            drop(_dot_guard);
-            if sigma == T::zero() || !sigma.is_finite() {
-                #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::new("TfqmrNorm");
-                stats.final_residual = ip.norm(&r, comm);
-                #[cfg(feature = "logging")]
-                drop(_norm_guard);
-                
+            let sigma = dot(&r_tld, v);
+            if !sigma.is_finite() || sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
-                stats.reason = crate::utils::convergence::ConvergedReason::Continued;
+                stats.final_residual = true_res;
+                stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
             let alpha = rho / sigma;
-            if alpha == T::zero() || !alpha.is_finite() {
-                #[cfg(feature = "logging")]
-                let _norm_guard = StageGuard::new("TfqmrNorm");
-                stats.final_residual = ip.norm(&r, comm);
-                #[cfg(feature = "logging")]
-                drop(_norm_guard);
-                
+            if !alpha.is_finite() || alpha == 0.0 {
                 stats.iterations = k;
-                stats.reason = crate::utils::convergence::ConvergedReason::Continued;
+                stats.final_residual = true_res;
+                stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
-            // --- TFQMR update steps ---
-            // u = r - alpha * v
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("TfqmrAxpy");
-            for (ui, (ri, vi)) in u.as_mut().iter_mut().zip(r.as_ref().iter().zip(v.as_ref())) {
-                *ui = *ri - alpha * *vi;
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
 
-            // q = u - alpha * v
-            let mut q = V::from(vec![T::zero(); n]);
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("TfqmrAxpy");
             for i in 0..n {
-                q.as_mut()[i] = u.as_ref()[i] - alpha * v.as_ref()[i];
+                u[i] = r[i] - alpha * v[i];
             }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
+            let mut tau_local = (norm2(u) * dpold).sqrt();
 
-            // --- PETSc/Saad: update the true residual before the two-step loop ---
-            let mut t = V::from(vec![T::zero(); n]);
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("TfqmrAxpy");
-            for i in 0..n {
-                t.as_mut()[i] = u.as_ref()[i] + q.as_ref()[i];
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
-            
-            let mut au = V::from(vec![T::zero(); n]);
-            #[cfg(feature = "logging")]
-            let _matvec_guard = StageGuard::new("TfqmrMatVec");
-            a.matvec(&t, &mut au);
-            #[cfg(feature = "logging")]
-            drop(_matvec_guard);
-            
-            // Optionally: if let Some(pc) = pc { pc.apply(&au, &mut au)?; }
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("TfqmrAxpy");
-            for i in 0..n {
-                r.as_mut()[i] = r.as_ref()[i] - alpha * au.as_ref()[i];
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
-            
-            #[cfg(feature = "logging")]
-            let _norm_guard = StageGuard::new("TfqmrNorm");
-            let dp = ip.norm(&r, comm);
-            #[cfg(feature = "logging")]
-            drop(_norm_guard);
-            let tau_m0 = (dp * dpold).sqrt();
-            let mut tau_local = tau_m0;
-            // --- TFQMR two-step inner loop ---
-            for m in 0..2 {
-                #[cfg(feature = "logging")]
-                let _substep_guard = StageGuard::new("TfqmrSubstep");
-                
-                let (norm_u_m, tau_for_m) = if m == 0 {
-                    (dp, tau_m0) // For m=0, norm is delta, tau is tau_m0
-                } else {
-                    #[cfg(feature = "logging")]
-                    let _norm_guard = StageGuard::new("TfqmrNorm");
-                    let norm_q = ip.norm(&q, comm);
-                    #[cfg(feature = "logging")]
-                    drop(_norm_guard);
-                    (norm_q, tau_local)
-                };
-                let u_m = if m == 0 { &u } else { &q };
-
-                // Compute psi, c, eta for this substep
-                let psi = norm_u_m / tau_for_m;
-                let c_m = T::one() / (T::one() + psi * psi).sqrt();
-                let eta = c_m * c_m * alpha;
-
-                // Update D: D = (m?Q:U) + cf*D, cf = psi_old^2 * eta_old / alpha
-                let cf = if alpha == T::zero() || k == 1 {
-                    T::zero()
-                } else {
-                    psi_old * psi_old * eta_old / alpha
-                };
-                #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::new("TfqmrAxpy");
-                for i in 0..n {
-                    d.as_mut()[i] = u_m.as_ref()[i] + cf * d.as_ref()[i];
-                }
-                #[cfg(feature = "logging")]
-                drop(_axpy_guard);
-
-                // Update x on both substeps
-                #[cfg(feature = "logging")]
-                let _axpy_guard = StageGuard::new("TfqmrAxpy");
-                for i in 0..n {
-                    x.as_mut()[i] = x.as_ref()[i] + eta * d.as_ref()[i];
-                }
-                #[cfg(feature = "logging")]
-                drop(_axpy_guard);
-
-                // Residual estimate: dpest = sqrt(2*k + m + 2) * tau_for_m
-                let dpest = T::from_usize(2 * k + m + 2).unwrap().sqrt() * tau_for_m;
-                
-                #[cfg(feature = "logging")]
-                trace!("TFQMR iteration {}, substep {}: residual = {:.3e}", k, m, dpest.to_f64().unwrap_or(0.0));
-                
-                // Call monitors with unique iteration count for each substep
-                if let Some(monitors) = monitors {
-                    let monitor_iter = 2 * (k - 1) + m + 1;
-                    for monitor in monitors {
-                        monitor(monitor_iter, dpest);
+            for mstep in 0..2 {
+                if mstep == 0 {
+                    for i in 0..n {
+                        qv[i] = u[i] - alpha * v[i];
                     }
                 }
-                
-                let (reason, s) = self.conv.check(dpest, res0, k);
-                stats = s;
-                psi_old = psi;
-                eta_old = eta;
-                tau_local = tau_for_m * psi * c_m;
-                if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
-                    || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
-                    stats.final_residual = dpest;
-                    stats.iterations = k;
-                    stats.reason = reason;
+                for i in 0..n {
+                    Au[i] = u[i] + qv[i];
+                }
+                let tmp_in = Au.to_vec();
+                a.matvec(&tmp_in, Au);
+                if let Some(pc) = pc {
+                    let tmp2 = Au.to_vec();
+                    pc.apply(PcSide::Left, &tmp2, Au)?;
+                }
+                for i in 0..n {
+                    r[i] -= alpha * Au[i];
+                }
+
+                {
+                    let src: &[f64] = if mstep == 0 { &u[..] } else { &qv[..] };
+                    let psi = norm2(src) / tau_local.max(1e-300);
+                    let c = 1.0 / (1.0 + psi * psi).sqrt();
+                    let eta = c * c * alpha;
+                    let cf = if k == 1 && mstep == 0 {
+                        0.0
+                    } else {
+                        theta_prev * theta_prev * (eta_prev / alpha)
+                    };
+                    for i in 0..n {
+                        d[i] = src[i] + cf * d[i];
+                        x[i] += eta * d[i];
+                    }
+
+                    let iter_count = 2 * (k - 1) + mstep + 1;
+                    let dpest = ((2 * k + mstep + 1) as f64).sqrt() * tau_local;
+                    for mfn in mons {
+                        mfn(iter_count, dpest);
+                    }
+                    let (reason, s2) = self.conv.check(dpest, res0, iter_count);
+                    stats = s2;
+                    theta_prev = psi;
+                    eta_prev = eta;
+                    tau_local *= psi * c;
+
+                    if self.resid_recalc_every > 0
+                        && (iter_count % self.resid_recalc_every == 0
+                            || matches!(
+                                reason,
+                                ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+                            ))
+                    {
+                        a.matvec(x, Au);
+                        for i in 0..n {
+                            Au[i] = b[i] - Au[i];
+                        }
+                        if let Some(pc) = pc {
+                            let tmp = Au.to_vec();
+                            pc.apply(PcSide::Left, &tmp, Au)?;
+                        }
+                        true_res = norm2(Au);
+                        stats.final_residual = true_res;
+                    } else {
+                        stats.final_residual = dpest;
+                    }
+
+                    if matches!(
+                        reason,
+                        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+                    ) {
+                        return Ok(stats);
+                    }
+                }
+
+                if mstep == 0 {
+                    for i in 0..n {
+                        qv[i] -= alpha * v[i];
+                        u[i] -= alpha * v[i];
+                    }
+                }
+            }
+
+            let rho_new = dot(&r_tld, r);
+            if !rho_new.is_finite() || rho_new.abs() < self.breakdown_eps {
+                stats.iterations = k;
+                stats.reason = ConvergedReason::DivergedDtol;
+                return Ok(stats);
+            }
+            let beta = rho_new / rho;
+            rho = rho_new;
+
+            for i in 0..n {
+                wv[i] = r[i] + beta * (qv[i] + beta * wv[i]);
+                yv[i] = r[i] + beta * (qv[i] + beta * yv[i]);
+            }
+
+            dpold = norm2(r);
+
+            if self.resid_recalc_every == 1 {
+                a.matvec(x, Au);
+                for i in 0..n {
+                    Au[i] = b[i] - Au[i];
+                }
+                if let Some(pc) = pc {
+                    let tmp = Au.clone();
+                    pc.apply(PcSide::Left, &tmp, Au)?;
+                }
+                true_res = norm2(Au);
+                stats.final_residual = true_res;
+                let (reason, s2) = self.conv.check(true_res, res0, 2 * k);
+                stats = s2;
+                if matches!(
+                    reason,
+                    ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+                ) {
                     return Ok(stats);
                 }
             }
-
-            #[allow(unused_assignments)]
-            let _tau = tau_local;
-
-            // 4) finish the outer update of r, rho, etc.
-            r.clone_from(&u); // r = u
-            
-            #[cfg(feature = "logging")]
-            let _dot_guard = StageGuard::new("TfqmrDotProduct");
-            let rho_new = ip.dot(&r_tld, &r, comm);
-            #[cfg(feature = "logging")]
-            drop(_dot_guard);
-            
-            let beta = rho_new / rho;
-            rho = rho_new;
-            // w <- u + beta * (q + beta*w)
-            #[cfg(feature = "logging")]
-            let _axpy_guard = StageGuard::new("TfqmrAxpy");
-            for i in 0..n {
-                w.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * w.as_ref()[i]);
-                y.as_mut()[i] = u.as_ref()[i] + beta * (q.as_ref()[i] + beta * y.as_ref()[i]);
-            }
-            #[cfg(feature = "logging")]
-            drop(_axpy_guard);
-            
-            dpold = dp; // update dpold for next outer iteration
         }
 
-        #[cfg(feature = "logging")]
-        let _norm_guard = StageGuard::new("TfqmrNorm");
-        stats.final_residual = ip.norm(&r, comm);
-        #[cfg(feature = "logging")]
-        drop(_norm_guard);
-        
-        #[cfg(feature = "logging")]
-        trace!("TFQMR solve completed after {} iterations", stats.iterations);
-        
         stats.iterations = self.conv.max_iters;
+        if !matches!(
+            stats.reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ) {
+            stats.reason = ConvergedReason::DivergedMaxIts;
+        }
         Ok(stats)
     }
+}
 
-    /// Setup workspace for TFQMR solver.
-    /// 
-    /// Currently TFQMR does not use workspace optimization,
-    /// so this is a no-op implementation.
-    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {
-        // No workspace setup needed for current TFQMR implementation
-    }
+#[inline]
+fn dot(x: &[f64], y: &[f64]) -> f64 {
+    x.iter().zip(y).map(|(a, b)| a * b).sum()
+}
+
+#[inline]
+fn norm2(x: &[f64]) -> f64 {
+    dot(x, x).sqrt()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::traits::MatVec;
+    use std::sync::{Arc, Mutex};
 
-    /// A simple 2×2 nonsymmetric example:
-    /// [2 1]
-    /// [3 4]
-    #[derive(Clone)]
-    struct Simple2;
-    impl MatVec<Vec<f64>> for Simple2 {
-        /// Matrix-vector multiplication: y = A x
-        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
-            y[0] = 2.0 * x[0] + 1.0 * x[1];
-            y[1] = 3.0 * x[0] + 4.0 * x[1];
+    struct Dense {
+        a: Vec<Vec<f64>>,
+    }
+    impl LinOp for Dense {
+        type S = f64;
+        fn dims(&self) -> (usize, usize) {
+            (self.a.len(), self.a[0].len())
+        }
+        fn matvec(&self, x: &[f64], y: &mut [f64]) {
+            for i in 0..self.a.len() {
+                let mut acc = 0.0;
+                for j in 0..self.a[0].len() {
+                    acc += self.a[i][j] * x[j];
+                }
+                y[i] = acc;
+            }
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct IdentityPc;
+    impl Preconditioner for IdentityPc {
+        fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+            Ok(())
+        }
+        fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+            y.copy_from_slice(x);
+            Ok(())
         }
     }
 
     #[test]
-    #[ignore] // This test is for demonstration; it may not pass in all environments
-    fn tfqmr_solves_simple2() {
-        // 2x2 nonsymmetric system: [2 1; 3 4] x = [4, 11] ⇒ x = [1, 2]
-        let a = Simple2;
-        let x_true = vec![1.0, 2.0];
-        let b = {
-            let mut v = vec![0.0; 2];
-            a.matvec(&x_true, &mut v);
-            v
+    fn tfqmr_solves_small_nonsym() {
+        let a = Dense {
+            a: vec![vec![2.0, 1.0], vec![3.0, 4.0]],
         };
-        let mut x = vec![0.0; 2];
-        let mut solver = TfqmrSolver::new(1e-10, 500);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let tol = 1e-3;
-        for (xi, xt) in x.iter().zip(x_true.iter()) {
-            assert!((xi - xt).abs() < tol, "xi={:.3}, expected {:.3}", xi, xt);
+        let b = [4.0, 11.0];
+        let mut x = [0.0, 0.0];
+        let mut w = Workspace::new(2);
+        let mut solver = TfqmrSolver::new(1e-12, 200);
+        let stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                Some(&mut w),
+            )
+            .unwrap();
+        assert!(
+            (x[0] - 1.0).abs() < 1e-8 && (x[1] - 2.0).abs() < 1e-8,
+            "x={:?}",
+            x
+        );
+        assert!(stats.final_residual <= 1e-10);
+    }
+
+    #[test]
+    fn tfqmr_solves_diag_dom() {
+        let a = Dense {
+            a: vec![
+                vec![5.0, 2.0, 0.0, 0.0, 0.0],
+                vec![1.0, 5.0, 2.0, 0.0, 0.0],
+                vec![0.0, 1.0, 5.0, 2.0, 0.0],
+                vec![0.0, 0.0, 1.0, 5.0, 2.0],
+                vec![0.0, 0.0, 0.0, 1.0, 5.0],
+            ],
+        };
+        let x_true = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mut b = [0.0; 5];
+        a.matvec(&x_true, &mut b);
+        let mut x = [0.0; 5];
+        let mut w = Workspace::new(5);
+        let mut solver = TfqmrSolver::new(1e-12, 500);
+        let stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                Some(&mut w),
+            )
+            .unwrap();
+        for i in 0..5 {
+            assert!((x[i] - x_true[i]).abs() < 1e-8);
         }
-        assert!(matches!(stats.reason,
-            crate::utils::convergence::ConvergedReason::ConvergedRtol |
-            crate::utils::convergence::ConvergedReason::ConvergedAtol), "TFQMR did not report Converged reason");
+        assert!(stats.final_residual <= 1e-10);
+    }
+
+    #[test]
+    fn tfqmr_monitors_and_pc() {
+        let a = Dense {
+            a: vec![vec![2.0, 1.0], vec![3.0, 4.0]],
+        };
+        let b = [4.0, 11.0];
+        let mut x = [0.0, 0.0];
+        let mut w = Workspace::new(2);
+        let mut solver = TfqmrSolver::new(1e-12, 200);
+        let pc = IdentityPc;
+        let residuals: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let res_clone = residuals.clone();
+        let monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>> = vec![Box::new(move |_, r| {
+            res_clone.lock().unwrap().push(r);
+        })];
+        let _stats = solver
+            .solve(
+                &a,
+                Some(&pc),
+                &b,
+                &mut x,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+                Some(&monitors),
+                Some(&mut w),
+            )
+            .unwrap();
+        assert!(!residuals.lock().unwrap().is_empty());
     }
 }
