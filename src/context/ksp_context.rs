@@ -5,8 +5,8 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
-    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, GmresSolver, LinearSolver, MatSolverAdapter,
-    MinresSolver, PcgSolver,
+    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
+    MatSolverAdapter, MinresSolver, PcgSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -44,6 +44,7 @@ pub enum SolverType {
     Cg,
     Cgnr,
     Gmres,
+    Fgmres,
     BiCgStab,
     Cgs,
     Pcg,
@@ -59,6 +60,7 @@ impl FromStr for SolverType {
             "cg" => Ok(SolverType::Cg),
             "cgnr" => Ok(SolverType::Cgnr),
             "gmres" => Ok(SolverType::Gmres),
+            "fgmres" => Ok(SolverType::Fgmres),
             "bicgstab" => Ok(SolverType::BiCgStab),
             "cgs" => Ok(SolverType::Cgs),
             "pcg" => Ok(SolverType::Pcg),
@@ -126,6 +128,7 @@ impl KspContext {
                 self.rtol,
                 self.maxits,
             ))),
+            SolverType::Fgmres => Box::new(FgmresSolver::new(self.rtol, self.maxits, self.restart)),
             SolverType::BiCgStab => Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
                 self.maxits,
@@ -137,7 +140,7 @@ impl KspContext {
                 self.maxits,
             ))),
             SolverType::Preonly => {
-                return Err(KError::SolveError("Preonly solver not available".into()))
+                return Err(KError::SolveError("Preonly solver not available".into()));
             }
         };
         self.solver = Some(solver);
@@ -204,7 +207,7 @@ impl KspContext {
                     other => {
                         return Err(KError::SolveError(format!(
                             "Unrecognized ksp_cg_norm: {other}"
-                        )))
+                        )));
                     }
                 };
                 s.set_norm(n);
