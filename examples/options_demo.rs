@@ -26,6 +26,7 @@
 //! ```
 
 use std::env;
+use std::sync::Arc;
 use faer::Mat;
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
@@ -85,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     
     // Solve the system
-    ksp.set_operators(a.clone(), None);
+    ksp.set_operators(Arc::new(a.clone()), None);
     match ksp.solve(&b, &mut x) {
         Ok(stats) => {
             println!("Solution Results:");

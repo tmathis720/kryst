@@ -15,6 +15,7 @@ use std::sync::Arc;
 use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
+use kryst::matrix::op::LinOp;
 
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
@@ -39,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_solves = 5;  // Number of right-hand sides to solve
 
     // Create the system matrix (represents a discrete Laplacian)
-    let a = Arc::new(create_test_matrix(n));
+    let a: Arc<dyn LinOp<S = f64>> = Arc::new(create_test_matrix(n));
     println!("Created {}×{} tridiagonal system matrix", n, n);
 
     // Create multiple right-hand side vectors
