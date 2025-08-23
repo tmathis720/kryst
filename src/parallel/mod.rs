@@ -4,6 +4,7 @@ use mpi::datatype::Equivalence;
 use mpi::topology::{Communicator, Color};
 #[cfg(feature = "mpi")]
 use mpi::traits::*;
+use std::sync::Arc;
 
 /// Abstract communicator for reductions & splits
 pub trait Comm: Send + Sync + 'static {
@@ -50,7 +51,7 @@ pub trait Comm: Send + Sync + 'static {
 }
 
 /// Default no‐MPI/no‐parallel communicator for serial execution
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NoComm;
 
 impl Comm for NoComm {
@@ -103,14 +104,60 @@ pub mod rayon_comm;
 #[cfg(feature="rayon")]
 pub use rayon_comm::RayonComm;
 
+#[derive(Clone)]
 pub enum UniverseComm {
     NoComm(NoComm),
     #[cfg(feature="mpi")]
-    Mpi(MpiComm),
+    Mpi(Arc<MpiComm>),
     #[cfg(feature="rayon")]
     Rayon(RayonComm),
     #[cfg(not(any(feature="mpi", feature="rayon")))]
     Serial,
+}
+
+impl std::fmt::Debug for UniverseComm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UniverseComm::NoComm(_) => f.write_str("NoComm"),
+            #[cfg(feature="mpi")]
+            UniverseComm::Mpi(comm) => write!(f, "MpiComm {{ id: {} }}", comm.world.as_raw()),
+            #[cfg(feature="rayon")]
+            UniverseComm::Rayon(_) => f.write_str("Rayon"),
+            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            UniverseComm::Serial => f.write_str("Serial"),
+        }
+    }
+}
+
+impl PartialEq for UniverseComm {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (UniverseComm::NoComm(_), UniverseComm::NoComm(_)) => true,
+            #[cfg(feature="mpi")]
+            (UniverseComm::Mpi(a), UniverseComm::Mpi(b)) => a.world.as_raw() == b.world.as_raw(),
+            #[cfg(feature="rayon")]
+            (UniverseComm::Rayon(_), UniverseComm::Rayon(_)) => true,
+            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            (UniverseComm::Serial, UniverseComm::Serial) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for UniverseComm {}
+
+impl UniverseComm {
+    pub fn id(&self) -> u64 {
+        match self {
+            UniverseComm::NoComm(_) => 0,
+            #[cfg(feature="mpi")]
+            UniverseComm::Mpi(comm) => comm.world.as_raw() as u64,
+            #[cfg(feature="rayon")]
+            UniverseComm::Rayon(_) => 0,
+            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            UniverseComm::Serial => 0,
+        }
+    }
 }
 
 impl Comm for UniverseComm {
@@ -224,13 +271,13 @@ impl Comm for UniverseComm {
                 let sub = comm.world.split_by_color_with_key(Color::with_value(color), key).expect("Failed to split communicator");
                 let sub_rank = sub.rank() as usize;
                 let sub_size = sub.size() as usize;
-                let new_comm = MpiComm { 
+                let new_comm = MpiComm {
                     _universe: mpi::initialize().unwrap(), // Workaround for universe sharing
-                    world: sub, 
-                    rank: sub_rank, 
-                    size: sub_size 
+                    world: sub,
+                    rank: sub_rank,
+                    size: sub_size
                 };
-                UniverseComm::Mpi(new_comm)
+                UniverseComm::Mpi(Arc::new(new_comm))
             },
             #[cfg(feature="rayon")]
             UniverseComm::Rayon(_comm) => UniverseComm::Rayon(RayonComm::new()),

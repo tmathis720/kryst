@@ -104,7 +104,7 @@ fn example_communicator_splitting() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature="rayon", not(feature="mpi")))]
     let main_comm = parallel::UniverseComm::Rayon(parallel::RayonComm::new());
     #[cfg(feature="mpi")]
-    let main_comm = parallel::UniverseComm::Mpi(parallel::MpiComm::new());
+    let main_comm = parallel::UniverseComm::Mpi(std::sync::Arc::new(parallel::MpiComm::new()));
     
     println!("Main communicator - Rank: {}, Size: {}", 
              main_comm.rank(), main_comm.size());
@@ -157,7 +157,7 @@ fn example_ksp_with_comm() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature="rayon", not(feature="mpi")))]
     let comm = parallel::UniverseComm::Rayon(parallel::RayonComm::new());
     #[cfg(feature="mpi")]
-    let comm = parallel::UniverseComm::Mpi(parallel::MpiComm::new());
+    let comm = parallel::UniverseComm::Mpi(std::sync::Arc::new(parallel::MpiComm::new()));
     
     // Setup KSP context with communicator
     let mut ksp = context::ksp_context::KspContext::new();

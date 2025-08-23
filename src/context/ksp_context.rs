@@ -267,8 +267,20 @@ impl KspContext {
         amat: Arc<dyn LinOp<S = f64>>,
         pmat: Option<Arc<dyn LinOp<S = f64>>>,
     ) -> &mut Self {
+        let pmat = pmat.unwrap_or_else(|| amat.clone());
+        let ac = amat.comm();
+        let pc = pmat.comm();
+        if ac != pc {
+            self.invalidate_setup();
+            let msg = format!(
+                "Amat/Pmat communicator mismatch: A={}, P={}",
+                ac.id(),
+                pc.id()
+            );
+            panic!("{}", msg);
+        }
         self.amat = Some(amat.clone());
-        self.pmat = Some(pmat.unwrap_or(amat));
+        self.pmat = Some(pmat);
         self.invalidate_setup();
         self
     }
@@ -380,12 +392,7 @@ impl KspContext {
             let pc = self.pc.as_mut().ok_or_else(|| {
                 KError::SolveError("PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into())
             })?;
-            pc.direct_solve(
-                pmat.as_ref(),
-                b,
-                x,
-                &UniverseComm::NoComm(crate::parallel::NoComm),
-            )?;
+            pc.direct_solve(pmat.as_ref(), b, x)?;
             return Ok(SolveStats {
                 iterations: 1,
                 final_residual: 0.0,
@@ -398,7 +405,7 @@ impl KspContext {
         } else {
             Some(self.monitors.as_slice())
         };
-        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let comm = amat.comm();
         let pc = self.pc.as_mut().map(|b| b.as_mut() as &mut dyn Preconditioner);
         let solver = self
             .solver

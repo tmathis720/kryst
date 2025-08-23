@@ -39,7 +39,7 @@ use kryst::parallel::MpiComm;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize MPI and create communicator
     #[cfg(feature = "mpi")]
-    let comm = UniverseComm::Mpi(MpiComm::new());
+    let comm = UniverseComm::Mpi(std::sync::Arc::new(MpiComm::new()));
     #[cfg(not(feature = "mpi"))]
     let comm = UniverseComm::NoComm(kryst::parallel::NoComm);
 
