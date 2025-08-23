@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::op::{LinOp, StructureId, ValuesId};
+use crate::error::KError;
 
 /// Matrix-free "shell" operator.
 pub struct MatShell<S> {
@@ -53,11 +54,12 @@ impl LinOp for MatShell<f64> {
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) { (self.mv)(x, y) }
 
-    fn matvec_t(&self, x: &[f64], y: &mut [f64]) {
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         if let Some(f) = &self.mvt {
             f(x, y);
+            Ok(())
         } else {
-            LinOp::matvec_t(self, x, y);
+            Err(KError::InvalidInput("t_matvec not supported by this operator".into()))
         }
     }
 
