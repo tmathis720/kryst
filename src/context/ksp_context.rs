@@ -7,6 +7,7 @@ use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
     MatSolverAdapter, MinresSolver, PcaGmresSolver, PcgSolver, QmrSolver, TfqmrSolver,
+    gmres::Preconditioning, PcaPcMode,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -195,6 +196,19 @@ impl KspContext {
     pub fn set_pc_type_from_str(&mut self, pc_type: &str) -> Result<&mut Self, KError> {
         let pct = PcType::from_str(pc_type)?;
         self.set_pc_type(pct, None)
+    }
+
+    /// Set the preconditioning side directly.
+    pub fn set_pc_side(&mut self, side: PcSide) -> &mut Self {
+        self.pc_side = side;
+        self.invalidate_setup();
+        self
+    }
+
+    /// Set the preconditioning side from a string ("left", "right", or "symmetric").
+    pub fn set_pc_side_from_str(&mut self, side: &str) -> Result<&mut Self, KError> {
+        let ps = PcSide::from_str(side)?;
+        Ok(self.set_pc_side(ps))
     }
 
     /// Configure the KSP context using parsed KSP options.
@@ -420,11 +434,6 @@ impl KspContext {
         if !self.setup_called {
             self.setup()?;
         }
-        let amat = self
-            .amat
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
-
         if matches!(self.solver_type, Some(SolverType::Preonly)) {
             let pmat = self
                 .pmat
@@ -440,6 +449,14 @@ impl KspContext {
                 reason: ConvergedReason::ConvergedAtol,
             });
         }
+
+        // Configure solver preconditioning side and validate compatibility
+        self.configure_pc_side()?;
+
+        let amat = self
+            .amat
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
 
         let monitors = if self.monitors.is_empty() {
             None
@@ -519,6 +536,61 @@ impl KspContext {
         self.maxits = maxits;
         self.invalidate_setup();
         self
+    }
+
+    /// Configure the underlying solver based on the requested preconditioning side.
+    fn configure_pc_side(&mut self) -> Result<(), KError> {
+        // Treat symmetric as left; only specialized PCs interpret it differently.
+        let side = match self.pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
+
+        match self.solver_type {
+            Some(SolverType::Gmres) => {
+                if let Some(adapter) = self
+                    .solver
+                    .as_mut()
+                    .and_then(|s| s.as_any_mut().downcast_mut::<
+                        MatSolverAdapter<GmresSolver<f64>>
+                    >())
+                {
+                    adapter.inner_mut().preconditioning = match side {
+                        PcSide::Left => Preconditioning::Left,
+                        PcSide::Right => Preconditioning::Right,
+                        PcSide::Symmetric => unreachable!(),
+                    };
+                }
+            }
+            Some(SolverType::PcaGmres) => {
+                if let Some(s) = self
+                    .solver
+                    .as_mut()
+                    .and_then(|s| s.as_any_mut().downcast_mut::<PcaGmresSolver>())
+                {
+                    s.pc_mode = match side {
+                        PcSide::Left => PcaPcMode::Left,
+                        PcSide::Right => PcaPcMode::Right,
+                        PcSide::Symmetric => unreachable!(),
+                    };
+                }
+            }
+            Some(SolverType::Fgmres) => {
+                if side != PcSide::Right {
+                    return Err(KError::SolveError(
+                        "FGMRES only supports right preconditioning".into(),
+                    ));
+                }
+            }
+            _ => {
+                if side == PcSide::Right {
+                    return Err(KError::SolveError(
+                        "Selected solver only supports left preconditioning".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Query whether setup has been performed.
