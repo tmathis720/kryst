@@ -103,6 +103,7 @@ where
         pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
+        pc_side: crate::preconditioner::PcSide,
         comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -114,6 +115,7 @@ where
         trace!("Starting MINRES solve");
 
         let _ = pc; // MINRES does not use preconditioner (yet)
+        let _ = pc_side;
         let n = b.as_ref().len();
         let ip = ();
 
@@ -413,7 +415,7 @@ mod tests {
         // run MINRES for up to 10 iters
         let mut x = vec![0.0; 3];
         let mut solver = MinresSolver::new(1e-6, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
 
         // compute final residual norm
         let mut r_final = vec![0.0; 3];
@@ -457,7 +459,7 @@ mod tests {
 
         // Use a very tight tol so iter=1 is required
         let mut solver = MinresSolver::new(1e-14, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
 
         // Since A=I, we expect x ≈ b exactly
         for i in 0..n {
@@ -501,7 +503,7 @@ mod tests {
         // solve A·x = b with MINRES
         let mut x = vec![0.0; 2];
         let mut solver = MinresSolver::new(1e-12, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
 
         // check final residual ‖b - A x‖₂
         let mut r = vec![0.0; 2];
@@ -550,12 +552,13 @@ mod tests {
 
         let mut solver = MinresSolver::new(1e-8, 10);
         let _stats = solver.solve(
-            &a, 
-            None, 
-            &b, 
-            &mut x, 
-            &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), 
-            Some(&monitors), 
+            &a,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+            Some(&monitors),
             None
         ).unwrap();
 

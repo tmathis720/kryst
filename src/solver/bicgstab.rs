@@ -81,6 +81,7 @@ where
         pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
+        pc_side: crate::preconditioner::PcSide,
         comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -96,6 +97,7 @@ where
         trace!("Starting BiCGStab solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
 
         let _ = pc; // BiCGStab does not use preconditioner (yet)
+        let _ = pc_side;
         let n = b.as_ref().len();
         let ip = ();
         let mut xk = x.as_ref().to_vec();
@@ -393,7 +395,7 @@ mod tests {
         let (a, b) = nonsym_3x3();
         let mut x = vec![0.0; 3];
         let mut solver = BiCgStabSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         eprintln!("BiCGStab stats: {{ reason: {:?}, iters: {}, final_res: {:e} }}", stats.reason, stats.iterations, stats.final_residual);
         // Compare to true solution
         let x_true = vec![1.0, 2.0, 3.0];

@@ -4027,6 +4027,7 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
         >,
         b: &Vec<f64>,
         x: &mut Vec<f64>,
+        pc_side: crate::preconditioner::PcSide,
         comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -4035,6 +4036,7 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
         let _guard = StageGuard::new("SuperLuDistSolve");
 
         let _ = pc; // Direct solvers do not use preconditioners
+        let _ = pc_side;
 
         // Validate input dimensions
         if b.len() != a.nrows() {
@@ -4091,7 +4093,7 @@ pub fn solve(
     let mut solver = SuperLuDistSolver::new();
     let mut x_vec = x.to_vec();
     let b_vec = b.to_vec();
-    solver.solve(a, None, &b_vec, &mut x_vec, comm, None, None)?;
+    solver.solve(a, None, &b_vec, &mut x_vec, crate::preconditioner::PcSide::Left, comm, None, None)?;
     x.copy_from_slice(&x_vec);
     Ok(())
 }
@@ -4739,7 +4741,7 @@ mod tests {
         let mut solver = SuperLuDistSolver::new();
 
         let comm = UniverseComm::NoComm(NoComm);
-        let result = solver.solve(&matrix, None, &b, &mut x, &comm, None, None);
+        let result = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None);
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), KError::InvalidInput(_)));
@@ -5486,7 +5488,7 @@ mod tests {
         assert!(solver.data.is_none());
 
         // This should succeed and automatically set up factorization
-        let result = solver.solve(&matrix, None, &b, &mut x, &comm, None, None);
+        let result = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None);
         assert!(result.is_ok());
 
         // After solve, factorization should exist

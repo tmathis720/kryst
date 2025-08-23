@@ -84,6 +84,7 @@ impl LinearSolver for CgsSolver {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -99,6 +100,7 @@ impl LinearSolver for CgsSolver {
         let mut r_tld = vec![0.0; n]; // shadow residual (fixed)
 
         let _ = pc; // unused for now
+        let _ = pc_side;
 
         // r = b - A x
         if x.iter().any(|&xi| xi != 0.0) {

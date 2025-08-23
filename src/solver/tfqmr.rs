@@ -63,6 +63,7 @@ impl LinearSolver for TfqmrSolver {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         _comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -103,7 +104,7 @@ impl LinearSolver for TfqmrSolver {
         }
         if let Some(pc) = pc {
             let rin = r.clone();
-            pc.apply(PcSide::Left, &rin, r)?;
+            pc.apply(pc_side, &rin, r)?;
         }
 
         let r_tld = r.clone();
@@ -140,7 +141,7 @@ impl LinearSolver for TfqmrSolver {
             a.matvec(yv, v);
             if let Some(pc) = pc {
                 let vin = v.to_vec();
-                pc.apply(PcSide::Left, &vin, v)?;
+                pc.apply(pc_side, &vin, v)?;
             }
 
             let sigma = dot(&r_tld, v);
@@ -176,7 +177,7 @@ impl LinearSolver for TfqmrSolver {
                 a.matvec(&tmp_in, Au);
                 if let Some(pc) = pc {
                     let tmp2 = Au.to_vec();
-                    pc.apply(PcSide::Left, &tmp2, Au)?;
+                    pc.apply(pc_side, &tmp2, Au)?;
                 }
                 for i in 0..n {
                     r[i] -= alpha * Au[i];
@@ -221,7 +222,7 @@ impl LinearSolver for TfqmrSolver {
                         }
                         if let Some(pc) = pc {
                             let tmp = Au.to_vec();
-                            pc.apply(PcSide::Left, &tmp, Au)?;
+                            pc.apply(pc_side, &tmp, Au)?;
                         }
                         true_res = norm2(Au);
                         stats.final_residual = true_res;
@@ -268,7 +269,7 @@ impl LinearSolver for TfqmrSolver {
                 }
                 if let Some(pc) = pc {
                     let tmp = Au.clone();
-                    pc.apply(PcSide::Left, &tmp, Au)?;
+                    pc.apply(pc_side, &tmp, Au)?;
                 }
                 true_res = norm2(Au);
                 stats.final_residual = true_res;

@@ -38,6 +38,7 @@ fn fgmres_uses_apply_mut() {
             Some(&mut pc),
             &b,
             &mut x,
+            PcSide::Right,
             &UniverseComm::NoComm(kryst::parallel::NoComm),
             None,
             None,

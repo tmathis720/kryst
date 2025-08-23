@@ -173,7 +173,7 @@ fn shell_with_solver_demo() -> Result<(), Box<dyn std::error::Error>> {
     // Solve with CG (since the matrix is SPD)
     let mut cg_solver = CgSolver::new(1e-10, 100);
     let mut x_solved = vec![0.0; n];
-    let stats = cg_solver.solve(&shell_matrix, None, &b, &mut x_solved, &comm, None, None)?;
+    let stats = cg_solver.solve(&shell_matrix, None, &b, &mut x_solved, crate::preconditioner::PcSide::Left, &comm, None, None)?;
     
     println!("Solved solution: {:?}", x_solved);
     println!("Solver stats: reason={:?}, iterations={}, residual={:.2e}", 

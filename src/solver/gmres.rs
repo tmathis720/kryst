@@ -387,6 +387,7 @@ where
         pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
         b: &V,
         x: &mut V,
+        pc_side: crate::preconditioner::PcSide,
         comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -396,6 +397,7 @@ where
         
         #[cfg(feature = "logging")]
         trace!("Starting GMRES solve");
+        let _ = pc_side;
 
         let n = b.as_ref().len();
         let ip = ();
@@ -843,7 +845,7 @@ mod tests {
         };
         let mut x = vec![0.0; 4];
         let mut solver = GmresSolver::new(4, 1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
@@ -875,7 +877,7 @@ mod tests {
         pc.setup(&a).unwrap();
         let mut x = vec![0.0; 4];
         let mut solver = GmresSolver::new(4, 1e-10, 100);
-        let stats = solver.solve(&a, Some(&pc), &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, Some(&pc), &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let tol = 1e-8;
         for (xi, ei) in x.iter().zip(x_true.iter()) {
             assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
@@ -907,7 +909,7 @@ mod tests {
         pc.setup(&a).unwrap();
         let mut x = vec![0.0; 4];
         let mut solver = GmresSolver::new(4, 1e-10, 100).with_preconditioning(Preconditioning::Right);
-        let _ = solver.solve(&a, Some(&pc), &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let _ = solver.solve(&a, Some(&pc), &b, &mut x, crate::preconditioner::PcSide::Right, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let tol = 1e-2;
         // Check residual norm instead of per-component equality
         let mut ax = vec![0.0; 4];
