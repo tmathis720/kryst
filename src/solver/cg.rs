@@ -1,546 +1,292 @@
-//! Conjugate Gradient (unpreconditioned) per Saad §6.1.
-//!
-//! This module implements the classic Conjugate Gradient (CG) method for solving symmetric positive definite (SPD)
-//! linear systems. CG is a Krylov subspace method that is efficient for large, sparse SPD matrices, and is widely used
-//! in scientific computing.
-//!
-//! # Overview
-//!
-//! The CG algorithm iteratively refines the solution to Ax = b by constructing conjugate search directions and minimizing
-//! the quadratic form. This implementation supports several norm types, single-reduction optimization, trust-region logic,
-//! and solution monitoring.
-//!
-//! # Usage
-//!
-//! - Create a `CgSolver` with the desired tolerance and maximum iterations.
-//! - Optionally configure norm type, single-reduction, trust-region, or monitoring.
-//! - Call `solve` with the system matrix, right-hand side, and initial guess.
-//! - The solver returns convergence statistics and the solution vector.
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 6.1.
-//! - https://en.wikipedia.org/wiki/Conjugate_gradient_method
-
-use crate::core::traits::{InnerProduct, MatVec};
-use crate::solver::legacy::LinearSolver;
-use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
+use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use crate::utils::profiling::StageGuard;
+use crate::matrix::op::LinOp;
+use crate::parallel::UniverseComm;
+use crate::preconditioner::{PcSide, Preconditioner};
+use crate::solver::LinearSolver;
+use crate::utils::convergence::{ConvergedReason, SolveStats};
+use std::any::Any;
 
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
 
-/// Norm type for CG convergence and monitoring.
-///
-/// - `Preconditioned`: Preconditioned residual norm
-/// - `Unpreconditioned`: Standard residual norm
-/// - `Natural`: Natural norm (r^T M^{-1} r)
-/// - `None`: No norm (for custom stopping)
-pub enum CgNormType { Preconditioned, Unpreconditioned, Natural, None }
-
-/// Conjugate Gradient solver struct.
-///
-/// Stores convergence parameters, norm type, and optional monitoring.
-pub struct CgSolver<T> {
-    pub conv: Convergence<T>,
-    pub norm_type: CgNormType,
-    pub single_reduction: bool,
-    pub radius: Option<T>,
-    pub obj_target: Option<T>,
-    pub monitor: Option<Box<dyn FnMut(usize, T) + Send + Sync>>,
-    pub residual_history: Vec<T>,
+#[derive(Debug, Clone, Copy)]
+pub enum CgNormType {
+    Preconditioned,
+    Unpreconditioned,
+    Natural,
+    None,
 }
 
-impl<T: Copy + num_traits::Float + From<f64> + std::ops::Mul<Output = T>> CgSolver<T> {
-    /// Create a new CG solver with the given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        let atol = <T as From<f64>>::from(1e-12);
-        let dtol = <T as From<f64>>::from(1e3);
+pub struct CgSolver {
+    rtol: f64,
+    atol: f64,
+    dtol: f64,
+    maxits: usize,
+    norm_type: CgNormType,
+    single_reduction: bool,
+    trust_region: Option<f64>,
+}
+
+impl CgSolver {
+    pub fn new(rtol: f64, maxits: usize) -> Self {
         Self {
-            conv: Convergence::new(tol, atol, dtol, max_iters),
+            rtol,
+            atol: 1e-12,
+            dtol: 1e3,
+            maxits,
             norm_type: CgNormType::Unpreconditioned,
             single_reduction: false,
-            radius: None,
-            obj_target: None,
-            monitor: None,
-            residual_history: Vec::new(),
+            trust_region: None,
         }
     }
-    
-    /// Create a new CG solver with full convergence criteria.
-    pub fn new_with_convergence(conv: Convergence<T>) -> Self {
-        Self {
-            conv,
-            norm_type: CgNormType::Unpreconditioned,
-            single_reduction: false,
-            radius: None,
-            obj_target: None,
-            monitor: None,
-            residual_history: Vec::new(),
+
+    pub fn with_norm(mut self, n: CgNormType) -> Self {
+        self.norm_type = n;
+        self
+    }
+    pub fn with_single_reduction(mut self, f: bool) -> Self {
+        self.single_reduction = f;
+        self
+    }
+    pub fn with_trust_region(mut self, r: f64) -> Self {
+        self.trust_region = Some(r);
+        self
+    }
+
+    pub fn set_norm(&mut self, n: CgNormType) {
+        self.norm_type = n;
+    }
+    pub fn set_single_reduction(&mut self, f: bool) {
+        self.single_reduction = f;
+    }
+    pub fn set_trust_region(&mut self, r: f64) {
+        self.trust_region = Some(r);
+    }
+
+    #[inline]
+    fn dot(u: &[f64], v: &[f64], _comm: &UniverseComm) -> f64 {
+        u.iter().zip(v).map(|(a, b)| a * b).sum()
+    }
+    #[inline]
+    fn nrm2(u: &[f64], comm: &UniverseComm) -> f64 {
+        Self::dot(u, u, comm).sqrt()
+    }
+
+    fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
+        if buf.len() != n {
+            buf.resize(n, 0.0);
         }
     }
-    /// Set the norm type for convergence and monitoring.
-    pub fn with_norm(mut self, norm_type: CgNormType) -> Self {
-        self.norm_type = norm_type;
-        self
-    }
-    /// Enable or disable single-reduction optimization.
-    pub fn with_single_reduction(mut self, flag: bool) -> Self {
-        self.single_reduction = flag;
-        self
-    }
-    /// Set a trust-region radius (Steihaug–Toint logic).
-    pub fn with_radius(mut self, radius: T) -> Self {
-        self.radius = Some(radius);
-        self
-    }
-    /// Set an objective function target for early stopping.
-    pub fn with_obj_target(mut self, obj: T) -> Self {
-        self.obj_target = Some(obj);
-        self
-    }
-    /// Set a monitor callback for residuals.
-    pub fn with_monitor<F>(mut self, f: F) -> Self
-    where F: FnMut(usize, T) + Send + Sync + 'static {
-        self.monitor = Some(Box::new(f));
-        self
-    }
-    /// Clear the residual history.
-    pub fn clear_history(&mut self) {
-        self.residual_history.clear();
+
+    fn acquire<'a>(
+        n: usize,
+        work: Option<&'a mut Workspace>,
+    ) -> (&'a mut [f64], &'a mut [f64], &'a mut [f64], &'a mut [f64], &'a mut [f64]) {
+        if let Some(wk) = work {
+            while wk.q.len() < 4 {
+                wk.q.push(vec![0.0; n]);
+            }
+            for v in &mut wk.q[0..4] {
+                Self::take_or_resize(v, n);
+            }
+            Self::take_or_resize(&mut wk.tmp1, n);
+            let (r_slice, rest) = wk.q.split_at_mut(1);
+            let (z_slice, rest) = rest.split_at_mut(1);
+            let (p_slice, rest) = rest.split_at_mut(1);
+            let (ap_slice, _) = rest.split_at_mut(1);
+            let r = &mut r_slice[0][..];
+            let z = &mut z_slice[0][..];
+            let p = &mut p_slice[0][..];
+            let ap = &mut ap_slice[0][..];
+            let tmp = &mut wk.tmp1[..];
+            (r, z, p, ap, tmp)
+        } else {
+            let mut mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
+            (mk(n), mk(n), mk(n), mk(n), mk(n))
+        }
     }
 }
 
-impl<M: ?Sized, V, T> LinearSolver<M, V> for CgSolver<T>
-where
-    M: MatVec<V>,
-    (): InnerProduct<V, Scalar = T>,
-    V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64> + Send + Sync + std::fmt::LowerExp,
-{
+impl LinearSolver for CgSolver {
     type Error = KError;
-    type Scalar = T;
 
-    /// Solve the linear system Ax = b using the Conjugate Gradient algorithm.
-    ///
-    /// This unified method handles all solve variants with optional monitoring,
-    /// profiling, and workspace for maximum efficiency.
-    ///
-    /// # Arguments
-    /// * `a` - System matrix
-    /// * `pc` - Optional preconditioner (currently unused)
-    /// * `b` - Right-hand side vector
-    /// * `x` - Initial guess (input/output)
-    /// * `comm` - Communicator for parallel operations
-    /// * `monitors` - Optional callbacks to invoke at each iteration with (iteration, residual_norm)
-    /// * `work` - Optional pre-allocated workspace containing temporary vectors
-    ///
-    /// Returns convergence statistics and the solution vector.
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        if work.q.len() < 4 {
+            work.q.resize(4, Vec::new());
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn solve(
         &mut self,
-        a: &M,
-        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
-        work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
-        let _solve_stage = StageGuard::new("CGSolve");
-        
-        let monitors = monitors.unwrap_or(&[]);
-        
-        // Only use monitors if monitoring is enabled at runtime
-        let use_monitors = crate::utils::profiling::is_monitoring_enabled() && !monitors.is_empty();
-        
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
         #[cfg(feature = "logging")]
-        trace!("Starting CG solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
-        #[cfg(feature = "logging")]
-        trace!("Starting CG solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
+        let _guard = StageGuard::new("CG");
 
-        let _ = pc; // CG does not use preconditioner (yet)
-        let n = b.as_ref().len();
-        let mut x_vec = x.as_ref().to_vec();
-        let ip = ();
+        let n = b.len();
+        if x.len() != n {
+            return Err(KError::InvalidInput("dimension mismatch x,b".into()));
+        }
 
-        // Compute initial residual r = b - A x
-        let mut r = {
-            let _matvec_stage = StageGuard::new("CGMatVec");
-            let mut tmp = V::from(vec![T::zero(); n]);
-            a.matvec(&V::from(x_vec.clone()), &mut tmp);
-            let r_vec = tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>();
-            V::from(r_vec)
+        let (r, z, p, ap, tmp) = Self::acquire(n, work);
+
+        if x.iter().any(|&xi| xi != 0.0) {
+            a.matvec(x, tmp);
+            for i in 0..n {
+                r[i] = b[i] - tmp[i];
+            }
+        } else {
+            r.copy_from_slice(b);
+        }
+
+        if let Some(m) = pc {
+            m.apply(PcSide::Left, r, z)?;
+        } else {
+            z.copy_from_slice(r);
+        }
+
+        let mut rho = Self::dot(r, z, comm);
+        if rho <= 0.0 || !rho.is_finite() {
+            return Err(KError::IndefinitePreconditioner);
+        }
+        let mut rsq = Self::dot(r, r, comm);
+        let bnorm = Self::nrm2(b, comm).max(1e-32);
+        let mut xnorm = Self::nrm2(x, comm);
+
+        let res0 = match self.norm_type {
+            CgNormType::Preconditioned => rho.abs().sqrt(),
+            CgNormType::Unpreconditioned => rsq.sqrt(),
+            CgNormType::Natural => rho.abs().sqrt(),
+            CgNormType::None => 0.0,
         };
-        
-        let mut p = r.clone();
-        let mut rsq = ip.dot(&r, &r, comm);
-        let res0 = rsq.sqrt();
-        
-        let mut stats = SolveStats { 
-            iterations: 0, 
-            final_residual: res0, 
-            reason: ConvergedReason::Continued 
-        };
-        
-        // Choose norm for monitoring
-        let dp = match self.norm_type {
-            CgNormType::Preconditioned => ip.dot(&r, &r, comm),
-            CgNormType::Unpreconditioned => ip.dot(&r, &r, comm),
-            CgNormType::Natural => ip.dot(&r, &p, comm),
-            CgNormType::None => T::zero(),
-        };
-        
-        // Invoke monitors for iteration 0
-        if use_monitors {
-            for monitor in monitors {
-                monitor(0, dp.sqrt());
+
+        if let Some(ms) = monitors {
+            for m in ms {
+                m(0, res0);
             }
         }
-        
-        if let Some(ref mut monitor) = self.monitor {
-            monitor(0, dp.sqrt());
-        }
-        self.residual_history.push(dp.sqrt());
-
         #[cfg(feature = "logging")]
         trace!("CG initial residual: {:.3e}", res0);
-        
-        for i in 1..=self.conv.max_iters {
-            let _iter_stage = StageGuard::new("CGIteration");
-            
-            #[cfg(feature = "logging")]
-            trace!("CG iteration {}", i);
 
-            // Compute Ap = A p
-            let ap = {
-                let _matvec_stage = StageGuard::new("CGMatVec");
-                let mut ap = V::from(vec![T::zero(); n]);
-                a.matvec(&p.clone(), &mut ap);
-                ap
-            };
-            
-            // Compute p^T A p (or single-reduction variant)
-            let p_dot_ap = if self.single_reduction {
-                let _dot_stage = StageGuard::new("CGDotProduct");
-                #[cfg(feature = "rayon")]
-                {
-                    use rayon::prelude::*;
-                    p.as_ref().par_iter()
-                        .zip(ap.as_ref().par_iter())
-                        .map(|(&pi, &api)| pi * api)
-                        .reduce(|| T::zero(), |acc, v| acc + v)
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    let mut p_dot_ap = T::zero();
-                    for i in 0..n {
-                        p_dot_ap = p_dot_ap + p.as_ref()[i] * ap.as_ref()[i];
-                    }
-                    p_dot_ap
-                }
+        p.copy_from_slice(z);
+
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: ConvergedReason::Continued,
+        };
+
+        let thresh = self.atol.max(self.rtol * bnorm);
+        if res0 <= thresh {
+            stats.reason = if res0 <= self.atol {
+                ConvergedReason::ConvergedAtol
             } else {
-                let _dot_stage = StageGuard::new("CGDotProduct");
-                ip.dot(&p, &ap, comm)
+                ConvergedReason::ConvergedRtol
             };
+            return Ok(stats);
+        }
 
-            // Indefinite-matrix detection
-            if p_dot_ap <= T::zero() {
-                let res_norm = ip.dot(&r, &r, comm).sqrt();
-                stats.iterations = i;
-                stats.final_residual = res_norm;
-                stats.reason = ConvergedReason::DivergedDtol;
-                
-                #[cfg(feature = "logging")]
-                trace!("CG indefinite matrix detected at iter {}", i);
+        for k in 1..=self.maxits {
+            a.matvec(p, ap);
+
+            let p_ap = Self::dot(p, ap, comm);
+            if p_ap <= 0.0 || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
-            
-            let alpha = rsq / p_dot_ap;
-            
-            // Trust-region (Steihaug–Toint) logic
-            if let Some(radius) = self.radius {
-                let _norm_stage = StageGuard::new("CGNorm");
-                let p_norm = ip.dot(&p, &p, comm).sqrt();
-                let x_norm = ip.dot(&V::from(x_vec.clone()), &V::from(x_vec.clone()), comm).sqrt();
-                if x_norm + alpha.abs() * p_norm > radius {
-                    let max_step = (radius - x_norm) / p_norm;
-                    {
-                        let _axpy_stage = StageGuard::new("CGAxpy");
-                        #[cfg(feature = "rayon")]
-                        {
-                            use rayon::prelude::*;
-                            x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
-                                *xj = *xj + max_step * pj;
-                            });
-                        }
-                        #[cfg(not(feature = "rayon"))]
-                        {
-                            for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                                *xj = *xj + max_step * *pj;
-                            }
-                        }
+
+            let alpha = rho / p_ap;
+
+            if let Some(rmax) = self.trust_region {
+                let pnorm = Self::nrm2(p, comm);
+                if xnorm + alpha.abs() * pnorm > rmax {
+                    let step = (rmax - xnorm) / (pnorm + 1e-300);
+                    for i in 0..n {
+                        x[i] += step * p[i];
                     }
-                    *x = V::from(x_vec.clone());
-                    let res_norm_tr = ip.dot(&r, &r, comm).sqrt();
-                    stats.iterations = i;
-                    stats.final_residual = res_norm_tr;
+                    stats.iterations = k;
+                    stats.final_residual = Self::nrm2(r, comm);
                     stats.reason = ConvergedReason::DivergedMaxIts;
                     return Ok(stats);
                 }
             }
-            
-            // Update x and r
-            {
-                let _axpy_stage = StageGuard::new("CGAxpy");
-                #[cfg(feature = "rayon")]
-                {
-                    use rayon::prelude::*;
-                    x_vec.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
-                        *xj = *xj + alpha * pj;
-                    });
-                    r.as_mut().par_iter_mut().zip(ap.as_ref().par_iter()).for_each(|(rj, &apj)| {
-                        *rj = *rj - alpha * apj;
-                    });
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    for (xj, pj) in x_vec.iter_mut().zip(p.as_ref()) {
-                        *xj = *xj + alpha * *pj;
-                    }
-                    for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
-                        *rj = *rj - alpha * *apj;
-                    }
-                }
+
+            for i in 0..n {
+                x[i] += alpha * p[i];
             }
-            
-            let rsq_new = {
-                let _norm_stage = StageGuard::new("CGNorm");
-                ip.dot(&r, &r, comm)
-            };
-            
-            let res_norm = match self.norm_type {
-                CgNormType::Preconditioned => rsq_new.sqrt(),
-                CgNormType::Unpreconditioned => rsq_new.sqrt(),
-                CgNormType::Natural => ip.dot(&r, &p, comm).abs().sqrt(),
-                CgNormType::None => T::zero(),
-            };
-            
-            // Objective function tracking (optional early stopping)
-            if let Some(obj_target) = self.obj_target {
-                let obj = {
-                    let _matvec_stage = StageGuard::new("CGMatVec");
-                    let mut ax = V::from(vec![T::zero(); n]);
-                    a.matvec(&V::from(x_vec.clone()), &mut ax);
-                    let x_dot_ax = ip.dot(&V::from(x_vec.clone()), &ax, comm);
-                    let x_dot_b = ip.dot(&V::from(x_vec.clone()), b, comm);
-                    num_traits::cast::<f64, T>(0.5).unwrap() * x_dot_ax - x_dot_b
-                };
-                let res_norm_obj = match self.norm_type {
-                    CgNormType::Preconditioned => ip.dot(&r, &r, comm).sqrt(),
-                    CgNormType::Unpreconditioned => rsq_new.sqrt(),
-                    CgNormType::Natural => ip.dot(&r, &p, comm).abs().sqrt(),
-                    CgNormType::None => T::zero(),
-                };
-                if obj <= obj_target {
-                    *x = V::from(x_vec.clone());
-                    stats.iterations = i;
-                    stats.final_residual = res_norm_obj;
-                    stats.reason = ConvergedReason::ConvergedRtol;
-                    return Ok(stats);
-                }
+            for i in 0..n {
+                r[i] -= alpha * ap[i];
             }
-            
-            // Indefinite-beta detection
-            if rsq_new / rsq < T::zero() {
-                stats.iterations = i;
-                stats.final_residual = res_norm;
-                stats.reason = ConvergedReason::DivergedDtol;
+            xnorm = Self::nrm2(x, comm);
+
+            if let Some(m) = pc {
+                m.apply(PcSide::Left, r, z)?;
+            } else {
+                z.copy_from_slice(r);
+            }
+
+            let rho_new = Self::dot(r, z, comm);
+            if rho_new <= 0.0 || !rho_new.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
             }
-            
-            // Invoke monitors for current iteration
-            if use_monitors {
-                for monitor in monitors {
-                    monitor(i, res_norm);
+            let rsq_new = Self::dot(r, r, comm);
+
+            let res = match self.norm_type {
+                CgNormType::Preconditioned => rho_new.abs().sqrt(),
+                CgNormType::Unpreconditioned => rsq_new.sqrt(),
+                CgNormType::Natural => rho_new.abs().sqrt(),
+                CgNormType::None => 0.0,
+            };
+
+            if let Some(ms) = monitors {
+                for m in ms {
+                    m(k, res);
                 }
             }
-            
-            if let Some(ref mut monitor) = self.monitor {
-                monitor(i, res_norm);
-            }
-            self.residual_history.push(res_norm);
 
-            #[cfg(feature = "logging")]
-            trace!("CG iteration {}: residual = {:.3e}", i, res_norm);
-            
-            // Check convergence using new interface
-            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
-            stats = new_stats;
-            if reason != ConvergedReason::Continued {
-                *x = V::from(x_vec.clone());
-                
-                #[cfg(feature = "logging")]
-                trace!("CG converged after {} iterations: {:?}", i, reason);
+            if res <= self.atol || res <= self.rtol * bnorm {
+                stats.iterations = k;
+                stats.final_residual = res;
+                stats.reason = if res <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                };
                 return Ok(stats);
             }
-            
-            let beta = rsq_new / rsq;
-            {
-                let _axpy_stage = StageGuard::new("CGAxpy");
-                #[cfg(feature = "rayon")]
-                {
-                    use rayon::prelude::*;
-                    p.as_mut().par_iter_mut().zip(r.as_ref().par_iter()).for_each(|(pj, &rj)| {
-                        *pj = rj + beta * *pj;
-                    });
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    for (pj, rj) in p.as_mut().iter_mut().zip(r.as_ref()) {
-                        *pj = *rj + beta * *pj;
-                    }
-                }
+            if !res.is_finite() || res >= self.dtol {
+                stats.iterations = k;
+                stats.final_residual = res;
+                stats.reason = ConvergedReason::DivergedDtol;
+                return Ok(stats);
             }
+
+            let beta = rho_new / rho;
+            for i in 0..n {
+                p[i] = z[i] + beta * p[i];
+            }
+
+            rho = rho_new;
             rsq = rsq_new;
+            stats.iterations = k;
+            stats.final_residual = res;
         }
-        
-        *x = V::from(x_vec);
-        
-        #[cfg(feature = "logging")]
-        trace!("CG solve completed: {} iterations, final residual: {:.3e}", 
-               stats.iterations, stats.final_residual);
-        
+
+        stats.reason = ConvergedReason::DivergedMaxIts;
         Ok(stats)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::traits::MatVec;
-
-    // Simple dense matrix type for testing
-    #[derive(Clone)]
-    struct DenseMat {
-        data: Vec<Vec<f64>>,
-    }
-    impl MatVec<Vec<f64>> for DenseMat {
-        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
-            for (i, row) in self.data.iter().enumerate() {
-                y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
-            }
-        }
-    }
-
-    #[test]
-    fn cg_solves_simple_spd() {
-        // SPD system: [[4,1],[1,3]] x = [1,2]
-        let a = DenseMat { data: vec![vec![4.0, 1.0], vec![1.0, 3.0]] };
-        let b = vec![1.0, 2.0];
-        let mut x = vec![0.0, 0.0];
-        let mut solver = CgSolver::new(1e-10, 20);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let expected = vec![0.09090909090909091, 0.6363636363636364];
-        let tol = 1e-8;
-        for (xi, ei) in x.iter().zip(expected.iter()) {
-            assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
-        }
-        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "CG did not converge: {:?}", stats.reason);
-    }
-
-    #[test]
-    fn cg_solves_spd() {
-        // Symmetric positive definite system
-        // A = [[4,1,0],[1,3,1],[0,1,2]]
-        // x_true = [1,2,3]
-        // b = A * x_true = [6,8,8]
-        let a = DenseMat {
-            data: vec![
-                vec![4.0, 1.0, 0.0],
-                vec![1.0, 3.0, 1.0],
-                vec![0.0, 1.0, 2.0],
-            ]
-        };
-        let x_true = vec![1.0, 2.0, 3.0];
-        let b = {
-            let mut b = vec![0.0; 3];
-            a.matvec(&x_true, &mut b);
-            b
-        };
-        let mut x = vec![0.0; 3];
-        let mut solver = CgSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let tol = 1e-8;
-        let mut r_final = vec![0.0; 3];
-        a.matvec(&x, &mut r_final);
-        for i in 0..3 {
-            r_final[i] = b[i] - r_final[i];
-        }
-        let res_norm = r_final.iter().map(|&ri| ri*ri).sum::<f64>().sqrt();
-        assert!(res_norm <= tol, "final residual = {:.6}, tol = {:.6}", res_norm, tol);
-        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "CG did not converge: {:?}", stats.reason);
-    }
-
-    #[test]
-    fn cg_single_reduction_equivalence() {
-        // SPD system: [[4,1],[1,3]] x = [1,2]
-        let a = DenseMat { data: vec![vec![4.0, 1.0], vec![1.0, 3.0]] };
-        let b = vec![1.0, 2.0];
-        let mut x_std = vec![0.0, 0.0];
-        let mut x_single = vec![0.0, 0.0];
-        let mut solver_std = CgSolver::new(1e-10, 20);
-        let mut solver_single = CgSolver::new(1e-10, 20).with_single_reduction(true);
-        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let tol = 1e-8;
-        for (xi, xj) in x_std.iter().zip(x_single.iter()) {
-            assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);
-        }
-        assert!(matches!(stats_single.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "Single-reduction CG did not converge: {:?}", stats_single.reason);
-        // Also check against expected solution
-        let expected = vec![0.09090909090909091, 0.6363636363636364];
-        for (xi, ei) in x_single.iter().zip(expected.iter()) {
-            assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
-        }
-    }
-
-    #[test]
-    fn cg_single_reduction_spd3() {
-        // SPD system: [[4,1,0],[1,3,1],[0,1,2]] x = [1,2,3]
-        let a = DenseMat {
-            data: vec![
-                vec![4.0, 1.0, 0.0],
-                vec![1.0, 3.0, 1.0],
-                vec![0.0, 1.0, 2.0],
-            ]
-        };
-        let x_true = vec![1.0, 2.0, 3.0];
-        let b = {
-            let mut b = vec![0.0; 3];
-            a.matvec(&x_true, &mut b);
-            b
-        };
-        let mut x_std = vec![0.0; 3];
-        let mut x_single = vec![0.0; 3];
-        let mut solver_std = CgSolver::new(1e-10, 100);
-        let mut solver_single = CgSolver::new(1e-10, 100).with_single_reduction(true);
-        let _stats_std = solver_std.solve(&a, None, &b, &mut x_std, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let stats_single = solver_single.solve(&a, None, &b, &mut x_single, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let tol = 1e-8;
-        for (xi, xj) in x_std.iter().zip(x_single.iter()) {
-            assert!((xi - xj).abs() < tol, "single-reduction and standard CG differ: {} vs {}", xi, xj);
-        }
-        let mut r_final = vec![0.0; 3];
-        a.matvec(&x_single, &mut r_final);
-        for i in 0..3 {
-            r_final[i] = b[i] - r_final[i];
-        }
-        let res_norm = r_final.iter().map(|&ri| ri*ri).sum::<f64>().sqrt();
-        assert!(res_norm <= tol, "final residual = {:.6}, tol = {:.6}", res_norm, tol);
-        assert!(matches!(stats_single.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "Single-reduction CG did not converge: {:?}", stats_single.reason);
-    }
-}

@@ -22,6 +22,9 @@ pub static SPECS: &[Spec] = &[
     Spec { flag: "-ksp_skip_real_r_check", key: "ksp_skip_real_r_check", arity: Arity::Zero, kind: ValueKind::Bool, doc: "toggle real-residual check" },
     Spec { flag: "-ksp_epsmac",     key: "ksp_epsmac",     arity: Arity::One, kind: ValueKind::Float, doc: "IEEE epsilon" },
     Spec { flag: "-ksp_guard_zero_residual", key: "ksp_guard_zero_residual", arity: Arity::One, kind: ValueKind::Float, doc: "guard for zero residual" },
+    Spec { flag: "-ksp_cg_norm", key: "ksp_cg_norm", arity: Arity::One, kind: ValueKind::Str, doc: "precond|unprecond|natural|none" },
+    Spec { flag: "-ksp_cg_single_reduction", key: "ksp_cg_single_reduction", arity: Arity::Zero, kind: ValueKind::Bool, doc: "single reduction" },
+    Spec { flag: "-ksp_trust_region", key: "ksp_trust_region", arity: Arity::One, kind: ValueKind::Float, doc: "trust region radius" },
 
     // --------- PC (subset shown; we include all below)
     Spec { flag: "-pc_type",             key: "pc_type",             arity: Arity::One, kind: ValueKind::Str,   doc: "jacobi, ilu, amg, ..." },

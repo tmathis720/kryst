@@ -6,10 +6,13 @@ use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::convergence::SolveStats;
+use std::any::Any;
 
 /// Object-safe linear solver operating on `f64` slices and [`LinOp`] operators.
-pub trait LinearSolver: Send {
+pub trait LinearSolver: Send + Any {
     type Error;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 
     /// Allow solver to configure workspace buffers.
     fn setup_workspace(&mut self, _work: &mut Workspace) {}
@@ -124,9 +127,13 @@ impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
 
 impl<S> LinearSolver for MatSolverAdapter<S>
 where
-    S: legacy::LinearSolver<faer::Mat<f64>, Vec<f64>, Scalar = f64, Error = KError> + Send,
+    S: legacy::LinearSolver<faer::Mat<f64>, Vec<f64>, Scalar = f64, Error = KError> + Send + 'static,
 {
     type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn setup_workspace(&mut self, work: &mut Workspace) {
         self.inner.setup_workspace(work);

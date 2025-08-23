@@ -5,6 +5,7 @@ use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+use std::any::Any;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CgNormType {
@@ -57,6 +58,10 @@ impl PcgSolver {
 
 impl LinearSolver for PcgSolver {
     type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn setup_workspace(&mut self, work: &mut Workspace) {
         if work.q.len() < 2 {

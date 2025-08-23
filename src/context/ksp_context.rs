@@ -110,27 +110,30 @@ impl KspContext {
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
         self.solver_type = Some(solver_type);
-        self.solver = match solver_type {
-            SolverType::Cg => Some(Box::new(MatSolverAdapter::new(CgSolver::new(
-                self.rtol,
-                self.maxits,
-            )))),
-            SolverType::Gmres => Some(Box::new(MatSolverAdapter::new(GmresSolver::new(
+        let solver: Box<dyn LinearSolver<Error = KError>> = match solver_type {
+            SolverType::Cg => Box::new(
+                CgSolver::new(self.rtol, self.maxits)
+                    .with_norm(crate::solver::cg::CgNormType::Unpreconditioned),
+            ),
+            SolverType::Gmres => Box::new(MatSolverAdapter::new(GmresSolver::new(
                 self.restart,
                 self.rtol,
                 self.maxits,
-            )))),
-            SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
+            ))),
+            SolverType::BiCgStab => Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
                 self.maxits,
-            )))),
-            SolverType::Pcg => Some(Box::new(PcgSolver::new(self.rtol, self.maxits))),
-            SolverType::Minres => Some(Box::new(MatSolverAdapter::new(MinresSolver::new(
+            ))),
+            SolverType::Pcg => Box::new(PcgSolver::new(self.rtol, self.maxits)),
+            SolverType::Minres => Box::new(MatSolverAdapter::new(MinresSolver::new(
                 self.rtol,
                 self.maxits,
-            )))),
-            SolverType::Preonly => None,
+            ))),
+            SolverType::Preonly => {
+                return Err(KError::SolveError("Preonly solver not available".into()))
+            }
         };
+        self.solver = Some(solver);
         self.invalidate_setup();
         Ok(self)
     }
@@ -178,6 +181,33 @@ impl KspContext {
         }
         if let Some(ref side) = opts.pc_side {
             self.pc_side = PcSide::from_str(side)?;
+        }
+
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<CgSolver>())
+        {
+            if let Some(ref norm) = opts.cg_norm {
+                let n = match norm.as_str() {
+                    "precond" => crate::solver::cg::CgNormType::Preconditioned,
+                    "unprecond" => crate::solver::cg::CgNormType::Unpreconditioned,
+                    "natural" => crate::solver::cg::CgNormType::Natural,
+                    "none" => crate::solver::cg::CgNormType::None,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_cg_norm: {other}"
+                        )))
+                    }
+                };
+                s.set_norm(n);
+            }
+            if let Some(flag) = opts.cg_single_reduction {
+                s.set_single_reduction(flag);
+            }
+            if let Some(r) = opts.trust_region {
+                s.set_trust_region(r);
+            }
         }
         self.invalidate_setup();
         Ok(self)
