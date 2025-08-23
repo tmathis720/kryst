@@ -1,11 +1,11 @@
 //! Solver traits and adapters.
 
-use crate::matrix::op::LinOp;
-use crate::preconditioner::{Preconditioner, PcSide};
-use crate::utils::convergence::SolveStats;
 use crate::context::ksp_context::Workspace;
-use crate::parallel::UniverseComm;
 use crate::error::KError;
+use crate::matrix::op::LinOp;
+use crate::parallel::UniverseComm;
+use crate::preconditioner::{PcSide, Preconditioner};
+use crate::utils::convergence::SolveStats;
 
 /// Object-safe linear solver operating on `f64` slices and [`LinOp`] operators.
 pub trait LinearSolver: Send {
@@ -111,8 +111,12 @@ struct MatPcAdapter<'a> {
     inner: &'a dyn Preconditioner,
 }
 
-impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>> for MatPcAdapter<'a> {
-    fn setup(&mut self, _a: &faer::Mat<f64>) -> Result<(), KError> { Ok(()) }
+impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
+    for MatPcAdapter<'a>
+{
+    fn setup(&mut self, _a: &faer::Mat<f64>) -> Result<(), KError> {
+        Ok(())
+    }
     fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         self.inner.apply(side, r.as_slice(), z.as_mut_slice())
     }
@@ -145,9 +149,9 @@ where
         let mut x_vec = x.to_vec();
         let b_vec = b.to_vec();
         let pc_adapter = pc.map(|p| MatPcAdapter { inner: p });
-        let pc_ref = pc_adapter
-            .as_ref()
-            .map(|p| p as &dyn crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>);
+        let pc_ref = pc_adapter.as_ref().map(|p| {
+            p as &dyn crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
+        });
         let stats = self
             .inner
             .solve(mat, pc_ref, &b_vec, &mut x_vec, comm, monitors, work)?;
@@ -166,10 +170,11 @@ pub mod bicgstab;
 pub use bicgstab::BiCgStabSolver;
 pub mod pcg;
 pub use pcg::PcgSolver;
+pub mod minres;
+pub use minres::MinresSolver;
 pub mod direct_lu;
 pub use direct_lu::{LuSolver, QrSolver};
 pub mod dense_lu;
 pub mod dense_qr;
 pub mod superlu_dist;
 pub use superlu_dist::SuperLuDistSolver;
-
