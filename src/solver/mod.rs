@@ -127,7 +127,9 @@ impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
 
 impl<S> LinearSolver for MatSolverAdapter<S>
 where
-    S: legacy::LinearSolver<faer::Mat<f64>, Vec<f64>, Scalar = f64, Error = KError> + Send + 'static,
+    S: legacy::LinearSolver<faer::Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>
+        + Send
+        + 'static,
 {
     type Error = KError;
 
@@ -175,6 +177,8 @@ pub use cgnr::CgnrSolver;
 
 pub mod gmres;
 pub use gmres::GmresSolver;
+pub mod fgmres;
+pub use fgmres::FgmresSolver;
 pub mod bicgstab;
 pub use bicgstab::BiCgStabSolver;
 pub mod cgs;
