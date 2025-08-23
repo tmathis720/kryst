@@ -71,6 +71,7 @@ pub struct PcOptions {
     pub amg_ieee_checks: Option<bool>,
     pub amg_optimize_workspace: Option<bool>,
     pub pc_chain: Option<String>,
+    pub chain: Option<Vec<PcOptions>>,
     pub omega: Option<f64>,
     pub drop_tol: Option<f64>,
 

@@ -1,184 +1,136 @@
-//! Preconditioner chaining for composite preconditioning strategies.
-//!
-//! This module implements PC-chaining that allows multiple preconditioners to be applied
-//! in sequence. This is useful for composite strategies like "Chebyshev → ILUTP" or 
-//! "Scaling → ILUTP → AMG".
-//!
-//! # Example Usage
-//!
-//! ```rust,ignore
-//! use kryst::preconditioner::{PcChain, Jacobi, Ilu0};
-//! 
-//! let mut chain = PcChain::new();
-//! chain.add_preconditioner(Box::new(Jacobi::new()));
-//! chain.add_preconditioner(Box::new(Ilu0::new()));
-//! 
-//! // Apply the chain: Jacobi followed by ILU(0)
-//! chain.apply(PcSide::Left, &r, &mut z)?;
-//! ```
-
 use crate::error::KError;
-use crate::preconditioner::{PcSide, legacy::Preconditioner};
-use faer::Mat;
+use crate::matrix::op::LinOp;
+use crate::preconditioner::{PcSide, Preconditioner};
+use std::sync::Mutex;
 
-/// Preconditioner chain that applies multiple preconditioners in sequence.
+/// A simple compositional preconditioner:
+/// y = P_k( ... P_2(P_1(x)) ... ) for all PcSide variants.
+/// This models M^{-1} ≈ P_k ∘ ... ∘ P_1.
 ///
-/// Each preconditioner in the chain is applied to the result of the previous one.
-/// For a chain [PC1, PC2, PC3], the application is: z = PC3(PC2(PC1(r)))
 pub struct PcChain {
-    /// Sequence of preconditioners to apply
-    chain: Vec<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>>,
-    /// Temporary vector for intermediate results
-    tmp: Option<Vec<f64>>,
+    stages: Vec<Box<dyn Preconditioner>>,
+    scratch: Mutex<ChainScratch>,
+}
+
+#[derive(Default)]
+struct ChainScratch {
+    buf1: Vec<f64>,
+    buf2: Vec<f64>,
 }
 
 impl PcChain {
-    /// Create a new empty preconditioner chain.
-    pub fn new() -> Self {
-        Self {
-            chain: Vec::new(),
-            tmp: None,
-        }
+    pub fn new(stages: Vec<Box<dyn Preconditioner>>) -> Self {
+        Self { stages, scratch: Mutex::new(ChainScratch::default()) }
     }
 
-    /// Add a preconditioner to the end of the chain.
-    pub fn add_preconditioner(&mut self, pc: Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>) {
-        self.chain.push(pc);
+    #[inline]
+    fn ensure_bufs(s: &mut ChainScratch, n: usize) {
+        if s.buf1.len() != n { s.buf1.resize(n, 0.0); }
+        if s.buf2.len() != n { s.buf2.resize(n, 0.0); }
     }
 
-    /// Get the number of preconditioners in the chain.
-    pub fn len(&self) -> usize {
-        self.chain.len()
-    }
-
-    /// Check if the chain is empty.
-    pub fn is_empty(&self) -> bool {
-        self.chain.is_empty()
-    }
-
-    /// Parse a comma-separated string of preconditioner names into preconditioner types.
-    /// 
-    /// # Arguments
-    /// * `chain_str` - Comma-separated list like "jacobi,ilu0,chebyshev"
-    /// 
-    /// Returns a vector of preconditioner type names.
-    pub fn parse_chain_string(chain_str: &str) -> Vec<String> {
-        chain_str
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
+    pub fn len(&self) -> usize { self.stages.len() }
+    pub fn is_empty(&self) -> bool { self.stages.is_empty() }
 }
 
-impl Default for PcChain {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Preconditioner<Mat<f64>, Vec<f64>> for PcChain {
-    /// Setup all preconditioners in the chain.
-    fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
-        // Initialize temporary vector
-        self.tmp = Some(vec![0.0; a.nrows()]);
-        
-        // Setup each preconditioner in the chain
-        for pc in &mut self.chain {
-            pc.setup(a)?;
+impl Preconditioner for PcChain {
+    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        for st in self.stages.iter_mut() {
+            st.setup(a)?;
         }
-        
         Ok(())
     }
 
-    /// Apply the preconditioner chain.
-    /// 
-    /// For a chain [PC1, PC2, PC3], applies: z = PC3(PC2(PC1(r)))
-    fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
-        if self.chain.is_empty() {
-            // Empty chain: just copy input to output
-            z.copy_from_slice(r);
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if self.stages.is_empty() {
+            y.copy_from_slice(x);
             return Ok(());
         }
-
-        let tmp = self.tmp.as_ref().ok_or_else(|| {
-            KError::SolveError("PcChain not properly initialized - call setup() first".to_string())
-        })?;
-
-        if self.chain.len() == 1 {
-            // Single preconditioner: apply directly
-            self.chain[0].apply(side, r, z)?;
-            return Ok(());
+        if self.stages.len() == 1 {
+            return self.stages[0].apply(side, x, y);
         }
 
-        // Multiple preconditioners: use temporary vectors
-        let mut current_in = r;
-        let mut current_out = vec![0.0; r.len()];
-        let mut next_tmp = vec![0.0; r.len()];
+        let n = x.len();
+        let mut s = self.scratch.lock().unwrap();
+        Self::ensure_bufs(&mut s, n);
+        let ChainScratch { buf1, buf2 } = &mut *s;
 
-        for (i, pc) in self.chain.iter().enumerate() {
-            if i == self.chain.len() - 1 {
-                // Last preconditioner: output to z
-                pc.apply(side, current_in, z)?;
+        self.stages[0].apply(side, x, buf1)?;
+        let mut in_is_buf1 = true;
+        let m = self.stages.len();
+        for st in self.stages.iter().skip(1).take(m - 2) {
+            if in_is_buf1 {
+                st.apply(side, &*buf1, buf2)?;
             } else {
-                // Intermediate preconditioner: output to temporary vector
-                pc.apply(side, current_in, &mut current_out)?;
-                
-                // Swap vectors for next iteration
-                std::mem::swap(&mut current_out, &mut next_tmp);
-                current_in = &next_tmp;
+                st.apply(side, &*buf2, buf1)?;
+            }
+            in_is_buf1 = !in_is_buf1;
+        }
+        let last = self.stages.last().unwrap();
+        if in_is_buf1 {
+            last.apply(side, &*buf1, y)?;
+        } else {
+            last.apply(side, &*buf2, y)?;
+        }
+        Ok(())
+    }
+
+    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if self.stages.is_empty() {
+            y.copy_from_slice(x);
+            return Ok(());
+        }
+        if self.stages.len() == 1 {
+            return self.stages[0].apply_mut(side, x, y);
+        }
+
+        let n = x.len();
+        let mut s = self.scratch.lock().unwrap();
+        Self::ensure_bufs(&mut s, n);
+        let ChainScratch { buf1, buf2 } = &mut *s;
+
+        self.stages[0].apply_mut(side, x, buf1)?;
+        let mut in_is_buf1 = true;
+        let m = self.stages.len();
+        for st in self.stages.iter_mut().skip(1).take(m - 2) {
+            if in_is_buf1 {
+                st.apply_mut(side, &*buf1, buf2)?;
+            } else {
+                st.apply_mut(side, &*buf2, buf1)?;
+            }
+            in_is_buf1 = !in_is_buf1;
+        }
+        let last = self.stages.last_mut().unwrap();
+        if in_is_buf1 {
+            last.apply_mut(side, &*buf1, y)?;
+        } else {
+            last.apply_mut(side, &*buf2, y)?;
+        }
+        Ok(())
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        self.stages.iter().all(|s| s.supports_numeric_update())
+    }
+
+    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        for st in self.stages.iter_mut() {
+            if st.supports_numeric_update() {
+                st.update_numeric(a)?;
+            } else {
+                st.update_symbolic(a)?;
             }
         }
+        Ok(())
+    }
 
+    fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        for st in self.stages.iter_mut() {
+            st.update_symbolic(a)?;
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::preconditioner::jacobi::Jacobi;
-
-    #[test]
-    fn test_pc_chain_creation() {
-        let chain = PcChain::new();
-        assert_eq!(chain.len(), 0);
-        assert!(chain.is_empty());
-    }
-
-    #[test]
-    fn test_pc_chain_parse_string() {
-        let parsed = PcChain::parse_chain_string("jacobi,ilu0,chebyshev");
-        assert_eq!(parsed, vec!["jacobi", "ilu0", "chebyshev"]);
-
-        let parsed = PcChain::parse_chain_string("jacobi, ilu0 , chebyshev ");
-        assert_eq!(parsed, vec!["jacobi", "ilu0", "chebyshev"]);
-
-        let parsed = PcChain::parse_chain_string("");
-        assert_eq!(parsed, Vec::<String>::new());
-    }
-
-    #[test]
-    fn test_pc_chain_single_preconditioner() {
-        use faer::Mat;
-        
-        let matrix = Mat::<f64>::from_fn(3, 3, |i, j| {
-            if i == j { 2.0 } else { 0.0 }
-        });
-
-        let mut chain = PcChain::new();
-        chain.add_preconditioner(Box::new(Jacobi::new()));
-        
-        chain.setup(&matrix).unwrap();
-        
-        let r = vec![1.0, 2.0, 3.0];
-        let mut z = vec![0.0; 3];
-        
-        chain.apply(PcSide::Left, &r, &mut z).unwrap();
-        
-        // Jacobi on diagonal matrix should give [0.5, 1.0, 1.5]
-        assert!((z[0] - 0.5).abs() < 1e-10);
-        assert!((z[1] - 1.0).abs() < 1e-10);
-        assert!((z[2] - 1.5).abs() < 1e-10);
-    }
-}
+mod tests;
