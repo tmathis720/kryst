@@ -4677,7 +4677,7 @@ mod tests {
 
         let comm = UniverseComm::NoComm(NoComm);
         let stats = solver
-            .solve(&matrix, None, &b, &mut x, &comm, None, None)
+            .solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None)
             .unwrap();
 
         // Verify solve completed
@@ -4722,7 +4722,7 @@ mod tests {
 
         let comm = UniverseComm::NoComm(NoComm);
         let stats = solver
-            .solve(&matrix, None, &b, &mut x, &comm, None, None)
+            .solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None)
             .unwrap();
 
         // For identity matrix, solution should equal RHS
@@ -4758,7 +4758,7 @@ mod tests {
         let b1 = vec![2.0, 3.0];
         let mut x1 = vec![0.0; 2];
         let _stats1 = solver
-            .solve(&matrix, None, &b1, &mut x1, &comm, None, None)
+            .solve(&matrix, None, &b1, &mut x1, crate::preconditioner::PcSide::Left, &comm, None, None)
             .unwrap();
 
         // Solver should now have factorization cached
@@ -4768,7 +4768,7 @@ mod tests {
         let b2 = vec![4.0, 6.0];
         let mut x2 = vec![0.0; 2];
         let _stats2 = solver
-            .solve(&matrix, None, &b2, &mut x2, &comm, None, None)
+            .solve(&matrix, None, &b2, &mut x2, crate::preconditioner::PcSide::Left, &comm, None, None)
             .unwrap();
 
         // Factorization should be reused

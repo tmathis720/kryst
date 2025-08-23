@@ -7,7 +7,7 @@ use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
     MatSolverAdapter, MinresSolver, PcaGmresSolver, PcgSolver, QmrSolver, TfqmrSolver,
-    gmres::Preconditioning, PcaPcMode,
+    PcaPcMode,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -23,6 +23,10 @@ pub struct Workspace {
     pub cs: Vec<f64>,
     pub sn: Vec<f64>,
     pub g: Vec<f64>,
+    /// Preconditioned basis vectors (Z) used by right-preconditioned solvers
+    /// or flexible methods like FGMRES. Left-preconditioned solvers leave this
+    /// empty.
+    pub z: Vec<Vec<f64>>,
 }
 
 impl Workspace {
@@ -35,6 +39,7 @@ impl Workspace {
             cs: Vec::new(),
             sn: Vec::new(),
             g: Vec::new(),
+            z: Vec::new(),
         }
     }
 }
@@ -134,11 +139,11 @@ impl KspContext {
                     .with_norm(crate::solver::cg::CgNormType::Unpreconditioned),
             ),
             SolverType::Cgnr => Box::new(CgnrSolver::new(self.rtol, self.maxits)),
-            SolverType::Gmres => Box::new(MatSolverAdapter::new(GmresSolver::new(
+            SolverType::Gmres => Box::new(GmresSolver::new(
                 self.restart,
                 self.rtol,
                 self.maxits,
-            ))),
+            )),
             SolverType::Fgmres => Box::new(FgmresSolver::new(self.rtol, self.maxits, self.restart)),
             SolverType::BiCgStab => Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
@@ -549,21 +554,6 @@ impl KspContext {
         };
 
         match self.solver_type {
-            Some(SolverType::Gmres) => {
-                if let Some(adapter) = self
-                    .solver
-                    .as_mut()
-                    .and_then(|s| s.as_any_mut().downcast_mut::<
-                        MatSolverAdapter<GmresSolver<f64>>
-                    >())
-                {
-                    adapter.inner_mut().preconditioning = match side {
-                        PcSide::Left => Preconditioning::Left,
-                        PcSide::Right => Preconditioning::Right,
-                        PcSide::Symmetric => unreachable!(),
-                    };
-                }
-            }
             Some(SolverType::PcaGmres) => {
                 if let Some(s) = self
                     .solver
@@ -584,6 +574,7 @@ impl KspContext {
                     ));
                 }
             }
+            Some(SolverType::Gmres) => {}
             _ => {
                 if side == PcSide::Right {
                     return Err(KError::SolveError(
