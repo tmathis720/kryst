@@ -7,8 +7,8 @@
 
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
-use kryst::solver::{CgSolver, GmresSolver};
-use kryst::solver::legacy::LinearSolver;
+use kryst::solver::{CgSolver, GmresSolver, MatSolverAdapter};
+use kryst::LinearSolver;
 use rand::Rng;
 use approx::assert_abs_diff_eq;
 
@@ -65,7 +65,7 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let a = Mat::from_fn(n, n, |i, j| data[j * n + i]);
     let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
     let mut x_gmres = vec![0.0; n];
-    let mut solver = GmresSolver::new(100, 1e-8, 1000);
+    let mut solver = MatSolverAdapter::new(GmresSolver::new(100, 1e-8, 1000));
     let stats = solver.solve(&a, None, &b, &mut x_gmres, &comm, None, None).unwrap();
     assert!(matches!(stats.reason, kryst::utils::convergence::ConvergedReason::ConvergedRtol | kryst::utils::convergence::ConvergedReason::ConvergedAtol));
     // Direct solve using QR decomposition
