@@ -242,6 +242,7 @@ pub mod chebyshev;
 pub mod approxinv;
 pub mod chain;
 pub mod direct;
+pub mod builders;
 
 // Re-exports for convenience
 pub use jacobi::Jacobi;

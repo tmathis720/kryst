@@ -110,6 +110,28 @@ pub struct PcOptions {
     pub superlu_aggressive_memory_reuse: Option<bool>,
     pub superlu_preallocation_strategy: Option<String>,
     pub reuse_policy: Option<String>,
+
+    // Additional per-PC knobs
+    pub jacobi_block_size: Option<usize>,
+    pub ilu_variant: Option<String>,
+    pub ilu_reordering: Option<String>,
+
+    // SOR
+    pub sor_omega: Option<f64>,
+    pub sor_sweeps: Option<usize>,
+    pub sor_symmetric: Option<bool>,
+    pub sor_mat_side: Option<String>,
+
+    // Chebyshev
+    pub cheb_degree: Option<usize>,
+    pub cheb_eig_lo: Option<f64>,
+    pub cheb_eig_hi: Option<f64>,
+
+    // ASM
+    pub asm_subdomain_size: Option<usize>,
+
+    // AMG
+    pub amg_smoother: Option<String>,
 }
 
 /// Side enum kept as-is.
