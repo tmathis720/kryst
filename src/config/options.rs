@@ -29,6 +29,9 @@ pub struct KspOptions {
     pub skip_real_r_check: Option<bool>,
     pub epsmac: Option<f64>,
     pub guard_zero_residual: Option<f64>,
+    pub cg_norm: Option<String>,
+    pub cg_single_reduction: Option<bool>,
+    pub trust_region: Option<f64>,
 }
 
 /// PC options.
@@ -138,6 +141,7 @@ impl Sink for KspOptions {
     fn set_bool(&mut self, key: &str, v: bool) -> Result<(), KError> {
         match key {
             "ksp_skip_real_r_check" => set_opt!(&mut self.skip_real_r_check, v),
+            "ksp_cg_single_reduction" => set_opt!(&mut self.cg_single_reduction, v),
             _ => Err(KError::SolveError(format!("Unknown KSP bool key: {key}"))),
         }
     }
@@ -157,6 +161,8 @@ impl Sink for KspOptions {
             "ksp_cf_tol" => set_opt!(&mut self.cf_tol, parse_as::<f64>(v, spec)?),
             "ksp_epsmac" => set_opt!(&mut self.epsmac, parse_as::<f64>(v, spec)?),
             "ksp_guard_zero_residual" => set_opt!(&mut self.guard_zero_residual, parse_as::<f64>(v, spec)?),
+            "ksp_cg_norm" => set_opt!(&mut self.cg_norm, v.to_string()),
+            "ksp_trust_region" => set_opt!(&mut self.trust_region, parse_as::<f64>(v, spec)?),
             "options_file" => Ok(()), // consumed earlier by expansion
             _ => Err(KError::SolveError(format!("Unknown KSP key: {}", spec.key))),
         }
@@ -310,6 +316,9 @@ impl KspOptions {
         }
         if let Ok(v) = std::env::var("KRYST_KSP_EPSMAC") { me.epsmac = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_EPSMAC: {v}")))?); }
         if let Ok(v) = std::env::var("KRYST_KSP_GUARD_ZERO_RESIDUAL") { me.guard_zero_residual = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_GUARD_ZERO_RESIDUAL: {v}")))?); }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_NORM") { me.cg_norm = Some(v); }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_SINGLE_REDUCTION") { let l = v.to_lowercase(); me.cg_single_reduction = Some(matches!(l.as_str(), "true"|"1"|"yes"|"on")); }
+        if let Ok(v) = std::env::var("KRYST_KSP_TRUST_REGION") { me.trust_region = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_TRUST_REGION: {v}")))?); }
         Ok(me)
     }
 }
