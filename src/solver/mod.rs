@@ -193,3 +193,6 @@ pub mod dense_lu;
 pub mod dense_qr;
 pub mod superlu_dist;
 pub use superlu_dist::SuperLuDistSolver;
+
+pub mod pca_gmres;
+pub use pca_gmres::{PcaGmresSolver, PcaPcMode};
