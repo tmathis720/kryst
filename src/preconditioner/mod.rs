@@ -16,6 +16,7 @@
 
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+#[cfg(feature = "legacy-pc-bridge")]
 use faer::Mat;
 use std::str::FromStr;
 
@@ -127,15 +128,6 @@ pub trait Preconditioner: Send + Sync {
 pub trait FlexiblePreconditioner: Preconditioner {}
 impl<T: Preconditioner + ?Sized> FlexiblePreconditioner for T {}
 
-/// Internal trait for preconditioners that operate directly on dense matrices.
-pub trait PreconditionerMat: Send + Sync {
-    /// Set up the preconditioner from a dense matrix.
-    fn setup_mat(&mut self, a: &Mat<f64>) -> Result<(), KError>;
-
-    /// Apply M⁻¹ to input slice.
-    fn apply_vec(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
-}
-
 /// Legacy generic preconditioner traits retained for transitional adapters.
 pub mod legacy {
     use super::PcSide;
@@ -154,22 +146,39 @@ pub mod legacy {
     }
 }
 
-/// Adapter that wraps a legacy matrix-based preconditioner and exposes the new
-/// object-safe [`Preconditioner`] interface.
+#[cfg(feature = "legacy-pc-bridge")]
+use std::sync::Mutex;
+
+#[cfg(feature = "legacy-pc-bridge")]
 pub struct LegacyOpPreconditioner {
-    /// Inner legacy preconditioner operating on dense matrices and vectors.
     inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>,
+    scratch: Mutex<Scratch>,
 }
 
+#[cfg(feature = "legacy-pc-bridge")]
+#[derive(Default)]
+struct Scratch {
+    x: Vec<f64>,
+    y: Vec<f64>,
+}
+
+#[cfg(feature = "legacy-pc-bridge")]
 impl LegacyOpPreconditioner {
-    /// Create a new adapter from a boxed legacy preconditioner.
     pub fn new(inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>) -> Self {
-        Self { inner }
+        Self { inner, scratch: Mutex::new(Scratch::default()) }
+    }
+
+    #[inline]
+    fn ensure_scratch(s: &mut Scratch, n: usize) {
+        if s.x.len() != n { s.x.resize(n, 0.0); }
+        if s.y.len() != n { s.y.resize(n, 0.0); }
     }
 }
 
+#[cfg(feature = "legacy-pc-bridge")]
 impl Preconditioner for LegacyOpPreconditioner {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        use crate::error::KError;
         let m = a
             .as_any()
             .downcast_ref::<Mat<f64>>()
@@ -178,15 +187,43 @@ impl Preconditioner for LegacyOpPreconditioner {
     }
 
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        let x_vec = x.to_vec();
-        let mut y_vec = vec![0.0; y.len()];
-        self.inner.apply(side, &x_vec, &mut y_vec)?;
-        y.copy_from_slice(&y_vec);
+        use crate::error::KError;
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!("x.len()={} != y.len()={}", x.len(), y.len())));
+        }
+        let mut s = self.scratch.lock().unwrap();
+        Self::ensure_scratch(&mut s, x.len());
+        s.x.copy_from_slice(x);
+        let Scratch { x: x_buf, y: y_buf } = &mut *s;
+        self.inner.apply(side, &*x_buf, y_buf)?;
+        y.copy_from_slice(&s.y);
         Ok(())
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
+    }
+}
+
+#[cfg(not(feature = "legacy-pc-bridge"))]
+pub struct LegacyOpPreconditioner {
+    _private: (),
+}
+
+#[cfg(not(feature = "legacy-pc-bridge"))]
+impl LegacyOpPreconditioner {
+    pub fn new(_: Box<dyn legacy::Preconditioner<faer::Mat<f64>, Vec<f64>> + Send + Sync>) -> Self {
+        panic!("legacy-pc-bridge feature is disabled")
+    }
+}
+
+#[cfg(not(feature = "legacy-pc-bridge"))]
+impl Preconditioner for LegacyOpPreconditioner {
+    fn setup(&mut self, _: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        Err(KError::Unsupported("legacy-pc-bridge feature is disabled"))
+    }
+    fn apply(&self, _: PcSide, _: &[f64], _: &mut [f64]) -> Result<(), KError> {
+        Err(KError::Unsupported("legacy-pc-bridge feature is disabled"))
     }
 }
 
@@ -225,50 +262,4 @@ pub use self::sor::MatSorType;
 pub use crate::context::pc_context::{PC, SparsityPattern};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use faer::Mat;
-
-    struct Dummy;
-
-    impl Preconditioner for Dummy {
-        fn setup(&mut self, _pmat: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
-
-        fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
-            z.copy_from_slice(r);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn default_direct_solve_errors() {
-        let mut pc = Dummy;
-        let a = Mat::<f64>::zeros(1, 1);
-        let mut x = [0.0];
-        let err = pc.direct_solve(&a, &[1.0], &mut x).unwrap_err();
-        match err {
-            KError::SolveError(msg) => assert!(msg.contains("direct_solve not supported")),
-            _ => panic!("unexpected error variant"),
-        }
-    }
-
-    #[test]
-    fn default_apply_mut_forwards_to_apply() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct CountPc {
-            calls: AtomicUsize,
-        }
-        impl Preconditioner for CountPc {
-            fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
-            fn apply(&self, _side: PcSide, _x: &[f64], _y: &mut [f64]) -> Result<(), KError> {
-                self.calls.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
-        let mut pc = CountPc { calls: AtomicUsize::new(0) };
-        let x = [0.0; 2];
-        let mut y = [0.0; 2];
-        pc.apply_mut(PcSide::Left, &x, &mut y).unwrap();
-        assert_eq!(pc.calls.load(Ordering::Relaxed), 1);
-    }
-}
+mod tests;

@@ -50,6 +50,9 @@ mpi = ["dep:mpi"]
 logging = ["dep:log"]
 mpi_examples = ["mpi"]
 
+# Optional, OFF by default, so new PCs must target the modern trait.
+legacy-pc-bridge = []
+
 [[example]]
 name = "mpi_amg_gmres_demo"
 required-features = ["mpi_examples"]
