@@ -3,11 +3,13 @@ use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
-use crate::preconditioner::{PcSide, Preconditioner, PcReusePolicy};
-use crate::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter, PcgSolver};
-use crate::utils::convergence::{SolveStats, ConvergedReason};
-use std::sync::Arc;
+use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+use crate::solver::{
+    BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter, MinresSolver, PcgSolver,
+};
+use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Workspace placeholder reused by solvers.
 #[derive(Debug)]
@@ -42,6 +44,7 @@ pub enum SolverType {
     Gmres,
     BiCgStab,
     Pcg,
+    Minres,
     Preonly,
 }
 
@@ -54,6 +57,7 @@ impl FromStr for SolverType {
             "gmres" => Ok(SolverType::Gmres),
             "bicgstab" => Ok(SolverType::BiCgStab),
             "pcg" => Ok(SolverType::Pcg),
+            "minres" => Ok(SolverType::Minres),
             "preonly" => Ok(SolverType::Preonly),
             other => Err(KError::UnrecognizedSolverType(other.to_string())),
         }
@@ -116,10 +120,15 @@ impl KspContext {
                 self.rtol,
                 self.maxits,
             )))),
-            SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(
-                BiCgStabSolver::new(self.rtol, self.maxits),
-            ))),
+            SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
+                self.rtol,
+                self.maxits,
+            )))),
             SolverType::Pcg => Some(Box::new(PcgSolver::new(self.rtol, self.maxits))),
+            SolverType::Minres => Some(Box::new(MatSolverAdapter::new(MinresSolver::new(
+                self.rtol,
+                self.maxits,
+            )))),
             SolverType::Preonly => None,
         };
         self.invalidate_setup();
@@ -141,10 +150,7 @@ impl KspContext {
         Ok(self)
     }
 
-    pub fn set_pc_type_from_str(
-        &mut self,
-        pc_type: &str,
-    ) -> Result<&mut Self, KError> {
+    pub fn set_pc_type_from_str(&mut self, pc_type: &str) -> Result<&mut Self, KError> {
         let pct = PcType::from_str(pc_type)?;
         self.set_pc_type(pct, None)
     }
@@ -224,8 +230,12 @@ impl KspContext {
         self.last_pc_vid = None;
     }
 
-    pub fn last_pc_sid(&self) -> Option<StructureId> { self.last_pc_sid }
-    pub fn last_pc_vid(&self) -> Option<ValuesId> { self.last_pc_vid }
+    pub fn last_pc_sid(&self) -> Option<StructureId> {
+        self.last_pc_sid
+    }
+    pub fn last_pc_vid(&self) -> Option<ValuesId> {
+        self.last_pc_vid
+    }
 
     /// Prepare preconditioner and workspace.
     pub fn setup(&mut self) -> Result<(), KError> {
@@ -314,14 +324,9 @@ impl KspContext {
                 .pmat
                 .as_ref()
                 .ok_or_else(|| KError::InvalidInput("Pmat not set".into()))?;
-            let pc = self
-                .pc
-                .as_mut()
-                .ok_or_else(|| {
-                    KError::SolveError(
-                        "PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into(),
-                    )
-                })?;
+            let pc = self.pc.as_mut().ok_or_else(|| {
+                KError::SolveError("PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into())
+            })?;
             pc.direct_solve(
                 pmat.as_ref(),
                 b,
@@ -386,13 +391,7 @@ impl KspContext {
     }
 
     /// Set solver tolerances and maximum iterations.
-    pub fn set_tolerances(
-        &mut self,
-        rtol: f64,
-        atol: f64,
-        dtol: f64,
-        maxits: usize,
-    ) -> &mut Self {
+    pub fn set_tolerances(&mut self, rtol: f64, atol: f64, dtol: f64, maxits: usize) -> &mut Self {
         self.rtol = rtol;
         self.atol = atol;
         self.dtol = dtol;
