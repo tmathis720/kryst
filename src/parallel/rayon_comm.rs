@@ -19,6 +19,7 @@ use rayon::prelude::*;
 ///
 /// Implements the `Comm` trait for shared-memory parallelism. All collective operations
 /// are no-ops or local, as there is no inter-process communication.
+#[derive(Clone)]
 pub struct RayonComm;
 
 impl RayonComm {

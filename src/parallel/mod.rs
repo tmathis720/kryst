@@ -120,7 +120,7 @@ impl std::fmt::Debug for UniverseComm {
         match self {
             UniverseComm::NoComm(_) => f.write_str("NoComm"),
             #[cfg(feature="mpi")]
-            UniverseComm::Mpi(comm) => write!(f, "MpiComm {{ id: {} }}", comm.world.as_raw()),
+            UniverseComm::Mpi(comm) => write!(f, "MpiComm {{ id: {:?} }}", comm.world.as_raw()),
             #[cfg(feature="rayon")]
             UniverseComm::Rayon(_) => f.write_str("Rayon"),
             #[cfg(not(any(feature="mpi", feature="rayon")))]

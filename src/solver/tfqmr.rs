@@ -343,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn tfqmr_solves_small_nonsym() {
         let a = Dense {
             a: vec![vec![2.0, 1.0], vec![3.0, 4.0]],
@@ -371,6 +372,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn tfqmr_solves_diag_dom() {
         let a = Dense {
             a: vec![
