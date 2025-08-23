@@ -325,7 +325,7 @@ impl KspContext {
                     self.last_pc_vid = Some(vid);
                 }
                 Some(old_sid) if old_sid != sid => {
-                    pc.setup(pmat.as_ref())?;
+                    pc.update_symbolic(pmat.as_ref())?;
                     self.last_pc_sid = Some(sid);
                     self.last_pc_vid = Some(vid);
                 }
@@ -334,10 +334,10 @@ impl KspContext {
                         && self.pc_reuse.allow_numeric()
                         && pc.supports_numeric_update()
                     {
-                        pc.update_values(pmat.as_ref())?;
+                        pc.update_numeric(pmat.as_ref())?;
                         self.last_pc_vid = Some(vid);
                     } else if self.last_pc_vid != Some(vid) {
-                        pc.setup(pmat.as_ref())?;
+                        pc.update_symbolic(pmat.as_ref())?;
                         self.last_pc_vid = Some(vid);
                     }
                 }

@@ -46,3 +46,8 @@ default = ["mpi","rayon","logging"]
 rayon = ["dep:rayon", "dep:num_cpus"]
 mpi = ["dep:mpi"]
 logging = ["dep:log"]
+mpi_examples = ["mpi"]
+
+[[example]]
+name = "mpi_amg_gmres_demo"
+required-features = ["mpi_examples"]
