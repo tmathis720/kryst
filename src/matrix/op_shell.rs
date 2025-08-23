@@ -2,14 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::op::{LinOp, StructureId, ValuesId};
-use crate::error::KError;
 
 /// Matrix-free "shell" operator.
 pub struct MatShell<S> {
     m: usize,
     n: usize,
     mv: Arc<dyn Fn(&[S], &mut [S]) + Send + Sync>,
-    mvt: Option<Arc<dyn Fn(&[S], &mut [S]) + Send + Sync>>, 
+    mvt: Option<Arc<dyn Fn(&[S], &mut [S]) + Send + Sync>>,
     sid: AtomicU64,
     vid: AtomicU64,
 }
@@ -50,20 +49,33 @@ impl MatShell<f64> {
 impl LinOp for MatShell<f64> {
     type S = f64;
 
-    fn dims(&self) -> (usize, usize) { (self.m, self.n) }
+    fn dims(&self) -> (usize, usize) {
+        (self.m, self.n)
+    }
 
-    fn matvec(&self, x: &[f64], y: &mut [f64]) { (self.mv)(x, y) }
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        (self.mv)(x, y)
+    }
 
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn supports_transpose(&self) -> bool {
+        self.mvt.is_some()
+    }
+
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
         if let Some(f) = &self.mvt {
             f(x, y);
-            Ok(())
         } else {
-            Err(KError::InvalidInput("t_matvec not supported by this operator".into()))
+            panic!("LinOp::t_matvec called but supports_transpose() == false");
         }
     }
 
-    fn structure_id(&self) -> StructureId { StructureId(self.sid.load(Ordering::Relaxed)) }
-    fn values_id(&self) -> ValuesId { ValuesId(self.vid.load(Ordering::Relaxed)) }
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn structure_id(&self) -> StructureId {
+        StructureId(self.sid.load(Ordering::Relaxed))
+    }
+    fn values_id(&self) -> ValuesId {
+        ValuesId(self.vid.load(Ordering::Relaxed))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

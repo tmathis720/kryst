@@ -1,8 +1,7 @@
-use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use faer::traits::ComplexField;
-use crate::error::KError;
+use std::any::Any;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StructureId(pub u64);
@@ -19,9 +18,14 @@ pub trait LinOp: Send + Sync + Any {
     /// Compute y = A x.
     fn matvec(&self, x: &[Self::S], y: &mut [Self::S]);
 
-    /// Optional transpose/adjoint matvec. Default returns an error.
-    fn t_matvec(&self, _x: &[Self::S], _y: &mut [Self::S]) -> Result<(), KError> {
-        Err(KError::InvalidInput("t_matvec not supported by this operator".into()))
+    /// Whether this operator supports `t_matvec`.
+    fn supports_transpose(&self) -> bool {
+        false
+    }
+
+    /// Optional transpose/adjoint matvec. Default panics if unsupported.
+    fn t_matvec(&self, _x: &[Self::S], _y: &mut [Self::S]) {
+        panic!("LinOp::t_matvec called but supports_transpose() == false");
     }
 
     /// Downcast hook for specialized solvers/preconditioners.
@@ -29,11 +33,15 @@ pub trait LinOp: Send + Sync + Any {
 
     /// Changes when the nonzero pattern / shape changes.
     /// Default 0 -> unknown; higher layers may fall back to pointer identity.
-    fn structure_id(&self) -> StructureId { StructureId(0) }
+    fn structure_id(&self) -> StructureId {
+        StructureId(0)
+    }
 
     /// Changes when only numerical values change.
     /// Default 0 -> unknown.
-    fn values_id(&self) -> ValuesId { ValuesId(0) }
+    fn values_id(&self) -> ValuesId {
+        ValuesId(0)
+    }
 }
 
 /// Simple bumpable counters for LinOp implementors/wrappers.
@@ -58,8 +66,8 @@ impl ChangeIds {
 }
 
 // --- Optional wrappers for dense and CSR matrices -------------------------
-use faer::Mat;
 use crate::matrix::sparse::CsrMatrix;
+use faer::Mat;
 
 pub struct DenseOp {
     mat: Arc<Mat<f64>>,
@@ -72,17 +80,28 @@ impl DenseOp {
         ids.bump_values();
         Self { mat, ids }
     }
-    pub fn mark_structure_changed(&self) { self.ids.bump_structure(); }
-    pub fn mark_values_changed(&self) { self.ids.bump_values(); }
-    pub fn inner(&self) -> &Mat<f64> { &self.mat }
+    pub fn mark_structure_changed(&self) {
+        self.ids.bump_structure();
+    }
+    pub fn mark_values_changed(&self) {
+        self.ids.bump_values();
+    }
+    pub fn inner(&self) -> &Mat<f64> {
+        &self.mat
+    }
 }
 impl LinOp for DenseOp {
     type S = f64;
-    fn dims(&self) -> (usize, usize) { (self.mat.nrows(), self.mat.ncols()) }
+    fn dims(&self) -> (usize, usize) {
+        (self.mat.nrows(), self.mat.ncols())
+    }
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         let _ = crate::matrix::utils::parallel_mat_vec(&self.mat, x, y);
     }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn supports_transpose(&self) -> bool {
+        true
+    }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
         assert_eq!(x.len(), self.mat.nrows());
         assert_eq!(y.len(), self.mat.ncols());
         for j in 0..self.mat.ncols() {
@@ -92,11 +111,16 @@ impl LinOp for DenseOp {
             }
             y[j] = sum;
         }
-        Ok(())
     }
-    fn as_any(&self) -> &dyn Any { &*self.mat }
-    fn structure_id(&self) -> StructureId { self.ids.structure_id() }
-    fn values_id(&self) -> ValuesId { self.ids.values_id() }
+    fn as_any(&self) -> &dyn Any {
+        &*self.mat
+    }
+    fn structure_id(&self) -> StructureId {
+        self.ids.structure_id()
+    }
+    fn values_id(&self) -> ValuesId {
+        self.ids.values_id()
+    }
 }
 
 pub struct CsrOp {
@@ -110,19 +134,30 @@ impl CsrOp {
         ids.bump_values();
         Self { csr, ids }
     }
-    pub fn mark_structure_changed(&self) { self.ids.bump_structure(); }
-    pub fn mark_values_changed(&self) { self.ids.bump_values(); }
-    pub fn inner(&self) -> &CsrMatrix<f64> { &self.csr }
+    pub fn mark_structure_changed(&self) {
+        self.ids.bump_structure();
+    }
+    pub fn mark_values_changed(&self) {
+        self.ids.bump_values();
+    }
+    pub fn inner(&self) -> &CsrMatrix<f64> {
+        &self.csr
+    }
 }
 impl LinOp for CsrOp {
     type S = f64;
-    fn dims(&self) -> (usize, usize) { (self.csr.nrows(), self.csr.ncols()) }
-    fn matvec(&self, x: &[f64], y: &mut [f64]) { self.csr.spmv(x, y); }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        // y <- A^T x using CSR structure
-        if x.len() != self.csr.nrows() || y.len() != self.csr.ncols() {
-            return Err(KError::InvalidInput("t_matvec dimension mismatch".into()));
-        }
+    fn dims(&self) -> (usize, usize) {
+        (self.csr.nrows(), self.csr.ncols())
+    }
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        self.csr.spmv(x, y);
+    }
+    fn supports_transpose(&self) -> bool {
+        true
+    }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.csr.nrows());
+        assert_eq!(y.len(), self.csr.ncols());
         y.fill(0.0);
         let rp = self.csr.row_ptr();
         let ci = self.csr.col_idx();
@@ -133,11 +168,16 @@ impl LinOp for CsrOp {
                 y[ci[idx]] += vv[idx] * xi;
             }
         }
-        Ok(())
     }
-    fn as_any(&self) -> &dyn Any { &*self.csr }
-    fn structure_id(&self) -> StructureId { self.ids.structure_id() }
-    fn values_id(&self) -> ValuesId { self.ids.values_id() }
+    fn as_any(&self) -> &dyn Any {
+        &*self.csr
+    }
+    fn structure_id(&self) -> StructureId {
+        self.ids.structure_id()
+    }
+    fn values_id(&self) -> ValuesId {
+        self.ids.values_id()
+    }
 }
 
 // --- Direct adapters ------------------------------------------------------
@@ -146,7 +186,9 @@ use std::hash::{Hash, Hasher};
 
 impl LinOp for Mat<f64> {
     type S = f64;
-    fn dims(&self) -> (usize, usize) { (self.nrows(), self.ncols()) }
+    fn dims(&self) -> (usize, usize) {
+        (self.nrows(), self.ncols())
+    }
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
@@ -158,8 +200,10 @@ impl LinOp for Mat<f64> {
             y[i] = sum;
         }
     }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        // y <- A^T x
+    fn supports_transpose(&self) -> bool {
+        true
+    }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
         assert_eq!(x.len(), self.nrows());
         assert_eq!(y.len(), self.ncols());
         for j in 0..self.ncols() {
@@ -169,27 +213,36 @@ impl LinOp for Mat<f64> {
             }
             y[j] = sum;
         }
-        Ok(())
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn structure_id(&self) -> StructureId {
         let mut h = DefaultHasher::new();
         self.nrows().hash(&mut h);
         self.ncols().hash(&mut h);
         StructureId(h.finish())
     }
-    fn values_id(&self) -> ValuesId { ValuesId(0) }
+    fn values_id(&self) -> ValuesId {
+        ValuesId(0)
+    }
 }
 
 use crate::matrix::sparse::SparseMatrix;
 impl LinOp for CsrMatrix<f64> {
     type S = f64;
-    fn dims(&self) -> (usize, usize) { (self.nrows(), self.ncols()) }
-    fn matvec(&self, x: &[f64], y: &mut [f64]) { self.spmv(x, y); }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        if x.len() != self.nrows() || y.len() != self.ncols() {
-            return Err(KError::InvalidInput("t_matvec dimension mismatch".into()));
-        }
+    fn dims(&self) -> (usize, usize) {
+        (self.nrows(), self.ncols())
+    }
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        self.spmv(x, y);
+    }
+    fn supports_transpose(&self) -> bool {
+        true
+    }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.nrows());
+        assert_eq!(y.len(), self.ncols());
         y.fill(0.0);
         let rp = self.row_ptr();
         let ci = self.col_idx();
@@ -200,14 +253,17 @@ impl LinOp for CsrMatrix<f64> {
                 y[ci[idx]] += vv[idx] * xi;
             }
         }
-        Ok(())
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn structure_id(&self) -> StructureId {
         let mut h = DefaultHasher::new();
         self.row_ptr().hash(&mut h);
         self.col_idx().hash(&mut h);
         StructureId(h.finish())
     }
-    fn values_id(&self) -> ValuesId { ValuesId(0) }
+    fn values_id(&self) -> ValuesId {
+        ValuesId(0)
+    }
 }

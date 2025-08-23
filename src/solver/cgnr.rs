@@ -2,7 +2,7 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
-use crate::preconditioner::{Preconditioner, PcSide};
+use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 
@@ -18,7 +18,12 @@ pub struct CgnrSolver {
 
 impl CgnrSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { rtol, atol: 1e-12, dtol: 1e3, maxits }
+        Self {
+            rtol,
+            atol: 1e-12,
+            dtol: 1e3,
+            maxits,
+        }
     }
 
     #[inline]
@@ -105,9 +110,7 @@ impl LinearSolver for CgnrSolver {
             return Err(KError::InvalidInput("CGNR: x has wrong length".into()));
         }
 
-        let mut probe_y = vec![0.0; ncols];
-        let probe = a.t_matvec(&vec![0.0; m], &mut probe_y);
-        if probe.is_err() {
+        if !a.supports_transpose() {
             return Err(KError::InvalidInput(
                 "CGNR requires t_matvec; provide an operator that implements A^T·x".into(),
             ));
@@ -131,9 +134,13 @@ impl LinearSolver for CgnrSolver {
             r.copy_from_slice(b);
         }
 
-        a.t_matvec(r, z)?;
+        a.t_matvec(r, z);
 
-        let mut zhat_buf: Vec<f64> = if pc.is_some() { vec![0.0; ncols] } else { Vec::new() };
+        let mut zhat_buf: Vec<f64> = if pc.is_some() {
+            vec![0.0; ncols]
+        } else {
+            Vec::new()
+        };
         if let Some(pc) = pc {
             pc.apply(PcSide::Left, z, &mut zhat_buf)?;
         }
@@ -183,7 +190,7 @@ impl LinearSolver for CgnrSolver {
                 r[i] -= alpha * ap[i];
             }
 
-            a.t_matvec(r, z)?;
+            a.t_matvec(r, z);
             if let Some(pc) = pc {
                 pc.apply(PcSide::Left, z, &mut zhat_buf)?;
             }
@@ -231,4 +238,3 @@ impl LinearSolver for CgnrSolver {
         })
     }
 }
-
