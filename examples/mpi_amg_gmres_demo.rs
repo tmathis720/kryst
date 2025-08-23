@@ -1,3 +1,4 @@
+#![cfg(feature = "mpi")]
 //! Large-scale MPI example demonstrating Matrix Market I/O with configurable solvers and preconditioners.
 //!
 //! This example shows how to:

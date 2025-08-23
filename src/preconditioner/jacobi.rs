@@ -47,10 +47,11 @@ impl Preconditioner for Jacobi {
     fn setup(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.recompute(pmat)
     }
-    fn update_values(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn supports_numeric_update(&self) -> bool { true }
+
+    fn update_numeric(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.recompute(pmat)
     }
-    fn supports_numeric_update(&self) -> bool { true }
     fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
         assert_eq!(r.len(), self.n);
         assert_eq!(z.len(), self.n);

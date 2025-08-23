@@ -85,11 +85,19 @@ pub trait Preconditioner: Send + Sync {
         ))
     }
 
-    fn update_values(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        self.setup(a)
+    /// True if we can keep the symbolic structure and only refresh numeric values.
+    fn supports_numeric_update(&self) -> bool { false }
+
+    /// Pattern unchanged: re-use hierarchy/structure, BUT refresh all numeric data.
+    fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        Err(KError::Unsupported("numeric update not supported"))
     }
 
-    fn supports_numeric_update(&self) -> bool { false }
+    /// Pattern may have changed: rebuild structure (potentially expensive).
+    fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        // By default, fall back to a full setup
+        self.setup(a)
+    }
 }
 
 /// Internal trait for preconditioners that operate directly on dense matrices.
