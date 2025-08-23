@@ -35,7 +35,7 @@ fn fgmres_solves_dd_nonsym() {
     ksp.set_type(SolverType::Fgmres).unwrap();
     ksp.set_pc_type(PcType::Jacobi, None).unwrap();
     ksp.set_operators(amat.clone(), Some(pmat));
-    ksp.pc_side = PcSide::Right;
+    ksp.set_pc_side(PcSide::Right);
 
     let stats = ksp.solve(&b, &mut x).unwrap();
     assert!(

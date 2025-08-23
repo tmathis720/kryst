@@ -108,6 +108,10 @@ impl<S> MatSolverAdapter<S> {
     pub fn new(inner: S) -> Self {
         Self { inner }
     }
+
+    pub fn inner_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
 }
 
 struct MatPcAdapter<'a> {
