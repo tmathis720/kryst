@@ -1,6 +1,8 @@
 use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarsenType, InterpType, RelaxType};
 use kryst::preconditioner::PcSide;
+use kryst::preconditioner::LegacyOpPreconditioner;
 use kryst::Preconditioner;
+use kryst::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
 use kryst::error::KError;
 use faer::Mat;
 
@@ -127,8 +129,11 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
     // Test preconditioning with correct API
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    
-    amg_hypre.apply(PcSide::Left, &x, &mut y)?;
+    // Wrap legacy AMG (which implements the legacy Preconditioner trait) with
+    // the object-safe adapter so we can use the new `Preconditioner` API.
+    let mut pc = LegacyOpPreconditioner::new(Box::new(amg_hypre));
+    pc.setup(&matrix)?;
+    pc.apply(PcSide::Left, &x, &mut y)?;
     println!("  AMG preconditioning applied successfully");
     
     println!("   Preconditioning effect:");
