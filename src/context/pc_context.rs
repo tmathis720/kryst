@@ -2,10 +2,9 @@ use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::direct::{LuPc, QrPc, SuperLuDistPc};
-use crate::preconditioner::{
-    jacobi::Jacobi, ChebyshevPre, Ilup, Ilut, Ilutp, LegacyOpPreconditioner, MatSorType, PcSide,
-    Preconditioner, PreconditionerMat, Sor,
-};
+use crate::preconditioner::{jacobi::Jacobi, LegacyOpPreconditioner, PcSide, Preconditioner};
+#[cfg(feature = "legacy-pc-bridge")]
+use crate::preconditioner::{ChebyshevPre, Ilup, Ilut, Ilutp, MatSorType, Sor};
 use faer::Mat;
 use std::str::FromStr;
 
@@ -85,30 +84,6 @@ impl Preconditioner for NoOpPreconditioner {
     }
 }
 
-/// Adapter for matrix-based preconditioners implementing [`PreconditionerMat`].
-struct MatOpPreconditioner {
-    inner: Box<dyn PreconditionerMat>,
-}
-
-impl MatOpPreconditioner {
-    fn new(inner: Box<dyn PreconditionerMat>) -> Self {
-        Self { inner }
-    }
-}
-
-impl Preconditioner for MatOpPreconditioner {
-    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let m = a
-            .as_any()
-            .downcast_ref::<Mat<f64>>()
-            .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64>".into()))?;
-        self.inner.setup_mat(m)
-    }
-
-    fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
-        self.inner.apply_vec(side, r, z)
-    }
-}
 
 /// Factory for creating preconditioners.
 pub struct PcFactory;
@@ -121,26 +96,76 @@ impl PcFactory {
         match pc_type {
             PcType::Jacobi => Ok(Box::new(Jacobi::new())),
             PcType::Ilut => {
-                let ilut = Ilut::new(0, 0.0);
-                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilut))))
-            }
+                #[cfg(feature = "legacy-pc-bridge")]
+                {
+                    let ilut = Ilut::new(0, 0.0);
+                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilut))));
+                }
+                #[cfg(not(feature = "legacy-pc-bridge"))]
+                {
+                    return Err(KError::Unsupported(
+                        "Ilut requires --features legacy-pc-bridge (or port to modern Preconditioner)",
+                    ));
+                }
+            },
             PcType::Ilutp => {
-                let ilutp = Ilutp::new();
-                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilutp))))
-            }
+                #[cfg(feature = "legacy-pc-bridge")]
+                {
+                    let ilutp = Ilutp::new();
+                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilutp))));
+                }
+                #[cfg(not(feature = "legacy-pc-bridge"))]
+                {
+                    return Err(KError::Unsupported(
+                        "Ilutp requires --features legacy-pc-bridge (or port to modern Preconditioner)",
+                    ));
+                }
+            },
             PcType::Ilup => {
-                let ilup = Ilup::new(0);
-                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))))
-            }
+                #[cfg(feature = "legacy-pc-bridge")]
+                {
+                    let ilup = Ilup::new(0);
+                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))));
+                }
+                #[cfg(not(feature = "legacy-pc-bridge"))]
+                {
+                    return Err(KError::Unsupported(
+                        "Ilup requires --features legacy-pc-bridge (or port to modern Preconditioner)",
+                    ));
+                }
+            },
             PcType::Sor => {
-                let sor =
-                    Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::APPLY_LOWER, 0.0);
-                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(sor))))
-            }
+                #[cfg(feature = "legacy-pc-bridge")]
+                {
+                    let sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(
+                        1.0,
+                        1,
+                        0,
+                        MatSorType::APPLY_LOWER,
+                        0.0,
+                    );
+                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(sor))));
+                }
+                #[cfg(not(feature = "legacy-pc-bridge"))]
+                {
+                    return Err(KError::Unsupported(
+                        "SOR requires --features legacy-pc-bridge (or port to modern Preconditioner)",
+                    ));
+                }
+            },
             PcType::Chebyshev => {
-                let pre = ChebyshevPre::new(Mat::zeros(0, 0), 0, 1.0, 1.0);
-                Ok(Box::new(LegacyOpPreconditioner::new(Box::new(pre))))
-            }
+                #[cfg(feature = "legacy-pc-bridge")]
+                {
+                    let pre = ChebyshevPre::new(Mat::zeros(0, 0), 0, 1.0, 1.0);
+                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(pre))));
+                }
+                #[cfg(not(feature = "legacy-pc-bridge"))]
+                {
+                    return Err(KError::Unsupported(
+                        "Chebyshev requires --features legacy-pc-bridge (or port to modern Preconditioner)",
+                    ));
+                }
+            },
             PcType::None => Ok(Box::new(NoOpPreconditioner)),
             PcType::Lu => Ok(Box::new(LuPc::new())),
             PcType::Qr => Ok(Box::new(QrPc::new())),
