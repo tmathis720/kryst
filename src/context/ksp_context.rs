@@ -5,7 +5,8 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
-    BiCgStabSolver, CgSolver, GmresSolver, LinearSolver, MatSolverAdapter, MinresSolver, PcgSolver,
+    BiCgStabSolver, CgSolver, CgnrSolver, GmresSolver, LinearSolver, MatSolverAdapter, MinresSolver,
+    PcgSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -41,6 +42,7 @@ impl Workspace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverType {
     Cg,
+    Cgnr,
     Gmres,
     BiCgStab,
     Pcg,
@@ -54,6 +56,7 @@ impl FromStr for SolverType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "cg" => Ok(SolverType::Cg),
+            "cgnr" => Ok(SolverType::Cgnr),
             "gmres" => Ok(SolverType::Gmres),
             "bicgstab" => Ok(SolverType::BiCgStab),
             "pcg" => Ok(SolverType::Pcg),
@@ -115,6 +118,7 @@ impl KspContext {
                 CgSolver::new(self.rtol, self.maxits)
                     .with_norm(crate::solver::cg::CgNormType::Unpreconditioned),
             ),
+            SolverType::Cgnr => Box::new(CgnrSolver::new(self.rtol, self.maxits)),
             SolverType::Gmres => Box::new(MatSolverAdapter::new(GmresSolver::new(
                 self.restart,
                 self.rtol,

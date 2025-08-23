@@ -1,515 +1,234 @@
-//! CGNR/CGNE solvers (Saad Ch 8.3)
-//!
-//! This module implements the CGNR (Conjugate Gradient on the Normal Residual) and CGNE (Conjugate Gradient on the Normal Equations)
-//! methods for solving least-squares problems and non-square linear systems. Both methods reduce the original system to a symmetric
-//! positive definite system and apply the Conjugate Gradient algorithm.
-//!
-//! # Overview
-//!
-//! - CGNR solves (AᵗA)x = Aᵗb by applying CG to the normal equations for the residual.
-//! - CGNE solves (AAᵗ)y = b, then x = Aᵗy, by applying CG to the normal equations for the error.
-//! - Both are suitable for overdetermined or underdetermined systems and least-squares problems.
-//!
-//! # Usage
-//!
-//! - Create a `CgnrSolver` or `CgneSolver` with the desired tolerance and maximum iterations.
-//! - Call `solve` with the system matrix, right-hand side, and initial guess.
-//! - The solver returns convergence statistics and the solution vector.
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 8.3.
-//! - https://en.wikipedia.org/wiki/Conjugate_gradient_method#The_normal_equations
-
-use crate::core::traits::{InnerProduct, MatVec};
-use crate::solver::legacy::LinearSolver;
-use crate::utils::convergence::{SolveStats, Convergence, ConvergedReason};
+use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-#[cfg(feature = "logging")]
-use log::trace;
+use crate::matrix::op::LinOp;
+use crate::parallel::UniverseComm;
+use crate::preconditioner::{Preconditioner, PcSide};
+use crate::solver::LinearSolver;
+use crate::utils::convergence::{ConvergedReason, SolveStats};
+
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 
-/// CGNR solver struct.
-///
-/// Stores convergence parameters.
-pub struct CgnrSolver<T> {
-    pub conv: Convergence<T>,
+pub struct CgnrSolver {
+    rtol: f64,
+    atol: f64,
+    dtol: f64,
+    maxits: usize,
 }
 
-/// CGNE solver struct.
-///
-/// Stores convergence parameters.
-pub struct CgneSolver<T> {
-    pub conv: Convergence<T>,
-}
+impl CgnrSolver {
+    pub fn new(rtol: f64, maxits: usize) -> Self {
+        Self { rtol, atol: 1e-12, dtol: 1e3, maxits }
+    }
 
-impl<T: num_traits::Float + From<f64>> CgnrSolver<T> {
-    /// Create a new CGNR solver with the given tolerance and maximum iterations.
-    pub fn new(rtol: T, max_iters: usize) -> Self {
-        let atol = <T as From<f64>>::from(1e-12);
-        let dtol = <T as From<f64>>::from(1e3);
-        Self { conv: Convergence::new(rtol, atol, dtol, max_iters) }
+    #[inline]
+    fn dot(x: &[f64], y: &[f64], _comm: &UniverseComm) -> f64 {
+        x.iter().zip(y).map(|(a, b)| a * b).sum()
+    }
+    #[inline]
+    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
+        Self::dot(x, x, comm).sqrt()
+    }
+
+    fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
+        if buf.len() != n {
+            buf.resize(n, 0.0);
+        }
+    }
+
+    fn acquire<'a>(
+        n: usize,
+        work: Option<&'a mut Workspace>,
+    ) -> (
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+    ) {
+        if let Some(wk) = work {
+            Self::take_or_resize(&mut wk.tmp1, n);
+            Self::take_or_resize(&mut wk.tmp2, n);
+            while wk.q.len() < 3 {
+                wk.q.push(Vec::new());
+            }
+            for k in 0..3 {
+                Self::take_or_resize(&mut wk.q[k], n);
+            }
+            let (p_slice, rest) = wk.q.split_at_mut(1);
+            let (ap_slice, rest) = rest.split_at_mut(1);
+            let (atap_slice, _) = rest.split_at_mut(1);
+            let r = &mut wk.tmp1[..];
+            let z = &mut wk.tmp2[..];
+            let p = &mut p_slice[0][..];
+            let ap = &mut ap_slice[0][..];
+            let atap = &mut atap_slice[0][..];
+            (r, z, p, ap, atap)
+        } else {
+            let mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
+            (mk(n), mk(n), mk(n), mk(n), mk(n))
+        }
     }
 }
 
-impl<T: num_traits::Float + From<f64>> CgneSolver<T> {
-    /// Create a new CGNE solver with the given tolerance and maximum iterations.
-    pub fn new(rtol: T, max_iters: usize) -> Self {
-        let atol = <T as From<f64>>::from(1e-12);
-        let dtol = <T as From<f64>>::from(1e3);
-        Self { conv: Convergence::new(rtol, atol, dtol, max_iters) }
-    }
-}
-
-impl<M: ?Sized, V, T> LinearSolver<M, V> for CgnrSolver<T>
-where
-    M: MatVec<V>,
-    (): InnerProduct<V, Scalar = T>,
-    V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64> + std::fmt::Debug,
-{
+impl LinearSolver for CgnrSolver {
     type Error = KError;
-    type Scalar = T;
 
-    /// Solve the least-squares problem using CGNR (CG on the normal residual).
-    ///
-    /// # Arguments
-    /// * `a` - System matrix
-    /// * `pc` - Optional preconditioner (currently unused)
-    /// * `b` - Right-hand side vector
-    /// * `x` - Initial guess (input/output)
-    /// * `comm` - Communication object for parallel computation
-    /// * `monitors` - Optional monitor callbacks for iteration progress
-    /// * `work` - Optional workspace for reusable allocations
-    ///
-    /// Returns convergence statistics and the solution vector.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        if work.q.len() < 3 {
+            work.q.resize(3, Vec::new());
+        }
+    }
+
     fn solve(
         &mut self,
-        a: &M,
-        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
-        work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<SolveStats<T>, KError> {
-        // Check runtime profiling and monitoring flags
-        let use_monitors = monitors.is_some();
-        let _has_workspace = work.is_some();
-
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
         #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("CGNRSolve");
-        #[cfg(feature = "logging")]
-        trace!("Starting CGNR solve, monitoring: {}, workspace: {}", use_monitors, _has_workspace);
+        let _guard = StageGuard::new("CGNR");
 
-        let _ = pc; // CGNR does not use preconditioner (yet)
-        let n = b.as_ref().len();
-        let mut xk = x.as_ref().to_vec();
-        let ip = ();
-        
-        // Compute initial residual r = b - A x
-        let mut r = {
-            #[cfg(feature = "logging")]
-            let _matvec_stage = StageGuard::new("CGNRMatVec");
-            let mut tmp = V::from(vec![T::zero(); n]);
-            a.matvec(&V::from(xk.clone()), &mut tmp);
-            let r_vec = b.as_ref().iter().zip(tmp.as_ref()).map(|(&bi, &axi)| bi - axi).collect::<Vec<_>>();
-            V::from(r_vec)
-        };
-        
-        let mut z = {
-            #[cfg(feature = "logging")]
-            let _matvec_stage = StageGuard::new("CGNRMatVec");
-            let mut z = V::from(vec![T::zero(); n]);
-            a.matvec(&r, &mut z); // z = A^T r (for CGNR, A^T = A^T)
-            z
-        };
-        
-        let mut p = z.clone();
-        let mut rz = ip.dot(&z, &z, comm);
-        let res0 = ip.norm(&r, comm);
-        let mut stats = SolveStats { 
-            iterations: 0, 
-            final_residual: res0, 
-            reason: ConvergedReason::Continued 
-        };
+        let (m, ncols) = a.dims();
+        if b.len() != m {
+            return Err(KError::InvalidInput("CGNR: b has wrong length".into()));
+        }
+        if x.len() != ncols {
+            return Err(KError::InvalidInput("CGNR: x has wrong length".into()));
+        }
 
-        // Invoke monitors for iteration 0
-        if use_monitors {
-            for monitor in monitors.unwrap() {
-                monitor(0, res0);
+        let mut probe_y = vec![0.0; ncols];
+        let probe = a.t_matvec(&vec![0.0; m], &mut probe_y);
+        if probe.is_err() {
+            return Err(KError::InvalidInput(
+                "CGNR requires t_matvec; provide an operator that implements A^T·x".into(),
+            ));
+        }
+
+        let (r, z, p, ap, _atap) = Self::acquire(ncols.max(m), work);
+        let (r, z, p, ap, _atap) = (
+            &mut r[..m],
+            &mut z[..ncols],
+            &mut p[..ncols],
+            &mut ap[..m],
+            &mut _atap[..ncols],
+        );
+
+        if x.iter().any(|&xi| xi != 0.0) {
+            a.matvec(x, ap);
+            for i in 0..m {
+                r[i] = b[i] - ap[i];
+            }
+        } else {
+            r.copy_from_slice(b);
+        }
+
+        a.t_matvec(r, z)?;
+
+        let mut zhat_buf: Vec<f64> = if pc.is_some() { vec![0.0; ncols] } else { Vec::new() };
+        if let Some(pc) = pc {
+            pc.apply(PcSide::Left, z, &mut zhat_buf)?;
+        }
+        let zhat_slice: &[f64] = if pc.is_some() { &zhat_buf[..] } else { &z[..] };
+
+        p.copy_from_slice(zhat_slice);
+
+        let mut rz = Self::dot(&z[..], zhat_slice, comm);
+        let bnorm = Self::nrm2(b, comm).max(1e-32);
+        let mut rnow = Self::nrm2(r, comm);
+
+        if let Some(ms) = monitors {
+            for m in ms {
+                m(0, rnow);
             }
         }
 
-        #[cfg(feature = "logging")]
-        trace!("CGNR initial residual: {:?}", res0);
+        let thr = self.atol.max(self.rtol * bnorm);
+        if rnow <= thr {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: rnow,
+                reason: if rnow <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                },
+            });
+        }
 
-        for i in 1..=self.conv.max_iters {
-            #[cfg(feature = "logging")]
-            let _iter_stage = StageGuard::new("CGNRIteration");
-            
-            #[cfg(feature = "logging")]
-            trace!("CGNR iteration {}", i);
+        let mut iters = 0usize;
+        for k in 1..=self.maxits {
+            iters = k;
 
-            // Compute Ap = A p
-            let ap = {
-                #[cfg(feature = "logging")]
-                let _matvec_stage = StageGuard::new("CGNRMatVec");
-                let mut ap = V::from(vec![T::zero(); n]);
-                a.matvec(&p, &mut ap);
-                ap
-            };
-            
-            // Compute AtAp = A^T (A p)
-            let at_ap = {
-                #[cfg(feature = "logging")]
-                let _matvec_stage = StageGuard::new("CGNRMatVec");
-                let mut at_ap = V::from(vec![T::zero(); n]);
-                a.matvec(&ap, &mut at_ap);
-                at_ap
-            };
-            
-            // Compute step size alpha
-            let denom = {
-                #[cfg(feature = "logging")]
-                let _dot_stage = StageGuard::new("CGNRDotProduct");
-                ip.dot(&at_ap, &at_ap, comm)
-            };
-            
-            if denom <= T::zero() {
-                #[cfg(feature = "logging")]
-                trace!("CGNR indefinite matrix detected at iter {}", i);
-                stats.iterations = i;
-                stats.final_residual = ip.norm(&r, comm);
-                stats.reason = ConvergedReason::DivergedDtol;
+            a.matvec(p, ap);
+
+            let denom = Self::dot(ap, ap, comm);
+            if denom <= 0.0 || !denom.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
-            
             let alpha = rz / denom;
-            
-            // Update x and r
-            {
-                #[cfg(feature = "logging")]
-                let _axpy_stage = StageGuard::new("CGNRAxpy");
-                for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
-                    *xj = *xj + alpha * *pj;
-                }
-                for (rj, apj) in r.as_mut().iter_mut().zip(ap.as_ref()) {
-                    *rj = *rj - alpha * *apj;
-                }
+
+            for i in 0..ncols {
+                x[i] += alpha * p[i];
             }
-            
-            {
-                #[cfg(feature = "logging")]
-                let _matvec_stage = StageGuard::new("CGNRMatVec");
-                a.matvec(&r, &mut z); // z = A^T r
+            for i in 0..m {
+                r[i] -= alpha * ap[i];
             }
-            
-            let rz_new = {
-                #[cfg(feature = "logging")]
-                let _dot_stage = StageGuard::new("CGNRDotProduct");
-                ip.dot(&z, &z, comm)
-            };
-            
-            let res_norm = {
-                #[cfg(feature = "logging")]
-                let _norm_stage = StageGuard::new("CGNRNorm");
-                ip.norm(&r, comm)
-            };
-            
-            // Invoke monitors for current iteration
-            if use_monitors {
-                for monitor in monitors.unwrap() {
-                    monitor(i, res_norm);
+
+            a.t_matvec(r, z)?;
+            if let Some(pc) = pc {
+                pc.apply(PcSide::Left, z, &mut zhat_buf)?;
+            }
+            let zhat_slice: &[f64] = if pc.is_some() { &zhat_buf[..] } else { &z[..] };
+
+            let rz_new = Self::dot(&z[..], zhat_slice, comm);
+            rnow = Self::nrm2(r, comm);
+
+            if let Some(ms) = monitors {
+                for m in ms {
+                    m(k, rnow);
                 }
             }
 
-            #[cfg(feature = "logging")]
-            trace!("CGNR iteration {}: residual = {:?}", i, res_norm);
-            
-            // Check convergence using new interface
-            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
-            stats = new_stats;
-            if reason != ConvergedReason::Continued {
-                *x = V::from(xk.clone());
-                
-                #[cfg(feature = "logging")]
-                trace!("CGNR converged after {} iterations: {:?}", i, reason);
-                return Ok(stats);
+            if rnow <= thr {
+                return Ok(SolveStats {
+                    iterations: k,
+                    final_residual: rnow,
+                    reason: if rnow <= self.atol {
+                        ConvergedReason::ConvergedAtol
+                    } else {
+                        ConvergedReason::ConvergedRtol
+                    },
+                });
             }
-            
-            // Update search direction
+            if rnow >= self.dtol || !rnow.is_finite() {
+                return Ok(SolveStats {
+                    iterations: k,
+                    final_residual: rnow,
+                    reason: ConvergedReason::DivergedDtol,
+                });
+            }
+
             let beta = rz_new / rz;
-            {
-                #[cfg(feature = "logging")]
-                let _axpy_stage = StageGuard::new("CGNRAxpy");
-                let p_old = p.clone();
-                for ((pj, zj), old_pj) in p.as_mut().iter_mut().zip(z.as_ref()).zip(p_old.as_ref()) {
-                    *pj = *zj + beta * *old_pj;
-                }
+            for i in 0..ncols {
+                p[i] = zhat_slice[i] + beta * p[i];
             }
             rz = rz_new;
         }
-        
-        *x = V::from(xk);
-        
-        #[cfg(feature = "logging")]
-        trace!("CGNR solve completed: {} iterations, final residual: {:?}", 
-               stats.iterations, stats.final_residual);
-        
-        Ok(stats)
+
+        Ok(SolveStats {
+            iterations: iters,
+            final_residual: rnow,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }
 
-impl<M, V, T> LinearSolver<M, V> for CgneSolver<T>
-where
-    M: MatVec<V>,
-    (): InnerProduct<V, Scalar = T>,
-    V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64>,
-{
-    type Error = KError;
-    type Scalar = T;
-
-    /// Solve the least-squares problem using CGNE (CG on the normal equations for the error).
-    ///
-    /// # Arguments
-    /// * `a` - System matrix
-    /// * `pc` - Optional preconditioner (currently unused)
-    /// * `b` - Right-hand side vector
-    /// * `x` - Initial guess (input/output)
-    /// * `comm` - Communication object for parallel computation
-    /// * `monitors` - Optional monitor callbacks for iteration progress
-    /// * `work` - Optional workspace for reusable allocations
-    ///
-    /// Returns convergence statistics and the solution vector.
-    fn solve(
-        &mut self,
-        a: &M,
-        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
-        work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<SolveStats<T>, KError> {
-        // Check runtime profiling and monitoring flags
-        let use_monitors = monitors.is_some();
-        let _has_workspace = work.is_some();
-
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("CGNESolve");
-        #[cfg(feature = "logging")]
-        trace!("Starting CGNE solve, monitoring: {}, workspace: {}", use_monitors, _has_workspace);
-
-        let _ = pc; // CGNE does not use preconditioner (yet)
-        let n = b.as_ref().len();
-        let mut xk = x.as_ref().to_vec();
-        let ip = ();
-        
-        // Compute initial residual r = b - A x
-        let mut r = {
-            #[cfg(feature = "logging")]
-            let _matvec_stage = StageGuard::new("CGNEMatVec");
-            let mut tmp = V::from(vec![T::zero(); n]);
-            a.matvec(&V::from(xk.clone()), &mut tmp);
-            let r_vec = b.as_ref().iter().zip(tmp.as_ref()).map(|(&bi, &axi)| bi - axi).collect::<Vec<_>>();
-            V::from(r_vec)
-        };
-        
-        let mut z = {
-            #[cfg(feature = "logging")]
-            let _matvec_stage = StageGuard::new("CGNEMatVec");
-            let mut z = V::from(vec![T::zero(); n]);
-            a.matvec(&r, &mut z); // z = A^T r (for CGNE, A^T = A^T)
-            z
-        };
-        
-        let mut p = z.clone();
-        let mut rz = ip.dot(&z, &z, comm);
-        let res0 = ip.norm(&r, comm);
-        let mut stats = SolveStats { 
-            iterations: 0, 
-            final_residual: res0, 
-            reason: ConvergedReason::Continued 
-        };
-
-        // Invoke monitors for iteration 0
-        if use_monitors {
-            for monitor in monitors.unwrap() {
-                monitor(0, res0);
-            }
-        }
-
-        #[cfg(feature = "logging")]
-        trace!("CGNE initial residual computed");
-
-        for i in 1..=self.conv.max_iters {
-            #[cfg(feature = "logging")]
-            let _iter_stage = StageGuard::new("CGNEIteration");
-            
-            #[cfg(feature = "logging")]
-            trace!("CGNE iteration {}", i);
-
-            // Compute At_p = A p
-            let at_p = {
-                #[cfg(feature = "logging")]
-                let _matvec_stage = StageGuard::new("CGNEMatVec");
-                let mut at_p = V::from(vec![T::zero(); n]);
-                a.matvec(&p, &mut at_p);
-                at_p
-            };
-            
-            // Compute Ap = A^T (A p)
-            let ap = {
-                #[cfg(feature = "logging")]
-                let _matvec_stage = StageGuard::new("CGNEMatVec");
-                let mut ap = V::from(vec![T::zero(); n]);
-                a.matvec(&at_p, &mut ap);
-                ap
-            };
-            
-            // Compute step size alpha
-            let denom = {
-                #[cfg(feature = "logging")]
-                let _dot_stage = StageGuard::new("CGNEDotProduct");
-                ip.dot(&ap, &ap, comm)
-            };
-            
-            if denom <= T::zero() {
-                #[cfg(feature = "logging")]
-                trace!("CGNE indefinite matrix detected at iter {}", i);
-                stats.iterations = i;
-                stats.final_residual = ip.norm(&r, comm);
-                stats.reason = ConvergedReason::DivergedDtol;
-                return Err(KError::IndefiniteMatrix);
-            }
-            
-            let alpha = rz / denom;
-            
-            // Update x and r
-            {
-                #[cfg(feature = "logging")]
-                let _axpy_stage = StageGuard::new("CGNEAxpy");
-                for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
-                    *xj = *xj + alpha * *pj;
-                }
-                for (rj, at_pj) in r.as_mut().iter_mut().zip(at_p.as_ref()) {
-                    *rj = *rj - alpha * *at_pj;
-                }
-            }
-            
-            {
-                #[cfg(feature = "logging")]
-                let _matvec_stage = StageGuard::new("CGNEMatVec");
-                a.matvec(&r, &mut z); // z = A^T r
-            }
-            
-            let rz_new = {
-                #[cfg(feature = "logging")]
-                let _dot_stage = StageGuard::new("CGNEDotProduct");
-                ip.dot(&z, &z, comm)
-            };
-            
-            let res_norm = {
-                #[cfg(feature = "logging")]
-                let _norm_stage = StageGuard::new("CGNENorm");
-                ip.norm(&r, comm)
-            };
-            
-            // Invoke monitors for current iteration
-            if use_monitors {
-                for monitor in monitors.unwrap() {
-                    monitor(i, res_norm);
-                }
-            }
-
-            #[cfg(feature = "logging")]
-            trace!("CGNE iteration {}: residual computed", i);
-            
-            // Check convergence using new interface
-            let (reason, new_stats) = self.conv.check(res_norm, res0, i);
-            stats = new_stats;
-            if reason != ConvergedReason::Continued {
-                *x = V::from(xk.clone());
-                
-                #[cfg(feature = "logging")]
-                trace!("CGNE converged after {} iterations", i);
-                return Ok(stats);
-            }
-            
-            // Update search direction
-            let beta = rz_new / rz;
-            {
-                #[cfg(feature = "logging")]
-                let _axpy_stage = StageGuard::new("CGNEAxpy");
-                let p_old = p.clone();
-                for ((pj, zj), old_pj) in p.as_mut().iter_mut().zip(z.as_ref()).zip(p_old.as_ref()) {
-                    *pj = *zj + beta * *old_pj;
-                }
-            }
-            rz = rz_new;
-        }
-        
-        *x = V::from(xk);
-        
-        #[cfg(feature = "logging")]
-        trace!("CGNE solve completed: {} iterations", stats.iterations);
-        
-        Ok(stats)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::traits::MatVec;
-
-    #[derive(Clone)]
-    struct DenseMat {
-        data: Vec<Vec<f64>>,
-    }
-    impl MatVec<Vec<f64>> for DenseMat {
-        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
-            for (i, row) in self.data.iter().enumerate() {
-                y[i] = row.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
-            }
-        }
-    }
-
-    #[test]
-    fn cgnr_solves_simple_least_squares() {
-        // Overdetermined system: minimize ||Ax - b||
-        // A = [[1, 0], [0, 1], [1, 1]], b = [1, 2, 3]
-        // Least squares solution: x = [1, 2]
-        let a = DenseMat { data: vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0]] };
-        let b = vec![1.0, 2.0, 3.0];
-        let mut x = vec![0.0, 0.0];
-        let mut solver = CgnrSolver::new(1e-10, 50);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let expected = vec![1.0, 2.0];
-        let tol = 1e-8;
-        for (xi, ei) in x.iter().zip(expected.iter()) {
-            assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
-        }
-        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "CGNR did not converge, reason: {:?}", stats.reason);
-    }
-
-    #[test]
-    fn cgne_solves_simple_least_squares() {
-        // Same system as above
-        let a = DenseMat { data: vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0]] };
-        let b = vec![1.0, 2.0, 3.0];
-        let mut x = vec![0.0, 0.0];
-        let mut solver = CgneSolver::new(1e-10, 50);
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        let expected = vec![1.0, 2.0];
-        let tol = 1e-8;
-        for (xi, ei) in x.iter().zip(expected.iter()) {
-            assert!((xi - ei).abs() < tol, "xi = {}, expected = {}", xi, ei);
-        }
-        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "CGNE did not converge, reason: {:?}", stats.reason);
-    }
-}

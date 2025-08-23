@@ -32,7 +32,7 @@ where
     T: ComplexField,
 {
     fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        LinOp::matvec_t(self, &x[..], &mut y[..]);
+        LinOp::t_matvec(self, &x[..], &mut y[..]).expect("t_matvec not supported");
     }
 }
 

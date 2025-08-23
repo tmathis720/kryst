@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use faer::traits::ComplexField;
+use crate::error::KError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StructureId(pub u64);
@@ -18,9 +19,9 @@ pub trait LinOp: Send + Sync + Any {
     /// Compute y = A x.
     fn matvec(&self, x: &[Self::S], y: &mut [Self::S]);
 
-    /// Optional transpose/adjoint matvec. Default panics.
-    fn matvec_t(&self, _x: &[Self::S], _y: &mut [Self::S]) {
-        unimplemented!("transpose/adjoint not provided for this operator");
+    /// Optional transpose/adjoint matvec. Default returns an error.
+    fn t_matvec(&self, _x: &[Self::S], _y: &mut [Self::S]) -> Result<(), KError> {
+        Err(KError::InvalidInput("t_matvec not supported by this operator".into()))
     }
 
     /// Downcast hook for specialized solvers/preconditioners.
@@ -81,6 +82,18 @@ impl LinOp for DenseOp {
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         let _ = crate::matrix::utils::parallel_mat_vec(&self.mat, x, y);
     }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        assert_eq!(x.len(), self.mat.nrows());
+        assert_eq!(y.len(), self.mat.ncols());
+        for j in 0..self.mat.ncols() {
+            let mut sum = 0.0;
+            for i in 0..self.mat.nrows() {
+                sum += self.mat[(i, j)] * x[i];
+            }
+            y[j] = sum;
+        }
+        Ok(())
+    }
     fn as_any(&self) -> &dyn Any { &*self.mat }
     fn structure_id(&self) -> StructureId { self.ids.structure_id() }
     fn values_id(&self) -> ValuesId { self.ids.values_id() }
@@ -105,6 +118,23 @@ impl LinOp for CsrOp {
     type S = f64;
     fn dims(&self) -> (usize, usize) { (self.csr.nrows(), self.csr.ncols()) }
     fn matvec(&self, x: &[f64], y: &mut [f64]) { self.csr.spmv(x, y); }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        // y <- A^T x using CSR structure
+        if x.len() != self.csr.nrows() || y.len() != self.csr.ncols() {
+            return Err(KError::InvalidInput("t_matvec dimension mismatch".into()));
+        }
+        y.fill(0.0);
+        let rp = self.csr.row_ptr();
+        let ci = self.csr.col_idx();
+        let vv = self.csr.values();
+        for i in 0..self.csr.nrows() {
+            let xi = x[i];
+            for idx in rp[i]..rp[i + 1] {
+                y[ci[idx]] += vv[idx] * xi;
+            }
+        }
+        Ok(())
+    }
     fn as_any(&self) -> &dyn Any { &*self.csr }
     fn structure_id(&self) -> StructureId { self.ids.structure_id() }
     fn values_id(&self) -> ValuesId { self.ids.values_id() }
@@ -128,8 +158,8 @@ impl LinOp for Mat<f64> {
             y[i] = sum;
         }
     }
-    fn matvec_t(&self, x: &[f64], y: &mut [f64]) {
-        // simple dense transpose matvec
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        // y <- A^T x
         assert_eq!(x.len(), self.nrows());
         assert_eq!(y.len(), self.ncols());
         for j in 0..self.ncols() {
@@ -139,6 +169,7 @@ impl LinOp for Mat<f64> {
             }
             y[j] = sum;
         }
+        Ok(())
     }
     fn as_any(&self) -> &dyn Any { self }
     fn structure_id(&self) -> StructureId {
@@ -155,6 +186,22 @@ impl LinOp for CsrMatrix<f64> {
     type S = f64;
     fn dims(&self) -> (usize, usize) { (self.nrows(), self.ncols()) }
     fn matvec(&self, x: &[f64], y: &mut [f64]) { self.spmv(x, y); }
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if x.len() != self.nrows() || y.len() != self.ncols() {
+            return Err(KError::InvalidInput("t_matvec dimension mismatch".into()));
+        }
+        y.fill(0.0);
+        let rp = self.row_ptr();
+        let ci = self.col_idx();
+        let vv = self.values();
+        for i in 0..self.nrows() {
+            let xi = x[i];
+            for idx in rp[i]..rp[i + 1] {
+                y[ci[idx]] += vv[idx] * xi;
+            }
+        }
+        Ok(())
+    }
     fn as_any(&self) -> &dyn Any { self }
     fn structure_id(&self) -> StructureId {
         let mut h = DefaultHasher::new();

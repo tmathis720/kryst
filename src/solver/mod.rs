@@ -170,6 +170,8 @@ where
 // Re-export solver implementations
 pub mod cg;
 pub use cg::CgSolver;
+pub mod cgnr;
+pub use cgnr::CgnrSolver;
 
 pub mod gmres;
 pub use gmres::GmresSolver;
