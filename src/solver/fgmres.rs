@@ -139,6 +139,11 @@ impl FgmresSolver {
             return Err(KError::InvalidInput("FGMRES: vector size mismatch".into()));
         }
 
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
+
         let block_m = if self.preallocate {
             self.restart.min(self.maxits)
         } else {

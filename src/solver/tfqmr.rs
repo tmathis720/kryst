@@ -77,6 +77,11 @@ impl LinearSolver for TfqmrSolver {
         }
         let mons: &[Box<dyn Fn(usize, f64) + Send + Sync>] = monitors.unwrap_or(&[]);
 
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
+
         let w = work.ok_or_else(|| {
             KError::InvalidInput("TFQMR requires a Workspace; call via KSP".into())
         })?;

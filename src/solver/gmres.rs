@@ -193,6 +193,11 @@ impl LinearSolver for GmresSolver {
             ));
         }
 
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
+
         let mut owned_ws;
         let ws = if let Some(w) = work { w } else {
             owned_ws = Workspace::new(n);
@@ -221,18 +226,17 @@ impl LinearSolver for GmresSolver {
                 ws.q.push(ws.tmp2.clone());
                 beta
             }
-            PcSide::Right | PcSide::Symmetric => {
+            PcSide::Right => {
                 let beta = Self::nrm2(&ws.tmp1);
                 let mut v0 = ws.tmp1.clone();
                 if beta > 0.0 {
                     for i in 0..n { v0[i] /= beta; }
                 }
                 ws.q.push(v0);
-                if matches!(pc_side, PcSide::Right) {
-                    ws.z.resize(1, vec![0.0; n]);
-                }
+                ws.z.resize(1, vec![0.0; n]);
                 beta
             }
+            PcSide::Symmetric => unreachable!(),
         };
 
         ws.g[0] = beta;
@@ -260,7 +264,7 @@ impl LinearSolver for GmresSolver {
                         a.matvec(&ws.q[k], &mut ws.tmp1);
                         self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                     }
-                    PcSide::Right | PcSide::Symmetric => {
+                    PcSide::Right => {
                         self.apply_precond(pc, PcSide::Right, &ws.q[k], &mut ws.tmp2)?;
                         if matches!(pc_side, PcSide::Right) {
                             if ws.z.len() <= k { ws.z.resize(k + 1, vec![0.0; n]); }
@@ -268,6 +272,7 @@ impl LinearSolver for GmresSolver {
                         }
                         a.matvec(&ws.tmp2, &mut ws.tmp1);
                     }
+                    PcSide::Symmetric => unreachable!(),
                 }
 
                 let (hcol, vnext) = Self::orthonormalize(&ws.q, &mut ws.tmp1);
@@ -296,7 +301,8 @@ impl LinearSolver for GmresSolver {
             let y = Self::backsolve(&ws.h, &ws.g, k_steps);
             match pc_side {
                 PcSide::Left => Self::axpy_update(x, &ws.q, &y),
-                PcSide::Right | PcSide::Symmetric => Self::axpy_update(x, &ws.z, &y),
+                PcSide::Right => Self::axpy_update(x, &ws.z, &y),
+                PcSide::Symmetric => unreachable!(),
             }
 
             // Recompute residual
@@ -307,7 +313,8 @@ impl LinearSolver for GmresSolver {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                     Self::nrm2(&ws.tmp2)
                 }
-                PcSide::Right | PcSide::Symmetric => Self::nrm2(&ws.tmp1),
+                PcSide::Right => Self::nrm2(&ws.tmp1),
+                PcSide::Symmetric => unreachable!(),
             };
 
             if res <= thr || total_iters >= self.conv.max_iters {
@@ -332,7 +339,7 @@ impl LinearSolver for GmresSolver {
                     ws.q.push(ws.tmp2.clone());
                     ws.g[0] = beta;
                 }
-                PcSide::Right | PcSide::Symmetric => {
+                PcSide::Right => {
                     let beta = Self::nrm2(&ws.tmp1);
                     let mut v0 = ws.tmp1.clone();
                     if beta > 0.0 {
@@ -340,10 +347,9 @@ impl LinearSolver for GmresSolver {
                     }
                     ws.q.push(v0);
                     ws.g[0] = beta;
-                    if matches!(pc_side, PcSide::Right) {
-                        ws.z.resize(1, vec![0.0; n]);
-                    }
+                    ws.z.resize(1, vec![0.0; n]);
                 }
+                PcSide::Symmetric => unreachable!(),
             }
         }
 

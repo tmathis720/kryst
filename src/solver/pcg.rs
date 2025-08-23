@@ -80,6 +80,12 @@ impl LinearSolver for PcgSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
+        if pc_side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "CG/MINRES require Left preconditioning (SPD M)".into(),
+            ));
+        }
+
         let n = b.len();
         if x.len() != n {
             return Err(KError::InvalidInput("dimension mismatch: x,b".into()));
