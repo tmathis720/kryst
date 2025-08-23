@@ -393,21 +393,36 @@ impl KspContext {
             });
         }
 
-        let solver = self
-            .solver
-            .as_mut()
-            .ok_or_else(|| KError::SolveError("No solver".into()))?;
         let monitors = if self.monitors.is_empty() {
             None
         } else {
             Some(self.monitors.as_slice())
         };
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let pc = self.pc.as_mut().map(|b| b.as_mut() as &mut dyn Preconditioner);
+        let solver = self
+            .solver
+            .as_mut()
+            .ok_or_else(|| KError::SolveError("No solver".into()))?;
+
+        if let Some(fgmres) = solver.as_any_mut().downcast_mut::<crate::solver::FgmresSolver>() {
+            return fgmres.solve_flexible(
+                amat.as_ref(),
+                pc,
+                b,
+                x,
+                &comm,
+                monitors,
+                self.work.as_mut(),
+            );
+        }
+
         solver.solve(
             amat.as_ref(),
-            self.pc.as_deref(),
+            pc.map(|p| p as &dyn Preconditioner),
             b,
             x,
-            &UniverseComm::NoComm(crate::parallel::NoComm),
+            &comm,
             monitors,
             self.work.as_mut(),
         )
@@ -434,6 +449,11 @@ impl KspContext {
     /// Clear all registered monitors.
     pub fn clear_monitors(&mut self) {
         self.monitors.clear();
+    }
+
+    #[cfg(test)]
+    pub fn set_preconditioner(&mut self, pc: Box<dyn Preconditioner>) {
+        self.pc = Some(pc);
     }
 
     /// Invoke all monitors with the provided iteration and residual.

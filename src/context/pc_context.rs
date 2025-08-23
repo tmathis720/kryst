@@ -74,6 +74,15 @@ impl Preconditioner for NoOpPreconditioner {
         z.copy_from_slice(r);
         Ok(())
     }
+
+    fn apply_mut(
+        &mut self,
+        side: PcSide,
+        x: &[f64],
+        y: &mut [f64],
+    ) -> Result<(), KError> {
+        self.apply(side, x, y)
+    }
 }
 
 /// Adapter for matrix-based preconditioners implementing [`PreconditionerMat`].

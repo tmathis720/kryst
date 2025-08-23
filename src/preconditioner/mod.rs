@@ -1,6 +1,14 @@
 //! Preconditioners for linear solvers.
 //!
 //! This module defines the Preconditioner trait and includes implementations such as Jacobi, ILU, SOR, AMG, Additive Schwarz, and more.
+//!
+//! ## Flexible preconditioners
+//!
+//! Flexible Krylov methods call [`Preconditioner::apply_mut`], allowing
+//! preconditioners to update internal state between applications.
+//! Non-flexible solvers continue to invoke [`Preconditioner::apply`].
+//! The default `apply_mut` simply forwards to `apply`, so existing
+//! implementations remain unchanged unless they opt in to mutation.
 
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -69,6 +77,19 @@ pub trait Preconditioner: Send + Sync {
     /// Apply M⁻¹ to input vector, writing result to output slice.
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 
+    /// Mutable application (flexible/nonlinear preconditioners).
+    ///
+    /// By default, delegates to [`apply`], so existing preconditioners
+    /// remain immutable unless they explicitly override this method.
+    fn apply_mut(
+        &mut self,
+        side: PcSide,
+        x: &[f64],
+        y: &mut [f64],
+    ) -> Result<(), KError> {
+        self.apply(side, x, y)
+    }
+
     /// Attempt to solve `op * x = b` directly using the preconditioner.
     ///
     /// The default implementation returns [`KError::SolveError`] indicating
@@ -99,6 +120,10 @@ pub trait Preconditioner: Send + Sync {
         self.setup(a)
     }
 }
+
+/// Marker trait: any [`Preconditioner`] can be treated as flexible via [`apply_mut`].
+pub trait FlexiblePreconditioner: Preconditioner {}
+impl<T: Preconditioner + ?Sized> FlexiblePreconditioner for T {}
 
 /// Internal trait for preconditioners that operate directly on dense matrices.
 pub trait PreconditionerMat: Send + Sync {
@@ -156,6 +181,10 @@ impl Preconditioner for LegacyOpPreconditioner {
         self.inner.apply(side, &x_vec, &mut y_vec)?;
         y.copy_from_slice(&y_vec);
         Ok(())
+    }
+
+    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        self.apply(side, x, y)
     }
 }
 
@@ -219,5 +248,25 @@ mod tests {
             KError::SolveError(msg) => assert!(msg.contains("direct_solve not supported")),
             _ => panic!("unexpected error variant"),
         }
+    }
+
+    #[test]
+    fn default_apply_mut_forwards_to_apply() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountPc {
+            calls: AtomicUsize,
+        }
+        impl Preconditioner for CountPc {
+            fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
+            fn apply(&self, _side: PcSide, _x: &[f64], _y: &mut [f64]) -> Result<(), KError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let mut pc = CountPc { calls: AtomicUsize::new(0) };
+        let x = [0.0; 2];
+        let mut y = [0.0; 2];
+        pc.apply_mut(PcSide::Left, &x, &mut y).unwrap();
+        assert_eq!(pc.calls.load(Ordering::Relaxed), 1);
     }
 }
