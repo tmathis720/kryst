@@ -150,6 +150,7 @@ impl LinearSolver for PcaGmresSolver {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        _pc_side: PcSide,
         _comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,

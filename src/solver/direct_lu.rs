@@ -81,6 +81,7 @@ where
         pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<T>, Vec<T>> + '_)>,
         b: &Vec<T>,
         x: &mut Vec<T>,
+        _pc_side: crate::preconditioner::PcSide,
         _comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -89,6 +90,7 @@ where
         let _guard = StageGuard::new("LuSolve");
         
         let _ = pc; // Direct solvers do not use preconditioner
+        let _ = _pc_side;
         
         // Call monitors at start if provided
         if let Some(monitors) = monitors {
@@ -170,6 +172,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
         pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<T>, Vec<T>> + '_)>,
         b: &Vec<T>,
         x: &mut Vec<T>,
+        _pc_side: crate::preconditioner::PcSide,
         _comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -178,6 +181,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
         let _guard = StageGuard::new("QrSolve");
         
         let _ = pc; // Direct solvers do not use preconditioner
+        let _ = _pc_side;
         
         // Call monitors at start if provided
         if let Some(monitors) = monitors {
@@ -233,7 +237,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = LuSolver::<f64>::new();
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
@@ -257,7 +261,7 @@ mod tests {
         let b = vec![4.0, 5.0, 6.0];
         let mut x = vec![0.0; 3];
         let mut solver = QrSolver::new();
-        let stats = solver.solve(&a, None, &b, &mut x, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
         let expected = vec![6.0, 15.0, -23.0];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {

@@ -75,6 +75,7 @@ impl LinearSolver for PcgSolver {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -134,7 +135,7 @@ impl LinearSolver for PcgSolver {
 
         // z = M^{-1} r
         if let Some(pc) = pc {
-            pc.apply(PcSide::Left, r, z)?;
+            pc.apply(pc_side, r, z)?;
         } else {
             z.copy_from_slice(r);
         }
@@ -189,7 +190,7 @@ impl LinearSolver for PcgSolver {
             }
 
             if let Some(pc) = pc {
-                pc.apply(PcSide::Left, r, z)?;
+                pc.apply(pc_side, r, z)?;
             } else {
                 z.copy_from_slice(r);
             }

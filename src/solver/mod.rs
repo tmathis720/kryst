@@ -24,6 +24,7 @@ pub trait LinearSolver: Send + Any {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -45,6 +46,7 @@ pub mod legacy {
             pc: Option<&(dyn Preconditioner<M, V> + '_)>,
             b: &V,
             x: &mut V,
+            pc_side: crate::preconditioner::PcSide,
             comm: &crate::parallel::UniverseComm,
             monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
             work: Option<&mut crate::context::ksp_context::Workspace>,
@@ -58,12 +60,13 @@ pub mod legacy {
             pc: Option<&(dyn Preconditioner<M, V> + '_)>,
             b: &V,
             x: &mut V,
+            pc_side: crate::preconditioner::PcSide,
             comm: &crate::parallel::UniverseComm,
         ) -> Result<SolveStats<Self::Scalar>, Self::Error>
         where
             Self: Sized,
         {
-            self.solve(a, pc, b, x, comm, None, None)
+            self.solve(a, pc, b, x, pc_side, comm, None, None)
         }
 
         fn solve_with_monitors(
@@ -72,13 +75,14 @@ pub mod legacy {
             pc: Option<&(dyn Preconditioner<M, V> + '_)>,
             b: &V,
             x: &mut V,
+            pc_side: crate::preconditioner::PcSide,
             comm: &crate::parallel::UniverseComm,
             monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
         ) -> Result<SolveStats<Self::Scalar>, Self::Error>
         where
             Self: Sized,
         {
-            self.solve(a, pc, b, x, comm, Some(monitors), None)
+            self.solve(a, pc, b, x, pc_side, comm, Some(monitors), None)
         }
 
         fn solve_with_workspace(
@@ -87,13 +91,14 @@ pub mod legacy {
             pc: Option<&(dyn Preconditioner<M, V> + '_)>,
             b: &V,
             x: &mut V,
+            pc_side: crate::preconditioner::PcSide,
             comm: &crate::parallel::UniverseComm,
             work: &mut crate::context::ksp_context::Workspace,
         ) -> Result<SolveStats<Self::Scalar>, Self::Error>
         where
             Self: Sized,
         {
-            self.solve(a, pc, b, x, comm, None, Some(work))
+            self.solve(a, pc, b, x, pc_side, comm, None, Some(work))
         }
     }
 }
@@ -151,6 +156,7 @@ where
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -167,7 +173,7 @@ where
         });
         let stats = self
             .inner
-            .solve(mat, pc_ref, &b_vec, &mut x_vec, comm, monitors, work)?;
+            .solve(mat, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work)?;
         x.copy_from_slice(&x_vec);
         Ok(stats)
     }

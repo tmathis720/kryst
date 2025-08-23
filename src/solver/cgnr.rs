@@ -95,6 +95,7 @@ impl LinearSolver for CgnrSolver {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -142,7 +143,7 @@ impl LinearSolver for CgnrSolver {
             Vec::new()
         };
         if let Some(pc) = pc {
-            pc.apply(PcSide::Left, z, &mut zhat_buf)?;
+            pc.apply(pc_side, z, &mut zhat_buf)?;
         }
         let zhat_slice: &[f64] = if pc.is_some() { &zhat_buf[..] } else { &z[..] };
 
@@ -192,7 +193,7 @@ impl LinearSolver for CgnrSolver {
 
             a.t_matvec(r, z);
             if let Some(pc) = pc {
-                pc.apply(PcSide::Left, z, &mut zhat_buf)?;
+                pc.apply(pc_side, z, &mut zhat_buf)?;
             }
             let zhat_slice: &[f64] = if pc.is_some() { &zhat_buf[..] } else { &z[..] };
 

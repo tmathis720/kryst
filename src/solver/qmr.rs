@@ -64,6 +64,7 @@ impl LinearSolver for QmrSolver {
         _pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         _comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -80,6 +81,7 @@ impl LinearSolver for QmrSolver {
         }
 
         let mons = monitors.unwrap_or(&[]);
+        let _ = pc_side;
         let mut local_work;
         let w = match work {
             Some(w) => w,

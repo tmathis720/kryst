@@ -130,6 +130,7 @@ impl LinearSolver for CgSolver {
         pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -154,7 +155,7 @@ impl LinearSolver for CgSolver {
         }
 
         if let Some(m) = pc {
-            m.apply(PcSide::Left, r, z)?;
+            m.apply(pc_side, r, z)?;
         } else {
             z.copy_from_slice(r);
         }
@@ -233,7 +234,7 @@ impl LinearSolver for CgSolver {
             xnorm = Self::nrm2(x, comm);
 
             if let Some(m) = pc {
-                m.apply(PcSide::Left, r, z)?;
+                m.apply(pc_side, r, z)?;
             } else {
                 z.copy_from_slice(r);
             }

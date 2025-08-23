@@ -119,6 +119,7 @@ impl FgmresSolver {
         mut pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
+        pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
@@ -216,7 +217,7 @@ impl FgmresSolver {
                     let vj = &v_part[v_off + j][..];
                     let zj = &mut z_part[j][..];
                     if let Some(pc_) = pc.as_deref_mut() {
-                        pc_.apply_mut(PcSide::Right, vj, zj)?;
+                        pc_.apply_mut(pc_side, vj, zj)?;
                     } else {
                         zj.copy_from_slice(vj);
                     }
@@ -523,7 +524,7 @@ impl LinearSolver for FgmresSolver {
                     let vj = &v_part[v_off + j][..];
                     let zj = &mut z_part[j][..];
                     if let Some(pc_) = pc {
-                        pc_.apply(PcSide::Right, vj, zj)?;
+                        pc_.apply(pc_side, vj, zj)?;
                     } else {
                         zj.copy_from_slice(vj);
                     }
