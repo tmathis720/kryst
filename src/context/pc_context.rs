@@ -1,10 +1,7 @@
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::direct::{LuPc, QrPc, SuperLuDistPc};
-use crate::preconditioner::{jacobi::Jacobi, LegacyOpPreconditioner, PcSide, Preconditioner};
-#[cfg(feature = "legacy-pc-bridge")]
-use crate::preconditioner::{ChebyshevPre, Ilup, Ilut, Ilutp, MatSorType, Sor};
+use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 use std::str::FromStr;
 
@@ -84,6 +81,117 @@ impl Preconditioner for NoOpPreconditioner {
     }
 }
 
+/// Typed configuration parsed from options.
+#[derive(Debug, Clone)]
+pub enum PcConfig {
+    None,
+    Jacobi,
+    BlockJacobi { block: usize },
+    Ilu0,
+    Iluk { level: usize },
+    Ilut { drop_tol: f64, max_fill: usize, reordering: Option<String> },
+    Milu0,
+    Sor { omega: f64, sweeps: usize, mat_side: crate::preconditioner::sor::MatSorType, symmetric: bool },
+    Chebyshev { degree: usize, eig_lo: f64, eig_hi: f64 },
+    Asm { overlap: usize, subdomain_hint: Option<usize> },
+    Amg { levels: Option<usize>, smoother: Option<String> },
+    Lu,
+    Qr,
+    SuperLuDist,
+}
+
+impl PcConfig {
+    pub fn from_type_and_options(pc_type: PcType, opts: Option<&PcOptions>) -> Result<Self, KError> {
+        use PcType::*;
+        let default_opts = PcOptions::default();
+        let o = opts.unwrap_or(&default_opts);
+        Ok(match pc_type {
+            None => PcConfig::None,
+
+            Jacobi => match o.jacobi_block_size {
+                Some(b) if b > 1 => PcConfig::BlockJacobi { block: b },
+                _ => PcConfig::Jacobi,
+            },
+
+            Ilu0 => PcConfig::Ilu0,
+
+            Ilu => {
+                match o.ilu_variant.as_deref() {
+                    Some("ilu0") | Option::None if o.ilu_level.is_none() && o.ilut_drop_tol.is_none() => PcConfig::Ilu0,
+                    Some("iluk") | Option::None if o.ilu_level.is_some() => {
+                        let level = o
+                            .ilu_level
+                            .ok_or_else(|| KError::InvalidInput("iluk requires PcOptions.ilu_level".into()))?;
+                        PcConfig::Iluk { level }
+                    }
+                    Some("ilut") | Option::None if o.ilut_drop_tol.is_some() => PcConfig::Ilut {
+                        drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
+                        max_fill: o.ilut_max_fill.unwrap_or(20),
+                        reordering: o.ilu_reordering.clone(),
+                    },
+                    Some("milu0") => PcConfig::Milu0,
+                    Some(other) => return Err(KError::InvalidInput(format!("unknown ilu_variant: {other}"))),
+                    Option::None => PcConfig::Ilu0,
+                }
+            }
+            Ilut => PcConfig::Ilut {
+                drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
+                max_fill: o.ilut_max_fill.unwrap_or(20),
+                reordering: o.ilu_reordering.clone(),
+            },
+            Ilutp => PcConfig::Ilut {
+                drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
+                max_fill: o.ilut_max_fill.unwrap_or(20),
+                reordering: o.ilu_reordering.clone(),
+            },
+            Ilup => PcConfig::Iluk { level: o.ilu_level.unwrap_or(0) },
+
+            Sor => {
+                use crate::preconditioner::sor::MatSorType;
+                let mat_side = match o.sor_mat_side.as_deref() {
+                    Some("lower") | Option::None => MatSorType::APPLY_LOWER,
+                    Some("upper") => MatSorType::APPLY_UPPER,
+                    Some("symmetric") => MatSorType::SYMMETRIC_SWEEP,
+                    Some(s) => return Err(KError::InvalidInput(format!("unknown sor_mat_side: {s}"))),
+                };
+                let omega = o.sor_omega.unwrap_or(1.0);
+                if !(0.0..2.0).contains(&omega) {
+                    return Err(KError::InvalidInput("sor_omega must be in (0,2)".into()));
+                }
+                PcConfig::Sor {
+                    omega,
+                    sweeps: o.sor_sweeps.unwrap_or(1),
+                    mat_side,
+                    symmetric: o.sor_symmetric.unwrap_or(false),
+                }
+            }
+
+            Chebyshev => {
+                let degree = o.cheb_degree.unwrap_or(2);
+                let eig_lo = o.cheb_eig_lo.unwrap_or(0.0);
+                let eig_hi = o.cheb_eig_hi.unwrap_or(1.0);
+                if degree < 1 || eig_hi <= eig_lo || eig_lo < 0.0 {
+                    return Err(KError::InvalidInput("invalid Chebyshev bounds".into()));
+                }
+                PcConfig::Chebyshev { degree, eig_lo, eig_hi }
+            }
+
+            Asm => PcConfig::Asm {
+                overlap: o.asm_overlap.unwrap_or(0),
+                subdomain_hint: o.asm_subdomain_size,
+            },
+            Amg => PcConfig::Amg {
+                levels: o.amg_levels,
+                smoother: o.amg_smoother.clone(),
+            },
+
+            Lu => PcConfig::Lu,
+            Qr => PcConfig::Qr,
+            SuperLuDist => PcConfig::SuperLuDist,
+            ApproxInverse | BlockJacobi => unreachable!(),
+        })
+    }
+}
 
 /// Factory for creating preconditioners.
 pub struct PcFactory;
@@ -91,95 +199,47 @@ pub struct PcFactory;
 impl PcFactory {
     pub fn create_preconditioner(
         pc_type: PcType,
-        _options: Option<&PcOptions>,
+        options: Option<&PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
-        match pc_type {
-            PcType::Jacobi => Ok(Box::new(Jacobi::new())),
-            PcType::Ilut => {
-                #[cfg(feature = "legacy-pc-bridge")]
-                {
-                    let ilut = Ilut::new(0, 0.0);
-                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilut))));
-                }
-                #[cfg(not(feature = "legacy-pc-bridge"))]
-                {
-                    return Err(KError::Unsupported(
-                        "Ilut requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-                    ));
-                }
-            },
-            PcType::Ilutp => {
-                #[cfg(feature = "legacy-pc-bridge")]
-                {
-                    let ilutp = Ilutp::new();
-                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilutp))));
-                }
-                #[cfg(not(feature = "legacy-pc-bridge"))]
-                {
-                    return Err(KError::Unsupported(
-                        "Ilutp requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-                    ));
-                }
-            },
-            PcType::Ilup => {
-                #[cfg(feature = "legacy-pc-bridge")]
-                {
-                    let ilup = Ilup::new(0);
-                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))));
-                }
-                #[cfg(not(feature = "legacy-pc-bridge"))]
-                {
-                    return Err(KError::Unsupported(
-                        "Ilup requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-                    ));
-                }
-            },
-            PcType::Sor => {
-                #[cfg(feature = "legacy-pc-bridge")]
-                {
-                    let sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(
-                        1.0,
-                        1,
-                        0,
-                        MatSorType::APPLY_LOWER,
-                        0.0,
-                    );
-                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(sor))));
-                }
-                #[cfg(not(feature = "legacy-pc-bridge"))]
-                {
-                    return Err(KError::Unsupported(
-                        "SOR requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-                    ));
-                }
-            },
-            PcType::Chebyshev => {
-                #[cfg(feature = "legacy-pc-bridge")]
-                {
-                    let pre = ChebyshevPre::new(Mat::zeros(0, 0), 0, 1.0, 1.0);
-                    return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(pre))));
-                }
-                #[cfg(not(feature = "legacy-pc-bridge"))]
-                {
-                    return Err(KError::Unsupported(
-                        "Chebyshev requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-                    ));
-                }
-            },
-            PcType::None => Ok(Box::new(NoOpPreconditioner)),
-            PcType::Lu => Ok(Box::new(LuPc::new())),
-            PcType::Qr => Ok(Box::new(QrPc::new())),
-            #[cfg(feature = "superlu_dist")]
-            PcType::SuperLuDist => Ok(Box::new(SuperLuDistPc::new())),
-            #[cfg(not(feature = "superlu_dist"))]
-            PcType::SuperLuDist => Err(KError::SolveError(
-                "superlu_dist feature not enabled".into(),
-            )),
-            other => Err(KError::UnrecognizedPcType(format!(
-                "{:?} not implemented",
-                other
-            ))),
+        let cfg = PcConfig::from_type_and_options(pc_type, options)?;
+        use crate::preconditioner::builders as b;
+        match cfg {
+            PcConfig::None => Ok(Box::new(NoOpPreconditioner)),
+            PcConfig::Jacobi => b::build_jacobi(),
+            PcConfig::BlockJacobi { block } => b::build_block_jacobi(block),
+
+            PcConfig::Ilu0 => b::build_ilu0(),
+            PcConfig::Iluk { level } => b::build_iluk(level),
+            PcConfig::Ilut { drop_tol, max_fill, reordering } => {
+                b::build_ilut(drop_tol, max_fill, reordering)
+            }
+            PcConfig::Milu0 => b::build_milu0(),
+
+            PcConfig::Sor { omega, sweeps, mat_side, symmetric } => {
+                b::build_sor(omega, sweeps, mat_side, symmetric)
+            }
+
+            PcConfig::Chebyshev { degree, eig_lo, eig_hi } => {
+                b::build_chebyshev(degree, eig_lo, eig_hi)
+            }
+
+            PcConfig::Asm { overlap, subdomain_hint } => b::build_asm(overlap, subdomain_hint),
+            PcConfig::Amg { levels, smoother } => b::build_amg(levels, smoother),
+
+            PcConfig::Lu => b::build_lu(),
+            PcConfig::Qr => b::build_qr(),
+            PcConfig::SuperLuDist => b::build_superlu_dist(),
         }
+    }
+
+    /// Convenience: build directly from options (when `pc_type` lives inside options)
+    pub fn create_from_options(opts: &PcOptions) -> Result<Box<dyn Preconditioner>, KError> {
+        let pct = if let Some(ref s) = opts.pc_type {
+            PcType::from_str(s)?
+        } else {
+            PcType::None
+        };
+        Self::create_preconditioner(pct, Some(opts))
     }
 
     pub fn create_deferred_pc(
@@ -236,14 +296,45 @@ mod tests {
         _is_pc(&qr);
     }
 
+    #[cfg(feature = "legacy-pc-bridge")]
     #[test]
-    fn factory_builds_superludist_or_errors_by_feature() {
-        let r = PcFactory::create_preconditioner(PcType::from_str("superludist").unwrap(), None);
+    fn factory_uses_options_for_ilut() {
+        let opts = PcOptions {
+            pc_type: Some("ilut".into()),
+            ilut_drop_tol: Some(1e-6),
+            ilut_max_fill: Some(50),
+            ..Default::default()
+        };
+        let pc = PcFactory::create_from_options(&opts).unwrap();
+        fn _is_pc(_: &Box<dyn Preconditioner>) {}
+        _is_pc(&pc);
+    }
 
-        #[cfg(feature = "superlu_dist")]
-        assert!(r.is_ok());
+    #[cfg(feature = "legacy-pc-bridge")]
+    #[test]
+    fn factory_builds_sor_from_options() {
+        let opts = PcOptions {
+            pc_type: Some("sor".into()),
+            sor_omega: Some(1.5),
+            sor_sweeps: Some(2),
+            sor_mat_side: Some("lower".into()),
+            ..Default::default()
+        };
+        let pc = PcFactory::create_from_options(&opts).unwrap();
+        fn _is_pc(_: &Box<dyn Preconditioner>) {}
+        _is_pc(&pc);
+    }
 
-        #[cfg(not(feature = "superlu_dist"))]
-        assert!(r.is_err());
+    #[test]
+    fn chebyshev_validates_bounds() {
+        let bad = PcOptions {
+            pc_type: Some("chebyshev".into()),
+            cheb_degree: Some(0),
+            cheb_eig_lo: Some(2.0),
+            cheb_eig_hi: Some(1.0),
+            ..Default::default()
+        };
+        let err = PcFactory::create_from_options(&bad).err().unwrap();
+        assert!(matches!(err, KError::InvalidInput(_)));
     }
 }
