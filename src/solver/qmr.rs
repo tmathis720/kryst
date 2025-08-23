@@ -81,6 +81,10 @@ impl LinearSolver for QmrSolver {
         }
 
         let mons = monitors.unwrap_or(&[]);
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
         let _ = pc_side;
         let mut local_work;
         let w = match work {

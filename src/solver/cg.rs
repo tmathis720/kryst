@@ -138,6 +138,12 @@ impl LinearSolver for CgSolver {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CG");
 
+        if pc_side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "CG/MINRES require Left preconditioning (SPD M)".into(),
+            ));
+        }
+
         let n = b.len();
         if x.len() != n {
             return Err(KError::InvalidInput("dimension mismatch x,b".into()));

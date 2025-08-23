@@ -18,6 +18,7 @@ use crate::solver::legacy::LinearSolver;
 use crate::core::traits::{MatVec, InnerProduct};
 use crate::utils::convergence::{Convergence, SolveStats};
 use crate::error::KError;
+use crate::preconditioner::PcSide;
 use num_traits::Float;
 #[cfg(feature = "logging")]
 use log::trace;
@@ -114,8 +115,13 @@ where
         #[cfg(feature = "logging")]
         trace!("Starting MINRES solve");
 
+        if pc_side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "CG/MINRES require Left preconditioning (SPD M)".into(),
+            ));
+        }
+
         let _ = pc; // MINRES does not use preconditioner (yet)
-        let _ = pc_side;
         let n = b.as_ref().len();
         let ip = ();
 

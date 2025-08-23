@@ -22,6 +22,7 @@
 
 use crate::core::traits::{InnerProduct, MatVec};
 use crate::error::KError;
+use crate::preconditioner::PcSide;
 use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
 use crate::utils::profiling::StageGuard;
@@ -87,8 +88,13 @@ where
         work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
         let _solve_stage = StageGuard::new("BiCGStabSolve");
-        
+
         let monitors = monitors.unwrap_or(&[]);
+
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
         
         // Only use monitors if monitoring is enabled at runtime
         let use_monitors = crate::utils::profiling::is_monitoring_enabled() && !monitors.is_empty();
