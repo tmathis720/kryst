@@ -177,6 +177,8 @@ pub mod gmres;
 pub use gmres::GmresSolver;
 pub mod bicgstab;
 pub use bicgstab::BiCgStabSolver;
+pub mod cgs;
+pub use cgs::CgsSolver;
 pub mod pcg;
 pub use pcg::PcgSolver;
 pub mod minres;

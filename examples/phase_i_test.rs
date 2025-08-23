@@ -9,6 +9,7 @@ use kryst::{
     context::ksp_context::{KspContext, SolverType},
     context::pc_context::PcType,
     config::options::PcOptions,
+    matrix::op::LinOp,
 };
 use faer::Mat;
 use std::sync::Arc;
@@ -61,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
        .set_pc_type(PcType::Asm, Some(&pc_opts))?;
     
     // Create a small test matrix
-    let a = Arc::new(Mat::from_fn(2, 2, |i, j| {
+    let a: Arc<dyn LinOp<S = f64>> = Arc::new(Mat::from_fn(2, 2, |i, j| {
         match (i, j) {
             (0, 0) => 4.0,
             (0, 1) => 1.0,

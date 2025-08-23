@@ -5,8 +5,8 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
-    BiCgStabSolver, CgSolver, CgnrSolver, GmresSolver, LinearSolver, MatSolverAdapter, MinresSolver,
-    PcgSolver,
+    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, GmresSolver, LinearSolver, MatSolverAdapter,
+    MinresSolver, PcgSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -45,6 +45,7 @@ pub enum SolverType {
     Cgnr,
     Gmres,
     BiCgStab,
+    Cgs,
     Pcg,
     Minres,
     Preonly,
@@ -59,6 +60,7 @@ impl FromStr for SolverType {
             "cgnr" => Ok(SolverType::Cgnr),
             "gmres" => Ok(SolverType::Gmres),
             "bicgstab" => Ok(SolverType::BiCgStab),
+            "cgs" => Ok(SolverType::Cgs),
             "pcg" => Ok(SolverType::Pcg),
             "minres" => Ok(SolverType::Minres),
             "preonly" => Ok(SolverType::Preonly),
@@ -128,6 +130,7 @@ impl KspContext {
                 self.rtol,
                 self.maxits,
             ))),
+            SolverType::Cgs => Box::new(CgsSolver::new(self.rtol, self.maxits)),
             SolverType::Pcg => Box::new(PcgSolver::new(self.rtol, self.maxits)),
             SolverType::Minres => Box::new(MatSolverAdapter::new(MinresSolver::new(
                 self.rtol,
