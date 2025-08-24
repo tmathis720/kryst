@@ -719,7 +719,6 @@ impl AMG {
 
         let mut levels = Vec::with_capacity(config.max_levels);
         let mut current_matrix = matrix.clone();
-        let mut current_diag = utils::extract_diagonal_inverse(&current_matrix);
         let mut setup_complexity = 0.0;
         let original_size = matrix.nrows();
 
@@ -807,9 +806,6 @@ impl AMG {
                 utils::apply_truncation(&mut interpolation, config.truncation_factor);
             }
 
-            // Build coarse matrix (Galerkin product: R * A * P) with error checking
-            let coarse_matrix = &restriction * &current_matrix * &interpolation;
-
             // Convert to sparse format for storage and operations
             let sparse_interpolation = utils::to_sparse_with_tolerance(&interpolation, 1e-12);
             let sparse_restriction = utils::to_sparse_with_tolerance(&restriction, 1e-12);
@@ -855,9 +851,8 @@ impl AMG {
                 nnz: coarse_nnz,
             });
 
-            // Update for next iteration using sparse matrix
+            // Update for next iteration using dense coarse matrix
             current_matrix = coarse_matrix;
-            current_diag = coarse_diag;
 
             // Check for stalling (HYPRE-style)
             if current_matrix.nrows() >= n {
@@ -875,13 +870,14 @@ impl AMG {
         // Add the coarsest level
         let final_size = current_matrix.nrows();
         let final_sparse_matrix = utils::to_sparse_with_tolerance(&current_matrix, 1e-12);
+        let final_diag = utils::extract_diagonal_inverse(&current_matrix);
         let final_nnz = final_sparse_matrix.nnz();
 
         levels.push(AMGLevel {
             interpolation: CsrMatrix::identity(final_size),
             restriction: CsrMatrix::identity(final_size),
             coarse_matrix: final_sparse_matrix,
-            diag_inv: current_diag,
+            diag_inv: final_diag,
             nnz: final_nnz,
         });
 
@@ -997,7 +993,6 @@ impl AMG {
     ) -> Self {
         let mut levels = Vec::new();
         let mut current_matrix = a.clone();
-        let mut current_diag = utils::extract_diagonal_inverse(&current_matrix);
         for _level_idx in 0..max_levels {
             let n = current_matrix.nrows();
             if n <= 10 {
@@ -1044,7 +1039,6 @@ impl AMG {
                 nnz: coarse_nnz,
             });
             current_matrix = coarse_matrix_dense;
-            current_diag = coarse_diag;
         }
         // Add the coarsest level (identity prolongation/restriction)
         let diag_inv_final = Self::extract_diagonal_inverse(&current_matrix);

@@ -1,10 +1,9 @@
 use faer::Mat;
-use kryst::Preconditioner;
 use kryst::error::KError;
-use kryst::preconditioner::LegacyOpPreconditioner;
-use kryst::preconditioner::PcSide;
 use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarsenType, InterpType, RelaxType};
-use kryst::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
+use kryst::preconditioner::{
+    LegacyOpPreconditioner, PcSide, Preconditioner, legacy::Preconditioner as LegacyPreconditioner,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    HYPRE-Inspired AMG Preconditioner Demo");

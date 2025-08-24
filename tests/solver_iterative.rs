@@ -8,8 +8,8 @@
 use approx::assert_abs_diff_eq;
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
-use kryst::LinearSolver;
 use kryst::preconditioner::PcSide;
+use kryst::solver::LinearSolver;
 use kryst::solver::{CgSolver, GmresSolver};
 use rand::Rng;
 

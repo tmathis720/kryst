@@ -88,13 +88,11 @@ fn main() -> Result<(), KError> {
 
     // Monitor 2: Print progress every iteration
     ksp2.add_monitor(|iter, residual| {
-        if iter % 1 == 0 || residual < 1e-6 {
-            println!("  GMRES iter {}: ||r|| = {:.3e}", iter, residual);
-        }
+        println!("  GMRES iter {}: ||r|| = {:.3e}", iter, residual);
     });
 
     // Monitor 3: Check for stagnation using Arc<Mutex<>>
-    let prev_residual = Arc::new(Mutex::new(std::f64::INFINITY));
+    let prev_residual = Arc::new(Mutex::new(f64::INFINITY));
     let prev_residual_clone = Arc::clone(&prev_residual);
     ksp2.add_monitor(move |iter, residual| {
         if iter > 0 {

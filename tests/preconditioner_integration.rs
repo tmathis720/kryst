@@ -6,9 +6,9 @@
 //! preconditioner and solver interfaces are compatible and robust for a variety of matrix types.
 
 use faer::Mat;
-use kryst::LinearSolver;
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::preconditioner::{Jacobi, PcSide};
+use kryst::solver::LinearSolver;
 use kryst::solver::{CgSolver, GmresSolver};
 
 /// Construct a symmetric positive definite (SPD) tridiagonal matrix of size `n`.

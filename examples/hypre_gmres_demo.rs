@@ -8,7 +8,7 @@ use faer::mat;
 use kryst::core::traits::MatVec;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
-use kryst::{LinearSolver, solver::GmresSolver};
+use kryst::solver::{GmresSolver, LinearSolver};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a well-conditioned non-symmetric system
