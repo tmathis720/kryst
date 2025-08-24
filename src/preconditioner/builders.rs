@@ -50,6 +50,8 @@ pub fn build_sor(
     }
     #[cfg(not(feature = "legacy-pc-bridge"))]
     {
+        // avoid unused parameter warnings when the legacy bridge is disabled
+        let _ = (omega, sweeps, mat_side);
         Err(KError::Unsupported(
             "SOR requires --features legacy-pc-bridge (or port to modern Preconditioner)",
         ))
@@ -69,6 +71,8 @@ pub fn build_chebyshev(
     }
     #[cfg(not(feature = "legacy-pc-bridge"))]
     {
+        // avoid unused parameter warnings when the legacy bridge is disabled
+        let _ = (degree, eig_lo, eig_hi);
         Err(KError::Unsupported(
             "Chebyshev requires --features legacy-pc-bridge (or port to modern Preconditioner)",
         ))
@@ -118,6 +122,7 @@ pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
     }
     #[cfg(not(feature = "legacy-pc-bridge"))]
     {
+        let _ = level;
         Err(KError::Unsupported(
             "ILU(k) requires port or legacy-pc-bridge feature",
         ))
@@ -136,6 +141,7 @@ pub fn build_ilut(
     }
     #[cfg(not(feature = "legacy-pc-bridge"))]
     {
+        let _ = (drop_tol, max_fill);
         Err(KError::Unsupported(
             "ILUT requires port or legacy-pc-bridge feature",
         ))

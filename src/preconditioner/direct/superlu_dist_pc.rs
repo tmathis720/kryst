@@ -8,6 +8,7 @@ use crate::matrix::sparse::CsrMatrix;
 
 #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
 pub struct SuperLuDistPc {
+    #[allow(dead_code)]
     comm: Option<UniverseComm>,
 }
 

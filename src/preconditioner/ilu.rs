@@ -369,7 +369,9 @@ pub struct Ilu<T> {
     /// Diagonal factor for modified ILU (extracted from U for efficiency)
     d: Vec<T>,
     /// Permutation arrays (HYPRE: perm, qperm)
+    #[allow(dead_code)]
     row_perm: Vec<usize>,
+    #[allow(dead_code)]
     col_perm: Vec<usize>,
     /// Consolidated preallocated workspace vectors for all operations
     workspace: IluWorkspace<T>,
@@ -553,11 +555,13 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     }
 
     /// Enhanced matrix analysis using matrix utils
+    #[allow(dead_code)]
     fn analyze_matrix_for_ilu(matrix: &Mat<f64>) -> (usize, f64, f64) {
         utils::analyze_matrix_properties(matrix)
     }
 
     /// Check matrix for IEEE issues using matrix utils
+    #[allow(dead_code)]
     fn check_matrix_ieee(matrix: &Mat<f64>) -> Result<(), KError> {
         utils::check_ieee_values(matrix)
     }
@@ -1040,6 +1044,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
     #[cfg(feature = "rayon")]
     /// Parallel forward substitution using level scheduling
+    #[allow(dead_code)]
     fn solve_triangular_parallel_forward(&self, b: &[T], x: &mut [T]) {
         let n = b.len();
         x.copy_from_slice(b);
@@ -1062,6 +1067,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
     #[cfg(feature = "rayon")]
     /// Parallel backward substitution using level scheduling
+    #[allow(dead_code)]
     fn solve_triangular_parallel_backward(&self, b: &[T], x: &mut [T]) {
         let n = b.len();
         x.copy_from_slice(b);

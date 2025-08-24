@@ -109,6 +109,8 @@ where
             use_monitors,
             work.is_some()
         );
+        #[cfg(not(feature = "logging"))]
+        let _ = work;
 
         let _ = pc; // BiCGStab does not use preconditioner (yet)
         let _ = pc_side;

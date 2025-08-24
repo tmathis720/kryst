@@ -111,7 +111,7 @@ impl ProcessGrid {
     /// Create a new process grid from communicator with automatic dimension selection
     pub fn new_auto(comm: &UniverseComm) -> Result<Self, KError> {
         let total_procs = comm.size();
-        let my_rank = comm.rank();
+        let _ = comm.rank();
 
         // Find optimal grid dimensions (as square as possible)
         let (prows, pcols) = Self::determine_optimal_grid(total_procs);
@@ -368,12 +368,12 @@ impl Panel {
     }
 
     /// Get mutable view as faer matrix
-    pub fn as_faer_mut(&mut self) -> MatMut<f64> {
+    pub fn as_faer_mut(&mut self) -> MatMut<'_, f64> {
         MatMut::from_column_major_slice_mut(&mut self.data, self.height, self.width)
     }
 
     /// Get view as faer matrix (using reference)
-    pub fn as_faer(&self) -> faer::MatRef<f64> {
+    pub fn as_faer(&self) -> faer::MatRef<'_, f64> {
         faer::MatRef::from_column_major_slice(&self.data, self.height, self.width)
     }
 
@@ -408,7 +408,7 @@ impl Panel {
                     }
 
                     if max_val < threshold {
-                        let error_msg = if max_val == 0.0 {
+                        let _error_msg = if max_val == 0.0 {
                             format!("Zero pivot encountered at column {}, matrix is singular", k)
                         } else {
                             format!(
@@ -419,7 +419,7 @@ impl Panel {
 
                         // For now, replace tiny pivot and continue, but log warning
                         #[cfg(feature = "logging")]
-                        log::warn!("{}", error_msg);
+                        log::warn!("{}", _error_msg);
 
                         is_singular = true;
                         if max_val == 0.0 {
@@ -710,7 +710,7 @@ impl TriangularSolveData {
         numeric_factor: &NumericFactorization,
     ) -> Self {
         let num_blocks = (n + block_size - 1) / block_size;
-        let local_blocks = num_blocks / distribution.grid.total_procs;
+        let _local_blocks = num_blocks / distribution.grid.total_procs;
 
         let mut local_solution_blocks = Vec::new();
         let mut block_owners = vec![0; num_blocks];
@@ -1326,13 +1326,16 @@ impl Default for SuperLuDistOptions {
 
 /// Graph structure for ordering algorithms
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct Graph {
     /// Number of vertices
+    #[allow(dead_code)]
     n: usize,
     /// Adjacency lists for each vertex
     adj: Vec<Vec<usize>>,
 }
 
+#[allow(dead_code)]
 impl Graph {
     /// Create graph from sparse matrix (A + A^T pattern)
     fn from_matrix_pattern(matrix: &CsrMatrix<f64>) -> Self {
@@ -1617,7 +1620,7 @@ impl OrderingAlgorithms {
     pub fn mmd_ata_ordering_distributed(
         matrix: &CsrMatrix<f64>,
         comm: &UniverseComm,
-        distribution: &BlockCyclicDistribution,
+        _distribution: &BlockCyclicDistribution,
     ) -> Result<Vec<usize>, KError> {
         let n = matrix.nrows();
 
@@ -1627,6 +1630,9 @@ impl OrderingAlgorithms {
 
         // Step 2: Build A + A^T graph
         let graph = Self::build_ata_graph(&global_pattern);
+
+        #[cfg(not(feature = "logging"))]
+        let _ = comm;
 
         // Step 3: Run MMD on the global graph (replicated computation)
         let mut adj_lists = graph.adj;
@@ -1641,6 +1647,8 @@ impl OrderingAlgorithms {
 
         // Main MMD elimination loop (same algorithm, but only log on rank 0)
         for step in 0..n {
+            #[cfg(not(feature = "logging"))]
+            let _ = step;
             let pivot = Self::select_minimum_degree_vertex(&degree, &eliminated);
             if pivot >= n {
                 break;

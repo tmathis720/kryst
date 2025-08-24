@@ -97,10 +97,10 @@ impl LinearSolver for PcgSolver {
         let mut p_store = Vec::new();
         let mut w_store = Vec::new();
 
-        let mut r: &mut [f64] = &mut [];
-        let mut z: &mut [f64] = &mut [];
-        let mut p: &mut [f64] = &mut [];
-        let mut w: &mut [f64] = &mut [];
+        let r: &mut [f64];
+        let z: &mut [f64];
+        let p: &mut [f64];
+        let w: &mut [f64];
 
         if let Some(wk) = work {
             Self::take_or_resize(&mut wk.tmp1, n);
