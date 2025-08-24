@@ -299,7 +299,7 @@ impl Comm for UniverseComm {
     }
 }
 
-#[cfg(all(not(feature = "mpi")))]
+#[cfg(not(feature = "mpi"))]
 pub trait Equivalence {}
 
 pub enum ReduceOp {

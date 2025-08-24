@@ -26,10 +26,10 @@ use num_traits::Float;
 use std::fmt;
 use std::marker::PhantomData;
 
-/// Bitflags for SOR sweep types and options.
-///
-/// Allows selection of forward, backward, symmetric, and Eisenstat sweeps.
 bitflags! {
+    /// Bitflags for SOR sweep types and options.
+    ///
+    /// Allows selection of forward, backward, symmetric, and Eisenstat sweeps.
     #[derive(Copy, Clone, Debug)]
     pub struct MatSorType: u32 {
         const ZERO_INITIAL_GUESS       = 0b000_00001;

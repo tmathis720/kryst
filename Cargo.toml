@@ -1,15 +1,10 @@
-cargo-features = ["edition2024"]
-
 [package]
 name = "kryst"
 version = "1.2.1"
 edition = "2024"
- 
-[lib]
-doctest = false
+authors = ["Thomas James Mathis <tmathis720@gmail.com>"]
 description = "Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with shared and distributed memory parallelism."
 license = "MIT"
-authors = ["Thomas James Mathis <tmathis720@gmail.com>"]
 repository = "https://github.com/tmathis720/kryst"
 documentation = "https://docs.rs/kryst"
 homepage = "https://github.com/tmathis720/kryst"
@@ -25,6 +20,9 @@ exclude = [
     "*.jpg",
     "*.jpeg",
 ]
+
+[lib]
+doctest = false
 
 [dependencies]
 faer = "0.22.6"
@@ -52,6 +50,8 @@ rayon = ["dep:rayon", "dep:num_cpus"]
 mpi = ["dep:mpi"]
 logging = ["dep:log"]
 mpi_examples = ["mpi"]
+superlu_dist = []
+tuning = []
 
 # Optional, OFF by default, so new PCs must target the modern trait.
 legacy-pc-bridge = []

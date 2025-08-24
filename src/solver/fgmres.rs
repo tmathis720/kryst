@@ -9,9 +9,6 @@ use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 
 #[cfg(feature = "logging")]
-use crate::utils::profiling::StageGuard;
-#[cfg(feature = "logging")]
-use log::trace;
 use std::any::Any;
 
 /// Orthogonalization flavor

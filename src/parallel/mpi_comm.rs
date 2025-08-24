@@ -1,38 +1,24 @@
-#[cfg(feature = "mpi")]
-use mpi::topology::{Color, Communicator, SimpleCommunicator};
-/// MPI-based parallel communication module.
-///
-/// This module provides an implementation of the `Comm` trait using the MPI (Message Passing Interface)
-/// backend for distributed-memory parallelism. It enables communication and collective operations
-/// between processes in a parallel environment, such as scatter, gather, barrier synchronization,
-/// and all-reduce. The implementation is only available when the `mpi` feature is enabled.
-///
-/// # Usage
-///
-/// - The `MpiComm` struct wraps an MPI communicator and exposes methods for parallel operations.
-/// - The `Comm` trait is implemented for `MpiComm`, allowing it to be used as a drop-in replacement
-///   for serial or other parallel communication backends.
-///
-/// # References
-/// - [MPI Standard](https://www.mpi-forum.org/)
-///
-/// # Example
-/// ```no_run
-/// #[cfg(feature = "mpi")]
-/// let comm = MpiComm::new();
-/// println!("Rank: {} / {}", comm.rank(), comm.size());
-/// comm.barrier();
-/// ```
+//! MPI-based parallel communication module.
+//!
+//! This module provides an implementation of the `Comm` trait using the MPI (Message Passing Interface)
+//! backend for distributed-memory parallelism. It enables communication and collective operations
+//! between processes in a parallel environment, such as scatter, gather, barrier synchronization,
+//! and all-reduce.
+//!
+//! # Example
+//! ```no_run
+//! let comm = MpiComm::new();
+//! println!("Rank: {} / {}", comm.rank(), comm.size());
+//! comm.barrier();
+//! ```
 
-#[cfg(feature = "mpi")]
+use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
-#[cfg(feature = "mpi")]
 use std::sync::Arc;
 
 /// MPI communicator wrapper for distributed parallelism.
 ///
 /// Holds the MPI universe, world communicator, the rank of the current process, and the total number of processes.
-#[cfg(feature = "mpi")]
 pub struct MpiComm {
     /// The MPI universe - must be kept alive for the entire duration
     pub _universe: mpi::environment::Universe,
@@ -44,12 +30,9 @@ pub struct MpiComm {
     pub size: usize,
 }
 
-#[cfg(feature = "mpi")]
 unsafe impl Send for MpiComm {}
-#[cfg(feature = "mpi")]
 unsafe impl Sync for MpiComm {}
 
-#[cfg(feature = "mpi")]
 impl MpiComm {
     /// Initializes MPI and constructs a new `MpiComm` instance.
     ///
@@ -90,7 +73,6 @@ impl MpiComm {
     }
 }
 
-#[cfg(feature = "mpi")]
 impl super::Comm for MpiComm {
     type Vec = Vec<f64>;
 
@@ -168,9 +150,8 @@ impl super::Comm for MpiComm {
     }
 
     /// Split this communicator into sub‐colors
-    fn split(&self, color: i32, key: i32) -> super::UniverseComm {
-        // For now, we'll return a simplified implementation that doesn't actually split
-        // A proper implementation would need to handle universe sharing differently
+    fn split(&self, _color: i32, _key: i32) -> super::UniverseComm {
+        // Placeholder: returns a duplicate of the current communicator
         super::UniverseComm::Mpi(Arc::new(MpiComm {
             _universe: mpi::initialize().unwrap(), // This is a workaround
             world: self.world.duplicate(),

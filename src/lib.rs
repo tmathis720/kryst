@@ -30,8 +30,6 @@ pub use context::*;
 pub use core::*;
 pub use error::*;
 pub use matrix::*;
-pub use preconditioner::*;
-pub use solver::*;
 pub use utils::*;
 
 // Re-export SolveStats at the crate root for convenience
