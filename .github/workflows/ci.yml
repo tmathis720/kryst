@@ -92,9 +92,17 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config curl clang gfortran \
+            libclang-dev llvm-dev \
             libopenmpi-dev openmpi-bin openmpi-common \
             libopenblas-dev liblapack-dev
           sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Verify MPI toolchain (debugging aid)
+        run: |
+          which mpicc || true
+          mpicc -show || true
+          pkg-config --modversion ompi || true
+          pkg-config --cflags --libs ompi || true
 
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -105,6 +113,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build (all features)
+        env:
+          # Prefer compiler wrapper; rsmpi will use this cleanly.
+          MPICC: mpicc
+          # Also hint pkg-config in case build.rs picks that route.
+          MPI_PKG_CONFIG: ompi
         run: cargo build --all-features --locked --verbose
 
       # Add oversubscription + force TCP/self transports to avoid IB/UCX hiccups on GH runners
