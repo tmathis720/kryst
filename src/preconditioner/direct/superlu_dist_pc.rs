@@ -1,11 +1,12 @@
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::{PcSide, Preconditioner};
 use crate::parallel::UniverseComm;
+use crate::preconditioner::{PcSide, Preconditioner};
 
 #[cfg(feature = "superlu_dist")]
 use crate::matrix::sparse::CsrMatrix;
 
+#[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
 pub struct SuperLuDistPc {
     comm: Option<UniverseComm>,
 }
@@ -54,14 +55,18 @@ impl Preconditioner for SuperLuDistPc {
             let a = pmat
                 .as_any()
                 .downcast_ref::<CsrMatrix<f64>>()
-                .ok_or_else(|| KError::InvalidInput("SuperLU_DIST PC requires CSR matrix".into()))?;
+                .ok_or_else(|| {
+                    KError::InvalidInput("SuperLU_DIST PC requires CSR matrix".into())
+                })?;
             let comm = self.comm.clone().unwrap_or_else(|| pmat.comm());
             crate::solver::superlu_dist::solve(a, b, x, &comm)
         }
         #[cfg(not(feature = "superlu_dist"))]
         {
             let _ = (pmat, b, x);
-            Err(KError::SolveError("superlu_dist feature not enabled".into()))
+            Err(KError::SolveError(
+                "superlu_dist feature not enabled".into(),
+            ))
         }
     }
 }

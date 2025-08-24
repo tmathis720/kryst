@@ -40,13 +40,19 @@ impl super::Comm for RayonComm {
     type Vec = Vec<f64>;
 
     /// Returns the rank of the current process (always 0 in shared memory).
-    fn rank(&self) -> usize { 0 }
+    fn rank(&self) -> usize {
+        0
+    }
 
     /// Returns the number of parallel workers (number of CPU cores).
-    fn size(&self) -> usize { num_cpus::get() }
+    fn size(&self) -> usize {
+        num_cpus::get()
+    }
 
     /// Synchronization barrier (no-op in shared memory, but uses a Rayon scope for API compatibility).
-    fn barrier(&self) { rayon::scope(|_| {}); }
+    fn barrier(&self) {
+        rayon::scope(|_| {});
+    }
 
     /// Mimics scatter operation by copying a chunk of the global array to the output buffer.
     ///
@@ -95,8 +101,16 @@ impl super::Comm for RayonComm {
     /// * `x` - Input vector.
     /// * `y` - Output vector (will be overwritten).
     fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
-        assert_eq!(a.ncols(), x.len(), "Matrix columns must match input vector length");
-        assert_eq!(a.nrows(), y.len(), "Matrix rows must match output vector length");
+        assert_eq!(
+            a.ncols(),
+            x.len(),
+            "Matrix columns must match input vector length"
+        );
+        assert_eq!(
+            a.nrows(),
+            y.len(),
+            "Matrix rows must match output vector length"
+        );
         // Compute y = A * x in parallel over rows
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             *yi = (0..a.ncols()).map(|j| a[(i, j)] * x[j]).sum();

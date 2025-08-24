@@ -1,3 +1,9 @@
+//! # CG side semantics
+//!
+//! CG requires **Left preconditioning** with SPD `M`.
+//! If [`PcSide`] is not `Left`, the solver returns `InvalidInput`.
+//! Residual norm is the preconditioned norm `||M^{-1} r||`; final stats include true `||r||`.
+
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -84,7 +90,13 @@ impl CgSolver {
     fn acquire<'a>(
         n: usize,
         work: Option<&'a mut Workspace>,
-    ) -> (&'a mut [f64], &'a mut [f64], &'a mut [f64], &'a mut [f64], &'a mut [f64]) {
+    ) -> (
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+    ) {
         if let Some(wk) = work {
             while wk.q.len() < 4 {
                 wk.q.push(vec![0.0; n]);
@@ -296,4 +308,3 @@ impl LinearSolver for CgSolver {
         Ok(stats)
     }
 }
-

@@ -4,7 +4,7 @@
 ///
 /// This struct defines four types of stopping criteria:
 /// - **Relative tolerance**: `‖r‖/‖b‖ ≤ rtol`
-/// - **Absolute tolerance**: `‖r‖ ≤ atol` 
+/// - **Absolute tolerance**: `‖r‖ ≤ atol`
 /// - **Divergence threshold**: `‖r‖ ≥ dtol * ‖b‖`
 /// - **Maximum iterations**: `iterations ≥ max_iters`
 pub struct Convergence<T> {
@@ -47,7 +47,12 @@ pub struct SolveStats<T> {
 impl<T: Copy + PartialOrd + From<f64> + std::ops::Mul<Output = T>> Convergence<T> {
     /// Create new convergence criteria.
     pub fn new(rtol: T, atol: T, dtol: T, max_iters: usize) -> Self {
-        Self { rtol, atol, dtol, max_iters }
+        Self {
+            rtol,
+            atol,
+            dtol,
+            max_iters,
+        }
     }
 
     /// Check convergence/divergence criteria.
@@ -64,49 +69,49 @@ impl<T: Copy + PartialOrd + From<f64> + std::ops::Mul<Output = T>> Convergence<T
     pub fn check(&self, rnorm: T, bnorm: T, iters: usize) -> (ConvergedReason, SolveStats<T>) {
         // Absolute tolerance test first (most restrictive)
         if rnorm <= self.atol {
-            let stats = SolveStats { 
-                iterations: iters, 
-                final_residual: rnorm, 
-                reason: ConvergedReason::ConvergedAtol 
+            let stats = SolveStats {
+                iterations: iters,
+                final_residual: rnorm,
+                reason: ConvergedReason::ConvergedAtol,
             };
             return (ConvergedReason::ConvergedAtol, stats);
         }
-        
+
         // Relative tolerance test
         if rnorm <= self.rtol * bnorm {
-            let stats = SolveStats { 
-                iterations: iters, 
-                final_residual: rnorm, 
-                reason: ConvergedReason::ConvergedRtol 
+            let stats = SolveStats {
+                iterations: iters,
+                final_residual: rnorm,
+                reason: ConvergedReason::ConvergedRtol,
             };
             return (ConvergedReason::ConvergedRtol, stats);
         }
-        
+
         // Divergence test
         if rnorm >= self.dtol * bnorm {
-            let stats = SolveStats { 
-                iterations: iters, 
-                final_residual: rnorm, 
-                reason: ConvergedReason::DivergedDtol 
+            let stats = SolveStats {
+                iterations: iters,
+                final_residual: rnorm,
+                reason: ConvergedReason::DivergedDtol,
             };
             return (ConvergedReason::DivergedDtol, stats);
         }
-        
+
         // Maximum iterations test
         if iters >= self.max_iters {
-            let stats = SolveStats { 
-                iterations: iters, 
-                final_residual: rnorm, 
-                reason: ConvergedReason::DivergedMaxIts 
+            let stats = SolveStats {
+                iterations: iters,
+                final_residual: rnorm,
+                reason: ConvergedReason::DivergedMaxIts,
             };
             return (ConvergedReason::DivergedMaxIts, stats);
         }
-        
+
         // Continue iterating
-        let stats = SolveStats { 
-            iterations: iters, 
-            final_residual: rnorm, 
-            reason: ConvergedReason::Continued 
+        let stats = SolveStats {
+            iterations: iters,
+            final_residual: rnorm,
+            reason: ConvergedReason::Continued,
         };
         (ConvergedReason::Continued, stats)
     }
@@ -116,23 +121,24 @@ impl<T: Copy + PartialOrd + From<f64> + std::ops::Mul<Output = T>> Convergence<T
 impl<T: Copy + num_traits::Float + std::ops::Mul<Output = T> + From<f64>> Convergence<T> {
     /// Legacy method for backward compatibility.
     /// Returns (should_stop, stats) given current `res_norm` and iteration `i`.
-    /// 
+    ///
     /// **Deprecated**: Use `check()` instead for more detailed convergence information.
     #[deprecated(since = "0.1.0", note = "use check() method instead")]
-    pub fn check_legacy(
-        &self,
-        res_norm: T,
-        res0_norm: T,
-        i: usize,
-    ) -> (bool, SolveStats<T>) {
+    pub fn check_legacy(&self, res_norm: T, res0_norm: T, i: usize) -> (bool, SolveStats<T>) {
         let (reason, stats) = self.check(res_norm, res0_norm, i);
-        let converged = matches!(reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol);
+        let converged = matches!(
+            reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        );
         let legacy_stats = SolveStats {
             iterations: stats.iterations,
             final_residual: stats.final_residual,
             reason: stats.reason,
         };
-        (converged || reason != ConvergedReason::Continued, legacy_stats)
+        (
+            converged || reason != ConvergedReason::Continued,
+            legacy_stats,
+        )
     }
 }
 
@@ -157,7 +163,7 @@ mod tests {
         let iters = 5;
 
         let (reason, stats) = conv.check(rnorm, bnorm, iters);
-        
+
         assert_eq!(reason, ConvergedReason::ConvergedAtol);
         assert_eq!(stats.reason, ConvergedReason::ConvergedAtol);
         assert_eq!(stats.iterations, 5);
@@ -172,7 +178,7 @@ mod tests {
         let iters = 10;
 
         let (reason, stats) = conv.check(rnorm, bnorm, iters);
-        
+
         assert_eq!(reason, ConvergedReason::ConvergedRtol);
         assert_eq!(stats.reason, ConvergedReason::ConvergedRtol);
         assert_eq!(stats.iterations, 10);
@@ -187,7 +193,7 @@ mod tests {
         let iters = 5;
 
         let (reason, stats) = conv.check(rnorm, bnorm, iters);
-        
+
         assert_eq!(reason, ConvergedReason::DivergedDtol);
         assert_eq!(stats.reason, ConvergedReason::DivergedDtol);
         assert_eq!(stats.iterations, 5);
@@ -202,7 +208,7 @@ mod tests {
         let iters = 10; // Equal to max_iters
 
         let (reason, stats) = conv.check(rnorm, bnorm, iters);
-        
+
         assert_eq!(reason, ConvergedReason::DivergedMaxIts);
         assert_eq!(stats.reason, ConvergedReason::DivergedMaxIts);
         assert_eq!(stats.iterations, 10);
@@ -217,7 +223,7 @@ mod tests {
         let iters = 5;
 
         let (reason, stats) = conv.check(rnorm, bnorm, iters);
-        
+
         assert_eq!(reason, ConvergedReason::Continued);
         assert_eq!(stats.reason, ConvergedReason::Continued);
         assert_eq!(stats.iterations, 5);
@@ -238,14 +244,29 @@ mod tests {
 
     #[test]
     fn test_converged_reason_equality() {
-        assert_eq!(ConvergedReason::ConvergedRtol, ConvergedReason::ConvergedRtol);
-        assert_eq!(ConvergedReason::ConvergedAtol, ConvergedReason::ConvergedAtol);
+        assert_eq!(
+            ConvergedReason::ConvergedRtol,
+            ConvergedReason::ConvergedRtol
+        );
+        assert_eq!(
+            ConvergedReason::ConvergedAtol,
+            ConvergedReason::ConvergedAtol
+        );
         assert_eq!(ConvergedReason::DivergedDtol, ConvergedReason::DivergedDtol);
-        assert_eq!(ConvergedReason::DivergedMaxIts, ConvergedReason::DivergedMaxIts);
+        assert_eq!(
+            ConvergedReason::DivergedMaxIts,
+            ConvergedReason::DivergedMaxIts
+        );
         assert_eq!(ConvergedReason::Continued, ConvergedReason::Continued);
 
-        assert_ne!(ConvergedReason::ConvergedRtol, ConvergedReason::ConvergedAtol);
-        assert_ne!(ConvergedReason::DivergedDtol, ConvergedReason::DivergedMaxIts);
+        assert_ne!(
+            ConvergedReason::ConvergedRtol,
+            ConvergedReason::ConvergedAtol
+        );
+        assert_ne!(
+            ConvergedReason::DivergedDtol,
+            ConvergedReason::DivergedMaxIts
+        );
     }
 
     #[test]
@@ -262,7 +283,7 @@ mod tests {
             final_residual: 1e-8,
             reason: ConvergedReason::ConvergedRtol,
         };
-        
+
         let cloned = stats.clone();
         assert_eq!(cloned.iterations, 42);
         assert_eq!(cloned.final_residual, 1e-8);
@@ -276,7 +297,7 @@ mod tests {
             final_residual: 1e-6,
             reason: ConvergedReason::ConvergedAtol,
         };
-        
+
         let debug_str = format!("{:?}", stats);
         assert!(debug_str.contains("10"));
         assert!(debug_str.contains("ConvergedAtol"));
@@ -291,7 +312,7 @@ mod tests {
         let iters = 5;
 
         let (should_stop, stats) = conv.check_legacy(res_norm, res0_norm, iters);
-        
+
         assert!(should_stop);
         assert_eq!(stats.iterations, 5);
         assert_eq!(stats.final_residual, 1e-8);
@@ -306,7 +327,7 @@ mod tests {
         let iters = 5;
 
         let (should_stop, stats) = conv.check_legacy(res_norm, res0_norm, iters);
-        
+
         assert!(!should_stop);
         assert_eq!(stats.iterations, 5);
         assert_eq!(stats.final_residual, 1e-3);

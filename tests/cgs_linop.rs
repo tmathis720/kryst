@@ -11,7 +11,9 @@ struct DenseOp {
 impl LinOp for DenseOp {
     type S = f64;
 
-    fn dims(&self) -> (usize, usize) { (self.a.len(), self.a[0].len()) }
+    fn dims(&self) -> (usize, usize) {
+        (self.a.len(), self.a[0].len())
+    }
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         let (m, n) = self.dims();
@@ -26,7 +28,9 @@ impl LinOp for DenseOp {
         }
     }
 
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[test]
@@ -58,7 +62,12 @@ fn cgs_solves_dd_nonsymmetric() {
 
     let tol = 1e-6;
     for (xi, ei) in x.iter().zip(x_true.iter()) {
-        assert!((xi - ei).abs() <= tol, "xi = {:.6}, expected = {:.6}", xi, ei);
+        assert!(
+            (xi - ei).abs() <= tol,
+            "xi = {:.6}, expected = {:.6}",
+            xi,
+            ei
+        );
     }
     assert!(matches!(
         stats.reason,
@@ -66,4 +75,3 @@ fn cgs_solves_dd_nonsymmetric() {
             | kryst::utils::convergence::ConvergedReason::ConvergedAtol
     ));
 }
-

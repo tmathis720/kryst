@@ -1,3 +1,16 @@
+//! # PcChain
+//!
+//! Compose PCs sequentially. Common use: cheap smoother before ILU.
+//!
+//! ```no_run
+//! # use kryst::context::pc_context::PcFactory;
+//! # use faer::Mat;
+//! let specs = PcFactory::create_pc_chain_from_str("jacobi->ilut", None).unwrap();
+//! // later, when P is known:
+//! # let p = Mat::<f64>::zeros(10,10);
+//! let chain = PcFactory::construct_deferred_pc_chain(specs, &p).unwrap();
+//! ```
+
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
@@ -20,17 +33,28 @@ struct ChainScratch {
 
 impl PcChain {
     pub fn new(stages: Vec<Box<dyn Preconditioner>>) -> Self {
-        Self { stages, scratch: Mutex::new(ChainScratch::default()) }
+        Self {
+            stages,
+            scratch: Mutex::new(ChainScratch::default()),
+        }
     }
 
     #[inline]
     fn ensure_bufs(s: &mut ChainScratch, n: usize) {
-        if s.buf1.len() != n { s.buf1.resize(n, 0.0); }
-        if s.buf2.len() != n { s.buf2.resize(n, 0.0); }
+        if s.buf1.len() != n {
+            s.buf1.resize(n, 0.0);
+        }
+        if s.buf2.len() != n {
+            s.buf2.resize(n, 0.0);
+        }
     }
 
-    pub fn len(&self) -> usize { self.stages.len() }
-    pub fn is_empty(&self) -> bool { self.stages.is_empty() }
+    pub fn len(&self) -> usize {
+        self.stages.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
+    }
 }
 
 impl Preconditioner for PcChain {

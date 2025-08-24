@@ -15,19 +15,19 @@
 //! ```rust
 //! let mut monitor = IterationMonitor::new();
 //! monitor.enable_logging("solver_convergence.csv");
-//! 
+//!
 //! // During solve iterations
 //! monitor.record_iteration(iter, residual_norm, Some(pc_apply_time));
-//! 
+//!
 //! // After solve
 //! let stats = monitor.get_statistics();
 //! println!("Convergence rate: {:.2e}", stats.avg_convergence_rate);
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
 
 /// Convergence statistics computed from iteration history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,10 +120,13 @@ impl IterationMonitor {
     pub fn enable_csv_logging(&mut self, filename: &str) -> Result<(), std::io::Error> {
         let file = File::create(filename)?;
         let mut writer = BufWriter::new(file);
-        
+
         // Write CSV header
-        writeln!(writer, "iteration,residual_norm,convergence_rate,iteration_time_ms,pc_time_ms,timestamp_ns")?;
-        
+        writeln!(
+            writer,
+            "iteration,residual_norm,convergence_rate,iteration_time_ms,pc_time_ms,timestamp_ns"
+        )?;
+
         self.csv_writer = Some(writer);
         Ok(())
     }
@@ -142,7 +145,12 @@ impl IterationMonitor {
     /// * `iteration` - Iteration number (0-indexed)
     /// * `residual_norm` - Current residual norm
     /// * `pc_time` - Optional time spent in preconditioner application
-    pub fn record_iteration(&mut self, iteration: usize, residual_norm: f64, pc_time: Option<Duration>) {
+    pub fn record_iteration(
+        &mut self,
+        iteration: usize,
+        residual_norm: f64,
+        pc_time: Option<Duration>,
+    ) {
         let now = Instant::now();
         let iteration_time = if iteration == 0 {
             Duration::from_nanos(0)
@@ -184,14 +192,18 @@ impl IterationMonitor {
 
         // Write to CSV if enabled
         if let Some(ref mut writer) = self.csv_writer {
-            let rate_str = iter_data.convergence_rate
+            let rate_str = iter_data
+                .convergence_rate
                 .map(|r| format!("{:.6e}", r))
                 .unwrap_or_else(|| "".to_string());
-            let pc_time_str = iter_data.pc_time
+            let pc_time_str = iter_data
+                .pc_time
                 .map(|t| format!("{:.3}", t.as_secs_f64() * 1000.0))
                 .unwrap_or_else(|| "".to_string());
-            
-            let _ = writeln!(writer, "{},{:.6e},{},{:.3},{},{}",
+
+            let _ = writeln!(
+                writer,
+                "{},{:.6e},{},{:.3},{},{}",
                 iteration,
                 residual_norm,
                 rate_str,
@@ -218,21 +230,24 @@ impl IterationMonitor {
     /// Get comprehensive convergence statistics.
     pub fn get_statistics(&self) -> ConvergenceStats {
         let total_iterations = self.history.len();
-        
-        let initial_residual = self.history.first()
-            .map(|d| d.residual_norm)
-            .unwrap_or(0.0);
-        
-        let final_residual = self.history.last()
-            .map(|d| d.residual_norm)
-            .unwrap_or(0.0);
 
-        let total_solve_time = self.solve_start_time
-            .and_then(|start| self.history.last().map(|last| last.timestamp.duration_since(start)))
+        let initial_residual = self.history.first().map(|d| d.residual_norm).unwrap_or(0.0);
+
+        let final_residual = self.history.last().map(|d| d.residual_norm).unwrap_or(0.0);
+
+        let total_solve_time = self
+            .solve_start_time
+            .and_then(|start| {
+                self.history
+                    .last()
+                    .map(|last| last.timestamp.duration_since(start))
+            })
             .unwrap_or_default();
 
         let avg_iteration_time = if total_iterations > 1 {
-            let total_nanos = self.history.iter()
+            let total_nanos = self
+                .history
+                .iter()
                 .skip(1) // Skip first iteration (setup time)
                 .map(|d| d.iteration_time.as_nanos())
                 .sum::<u128>();
@@ -243,9 +258,7 @@ impl IterationMonitor {
         };
 
         let avg_pc_time = {
-            let pc_times: Vec<_> = self.history.iter()
-                .filter_map(|d| d.pc_time)
-                .collect();
+            let pc_times: Vec<_> = self.history.iter().filter_map(|d| d.pc_time).collect();
             if !pc_times.is_empty() {
                 let total_pc_nanos: u128 = pc_times.iter().map(|t| t.as_nanos()).sum();
                 let avg_nanos = (total_pc_nanos / (pc_times.len() as u128)) as u64;
@@ -255,18 +268,21 @@ impl IterationMonitor {
             }
         };
 
-        let rates: Vec<f64> = self.history.iter()
+        let rates: Vec<f64> = self
+            .history
+            .iter()
             .filter_map(|d| d.convergence_rate)
             .collect();
 
-        let (avg_convergence_rate, best_convergence_rate, worst_convergence_rate) = if !rates.is_empty() {
-            let avg = rates.iter().sum::<f64>() / (rates.len() as f64);
-            let best = rates.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-            let worst = rates.iter().fold(0.0f64, |a, &b| a.max(b));
-            (avg, best, worst)
-        } else {
-            (1.0, 1.0, 1.0) // Default to no convergence
-        };
+        let (avg_convergence_rate, best_convergence_rate, worst_convergence_rate) =
+            if !rates.is_empty() {
+                let avg = rates.iter().sum::<f64>() / (rates.len() as f64);
+                let best = rates.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let worst = rates.iter().fold(0.0f64, |a, &b| a.max(b));
+                (avg, best, worst)
+            } else {
+                (1.0, 1.0, 1.0) // Default to no convergence
+            };
 
         ConvergenceStats {
             total_iterations,
@@ -298,13 +314,16 @@ impl IterationMonitor {
         if self.history.len() < 2 {
             return None;
         }
-        
-        let start_idx = self.history.len().saturating_sub(window.min(self.history.len()));
+
+        let start_idx = self
+            .history
+            .len()
+            .saturating_sub(window.min(self.history.len()));
         let recent_rates: Vec<f64> = self.history[start_idx..]
             .iter()
             .filter_map(|d| d.convergence_rate)
             .collect();
-        
+
         if recent_rates.is_empty() {
             None
         } else {
@@ -346,14 +365,14 @@ mod tests {
     fn test_monitor_basic_functionality() {
         let mut monitor = IterationMonitor::new();
         monitor.start_solve();
-        
+
         // Record some iterations
         monitor.record_iteration(0, 1.0, None);
         monitor.record_iteration(1, 0.5, Some(Duration::from_millis(10)));
         monitor.record_iteration(2, 0.25, Some(Duration::from_millis(12)));
-        
+
         monitor.mark_converged("Relative tolerance achieved");
-        
+
         let stats = monitor.get_statistics();
         assert_eq!(stats.total_iterations, 3);
         assert_eq!(stats.initial_residual, 1.0);
@@ -366,11 +385,11 @@ mod tests {
     fn test_convergence_rate_calculation() {
         let mut monitor = IterationMonitor::new();
         monitor.start_solve();
-        
+
         monitor.record_iteration(0, 1.0, None);
         monitor.record_iteration(1, 0.1, None); // Rate = 0.1
         monitor.record_iteration(2, 0.01, None); // Rate = 0.1
-        
+
         let recent_rate = monitor.recent_convergence_rate(2);
         assert!((recent_rate.unwrap() - 0.1).abs() < 1e-10);
     }
@@ -379,11 +398,11 @@ mod tests {
     fn test_stagnation_detection() {
         let mut monitor = IterationMonitor::new();
         monitor.start_solve();
-        
+
         monitor.record_iteration(0, 1.0, None);
         monitor.record_iteration(1, 0.99, None); // Poor rate = 0.99
         monitor.record_iteration(2, 0.98, None); // Poor rate ≈ 0.99
-        
+
         assert!(monitor.is_stagnating(0.95, 2));
         assert!(!monitor.is_stagnating(0.999, 2));
     }

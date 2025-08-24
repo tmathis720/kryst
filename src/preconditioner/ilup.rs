@@ -36,7 +36,10 @@ pub struct SparseRow<T> {
 impl<T> SparseRow<T> {
     /// Create an empty sparse row
     pub fn new() -> Self {
-        Self { cols: Vec::new(), vals: Vec::new() }
+        Self {
+            cols: Vec::new(),
+            vals: Vec::new(),
+        }
     }
 }
 impl<T> Default for SparseRow<T> {
@@ -61,7 +64,12 @@ pub struct Ilup<T> {
 impl<T: num_traits::Float + Clone + std::fmt::Debug> Ilup<T> {
     /// Create a new ILU(p) preconditioner with given fill level.
     pub fn new(fill: usize) -> Self {
-        Self { fill, l: Vec::new(), u: Vec::new(), n: 0 }
+        Self {
+            fill,
+            l: Vec::new(),
+            u: Vec::new(),
+            n: 0,
+        }
     }
 }
 
@@ -104,15 +112,19 @@ where
                     // Find U[j,j]
                     let u_jj = a_work[j][j];
                     if u_jj.is_zero() {
-                        return Err(KError::SolveError(format!("ILUP: zero diagonal in U at row {}", j)));
+                        return Err(KError::SolveError(format!(
+                            "ILUP: zero diagonal in U at row {}",
+                            j
+                        )));
                     }
                     let lij = a_work[i][j] / u_jj;
                     self.l[i].cols.push(j);
                     self.l[i].vals.push(lij);
                     // Update fill levels and values for row i
-                    for k in (j+1)..n {
+                    for k in (j + 1)..n {
                         if !a_work[j][k].is_zero() {
-                            let new_level = level[i][j].saturating_add(level[j][k]).saturating_add(1);
+                            let new_level =
+                                level[i][j].saturating_add(level[j][k]).saturating_add(1);
                             if new_level <= self.fill {
                                 let update = lij * a_work[j][k];
                                 a_work[i][k] = a_work[i][k] - update;
@@ -176,11 +188,17 @@ mod tests {
         data: Vec<Vec<T>>,
     }
     impl<T: Copy> DenseMat<T> {
-        fn new(data: Vec<Vec<T>>) -> Self { Self { data } }
+        fn new(data: Vec<Vec<T>>) -> Self {
+            Self { data }
+        }
     }
     impl<T: Copy> MatShape for DenseMat<T> {
-        fn nrows(&self) -> usize { self.data.len() }
-        fn ncols(&self) -> usize { self.data[0].len() }
+        fn nrows(&self) -> usize {
+            self.data.len()
+        }
+        fn ncols(&self) -> usize {
+            self.data[0].len()
+        }
     }
     impl<T: Copy> std::ops::Index<(usize, usize)> for DenseMat<T> {
         type Output = T;
@@ -194,7 +212,9 @@ mod tests {
     {
         fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
             for i in 0..self.nrows() {
-                y[i] = (0..self.ncols()).map(|j| self[(i, j)] * x[j]).fold(T::zero(), |a, b| a + b);
+                y[i] = (0..self.ncols())
+                    .map(|j| self[(i, j)] * x[j])
+                    .fold(T::zero(), |a, b| a + b);
             }
         }
     }
@@ -207,7 +227,13 @@ mod tests {
         pc.setup(&a).unwrap();
         let r = vec![2.0f64, 3.0];
         let mut z = vec![0.0; 2];
-        Preconditioner::<Mat, Vec<f64>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
+        Preconditioner::<Mat, Vec<f64>>::apply(
+            &pc,
+            crate::preconditioner::PcSide::Left,
+            &r,
+            &mut z,
+        )
+        .unwrap();
         assert!((z[0] - 2.0).abs() < 1e-12 && (z[1] - 3.0).abs() < 1e-12);
     }
 
@@ -223,7 +249,13 @@ mod tests {
         pc.setup(&a).unwrap();
         let r = vec![1.0f64, 2.0, 3.0];
         let mut z = vec![0.0; 3];
-        Preconditioner::<Mat, Vec<f64>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
+        Preconditioner::<Mat, Vec<f64>>::apply(
+            &pc,
+            crate::preconditioner::PcSide::Left,
+            &r,
+            &mut z,
+        )
+        .unwrap();
         assert!(z.iter().all(|&zi| zi.is_finite()));
     }
 }

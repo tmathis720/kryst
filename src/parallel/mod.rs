@@ -1,7 +1,7 @@
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
-use mpi::topology::{Communicator, Color};
+use mpi::topology::{Color, Communicator};
 #[cfg(feature = "mpi")]
 use mpi::traits::*;
 use std::sync::Arc;
@@ -20,18 +20,18 @@ pub trait Comm: Send + Sync + 'static {
     fn gather<T: Clone + Equivalence>(&self, local: &[T], out: &mut Vec<T>, root: usize);
     #[cfg(not(feature = "mpi"))]
     fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, root: usize);
-    
+
     /// All‐reduce a scalar (sum) across ranks
     fn all_reduce_f64(&self, local: f64) -> f64;
-    
+
     /// Split this communicator into sub‐colors
     fn split(&self, color: i32, key: i32) -> UniverseComm;
-    
+
     /// Legacy all_reduce method for backward compatibility
     fn all_reduce(&self, x: f64) -> f64 {
         self.all_reduce_f64(x)
     }
-    
+
     fn dot(&self, a: &[f64], b: &[f64]) -> f64 {
         let local = a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f64>();
         self.all_reduce_f64(local)
@@ -56,11 +56,15 @@ pub struct NoComm;
 
 impl Comm for NoComm {
     type Vec = Vec<f64>;
-    
-    fn rank(&self) -> usize { 0 }
-    fn size(&self) -> usize { 1 }
+
+    fn rank(&self) -> usize {
+        0
+    }
+    fn size(&self) -> usize {
+        1
+    }
     fn barrier(&self) {}
-    
+
     #[cfg(feature = "mpi")]
     fn scatter<T: Clone + Equivalence>(&self, global: &[T], out: &mut [T], _root: usize) {
         // For no-comm case, just copy from first elements
@@ -75,7 +79,7 @@ impl Comm for NoComm {
             *dst = src.clone();
         }
     }
-    
+
     #[cfg(feature = "mpi")]
     fn gather<T: Clone + Equivalence>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
         out.clear();
@@ -86,32 +90,37 @@ impl Comm for NoComm {
         out.clear();
         out.extend_from_slice(local);
     }
-    
-    fn all_reduce_f64(&self, local: f64) -> f64 { local }
-    
-    fn split(&self, _color: i32, _key: i32) -> UniverseComm { 
+
+    fn all_reduce_f64(&self, local: f64) -> f64 {
+        local
+    }
+
+    fn split(&self, _color: i32, _key: i32) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
     }
 }
 
-#[cfg(feature="mpi")]
+#[cfg(feature = "mpi")]
 pub mod mpi_comm;
-#[cfg(feature="mpi")]
+#[cfg(feature = "mpi")]
 pub use mpi_comm::MpiComm;
 
-#[cfg(feature="rayon")]
+#[cfg(feature = "rayon")]
 pub mod rayon_comm;
-#[cfg(feature="rayon")]
+#[cfg(feature = "rayon")]
 pub use rayon_comm::RayonComm;
 
+/// `UniverseComm` is a stable logical handle for MPI (or `NoComm` for serial).
+/// It is `Clone + Eq` and cheap to pass; use it only for initialization or
+/// when launching collectives. Do not store per-rank derived state here.
 #[derive(Clone)]
 pub enum UniverseComm {
     NoComm(NoComm),
-    #[cfg(feature="mpi")]
+    #[cfg(feature = "mpi")]
     Mpi(Arc<MpiComm>),
-    #[cfg(feature="rayon")]
+    #[cfg(feature = "rayon")]
     Rayon(RayonComm),
-    #[cfg(not(any(feature="mpi", feature="rayon")))]
+    #[cfg(not(any(feature = "mpi", feature = "rayon")))]
     Serial,
 }
 
@@ -119,11 +128,11 @@ impl std::fmt::Debug for UniverseComm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UniverseComm::NoComm(_) => f.write_str("NoComm"),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => write!(f, "MpiComm {{ id: {:?} }}", comm.world.as_raw()),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_) => f.write_str("Rayon"),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => f.write_str("Serial"),
         }
     }
@@ -133,11 +142,11 @@ impl PartialEq for UniverseComm {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (UniverseComm::NoComm(_), UniverseComm::NoComm(_)) => true,
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             (UniverseComm::Mpi(a), UniverseComm::Mpi(b)) => a.world.as_raw() == b.world.as_raw(),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             (UniverseComm::Rayon(_), UniverseComm::Rayon(_)) => true,
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             (UniverseComm::Serial, UniverseComm::Serial) => true,
             _ => false,
         }
@@ -150,11 +159,11 @@ impl UniverseComm {
     pub fn id(&self) -> u64 {
         match self {
             UniverseComm::NoComm(_) => 0,
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => comm.world.as_raw() as u64,
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_) => 0,
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => 0,
         }
     }
@@ -165,34 +174,34 @@ impl Comm for UniverseComm {
     fn rank(&self) -> usize {
         match self {
             UniverseComm::NoComm(comm) => comm.rank(),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => comm.rank(),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.rank(),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => 0,
         }
     }
     fn size(&self) -> usize {
         match self {
             UniverseComm::NoComm(comm) => comm.size(),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => comm.size(),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.size(),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => 1,
         }
     }
     fn barrier(&self) {
         match self {
             UniverseComm::NoComm(comm) => comm.barrier(),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => comm.barrier(),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.barrier(),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
-            UniverseComm::Serial => {},
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => {}
         }
     }
     #[cfg(feature = "mpi")]
@@ -207,14 +216,14 @@ impl Comm for UniverseComm {
     fn scatter<T: Clone>(&self, global: &[T], out: &mut [T], root: usize) {
         match self {
             UniverseComm::NoComm(comm) => comm.scatter(global, out, root),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.scatter(global, out, root),
-            #[cfg(not(feature="rayon"))]
+            #[cfg(not(feature = "rayon"))]
             UniverseComm::Serial => {
                 for (dst, src) in out.iter_mut().zip(global.iter()) {
                     *dst = src.clone();
                 }
-            },
+            }
         }
     }
     #[cfg(feature = "mpi")]
@@ -229,59 +238,62 @@ impl Comm for UniverseComm {
     fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
         match self {
             UniverseComm::NoComm(comm) => comm.gather(local, out, _root),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.gather(local, out, _root),
-            #[cfg(not(feature="rayon"))]
+            #[cfg(not(feature = "rayon"))]
             UniverseComm::Serial => {
                 out.clear();
                 out.extend_from_slice(local);
-            },
+            }
         }
     }
     fn all_reduce(&self, x: f64) -> f64 {
         match self {
             UniverseComm::NoComm(comm) => comm.all_reduce(x),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => comm.all_reduce(x),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.all_reduce(x),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => x,
         }
     }
-    
+
     fn all_reduce_f64(&self, local: f64) -> f64 {
         match self {
             UniverseComm::NoComm(comm) => comm.all_reduce_f64(local),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => comm.all_reduce_f64(local),
-            #[cfg(feature="rayon")]
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(comm) => comm.all_reduce_f64(local),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => local,
         }
     }
-    
+
     fn split(&self, color: i32, key: i32) -> UniverseComm {
         match self {
             UniverseComm::NoComm(comm) => comm.split(color, key),
-            #[cfg(feature="mpi")]
+            #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Split the MPI communicator and return a new UniverseComm
-                let sub = comm.world.split_by_color_with_key(Color::with_value(color), key).expect("Failed to split communicator");
+                let sub = comm
+                    .world
+                    .split_by_color_with_key(Color::with_value(color), key)
+                    .expect("Failed to split communicator");
                 let sub_rank = sub.rank() as usize;
                 let sub_size = sub.size() as usize;
                 let new_comm = MpiComm {
                     _universe: mpi::initialize().unwrap(), // Workaround for universe sharing
                     world: sub,
                     rank: sub_rank,
-                    size: sub_size
+                    size: sub_size,
                 };
                 UniverseComm::Mpi(Arc::new(new_comm))
-            },
-            #[cfg(feature="rayon")]
+            }
+            #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_comm) => UniverseComm::Rayon(RayonComm::new()),
-            #[cfg(not(any(feature="mpi", feature="rayon")))]
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => UniverseComm::Serial,
         }
     }

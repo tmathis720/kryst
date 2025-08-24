@@ -1,5 +1,5 @@
 pub mod options;
-pub mod registry;
 pub mod options_core;
-pub use options::{PcOptions, KspOptions, PcSide, print_help, parse_all_options};
+pub mod registry;
+pub use options::{KspOptions, PcOptions, PcSide, parse_all_options, print_help};
 pub use options_core::{Arity, Registry, Spec, ValueKind};

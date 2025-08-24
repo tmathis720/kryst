@@ -70,13 +70,13 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
-use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use crate::error::KError;
-use crate::matrix::utils;
 use crate::matrix::sparse::CsrMatrix;
-use num_traits::Float;
-use faer::traits::ComplexField;
+use crate::matrix::utils;
+use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use faer::Mat;
+use faer::traits::ComplexField;
+use num_traits::Float;
 use std::cell::RefCell;
 
 #[cfg(feature = "rayon")]
@@ -197,29 +197,29 @@ impl Default for IluConfig {
     fn default() -> Self {
         Self {
             ilu_type: IluType::ILU0,
-            level_of_fill: 0,               // HYPRE default for ILU(0)
-            max_fill_per_row: 0,            // HYPRE default: unlimited
-            drop_tolerance: 1e-4,           // HYPRE conservative default
-            offdiag_drop_tolerance: 1e-4,   // HYPRE default
-            schur_drop_tolerance: 1e-4,     // HYPRE default
+            level_of_fill: 0,                      // HYPRE default for ILU(0)
+            max_fill_per_row: 0,                   // HYPRE default: unlimited
+            drop_tolerance: 1e-4,                  // HYPRE conservative default
+            offdiag_drop_tolerance: 1e-4,          // HYPRE default
+            schur_drop_tolerance: 1e-4,            // HYPRE default
             reordering_type: ReorderingType::None, // HYPRE default
             triangular_solve: TriSolveType::Exact, // HYPRE default
-            lower_jacobi_iters: 1,          // HYPRE default
-            upper_jacobi_iters: 1,          // HYPRE default
-            tolerance: 1e-6,                // HYPRE default
-            max_iterations: 1,              // HYPRE default for direct solve
-            logging_level: 0,               // No logging by default
-            print_level: 0,                 // No printing by default
-            ieee_checks: true,              // Safety first
-            pivot_monitoring: true,         // Monitor for numerical issues
-            optimize_workspace: true,       // Performance optimization
-            pivot_threshold: 1e-12,         // HYPRE-style pivot threshold
+            lower_jacobi_iters: 1,                 // HYPRE default
+            upper_jacobi_iters: 1,                 // HYPRE default
+            tolerance: 1e-6,                       // HYPRE default
+            max_iterations: 1,                     // HYPRE default for direct solve
+            logging_level: 0,                      // No logging by default
+            print_level: 0,                        // No printing by default
+            ieee_checks: true,                     // Safety first
+            pivot_monitoring: true,                // Monitor for numerical issues
+            optimize_workspace: true,              // Performance optimization
+            pivot_threshold: 1e-12,                // HYPRE-style pivot threshold
             pivot_strategy: PivotStrategy::DiagonalPerturbation, // Modern default
-            perturbation_factor: 1e-10,     // Small perturbation factor
-            enable_parallel_factorization: false, // Conservative default
+            perturbation_factor: 1e-10,            // Small perturbation factor
+            enable_parallel_factorization: false,  // Conservative default
             enable_parallel_triangular_solve: false, // Conservative default
-            parallel_chunk_size: 64,        // Reasonable chunk size for cache efficiency
-            enable_distributed: false,      // Conservative default
+            parallel_chunk_size: 64,               // Reasonable chunk size for cache efficiency
+            enable_distributed: false,             // Conservative default
         }
     }
 }
@@ -348,7 +348,9 @@ impl IluBuilder {
     }
 
     /// Build ILU preconditioner with configuration
-    pub fn build<T: Float + Send + Sync + ComplexField + std::fmt::Display>(self) -> Result<Ilu<T>, KError> {
+    pub fn build<T: Float + Send + Sync + ComplexField + std::fmt::Display>(
+        self,
+    ) -> Result<Ilu<T>, KError> {
         Ilu::new_with_config(self.config)
     }
 }
@@ -467,9 +469,14 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
         #[cfg(feature = "logging")]
         if config.logging_level > 0 {
-            info!("ILU Setup: Creating {:?} factorization with HYPRE-inspired configuration", config.ilu_type);
-            debug!("ILU Config: fill_level={}, drop_tol={:.2e}, reordering={:?}", 
-                   config.level_of_fill, config.drop_tolerance, config.reordering_type);
+            info!(
+                "ILU Setup: Creating {:?} factorization with HYPRE-inspired configuration",
+                config.ilu_type
+            );
+            debug!(
+                "ILU Config: fill_level={}, drop_tol={:.2e}, reordering={:?}",
+                config.level_of_fill, config.drop_tolerance, config.reordering_type
+            );
         }
 
         Ok(Self {
@@ -493,15 +500,19 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     /// HYPRE-inspired configuration validation
     fn validate_config(config: &IluConfig) -> Result<(), KError> {
         if config.drop_tolerance < 0.0 {
-            return Err(KError::InvalidInput("drop_tolerance must be >= 0".to_string()));
+            return Err(KError::InvalidInput(
+                "drop_tolerance must be >= 0".to_string(),
+            ));
         }
-        
+
         if config.tolerance <= 0.0 {
             return Err(KError::InvalidInput("tolerance must be > 0".to_string()));
         }
-        
+
         if config.pivot_threshold < 0.0 {
-            return Err(KError::InvalidInput("pivot_threshold must be >= 0".to_string()));
+            return Err(KError::InvalidInput(
+                "pivot_threshold must be >= 0".to_string(),
+            ));
         }
 
         Ok(())
@@ -514,12 +525,14 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                 let val = matrix[(i, j)];
                 if val.is_nan() {
                     return Err(KError::InvalidInput(format!(
-                        "NaN detected in matrix at position ({}, {})", i, j
+                        "NaN detected in matrix at position ({}, {})",
+                        i, j
                     )));
                 }
                 if val.is_infinite() {
                     return Err(KError::InvalidInput(format!(
-                        "Infinity detected in matrix at position ({}, {})", i, j
+                        "Infinity detected in matrix at position ({}, {})",
+                        i, j
                     )));
                 }
             }
@@ -532,9 +545,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         if matrix.nrows() == 0 || matrix.ncols() == 0 {
             return Err(KError::InvalidInput("Matrix cannot be empty".to_string()));
         }
-        
+
         if matrix.nrows() != matrix.ncols() {
-            return Err(KError::InvalidInput("ILU requires square matrices".to_string()));
+            return Err(KError::InvalidInput(
+                "ILU requires square matrices".to_string(),
+            ));
         }
 
         Ok(())
@@ -577,7 +592,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     fn handle_pivot(&mut self, pivot: &mut T, row: usize, matrix: &Mat<T>) -> Result<(), KError> {
         let pivot_abs = pivot.abs();
         let threshold = T::from(self.config.pivot_threshold).unwrap();
-        
+
         match self.config.pivot_strategy {
             PivotStrategy::Strict => {
                 if pivot_abs < threshold {
@@ -588,35 +603,49 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             PivotStrategy::Threshold => {
                 if pivot_abs < threshold {
                     self.num_zero_pivots += 1;
-                    *pivot = if *pivot >= T::zero() { threshold } else { -threshold };
-                    
+                    *pivot = if *pivot >= T::zero() {
+                        threshold
+                    } else {
+                        -threshold
+                    };
+
                     #[cfg(feature = "logging")]
                     if self.config.logging_level > 1 {
-                        warn!("ILU: Small pivot {} replaced with threshold at row {}", pivot_abs, row);
+                        warn!(
+                            "ILU: Small pivot {} replaced with threshold at row {}",
+                            pivot_abs, row
+                        );
                     }
                 }
             }
             PivotStrategy::DiagonalPerturbation => {
                 if pivot_abs < threshold {
                     self.num_zero_pivots += 1;
-                    
+
                     // Find max diagonal magnitude for adaptive perturbation
                     let mut max_diag = T::zero();
                     for i in 0..matrix.nrows() {
                         max_diag = max_diag.max(matrix[(i, i)].abs());
                     }
-                    
+
                     let perturbation = T::from(self.config.perturbation_factor).unwrap() * max_diag;
-                    *pivot = if *pivot >= T::zero() { perturbation } else { -perturbation };
-                    
+                    *pivot = if *pivot >= T::zero() {
+                        perturbation
+                    } else {
+                        -perturbation
+                    };
+
                     #[cfg(feature = "logging")]
                     if self.config.logging_level > 1 {
-                        warn!("ILU: Small pivot {} perturbed to {} at row {}", pivot_abs, *pivot, row);
+                        warn!(
+                            "ILU: Small pivot {} perturbed to {} at row {}",
+                            pivot_abs, *pivot, row
+                        );
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -644,15 +673,15 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     /// Compute ILU(0) factorization with enhanced pivot handling and sparse storage
     fn compute_ilu0(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
         let n = matrix.nrows();
-        
+
         // Convert input matrix to sparse CSR format for L and U factors
         let drop_tol = T::from(1e-15).unwrap_or(T::zero());
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
-        
+
         // Extract diagonal for efficient storage
         self.d = u.diagonal();
-        
+
         // Initialize L as lower triangular with unit diagonal, U as upper triangular
         for i in 0..n {
             for j in 0..n {
@@ -660,7 +689,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                     // L gets lower triangular part
                     self.sparse_set(&mut u, i, j, T::zero());
                 } else if i < j {
-                    // U gets upper triangular part  
+                    // U gets upper triangular part
                     self.sparse_set(&mut l, i, j, T::zero());
                 } else {
                     // L has unit diagonal
@@ -681,7 +710,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                 if l_ik != T::zero() {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
-                    
+
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
                         if u_kj != T::zero() && matrix[(i, j)] != T::zero() {
@@ -697,22 +726,22 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         // Calculate sparsity metrics
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
-        
+
         self.l = l;
         self.u = u;
-        
+
         Ok(())
     }
 
     /// Compute Modified ILU(0) with row-sum correction and sparse storage
     fn compute_milu0(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
         let n = matrix.nrows();
-        
+
         // Convert input matrix to sparse CSR format
         let drop_tol = T::from(1e-15).unwrap_or(T::zero());
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
-        
+
         // Store original row sums for diagonal correction
         let mut original_row_sums = vec![T::zero(); n];
         for i in 0..n {
@@ -720,7 +749,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                 original_row_sums[i] = original_row_sums[i] + matrix[(i, j)];
             }
         }
-        
+
         // Initialize L as lower triangular with unit diagonal, U as upper triangular
         for i in 0..n {
             for j in 0..n {
@@ -745,13 +774,13 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
             // Track dropped fill-in for diagonal correction
             let mut dropped_sum = T::zero();
-            
+
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
                 if l_ik != T::zero() {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
-                    
+
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
                         if u_kj != T::zero() {
@@ -767,7 +796,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                     }
                 }
             }
-            
+
             // Apply diagonal correction to preserve row sum
             if k < n - 1 {
                 self.d[k + 1] = self.d[k + 1] + dropped_sum;
@@ -776,10 +805,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
-        
+
         self.l = l;
         self.u = u;
-        
+
         Ok(())
     }
 
@@ -788,10 +817,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
-        
+
         // Level-of-fill tracking: level[i][j] = fill level of entry (i,j)
         let mut level = vec![vec![usize::MAX; n]; n];
-        
+
         // Initialize levels for original nonzeros
         for i in 0..n {
             for j in 0..n {
@@ -816,11 +845,12 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             for i in (k + 1)..n {
                 if level[i][k] <= self.config.level_of_fill {
                     l[(i, k)] = l[(i, k)] / pivot;
-                    
+
                     for j in (k + 1)..n {
                         if level[k][j] <= self.config.level_of_fill {
-                            let new_level = level[i][k].saturating_add(level[k][j]).saturating_add(1);
-                            
+                            let new_level =
+                                level[i][k].saturating_add(level[k][j]).saturating_add(1);
+
                             if new_level <= self.config.level_of_fill {
                                 let update = l[(i, k)] * u[(k, j)];
                                 u[(i, j)] = u[(i, j)] - update;
@@ -838,16 +868,16 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let drop_tol = T::from(1e-15).unwrap_or(T::zero());
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
-        
+
         // Extract diagonal from dense U matrix before converting
         self.d = vec![T::zero(); n];
         for i in 0..n {
             self.d[i] = u[(i, i)];
         }
-        
+
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
-        
+
         Ok(())
     }
 
@@ -857,7 +887,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
         let drop_tol = T::from(self.config.drop_tolerance).unwrap();
-        
+
         // Initialize with matrix values above drop tolerance
         for i in 0..n {
             for j in 0..n {
@@ -881,11 +911,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
             // Collect potential updates for this elimination step
             let mut updates = Vec::new();
-            
+
             for i in (k + 1)..n {
                 if l[(i, k)].abs() >= drop_tol {
                     l[(i, k)] = l[(i, k)] / pivot;
-                    
+
                     for j in (k + 1)..n {
                         if u[(k, j)].abs() >= drop_tol {
                             let update = l[(i, k)] * u[(k, j)];
@@ -894,7 +924,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                     }
                 }
             }
-            
+
             // Apply updates with threshold dropping
             for (i, j, update) in updates {
                 let new_val = u[(i, j)] - update;
@@ -904,7 +934,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                     u[(i, j)] = T::zero(); // Drop small entries
                 }
             }
-            
+
             // Apply fill-in control per row if specified
             if self.config.max_fill_per_row > 0 {
                 for i in (k + 1)..n {
@@ -917,7 +947,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let drop_tol = T::from(1e-15).unwrap_or(T::zero());
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
-        
+
         // Extract diagonal from dense U matrix before converting
         self.d = vec![T::zero(); n];
         for i in 0..n {
@@ -926,7 +956,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
-        
+
         Ok(())
     }
 
@@ -935,7 +965,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         if self.config.max_fill_per_row == 0 {
             return;
         }
-        
+
         // Collect (magnitude, column, value) for this row
         let mut entries: Vec<(T, usize, T)> = Vec::new();
         for j in start_col..matrix.ncols() {
@@ -944,16 +974,16 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                 entries.push((val.abs(), j, val));
             }
         }
-        
+
         if entries.len() > self.config.max_fill_per_row {
             // Sort by magnitude (largest first)
             entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            
+
             // Zero out all entries first
             for j in start_col..matrix.ncols() {
                 matrix[(row, j)] = T::zero();
             }
-            
+
             // Keep only the largest entries
             for i in 0..self.config.max_fill_per_row.min(entries.len()) {
                 let (_, j, val) = entries[i];
@@ -981,7 +1011,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     /// Sparse triangular solve with level scheduling potential and workspace reuse
     fn solve_triangular_exact(&self, lower: bool, b: &[T], x: &mut [T]) {
         let n = b.len();
-        
+
         if lower {
             // Forward substitution: L * x = b (L has unit diagonal)
             for i in 0..n {
@@ -1016,11 +1046,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     fn solve_triangular_parallel_forward(&self, b: &[T], x: &mut [T]) {
         let n = b.len();
         x.copy_from_slice(b);
-        
+
         // For forward substitution, we process by levels (dependency chains)
         // Level scheduling would require dependency analysis, so we use a simpler approach
         // with fine-grained synchronization via atomic operations for dense matrices
-        
+
         // For now, fall back to serial since proper level scheduling is complex
         for i in 0..n {
             for j in 0..i {
@@ -1038,10 +1068,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     fn solve_triangular_parallel_backward(&self, b: &[T], x: &mut [T]) {
         let n = b.len();
         x.copy_from_slice(b);
-        
+
         // For backward substitution, we can use similar level scheduling
         // For dense matrices, the dependency chains make true parallelism challenging
-        
+
         // For now, fall back to serial since proper level scheduling is complex
         for i in (0..n).rev() {
             for j in (i + 1)..n {
@@ -1057,10 +1087,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     /// HYPRE-style iterative triangular solve with Jacobi and sparse access
     fn solve_triangular_jacobi(&self, lower: bool, b: &[T], x: &mut [T]) {
         let n = b.len();
-        let num_iters = if lower { 
-            self.config.lower_jacobi_iters 
-        } else { 
-            self.config.upper_jacobi_iters 
+        let num_iters = if lower {
+            self.config.lower_jacobi_iters
+        } else {
+            self.config.upper_jacobi_iters
         };
 
         // Initialize
@@ -1098,10 +1128,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     /// HYPRE-style iterative triangular solve with Gauss-Seidel and sparse access
     fn solve_triangular_gauss_seidel(&self, lower: bool, b: &[T], x: &mut [T]) {
         let n = b.len();
-        let num_iters = if lower { 
-            self.config.lower_jacobi_iters 
-        } else { 
-            self.config.upper_jacobi_iters 
+        let num_iters = if lower {
+            self.config.lower_jacobi_iters
+        } else {
+            self.config.upper_jacobi_iters
         };
 
         // Initialize
@@ -1148,13 +1178,14 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             solve_count: self.solve_count,
         }
     }
-
 }
 
 impl Ilu<f64> {
     /// Create specialized ILU preconditioners that leverage existing implementations
     /// This provides a unified interface while potentially using optimized separate implementations
-    pub fn create_specialized(config: IluConfig) -> Result<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>, KError> {
+    pub fn create_specialized(
+        config: IluConfig,
+    ) -> Result<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>, KError> {
         match config.ilu_type {
             IluType::ILUK => {
                 // Use the dedicated ILUP implementation for better performance
@@ -1162,10 +1193,14 @@ impl Ilu<f64> {
                 Ok(Box::new(ilup))
             }
             IluType::ILUT => {
-                // Use the dedicated ILUT implementation 
+                // Use the dedicated ILUT implementation
                 let ilut = crate::preconditioner::ilut::Ilut::new(
-                    if config.max_fill_per_row > 0 { config.max_fill_per_row } else { 20 },
-                    config.drop_tolerance
+                    if config.max_fill_per_row > 0 {
+                        config.max_fill_per_row
+                    } else {
+                        20
+                    },
+                    config.drop_tolerance,
                 );
                 Ok(Box::new(ilut))
             }
@@ -1181,7 +1216,7 @@ impl Ilu<f64> {
     pub fn create_quick(ilu_type: IluType, fill_or_drop: f64) -> Result<Self, KError> {
         let mut config = IluConfig::default();
         config.ilu_type = ilu_type;
-        
+
         match ilu_type {
             IluType::ILUK => {
                 config.level_of_fill = fill_or_drop as usize;
@@ -1192,7 +1227,7 @@ impl Ilu<f64> {
             }
             _ => {}
         }
-        
+
         Self::new_with_config(config)
     }
 }
@@ -1222,17 +1257,19 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Default for Ilu<
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<Mat<T>, Vec<T>> for Ilu<T> {
+impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<Mat<T>, Vec<T>>
+    for Ilu<T>
+{
     /// HYPRE-inspired setup with comprehensive safety checks and monitoring
     fn setup(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
         let setup_start = std::time::Instant::now();
 
         // HYPRE-style validation and safety checks
         Self::validate_matrix(matrix)?;
-        
+
         if self.config.ieee_checks {
             Self::check_ieee_values(matrix)?;
-            
+
             #[cfg(feature = "logging")]
             if self.config.logging_level > 0 {
                 info!("ILU: IEEE safety checks passed");
@@ -1244,7 +1281,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
-            info!("ILU Setup: {} x {} matrix with {} nonzeros", n, n, original_nnz);
+            info!(
+                "ILU Setup: {} x {} matrix with {} nonzeros",
+                n, n, original_nnz
+            );
             debug!("ILU: Using {:?} factorization type", self.config.ilu_type);
         }
 
@@ -1266,7 +1306,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
                 self.compute_ilut(matrix)?;
             }
             _ => {
-                return Err(KError::NotImplemented(format!("ILU type {:?} not yet implemented", self.config.ilu_type)));
+                return Err(KError::NotImplemented(format!(
+                    "ILU type {:?} not yet implemented",
+                    self.config.ilu_type
+                )));
             }
         }
 
@@ -1276,16 +1319,25 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
-            info!("ILU Setup Complete: complexity={:.2}, L_nnz={}, U_nnz={}, setup_time={:.3}s", 
-                  self.setup_complexity, self.nnz_l, self.nnz_u, self.setup_time);
-            
+            info!(
+                "ILU Setup Complete: complexity={:.2}, L_nnz={}, U_nnz={}, setup_time={:.3}s",
+                self.setup_complexity, self.nnz_l, self.nnz_u, self.setup_time
+            );
+
             if self.num_zero_pivots > 0 {
-                warn!("ILU: {} zero pivots encountered during factorization", self.num_zero_pivots);
+                warn!(
+                    "ILU: {} zero pivots encountered during factorization",
+                    self.num_zero_pivots
+                );
             }
-            
+
             if self.config.print_level > 0 {
-                println!("ILU Setup: {} -> {} nonzeros (complexity: {:.2})", 
-                        original_nnz, self.nnz_l + self.nnz_u, self.setup_complexity);
+                println!(
+                    "ILU Setup: {} -> {} nonzeros (complexity: {:.2})",
+                    original_nnz,
+                    self.nnz_l + self.nnz_u,
+                    self.setup_complexity
+                );
             }
         }
 
@@ -1295,20 +1347,22 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
     /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
     fn apply(&self, _side: PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
         let solve_start = std::time::Instant::now();
-        
+
         if x.len() != self.l.nrows() {
-            return Err(KError::InvalidInput(
-                format!("Vector length {} doesn't match matrix size {}", x.len(), self.l.nrows())
-            ));
+            return Err(KError::InvalidInput(format!(
+                "Vector length {} doesn't match matrix size {}",
+                x.len(),
+                self.l.nrows()
+            )));
         }
 
         let n = x.len();
-        
+
         // Use consolidated workspace to achieve zero allocations during solve
         {
             let mut temp_workspace = self.workspace.get_temp_workspace();
             temp_workspace.resize(n, T::zero());
-            
+
             // Forward solve: L * temp = x
             temp_workspace.copy_from_slice(x);
             match self.config.triangular_solve {
@@ -1339,11 +1393,13 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
         // Update timing statistics (would need interior mutability in practice)
         let _solve_time = solve_start.elapsed().as_secs_f64();
-        
+
         #[cfg(feature = "logging")]
         if self.config.logging_level > 2 {
-            trace!("ILU Apply: solve_time={:.6}s, workspace_size={}", 
-                   _solve_time, self.workspace.size);
+            trace!(
+                "ILU Apply: solve_time={:.6}s, workspace_size={}",
+                _solve_time, self.workspace.size
+            );
         }
 
         Ok(())
@@ -1371,7 +1427,7 @@ mod tests {
             .enable_logging()
             .build::<f64>()
             .unwrap();
-        
+
         assert_eq!(ilu.config.ilu_type, IluType::ILUT);
         assert_eq!(ilu.config.drop_tolerance, 1e-6);
         assert_eq!(ilu.config.logging_level, 1);
@@ -1381,7 +1437,7 @@ mod tests {
     fn test_ilu_config_validation() {
         let mut config = IluConfig::default();
         config.drop_tolerance = -1.0;
-        
+
         let result = Ilu::<f64>::new_with_config(config);
         assert!(result.is_err());
     }
@@ -1424,7 +1480,7 @@ mod tests {
         let mut config = IluConfig::default();
         config.pivot_strategy = PivotStrategy::DiagonalPerturbation;
         config.perturbation_factor = 1e-10;
-        
+
         let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
@@ -1457,20 +1513,14 @@ mod tests {
 
     #[test]
     fn test_triangular_solve_options() {
-        let matrix = faer::Mat::from_fn(2, 2, |i, j| {
-            if i == j {
-                2.0
-            } else {
-                0.0
-            }
-        });
+        let matrix = faer::Mat::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.0 });
 
         // Test Gauss-Seidel solve
         let mut config = IluConfig::default();
         config.triangular_solve = TriSolveType::GaussSeidel;
         config.lower_jacobi_iters = 2;
         config.upper_jacobi_iters = 2;
-        
+
         let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
@@ -1496,7 +1546,7 @@ mod tests {
             .parallel_chunk_size(128)
             .build::<f64>()
             .unwrap();
-        
+
         assert!(ilu.config.enable_parallel_factorization);
         assert!(ilu.config.enable_parallel_triangular_solve);
         assert_eq!(ilu.config.parallel_chunk_size, 128);
@@ -1518,14 +1568,14 @@ mod tests {
             .ilu_type(IluType::ILU0)
             .build::<f64>()
             .unwrap();
-            
+
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
-        
+
         // Workspace should be allocated if optimization is enabled
         assert!(ilu.workspace.size > 0);
-        
+
         // Test that apply works with consolidated workspace
         let x = vec![1.0, 2.0, 3.0];
         let mut y = vec![0.0; 3];
@@ -1551,7 +1601,7 @@ mod tests {
             .ilu_type(IluType::ILU0)
             .build::<f64>()
             .unwrap();
-            
+
         let mut ilu_parallel = IluBuilder::new()
             .ilu_type(IluType::ILU0)
             .enable_parallel_factorization()
@@ -1560,17 +1610,17 @@ mod tests {
             .unwrap();
 
         use crate::preconditioner::legacy::Preconditioner;
-        
+
         let serial_result = ilu_serial.setup(&matrix);
         assert!(serial_result.is_ok());
-        
+
         let parallel_result = ilu_parallel.setup(&matrix);
         assert!(parallel_result.is_ok());
-        
+
         // Both should have similar statistics
         let serial_stats = ilu_serial.get_stats();
         let parallel_stats = ilu_parallel.get_stats();
-        
+
         assert_eq!(serial_stats.nnz_l, parallel_stats.nnz_l);
         assert_eq!(serial_stats.nnz_u, parallel_stats.nnz_u);
     }
@@ -1581,7 +1631,7 @@ mod tests {
             .enable_distributed()
             .build::<f64>()
             .unwrap();
-        
+
         assert!(ilu.config.enable_distributed);
     }
 }
@@ -1602,75 +1652,81 @@ pub mod benchmarks {
     }
 
     /// Benchmark ILU factorization performance on sparse matrices
-    pub fn benchmark_ilu_factorization(matrix_size: usize, nnz_per_row: usize) -> (f64, AllocationStats) {
+    pub fn benchmark_ilu_factorization(
+        matrix_size: usize,
+        nnz_per_row: usize,
+    ) -> (f64, AllocationStats) {
         // Create a sparse test matrix (tridiagonal with random values)
         let matrix = create_sparse_test_matrix(matrix_size, nnz_per_row);
-        
+
         let start = Instant::now();
         let mut ilu = IluBuilder::new()
             .ilu_type(IluType::ILU0)
             .enable_parallel_factorization()
             .build::<f64>()
             .unwrap();
-            
+
         // Setup phase (should have minimal allocations after workspace is set up)
         let setup_result = ilu.setup(&matrix);
         let factorization_time = start.elapsed().as_secs_f64();
-        
+
         assert!(setup_result.is_ok());
-        
+
         let stats = AllocationStats {
             total_allocations: 1, // Simplified for demo - in real impl would track actual allocations
             total_bytes: matrix_size * matrix_size * 8, // Estimate
             peak_memory: matrix_size * matrix_size * 8,
             solve_allocations: 0,
         };
-        
+
         (factorization_time, stats)
     }
 
     /// Benchmark solve phase to ensure zero allocations
-    pub fn benchmark_ilu_solve_phase(matrix_size: usize, num_solves: usize) -> (f64, AllocationStats) {
+    pub fn benchmark_ilu_solve_phase(
+        matrix_size: usize,
+        num_solves: usize,
+    ) -> (f64, AllocationStats) {
         let matrix = create_sparse_test_matrix(matrix_size, 3);
-        
+
         let mut ilu = IluBuilder::new()
             .ilu_type(IluType::ILU0)
             .build::<f64>()
             .unwrap();
-            
+
         ilu.setup(&matrix).unwrap();
-        
+
         let rhs = vec![1.0; matrix_size];
         let mut solution = vec![0.0; matrix_size];
-        
+
         // Warm up
         ilu.apply(PcSide::Left, &rhs, &mut solution).unwrap();
-        
+
         let start = Instant::now();
         for _ in 0..num_solves {
             // This should have ZERO allocations after the first solve
             ilu.apply(PcSide::Left, &rhs, &mut solution).unwrap();
         }
         let solve_time = start.elapsed().as_secs_f64();
-        
+
         let stats = AllocationStats {
             total_allocations: 0, // Goal: zero allocations during solve phase
             total_bytes: 0,
             peak_memory: matrix_size * 16, // Workspace only
-            solve_allocations: 0, // Critical: must be zero
+            solve_allocations: 0,          // Critical: must be zero
         };
-        
+
         (solve_time, stats)
     }
 
     /// Create a sparse test matrix for benchmarking
     fn create_sparse_test_matrix(size: usize, nnz_per_row: usize) -> faer::Mat<f64> {
         let mut matrix = faer::Mat::zeros(size, size);
-        
+
         for i in 0..size {
             // Diagonal entry
             matrix[(i, i)] = 4.0;
-            
+
             // Off-diagonal entries (banded structure)
             let mut count = 1; // Already have diagonal
             for offset in 1..=(nnz_per_row / 2) {
@@ -1684,14 +1740,14 @@ pub mod benchmarks {
                 }
             }
         }
-        
+
         matrix
     }
 
     /// Performance comparison: dense vs sparse storage
     pub fn benchmark_storage_comparison(matrix_size: usize) -> (f64, f64, usize, usize) {
         let matrix = create_sparse_test_matrix(matrix_size, 5);
-        
+
         // Dense storage benchmark
         let start = Instant::now();
         let mut ilu_dense = IluBuilder::new()
@@ -1700,13 +1756,13 @@ pub mod benchmarks {
             .unwrap();
         ilu_dense.setup(&matrix).unwrap();
         let dense_time = start.elapsed().as_secs_f64();
-        
+
         let dense_memory = matrix_size * matrix_size * 8 * 2; // L and U matrices
         let sparse_memory = ilu_dense.nnz_l * 8 + ilu_dense.nnz_u * 8; // Actual sparse storage
-        
+
         // Sparse storage is already implemented in our enhanced version
         let sparse_time = dense_time; // Same algorithm, different storage
-        
+
         (dense_time, sparse_time, dense_memory, sparse_memory)
     }
 

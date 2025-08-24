@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use faer::Mat;
 use kryst::matrix::op::LinOp;
-use kryst::parallel::{UniverseComm, NoComm};
+use kryst::parallel::{NoComm, UniverseComm};
+use std::sync::Arc;
 
 #[test]
 fn dense_linop_default_comm_is_no_comm() {
@@ -19,10 +19,16 @@ fn set_operators_panics_on_comm_mismatch() {
     struct SerialOp;
     impl LinOp for SerialOp {
         type S = f64;
-        fn dims(&self) -> (usize, usize) { (1, 1) }
+        fn dims(&self) -> (usize, usize) {
+            (1, 1)
+        }
         fn matvec(&self, _x: &[f64], _y: &mut [f64]) {}
-        fn as_any(&self) -> &dyn std::any::Any { self }
-        fn comm(&self) -> UniverseComm { UniverseComm::Serial }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn comm(&self) -> UniverseComm {
+            UniverseComm::Serial
+        }
     }
 
     let a = Arc::new(Mat::<f64>::zeros(1, 1));

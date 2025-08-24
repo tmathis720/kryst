@@ -10,9 +10,9 @@
 //! The tests use the `faer` crate for matrix construction and `approx` for floating-point comparisons.
 
 use approx::assert_relative_eq;
-use kryst::preconditioner::{Sor, MatSorType};
-use kryst::preconditioner::legacy::Preconditioner;
 use faer::Mat;
+use kryst::preconditioner::legacy::Preconditioner;
+use kryst::preconditioner::{MatSorType, Sor};
 
 /// Constructs a tridiagonal matrix of size `n` with subdiagonal `a`, diagonal `b`, and superdiagonal `c`.
 ///
@@ -24,9 +24,13 @@ use faer::Mat;
 fn make_tridiag(n: usize, a: f64, b: f64, c: f64) -> Mat<f64> {
     let mut mat = Mat::<f64>::zeros(n, n);
     for i in 0..n {
-        if i > 0 { mat[(i, i-1)] = a; }
+        if i > 0 {
+            mat[(i, i - 1)] = a;
+        }
         mat[(i, i)] = b;
-        if i+1 < n { mat[(i, i+1)] = c; }
+        if i + 1 < n {
+            mat[(i, i + 1)] = c;
+        }
     }
     mat
 }
@@ -50,9 +54,10 @@ fn test_sor_identity() {
     sor.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y)
+        .unwrap();
     // Output should match input exactly
-    assert_relative_eq!(x.as_slice(), y.as_slice(), epsilon=1e-12);
+    assert_relative_eq!(x.as_slice(), y.as_slice(), epsilon = 1e-12);
 }
 
 /// Test SOR on a tridiagonal matrix with a forward sweep.
@@ -67,17 +72,24 @@ fn test_sor_tridiag_forward() {
     sor.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y)
+        .unwrap();
     // Compute expected SOR sweep (forward, in-place)
     let mut expected = vec![0.0; n];
     for i in 0..n {
-        let left = if i > 0 { expected[i-1] } else { 0.0 };
-        let right = if i+1 < n { x[i+1] } else { 0.0 };
+        let left = if i > 0 { expected[i - 1] } else { 0.0 };
+        let right = if i + 1 < n { x[i + 1] } else { 0.0 };
         expected[i] = (x[i] + left + right) / 4.0;
     }
     // Compare each entry with a tight tolerance
     for i in 0..n {
-        assert!((y[i] - expected[i]).abs() < 1e-12, "SOR mismatch at i={}: got {}, expected {}", i, y[i], expected[i]);
+        assert!(
+            (y[i] - expected[i]).abs() < 1e-12,
+            "SOR mismatch at i={}: got {}, expected {}",
+            i,
+            y[i],
+            expected[i]
+        );
     }
 }
 
@@ -93,7 +105,8 @@ fn test_ssor_tridiag() {
     sor.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+    sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y)
+        .unwrap();
     // All output values should be finite
     assert!(y.iter().all(|&v| (v as f64).is_finite()));
 }

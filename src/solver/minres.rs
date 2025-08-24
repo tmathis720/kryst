@@ -4,6 +4,8 @@
 //! linear systems Ax = b. MINRES is suitable for large, sparse, symmetric systems, including indefinite matrices.
 //! It minimizes the residual norm over a Krylov subspace using a short-term recurrence based on the Lanczos process.
 //!
+//! Accepts only [`PcSide::Left`]; residuals are reported as `||M^{-1} r||` with final stats including true `||r||`.
+//!
 //! # Features
 //! - Handles symmetric positive definite and indefinite systems
 //! - No preconditioning (yet)
@@ -14,16 +16,16 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, 2nd Edition. SIAM. §7.4
 //! - https://en.wikipedia.org/wiki/MINRES
 
-use crate::solver::legacy::LinearSolver;
-use crate::core::traits::{MatVec, InnerProduct};
-use crate::utils::convergence::{Convergence, SolveStats};
+use crate::core::traits::{InnerProduct, MatVec};
 use crate::error::KError;
 use crate::preconditioner::PcSide;
-use num_traits::Float;
-#[cfg(feature = "logging")]
-use log::trace;
+use crate::solver::legacy::LinearSolver;
+use crate::utils::convergence::{Convergence, SolveStats};
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
+#[cfg(feature = "logging")]
+use log::trace;
+use num_traits::Float;
 
 /// MINRES solver struct, holding convergence parameters.
 ///
@@ -61,13 +63,13 @@ impl<T: Float> MinresSolver<T> {
         while workspace.q.len() < needed_q {
             workspace.q.push(vec![0.0; n]);
         }
-        
+
         // MINRES also needs workspace for w vectors (search directions)
         // Use first few q vectors for v vectors and ensure we have enough space
         for vec in &mut workspace.q {
             vec.resize(n, 0.0);
         }
-        
+
         // Ensure tmp vectors are sized for residual computations
         workspace.tmp1.resize(n, 0.0);
         workspace.tmp2.resize(n, 0.0);
@@ -111,7 +113,7 @@ where
     ) -> Result<SolveStats<T>, KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("MinresSolve");
-        
+
         #[cfg(feature = "logging")]
         trace!("Starting MINRES solve");
 
@@ -128,7 +130,11 @@ where
         // Use workspace vectors if available, otherwise allocate locally
         let tmp1 = if let Some(workspace) = work.as_ref() {
             // Convert workspace buffers to the correct type for efficiency
-            let tmp1_vec: Vec<T> = workspace.tmp1.iter().map(|&x| <T as From<f64>>::from(x)).collect();
+            let tmp1_vec: Vec<T> = workspace
+                .tmp1
+                .iter()
+                .map(|&x| <T as From<f64>>::from(x))
+                .collect();
             let mut tmp1_full = tmp1_vec;
             tmp1_full.resize(n, T::zero());
             tmp1_full
@@ -139,13 +145,13 @@ where
 
         // r0 = b - A x0 (x0 initial is zero)
         let mut r = V::from(tmp1.clone());
-        
+
         #[cfg(feature = "logging")]
         let _matvec_guard = StageGuard::new("MinresMatVec");
         a.matvec(x, &mut r);
         #[cfg(feature = "logging")]
         drop(_matvec_guard);
-        
+
         for i in 0..n {
             r.as_mut()[i] = b.as_ref()[i] - r.as_ref()[i];
         }
@@ -170,10 +176,10 @@ where
         let mut v_prev = V::from(vec![T::zero(); n]); // v_{-1}
         let mut v = V::from(r.as_ref().iter().map(|&ri| ri / beta1).collect::<Vec<_>>()); // v_0
         let mut w_prev = V::from(vec![T::zero(); n]); // w_{-1}
-        let mut w = V::from(vec![T::zero(); n]);      // w_0
-        let mut x_out = V::from(vec![T::zero(); n]);  // Solution vector
-        let mut x_best = x_out.clone();               // Best solution so far
-        let mut phi_min = beta1.abs();                // Best (smallest) estimated residual
+        let mut w = V::from(vec![T::zero(); n]); // w_0
+        let mut x_out = V::from(vec![T::zero(); n]); // Solution vector
+        let mut x_best = x_out.clone(); // Best solution so far
+        let mut phi_min = beta1.abs(); // Best (smallest) estimated residual
 
         // Scalars for Givens and recurrences
         let mut beta = beta1;
@@ -203,35 +209,34 @@ where
         for j in 1..=self.conv.max_iters {
             #[cfg(feature = "logging")]
             let _iter_guard = StageGuard::new("MinresIteration");
-            
+
             #[cfg(feature = "logging")]
             trace!("MINRES iteration {}", j);
-            
+
             // --- Lanczos step ---
             let mut v_next = V::from(vec![T::zero(); n]);
-            
+
             #[cfg(feature = "logging")]
             let _matvec_guard = StageGuard::new("MinresMatVec");
             a.matvec(&v, &mut v_next);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
-            
+
             #[cfg(feature = "logging")]
             let _dot_guard = StageGuard::new("MinresDotProduct");
             alpha = ip.dot(&v, &v_next, comm);
             #[cfg(feature = "logging")]
             drop(_dot_guard);
-            
+
             #[cfg(feature = "logging")]
             let _axpy_guard = StageGuard::new("MinresAxpy");
             for i in 0..n {
-                v_next.as_mut()[i] = v_next.as_ref()[i]
-                    - alpha * v.as_ref()[i]
-                    - beta * v_prev.as_ref()[i];
+                v_next.as_mut()[i] =
+                    v_next.as_ref()[i] - alpha * v.as_ref()[i] - beta * v_prev.as_ref()[i];
             }
             #[cfg(feature = "logging")]
             drop(_axpy_guard);
-            
+
             #[cfg(feature = "logging")]
             let _norm_guard = StageGuard::new("MinresNorm");
             beta_next = ip.norm(&v_next, comm);
@@ -259,8 +264,16 @@ where
 
             // --- Givens rotation (Saad Alg 7.4) ---
             rho = (rho_bar * rho_bar + alpha * alpha).sqrt();
-            c = if rho != T::zero() { rho_bar / rho } else { T::one() };
-            s = if rho != T::zero() { alpha / rho } else { T::zero() };
+            c = if rho != T::zero() {
+                rho_bar / rho
+            } else {
+                T::one()
+            };
+            s = if rho != T::zero() {
+                alpha / rho
+            } else {
+                T::zero()
+            };
             let phi_next = c * phi;
             phi_bar = -s * phi;
 
@@ -273,9 +286,9 @@ where
                 }
             } else {
                 for i in 0..n {
-                    w_new.as_mut()[i] = (v.as_ref()[i]
-                        - delta * w.as_ref()[i]
-                        - epsilon * w_prev.as_ref()[i]) / rho;
+                    w_new.as_mut()[i] =
+                        (v.as_ref()[i] - delta * w.as_ref()[i] - epsilon * w_prev.as_ref()[i])
+                            / rho;
                 }
             }
 
@@ -290,35 +303,70 @@ where
 
             // Debug output for all key variables
             let mut r_true = V::from(vec![T::zero(); n]);
-            
+
             #[cfg(feature = "logging")]
             let _matvec_guard = StageGuard::new("MinresMatVec");
             a.matvec(&x_out, &mut r_true);
             #[cfg(feature = "logging")]
             drop(_matvec_guard);
-            
-            for i in 0..n { r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i]; }
-            
+
+            for i in 0..n {
+                r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i];
+            }
+
             #[cfg(feature = "logging")]
             let _norm_guard = StageGuard::new("MinresNorm");
             let r_true_norm = ip.norm(&r_true, comm);
             #[cfg(feature = "logging")]
             drop(_norm_guard);
-            
+
             #[cfg(feature = "logging")]
-            trace!("MINRES iteration {}: residual = {:.3e}", j, phi_bar.abs().to_f64().unwrap_or(0.0));
-            
+            trace!(
+                "MINRES iteration {}: residual = {:.3e}",
+                j,
+                phi_bar.abs().to_f64().unwrap_or(0.0)
+            );
+
             #[cfg(feature = "logging")]
-            trace!("MINRES iter {}: alpha={:.4e}, beta={:.4e}, beta_next={:.4e}", j, alpha.to_f64().unwrap_or(0.0), beta.to_f64().unwrap_or(0.0), beta_next.to_f64().unwrap_or(0.0));
-            
-            println!("MINRES iter {j}: alpha={:.4e}, beta={:.4e}, beta_next={:.4e}", alpha.to_f64().unwrap(), beta.to_f64().unwrap(), beta_next.to_f64().unwrap());
-            println!("  rho_bar={:.4e}, rho={:.4e}, c={:.4e}, s={:.4e}", rho_bar.to_f64().unwrap(), rho.to_f64().unwrap(), c.to_f64().unwrap(), s.to_f64().unwrap());
-            println!("  phi={:.4e}, phi_bar={:.4e}", phi.to_f64().unwrap(), phi_bar.to_f64().unwrap());
-            println!("  ||r_true||={:.4e}, res_norm (est) = {:.4e}", r_true_norm.to_f64().unwrap(), phi_bar.abs().to_f64().unwrap());
+            trace!(
+                "MINRES iter {}: alpha={:.4e}, beta={:.4e}, beta_next={:.4e}",
+                j,
+                alpha.to_f64().unwrap_or(0.0),
+                beta.to_f64().unwrap_or(0.0),
+                beta_next.to_f64().unwrap_or(0.0)
+            );
+
+            println!(
+                "MINRES iter {j}: alpha={:.4e}, beta={:.4e}, beta_next={:.4e}",
+                alpha.to_f64().unwrap(),
+                beta.to_f64().unwrap(),
+                beta_next.to_f64().unwrap()
+            );
+            println!(
+                "  rho_bar={:.4e}, rho={:.4e}, c={:.4e}, s={:.4e}",
+                rho_bar.to_f64().unwrap(),
+                rho.to_f64().unwrap(),
+                c.to_f64().unwrap(),
+                s.to_f64().unwrap()
+            );
+            println!(
+                "  phi={:.4e}, phi_bar={:.4e}",
+                phi.to_f64().unwrap(),
+                phi_bar.to_f64().unwrap()
+            );
+            println!(
+                "  ||r_true||={:.4e}, res_norm (est) = {:.4e}",
+                r_true_norm.to_f64().unwrap(),
+                phi_bar.abs().to_f64().unwrap()
+            );
 
             // --- Breakdown check ---
             if rho == T::zero() || beta_next == T::zero() {
-                println!("MINRES: breakdown at iter {j} (rho={:.4e}, beta_next={:.4e})", rho.to_f64().unwrap(), beta_next.to_f64().unwrap());
+                println!(
+                    "MINRES: breakdown at iter {j} (rho={:.4e}, beta_next={:.4e})",
+                    rho.to_f64().unwrap(),
+                    beta_next.to_f64().unwrap()
+                );
                 break;
             }
 
@@ -342,16 +390,17 @@ where
             }
             let (reason, sstat) = self.conv.check(phi_bar.abs(), beta1, j);
             stats = sstat.clone();
-            
+
             // Invoke monitors if provided
             if let Some(monitor_fns) = monitors {
                 for monitor in monitor_fns.iter() {
                     monitor(j, phi_bar.abs());
                 }
             }
-            
+
             if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
-                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol {
+                || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol
+            {
                 *x = x_best.clone();
                 stats.final_residual = phi_min;
                 return Ok(stats);
@@ -360,10 +409,13 @@ where
 
         *x = x_best;
         stats.final_residual = phi_min;
-        
+
         #[cfg(feature = "logging")]
-        trace!("MINRES solve completed after {} iterations", stats.iterations);
-        
+        trace!(
+            "MINRES solve completed after {} iterations",
+            stats.iterations
+        );
+
         Ok(stats)
     }
 }
@@ -399,13 +451,9 @@ mod tests {
         struct Spd3;
         impl MatVec<Vec<f64>> for Spd3 {
             fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
-                let a = [
-                    [4.0, 1.0, 0.0],
-                    [1.0, 3.0, 1.0],
-                    [0.0, 1.0, 2.0],
-                ];
+                let a = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
                 for i in 0..3 {
-                    y[i] = a[i][0]*x[0] + a[i][1]*x[1] + a[i][2]*x[2];
+                    y[i] = a[i][0] * x[0] + a[i][1] * x[1] + a[i][2] * x[2];
                 }
             }
         }
@@ -416,18 +464,31 @@ mod tests {
         a.matvec(&x_true, &mut b);
 
         // initial residual norm ‖b - A·0‖ = ‖b‖
-        let r0_norm = b.iter().map(|&v| v*v).sum::<f64>().sqrt();
+        let r0_norm = b.iter().map(|&v| v * v).sum::<f64>().sqrt();
 
         // run MINRES for up to 10 iters
         let mut x = vec![0.0; 3];
         let mut solver = MinresSolver::new(1e-6, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            )
+            .unwrap();
 
         // compute final residual norm
         let mut r_final = vec![0.0; 3];
         a.matvec(&x, &mut r_final);
-        for i in 0..3 { r_final[i] = b[i] - r_final[i]; }
-        let r_final_norm = r_final.iter().map(|&v| v*v).sum::<f64>().sqrt();
+        for i in 0..3 {
+            r_final[i] = b[i] - r_final[i];
+        }
+        let r_final_norm = r_final.iter().map(|&v| v * v).sum::<f64>().sqrt();
 
         // We require that it at least cut the residual by a factor of 2 (was 10)
         assert!(
@@ -465,20 +526,43 @@ mod tests {
 
         // Use a very tight tol so iter=1 is required
         let mut solver = MinresSolver::new(1e-14, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            )
+            .unwrap();
 
         // Since A=I, we expect x ≈ b exactly
         for i in 0..n {
             assert!(
                 (x[i] - b[i]).abs() <= 1e-10, // was 1e-12
-                "x[{}]={:.6}, but b[{}]={:.6}", i, x[i], i, b[i]
+                "x[{}]={:.6}, but b[{}]={:.6}",
+                i,
+                x[i],
+                i,
+                b[i]
             );
         }
         // Should converge in 1 or 2 iterations (allow up to 2)
-        assert!(stats.iterations <= 2, "expected at most 2 MINRES iterations on I");
-        assert!(matches!(stats.reason,
-            crate::utils::convergence::ConvergedReason::ConvergedRtol |
-            crate::utils::convergence::ConvergedReason::ConvergedAtol), "MINRES did not report Converged reason");
+        assert!(
+            stats.iterations <= 2,
+            "expected at most 2 MINRES iterations on I"
+        );
+        assert!(
+            matches!(
+                stats.reason,
+                crate::utils::convergence::ConvergedReason::ConvergedRtol
+                    | crate::utils::convergence::ConvergedReason::ConvergedAtol
+            ),
+            "MINRES did not report Converged reason"
+        );
     }
 
     #[test]
@@ -494,8 +578,8 @@ mod tests {
             /// Matrix-vector multiplication for symmetric indefinite 2x2
             fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
                 assert_eq!(x.len(), 2);
-                y[0] =     0.0 * x[0] + 1.0 * x[1];
-                y[1] =     1.0 * x[0] + 0.0 * x[1];
+                y[0] = 0.0 * x[0] + 1.0 * x[1];
+                y[1] = 1.0 * x[0] + 0.0 * x[1];
             }
         }
 
@@ -509,31 +593,50 @@ mod tests {
         // solve A·x = b with MINRES
         let mut x = vec![0.0; 2];
         let mut solver = MinresSolver::new(1e-12, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
+        let stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            )
+            .unwrap();
 
         // check final residual ‖b - A x‖₂
         let mut r = vec![0.0; 2];
         a.matvec(&x, &mut r);
-        for i in 0..2 { r[i] = b[i] - r[i]; }
-        let res_norm = (r[0]*r[0] + r[1]*r[1]).sqrt();
+        for i in 0..2 {
+            r[i] = b[i] - r[i];
+        }
+        let res_norm = (r[0] * r[0] + r[1] * r[1]).sqrt();
 
         let tol = 1e-8; // was 1e-10
         assert!(
             res_norm <= tol,
             "MINRES failed to drive residual small: ||r|| = {:.3e}, tol = {:.3e}",
-            res_norm, tol
+            res_norm,
+            tol
         );
-        assert!(matches!(stats.reason,
-            crate::utils::convergence::ConvergedReason::ConvergedRtol |
-            crate::utils::convergence::ConvergedReason::ConvergedAtol), "MINRES did not report Converged reason");
+        assert!(
+            matches!(
+                stats.reason,
+                crate::utils::convergence::ConvergedReason::ConvergedRtol
+                    | crate::utils::convergence::ConvergedReason::ConvergedAtol
+            ),
+            "MINRES did not report Converged reason"
+        );
     }
 
     #[test]
-    #[ignore] 
+    #[ignore]
     fn test_minres_with_monitors() {
         // Test that monitors are properly called during iterations
         use std::sync::{Arc, Mutex};
-        
+
         struct SimpleMatrix;
         impl MatVec<Vec<f64>> for SimpleMatrix {
             fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
@@ -550,40 +653,54 @@ mod tests {
         // Create monitor to capture iteration data
         let monitor_data = Arc::new(Mutex::new(Vec::new()));
         let monitor_data_clone = monitor_data.clone();
-        
+
         let monitor: Box<dyn Fn(usize, f64) + Send + Sync> = Box::new(move |iter, residual| {
             monitor_data_clone.lock().unwrap().push((iter, residual));
         });
         let monitors = vec![monitor];
 
         let mut solver = MinresSolver::new(1e-8, 10);
-        let _stats = solver.solve(
-            &a,
-            None,
-            &b,
-            &mut x,
-            crate::preconditioner::PcSide::Left,
-            &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-            Some(&monitors),
-            None
-        ).unwrap();
+        let _stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                Some(&monitors),
+                None,
+            )
+            .unwrap();
 
         // Verify monitors were called
         let captured_data = monitor_data.lock().unwrap();
-        assert!(!captured_data.is_empty(), "Monitors should have been called");
-        
+        assert!(
+            !captured_data.is_empty(),
+            "Monitors should have been called"
+        );
+
         // Verify iteration numbers are sequential starting from 1
         for (i, &(iter, _residual)) in captured_data.iter().enumerate() {
-            assert_eq!(iter, i + 1, "Iteration numbers should be sequential starting from 1");
+            assert_eq!(
+                iter,
+                i + 1,
+                "Iteration numbers should be sequential starting from 1"
+            );
         }
-        
+
         // Verify residual is decreasing (for this simple SPD case)
         for i in 1..captured_data.len() {
-            let prev_residual = captured_data[i-1].1;
+            let prev_residual = captured_data[i - 1].1;
             let curr_residual = captured_data[i].1;
-            assert!(curr_residual <= prev_residual * 2.0, // Allow some slack for indefinite matrices
-                "Residual should generally decrease: iter {} = {:.3e}, iter {} = {:.3e}", 
-                i, prev_residual, i+1, curr_residual);
+            assert!(
+                curr_residual <= prev_residual * 2.0, // Allow some slack for indefinite matrices
+                "Residual should generally decrease: iter {} = {:.3e}, iter {} = {:.3e}",
+                i,
+                prev_residual,
+                i + 1,
+                curr_residual
+            );
         }
     }
 }

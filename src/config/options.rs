@@ -6,10 +6,10 @@
 //! - Help now generated from registry: `print_help()`
 //! - Boolean flags accept presence or explicit on/off/true/false/1/0
 
-use std::str::FromStr;
 use crate::error::KError;
+use std::str::FromStr;
 
-use crate::config::options_core::{parse_as, Sink, Spec, expand_options_files};
+use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
 
 /// KSP (Krylov Solver) options.
@@ -37,15 +37,22 @@ pub struct KspOptions {
 /// PC options.
 #[derive(Debug, Default, Clone)]
 pub struct PcOptions {
+    /// Preconditioner type (e.g., "jacobi", "ilut").
     pub pc_type: Option<String>,
+    /// Level of fill for ILU(k).
     pub ilu_level: Option<usize>,
+    /// Degree for Chebyshev smoother.
     pub chebyshev_degree: Option<usize>,
+    /// Drop tolerance for ILUT.
     pub ilut_drop_tol: Option<f64>,
+    /// Maximum fill for ILUT.
     pub ilut_max_fill: Option<usize>,
     pub ilut_perm_tol: Option<f64>,
     pub reorder: Option<String>,
     pub scaling: Option<String>,
+    /// Overlap for Additive Schwarz.
     pub asm_overlap: Option<usize>,
+    /// Explicit subdomain sizes for ASM.
     pub asm_subdomains: Option<Vec<usize>>,
     pub asm_inner_pc: Option<String>,
     pub chebyshev_lambda_min: Option<f64>,
@@ -70,9 +77,13 @@ pub struct PcOptions {
     pub amg_min_iterations: Option<usize>,
     pub amg_ieee_checks: Option<bool>,
     pub amg_optimize_workspace: Option<bool>,
+    /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
+    /// Structured chain.
     pub chain: Option<Vec<PcOptions>>,
+    /// Relaxation factor for SOR, ω ∈ (0, 2).
     pub omega: Option<f64>,
+    /// Generic drop tolerance.
     pub drop_tol: Option<f64>,
 
     pub ilu_type: Option<String>,
@@ -113,31 +124,47 @@ pub struct PcOptions {
     pub reuse_policy: Option<String>,
 
     // Additional per-PC knobs
+    /// Block size for block Jacobi.
     pub jacobi_block_size: Option<usize>,
+    /// ILU variant ("iluk", "ilut", ...).
     pub ilu_variant: Option<String>,
+    /// Reordering strategy for ILU.
     pub ilu_reordering: Option<String>,
 
     // SOR
+    /// SOR relaxation ω ∈ (0,2).
     pub sor_omega: Option<f64>,
+    /// Number of SOR sweeps.
     pub sor_sweeps: Option<usize>,
+    /// Use symmetric SOR.
     pub sor_symmetric: Option<bool>,
+    /// Matrix side for SOR traversal.
     pub sor_mat_side: Option<String>,
 
     // Chebyshev
+    /// Degree of Chebyshev polynomial.
     pub cheb_degree: Option<usize>,
+    /// Lower eigenvalue estimate for Chebyshev.
     pub cheb_eig_lo: Option<f64>,
+    /// Upper eigenvalue estimate for Chebyshev.
     pub cheb_eig_hi: Option<f64>,
 
     // ASM
+    /// Hint for ASM subdomain size.
     pub asm_subdomain_size: Option<usize>,
 
     // AMG
+    /// AMG smoother name.
     pub amg_smoother: Option<String>,
 }
 
 /// Side enum kept as-is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PcSide { Left, Right, Symmetric }
+pub enum PcSide {
+    Left,
+    Right,
+    Symmetric,
+}
 
 impl FromStr for PcSide {
     type Err = KError;
@@ -183,7 +210,9 @@ impl Sink for KspOptions {
             "ksp_min_iter" => set_opt!(&mut self.min_iter, parse_as::<usize>(v, spec)?),
             "ksp_cf_tol" => set_opt!(&mut self.cf_tol, parse_as::<f64>(v, spec)?),
             "ksp_epsmac" => set_opt!(&mut self.epsmac, parse_as::<f64>(v, spec)?),
-            "ksp_guard_zero_residual" => set_opt!(&mut self.guard_zero_residual, parse_as::<f64>(v, spec)?),
+            "ksp_guard_zero_residual" => {
+                set_opt!(&mut self.guard_zero_residual, parse_as::<f64>(v, spec)?)
+            }
             "ksp_cg_norm" => set_opt!(&mut self.cg_norm, v.to_string()),
             "ksp_trust_region" => set_opt!(&mut self.trust_region, parse_as::<f64>(v, spec)?),
             "options_file" => Ok(()), // consumed earlier by expansion
@@ -206,9 +235,13 @@ impl Sink for PcOptions {
             "pc_ilu_optimize_workspace" => set_opt!(&mut self.ilu_optimize_workspace, v),
             "pc_superlu_replace_tiny_pivot" => set_opt!(&mut self.superlu_replace_tiny_pivots, v),
             "pc_superlu_static_pivoting" => set_opt!(&mut self.superlu_static_pivoting, v),
-            "pc_superlu_enable_3d_factorization" => set_opt!(&mut self.superlu_enable_3d_factorization, v),
+            "pc_superlu_enable_3d_factorization" => {
+                set_opt!(&mut self.superlu_enable_3d_factorization, v)
+            }
             "pc_superlu_async_panel_updates" => set_opt!(&mut self.superlu_async_panel_updates, v),
-            "pc_superlu_aggressive_memory_reuse" => set_opt!(&mut self.superlu_aggressive_memory_reuse, v),
+            "pc_superlu_aggressive_memory_reuse" => {
+                set_opt!(&mut self.superlu_aggressive_memory_reuse, v)
+            }
             _ => Err(KError::SolveError(format!("Unknown PC bool key: {key}"))),
         }
     }
@@ -217,7 +250,9 @@ impl Sink for PcOptions {
         match spec.key {
             "pc_type" => set_opt!(&mut self.pc_type, v.to_string()),
             "pc_ilu_levels" => set_opt!(&mut self.ilu_level, parse_as::<usize>(v, spec)?),
-            "pc_chebyshev_degree" => set_opt!(&mut self.chebyshev_degree, parse_as::<usize>(v, spec)?),
+            "pc_chebyshev_degree" => {
+                set_opt!(&mut self.chebyshev_degree, parse_as::<usize>(v, spec)?)
+            }
             "pc_ilut_drop_tol" => set_opt!(&mut self.ilut_drop_tol, parse_as::<f64>(v, spec)?),
             "pc_ilut_max_fill" => set_opt!(&mut self.ilut_max_fill, parse_as::<usize>(v, spec)?),
             "pc_ilut_perm_tol" => set_opt!(&mut self.ilut_perm_tol, parse_as::<f64>(v, spec)?),
@@ -225,59 +260,141 @@ impl Sink for PcOptions {
             "pc_scaling" => set_opt!(&mut self.scaling, v.to_lowercase()),
             "pc_asm_overlap" => set_opt!(&mut self.asm_overlap, parse_as::<usize>(v, spec)?),
             "pc_asm_subdomains" => {
-                let parsed: Result<Vec<usize>, _> = v.split(',').map(|s| s.trim().parse()).collect();
+                let parsed: Result<Vec<usize>, _> =
+                    v.split(',').map(|s| s.trim().parse()).collect();
                 match parsed {
                     Ok(vv) => set_opt!(&mut self.asm_subdomains, vv),
-                    Err(_) => Err(KError::SolveError(format!("Invalid {} value: {}. Use comma-separated usize list", spec.flag, v))),
+                    Err(_) => Err(KError::SolveError(format!(
+                        "Invalid {} value: {}. Use comma-separated usize list",
+                        spec.flag, v
+                    ))),
                 }
             }
             "pc_asm_inner_pc" => set_opt!(&mut self.asm_inner_pc, v.to_lowercase()),
-            "pc_chebyshev_lambda_min" => set_opt!(&mut self.chebyshev_lambda_min, parse_as::<f64>(v, spec)?),
-            "pc_chebyshev_lambda_max" => set_opt!(&mut self.chebyshev_lambda_max, parse_as::<f64>(v, spec)?),
+            "pc_chebyshev_lambda_min" => {
+                set_opt!(&mut self.chebyshev_lambda_min, parse_as::<f64>(v, spec)?)
+            }
+            "pc_chebyshev_lambda_max" => {
+                set_opt!(&mut self.chebyshev_lambda_max, parse_as::<f64>(v, spec)?)
+            }
             "pc_amg_levels" => set_opt!(&mut self.amg_levels, parse_as::<usize>(v, spec)?),
-            "pc_amg_strength_threshold" => set_opt!(&mut self.amg_strength_threshold, parse_as::<f64>(v, spec)?),
+            "pc_amg_strength_threshold" => {
+                set_opt!(&mut self.amg_strength_threshold, parse_as::<f64>(v, spec)?)
+            }
             "pc_amg_nu_pre" => set_opt!(&mut self.amg_nu_pre, parse_as::<usize>(v, spec)?),
             "pc_amg_nu_post" => set_opt!(&mut self.amg_nu_post, parse_as::<usize>(v, spec)?),
-            "pc_amg_coarse_threshold" => set_opt!(&mut self.amg_coarse_threshold, parse_as::<usize>(v, spec)?),
-            "pc_amg_max_coarse_size" => set_opt!(&mut self.amg_max_coarse_size, parse_as::<usize>(v, spec)?),
-            "pc_amg_min_coarse_size" => set_opt!(&mut self.amg_min_coarse_size, parse_as::<usize>(v, spec)?),
-            "pc_amg_truncation_factor" => set_opt!(&mut self.amg_truncation_factor, parse_as::<f64>(v, spec)?),
-            "pc_amg_max_elements_per_row" => set_opt!(&mut self.amg_max_elements_per_row, parse_as::<usize>(v, spec)?),
-            "pc_amg_interpolation_truncation" => set_opt!(&mut self.amg_interpolation_truncation, parse_as::<f64>(v, spec)?),
+            "pc_amg_coarse_threshold" => {
+                set_opt!(&mut self.amg_coarse_threshold, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_max_coarse_size" => {
+                set_opt!(&mut self.amg_max_coarse_size, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_min_coarse_size" => {
+                set_opt!(&mut self.amg_min_coarse_size, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_truncation_factor" => {
+                set_opt!(&mut self.amg_truncation_factor, parse_as::<f64>(v, spec)?)
+            }
+            "pc_amg_max_elements_per_row" => set_opt!(
+                &mut self.amg_max_elements_per_row,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_amg_interpolation_truncation" => set_opt!(
+                &mut self.amg_interpolation_truncation,
+                parse_as::<f64>(v, spec)?
+            ),
             "pc_amg_coarsen_type" => set_opt!(&mut self.amg_coarsen_type, v.to_lowercase()),
             "pc_amg_interp_type" => set_opt!(&mut self.amg_interp_type, v.to_lowercase()),
             "pc_amg_relax_type" => set_opt!(&mut self.amg_relax_type, v.to_lowercase()),
-            "pc_amg_logging_level" => set_opt!(&mut self.amg_logging_level, parse_as::<usize>(v, spec)?),
-            "pc_amg_print_level" => set_opt!(&mut self.amg_print_level, parse_as::<usize>(v, spec)?),
+            "pc_amg_logging_level" => {
+                set_opt!(&mut self.amg_logging_level, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_print_level" => {
+                set_opt!(&mut self.amg_print_level, parse_as::<usize>(v, spec)?)
+            }
             "pc_amg_tolerance" => set_opt!(&mut self.amg_tolerance, parse_as::<f64>(v, spec)?),
-            "pc_amg_max_iterations" => set_opt!(&mut self.amg_max_iterations, parse_as::<usize>(v, spec)?),
-            "pc_amg_min_iterations" => set_opt!(&mut self.amg_min_iterations, parse_as::<usize>(v, spec)?),
+            "pc_amg_max_iterations" => {
+                set_opt!(&mut self.amg_max_iterations, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_min_iterations" => {
+                set_opt!(&mut self.amg_min_iterations, parse_as::<usize>(v, spec)?)
+            }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_ilu_type" => set_opt!(&mut self.ilu_type, v.to_lowercase()),
-            "pc_ilu_level_of_fill" => set_opt!(&mut self.ilu_level_of_fill, parse_as::<usize>(v, spec)?),
-            "pc_ilu_max_fill_per_row" => set_opt!(&mut self.ilu_max_fill_per_row, parse_as::<usize>(v, spec)?),
-            "pc_ilu_offdiag_drop_tolerance" => set_opt!(&mut self.ilu_offdiag_drop_tolerance, parse_as::<f64>(v, spec)?),
-            "pc_ilu_schur_drop_tolerance" => set_opt!(&mut self.ilu_schur_drop_tolerance, parse_as::<f64>(v, spec)?),
+            "pc_ilu_level_of_fill" => {
+                set_opt!(&mut self.ilu_level_of_fill, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ilu_max_fill_per_row" => {
+                set_opt!(&mut self.ilu_max_fill_per_row, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ilu_offdiag_drop_tolerance" => set_opt!(
+                &mut self.ilu_offdiag_drop_tolerance,
+                parse_as::<f64>(v, spec)?
+            ),
+            "pc_ilu_schur_drop_tolerance" => set_opt!(
+                &mut self.ilu_schur_drop_tolerance,
+                parse_as::<f64>(v, spec)?
+            ),
             "pc_ilu_reordering_type" => set_opt!(&mut self.ilu_reordering_type, v.to_lowercase()),
             "pc_ilu_triangular_solve" => set_opt!(&mut self.ilu_triangular_solve, v.to_lowercase()),
-            "pc_ilu_lower_jacobi_iters" => set_opt!(&mut self.ilu_lower_jacobi_iters, parse_as::<usize>(v, spec)?),
-            "pc_ilu_upper_jacobi_iters" => set_opt!(&mut self.ilu_upper_jacobi_iters, parse_as::<usize>(v, spec)?),
+            "pc_ilu_lower_jacobi_iters" => set_opt!(
+                &mut self.ilu_lower_jacobi_iters,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_ilu_upper_jacobi_iters" => set_opt!(
+                &mut self.ilu_upper_jacobi_iters,
+                parse_as::<usize>(v, spec)?
+            ),
             "pc_ilu_tolerance" => set_opt!(&mut self.ilu_tolerance, parse_as::<f64>(v, spec)?),
-            "pc_ilu_max_iterations" => set_opt!(&mut self.ilu_max_iterations, parse_as::<usize>(v, spec)?),
-            "pc_ilu_logging_level" => set_opt!(&mut self.ilu_logging_level, parse_as::<usize>(v, spec)?),
-            "pc_ilu_print_level" => set_opt!(&mut self.ilu_print_level, parse_as::<usize>(v, spec)?),
-            "pc_ilu_pivot_threshold" => set_opt!(&mut self.ilu_pivot_threshold, parse_as::<f64>(v, spec)?),
-            "pc_superlu_pivot_threshold" => set_opt!(&mut self.superlu_pivot_threshold, parse_as::<f64>(v, spec)?),
-            "pc_superlu_print_level" => set_opt!(&mut self.superlu_print_level, parse_as::<u8>(v, spec)?),
-            "pc_superlu_column_permutation" => set_opt!(&mut self.superlu_column_permutation, v.to_string()),
-            "pc_superlu_row_permutation" => set_opt!(&mut self.superlu_row_permutation, v.to_string()),
-            "pc_superlu_iterative_refinement" => set_opt!(&mut self.superlu_iterative_refinement, v.to_string()),
-            "pc_superlu_panel_size" => set_opt!(&mut self.superlu_panel_size, parse_as::<usize>(v, spec)?),
-            "pc_superlu_process_grid_3d_depth" => set_opt!(&mut self.superlu_process_grid_3d_depth, parse_as::<usize>(v, spec)?),
-            "pc_superlu_memory_tradeoff_factor" => set_opt!(&mut self.superlu_memory_tradeoff_factor, parse_as::<f64>(v, spec)?),
-            "pc_superlu_max_concurrent_panels" => set_opt!(&mut self.superlu_max_concurrent_panels, parse_as::<usize>(v, spec)?),
-            "pc_superlu_workspace_memory_limit" => set_opt!(&mut self.superlu_workspace_memory_limit, parse_as::<usize>(v, spec)?),
-            "pc_superlu_preallocation_strategy" => set_opt!(&mut self.superlu_preallocation_strategy, v.to_lowercase()),
+            "pc_ilu_max_iterations" => {
+                set_opt!(&mut self.ilu_max_iterations, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ilu_logging_level" => {
+                set_opt!(&mut self.ilu_logging_level, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ilu_print_level" => {
+                set_opt!(&mut self.ilu_print_level, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ilu_pivot_threshold" => {
+                set_opt!(&mut self.ilu_pivot_threshold, parse_as::<f64>(v, spec)?)
+            }
+            "pc_superlu_pivot_threshold" => {
+                set_opt!(&mut self.superlu_pivot_threshold, parse_as::<f64>(v, spec)?)
+            }
+            "pc_superlu_print_level" => {
+                set_opt!(&mut self.superlu_print_level, parse_as::<u8>(v, spec)?)
+            }
+            "pc_superlu_column_permutation" => {
+                set_opt!(&mut self.superlu_column_permutation, v.to_string())
+            }
+            "pc_superlu_row_permutation" => {
+                set_opt!(&mut self.superlu_row_permutation, v.to_string())
+            }
+            "pc_superlu_iterative_refinement" => {
+                set_opt!(&mut self.superlu_iterative_refinement, v.to_string())
+            }
+            "pc_superlu_panel_size" => {
+                set_opt!(&mut self.superlu_panel_size, parse_as::<usize>(v, spec)?)
+            }
+            "pc_superlu_process_grid_3d_depth" => set_opt!(
+                &mut self.superlu_process_grid_3d_depth,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_superlu_memory_tradeoff_factor" => set_opt!(
+                &mut self.superlu_memory_tradeoff_factor,
+                parse_as::<f64>(v, spec)?
+            ),
+            "pc_superlu_max_concurrent_panels" => set_opt!(
+                &mut self.superlu_max_concurrent_panels,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_superlu_workspace_memory_limit" => set_opt!(
+                &mut self.superlu_workspace_memory_limit,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_superlu_preallocation_strategy" => {
+                set_opt!(&mut self.superlu_preallocation_strategy, v.to_lowercase())
+            }
             "pc_reuse_policy" => set_opt!(&mut self.reuse_policy, v.to_string()),
             "options_file" => Ok(()), // consumed earlier
             _ => Err(KError::SolveError(format!("Unknown PC key: {}", spec.key))),
@@ -291,7 +408,10 @@ impl Sink for PcOptions {
                 let cols = parse_as::<usize>(b, spec)?;
                 set_opt!(&mut self.superlu_process_grid, (rows, cols))
             }
-            _ => Err(KError::SolveError(format!("Unknown PC pair key: {}", spec.key))),
+            _ => Err(KError::SolveError(format!(
+                "Unknown PC pair key: {}",
+                spec.key
+            ))),
         }
     }
 }
@@ -299,7 +419,9 @@ impl Sink for PcOptions {
 // ---- Public constructors / precedence ----
 
 impl KspOptions {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn from_args(args: &[&str]) -> Result<Self, KError> {
         let mut me = Self::default();
@@ -322,60 +444,157 @@ impl KspOptions {
 
     pub fn from_env() -> Result<Self, KError> {
         let mut me = Self::default();
-        if let Ok(v) = std::env::var("KRYST_KSP_TYPE") { me.ksp_type = Some(v); }
-        if let Ok(v) = std::env::var("KRYST_KSP_RTOL") { me.rtol = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_RTOL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_ATOL") { me.atol = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_ATOL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_DTOL") { me.dtol = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_DTOL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_MAX_IT") { me.maxits = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MAX_IT: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_GMRES_RESTART") { me.restart = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_GMRES_RESTART: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_PC_SIDE") { PcSide::from_str(&v)?; me.pc_side = Some(v); }
-        if let Ok(v) = std::env::var("KRYST_MATRIX_FILE") { me.matrix_file = Some(v); }
-        if let Ok(v) = std::env::var("KRYST_RHS_FILE") { me.rhs_file = Some(v); }
-        if let Ok(v) = std::env::var("KRYST_KSP_MIN_ITER") { me.min_iter = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MIN_ITER: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_CF_TOL") { me.cf_tol = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_CF_TOL: {v}")))?); }
+        if let Ok(v) = std::env::var("KRYST_KSP_TYPE") {
+            me.ksp_type = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_RTOL") {
+            me.rtol = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_RTOL: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_ATOL") {
+            me.atol = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_ATOL: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_DTOL") {
+            me.dtol = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_DTOL: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_MAX_IT") {
+            me.maxits = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MAX_IT: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_GMRES_RESTART") {
+            me.restart = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_GMRES_RESTART: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_PC_SIDE") {
+            PcSide::from_str(&v)?;
+            me.pc_side = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_MATRIX_FILE") {
+            me.matrix_file = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_RHS_FILE") {
+            me.rhs_file = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_MIN_ITER") {
+            me.min_iter = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MIN_ITER: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CF_TOL") {
+            me.cf_tol = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_CF_TOL: {v}")))?,
+            );
+        }
         if let Ok(v) = std::env::var("KRYST_KSP_SKIP_REAL_R_CHECK") {
             let l = v.to_lowercase();
-            me.skip_real_r_check = Some(matches!(l.as_str(), "true"|"1"|"yes"|"on"));
+            me.skip_real_r_check = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
         }
-        if let Ok(v) = std::env::var("KRYST_KSP_EPSMAC") { me.epsmac = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_EPSMAC: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_GUARD_ZERO_RESIDUAL") { me.guard_zero_residual = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_GUARD_ZERO_RESIDUAL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_KSP_CG_NORM") { me.cg_norm = Some(v); }
-        if let Ok(v) = std::env::var("KRYST_KSP_CG_SINGLE_REDUCTION") { let l = v.to_lowercase(); me.cg_single_reduction = Some(matches!(l.as_str(), "true"|"1"|"yes"|"on")); }
-        if let Ok(v) = std::env::var("KRYST_KSP_TRUST_REGION") { me.trust_region = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_TRUST_REGION: {v}")))?); }
+        if let Ok(v) = std::env::var("KRYST_KSP_EPSMAC") {
+            me.epsmac = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_EPSMAC: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_GUARD_ZERO_RESIDUAL") {
+            me.guard_zero_residual = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_GUARD_ZERO_RESIDUAL: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_NORM") {
+            me.cg_norm = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_SINGLE_REDUCTION") {
+            let l = v.to_lowercase();
+            me.cg_single_reduction = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_TRUST_REGION") {
+            me.trust_region =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_KSP_TRUST_REGION: {v}"))
+                })?);
+        }
         Ok(me)
     }
 }
 
 impl PcOptions {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn from_args(args: &[&str]) -> Result<Self, KError> {
         let mut me = Self::default();
         registry().parse_into(args, &mut me, Some("-pc_"))?;
         // enum validations with friendly messages
         if let Some(ref t) = me.reorder {
-            match t.as_str() { "none"|"colamd"|"amd"|"rcm"|"cuthill_mckee" => {}, _ => return Err(KError::SolveError(format!("Invalid reorder type: {t}"))) }
+            match t.as_str() {
+                "none" | "colamd" | "amd" | "rcm" | "cuthill_mckee" => {}
+                _ => return Err(KError::SolveError(format!("Invalid reorder type: {t}"))),
+            }
         }
         if let Some(ref s) = me.scaling {
-            match s.as_str() { "none"|"diagonal"|"symmetric" => {}, _ => return Err(KError::SolveError(format!("Invalid scaling type: {s}"))) }
+            match s.as_str() {
+                "none" | "diagonal" | "symmetric" => {}
+                _ => return Err(KError::SolveError(format!("Invalid scaling type: {s}"))),
+            }
         }
         if let Some(ref t) = me.ilu_type {
-            match t.as_str() { "ilu0"|"iluk"|"ilut"|"milu0"|"block_jacobi"|"gmres_iluk"|"gmres_ilut" => {}, _ => return Err(KError::SolveError(format!("Invalid ilu_type: {t}"))) }
+            match t.as_str() {
+                "ilu0" | "iluk" | "ilut" | "milu0" | "block_jacobi" | "gmres_iluk"
+                | "gmres_ilut" => {}
+                _ => return Err(KError::SolveError(format!("Invalid ilu_type: {t}"))),
+            }
         }
         if let Some(ref t) = me.ilu_reordering_type {
-            match t.as_str() { "none"|"rcm"|"amd"|"natural" => {}, _ => return Err(KError::SolveError(format!("Invalid ilu_reordering_type: {t}"))) }
+            match t.as_str() {
+                "none" | "rcm" | "amd" | "natural" => {}
+                _ => {
+                    return Err(KError::SolveError(format!(
+                        "Invalid ilu_reordering_type: {t}"
+                    )));
+                }
+            }
         }
         if let Some(ref t) = me.ilu_triangular_solve {
-            match t.as_str() { "exact"|"iterative" => {}, _ => return Err(KError::SolveError(format!("Invalid ilu_triangular_solve: {t}"))) }
+            match t.as_str() {
+                "exact" | "iterative" => {}
+                _ => {
+                    return Err(KError::SolveError(format!(
+                        "Invalid ilu_triangular_solve: {t}"
+                    )));
+                }
+            }
         }
         if let Some(ref t) = me.amg_coarsen_type {
-            match t.as_str() { "rs"|"hmis"|"pmis"|"falgout" => {}, _ => return Err(KError::SolveError(format!("Invalid amg_coarsen_type: {t}"))) }
+            match t.as_str() {
+                "rs" | "hmis" | "pmis" | "falgout" => {}
+                _ => return Err(KError::SolveError(format!("Invalid amg_coarsen_type: {t}"))),
+            }
         }
         if let Some(ref t) = me.amg_interp_type {
-            match t.as_str() { "classical"|"direct"|"multipass"|"extended"|"standard" => {}, _ => return Err(KError::SolveError(format!("Invalid amg_interp_type: {t}"))) }
+            match t.as_str() {
+                "classical" | "direct" | "multipass" | "extended" | "standard" => {}
+                _ => return Err(KError::SolveError(format!("Invalid amg_interp_type: {t}"))),
+            }
         }
         if let Some(ref t) = me.amg_relax_type {
-            match t.as_str() { "jacobi"|"gs"|"gsr"|"sgs"|"hgs"|"l1jacobi"|"chebyshev" => {}, _ => return Err(KError::SolveError(format!("Invalid amg_relax_type: {t}"))) }
+            match t.as_str() {
+                "jacobi" | "gs" | "gsr" | "sgs" | "hgs" | "l1jacobi" | "chebyshev" => {}
+                _ => return Err(KError::SolveError(format!("Invalid amg_relax_type: {t}"))),
+            }
         }
         Ok(me)
     }
@@ -387,14 +606,44 @@ impl PcOptions {
 
     pub fn from_env() -> Result<Self, KError> {
         let mut me = Self::default();
-        if let Ok(v) = std::env::var("KRYST_PC_TYPE") { me.pc_type = Some(v); }
-        if let Ok(v) = std::env::var("KRYST_PC_ILU_LEVELS") { me.ilu_level = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILU_LEVELS: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_PC_CHEBYSHEV_DEGREE") { me.chebyshev_degree = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_CHEBYSHEV_DEGREE: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_PC_ILUT_DROP_TOL") { me.ilut_drop_tol = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILUT_DROP_TOL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_PC_ILUT_MAX_FILL") { me.ilut_max_fill = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILUT_MAX_FILL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_PC_ILUT_PERM_TOL") { me.ilut_perm_tol = Some(v.parse().map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILUT_PERM_TOL: {v}")))?); }
-        if let Ok(v) = std::env::var("KRYST_PC_REORDER") { me.reorder = Some(v.to_lowercase()); }
-        if let Ok(v) = std::env::var("KRYST_PC_SCALING") { me.scaling = Some(v.to_lowercase()); }
+        if let Ok(v) = std::env::var("KRYST_PC_TYPE") {
+            me.pc_type = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_LEVELS") {
+            me.ilu_level =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILU_LEVELS: {v}"))
+                })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_CHEBYSHEV_DEGREE") {
+            me.chebyshev_degree = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_CHEBYSHEV_DEGREE: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUT_DROP_TOL") {
+            me.ilut_drop_tol =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILUT_DROP_TOL: {v}"))
+                })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUT_MAX_FILL") {
+            me.ilut_max_fill =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILUT_MAX_FILL: {v}"))
+                })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUT_PERM_TOL") {
+            me.ilut_perm_tol =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILUT_PERM_TOL: {v}"))
+                })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_REORDER") {
+            me.reorder = Some(v.to_lowercase());
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SCALING") {
+            me.scaling = Some(v.to_lowercase());
+        }
         Ok(me)
     }
 }
@@ -420,7 +669,10 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
     let mut args = args.to_vec();
 
     // help?
-    if args.iter().any(|a| a == "-help" || a == "--help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "-help" || a == "--help" || a == "-h")
+    {
         print_help();
         std::process::exit(0);
     }
@@ -431,40 +683,108 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 
     // start from environment
     let mut ksp_opts = KspOptions::from_env()?;
-    let mut pc_opts  = PcOptions::from_env()?;
+    let mut pc_opts = PcOptions::from_env()?;
 
     // parse CLI and override env/options-file (we just parse whole argv once per group)
     let as_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let cli_ksp = KspOptions::from_args(&as_refs)?;
-    let cli_pc  = PcOptions::from_args(&as_refs)?;
+    let cli_pc = PcOptions::from_args(&as_refs)?;
 
     // overlay helper
     macro_rules! overlay {
         ($lhs:expr, $rhs:expr, $($f:ident),+ $(,)?) => { $( if $rhs.$f.is_some() { $lhs.$f = $rhs.$f; } )+ };
     }
 
-    overlay!(ksp_opts, cli_ksp,
-        ksp_type, rtol, atol, dtol, maxits, restart, pc_side, matrix_file, rhs_file,
-        min_iter, cf_tol, skip_real_r_check, epsmac, guard_zero_residual,
+    overlay!(
+        ksp_opts,
+        cli_ksp,
+        ksp_type,
+        rtol,
+        atol,
+        dtol,
+        maxits,
+        restart,
+        pc_side,
+        matrix_file,
+        rhs_file,
+        min_iter,
+        cf_tol,
+        skip_real_r_check,
+        epsmac,
+        guard_zero_residual,
     );
-    overlay!(pc_opts,  cli_pc,
-        pc_type, ilu_level, chebyshev_degree, ilut_drop_tol, ilut_max_fill, ilut_perm_tol,
-        reorder, scaling, asm_overlap, asm_subdomains, asm_inner_pc,
-        chebyshev_lambda_min, chebyshev_lambda_max,
-        amg_levels, amg_strength_threshold, amg_nu_pre, amg_nu_post, amg_coarse_threshold,
-        amg_max_coarse_size, amg_min_coarse_size, amg_truncation_factor, amg_max_elements_per_row,
-        amg_interpolation_truncation, amg_coarsen_type, amg_interp_type, amg_relax_type,
-        amg_logging_level, amg_print_level, amg_tolerance, amg_max_iterations, amg_min_iterations,
-        amg_ieee_checks, amg_optimize_workspace, pc_chain, omega, drop_tol,
-        ilu_type, ilu_level_of_fill, ilu_max_fill_per_row, ilu_offdiag_drop_tolerance,
-        ilu_schur_drop_tolerance, ilu_reordering_type, ilu_triangular_solve, ilu_lower_jacobi_iters,
-        ilu_upper_jacobi_iters, ilu_tolerance, ilu_max_iterations, ilu_logging_level, ilu_print_level,
-        ilu_ieee_checks, ilu_pivot_monitoring, ilu_optimize_workspace, ilu_pivot_threshold,
-        superlu_pivot_threshold, superlu_replace_tiny_pivots, superlu_print_level, superlu_process_grid,
-        superlu_column_permutation, superlu_row_permutation, superlu_iterative_refinement,
-        superlu_static_pivoting, superlu_panel_size, superlu_enable_3d_factorization,
-        superlu_process_grid_3d_depth, superlu_memory_tradeoff_factor, superlu_max_concurrent_panels,
-        superlu_async_panel_updates, superlu_workspace_memory_limit, superlu_aggressive_memory_reuse,
+    overlay!(
+        pc_opts,
+        cli_pc,
+        pc_type,
+        ilu_level,
+        chebyshev_degree,
+        ilut_drop_tol,
+        ilut_max_fill,
+        ilut_perm_tol,
+        reorder,
+        scaling,
+        asm_overlap,
+        asm_subdomains,
+        asm_inner_pc,
+        chebyshev_lambda_min,
+        chebyshev_lambda_max,
+        amg_levels,
+        amg_strength_threshold,
+        amg_nu_pre,
+        amg_nu_post,
+        amg_coarse_threshold,
+        amg_max_coarse_size,
+        amg_min_coarse_size,
+        amg_truncation_factor,
+        amg_max_elements_per_row,
+        amg_interpolation_truncation,
+        amg_coarsen_type,
+        amg_interp_type,
+        amg_relax_type,
+        amg_logging_level,
+        amg_print_level,
+        amg_tolerance,
+        amg_max_iterations,
+        amg_min_iterations,
+        amg_ieee_checks,
+        amg_optimize_workspace,
+        pc_chain,
+        omega,
+        drop_tol,
+        ilu_type,
+        ilu_level_of_fill,
+        ilu_max_fill_per_row,
+        ilu_offdiag_drop_tolerance,
+        ilu_schur_drop_tolerance,
+        ilu_reordering_type,
+        ilu_triangular_solve,
+        ilu_lower_jacobi_iters,
+        ilu_upper_jacobi_iters,
+        ilu_tolerance,
+        ilu_max_iterations,
+        ilu_logging_level,
+        ilu_print_level,
+        ilu_ieee_checks,
+        ilu_pivot_monitoring,
+        ilu_optimize_workspace,
+        ilu_pivot_threshold,
+        superlu_pivot_threshold,
+        superlu_replace_tiny_pivots,
+        superlu_print_level,
+        superlu_process_grid,
+        superlu_column_permutation,
+        superlu_row_permutation,
+        superlu_iterative_refinement,
+        superlu_static_pivoting,
+        superlu_panel_size,
+        superlu_enable_3d_factorization,
+        superlu_process_grid_3d_depth,
+        superlu_memory_tradeoff_factor,
+        superlu_max_concurrent_panels,
+        superlu_async_panel_updates,
+        superlu_workspace_memory_limit,
+        superlu_aggressive_memory_reuse,
         superlu_preallocation_strategy,
     );
 
@@ -496,7 +816,7 @@ mod tests {
             "-options_file".to_string(),
             tmp.path().to_str().unwrap().to_string(),
             "-pc_type".to_string(),
-            "jacobi".to_string()
+            "jacobi".to_string(),
         ];
         let (ksp, pc) = parse_all_options(&args).unwrap();
         assert_eq!(ksp.ksp_type.as_deref(), Some("gmres"));
@@ -537,7 +857,7 @@ mod old_tests {
     fn test_ksp_options_from_args_basic() {
         let args = vec!["-ksp_type", "gmres", "-ksp_rtol", "1e-8"];
         let opts = KspOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.ksp_type, Some("gmres".to_string()));
         assert_eq!(opts.rtol, Some(1e-8));
         assert!(opts.atol.is_none());
@@ -546,16 +866,23 @@ mod old_tests {
     #[test]
     fn test_ksp_options_from_args_all_options() {
         let args = vec![
-            "-ksp_type", "cg",
-            "-ksp_rtol", "1e-6",
-            "-ksp_atol", "1e-12", 
-            "-ksp_dtol", "1e3",
-            "-ksp_max_it", "1000",
-            "-ksp_gmres_restart", "30",
-            "-ksp_pc_side", "left"
+            "-ksp_type",
+            "cg",
+            "-ksp_rtol",
+            "1e-6",
+            "-ksp_atol",
+            "1e-12",
+            "-ksp_dtol",
+            "1e3",
+            "-ksp_max_it",
+            "1000",
+            "-ksp_gmres_restart",
+            "30",
+            "-ksp_pc_side",
+            "left",
         ];
         let opts = KspOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.ksp_type, Some("cg".to_string()));
         assert_eq!(opts.rtol, Some(1e-6));
         assert_eq!(opts.atol, Some(1e-12));
@@ -568,17 +895,25 @@ mod old_tests {
     #[test]
     fn test_ksp_options_gmres_advanced() {
         let args = vec![
-            "-ksp_type", "gmres",
-            "-ksp_rtol", "1e-8",
-            "-ksp_gmres_restart", "50",
-            "-ksp_min_iter", "5",
-            "-ksp_cf_tol", "0.9",
-            "-ksp_skip_real_r_check", "true",
-            "-ksp_epsmac", "1e-15",
-            "-ksp_guard_zero_residual", "1e-14"
+            "-ksp_type",
+            "gmres",
+            "-ksp_rtol",
+            "1e-8",
+            "-ksp_gmres_restart",
+            "50",
+            "-ksp_min_iter",
+            "5",
+            "-ksp_cf_tol",
+            "0.9",
+            "-ksp_skip_real_r_check",
+            "true",
+            "-ksp_epsmac",
+            "1e-15",
+            "-ksp_guard_zero_residual",
+            "1e-14",
         ];
         let opts = KspOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.ksp_type, Some("gmres".to_string()));
         assert_eq!(opts.rtol, Some(1e-8));
         assert_eq!(opts.restart, Some(50));
@@ -606,7 +941,12 @@ mod old_tests {
         for (bool_str, expected) in test_cases {
             let args = vec!["-ksp_skip_real_r_check", bool_str];
             let opts = KspOptions::from_args(&args).unwrap();
-            assert_eq!(opts.skip_real_r_check, Some(expected), "Failed for input: {}", bool_str);
+            assert_eq!(
+                opts.skip_real_r_check,
+                Some(expected),
+                "Failed for input: {}",
+                bool_str
+            );
         }
     }
 
@@ -614,7 +954,7 @@ mod old_tests {
     fn test_pc_options_from_args_basic() {
         let args = vec!["-pc_type", "jacobi"];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("jacobi".to_string()));
         assert!(opts.ilu_level.is_none());
     }
@@ -622,14 +962,19 @@ mod old_tests {
     #[test]
     fn test_pc_options_from_args_all_options() {
         let args = vec![
-            "-pc_type", "ilu",
-            "-pc_ilu_levels", "5",
-            "-pc_chebyshev_degree", "10",
-            "-pc_ilut_drop_tol", "1e-4",
-            "-pc_ilut_max_fill", "20"
+            "-pc_type",
+            "ilu",
+            "-pc_ilu_levels",
+            "5",
+            "-pc_chebyshev_degree",
+            "10",
+            "-pc_ilut_drop_tol",
+            "1e-4",
+            "-pc_ilut_max_fill",
+            "20",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("ilu".to_string()));
         assert_eq!(opts.ilu_level, Some(5));
         assert_eq!(opts.chebyshev_degree, Some(10));
@@ -640,12 +985,15 @@ mod old_tests {
     #[test]
     fn test_pc_options_amg_basic() {
         let args = vec![
-            "-pc_type", "amg",
-            "-pc_amg_levels", "15",
-            "-pc_amg_strength_threshold", "0.5"
+            "-pc_type",
+            "amg",
+            "-pc_amg_levels",
+            "15",
+            "-pc_amg_strength_threshold",
+            "0.5",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("amg".to_string()));
         assert_eq!(opts.amg_levels, Some(15));
         assert_eq!(opts.amg_strength_threshold, Some(0.5));
@@ -654,30 +1002,51 @@ mod old_tests {
     #[test]
     fn test_pc_options_amg_comprehensive() {
         let args = vec![
-            "-pc_type", "amg",
-            "-pc_amg_levels", "20",
-            "-pc_amg_strength_threshold", "0.3",
-            "-pc_amg_nu_pre", "2",
-            "-pc_amg_nu_post", "2",
-            "-pc_amg_coarse_threshold", "5",
-            "-pc_amg_max_coarse_size", "100",
-            "-pc_amg_min_coarse_size", "2",
-            "-pc_amg_truncation_factor", "0.1",
-            "-pc_amg_max_elements_per_row", "8",
-            "-pc_amg_interpolation_truncation", "0.05",
-            "-pc_amg_coarsen_type", "hmis",
-            "-pc_amg_interp_type", "classical",
-            "-pc_amg_relax_type", "gs",
-            "-pc_amg_logging_level", "1",
-            "-pc_amg_print_level", "2",
-            "-pc_amg_tolerance", "1e-10",
-            "-pc_amg_max_iterations", "200",
-            "-pc_amg_min_iterations", "5",
-            "-pc_amg_ieee_checks", "true",
-            "-pc_amg_optimize_workspace", "false"
+            "-pc_type",
+            "amg",
+            "-pc_amg_levels",
+            "20",
+            "-pc_amg_strength_threshold",
+            "0.3",
+            "-pc_amg_nu_pre",
+            "2",
+            "-pc_amg_nu_post",
+            "2",
+            "-pc_amg_coarse_threshold",
+            "5",
+            "-pc_amg_max_coarse_size",
+            "100",
+            "-pc_amg_min_coarse_size",
+            "2",
+            "-pc_amg_truncation_factor",
+            "0.1",
+            "-pc_amg_max_elements_per_row",
+            "8",
+            "-pc_amg_interpolation_truncation",
+            "0.05",
+            "-pc_amg_coarsen_type",
+            "hmis",
+            "-pc_amg_interp_type",
+            "classical",
+            "-pc_amg_relax_type",
+            "gs",
+            "-pc_amg_logging_level",
+            "1",
+            "-pc_amg_print_level",
+            "2",
+            "-pc_amg_tolerance",
+            "1e-10",
+            "-pc_amg_max_iterations",
+            "200",
+            "-pc_amg_min_iterations",
+            "5",
+            "-pc_amg_ieee_checks",
+            "true",
+            "-pc_amg_optimize_workspace",
+            "false",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("amg".to_string()));
         assert_eq!(opts.amg_levels, Some(20));
         assert_eq!(opts.amg_strength_threshold, Some(0.3));
@@ -706,7 +1075,7 @@ mod old_tests {
         let args = vec!["-pc_amg_coarsen_type", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid amg_coarsen_type"));
         } else {
@@ -719,7 +1088,7 @@ mod old_tests {
         let args = vec!["-pc_amg_interp_type", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid amg_interp_type"));
         } else {
@@ -732,7 +1101,7 @@ mod old_tests {
         let args = vec!["-pc_amg_relax_type", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid amg_relax_type"));
         } else {
@@ -749,7 +1118,7 @@ mod old_tests {
             let opts = PcOptions::from_args(&args).unwrap();
             assert_eq!(opts.amg_ieee_checks, Some(true));
         }
-        
+
         // Test false values
         let false_values = vec!["false", "0", "no", "off"];
         for value in false_values {
@@ -762,13 +1131,17 @@ mod old_tests {
     #[test]
     fn test_pc_options_asm_options() {
         let args = vec![
-            "-pc_type", "asm",
-            "-pc_asm_overlap", "2",
-            "-pc_asm_subdomains", "0,1,2,3",
-            "-pc_asm_inner_pc", "ilu"
+            "-pc_type",
+            "asm",
+            "-pc_asm_overlap",
+            "2",
+            "-pc_asm_subdomains",
+            "0,1,2,3",
+            "-pc_asm_inner_pc",
+            "ilu",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("asm".to_string()));
         assert_eq!(opts.asm_overlap, Some(2));
         assert_eq!(opts.asm_subdomains, Some(vec![0, 1, 2, 3]));
@@ -778,13 +1151,17 @@ mod old_tests {
     #[test]
     fn test_pc_options_chebyshev_options() {
         let args = vec![
-            "-pc_type", "chebyshev",
-            "-pc_chebyshev_degree", "5",
-            "-pc_chebyshev_lambda_min", "0.1",
-            "-pc_chebyshev_lambda_max", "10.0"
+            "-pc_type",
+            "chebyshev",
+            "-pc_chebyshev_degree",
+            "5",
+            "-pc_chebyshev_lambda_min",
+            "0.1",
+            "-pc_chebyshev_lambda_max",
+            "10.0",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("chebyshev".to_string()));
         assert_eq!(opts.chebyshev_degree, Some(5));
         assert_eq!(opts.chebyshev_lambda_min, Some(0.1));
@@ -793,12 +1170,9 @@ mod old_tests {
 
     #[test]
     fn test_pc_options_reorder_and_scaling() {
-        let args = vec![
-            "-pc_reorder", "colamd",
-            "-pc_scaling", "diagonal"
-        ];
+        let args = vec!["-pc_reorder", "colamd", "-pc_scaling", "diagonal"];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.reorder, Some("colamd".to_string()));
         assert_eq!(opts.scaling, Some("diagonal".to_string()));
     }
@@ -808,7 +1182,7 @@ mod old_tests {
         let args = vec!["-pc_reorder", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid reorder type"));
         } else {
@@ -821,7 +1195,7 @@ mod old_tests {
         let args = vec!["-pc_scaling", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid scaling type"));
         } else {
@@ -833,34 +1207,52 @@ mod old_tests {
     fn test_pc_options_chain() {
         let args = vec!["-pc_chain", "jacobi,ilu,amg"];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_chain, Some("jacobi,ilu,amg".to_string()));
     }
 
     #[test]
     fn test_pc_options_ilu_comprehensive() {
         let args = vec![
-            "-pc_type", "ilu",
-            "-pc_ilu_type", "ilut",
-            "-pc_ilu_level_of_fill", "3",
-            "-pc_ilu_max_fill_per_row", "50",
-            "-pc_ilu_offdiag_drop_tolerance", "1e-5",
-            "-pc_ilu_schur_drop_tolerance", "1e-6",
-            "-pc_ilu_reordering_type", "rcm",
-            "-pc_ilu_triangular_solve", "iterative",
-            "-pc_ilu_lower_jacobi_iters", "2",
-            "-pc_ilu_upper_jacobi_iters", "3",
-            "-pc_ilu_tolerance", "1e-8",
-            "-pc_ilu_max_iterations", "10",
-            "-pc_ilu_logging_level", "2",
-            "-pc_ilu_print_level", "1",
-            "-pc_ilu_ieee_checks", "true",
-            "-pc_ilu_pivot_monitoring", "false",
-            "-pc_ilu_optimize_workspace", "true",
-            "-pc_ilu_pivot_threshold", "1e-10"
+            "-pc_type",
+            "ilu",
+            "-pc_ilu_type",
+            "ilut",
+            "-pc_ilu_level_of_fill",
+            "3",
+            "-pc_ilu_max_fill_per_row",
+            "50",
+            "-pc_ilu_offdiag_drop_tolerance",
+            "1e-5",
+            "-pc_ilu_schur_drop_tolerance",
+            "1e-6",
+            "-pc_ilu_reordering_type",
+            "rcm",
+            "-pc_ilu_triangular_solve",
+            "iterative",
+            "-pc_ilu_lower_jacobi_iters",
+            "2",
+            "-pc_ilu_upper_jacobi_iters",
+            "3",
+            "-pc_ilu_tolerance",
+            "1e-8",
+            "-pc_ilu_max_iterations",
+            "10",
+            "-pc_ilu_logging_level",
+            "2",
+            "-pc_ilu_print_level",
+            "1",
+            "-pc_ilu_ieee_checks",
+            "true",
+            "-pc_ilu_pivot_monitoring",
+            "false",
+            "-pc_ilu_optimize_workspace",
+            "true",
+            "-pc_ilu_pivot_threshold",
+            "1e-10",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("ilu".to_string()));
         assert_eq!(opts.ilu_type, Some("ilut".to_string()));
         assert_eq!(opts.ilu_level_of_fill, Some(3));
@@ -886,7 +1278,7 @@ mod old_tests {
         let args = vec!["-pc_ilu_type", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid ilu_type"));
         } else {
@@ -899,7 +1291,7 @@ mod old_tests {
         let args = vec!["-pc_ilu_reordering_type", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid ilu_reordering_type"));
         } else {
@@ -912,7 +1304,7 @@ mod old_tests {
         let args = vec!["-pc_ilu_triangular_solve", "invalid"];
         let result = PcOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Invalid ilu_triangular_solve"));
         } else {
@@ -929,8 +1321,8 @@ mod old_tests {
             let opts = PcOptions::from_args(&args).unwrap();
             assert_eq!(opts.ilu_ieee_checks, Some(true));
         }
-        
-        // Test false values  
+
+        // Test false values
         let false_values = vec!["false", "0", "no", "off"];
         for value in false_values {
             let args = vec!["-pc_ilu_pivot_monitoring", value];
@@ -942,12 +1334,15 @@ mod old_tests {
     #[test]
     fn test_pc_options_ilu_basic() {
         let args = vec![
-            "-pc_type", "ilu",
-            "-pc_ilu_type", "ilu0",
-            "-pc_ilu_reordering_type", "none"
+            "-pc_type",
+            "ilu",
+            "-pc_ilu_type",
+            "ilu0",
+            "-pc_ilu_reordering_type",
+            "none",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("ilu".to_string()));
         assert_eq!(opts.ilu_type, Some("ilu0".to_string()));
         assert_eq!(opts.ilu_reordering_type, Some("none".to_string()));
@@ -958,7 +1353,7 @@ mod old_tests {
         let args = vec!["-ksp_type"];
         let result = KspOptions::from_args(&args);
         assert!(result.is_err());
-        
+
         if let Err(KError::SolveError(msg)) = result {
             assert!(msg.contains("Missing value for -ksp_type"));
         } else {
@@ -988,7 +1383,7 @@ mod old_tests {
         assert_eq!(PcSide::from_str("RIGHT").unwrap(), PcSide::Right);
         assert_eq!(PcSide::from_str("symmetric").unwrap(), PcSide::Symmetric);
         assert_eq!(PcSide::from_str("SYMMETRIC").unwrap(), PcSide::Symmetric);
-        
+
         let result = PcSide::from_str("unknown");
         assert!(result.is_err());
     }
@@ -998,7 +1393,7 @@ mod old_tests {
         assert_eq!(PcSide::Left, PcSide::Left);
         assert_eq!(PcSide::Right, PcSide::Right);
         assert_eq!(PcSide::Symmetric, PcSide::Symmetric);
-        
+
         assert_ne!(PcSide::Left, PcSide::Right);
         assert_ne!(PcSide::Left, PcSide::Symmetric);
         assert_ne!(PcSide::Right, PcSide::Symmetric);
@@ -1014,13 +1409,17 @@ mod old_tests {
     fn test_options_skip_non_ksp_args() {
         let args = vec![
             "program_name",
-            "-some_other_option", "value",
-            "-ksp_type", "gmres",
-            "-another_option", "value2",
-            "-ksp_rtol", "1e-6"
+            "-some_other_option",
+            "value",
+            "-ksp_type",
+            "gmres",
+            "-another_option",
+            "value2",
+            "-ksp_rtol",
+            "1e-6",
         ];
         let opts = KspOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.ksp_type, Some("gmres".to_string()));
         assert_eq!(opts.rtol, Some(1e-6));
     }
@@ -1029,12 +1428,15 @@ mod old_tests {
     fn test_options_skip_non_pc_args() {
         let args = vec![
             "program_name",
-            "-some_option", "value",
-            "-pc_type", "jacobi",
-            "-another_option", "value2"
+            "-some_option",
+            "value",
+            "-pc_type",
+            "jacobi",
+            "-another_option",
+            "value2",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("jacobi".to_string()));
     }
 
@@ -1044,22 +1446,19 @@ mod old_tests {
             "-ksp_type".to_string(),
             "bicgstab".to_string(),
             "-ksp_rtol".to_string(),
-            "1e-7".to_string()
+            "1e-7".to_string(),
         ];
         let opts = KspOptions::from_strings(&args).unwrap();
-        
+
         assert_eq!(opts.ksp_type, Some("bicgstab".to_string()));
         assert_eq!(opts.rtol, Some(1e-7));
     }
 
     #[test]
     fn test_pc_options_from_strings() {
-        let args = vec![
-            "-pc_type".to_string(),
-            "ilu0".to_string()
-        ];
+        let args = vec!["-pc_type".to_string(), "ilu0".to_string()];
         let opts = PcOptions::from_strings(&args).unwrap();
-        
+
         assert_eq!(opts.pc_type, Some("ilu0".to_string()));
     }
 
@@ -1068,7 +1467,7 @@ mod old_tests {
         let mut opts1 = KspOptions::new();
         opts1.ksp_type = Some("gmres".to_string());
         opts1.rtol = Some(1e-8);
-        
+
         let opts2 = opts1.clone();
         assert_eq!(opts1.ksp_type, opts2.ksp_type);
         assert_eq!(opts1.rtol, opts2.rtol);
@@ -1078,7 +1477,7 @@ mod old_tests {
     fn test_options_debug() {
         let mut opts = KspOptions::new();
         opts.ksp_type = Some("cg".to_string());
-        
+
         let debug_str = format!("{:?}", opts);
         assert!(debug_str.contains("cg"));
     }
@@ -1088,7 +1487,7 @@ mod old_tests {
         let args: Vec<&str> = vec![];
         let ksp_opts = KspOptions::from_args(&args).unwrap();
         let pc_opts = PcOptions::from_args(&args).unwrap();
-        
+
         // Should be equivalent to default options
         assert!(ksp_opts.ksp_type.is_none());
         assert!(pc_opts.pc_type.is_none());
@@ -1097,10 +1496,7 @@ mod old_tests {
     #[test]
     fn test_multiple_same_option() {
         // Last occurrence should win
-        let args = vec![
-            "-ksp_type", "cg",
-            "-ksp_type", "gmres"
-        ];
+        let args = vec!["-ksp_type", "cg", "-ksp_type", "gmres"];
         let opts = KspOptions::from_args(&args).unwrap();
         assert_eq!(opts.ksp_type, Some("gmres".to_string()));
     }
@@ -1108,15 +1504,19 @@ mod old_tests {
     #[test]
     fn test_mixed_ksp_pc_args() {
         let args = vec![
-            "-ksp_type", "cg",
-            "-pc_type", "jacobi",
-            "-ksp_rtol", "1e-6",
-            "-pc_ilu_levels", "3"
+            "-ksp_type",
+            "cg",
+            "-pc_type",
+            "jacobi",
+            "-ksp_rtol",
+            "1e-6",
+            "-pc_ilu_levels",
+            "3",
         ];
-        
+
         let ksp_opts = KspOptions::from_args(&args).unwrap();
         let pc_opts = PcOptions::from_args(&args).unwrap();
-        
+
         assert_eq!(ksp_opts.ksp_type, Some("cg".to_string()));
         assert_eq!(ksp_opts.rtol, Some(1e-6));
         assert_eq!(pc_opts.pc_type, Some("jacobi".to_string()));

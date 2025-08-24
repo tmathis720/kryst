@@ -17,17 +17,17 @@
 //! tuner.add_solver_types(vec![SolverType::Cg, SolverType::Gmres]);
 //! tuner.add_pc_types(vec![PcType::Jacobi, PcType::Ilu0]);
 //! tuner.add_tolerances(vec![1e-6, 1e-8, 1e-10]);
-//! 
+//!
 //! let best_config = tuner.tune_parameters(&matrix, &rhs, max_trials)?;
 //! println!("Best configuration: {:?}", best_config);
 //! ```
 
-use crate::context::KspContext;
 use crate::config::options::PcOptions;
+use crate::context::KspContext;
 use crate::context::ksp_context::SolverType;
 use crate::context::pc_context::PcType;
-use crate::utils::monitor::IterationMonitor;
 use crate::error::KError;
+use crate::utils::monitor::IterationMonitor;
 use faer::Mat;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -41,7 +41,7 @@ pub struct ParameterConfig {
     pub atol: f64,
     pub maxits: usize,
     pub restart: Option<usize>, // For GMRES-type solvers
-    
+
     // Preconditioner-specific parameters
     pub amg_levels: Option<usize>,
     pub amg_strength_threshold: Option<f64>,
@@ -159,7 +159,10 @@ impl ParameterTuner {
                             rtol,
                             atol: rtol * 1e-3, // atol = rtol / 1000 by default
                             maxits,
-                            restart: if matches!(solver_type, SolverType::Gmres | SolverType::Fgmres) {
+                            restart: if matches!(
+                                solver_type,
+                                SolverType::Gmres | SolverType::Fgmres
+                            ) {
                                 Some(30)
                             } else {
                                 None
@@ -192,7 +195,7 @@ impl ParameterTuner {
                                         }
                                     }
                                 }
-                            },
+                            }
                             PcType::Chebyshev => {
                                 // Test Chebyshev parameter combinations
                                 for &degree in &self.chebyshev_degree_range {
@@ -201,7 +204,7 @@ impl ParameterTuner {
                                     // Leave lambda bounds for auto-estimation
                                     configs.push(config);
                                 }
-                            },
+                            }
                             _ => {
                                 // Use base configuration for other PC types
                                 configs.push(base_config);
@@ -223,7 +226,10 @@ impl ParameterTuner {
                             rtol,
                             atol: rtol * 1e-3,
                             maxits,
-                            restart: if matches!(solver_type, SolverType::Gmres | SolverType::Fgmres) {
+                            restart: if matches!(
+                                solver_type,
+                                SolverType::Gmres | SolverType::Fgmres
+                            ) {
                                 Some(30)
                             } else {
                                 None
@@ -256,13 +262,13 @@ impl ParameterTuner {
         rhs: &Vec<f64>,
     ) -> Result<PerformanceMetrics, KError> {
         let setup_start = Instant::now();
-        
+
         // Create KSP context with configuration
         let mut ksp = KspContext::new();
-        
+
         // Set solver type
         ksp.set_type(config.solver_type)?;
-        
+
         // Set tolerances and limits
         ksp.rtol = config.rtol;
         ksp.atol = config.atol;
@@ -270,13 +276,13 @@ impl ParameterTuner {
         if let Some(restart) = config.restart {
             ksp.restart = restart;
         }
-        
+
         // Configure preconditioner
         if let Some(ref chain) = config.pc_chain {
             // Use PC chain
             let mut pc_opts = PcOptions::default();
             pc_opts.pc_chain = Some(chain.clone());
-            
+
             // Set AMG parameters if any preconditioner in chain is AMG
             if chain.contains("amg") {
                 pc_opts.amg_levels = config.amg_levels;
@@ -284,19 +290,19 @@ impl ParameterTuner {
                 pc_opts.amg_nu_pre = config.amg_nu_pre;
                 pc_opts.amg_nu_post = config.amg_nu_post;
             }
-            
+
             // Set Chebyshev parameters if any preconditioner in chain is Chebyshev
             if chain.contains("chebyshev") {
                 pc_opts.chebyshev_degree = config.chebyshev_degree;
                 pc_opts.chebyshev_lambda_min = config.chebyshev_lambda_min;
                 pc_opts.chebyshev_lambda_max = config.chebyshev_lambda_max;
             }
-            
+
             ksp.set_pc_options(pc_opts);
         } else {
             // Single preconditioner
             ksp.set_pc_type(config.pc_type)?;
-            
+
             // Set PC-specific options
             let mut pc_opts = PcOptions::default();
             match config.pc_type {
@@ -305,45 +311,45 @@ impl ParameterTuner {
                     pc_opts.amg_strength_threshold = config.amg_strength_threshold;
                     pc_opts.amg_nu_pre = config.amg_nu_pre;
                     pc_opts.amg_nu_post = config.amg_nu_post;
-                },
+                }
                 PcType::Chebyshev => {
                     pc_opts.chebyshev_degree = config.chebyshev_degree;
                     pc_opts.chebyshev_lambda_min = config.chebyshev_lambda_min;
                     pc_opts.chebyshev_lambda_max = config.chebyshev_lambda_max;
-                },
-                _ => {}, // No special parameters for other types
+                }
+                _ => {} // No special parameters for other types
             }
             ksp.set_pc_options(pc_opts);
         }
-        
+
         // Setup timing
         let n = matrix.nrows();
         ksp.setup(matrix, n)?;
         let setup_time = setup_start.elapsed();
-        
+
         // Create solution vector
         let mut x = vec![0.0; n];
-        
+
         // Set up monitoring if enabled
         let mut monitor = if self.enable_monitoring {
             Some(IterationMonitor::new())
         } else {
             None
         };
-        
+
         if let Some(ref mut mon) = monitor {
             mon.start_solve();
         }
-        
+
         // Solve with timeout
         let solve_start = Instant::now();
         let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Create a simple timeout mechanism using solver iteration callback
             ksp.solve(matrix, rhs, &mut x)
         }));
-        
+
         let solve_time = solve_start.elapsed();
-        
+
         // Check for timeout
         if solve_time > self.max_config_time {
             return Ok(PerformanceMetrics {
@@ -374,7 +380,7 @@ impl ParameterTuner {
                                 }
                             }
                         }
-                        
+
                         // residual = |b - Ax|
                         let mut residual_norm = 0.0;
                         for i in 0..n {
@@ -382,21 +388,25 @@ impl ParameterTuner {
                             residual_norm += diff * diff;
                         }
                         residual_norm = residual_norm.sqrt();
-                        
+
                         // Get stats from monitor if available
                         let (iterations, avg_rate, reason) = if let Some(ref mon) = monitor {
                             let stats = mon.get_statistics();
-                            (stats.total_iterations, stats.avg_convergence_rate, stats.convergence_reason)
+                            (
+                                stats.total_iterations,
+                                stats.avg_convergence_rate,
+                                stats.convergence_reason,
+                            )
                         } else {
                             // Estimate from maxits (rough approximation)
-                            let estimated_iters = if residual_norm < config.rtol { 
+                            let estimated_iters = if residual_norm < config.rtol {
                                 (config.maxits as f64 * 0.7) as usize // Assume ~70% of maxits for convergence
-                            } else { 
-                                config.maxits 
+                            } else {
+                                config.maxits
                             };
                             (estimated_iters, 0.9, "Estimated".to_string())
                         };
-                        
+
                         Ok(PerformanceMetrics {
                             config: config.clone(),
                             converged: residual_norm < config.rtol,
@@ -408,35 +418,31 @@ impl ParameterTuner {
                             memory_usage_estimate: None, // TODO: Implement memory tracking
                             convergence_reason: reason,
                         })
-                    },
-                    Err(e) => {
-                        Ok(PerformanceMetrics {
-                            config: config.clone(),
-                            converged: false,
-                            iterations: 0,
-                            final_residual: f64::INFINITY,
-                            solve_time,
-                            avg_convergence_rate: f64::INFINITY,
-                            setup_time,
-                            memory_usage_estimate: None,
-                            convergence_reason: format!("Solve error: {}", e),
-                        })
                     }
+                    Err(e) => Ok(PerformanceMetrics {
+                        config: config.clone(),
+                        converged: false,
+                        iterations: 0,
+                        final_residual: f64::INFINITY,
+                        solve_time,
+                        avg_convergence_rate: f64::INFINITY,
+                        setup_time,
+                        memory_usage_estimate: None,
+                        convergence_reason: format!("Solve error: {}", e),
+                    }),
                 }
-            },
-            Err(_) => {
-                Ok(PerformanceMetrics {
-                    config: config.clone(),
-                    converged: false,
-                    iterations: 0,
-                    final_residual: f64::INFINITY,
-                    solve_time,
-                    avg_convergence_rate: f64::INFINITY,
-                    setup_time,
-                    memory_usage_estimate: None,
-                    convergence_reason: "Panic/crash".to_string(),
-                })
             }
+            Err(_) => Ok(PerformanceMetrics {
+                config: config.clone(),
+                converged: false,
+                iterations: 0,
+                final_residual: f64::INFINITY,
+                solve_time,
+                avg_convergence_rate: f64::INFINITY,
+                setup_time,
+                memory_usage_estimate: None,
+                convergence_reason: "Panic/crash".to_string(),
+            }),
         }
     }
 
@@ -462,59 +468,84 @@ impl ParameterTuner {
         } else {
             total_configs
         };
-        
-        println!("Starting parameter tuning: {} configurations to test", configs_to_test);
-        
+
+        println!(
+            "Starting parameter tuning: {} configurations to test",
+            configs_to_test
+        );
+
         self.results.clear();
-        
+
         for (i, config) in configurations.iter().take(configs_to_test).enumerate() {
-            println!("Testing configuration {}/{}: {:?} + {:?}", 
-                     i + 1, configs_to_test, config.solver_type, config.pc_type);
-            
+            println!(
+                "Testing configuration {}/{}: {:?} + {:?}",
+                i + 1,
+                configs_to_test,
+                config.solver_type,
+                config.pc_type
+            );
+
             match self.test_configuration(config, matrix, rhs) {
                 Ok(metrics) => {
-                    println!("  Result: converged={}, iterations={}, time={:.3}s, rate={:.2e}", 
-                             metrics.converged, metrics.iterations, 
-                             metrics.solve_time.as_secs_f64(), metrics.avg_convergence_rate);
+                    println!(
+                        "  Result: converged={}, iterations={}, time={:.3}s, rate={:.2e}",
+                        metrics.converged,
+                        metrics.iterations,
+                        metrics.solve_time.as_secs_f64(),
+                        metrics.avg_convergence_rate
+                    );
                     self.results.push(metrics);
-                },
+                }
                 Err(e) => {
                     println!("  Error: {}", e);
                     // Continue with next configuration
                 }
             }
         }
-        
+
         // Find best configuration (converged, fewest iterations, fastest time)
-        let best_metrics = self.results.iter()
+        let best_metrics = self
+            .results
+            .iter()
             .filter(|m| m.converged)
             .min_by(|a, b| {
                 // Primary: converged solutions first
                 // Secondary: fewer iterations
                 // Tertiary: faster solve time
-                a.iterations.cmp(&b.iterations)
+                a.iterations
+                    .cmp(&b.iterations)
                     .then(a.solve_time.cmp(&b.solve_time))
             })
             .or_else(|| {
                 // If no converged solutions, pick the one with best residual
-                self.results.iter()
-                    .min_by(|a, b| a.final_residual.partial_cmp(&b.final_residual).unwrap_or(std::cmp::Ordering::Equal))
+                self.results.iter().min_by(|a, b| {
+                    a.final_residual
+                        .partial_cmp(&b.final_residual)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             });
-        
+
         match best_metrics {
             Some(best) => {
                 println!("\nBest configuration found:");
-                println!("  Solver: {:?}, PC: {:?}", best.config.solver_type, best.config.pc_type);
+                println!(
+                    "  Solver: {:?}, PC: {:?}",
+                    best.config.solver_type, best.config.pc_type
+                );
                 if let Some(ref chain) = best.config.pc_chain {
                     println!("  PC Chain: {}", chain);
                 }
-                println!("  Converged: {}, Iterations: {}, Time: {:.3}s", 
-                         best.converged, best.iterations, best.solve_time.as_secs_f64());
+                println!(
+                    "  Converged: {}, Iterations: {}, Time: {:.3}s",
+                    best.converged,
+                    best.iterations,
+                    best.solve_time.as_secs_f64()
+                );
                 Ok((best.config.clone(), self.results.clone()))
-            },
-            None => {
-                Err(KError::SolveError("No valid configurations found".to_string()))
             }
+            None => Err(KError::SolveError(
+                "No valid configurations found".to_string(),
+            )),
         }
     }
 
@@ -522,15 +553,19 @@ impl ParameterTuner {
     pub fn export_results(&self, filename: &str) -> Result<(), std::io::Error> {
         use std::fs::File;
         use std::io::{BufWriter, Write};
-        
+
         let file = File::create(filename)?;
         let mut writer = BufWriter::new(file);
-        
+
         // Write a simple text summary instead of JSON
         writeln!(writer, "Parameter Tuning Results")?;
         writeln!(writer, "=======================")?;
-        writeln!(writer, "Total configurations tested: {}", self.results.len())?;
-        
+        writeln!(
+            writer,
+            "Total configurations tested: {}",
+            self.results.len()
+        )?;
+
         for (i, result) in self.results.iter().enumerate() {
             writeln!(writer, "\nConfiguration {}:", i + 1)?;
             writeln!(writer, "  Solver: {:?}", result.config.solver_type)?;
@@ -538,35 +573,48 @@ impl ParameterTuner {
             writeln!(writer, "  Tolerance: {:.2e}", result.config.rtol)?;
             writeln!(writer, "  Converged: {}", result.converged)?;
             writeln!(writer, "  Iterations: {}", result.iterations)?;
-            writeln!(writer, "  Solve time: {:.3}s", result.solve_time.as_secs_f64())?;
+            writeln!(
+                writer,
+                "  Solve time: {:.3}s",
+                result.solve_time.as_secs_f64()
+            )?;
         }
-        
+
         Ok(())
     }
 
     /// Get summary statistics across all tested configurations.
     pub fn get_summary(&self) -> HashMap<String, f64> {
         let mut summary = HashMap::new();
-        
+
         let total_configs = self.results.len() as f64;
         let converged_configs = self.results.iter().filter(|r| r.converged).count() as f64;
-        
+
         summary.insert("total_configurations".to_string(), total_configs);
         summary.insert("converged_configurations".to_string(), converged_configs);
-        summary.insert("convergence_rate".to_string(), converged_configs / total_configs);
-        
+        summary.insert(
+            "convergence_rate".to_string(),
+            converged_configs / total_configs,
+        );
+
         if !self.results.is_empty() {
-            let avg_solve_time = self.results.iter()
+            let avg_solve_time = self
+                .results
+                .iter()
                 .map(|r| r.solve_time.as_secs_f64())
-                .sum::<f64>() / total_configs;
+                .sum::<f64>()
+                / total_configs;
             summary.insert("avg_solve_time".to_string(), avg_solve_time);
-            
-            let avg_iterations = self.results.iter()
+
+            let avg_iterations = self
+                .results
+                .iter()
                 .map(|r| r.iterations as f64)
-                .sum::<f64>() / total_configs;
+                .sum::<f64>()
+                / total_configs;
             summary.insert("avg_iterations".to_string(), avg_iterations);
         }
-        
+
         summary
     }
 }
@@ -587,9 +635,12 @@ mod tests {
         let tuner = ParameterTuner::new();
         let configs = tuner.generate_configurations();
         assert!(!configs.is_empty());
-        
+
         // Should have at least one config for each solver/PC combination
-        let min_expected = tuner.solver_types.len() * tuner.pc_types.len() * tuner.tolerances.len() * tuner.max_iterations.len();
+        let min_expected = tuner.solver_types.len()
+            * tuner.pc_types.len()
+            * tuner.tolerances.len()
+            * tuner.max_iterations.len();
         assert!(configs.len() >= min_expected);
     }
 
@@ -599,15 +650,15 @@ mod tests {
         let n = 4;
         let matrix = Mat::identity(n, n);
         let rhs = vec![1.0; n];
-        
+
         let mut tuner = ParameterTuner::new();
         tuner.set_solver_types(vec![SolverType::Cg]);
         tuner.set_pc_types(vec![PcType::Jacobi]);
         tuner.set_tolerances(vec![1e-6]);
-        
+
         let result = tuner.tune_parameters(&matrix, &rhs, 1);
         assert!(result.is_ok());
-        
+
         let (best_config, results) = result.unwrap();
         assert!(!results.is_empty());
         assert_eq!(best_config.solver_type, SolverType::Cg);

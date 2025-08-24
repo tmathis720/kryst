@@ -3,8 +3,8 @@
 //! This module contains generic matrix operations, analysis functions, and
 //! utilities that are useful beyond just the AMG preconditioner.
 
-use crate::matrix::sparse::CsrMatrix;
 use crate::KError;
+use crate::matrix::sparse::CsrMatrix;
 use faer::Mat;
 
 #[cfg(feature = "rayon")]

@@ -26,9 +26,9 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems. (Section 12.3)
 //! - https://en.wikipedia.org/wiki/Chebyshev_polynomials
 
+use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::preconditioner::legacy::Preconditioner;
-use crate::core::traits::MatVec;
 use faer::Mat;
 
 /// Chebyshev polynomial preconditioner struct
@@ -55,7 +55,12 @@ impl ChebyshevPre {
     /// * `lambda_min` - Lower bound of the spectrum
     /// * `lambda_max` - Upper bound of the spectrum
     pub fn new(matrix: Mat<f64>, degree: usize, lambda_min: f64, lambda_max: f64) -> Self {
-        Self { matrix, degree, lambda_min, lambda_max }
+        Self {
+            matrix,
+            degree,
+            lambda_min,
+            lambda_max,
+        }
     }
 
     /// Estimate eigenvalue bounds using power iteration if not provided
@@ -80,16 +85,16 @@ impl ChebyshevPre {
         for _ in 0..max_iters {
             // Apply matrix
             matrix.matvec(&v, &mut av);
-            
+
             // Rayleigh quotient
             let new_lambda_max: f64 = v.iter().zip(av.iter()).map(|(&vi, &avi)| vi * avi).sum();
-            
+
             if (new_lambda_max - lambda_max).abs() < tol * lambda_max.abs() {
                 lambda_max = new_lambda_max;
                 break;
             }
             lambda_max = new_lambda_max;
-            
+
             // Normalize
             let norm: f64 = av.iter().map(|&x| x * x).sum::<f64>().sqrt();
             if norm > 0.0 {
@@ -115,12 +120,24 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for ChebyshevPre {
     }
 
     /// Apply Chebyshev polynomial preconditioner
-    fn apply(&self, _side: crate::preconditioner::PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        r: &Vec<f64>,
+        z: &mut Vec<f64>,
+    ) -> Result<(), KError> {
         if r.len() != z.len() {
             return Err(KError::SolveError("Vector length mismatch".to_string()));
         }
-        
-        apply_chebyshev(&self.matrix, r, z, self.lambda_min, self.lambda_max, self.degree);
+
+        apply_chebyshev(
+            &self.matrix,
+            r,
+            z,
+            self.lambda_min,
+            self.lambda_max,
+            self.degree,
+        );
         Ok(())
     }
 }
@@ -145,7 +162,11 @@ impl<T> Chebyshev<T> {
     /// * `lambda_min` - Optional lower bound of the spectrum
     /// * `lambda_max` - Optional upper bound of the spectrum
     pub fn new(degree: usize, lambda_min: Option<T>, lambda_max: Option<T>) -> Self {
-        Self { degree, lambda_min, lambda_max }
+        Self {
+            degree,
+            lambda_min,
+            lambda_max,
+        }
     }
 }
 
@@ -161,8 +182,16 @@ where
         Ok(())
     }
     /// Not implemented: use `apply_chebyshev` free function instead
-    fn apply(&self, _side: crate::preconditioner::PcSide, _r: &V, _z: &mut V) -> Result<(), KError> {
-        Err(KError::SolveError("Chebyshev preconditioner requires matrix argument; use apply_chebyshev free function.".to_string()))
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        _r: &V,
+        _z: &mut V,
+    ) -> Result<(), KError> {
+        Err(KError::SolveError(
+            "Chebyshev preconditioner requires matrix argument; use apply_chebyshev free function."
+                .to_string(),
+        ))
     }
 }
 
@@ -264,7 +293,9 @@ mod tests {
         data: Vec<Vec<T>>,
     }
     impl<T: Copy> DenseMat<T> {
-        fn new(data: Vec<Vec<T>>) -> Self { Self { data } }
+        fn new(data: Vec<Vec<T>>) -> Self {
+            Self { data }
+        }
     }
     impl<T> MatVec<Vec<T>> for DenseMat<T>
     where
@@ -272,7 +303,9 @@ mod tests {
     {
         fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
             for i in 0..self.data.len() {
-                y[i] = (0..self.data[0].len()).map(|j| self.data[i][j] * x[j]).sum();
+                y[i] = (0..self.data[0].len())
+                    .map(|j| self.data[i][j] * x[j])
+                    .sum();
             }
         }
     }

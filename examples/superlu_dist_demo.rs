@@ -25,14 +25,14 @@
 
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{Comm, UniverseComm};
+use kryst::preconditioner::PcSide;
+use kryst::solver::SuperLuDistSolver;
+use kryst::solver::legacy::LinearSolver;
 use kryst::solver::superlu_dist::{
     ColumnPermutation, IterativeRefinement, RefinementConfig, ResidualMethod, RowPermutation,
     SuperLuDistBuilder,
 };
-use kryst::solver::SuperLuDistSolver;
 use kryst::utils::matrix_market::read_matrix_market;
-use kryst::preconditioner::PcSide;
-use kryst::solver::legacy::LinearSolver;
 
 #[cfg(not(feature = "mpi"))]
 use kryst::parallel::NoComm;

@@ -7,8 +7,8 @@
 //! The algorithm follows the approach described in Saad's "Iterative Methods for
 //! Sparse Linear Systems" with modifications for numerical stability.
 
-use crate::preconditioner::legacy::Preconditioner;
 use crate::error::KError;
+use crate::preconditioner::legacy::Preconditioner;
 use faer::Mat;
 use std::cmp::Ordering;
 
@@ -76,15 +76,17 @@ impl Ilutp {
     fn compute_factorization(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
         if n != matrix.ncols() {
-            return Err(KError::SolveError("Matrix must be square for ILUTP".to_string()));
+            return Err(KError::SolveError(
+                "Matrix must be square for ILUTP".to_string(),
+            ));
         }
 
         // Initialize working matrix as a copy
         let mut work_matrix = matrix.clone();
-        
+
         // Initialize permutation as identity
         self.row_perm = (0..n).collect();
-        
+
         // Initialize L and U factors
         let mut l_factor = Mat::zeros(n, n);
         let mut u_factor = Mat::zeros(n, n);
@@ -99,7 +101,7 @@ impl Ilutp {
             // Find pivot row (simplified pivoting with zero avoidance)
             let mut pivot_row = k;
             let mut max_val = work_matrix[(k, k)].abs();
-            
+
             // Look for a better pivot if current is too small
             if max_val < 1e-12 {
                 for i in (k + 1)..n {
@@ -119,7 +121,7 @@ impl Ilutp {
                     }
                 }
             }
-            
+
             // Swap rows if needed
             if pivot_row != k {
                 self.row_perm.swap(k, pivot_row);
@@ -134,8 +136,12 @@ impl Ilutp {
             if pivot.abs() < 1e-12 {
                 // Handle near-zero pivot by regularization
                 work_matrix[(k, k)] = if pivot >= 0.0 { 1e-12 } else { -1e-12 };
-                eprintln!("Warning: Near-zero pivot at row {} regularized from {} to {}", 
-                         k, pivot, work_matrix[(k, k)]);
+                eprintln!(
+                    "Warning: Near-zero pivot at row {} regularized from {} to {}",
+                    k,
+                    pivot,
+                    work_matrix[(k, k)]
+                );
             }
 
             // Store U factor
@@ -148,7 +154,7 @@ impl Ilutp {
                 if work_matrix[(i, k)].abs() > self.drop_tol {
                     let multiplier = work_matrix[(i, k)] / pivot;
                     l_factor[(i, k)] = multiplier;
-                    
+
                     // Collect row elements for fill-in control
                     let mut row_elements = Vec::new();
                     for j in (k + 1)..n {
@@ -157,13 +163,15 @@ impl Ilutp {
                             row_elements.push((j, new_val));
                         }
                     }
-                    
+
                     // Apply fill-in control
                     if row_elements.len() > self.max_fill {
-                        row_elements.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(Ordering::Equal));
+                        row_elements.sort_by(|a, b| {
+                            b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(Ordering::Equal)
+                        });
                         row_elements.truncate(self.max_fill);
                     }
-                    
+
                     // Clear row and set selected elements
                     for j in (k + 1)..n {
                         work_matrix[(i, j)] = 0.0;
@@ -183,7 +191,7 @@ impl Ilutp {
     /// Forward substitution: solve Ly = Pb
     fn forward_solve(&self, b: &[f64], y: &mut [f64]) -> Result<(), KError> {
         let n = self.l_factor.nrows();
-        
+
         // Apply row permutation
         for i in 0..n {
             y[i] = b[self.row_perm[i]];
@@ -212,7 +220,10 @@ impl Ilutp {
             }
             let diag = self.u_factor[(i, i)];
             if diag.abs() < 1e-14 {
-                return Err(KError::SolveError(format!("Singular U factor at diagonal {}", i)));
+                return Err(KError::SolveError(format!(
+                    "Singular U factor at diagonal {}",
+                    i
+                )));
             }
             x[i] /= diag;
         }
@@ -234,18 +245,23 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
     }
 
     /// Apply the ILUTP preconditioner: solve M⁻¹x = b where M ≈ A.
-    fn apply(&self, _side: crate::preconditioner::PcSide, input: &Vec<f64>, output: &mut Vec<f64>) -> Result<(), KError> {
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        input: &Vec<f64>,
+        output: &mut Vec<f64>,
+    ) -> Result<(), KError> {
         let n = input.len();
         if output.len() != n || self.l_factor.nrows() != n {
             return Err(KError::SolveError("Vector size mismatch".to_string()));
         }
 
         let mut temp = vec![0.0; n];
-        
+
         // Forward solve: Ly = Pb
         self.forward_solve(input, &mut temp)?;
-        
-        // Backward solve: Ux = y  
+
+        // Backward solve: Ux = y
         self.backward_solve(&temp, output)?;
 
         Ok(())
@@ -260,7 +276,7 @@ mod tests {
     #[test]
     fn test_ilutp_basic() {
         let mut ilutp = Ilutp::new();
-        
+
         // Test matrix: simple 3x3 diagonally dominant
         let mut matrix = Mat::zeros(3, 3);
         matrix[(0, 0)] = 4.0;
@@ -277,13 +293,17 @@ mod tests {
         // Test application
         let input = vec![1.0, 2.0, 3.0];
         let mut output = vec![0.0; 3];
-        assert!(ilutp.apply(crate::preconditioner::PcSide::Left, &input, &mut output).is_ok());
+        assert!(
+            ilutp
+                .apply(crate::preconditioner::PcSide::Left, &input, &mut output)
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_ilutp_with_custom_params() {
         let mut ilutp = Ilutp::with_params(5, 1e-6, 0.01);
-        
+
         // Test parameter setting
         ilutp.set_max_fill(15);
         ilutp.set_drop_tolerance(1e-8);

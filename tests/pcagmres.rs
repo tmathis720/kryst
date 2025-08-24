@@ -74,4 +74,3 @@ fn pcagmres_solves_dd_nonsym_right_pc() {
         assert!((xi - xt).abs() <= 1e-6, "xi = {}, expected = {}", xi, xt);
     }
 }
-

@@ -7,7 +7,7 @@
 use faer::mat;
 use kryst::core::traits::MatVec;
 use kryst::parallel::UniverseComm;
-use kryst::preconditioner::{Jacobi, Preconditioner, PcSide};
+use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
 use kryst::{LinearSolver, solver::GmresSolver};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,19 +29,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut solver = GmresSolver::new(30, 1e-10, 100);
     let mut x = vec![0.0; 4];
     let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, None)?;
-    println!("Basic GMRES: iterations = {}, residual = {:.2e}", stats.iterations, stats.final_residual);
+    println!(
+        "Basic GMRES: iterations = {}, residual = {:.2e}",
+        stats.iterations, stats.final_residual
+    );
 
     // GMRES with Jacobi preconditioner
     let mut pc = Jacobi::new();
     pc.setup(&a)?;
     let mut x_pc = vec![0.0; 4];
-    let stats_pc = solver.solve(&a, Some(&pc), &b, &mut x_pc, PcSide::Left, &comm, None, None)?;
-    println!("Preconditioned GMRES: iterations = {}, residual = {:.2e}", stats_pc.iterations, stats_pc.final_residual);
+    let stats_pc = solver.solve(
+        &a,
+        Some(&pc),
+        &b,
+        &mut x_pc,
+        PcSide::Left,
+        &comm,
+        None,
+        None,
+    )?;
+    println!(
+        "Preconditioned GMRES: iterations = {}, residual = {:.2e}",
+        stats_pc.iterations, stats_pc.final_residual
+    );
 
     // Demonstrate IEEE safety check with NaN in rhs
     let bad_b = vec![1.0, 2.0, f64::NAN, 4.0];
     let mut x_bad = vec![0.0; 4];
-    match solver.solve(&a, None, &bad_b, &mut x_bad, PcSide::Left, &comm, None, None) {
+    match solver.solve(
+        &a,
+        None,
+        &bad_b,
+        &mut x_bad,
+        PcSide::Left,
+        &comm,
+        None,
+        None,
+    ) {
         Ok(_) => println!("Unexpected success with NaN RHS"),
         Err(e) => println!("\u{2713} Detected invalid input: {}", e),
     }

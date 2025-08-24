@@ -1,7 +1,7 @@
+use crate::parallel::{NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
-use crate::parallel::{UniverseComm, NoComm};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,7 +44,14 @@ pub trait LinOp: Send + Sync + Any {
         ValuesId(0)
     }
 
-    /// The communicator that owns this operator. Defaults to serial `NoComm`.
+    /// Parallel communicator for this operator.
+    ///
+    /// Returns the communicator that owns the operator, used by distributed PCs
+    /// and solvers. Local/dense operators return [`UniverseComm::NoComm`].
+    ///
+    /// # Invariants
+    /// - `A.comm() == P.comm()` is enforced by [`KspContext::set_operators`].
+    /// - PCs obtain their communicator from the operator passed to [`Preconditioner::setup`].
     fn comm(&self) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
     }

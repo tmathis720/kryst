@@ -1,7 +1,17 @@
-//! kryst: PETSc-style PC/KSP interface over Faer
+#![deny(rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+//! # kryst
 //!
-//! This crate provides flexible, high-performance Krylov subspace solvers and preconditioners
-//! for dense and sparse linear systems, with support for shared and distributed memory parallelism.
+//! PETSc-like KSP/PC in Rust with MPI-friendly design.
+//!
+//! ## Architecture decisions (read first)
+//! - [`LinOp::comm()`] is the single source of truth for parallel context (ADR-001).
+//! - Preconditioners compute **z = M⁻¹ x**; solvers decide left/right placement (ADR-002).
+//! - Flexible PCs use [`Preconditioner::apply_mut`] (FGMRES, etc.).
+//! - Options map to builders; no in-solver construction.
+//!
+//! See `docs/adr/` for rationale and trade-offs.
 
 pub mod parallel;
 

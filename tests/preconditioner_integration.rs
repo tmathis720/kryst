@@ -7,8 +7,8 @@
 
 use faer::Mat;
 use kryst::LinearSolver;
-use kryst::preconditioner::{Jacobi, PcSide};
 use kryst::preconditioner::legacy::Preconditioner;
+use kryst::preconditioner::{Jacobi, PcSide};
 use kryst::solver::{CgSolver, GmresSolver};
 
 /// Construct a symmetric positive definite (SPD) tridiagonal matrix of size `n`.

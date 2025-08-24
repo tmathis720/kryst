@@ -12,7 +12,7 @@
 // 2. Call `setup` with the system matrix to factorize each block.
 // 3. Use `apply` to apply the preconditioner to a vector.
 
-use crate::core::traits::{RowPattern, MatrixGet};
+use crate::core::traits::{MatrixGet, RowPattern};
 use crate::preconditioner::PcSide;
 use crate::solver::direct_lu::LuSolver;
 use crate::solver::legacy::LinearSolver;
@@ -37,7 +37,10 @@ impl BlockJacobi<f64> {
     ///
     /// # Arguments
     /// * `a` - The system matrix (must support row access and element access)
-    pub fn setup<M: RowPattern + MatrixGet<f64> + crate::matrix::dense::DenseMatrix<f64>>(&mut self, a: &M) {
+    pub fn setup<M: RowPattern + MatrixGet<f64> + crate::matrix::dense::DenseMatrix<f64>>(
+        &mut self,
+        a: &M,
+    ) {
         self.block_factors.clear();
         for block in &self.blocks {
             let n = block.len();
@@ -79,33 +82,41 @@ impl BlockJacobi<f64> {
     /// * `z` - Output vector (solution, overwritten)
     pub fn apply(&self, r: &[f64], z: &mut [f64]) {
         // Zero out the output vector
-        for zi in z.iter_mut() { *zi = 0.0; }
+        for zi in z.iter_mut() {
+            *zi = 0.0;
+        }
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
             use std::sync::Arc;
             use std::sync::Mutex;
             let z_arc = Arc::new(Mutex::new(z));
-            self.block_factors.par_iter().for_each(|(indices, lusolver)| {
-                // Extract the block of r corresponding to this block
-                let mut r_block = Vec::with_capacity(indices.len());
-                for &i in indices { r_block.push(r[i]); }
-                let mut x_block = vec![0.0; indices.len()];
-                // Solve the block system
-                lusolver.solve_cached(&r_block, &mut x_block);
-                // Write the solution back to the correct entries in z
-                let mut z_guard = z_arc.lock().unwrap();
-                for (&i, &xi) in indices.iter().zip(x_block.iter()) {
-                    z_guard[i] = xi;
-                }
-            });
+            self.block_factors
+                .par_iter()
+                .for_each(|(indices, lusolver)| {
+                    // Extract the block of r corresponding to this block
+                    let mut r_block = Vec::with_capacity(indices.len());
+                    for &i in indices {
+                        r_block.push(r[i]);
+                    }
+                    let mut x_block = vec![0.0; indices.len()];
+                    // Solve the block system
+                    lusolver.solve_cached(&r_block, &mut x_block);
+                    // Write the solution back to the correct entries in z
+                    let mut z_guard = z_arc.lock().unwrap();
+                    for (&i, &xi) in indices.iter().zip(x_block.iter()) {
+                        z_guard[i] = xi;
+                    }
+                });
         }
         #[cfg(not(feature = "rayon"))]
         {
             for (indices, lusolver) in &self.block_factors {
                 // Extract the block of r corresponding to this block
                 let mut r_block = Vec::with_capacity(indices.len());
-                for &i in indices { r_block.push(r[i]); }
+                for &i in indices {
+                    r_block.push(r[i]);
+                }
                 let mut x_block = vec![0.0; indices.len()];
                 // Solve the block system
                 lusolver.solve_cached(&r_block, &mut x_block);

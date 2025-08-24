@@ -4,8 +4,8 @@
 //! similar to PETSc's profiling stages. Profiling can be enabled/disabled at runtime
 //! via global configuration.
 
-use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// Global flag to enable/disable profiling at runtime.
 static PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -52,7 +52,7 @@ pub fn is_monitoring_enabled() -> bool {
 /// # Example
 /// ```rust
 /// use kryst::utils::profiling::{StageGuard, enable_profiling};
-/// 
+///
 /// enable_profiling();
 /// {
 ///     let _setup = StageGuard::new("KSPSetup");
@@ -83,10 +83,7 @@ impl StageGuard {
             None
         };
 
-        StageGuard {
-            name,
-            start_time,
-        }
+        StageGuard { name, start_time }
     }
 
     /// Get the elapsed time since the stage started.
@@ -116,19 +113,17 @@ impl Drop for StageGuard {
 /// # Example
 /// ```rust,ignore
 /// use kryst::utils::profiling::time_stage;
-/// 
+///
 /// time_stage!("MatVec", {
 ///     // ... matrix-vector multiplication code ...
 /// });
 /// ```
 #[macro_export]
 macro_rules! time_stage {
-    ($name:expr, $block:block) => {
-        {
-            let _guard = $crate::utils::profiling::StageGuard::new($name);
-            $block
-        }
-    };
+    ($name:expr, $block:block) => {{
+        let _guard = $crate::utils::profiling::StageGuard::new($name);
+        $block
+    }};
 }
 
 /// Conditionally execute profiling code only when profiling is enabled.
@@ -139,7 +134,7 @@ macro_rules! time_stage {
 /// # Example
 /// ```rust,ignore
 /// use kryst::utils::profiling::with_profiling;
-/// 
+///
 /// with_profiling!(|| {
 ///     eprintln!("Starting expensive operation");
 ///     let start = std::time::Instant::now();
@@ -164,7 +159,7 @@ macro_rules! with_profiling {
 /// # Example
 /// ```rust,ignore
 /// use kryst::utils::profiling::with_monitoring;
-/// 
+///
 /// with_monitoring!(|| {
 ///     eprintln!("Iteration {}: residual = {:.2e}", iter, residual);
 /// });

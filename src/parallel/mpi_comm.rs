@@ -1,3 +1,5 @@
+#[cfg(feature = "mpi")]
+use mpi::topology::{Color, Communicator, SimpleCommunicator};
 /// MPI-based parallel communication module.
 ///
 /// This module provides an implementation of the `Comm` trait using the MPI (Message Passing Interface)
@@ -24,8 +26,6 @@
 
 #[cfg(feature = "mpi")]
 use mpi::traits::*;
-#[cfg(feature = "mpi")]
-use mpi::topology::{SimpleCommunicator, Communicator, Color};
 #[cfg(feature = "mpi")]
 use std::sync::Arc;
 
@@ -57,10 +57,15 @@ impl MpiComm {
     /// Panics if MPI initialization fails.
     pub fn new() -> Self {
         let universe = mpi::initialize().unwrap();
-        let world    = universe.world();
-        let rank     = world.rank() as usize;
-        let size     = world.size() as usize;
-        MpiComm { _universe: universe, world, rank, size }
+        let world = universe.world();
+        let rank = world.rank() as usize;
+        let size = world.size() as usize;
+        MpiComm {
+            _universe: universe,
+            world,
+            rank,
+            size,
+        }
     }
 
     /// Attempts to initialize MPI and construct a new `MpiComm` instance.
@@ -74,8 +79,14 @@ impl MpiComm {
             let world = universe.world();
             let rank = world.rank() as usize;
             let size = world.size() as usize;
-            MpiComm { _universe: universe, world, rank, size }
-        }).ok()
+            MpiComm {
+                _universe: universe,
+                world,
+                rank,
+                size,
+            }
+        })
+        .ok()
     }
 }
 
@@ -84,11 +95,17 @@ impl super::Comm for MpiComm {
     type Vec = Vec<f64>;
 
     /// Returns the rank (ID) of this process.
-    fn rank(&self) -> usize { self.rank }
+    fn rank(&self) -> usize {
+        self.rank
+    }
     /// Returns the total number of processes in the communicator.
-    fn size(&self) -> usize { self.size }
+    fn size(&self) -> usize {
+        self.size
+    }
     /// Synchronizes all processes at a barrier.
-    fn barrier(&self) { self.world.barrier(); }
+    fn barrier(&self) {
+        self.world.barrier();
+    }
 
     /// Distributes slices of a global array to all processes (scatter operation).
     ///
@@ -140,7 +157,8 @@ impl super::Comm for MpiComm {
     fn all_reduce(&self, x: f64) -> f64 {
         use mpi::collective::SystemOperation;
         let mut y = x;
-        self.world.all_reduce_into(&x, &mut y, &SystemOperation::sum());
+        self.world
+            .all_reduce_into(&x, &mut y, &SystemOperation::sum());
         y
     }
 

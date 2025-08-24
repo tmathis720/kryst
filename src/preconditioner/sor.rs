@@ -20,7 +20,7 @@
 
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
-use crate::preconditioner::{legacy::Preconditioner, PcSide};
+use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use bitflags::bitflags;
 use num_traits::Float;
 use std::fmt;

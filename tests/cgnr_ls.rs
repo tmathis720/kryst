@@ -23,11 +23,14 @@ fn cgnr_solves_simple_ls() {
     ksp.set_operators(amat, Some(pmat));
     let stats = ksp.solve(&b, &mut x).unwrap();
 
-    assert!((x[0] - 1.0).abs() < 1e-8 && (x[1] - 2.0).abs() < 1e-8, "x = {:?}", x);
+    assert!(
+        (x[0] - 1.0).abs() < 1e-8 && (x[1] - 2.0).abs() < 1e-8,
+        "x = {:?}",
+        x
+    );
     assert!(matches!(
         stats.reason,
         kryst::utils::convergence::ConvergedReason::ConvergedRtol
             | kryst::utils::convergence::ConvergedReason::ConvergedAtol
     ));
 }
-

@@ -1,34 +1,42 @@
 #[cfg(test)]
 mod tests_gmres_lr {
-    use std::sync::Arc;
     use crate::context::ksp_context::{KspContext, SolverType};
     use crate::context::pc_context::PcType;
-    use crate::preconditioner::PcSide;
-    use crate::matrix::op::LinOp;
     use crate::error::KError;
+    use crate::matrix::op::LinOp;
+    use crate::preconditioner::PcSide;
     use faer::Mat;
+    use std::sync::Arc;
 
-    fn true_residual_norm(a: &dyn LinOp<S=f64>, x: &[f64], b: &[f64]) -> f64 {
+    fn true_residual_norm(a: &dyn LinOp<S = f64>, x: &[f64], b: &[f64]) -> f64 {
         let n = b.len();
         let mut r = b.to_vec();
         let mut ax = vec![0.0; n];
         a.matvec(x, &mut ax);
-        for i in 0..n { r[i] -= ax[i]; }
-        (r.iter().map(|v| v*v).sum::<f64>()).sqrt()
+        for i in 0..n {
+            r[i] -= ax[i];
+        }
+        (r.iter().map(|v| v * v).sum::<f64>()).sqrt()
     }
 
     #[test]
     fn gmres_left_right_same_solution_jacobi() -> Result<(), KError> {
         // Nonsymmetric, strictly diagonally dominant (easy to solve)
         let a = Mat::from_fn(3, 3, |i, j| match (i, j) {
-            (0,0) => 4.0, (0,1) => 1.0, (0,2) => 0.0,
-            (1,0) => -2.0,(1,1) => 3.0, (1,2) => 1.0,
-            (2,0) => 0.0, (2,1) => -1.0,(2,2) => 2.0,
+            (0, 0) => 4.0,
+            (0, 1) => 1.0,
+            (0, 2) => 0.0,
+            (1, 0) => -2.0,
+            (1, 1) => 3.0,
+            (1, 2) => 1.0,
+            (2, 0) => 0.0,
+            (2, 1) => -1.0,
+            (2, 2) => 2.0,
             _ => unreachable!(),
         });
         let b = [1.0, 2.0, 3.0];
 
-        let amat: Arc<dyn LinOp<S=f64>> = Arc::new(a.clone());
+        let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
 
         // --- LEFT preconditioning
         let mut ksp_left = KspContext::new();
@@ -55,11 +63,17 @@ mod tests_gmres_lr {
         let res_r = true_residual_norm(amat.as_ref(), &x_right, &b);
         assert!(res_l < 1e-4, "left true residual too large: {res_l:e}");
         assert!(res_r < 1e-4, "right true residual too large: {res_r:e}");
-        assert!((res_l - res_r).abs() < 1e-4, "true residuals differ: {res_l:e} vs {res_r:e}");
+        assert!(
+            (res_l - res_r).abs() < 1e-4,
+            "true residuals differ: {res_l:e} vs {res_r:e}"
+        );
 
         // Solutions match to tolerance
         for i in 0..3 {
-            assert!((x_left[i] - x_right[i]).abs() < 1e-4, "x_left[{i}] != x_right[{i}]");
+            assert!(
+                (x_left[i] - x_right[i]).abs() < 1e-4,
+                "x_left[{i}] != x_right[{i}]"
+            );
         }
 
         // Internal sanity: Left keeps no Z basis; Right populates it
@@ -68,7 +82,11 @@ mod tests_gmres_lr {
         }
         if let Some(wr) = ksp_right.debug_workspace() {
             assert!(!wr.z.is_empty(), "Right GMRES should populate Z basis");
-            assert_eq!(wr.z.len(), wr.q.len().saturating_sub(1), "Z basis length should match Krylov dim");
+            assert_eq!(
+                wr.z.len(),
+                wr.q.len().saturating_sub(1),
+                "Z basis length should match Krylov dim"
+            );
         }
 
         // And both reported a result

@@ -35,11 +35,11 @@ fn diagonal_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
     // Create a 5x5 diagonal matrix with entries [1, 2, 3, 4, 5]
     let diagonal_entries = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let n = diagonal_entries.len();
-    
+
     // Clone for the closure (need to move into closure)
     let diag_for_mult = diagonal_entries.clone();
     let diag_for_trans = diagonal_entries.clone();
-    
+
     let shell_matrix = ShellMat::new(
         n,
         move |x: &Vec<f64>, y: &mut Vec<f64>| {
@@ -61,12 +61,12 @@ fn diagonal_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
     // Test matrix-vector multiplication
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    
+
     shell_matrix.matvec(&x, &mut y);
     println!("Input vector x: {:?}", x);
     println!("Output y = A*x: {:?}", y);
     println!("Expected: {:?}", diagonal_entries);
-    
+
     // Verify correctness
     for i in 0..n {
         assert!((y[i] - diagonal_entries[i]).abs() < 1e-14);
@@ -81,7 +81,7 @@ fn finite_difference_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
     let n = 5;
     let h = 1.0 / (n as f64 + 1.0);
     let h2_inv = 1.0 / (h * h);
-    
+
     // Create a finite difference operator for -d²/dx² (with homogeneous Dirichlet BC)
     // The matrix looks like:
     //   [ 2 -1  0  0  0]
@@ -89,24 +89,21 @@ fn finite_difference_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
     //   [ 0 -1  2 -1  0]
     //   [ 0  0 -1  2 -1]
     //   [ 0  0  0 -1  2]
-    let finite_diff = ShellMat::new_symmetric(
-        n,
-        move |x: &Vec<f64>, y: &mut Vec<f64>| {
-            let x_ref: &[f64] = x.as_ref();
-            let y_mut: &mut [f64] = y.as_mut();
-            
-            for i in 0..n {
-                y_mut[i] = 2.0 * x_ref[i] * h2_inv;
-                
-                if i > 0 {
-                    y_mut[i] -= x_ref[i-1] * h2_inv;
-                }
-                if i < n-1 {
-                    y_mut[i] -= x_ref[i+1] * h2_inv;
-                }
+    let finite_diff = ShellMat::new_symmetric(n, move |x: &Vec<f64>, y: &mut Vec<f64>| {
+        let x_ref: &[f64] = x.as_ref();
+        let y_mut: &mut [f64] = y.as_mut();
+
+        for i in 0..n {
+            y_mut[i] = 2.0 * x_ref[i] * h2_inv;
+
+            if i > 0 {
+                y_mut[i] -= x_ref[i - 1] * h2_inv;
             }
-        },
-    );
+            if i < n - 1 {
+                y_mut[i] -= x_ref[i + 1] * h2_inv;
+            }
+        }
+    });
 
     // Test with a simple function (quadratic)
     let mut x = vec![0.0; n];
@@ -114,26 +111,27 @@ fn finite_difference_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
         let xi = (i as f64 + 1.0) * h;
         x[i] = xi * (1.0 - xi); // Quadratic function x(1-x)
     }
-    
+
     let mut y = vec![0.0; n];
     finite_diff.matvec(&x, &mut y);
-    
+
     println!("Grid points (h = {:.3}):", h);
     println!("Input function u(x) = x(1-x): {:?}", x);
     println!("Output -d²u/dx²: {:?}", y);
-    
+
     // For u(x) = x(1-x), we have d²u/dx² = -2, so -d²u/dx² = 2
     let expected = vec![2.0; n];
     println!("Expected (analytical): {:?}", expected);
-    
+
     // Check if result is close to expected (within discretization error)
-    let max_error = y.iter().zip(expected.iter())
+    let max_error = y
+        .iter()
+        .zip(expected.iter())
         .map(|(yi, ei)| (yi - ei).abs())
         .fold(0.0, f64::max);
-    
+
     println!("Maximum error: {:.6}", max_error);
     println!("✓ Finite difference operator working correctly!");
 
     Ok(())
 }
-
