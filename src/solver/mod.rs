@@ -211,3 +211,6 @@ pub use tfqmr::TfqmrSolver;
 
 pub mod pca_gmres;
 pub use pca_gmres::{PcaGmresSolver, PcaPcMode};
+
+#[cfg(test)]
+mod tests;

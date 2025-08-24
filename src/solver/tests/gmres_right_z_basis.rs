@@ -1,0 +1,62 @@
+#[cfg(test)]
+mod tests_gmres_z_basis {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::preconditioner::{Preconditioner, PcSide};
+    use crate::context::ksp_context::{KspContext, SolverType};
+    use crate::matrix::op::LinOp;
+    use crate::error::KError;
+    use faer::Mat;
+
+    struct CountingIdentityPc {
+        hits: Arc<AtomicUsize>,
+    }
+    impl CountingIdentityPc {
+        fn new(hits: Arc<AtomicUsize>) -> Self { Self { hits } }
+    }
+    impl Preconditioner for CountingIdentityPc {
+        fn setup(&mut self, _a: &dyn LinOp<S=f64>) -> Result<(), KError> { Ok(()) }
+        fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            y.copy_from_slice(x);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn gmres_right_uses_z_basis_and_calls_pc_per_step() -> Result<(), KError> {
+        // A: simple nonsymmetric to avoid early convergence in one step
+        let a = Mat::from_fn(4, 4, |i, j| if i == j { 3.0 } else if j + 1 == i { -1.0 } else { 0.2 });
+        let b = [1.0, 0.0, 0.0, 0.0];
+        let amat: Arc<dyn LinOp<S=f64>> = Arc::new(a);
+
+        // Counting identity PC
+        let hits = Arc::new(AtomicUsize::new(0));
+        let pc = Box::new(CountingIdentityPc::new(hits.clone())) as Box<dyn Preconditioner>;
+
+        // GMRES with a small restart to make a clear "cycle"
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres)?;
+        ksp.set_operators(amat.clone(), None);
+        ksp.pc_side = PcSide::Right;
+        ksp.restart = 3;   // keep small for predictable cycle
+        ksp.rtol = 1e-12;  // try to make it finish inside a couple cycles
+        ksp.set_pc_box_for_tests(pc);
+
+        let mut x = [0.0; 4];
+        let _stats = ksp.solve(&b, &mut x)?;
+
+        // Inspect workspace
+        let w = ksp.debug_workspace().expect("workspace present");
+        // Krylov dimension of last cycle (q has the Arnoldi basis vectors; q.len() = m+1)
+        let krylov_dim = w.q.len().saturating_sub(1);
+        // Z should have one vector per Arnoldi step
+        assert_eq!(w.z.len(), krylov_dim, "Z basis must match Krylov dimension for Right GMRES");
+
+        // Counting PC should be called once per step in the last cycle at least.
+        let calls = hits.load(Ordering::Relaxed);
+        assert!(calls >= w.z.len(), "PC apply calls ({calls}) must be >= last-cycle steps ({})", w.z.len());
+
+        Ok(())
+    }
+}
