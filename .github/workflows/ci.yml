@@ -99,10 +99,13 @@ jobs:
 
       - name: Verify MPI toolchain (debugging aid)
         run: |
+          set -x
           which mpicc || true
           mpicc -show || true
-          pkg-config --modversion ompi || true
-          pkg-config --cflags --libs ompi || true
+          # Show where *.pc files actually are:
+          dpkg -L libopenmpi-dev | grep '\.pc$' || true
+          # Show pkg-config default search path:
+          pkg-config --variable pc_path pkg-config || true
 
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -114,11 +117,17 @@ jobs:
 
       - name: Build (all features)
         env:
-          # Prefer compiler wrapper; rsmpi will use this cleanly.
+          # Tell pkg-config where OpenMPI’s ompi.pc is (plus standard dirs)
+          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/openmpi/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig
+          # Prefer compiler wrapper as an additional discovery route
           MPICC: mpicc
-          # Also hint pkg-config in case build.rs picks that route.
+          # Hint which pkg-config package to use if the build script supports it
           MPI_PKG_CONFIG: ompi
-        run: cargo build --all-features --locked --verbose
+        run: |
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+          pkg-config --modversion ompi
+          pkg-config --cflags --libs ompi
+          cargo build --all-features --locked --verbose
 
       # Add oversubscription + force TCP/self transports to avoid IB/UCX hiccups on GH runners
       - name: Run MPI tests (4 processes)
