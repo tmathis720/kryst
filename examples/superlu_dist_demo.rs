@@ -29,8 +29,10 @@ use kryst::solver::superlu_dist::{
     ColumnPermutation, IterativeRefinement, RefinementConfig, ResidualMethod, RowPermutation,
     SuperLuDistBuilder,
 };
-use kryst::solver::{SuperLuDistSolver, legacy::LinearSolver};
+use kryst::solver::SuperLuDistSolver;
 use kryst::utils::matrix_market::read_matrix_market;
+use kryst::preconditioner::PcSide;
+use kryst::solver::legacy::LinearSolver;
 
 #[cfg(not(feature = "mpi"))]
 use kryst::parallel::NoComm;
@@ -247,7 +249,7 @@ fn example_matrix_market_solve(
     }
 
     let start = Instant::now();
-    let stats = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, comm, None, None)?;
+    let stats = solver.solve(&matrix, None, &b, &mut x, PcSide::Left, comm, None, None)?;
     let solve_time = start.elapsed();
 
     if is_rank_0 {
@@ -362,7 +364,7 @@ fn example_builder_pattern(
 
     // Solve with advanced configuration
     let start = Instant::now();
-    let stats = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, comm, None, None)?;
+    let stats = solver.solve(&matrix, None, &b, &mut x, PcSide::Left, comm, None, None)?;
     let solve_time = start.elapsed();
 
     if is_rank_0 {
@@ -493,7 +495,7 @@ fn example_performance_analysis(
         let mut x = vec![0.0; b.len()];
 
         let start = Instant::now();
-        let stats = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, comm, None, None)?;
+        let stats = solver.solve(&matrix, None, &b, &mut x, PcSide::Left, comm, None, None)?;
         let solve_time = start.elapsed();
 
         if is_rank_0 {
@@ -611,7 +613,7 @@ fn example_refinement_analysis(
         let mut x = vec![0.0; b.len()];
 
         let start = Instant::now();
-        let _stats = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, comm, None, None)?;
+        let _stats = solver.solve(&matrix, None, &b, &mut x, PcSide::Left, comm, None, None)?;
         let solve_time = start.elapsed();
 
         if is_rank_0 {

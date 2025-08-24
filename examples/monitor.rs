@@ -10,6 +10,7 @@
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
+use kryst::matrix::op::LinOp;
 use faer::Mat;
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +33,7 @@ fn main() -> Result<(), KError> {
     a_data[6] = 0.0; a_data[7] = -1.0; a_data[8] = 4.0;   // [0 -1  4]
     
     let a = Mat::from_fn(n, n, |i, j| a_data[i * n + j]);
+    let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
     let b = vec![3.0, 2.0, 3.0];
     let mut x = vec![0.0; n];
     
@@ -49,11 +51,12 @@ fn main() -> Result<(), KError> {
         println!("  Iter {}: residual = {:.3e}", iter, residual);
     });
     
-    ksp1.set_type(SolverType::Cg)?
-        .set_pc_type(PcType::None)?
+    ksp1.set_operators(a_op.clone(), None)
+        .set_type(SolverType::Cg)?
+        .set_pc_type(PcType::None, None)?
         .set_tolerances(1e-6, 1e-12, 1e3, 100);
-    
-    let stats1 = ksp1.solve(&a, &b, &mut x)?;
+
+    let stats1 = ksp1.solve(&b, &mut x)?;
     println!("Solution: x = [{:.6}, {:.6}, {:.6}]", x[0], x[1], x[2]);
     println!("Converged in {} iterations with final residual {:.3e}", 
              stats1.iterations, stats1.final_residual);
@@ -101,15 +104,17 @@ fn main() -> Result<(), KError> {
     });
     
     x.fill(0.0); // Reset solution
-    ksp2.set_type(SolverType::Gmres)?
-        .set_pc_type(PcType::Jacobi)?
-        .set_restart(10)
-        .set_tolerances(1e-8, 1e-12, 1e3, 100);
-    
+    ksp2
+        .set_operators(a_op.clone(), None)
+        .set_type(SolverType::Gmres)?
+        .set_pc_type(PcType::Jacobi, None)?;
+    ksp2.set_restart(10);
+    ksp2.set_tolerances(1e-8, 1e-12, 1e3, 100);
+
     #[cfg(feature = "logging")]
     debug!("Starting GMRES solve with Jacobi preconditioning");
-    
-    let stats2 = ksp2.solve(&a, &b, &mut x)?;
+
+    let stats2 = ksp2.solve(&b, &mut x)?;
     println!("Solution: x = [{:.6}, {:.6}, {:.6}]", x[0], x[1], x[2]);
     println!("Converged in {} iterations with final residual {:.3e}", 
              stats2.iterations, stats2.final_residual);
@@ -143,11 +148,12 @@ fn main() -> Result<(), KError> {
     });
     
     x.fill(0.0); // Reset solution
-    ksp3.set_type(SolverType::BiCgStab)?
-        .set_pc_type(PcType::None)?
+    ksp3.set_operators(a_op, None)
+        .set_type(SolverType::BiCgStab)?
+        .set_pc_type(PcType::None, None)?
         .set_tolerances(1e-6, 1e-12, 1e3, 100);
-    
-    let stats3 = ksp3.solve(&a, &b, &mut x)?;
+
+    let stats3 = ksp3.solve(&b, &mut x)?;
     println!("BiCGStab converged in {} iterations", stats3.iterations);
     println!();
 

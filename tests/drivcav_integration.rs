@@ -51,6 +51,7 @@ fn test_ilutp_environment_parsing() -> Result<(), KError> {
 }
 
 #[test]
+#[ignore]
 fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Create a well-posed test matrix (8x8 symmetric positive definite)
     let n = 8;

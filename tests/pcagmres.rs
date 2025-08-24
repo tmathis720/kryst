@@ -63,6 +63,7 @@ fn pcagmres_solves_dd_nonsym_right_pc() {
             Some(&pc),
             &b,
             &mut x,
+            PcSide::Right,
             &UniverseComm::NoComm(kryst::parallel::NoComm),
             None,
             None,
