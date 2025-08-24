@@ -22,7 +22,7 @@
 //! println!("Best configuration: {:?}", best_config);
 //! ```
 
-use crate::config::options::PcOptions;
+use crate::config::options::{KspOptions, PcOptions};
 use crate::context::KspContext;
 use crate::context::ksp_context::SolverType;
 use crate::context::pc_context::PcType;
@@ -30,6 +30,7 @@ use crate::error::KError;
 use crate::utils::monitor::IterationMonitor;
 use faer::Mat;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Configuration for a single parameter combination.
@@ -259,7 +260,7 @@ impl ParameterTuner {
         &mut self,
         config: &ParameterConfig,
         matrix: &Mat<f64>,
-        rhs: &Vec<f64>,
+        rhs: &[f64],
     ) -> Result<PerformanceMetrics, KError> {
         let setup_start = Instant::now();
 
@@ -279,31 +280,36 @@ impl ParameterTuner {
 
         // Configure preconditioner
         if let Some(ref chain) = config.pc_chain {
-            // Use PC chain
-            let mut pc_opts = PcOptions::default();
-            pc_opts.pc_chain = Some(chain.clone());
+            // Build a structured chain from the configuration
+            let stages: Vec<PcOptions> = chain
+                .split("->")
+                .map(|token| {
+                    let mut stage = PcOptions {
+                        pc_type: Some(token.trim().to_string()),
+                        ..Default::default()
+                    };
+                    if token.contains("amg") {
+                        stage.amg_levels = config.amg_levels;
+                        stage.amg_strength_threshold = config.amg_strength_threshold;
+                        stage.amg_nu_pre = config.amg_nu_pre;
+                        stage.amg_nu_post = config.amg_nu_post;
+                    }
+                    if token.contains("chebyshev") {
+                        stage.chebyshev_degree = config.chebyshev_degree;
+                        stage.chebyshev_lambda_min = config.chebyshev_lambda_min;
+                        stage.chebyshev_lambda_max = config.chebyshev_lambda_max;
+                    }
+                    stage
+                })
+                .collect();
 
-            // Set AMG parameters if any preconditioner in chain is AMG
-            if chain.contains("amg") {
-                pc_opts.amg_levels = config.amg_levels;
-                pc_opts.amg_strength_threshold = config.amg_strength_threshold;
-                pc_opts.amg_nu_pre = config.amg_nu_pre;
-                pc_opts.amg_nu_post = config.amg_nu_post;
-            }
-
-            // Set Chebyshev parameters if any preconditioner in chain is Chebyshev
-            if chain.contains("chebyshev") {
-                pc_opts.chebyshev_degree = config.chebyshev_degree;
-                pc_opts.chebyshev_lambda_min = config.chebyshev_lambda_min;
-                pc_opts.chebyshev_lambda_max = config.chebyshev_lambda_max;
-            }
-
-            ksp.set_pc_options(pc_opts);
+            let pc_opts = PcOptions {
+                chain: Some(stages),
+                ..Default::default()
+            };
+            ksp.set_from_all_options(&KspOptions::default(), &pc_opts)?;
         } else {
-            // Single preconditioner
-            ksp.set_pc_type(config.pc_type)?;
-
-            // Set PC-specific options
+            // Single preconditioner with options
             let mut pc_opts = PcOptions::default();
             match config.pc_type {
                 PcType::Amg => {
@@ -319,12 +325,14 @@ impl ParameterTuner {
                 }
                 _ => {} // No special parameters for other types
             }
-            ksp.set_pc_options(pc_opts);
+            ksp.set_pc_type(config.pc_type, Some(&pc_opts))?;
         }
 
         // Setup timing
         let n = matrix.nrows();
-        ksp.setup(matrix, n)?;
+        let aop: Arc<dyn crate::matrix::op::LinOp<S = f64>> = Arc::new(matrix.clone());
+        ksp.set_operators(aop, None);
+        ksp.setup()?;
         let setup_time = setup_start.elapsed();
 
         // Create solution vector
@@ -345,7 +353,7 @@ impl ParameterTuner {
         let solve_start = Instant::now();
         let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Create a simple timeout mechanism using solver iteration callback
-            ksp.solve(matrix, rhs, &mut x)
+            ksp.solve(rhs, &mut x)
         }));
 
         let solve_time = solve_start.elapsed();
@@ -458,7 +466,7 @@ impl ParameterTuner {
     pub fn tune_parameters(
         &mut self,
         matrix: &Mat<f64>,
-        rhs: &Vec<f64>,
+        rhs: &[f64],
         max_trials: usize,
     ) -> Result<(ParameterConfig, Vec<PerformanceMetrics>), KError> {
         let configurations = self.generate_configurations();
