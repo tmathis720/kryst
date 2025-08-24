@@ -168,7 +168,6 @@ impl LinearSolver for CgsSolver {
         }
 
         // CGS parameters
-        let mut rho_old = 0.0f64;
         let mut rho = Self::dot(&r_tld, r, comm); // (r~, r)
         if rho.abs() <= f64::EPSILON {
             return Err(KError::IndefiniteMatrix); // classic breakdown
@@ -178,6 +177,7 @@ impl LinearSolver for CgsSolver {
         u.copy_from_slice(r);
         p.copy_from_slice(u);
 
+        let mut rho_old: f64;
         let mut iters = 0usize;
         for k in 1..=self.maxits {
             iters = k;

@@ -415,7 +415,7 @@ impl LinearSolver for FgmresSolver {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        pc: Option<&dyn Preconditioner>,
+        _pc: Option<&dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,

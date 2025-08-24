@@ -116,7 +116,7 @@ impl CgSolver {
             let tmp = &mut wk.tmp1[..];
             (r, z, p, ap, tmp)
         } else {
-            let mut mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
+            let mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
             (mk(n), mk(n), mk(n), mk(n), mk(n))
         }
     }
@@ -182,7 +182,7 @@ impl LinearSolver for CgSolver {
         if rho <= 0.0 || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
-        let mut rsq = Self::dot(r, r, comm);
+        let rsq = Self::dot(r, r, comm);
         let bnorm = Self::nrm2(b, comm).max(1e-32);
         let mut xnorm = Self::nrm2(x, comm);
 
@@ -299,7 +299,6 @@ impl LinearSolver for CgSolver {
             }
 
             rho = rho_new;
-            rsq = rsq_new;
             stats.iterations = k;
             stats.final_residual = res;
         }

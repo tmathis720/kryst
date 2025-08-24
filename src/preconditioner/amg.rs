@@ -53,6 +53,8 @@
 //!     .build(&matrix)?;
 //! ```
 
+#![allow(dead_code)]
+
 use crate::error::KError;
 use crate::matrix::sparse::{CsrMatrix, SparseMatrix};
 use crate::matrix::utils;
@@ -719,7 +721,7 @@ impl AMG {
 
         let mut levels = Vec::with_capacity(config.max_levels);
         let mut current_matrix = matrix.clone();
-        let mut setup_complexity = 0.0;
+        let mut _setup_complexity = 0.0;
         let original_size = matrix.nrows();
 
         for level_idx in 0..config.max_levels {
@@ -841,7 +843,7 @@ impl AMG {
 
             // HYPRE-style complexity tracking using sparse nnz
             let coarse_nnz = sparse_coarse_matrix.nnz();
-            setup_complexity += coarse_nnz as f64 / original_size as f64;
+            _setup_complexity += coarse_nnz as f64 / original_size as f64;
 
             levels.push(AMGLevel {
                 interpolation: sparse_interpolation,
@@ -886,12 +888,12 @@ impl AMG {
             info!(
                 "AMG Setup Complete: {} levels, complexity={:.2}",
                 levels.len(),
-                setup_complexity
+                _setup_complexity
             );
             if config.print_level > 0 {
                 println!(
                     "AMG Setup: {} -> {} (complexity: {:.2})",
-                    original_size, final_size, setup_complexity
+                    original_size, final_size, _setup_complexity
                 );
             }
         }
@@ -961,10 +963,10 @@ impl AMG {
             ..Default::default()
         };
 
-        Self::new_with_config(a, config).unwrap_or_else(|e| {
+        Self::new_with_config(a, config).unwrap_or_else(|_e| {
             // Fallback to original implementation for compatibility
             #[cfg(feature = "logging")]
-            warn!("AMG: Falling back to legacy constructor due to: {}", e);
+            warn!("AMG: Falling back to legacy constructor due to: {}", _e);
 
             Self::with_smoothing(a, max_levels, base_threshold, 1, 1)
         })

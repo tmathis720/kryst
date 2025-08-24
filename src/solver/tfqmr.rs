@@ -91,7 +91,7 @@ impl LinearSolver for TfqmrSolver {
         })?;
         TfqmrSolver::setup_tfqmr_workspace(w, n);
 
-        let (r, Au) = (&mut w.tmp1, &mut w.tmp2);
+        let (r, au) = (&mut w.tmp1, &mut w.tmp2);
         let (u_slice, rest) = w.q.split_at_mut(1);
         let (v_slice, rest) = rest.split_at_mut(1);
         let (wv_slice, rest) = rest.split_at_mut(1);
@@ -180,16 +180,16 @@ impl LinearSolver for TfqmrSolver {
                     }
                 }
                 for i in 0..n {
-                    Au[i] = u[i] + qv[i];
+                    au[i] = u[i] + qv[i];
                 }
-                let tmp_in = Au.to_vec();
-                a.matvec(&tmp_in, Au);
+                let tmp_in = au.to_vec();
+                a.matvec(&tmp_in, au);
                 if let Some(pc) = pc {
-                    let tmp2 = Au.to_vec();
-                    pc.apply(pc_side, &tmp2, Au)?;
+                    let tmp2 = au.to_vec();
+                    pc.apply(pc_side, &tmp2, au)?;
                 }
                 for i in 0..n {
-                    r[i] -= alpha * Au[i];
+                    r[i] -= alpha * au[i];
                 }
 
                 {
@@ -225,15 +225,15 @@ impl LinearSolver for TfqmrSolver {
                                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                             ))
                     {
-                        a.matvec(x, Au);
+                        a.matvec(x, au);
                         for i in 0..n {
-                            Au[i] = b[i] - Au[i];
+                            au[i] = b[i] - au[i];
                         }
                         if let Some(pc) = pc {
-                            let tmp = Au.to_vec();
-                            pc.apply(pc_side, &tmp, Au)?;
+                            let tmp = au.to_vec();
+                            pc.apply(pc_side, &tmp, au)?;
                         }
-                        true_res = norm2(Au);
+                        true_res = norm2(au);
                         stats.final_residual = true_res;
                     } else {
                         stats.final_residual = dpest;
@@ -272,15 +272,15 @@ impl LinearSolver for TfqmrSolver {
             dpold = norm2(r);
 
             if self.resid_recalc_every == 1 {
-                a.matvec(x, Au);
+                a.matvec(x, au);
                 for i in 0..n {
-                    Au[i] = b[i] - Au[i];
+                    au[i] = b[i] - au[i];
                 }
                 if let Some(pc) = pc {
-                    let tmp = Au.clone();
-                    pc.apply(pc_side, &tmp, Au)?;
+                    let tmp = au.clone();
+                    pc.apply(pc_side, &tmp, au)?;
                 }
-                true_res = norm2(Au);
+                true_res = norm2(au);
                 stats.final_residual = true_res;
                 let (reason, s2) = self.conv.check(true_res, res0, 2 * k);
                 stats = s2;
