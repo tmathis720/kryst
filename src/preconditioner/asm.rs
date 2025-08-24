@@ -6,10 +6,6 @@ use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use crate::solver::legacy::LinearSolver;
-#[cfg(feature = "rayon")]
-use rayon::iter::IntoParallelRefIterator;
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
 use std::sync::Mutex;
 
 /// Additive Schwarz (overlapping block Jacobi) preconditioner.

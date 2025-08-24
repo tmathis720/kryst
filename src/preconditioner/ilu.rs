@@ -79,9 +79,6 @@ use faer::traits::ComplexField;
 use num_traits::Float;
 use std::cell::RefCell;
 
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
-
 #[cfg(feature = "logging")]
 use log::{debug, info, trace, warn};
 

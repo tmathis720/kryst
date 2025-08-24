@@ -26,11 +26,11 @@ use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcaPcMode, PcgSolver, QmrSolver, TfqmrSolver,
+    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcaPcMode, PcgSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;

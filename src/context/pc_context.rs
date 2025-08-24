@@ -310,7 +310,7 @@ impl PcFactory {
 
     pub fn construct_deferred_preconditioner(
         info: DeferredPcInfo,
-        matrix: &Mat<f64>,
+        _matrix: &Mat<f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         match info.pc_type {
             PcType::Amg => Err(KError::NotImplemented("AMG not yet implemented".into())),
