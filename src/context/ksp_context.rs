@@ -613,3 +613,16 @@ impl KspContext {
         self.invalidate_setup();
     }
 }
+
+#[cfg(test)]
+impl KspContext {
+    /// Test-only: view current workspace (e.g., to inspect GMRES V/Z basis sizes).
+    pub fn debug_workspace(&self) -> Option<&Workspace> {
+        self.work.as_ref()
+    }
+
+    /// Test-only: inject a preconditioner for controlled testing.
+    pub fn set_pc_box_for_tests(&mut self, pc: Box<dyn Preconditioner>) {
+        self.pc = Some(pc);
+    }
+}

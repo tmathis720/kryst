@@ -222,3 +222,6 @@ where
         }
     }
 }
+
+#[cfg(all(test, feature = "legacy-pc-bridge"))]
+mod tests_symmetric;
