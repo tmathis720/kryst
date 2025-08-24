@@ -4,6 +4,7 @@ use mpi::datatype::Equivalence;
 use mpi::topology::{Color, Communicator};
 #[cfg(feature = "mpi")]
 use mpi::traits::*;
+#[cfg(any(feature = "mpi", feature = "rayon"))]
 use std::sync::Arc;
 
 /// Abstract communicator for reductions & splits
