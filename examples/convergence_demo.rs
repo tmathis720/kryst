@@ -14,7 +14,6 @@
 use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
-use kryst::utils::convergence::ConvergedReason;
 use std::sync::Arc;
 
 fn create_test_matrix(n: usize) -> Mat<f64> {
