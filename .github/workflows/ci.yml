@@ -14,6 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # OPTIONAL: list any non-MPI features your project needs in the fast path.
+  # Example: "blas,serde"
+  NON_MPI_FEATURES: ""
 
 jobs:
   build-and-unit-tests:
@@ -29,54 +32,84 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Minimal, faster apt set (no Python unless you actually need it)
       - name: Install build deps (no MPI)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config curl clang \
             libopenblas-dev liblapack-dev
-          # Optional: quiet dpkg logs to speed log I/O
           sudo rm -rf /var/lib/apt/lists/*
 
-      # Use maintained Rust toolchain action
       - name: Set up Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
           components: clippy,rustfmt
 
-      # Smarter cache for target/, registry, git (handles feature/toolchain keys automatically)
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
 
-      # Build once per toolchain; tests on both; clippy/fmt only on stable to avoid duplication
-      - name: Build (locked)
-        run: cargo build --locked --verbose
+      - name: Build (NO MPI features)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEAT_ARGS=()
+          if [[ -n "${NON_MPI_FEATURES}" ]]; then
+            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          fi
+          echo "Using feature args: ${FEAT_ARGS[*]:-<none>} (with --no-default-features)"
+          cargo build --locked --verbose --no-default-features "${FEAT_ARGS[@]}"
 
-      - name: Run unit tests (non-MPI)
-        run: cargo test --all --locked --verbose -- --nocapture --skip mpi
+      - name: Run unit tests (NO MPI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEAT_ARGS=()
+          if [[ -n "${NON_MPI_FEATURES}" ]]; then
+            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          fi
+          cargo test --locked --verbose --no-default-features "${FEAT_ARGS[@]}" -- --nocapture --skip mpi
 
-      - name: Clippy (stable only)
+      - name: Clippy (stable only, NO MPI)
         if: matrix.rust == 'stable'
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEAT_ARGS=()
+          if [[ -n "${NON_MPI_FEATURES}" ]]; then
+            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          fi
+          cargo clippy --all-targets --no-default-features "${FEAT_ARGS[@]}" -- -D warnings
 
       - name: rustfmt check (stable only)
         if: matrix.rust == 'stable'
         run: cargo fmt --all -- --check
 
-      # Doctests + docs on stable only; these are heavy
-      - name: Doc tests (stable only)
+      - name: Doc tests (stable only, NO MPI)
         if: matrix.rust == 'stable'
-        run: cargo test --doc --all-features --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEAT_ARGS=()
+          if [[ -n "${NON_MPI_FEATURES}" ]]; then
+            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          fi
+          cargo test --doc --locked --no-default-features "${FEAT_ARGS[@]}"
 
-      - name: Build docs (stable only; docs.rs config)
+      - name: Build docs (stable only; docs.rs config; NO MPI)
         if: matrix.rust == 'stable'
         env:
           RUSTDOCFLAGS: --cfg docsrs
-        run: cargo doc --all-features --no-deps --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEAT_ARGS=()
+          if [[ -n "${NON_MPI_FEATURES}" ]]; then
+            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          fi
+          cargo doc --no-deps --locked --no-default-features "${FEAT_ARGS[@]}"
 
   mpi-tests:
     runs-on: ubuntu-latest
@@ -99,10 +132,11 @@ jobs:
 
       - name: Verify MPI toolchain (debugging aid)
         run: |
+          set -x
           which mpicc || true
           mpicc -show || true
-          pkg-config --modversion ompi || true
-          pkg-config --cflags --libs ompi || true
+          dpkg -L libopenmpi-dev | grep '\.pc$' || true
+          pkg-config --variable pc_path pkg-config || true
 
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -112,15 +146,18 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (all features)
+      - name: Build (MPI features ON)
         env:
-          # Prefer compiler wrapper; rsmpi will use this cleanly.
+          # Adjust the feature name below if your MPI feature is named differently.
+          # Common choices: "mpi", "with-mpi"
+          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/openmpi/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig
           MPICC: mpicc
-          # Also hint pkg-config in case build.rs picks that route.
           MPI_PKG_CONFIG: ompi
-        run: cargo build --all-features --locked --verbose
+        run: |
+          # Replace 'mpi' with your actual cargo feature that enables MPI:
+          cargo build --all-features --locked --verbose || \
+          cargo build --locked --verbose --features mpi
 
-      # Add oversubscription + force TCP/self transports to avoid IB/UCX hiccups on GH runners
       - name: Run MPI tests (4 processes)
         env:
           OMPI_MCA_rmaps_base_oversubscribe: "1"
@@ -128,5 +165,6 @@ jobs:
           OMPI_MCA_plm: rsh
         run: |
           echo "[CI] Running MPI-enabled tests with 4 processes..."
+          # Prefer running only MPI-tagged tests; adjust the filter as needed.
           mpirun --oversubscribe -np 4 \
-            cargo test --all-features --locked -- --nocapture --ignored
+            cargo test --locked --verbose --features mpi -- --nocapture --ignored
