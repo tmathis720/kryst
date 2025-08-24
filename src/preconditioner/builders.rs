@@ -1,19 +1,25 @@
 use crate::error::KError;
 use crate::preconditioner::{
     Preconditioner,
-    chebyshev::ChebyshevPre,
     direct::{LuPc, QrPc},
     jacobi::Jacobi,
-    sor::{MatSorType, Sor},
+    sor::MatSorType,
+};
+
+#[cfg(feature = "legacy-pc-bridge")]
+use crate::preconditioner::{
+    chebyshev::ChebyshevPre,
+    sor::Sor,
+    LegacyOpPreconditioner,
+    ilup::Ilup,
+    ilut::Ilut,
 };
 
 #[cfg(feature = "superlu_dist")]
 use crate::preconditioner::direct::SuperLuDistPc;
 
-use faer::Mat;
-
 #[cfg(feature = "legacy-pc-bridge")]
-use crate::preconditioner::{LegacyOpPreconditioner, ilup::Ilup, ilut::Ilut};
+use faer::Mat;
 
 /// Build a Jacobi preconditioner.
 pub fn build_jacobi() -> Result<Box<dyn Preconditioner>, KError> {

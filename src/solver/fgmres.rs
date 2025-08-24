@@ -7,8 +7,6 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
-
-#[cfg(feature = "logging")]
 use std::any::Any;
 
 /// Orthogonalization flavor
