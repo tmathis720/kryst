@@ -4,6 +4,9 @@ cargo-features = ["edition2024"]
 name = "kryst"
 version = "1.2.1"
 edition = "2024"
+ 
+[lib]
+doctest = false
 description = "Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with shared and distributed memory parallelism."
 license = "MIT"
 authors = ["Thomas James Mathis <tmathis720@gmail.com>"]

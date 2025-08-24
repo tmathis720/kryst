@@ -1,6 +1,7 @@
 use faer::Mat;
 use kryst::matrix::op::LinOp;
 use kryst::parallel::UniverseComm;
+use kryst::preconditioner::PcSide;
 use kryst::solver::{LinearSolver, QmrSolver};
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ fn qmr_solves_simple_nonsymmetric() {
             None,
             &b,
             &mut x,
+            PcSide::Left,
             &UniverseComm::NoComm(kryst::parallel::NoComm),
             None,
             None,

@@ -2,6 +2,7 @@
 
 use kryst::solver::{LuSolver, QrSolver};
 use kryst::solver::legacy::LinearSolver;
+use kryst::preconditioner::PcSide;
 use faer::Mat;
 use rand::Rng;
 
@@ -24,11 +25,13 @@ fn main() {
 
     // LU solve
     let mut lus = LuSolver::new();
-    let stats_lu = lus.solve(&a, None, &b, &mut x, &comm, None, None).unwrap();
+    let stats_lu =
+        lus.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, None).unwrap();
     println!("LU x = {:?}, stats = {:?}", x, stats_lu);
 
     // QR solve
     let mut qrs = QrSolver::new();
-    let stats_qr = qrs.solve(&a, None, &b, &mut x, &comm, None, None).unwrap();
+    let stats_qr =
+        qrs.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, None).unwrap();
     println!("QR x = {:?}, stats = {:?}", x, stats_qr);
 }
