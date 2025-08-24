@@ -47,6 +47,8 @@ mod tests_gmres_lr {
         ksp_left.rtol = 1e-10;
         let mut x_left = [0.0; 3];
         let stats_left = ksp_left.solve(&b, &mut x_left)?;
+        assert!(stats_left.iterations > 0);
+        assert!(stats_left.final_residual < 1e-4, "left solver failed to converge");
 
         // --- RIGHT preconditioning
         let mut ksp_right = KspContext::new();
@@ -57,6 +59,8 @@ mod tests_gmres_lr {
         ksp_right.rtol = 1e-10;
         let mut x_right = [0.0; 3];
         let stats_right = ksp_right.solve(&b, &mut x_right)?;
+        assert!(stats_right.iterations > 0);
+        assert!(stats_right.final_residual < 1e-4, "right solver failed to converge");
 
         // True residuals are small and comparable
         let res_l = true_residual_norm(amat.as_ref(), &x_left, &b);

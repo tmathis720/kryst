@@ -477,7 +477,6 @@ pub fn write_vector_market<P: AsRef<Path>>(file_path: P, vector: &[f64]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::sparse::SparseMatrix;
     use std::fs;
 
     const MATRIX_FILE: &str = "examples/e05r0000/e05r0000.mtx";
