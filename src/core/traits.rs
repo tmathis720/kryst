@@ -687,6 +687,39 @@ mod tests {
                 (global_sq.sqrt()).into()
             }
         }
+        struct Dummy;
+
+        impl TestMatVec<Vec<f64>> for Dummy {
+            fn matvec(&self, _x: &Vec<f64>, _y: &mut Vec<f64>) {}
+        }
+
+        impl TestMatTransVec<Vec<f64>> for Dummy {
+            fn mattransvec(&self, _x: &Vec<f64>, _y: &mut Vec<f64>) {}
+        }
+
+        impl TestInnerProduct<Vec<f64>> for Dummy {
+            type Scalar = f64;
+            fn dot(
+                &self,
+                _x: &Vec<f64>,
+                _y: &Vec<f64>,
+                _comm: &impl crate::parallel::Comm,
+            ) -> Self::Scalar {
+                0.0
+            }
+        }
+
+        fn _use_traits<T: TestMatVec<Vec<f64>> + TestMatTransVec<Vec<f64>> + TestInnerProduct<Vec<f64>>>() {}
+        _use_traits::<Dummy>();
+
+        let dummy = Dummy;
+        let comm = crate::parallel::NoComm;
+        let v = vec![0.0; 1];
+        let mut y = vec![0.0; 1];
+        dummy.matvec(&v, &mut y);
+        dummy.mattransvec(&v, &mut y);
+        let _ = dummy.dot(&v, &v, &comm);
+        let _ = dummy.norm(&v, &comm);
 
         // All method signatures should compile
         assert!(true);

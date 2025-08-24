@@ -4892,7 +4892,7 @@ mod tests {
 
     #[test]
     fn test_refinement_convergence_criteria() {
-        let mut engine = RefinementEngine::with_defaults();
+        let engine = RefinementEngine::with_defaults();
 
         // Test absolute tolerance convergence
         assert!(engine.check_convergence(1e-13, 1e-6, 1));

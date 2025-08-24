@@ -1493,7 +1493,7 @@ mod tests {
 
     #[test]
     fn test_ilu_variants() {
-        let matrix = faer::Mat::from_fn(3, 3, |i, j| {
+        let _matrix = faer::Mat::from_fn(3, 3, |i, j| {
             if i == j {
                 4.0
             } else if (i as i32 - j as i32).abs() == 1 {
