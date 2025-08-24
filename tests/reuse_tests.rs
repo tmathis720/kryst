@@ -1,15 +1,27 @@
-use std::sync::Arc;
-use kryst::matrix::{CsrOp};
-use kryst::matrix::sparse::CsrMatrix;
 use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::preconditioner::{PcReusePolicy};
 use kryst::context::pc_context::PcType;
+use kryst::matrix::CsrOp;
+use kryst::matrix::sparse::CsrMatrix;
+use kryst::preconditioner::PcReusePolicy;
+use std::sync::Arc;
 
 #[test]
 fn pc_rebuilds_on_structure_change() {
-    let a1 = Arc::new(CsrMatrix::from_csr(2,2, vec![0,1,2], vec![0,1], vec![1.0,2.0]));
+    let a1 = Arc::new(CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![1.0, 2.0],
+    ));
     let op1 = Arc::new(CsrOp::new(a1));
-    let a2 = Arc::new(CsrMatrix::from_csr(2,2, vec![0,1,2], vec![0,1], vec![3.0,4.0]));
+    let a2 = Arc::new(CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![3.0, 4.0],
+    ));
     let op2 = Arc::new(CsrOp::new(a2));
 
     let mut ksp = KspContext::new();
@@ -28,7 +40,13 @@ fn pc_rebuilds_on_structure_change() {
 
 #[test]
 fn jacobi_numeric_update_without_rebuild() {
-    let a = Arc::new(CsrMatrix::from_csr(2,2, vec![0,1,2], vec![0,1], vec![1.0,2.0]));
+    let a = Arc::new(CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![1.0, 2.0],
+    ));
     let op = Arc::new(CsrOp::new(a));
 
     let mut ksp = KspContext::new();

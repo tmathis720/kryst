@@ -1,12 +1,12 @@
-use criterion::{black_box, Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
-use kryst::solver::{LuSolver, LinearSolver};
+use kryst::solver::{LinearSolver, LuSolver};
 
 fn bench_lu_vs_faer(c: &mut Criterion) {
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 200;
-    let data: Vec<f64> = (0..n*n).map(|i| (i as f64).sin()).collect();
+    let data: Vec<f64> = (0..n * n).map(|i| (i as f64).sin()).collect();
     let a = Mat::from_fn(n, n, |i, j| data[j * n + i]);
     let b: Vec<f64> = (0..n).map(|i| (i as f64).cos()).collect();
     let mut x = vec![0.0; n];
@@ -14,7 +14,17 @@ fn bench_lu_vs_faer(c: &mut Criterion) {
     c.bench_function("kryst LU", |ben| {
         let mut solver = LuSolver::new();
         ben.iter(|| {
-            let _stats = solver.solve(black_box(&a), None, black_box(&b), black_box(&mut x), &comm, None, None).unwrap();
+            let _stats = solver
+                .solve(
+                    black_box(&a),
+                    None,
+                    black_box(&b),
+                    black_box(&mut x),
+                    &comm,
+                    None,
+                    None,
+                )
+                .unwrap();
         })
     });
 

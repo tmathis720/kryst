@@ -74,4 +74,3 @@ fn cg_with_jacobi_pc() {
     let res = (r.iter().map(|v| v * v).sum::<f64>()).sqrt();
     assert!(res <= 1e-8);
 }
-

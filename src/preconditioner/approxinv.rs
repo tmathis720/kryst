@@ -29,10 +29,10 @@ use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
+use faer::linalg::solvers::SolveCore;
+use faer::prelude::SolveLstsq;
 use num_traits::Float;
 use std::any::TypeId;
-use faer::prelude::SolveLstsq;
-use faer::linalg::solvers::SolveCore;
 use std::marker::PhantomData;
 
 /// Sparse Approximate Inverse (SPAI) preconditioner
@@ -46,30 +46,30 @@ use std::marker::PhantomData;
 /// - `T`: Scalar type (must implement `Float`)
 pub struct ApproxInv<M, V, T> {
     /// Sparsity pattern for the approximate inverse (manual or automatic)
-    pub pattern:    SparsityPattern,
+    pub pattern: SparsityPattern,
     /// Tolerance for numerical operations (pivoting, etc.)
-    pub tol:        T,
+    pub tol: T,
     /// Maximum number of outer iterations (not used in this basic SPAI)
-    pub max_iter:   usize,
+    pub max_iter: usize,
     /// Maximum number of improvement steps per row (not used in this basic SPAI)
-    pub nbsteps:    usize,
+    pub nbsteps: usize,
     /// Maximum size of working arrays (not used in this basic SPAI)
-    pub max_size:   usize,
+    pub max_size: usize,
     /// Maximum new fill per step (not used in this basic SPAI)
-    pub max_new:    usize,
+    pub max_new: usize,
     /// Block size for block SPAI (not implemented)
     pub block_size: usize,
     /// Cache size hint (not implemented)
     pub cache_size: usize,
     /// Verbosity flag (print timing/stats)
-    pub verbose:    bool,
+    pub verbose: bool,
     /// Symmetric pattern flag (not implemented)
-    pub sp:         bool,
+    pub sp: bool,
     /// Inverse rows: for each row i, a vector of (column, value) pairs (CSR-like storage)
-    pub inv_rows:   Vec<Vec<(usize, T)>>,
+    pub inv_rows: Vec<Vec<(usize, T)>>,
     /// Optionally stores the matrix A (not used in this implementation)
-    pub a:          Option<M>,
-    _phantom:       PhantomData<V>,
+    pub a: Option<M>,
+    _phantom: PhantomData<V>,
 }
 
 impl<M, V, T> ApproxInv<M, V, T>
@@ -129,7 +129,9 @@ where
                 if let Some(nrows) = get_nrows(a) {
                     nrows
                 } else {
-                    return Err(KError::Unsupported("SparsityPattern::Auto requires nrows() or row_indices() support"));
+                    return Err(KError::Unsupported(
+                        "SparsityPattern::Auto requires nrows() or row_indices() support",
+                    ));
                 }
             }
         };
@@ -164,8 +166,8 @@ where
             e_j[j] = T::one();
             // Solve for m_j using either faer (for f64) or normal equations
             let m_vec: Vec<T> = if TypeId::of::<T>() == TypeId::of::<f64>() {
+                use faer::linalg::solvers::{FullPivLu, Qr};
                 use faer::{Mat, MatMut};
-                use faer::linalg::solvers::{Qr, FullPivLu};
                 // b_f64: n x m (column-major)
                 let b_f64 = Mat::from_fn(n, m, |j, i| b[i][j].to_f64().unwrap());
                 let rhs = Mat::from_fn(n, 1, |i, _| e_j[i].to_f64().unwrap());
@@ -205,7 +207,7 @@ where
                 let mut m_vec_pattern = bt_e.clone();
                 for k in 0..m {
                     let mut max_row = k;
-                    for r in (k+1)..m {
+                    for r in (k + 1)..m {
                         if bt_b[r][k].abs() > bt_b[max_row][k].abs() {
                             max_row = r;
                         }
@@ -218,7 +220,7 @@ where
                     if pivot.abs() < self.tol {
                         continue;
                     }
-                    for r in (k+1)..m {
+                    for r in (k + 1)..m {
                         let f = bt_b[r][k] / pivot;
                         for c in k..m {
                             bt_b[r][c] = bt_b[r][c] - f * bt_b[k][c];
@@ -229,7 +231,7 @@ where
                 // Back substitution
                 for k in (0..m).rev() {
                     let mut sum = m_vec_pattern[k];
-                    for c in (k+1)..m {
+                    for c in (k + 1)..m {
                         sum = sum - bt_b[k][c] * m_vec_pattern[c];
                     }
                     let pivot = bt_b[k][k];
@@ -342,7 +344,11 @@ mod tests {
     impl<T: Float> MatVec<Vec<T>> for DenseMat<T> {
         fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
             for (i, row) in self.data.iter().enumerate() {
-                y[i] = row.iter().zip(x.iter()).map(|(a, b)| *a * *b).fold(T::zero(), |acc, v| acc + v);
+                y[i] = row
+                    .iter()
+                    .zip(x.iter())
+                    .map(|(a, b)| *a * *b)
+                    .fold(T::zero(), |acc, v| acc + v);
             }
         }
     }
@@ -382,11 +388,16 @@ mod tests {
     #[test]
     fn approxinv_exact_inverse() {
         // 3x3 diagonal matrix
-        let a = DenseMat { data: vec![vec![2.0, 0.0, 0.0], vec![0.0, 3.0, 0.0], vec![0.0, 0.0, 4.0]] };
+        let a = DenseMat {
+            data: vec![
+                vec![2.0, 0.0, 0.0],
+                vec![0.0, 3.0, 0.0],
+                vec![0.0, 0.0, 4.0],
+            ],
+        };
         let pattern = SparsityPattern::Manual(vec![vec![0], vec![1], vec![2]]);
-        let mut spai = ApproxInv::<_, Vec<f64>, f64>::new(
-            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false
-        );
+        let mut spai =
+            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
         spai.setup(&a).unwrap();
         // Should recover the exact inverse
         let inv = &spai.inv_rows;
@@ -398,24 +409,24 @@ mod tests {
     #[test]
     fn approxinv_apply_vector() {
         // 2x2 matrix
-        let a = DenseMat { data: vec![vec![4.0, 1.0], vec![2.0, 3.0]] };
+        let a = DenseMat {
+            data: vec![vec![4.0, 1.0], vec![2.0, 3.0]],
+        };
         let pattern = SparsityPattern::Manual(vec![vec![0, 1], vec![0, 1]]);
-        let mut spai = ApproxInv::<_, Vec<f64>, f64>::new(
-            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false
-        );
+        let mut spai =
+            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
         spai.setup(&a).unwrap();
         let x = vec![1.0, 2.0];
         let mut y = vec![0.0, 0.0];
-        spai.apply(crate::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+        spai.apply(crate::preconditioner::PcSide::Left, &x, &mut y)
+            .unwrap();
         // Compare to expected inverse * x using faer
-        let a_inv = faer::Mat::<f64>::from_fn(2, 2, |i, j| {
-            match (i, j) {
-                (0, 0) => 0.375,
-                (0, 1) => -0.125,
-                (1, 0) => -0.25,
-                (1, 1) => 0.5,
-                _ => 0.0,
-            }
+        let a_inv = faer::Mat::<f64>::from_fn(2, 2, |i, j| match (i, j) {
+            (0, 0) => 0.375,
+            (0, 1) => -0.125,
+            (1, 0) => -0.25,
+            (1, 1) => 0.5,
+            _ => 0.0,
         });
         let x_vec = faer::Mat::<f64>::from_fn(2, 1, |i, _| x[i]);
         let y_expected = &a_inv * &x_vec;
@@ -428,13 +439,13 @@ mod tests {
         // Identity matrix
         let a = eye::<f64>(4);
         let pattern = SparsityPattern::Manual(vec![vec![0], vec![1], vec![2], vec![3]]);
-        let mut spai = ApproxInv::<_, Vec<f64>, f64>::new(
-            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false
-        );
+        let mut spai =
+            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
         spai.setup(&a).unwrap();
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let mut y = vec![0.0; 4];
-        spai.apply(crate::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+        spai.apply(crate::preconditioner::PcSide::Left, &x, &mut y)
+            .unwrap();
         assert_relative_eq!(x[0], y[0], epsilon = 1e-12);
         assert_relative_eq!(x[1], y[1], epsilon = 1e-12);
         assert_relative_eq!(x[2], y[2], epsilon = 1e-12);
@@ -444,8 +455,8 @@ mod tests {
     #[test]
     fn debug_faer_lu_inverse_rows() {
         // Test faer LU for inverting a 2x2 matrix row-wise
-        use faer::{Mat, MatMut};
         use faer::linalg::solvers::FullPivLu;
+        use faer::{Mat, MatMut};
         let a = Mat::from_fn(2, 2, |j, i| match (i, j) {
             (0, 0) => 4.0,
             (0, 1) => 1.0,

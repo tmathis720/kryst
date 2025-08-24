@@ -8,11 +8,11 @@
 //! - Iteration monitoring
 //! - Preconditioner integration
 
+use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
+use kryst::utils::convergence::ConvergedReason;
 use std::sync::Arc;
-use kryst::utils::convergence::{ConvergedReason};
-use faer::Mat;
 
 #[cfg(feature = "logging")]
 use env_logger;
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a non-symmetric test problem
     let n = 100;
     let mut a_data = vec![0.0; n * n];
-    
+
     // Create a diagonally dominant non-symmetric matrix
     for i in 0..n {
         for j in 0..n {
@@ -42,9 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     let a = Mat::from_fn(n, n, |i, j| a_data[i * n + j]);
-    
+
     // Create right-hand side (solution should be approximately [1, 1, 1, ...])
     let x_true: Vec<f64> = (1..=n).map(|i| (i as f64).sin()).collect();
     let mut b = vec![0.0; n];
@@ -56,14 +56,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Problem size: {}x{}", n, n);
     println!("Matrix condition: Diagonally dominant non-symmetric");
-    println!("True solution norm: {:.6e}", x_true.iter().map(|x| x*x).sum::<f64>().sqrt());
+    println!(
+        "True solution norm: {:.6e}",
+        x_true.iter().map(|x| x * x).sum::<f64>().sqrt()
+    );
 
     // Test 1: Basic workspace-enabled BiCGStab solve
     println!("\n--- Test 1: Basic BiCGStab with Workspace ---");
-    
+
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::BiCgStab)?
-       .set_tolerances(1e-8, 1e-12, 1e3, 100);
+        .set_tolerances(1e-8, 1e-12, 1e3, 100);
 
     // Add a monitor to track convergence
     ksp.add_monitor(move |iter, residual| {
@@ -74,28 +77,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Register the operator then solve
     ksp.set_operators(Arc::new(a.clone()), None);
     let stats = ksp.solve(&b, &mut x)?;
-    
+
     println!("BiCGStab Results:");
     println!("  Converged: {:?}", stats.reason);
     println!("  Iterations: {}", stats.iterations);
     println!("  Final residual: {:.3e}", stats.final_residual);
-    
+
     // Check solution accuracy
-    let error_norm = x.iter().zip(x_true.iter())
+    let error_norm = x
+        .iter()
+        .zip(x_true.iter())
         .map(|(xi, xi_true)| (xi - xi_true).powi(2))
-        .sum::<f64>().sqrt();
+        .sum::<f64>()
+        .sqrt();
     println!("  Solution error norm: {:.3e}", error_norm);
 
     // Test 2: BiCGStab with preconditioner
     println!("\n--- Test 2: BiCGStab with Jacobi Preconditioner ---");
-    
+
     let mut ksp2 = KspContext::new();
     ksp2.set_type(SolverType::BiCgStab)?
         .set_pc_type(PcType::Jacobi, None)?
         .set_tolerances(1e-8, 1e-12, 1e3, 100);
 
     ksp2.add_monitor(move |iter, residual| {
-        if iter % 5 == 0 || iter < 5 { // Print every 5th iteration
+        if iter % 5 == 0 || iter < 5 {
+            // Print every 5th iteration
             println!("  Iteration {}: residual = {:.3e}", iter, residual);
         }
     });
@@ -103,20 +110,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut x2 = vec![0.0; n];
     ksp2.set_operators(Arc::new(a.clone()), None);
     let stats2 = ksp2.solve(&b, &mut x2)?;
-    
+
     println!("BiCGStab + Jacobi Results:");
     println!("  Converged: {:?}", stats2.reason);
     println!("  Iterations: {}", stats2.iterations);
     println!("  Final residual: {:.3e}", stats2.final_residual);
-    
-    let error_norm2 = x2.iter().zip(x_true.iter())
+
+    let error_norm2 = x2
+        .iter()
+        .zip(x_true.iter())
         .map(|(xi, xi_true)| (xi - xi_true).powi(2))
-        .sum::<f64>().sqrt();
+        .sum::<f64>()
+        .sqrt();
     println!("  Solution error norm: {:.3e}", error_norm2);
 
     // Test 3: Workspace reuse - multiple solves
     println!("\n--- Test 3: Workspace Reuse - Multiple RHS ---");
-    
+
     let mut ksp3 = KspContext::new();
     ksp3.set_type(SolverType::BiCgStab)?
         .set_tolerances(1e-6, 1e-12, 1e3, 50);
@@ -129,22 +139,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Solve multiple right-hand sides using the same workspace
     for rhs_id in 1..=3 {
         println!("  RHS #{}: ", rhs_id);
-        
+
         // Create a different RHS
         let mut b_i = vec![0.0; n];
         for i in 0..n {
             b_i[i] = (i as f64 * rhs_id as f64).sin();
         }
-        
+
         let mut x_i = vec![0.0; n];
-    let stats_i = ksp3.solve(&b_i, &mut x_i)?;
-        println!("    Iterations: {}, Final residual: {:.3e}", 
-               stats_i.iterations, stats_i.final_residual);
+        let stats_i = ksp3.solve(&b_i, &mut x_i)?;
+        println!(
+            "    Iterations: {}, Final residual: {:.3e}",
+            stats_i.iterations, stats_i.final_residual
+        );
     }
 
     // Test 4: Convergence callback
     println!("\n--- Test 4: Custom Convergence Test ---");
-    
+
     let mut ksp4 = KspContext::new();
     // Note: custom convergence-test hooks were removed from the KspContext API.
     // We emulate a custom stopping criterion by tightening tolerances here.
@@ -154,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut x4 = vec![0.0; n];
     let stats4 = ksp4.solve(&b, &mut x4)?;
-    
+
     println!("Custom convergence results:");
     println!("  Converged: {:?}", stats4.reason);
     println!("  Iterations: {}", stats4.iterations);
@@ -172,7 +184,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Preconditioner integration ready");
     println!("✓ Workspace reuse across multiple solves");
 
-    if stats.reason == ConvergedReason::ConvergedRtol || stats.reason == ConvergedReason::ConvergedAtol {
+    if stats.reason == ConvergedReason::ConvergedRtol
+        || stats.reason == ConvergedReason::ConvergedAtol
+    {
         println!("\n🎉 BiCGStab workspace integration: SUCCESS!");
     } else {
         println!("\n⚠️  BiCGStab did not converge as expected");

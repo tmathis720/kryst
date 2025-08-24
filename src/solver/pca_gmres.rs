@@ -41,7 +41,12 @@ impl PcaGmresSolver {
             restart: restart.max(1),
             pipeline_depth,
             block_size,
-            conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits },
+            conv: Convergence {
+                rtol,
+                atol: 1e-12,
+                dtol: 1e3,
+                max_iters: maxits,
+            },
             pc_mode: PcaPcMode::Left, // matches former default
             modified_gs: true,
             haptol: 1e-12,
@@ -416,4 +421,3 @@ impl LinearSolver for PcaGmresSolver {
         Ok(stats)
     }
 }
-

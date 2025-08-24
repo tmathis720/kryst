@@ -1,7 +1,17 @@
-//! Standard restarted GMRES implementation over &dyn LinOp<f64> with explicit
-//! left/right preconditioning semantics. The preconditioner is always applied
-//! as `z <- M^{-1} x` and the solver decides whether to use the preconditioned
-//! vectors on the left or right.
+//! # GMRES side semantics
+//!
+//! - **Left**: Arnoldi on `M^{-1} A`
+//!   - `v1 = M^{-1} r0 / ||M^{-1} r0||`
+//!   - Krylov matvec: `w = M^{-1} A v_k`
+//!   - Update: `x += V y`
+//!   - Iteration monitors should report `||M^{-1} r||`; final stats report true `||r||`.
+//!
+//! - **Right**: Arnoldi on `A M^{-1}`
+//!   - `v1 = r0 / ||r0||`, `u = M^{-1} v_k`, `w = A u`
+//!   - Store `Z_k = u` and update via `x += Z y`
+//!   - Monitors report true `||r||`.
+//!
+//! Implementation detail: `Workspace.z` holds the `Z_k` basis for Right and FGMRES.
 
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
@@ -23,7 +33,12 @@ impl GmresSolver {
     pub fn new(restart: usize, rtol: f64, maxits: usize) -> Self {
         Self {
             restart: restart.max(1),
-            conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits },
+            conv: Convergence {
+                rtol,
+                atol: 1e-12,
+                dtol: 1e3,
+                max_iters: maxits,
+            },
             haptol: 1e-12,
         }
     }
@@ -39,23 +54,45 @@ impl GmresSolver {
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize) {
         let m = self.restart;
-        if w.tmp1.len() != n { w.tmp1.resize(n, 0.0); }
-        if w.tmp2.len() != n { w.tmp2.resize(n, 0.0); }
-        if w.q.len() < m + 1 { w.q.resize(m + 1, Vec::new()); }
+        if w.tmp1.len() != n {
+            w.tmp1.resize(n, 0.0);
+        }
+        if w.tmp2.len() != n {
+            w.tmp2.resize(n, 0.0);
+        }
+        if w.q.len() < m + 1 {
+            w.q.resize(m + 1, Vec::new());
+        }
         for q in &mut w.q[..m + 1] {
-            if q.len() != n { q.resize(n, 0.0); }
+            if q.len() != n {
+                q.resize(n, 0.0);
+            }
         }
-        if w.z.len() < m { w.z.resize(m, Vec::new()); }
+        if w.z.len() < m {
+            w.z.resize(m, Vec::new());
+        }
         for z in &mut w.z[..m] {
-            if z.len() != n { z.resize(n, 0.0); }
+            if z.len() != n {
+                z.resize(n, 0.0);
+            }
         }
-        if w.h.len() < m + 1 { w.h.resize(m + 1, Vec::new()); }
+        if w.h.len() < m + 1 {
+            w.h.resize(m + 1, Vec::new());
+        }
         for row in &mut w.h[..m + 1] {
-            if row.len() != m { row.resize(m, 0.0); }
+            if row.len() != m {
+                row.resize(m, 0.0);
+            }
         }
-        if w.cs.len() < m { w.cs.resize(m, 0.0); }
-        if w.sn.len() < m { w.sn.resize(m, 0.0); }
-        if w.g.len() < m + 1 { w.g.resize(m + 1, 0.0); }
+        if w.cs.len() < m {
+            w.cs.resize(m, 0.0);
+        }
+        if w.sn.len() < m {
+            w.sn.resize(m, 0.0);
+        }
+        if w.g.len() < m + 1 {
+            w.g.resize(m + 1, 0.0);
+        }
     }
 
     fn apply_precond(
@@ -163,7 +200,9 @@ impl GmresSolver {
 impl LinearSolver for GmresSolver {
     type Error = KError;
 
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
         if w.q.len() < self.restart + 1 {
@@ -199,7 +238,9 @@ impl LinearSolver for GmresSolver {
         };
 
         let mut owned_ws;
-        let ws = if let Some(w) = work { w } else {
+        let ws = if let Some(w) = work {
+            w
+        } else {
             owned_ws = Workspace::new(n);
             &mut owned_ws
         };
@@ -207,7 +248,9 @@ impl LinearSolver for GmresSolver {
 
         // r0 = b - A x
         a.matvec(x, &mut ws.tmp1);
-        for i in 0..n { ws.tmp1[i] = b[i] - ws.tmp1[i]; }
+        for i in 0..n {
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
+        }
 
         ws.q.clear();
         ws.h.iter_mut().for_each(|r| r.fill(0.0));
@@ -221,7 +264,9 @@ impl LinearSolver for GmresSolver {
                 self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                 let beta = Self::nrm2(&ws.tmp2);
                 if beta > 0.0 {
-                    for i in 0..n { ws.tmp2[i] /= beta; }
+                    for i in 0..n {
+                        ws.tmp2[i] /= beta;
+                    }
                 }
                 ws.q.push(ws.tmp2.clone());
                 beta
@@ -230,7 +275,9 @@ impl LinearSolver for GmresSolver {
                 let beta = Self::nrm2(&ws.tmp1);
                 let mut v0 = ws.tmp1.clone();
                 if beta > 0.0 {
-                    for i in 0..n { v0[i] /= beta; }
+                    for i in 0..n {
+                        v0[i] /= beta;
+                    }
                 }
                 ws.q.push(v0);
                 ws.z.resize(1, vec![0.0; n]);
@@ -245,13 +292,23 @@ impl LinearSolver for GmresSolver {
 
         let mut total_iters = 0usize;
         let mut res = beta;
-        let mut stats = SolveStats { iterations: 0, final_residual: res, reason: ConvergedReason::Continued };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res,
+            reason: ConvergedReason::Continued,
+        };
 
         if let Some(ms) = monitors {
-            for m in ms { m(0, res); }
+            for m in ms {
+                m(0, res);
+            }
         }
         if res <= thr {
-            stats.reason = if res <= self.conv.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol };
+            stats.reason = if res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else {
+                ConvergedReason::ConvergedRtol
+            };
             stats.final_residual = res;
             return Ok(stats);
         }
@@ -267,7 +324,9 @@ impl LinearSolver for GmresSolver {
                     PcSide::Right => {
                         self.apply_precond(pc, PcSide::Right, &ws.q[k], &mut ws.tmp2)?;
                         if matches!(pc_side, PcSide::Right) {
-                            if ws.z.len() <= k { ws.z.resize(k + 1, vec![0.0; n]); }
+                            if ws.z.len() <= k {
+                                ws.z.resize(k + 1, vec![0.0; n]);
+                            }
                             ws.z[k].copy_from_slice(&ws.tmp2);
                         }
                         a.matvec(&ws.tmp2, &mut ws.tmp1);
@@ -276,7 +335,9 @@ impl LinearSolver for GmresSolver {
                 }
 
                 let (hcol, vnext) = Self::orthonormalize(&ws.q, &mut ws.tmp1);
-                for i in 0..=k + 1 { ws.h[i][k] = hcol[i]; }
+                for i in 0..=k + 1 {
+                    ws.h[i][k] = hcol[i];
+                }
                 ws.q.push(vnext);
 
                 Self::apply_givens_and_update(&mut ws.h, &mut ws.cs, &mut ws.sn, &mut ws.g, k);
@@ -286,7 +347,9 @@ impl LinearSolver for GmresSolver {
                 k_steps = k + 1;
 
                 if let Some(ms) = monitors {
-                    for m in ms { m(total_iters, res); }
+                    for m in ms {
+                        m(total_iters, res);
+                    }
                 }
 
                 if res <= thr {
@@ -307,7 +370,9 @@ impl LinearSolver for GmresSolver {
 
             // Recompute residual
             a.matvec(x, &mut ws.tmp1);
-            for i in 0..n { ws.tmp1[i] = b[i] - ws.tmp1[i]; }
+            for i in 0..n {
+                ws.tmp1[i] = b[i] - ws.tmp1[i];
+            }
             res = match pc_side {
                 PcSide::Left => {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
@@ -334,7 +399,9 @@ impl LinearSolver for GmresSolver {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                     let beta = Self::nrm2(&ws.tmp2);
                     if beta > 0.0 {
-                        for i in 0..n { ws.tmp2[i] /= beta; }
+                        for i in 0..n {
+                            ws.tmp2[i] /= beta;
+                        }
                     }
                     ws.q.push(ws.tmp2.clone());
                     ws.g[0] = beta;
@@ -343,7 +410,9 @@ impl LinearSolver for GmresSolver {
                     let beta = Self::nrm2(&ws.tmp1);
                     let mut v0 = ws.tmp1.clone();
                     if beta > 0.0 {
-                        for i in 0..n { v0[i] /= beta; }
+                        for i in 0..n {
+                            v0[i] /= beta;
+                        }
                     }
                     ws.q.push(v0);
                     ws.g[0] = beta;
@@ -355,11 +424,12 @@ impl LinearSolver for GmresSolver {
 
         // Compute true residual for reporting
         a.matvec(x, &mut ws.tmp1);
-        for i in 0..n { ws.tmp1[i] = b[i] - ws.tmp1[i]; }
+        for i in 0..n {
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
+        }
         let true_res = Self::nrm2(&ws.tmp1);
         let (_reason, mut s) = self.conv.check(true_res, bnorm, total_iters);
         s.final_residual = true_res;
         Ok(s)
     }
 }
-

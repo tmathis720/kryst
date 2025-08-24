@@ -1,3 +1,7 @@
+//! # TFQMR side semantics
+//!
+//! Accepts [`PcSide::Left`] or [`PcSide::Right`]; residuals are reported as the true `||r||`.
+
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;

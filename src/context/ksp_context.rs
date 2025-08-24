@@ -1,13 +1,36 @@
+//! # KSP context
+//!
+//! ## Operator/PC lifecycle
+//! 1. [`set_operators`] stores `A` and `P` (or `A` if `P` is `None`).
+//! 2. Enforces **communicator equality** via [`LinOp::comm()`]. Mismatch aborts early.
+//! 3. [`setup`] resolves any deferred PC specs (including chains), then calls
+//!    [`Preconditioner::setup`] followed by reuse logic:
+//!    - If structure id changed → [`update_symbolic`]
+//!    - Else if values id changed and numeric reuse allowed → [`update_numeric`]
+//!    - Else unchanged.
+//!
+//! ## Side policy
+//! [`pc_side`](struct.KspContext.html#structfield.pc_side) is passed to solvers; PCs **do not** decide left vs right placement.
+//!
+//! ## Deferred PCs / Chaining
+//! [`PcFactory::create_deferred_pc`] stores type+options without a matrix.
+//! [`PcFactory::construct_deferred_preconditioner`] materializes it once `P` is known.
+//! [`PcChain`] composes multiple PCs: `y = P_k(...P_1(x))`.
+//!
+//! ## Monitors
+//! Iteration monitors receive `(iter, residual)` where the residual is solver-specific
+//! (preconditioned norm for Left CG/GMRES, true norm for Right GMRES). Final stats
+//! always include the true residual.
+
 use crate::config::options::{KspOptions, PcOptions};
-use crate::context::pc_context::{PcFactory, PcType, DeferredPcInfo};
+use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcgSolver, QmrSolver, TfqmrSolver,
-    PcaPcMode,
+    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcaPcMode, PcgSolver, QmrSolver, TfqmrSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -139,11 +162,7 @@ impl KspContext {
                     .with_norm(crate::solver::cg::CgNormType::Preconditioned),
             ),
             SolverType::Cgnr => Box::new(CgnrSolver::new(self.rtol, self.maxits)),
-            SolverType::Gmres => Box::new(GmresSolver::new(
-                self.restart,
-                self.rtol,
-                self.maxits,
-            )),
+            SolverType::Gmres => Box::new(GmresSolver::new(self.restart, self.rtol, self.maxits)),
             SolverType::Fgmres => Box::new(FgmresSolver::new(self.rtol, self.maxits, self.restart)),
             SolverType::BiCgStab => Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
@@ -307,6 +326,10 @@ impl KspContext {
     }
 
     /// Assign the system and preconditioner operators.
+    ///
+    /// # Panics
+    /// Panics if the communicators of `A` and `P` differ. `LinOp::comm()` is the
+    /// single source of truth for parallel context; mismatches indicate a bug.
     pub fn set_operators(
         &mut self,
         amat: Arc<dyn LinOp<S = f64>>,
@@ -363,14 +386,20 @@ impl KspContext {
                 let m = pmat
                     .as_any()
                     .downcast_ref::<faer::Mat<f64>>()
-                    .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64> for chain construction".into()))?;
+                    .ok_or_else(|| {
+                        KError::InvalidInput(
+                            "expected faer::Mat<f64> for chain construction".into(),
+                        )
+                    })?;
                 let chain = PcFactory::construct_deferred_pc_chain(specs, m)?;
                 self.pc = Some(chain);
             } else if let Some(spec) = self.pending_pc.take() {
                 let m = pmat
                     .as_any()
                     .downcast_ref::<faer::Mat<f64>>()
-                    .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64> for PC construction".into()))?;
+                    .ok_or_else(|| {
+                        KError::InvalidInput("expected faer::Mat<f64> for PC construction".into())
+                    })?;
                 let pc = PcFactory::construct_deferred_preconditioner(spec, m)?;
                 self.pc = Some(pc);
             }
@@ -472,7 +501,10 @@ impl KspContext {
             Some(self.monitors.as_slice())
         };
         let comm = amat.comm();
-        let mut pc = self.pc.as_mut().map(|b| b.as_mut() as &mut dyn Preconditioner);
+        let mut pc = self
+            .pc
+            .as_mut()
+            .map(|b| b.as_mut() as &mut dyn Preconditioner);
         let solver = self
             .solver
             .as_mut()
@@ -481,7 +513,10 @@ impl KspContext {
         // Some solvers (e.g. FGMRES) require a mutable preconditioner and have
         // a specialised entry point. Handle this before computing the final
         // residual below.
-        let mut stats = if let Some(fgmres) = solver.as_any_mut().downcast_mut::<crate::solver::FgmresSolver>() {
+        let mut stats = if let Some(fgmres) = solver
+            .as_any_mut()
+            .downcast_mut::<crate::solver::FgmresSolver>()
+        {
             fgmres.solve_flexible(
                 amat.as_ref(),
                 pc.as_deref_mut(),

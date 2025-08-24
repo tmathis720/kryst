@@ -4,6 +4,8 @@
 //! non-symmetric linear systems. BiCGStab is a popular Krylov subspace method that combines the
 //! robustness of BiCG with smoother convergence, making it suitable for a wide range of problems.
 //!
+//! Accepts [`PcSide::Left`] or [`PcSide::Right`]; residuals are reported as the true `||r||`.
+//!
 //! # Overview
 //!
 //! The BiCGStab algorithm iteratively refines the solution to Ax = b by constructing two coupled
@@ -24,7 +26,7 @@ use crate::core::traits::{InnerProduct, MatVec};
 use crate::error::KError;
 use crate::preconditioner::PcSide;
 use crate::solver::legacy::LinearSolver;
-use crate::utils::convergence::{Convergence, SolveStats, ConvergedReason};
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use crate::utils::profiling::StageGuard;
 
 #[cfg(feature = "logging")]
@@ -47,7 +49,9 @@ impl<T: num_traits::Float + From<f64> + std::ops::Mul<Output = T> + Send + Sync>
     pub fn new(tol: T, max_iters: usize) -> Self {
         let atol = <T as From<f64>>::from(1e-12);
         let dtol = <T as From<f64>>::from(1e3);
-        Self { conv: Convergence::new(tol, atol, dtol, max_iters) }
+        Self {
+            conv: Convergence::new(tol, atol, dtol, max_iters),
+        }
     }
 }
 
@@ -95,39 +99,49 @@ where
             PcSide::Symmetric => PcSide::Left,
             s => s,
         };
-        
+
         // Only use monitors if monitoring is enabled at runtime
         let use_monitors = crate::utils::profiling::is_monitoring_enabled() && !monitors.is_empty();
-        
+
         #[cfg(feature = "logging")]
-        trace!("Starting BiCGStab solve, monitoring: {}, workspace: {}", use_monitors, work.is_some());
+        trace!(
+            "Starting BiCGStab solve, monitoring: {}, workspace: {}",
+            use_monitors,
+            work.is_some()
+        );
 
         let _ = pc; // BiCGStab does not use preconditioner (yet)
         let _ = pc_side;
         let n = b.as_ref().len();
         let ip = ();
         let mut xk = x.as_ref().to_vec();
-        
+
         // r0 = b - A x0
         let mut tmp = V::from(vec![T::zero(); n]);
         {
             let _matvec_stage = StageGuard::new("BiCGStabMatVec");
             a.matvec(&V::from(xk.clone()), &mut tmp);
         }
-        let mut r = V::from(tmp.as_ref().iter().zip(b.as_ref()).map(|(&ax, &bi)| bi - ax).collect::<Vec<_>>());
+        let mut r = V::from(
+            tmp.as_ref()
+                .iter()
+                .zip(b.as_ref())
+                .map(|(&ax, &bi)| bi - ax)
+                .collect::<Vec<_>>(),
+        );
         let r_hat = r.clone(); // shadow residual
         let mut rho_prev = T::one();
         let mut alpha = T::one();
         let mut omega_prev = T::one();
         let mut v = V::from(vec![T::zero(); n]);
         let mut p = r.clone(); // Properly initialize p = r
-        
+
         // Compute initial residual norm
         let res0 = {
             let _norm_stage = StageGuard::new("BiCGStabNorm");
             ip.norm(&r, comm)
         };
-        
+
         // Invoke monitors for iteration 0
         if use_monitors {
             for monitor in monitors {
@@ -135,12 +149,12 @@ where
             }
         }
 
-        let mut stats = SolveStats { 
-            iterations: 0, 
-            final_residual: res0, 
-            reason: ConvergedReason::Continued 
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: ConvergedReason::Continued,
         };
-        
+
         // Check initial convergence using new interface
         let (reason, initial_stats) = self.conv.check(res0, res0, 0);
         if reason != ConvergedReason::Continued {
@@ -150,10 +164,10 @@ where
 
         #[cfg(feature = "logging")]
         trace!("BiCGStab initial residual: {:.3e}", res0);
-        
+
         for i in 1..=self.conv.max_iters {
             let _iter_stage = StageGuard::new("BiCGStabIteration");
-            
+
             #[cfg(feature = "logging")]
             trace!("BiCGStab iteration {}", i);
 
@@ -162,19 +176,19 @@ where
                 let _dot_stage = StageGuard::new("BiCGStabDotProduct");
                 ip.dot(&r_hat, &r, comm)
             };
-            
+
             if rho.abs() < T::epsilon() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho = {:.3e}", rho);
                 break; // breakdown
             }
-            
+
             let beta = if i == 1 {
                 T::zero()
             } else {
                 (rho / rho_prev) * (alpha / omega_prev)
             };
-            
+
             // p = r + beta * (p - omega_prev * v)
             {
                 let _axpy_stage = StageGuard::new("BiCGStabAxpy");
@@ -182,7 +196,8 @@ where
                 {
                     let beta = beta;
                     let omega = omega_prev;
-                    p.as_mut().par_iter_mut()
+                    p.as_mut()
+                        .par_iter_mut()
                         .zip(r.as_ref().par_iter())
                         .zip(v.as_ref().par_iter())
                         .for_each(|((p_j, &r_j), &v_j)| {
@@ -196,7 +211,7 @@ where
                     }
                 }
             }
-            
+
             // v = A p
             {
                 let _matvec_stage = StageGuard::new("BiCGStabMatVec");
@@ -204,40 +219,52 @@ where
                 a.matvec(&p.clone(), &mut v_tmp);
                 v = v_tmp;
             }
-            
+
             let alpha_num = rho;
             // alpha_den = <r_hat, v>
             let alpha_den = {
                 let _dot_stage = StageGuard::new("BiCGStabDotProduct");
                 ip.dot(&r_hat, &v, comm)
             };
-            
+
             if alpha_den.abs() < T::epsilon() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den = {:.3e}", alpha_den);
                 break; // breakdown
             }
             alpha = alpha_num / alpha_den;
-            
+
             // s = r - alpha * v
             let s = {
                 let _axpy_stage = StageGuard::new("BiCGStabAxpy");
                 #[cfg(feature = "rayon")]
                 {
-                    V::from(r.as_ref().par_iter().zip(v.as_ref().par_iter()).map(|(&rj, &vj)| rj - alpha * vj).collect::<Vec<_>>())
+                    V::from(
+                        r.as_ref()
+                            .par_iter()
+                            .zip(v.as_ref().par_iter())
+                            .map(|(&rj, &vj)| rj - alpha * vj)
+                            .collect::<Vec<_>>(),
+                    )
                 }
                 #[cfg(not(feature = "rayon"))]
                 {
-                    V::from(r.as_ref().iter().zip(v.as_ref()).map(|(&rj, &vj)| rj - alpha * vj).collect::<Vec<_>>())
+                    V::from(
+                        r.as_ref()
+                            .iter()
+                            .zip(v.as_ref())
+                            .map(|(&rj, &vj)| rj - alpha * vj)
+                            .collect::<Vec<_>>(),
+                    )
                 }
             };
-            
+
             // Compute norm of s
             let s_norm = {
                 let _norm_stage = StageGuard::new("BiCGStabNorm");
                 ip.norm(&s, comm)
             };
-            
+
             // Invoke monitors for current iteration (intermediate)
             if use_monitors {
                 for monitor in monitors {
@@ -247,8 +274,8 @@ where
 
             #[cfg(feature = "logging")]
             trace!("BiCGStab iteration {}: s_norm = {:.3e}", i, s_norm);
-            
-            // Check convergence for s using new interface  
+
+            // Check convergence for s using new interface
             let (s_reason, s_stats) = self.conv.check(s_norm, res0, i);
             if s_reason != ConvergedReason::Continued {
                 // Early convergence: update x and return
@@ -256,9 +283,11 @@ where
                     let _axpy_stage = StageGuard::new("BiCGStabAxpy");
                     #[cfg(feature = "rayon")]
                     {
-                        xk.par_iter_mut().zip(p.as_ref().par_iter()).for_each(|(xj, &pj)| {
-                            *xj = *xj + alpha * pj;
-                        });
+                        xk.par_iter_mut()
+                            .zip(p.as_ref().par_iter())
+                            .for_each(|(xj, &pj)| {
+                                *xj = *xj + alpha * pj;
+                            });
                     }
                     #[cfg(not(feature = "rayon"))]
                     {
@@ -268,19 +297,22 @@ where
                     }
                 }
                 *x = V::from(xk);
-                
+
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab early convergence after {} iterations: {:?}", i, s_reason);
+                trace!(
+                    "BiCGStab early convergence after {} iterations: {:?}",
+                    i, s_reason
+                );
                 return Ok(s_stats);
             }
-            
+
             // t = A s
             let mut t = V::from(vec![T::zero(); n]);
             {
                 let _matvec_stage = StageGuard::new("BiCGStabMatVec");
                 a.matvec(&s, &mut t);
             }
-            
+
             // omega = <t, s> / <t, t>
             let (omega_num, omega_den) = {
                 let _dot_stage = StageGuard::new("BiCGStabDotProduct");
@@ -288,14 +320,14 @@ where
                 let omega_den = ip.dot(&t, &t, comm);
                 (omega_num, omega_den)
             };
-            
+
             if omega_den.abs() < T::epsilon() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den = {:.3e}", omega_den);
                 break; // breakdown
             }
             let omega = omega_num / omega_den;
-            
+
             // x = x + alpha * p + omega * s
             {
                 let _axpy_stage = StageGuard::new("BiCGStabAxpy");
@@ -315,27 +347,39 @@ where
                     }
                 }
             }
-            
+
             // r = s - omega * t
             let r_new = {
                 let _axpy_stage = StageGuard::new("BiCGStabAxpy");
                 #[cfg(feature = "rayon")]
                 {
-                    V::from(s.as_ref().par_iter().zip(t.as_ref().par_iter()).map(|(&sj, &tj)| sj - omega * tj).collect::<Vec<_>>())
+                    V::from(
+                        s.as_ref()
+                            .par_iter()
+                            .zip(t.as_ref().par_iter())
+                            .map(|(&sj, &tj)| sj - omega * tj)
+                            .collect::<Vec<_>>(),
+                    )
                 }
                 #[cfg(not(feature = "rayon"))]
                 {
-                    V::from(s.as_ref().iter().zip(t.as_ref()).map(|(&sj, &tj)| sj - omega * tj).collect::<Vec<_>>())
+                    V::from(
+                        s.as_ref()
+                            .iter()
+                            .zip(t.as_ref())
+                            .map(|(&sj, &tj)| sj - omega * tj)
+                            .collect::<Vec<_>>(),
+                    )
                 }
             };
             r = r_new;
-            
+
             // Compute norm of r
             let r_norm = {
                 let _norm_stage = StageGuard::new("BiCGStabNorm");
                 ip.norm(&r, comm)
             };
-            
+
             // Invoke monitors for current iteration (final)
             if use_monitors {
                 for monitor in monitors {
@@ -345,34 +389,36 @@ where
 
             #[cfg(feature = "logging")]
             trace!("BiCGStab iteration {}: residual = {:.3e}", i, r_norm);
-            
+
             // Check convergence using new interface
             let (r_reason, r_stats) = self.conv.check(r_norm, res0, i);
             stats = r_stats;
             if r_reason != ConvergedReason::Continued {
                 *x = V::from(xk);
-                
+
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab converged after {} iterations: {:?}", i, r_reason);
                 return Ok(stats);
             }
-            
+
             if omega.abs() < T::epsilon() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega = {:.3e}", omega);
                 break; // breakdown
             }
-            
+
             rho_prev = rho;
             omega_prev = omega;
         }
-        
+
         *x = V::from(xk);
-        
+
         #[cfg(feature = "logging")]
-        trace!("BiCGStab solve completed: {} iterations, final residual: {:.3e}", 
-               stats.iterations, stats.final_residual);
-        
+        trace!(
+            "BiCGStab solve completed: {} iterations, final residual: {:.3e}",
+            stats.iterations, stats.final_residual
+        );
+
         Ok(stats)
     }
 }
@@ -380,12 +426,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faer::Mat;
     use approx::assert_abs_diff_eq;
+    use faer::Mat;
 
     // Helper: random well-conditioned non-symmetric 3x3 matrix
     fn nonsym_3x3() -> (Mat<f64>, Vec<f64>) {
-        let a = Mat::from_fn(3, 3, |i, j| if i == j { 4.0 } else { (i + 2 * j) as f64 + 1.0 });
+        let a = Mat::from_fn(3, 3, |i, j| {
+            if i == j {
+                4.0
+            } else {
+                (i + 2 * j) as f64 + 1.0
+            }
+        });
         let x_true = vec![1.0, 2.0, 3.0];
         let mut b = vec![0.0; 3];
         for i in 0..3 {
@@ -401,14 +453,34 @@ mod tests {
         let (a, b) = nonsym_3x3();
         let mut x = vec![0.0; 3];
         let mut solver = BiCgStabSolver::new(1e-10, 100);
-        let stats = solver.solve(&a, None, &b, &mut x, crate::preconditioner::PcSide::Left, &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm), None, None).unwrap();
-        eprintln!("BiCGStab stats: {{ reason: {:?}, iters: {}, final_res: {:e} }}", stats.reason, stats.iterations, stats.final_residual);
+        let stats = solver
+            .solve(
+                &a,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            )
+            .unwrap();
+        eprintln!(
+            "BiCGStab stats: {{ reason: {:?}, iters: {}, final_res: {:e} }}",
+            stats.reason, stats.iterations, stats.final_residual
+        );
         // Compare to true solution
         let x_true = vec![1.0, 2.0, 3.0];
         for i in 0..3 {
             assert_abs_diff_eq!(x[i], x_true[i], epsilon = 1e-8);
         }
-        assert!(matches!(stats.reason, ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol), 
-                "BiCGStab did not converge: stats = {:?}", stats);
+        assert!(
+            matches!(
+                stats.reason,
+                ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+            ),
+            "BiCGStab did not converge: stats = {:?}",
+            stats
+        );
     }
 }

@@ -3,7 +3,7 @@
 //! This module provides the `DenseMatrix` trait and its implementation for the `faer::Mat<T>` type,
 //! enabling construction from raw column-major storage.
 
-use crate::core::traits::{Indexing, MatVec, SubmatrixExtract, MatShape};
+use crate::core::traits::{Indexing, MatShape, MatVec, SubmatrixExtract};
 use faer::Mat;
 
 impl<T: Copy + num_traits::Float> crate::core::traits::MatrixGet<T> for Mat<T> {

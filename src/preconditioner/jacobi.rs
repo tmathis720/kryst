@@ -1,7 +1,7 @@
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
-use crate::preconditioner::{Preconditioner, PcSide};
+use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 
 pub struct Jacobi {
@@ -9,7 +9,12 @@ pub struct Jacobi {
     n: usize,
 }
 impl Jacobi {
-    pub fn new() -> Self { Self { diag_inv: Vec::new(), n: 0 } }
+    pub fn new() -> Self {
+        Self {
+            diag_inv: Vec::new(),
+            n: 0,
+        }
+    }
 
     fn recompute(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
         if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
@@ -47,7 +52,9 @@ impl Preconditioner for Jacobi {
     fn setup(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.recompute(pmat)
     }
-    fn supports_numeric_update(&self) -> bool { true }
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
 
     fn update_numeric(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.recompute(pmat)

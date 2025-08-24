@@ -3,8 +3,8 @@
 //! This example shows how to parse and use all the AMG and ILU options
 //! in the Kryst linear solver library.
 
-use std::env;
 use kryst::config::options::{KspOptions, PcOptions, parse_all_options};
+use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Kryst Comprehensive Preconditioner Options Demonstration");
@@ -67,7 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("         -pc_ilu_max_fill_per_row 50 -pc_ilu_reordering_type rcm \\");
     println!("         -pc_ilu_triangular_solve iterative -pc_ilu_lower_jacobi_iters 2 \\");
     println!("         -pc_ilu_upper_jacobi_iters 3 -pc_ilu_tolerance 1e-10 \\");
-    println!("         -pc_ilu_ieee_checks true -pc_ilu_pivot_monitoring true -pc_ilu_print_level 1");
+    println!(
+        "         -pc_ilu_ieee_checks true -pc_ilu_pivot_monitoring true -pc_ilu_print_level 1"
+    );
     let (ksp_opts, pc_opts) = parse_all_options(&comprehensive_ilu_args)?;
     print_configuration(&ksp_opts, &pc_opts);
     println!();
@@ -102,7 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Command: -ksp_type bicgstab -ksp_rtol 1e-6 -pc_type amg \\");
     println!("         -pc_amg_levels 15 -pc_amg_strength_threshold 0.25 \\");
     println!("         -pc_amg_coarsen_type hmis -pc_amg_interp_type classical \\");
-    println!("         -pc_amg_relax_type gs -pc_amg_nu_pre 2 -pc_amg_nu_post 2 -pc_amg_print_level 1");
+    println!(
+        "         -pc_amg_relax_type gs -pc_amg_nu_pre 2 -pc_amg_nu_post 2 -pc_amg_print_level 1"
+    );
     let (ksp_opts, pc_opts) = parse_all_options(&advanced_amg_args)?;
     print_configuration(&ksp_opts, &pc_opts);
     println!();
@@ -116,7 +120,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_configuration(&ksp_opts, &pc_opts);
     } else {
         println!("Example 4: No command-line arguments provided.");
-        println!("Try running with: cargo run --example amg_options_demo -- -ksp_type cg -pc_type ilu -pc_ilu_type ilu0 -pc_ilu_reordering_type rcm");
+        println!(
+            "Try running with: cargo run --example amg_options_demo -- -ksp_type cg -pc_type ilu -pc_ilu_type ilu0 -pc_ilu_reordering_type rcm"
+        );
     }
 
     println!();
@@ -127,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_configuration(ksp_opts: &KspOptions, pc_opts: &PcOptions) {
     println!("Configuration:");
-    
+
     // KSP options
     if let Some(ref solver) = ksp_opts.ksp_type {
         println!("  Solver: {}", solver);
@@ -213,7 +219,10 @@ fn print_configuration(ksp_opts: &KspOptions, pc_opts: &PcOptions) {
             println!("    Off-diagonal drop tolerance: {:.2e}", offdiag_drop_tol);
         }
         if let Some(schur_drop_tol) = pc_opts.ilu_schur_drop_tolerance {
-            println!("    Schur complement drop tolerance: {:.2e}", schur_drop_tol);
+            println!(
+                "    Schur complement drop tolerance: {:.2e}",
+                schur_drop_tol
+            );
         }
         if let Some(ref reordering) = pc_opts.ilu_reordering_type {
             println!("    Reordering type: {}", reordering);

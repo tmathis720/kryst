@@ -411,8 +411,10 @@ impl Panel {
                         let error_msg = if max_val == 0.0 {
                             format!("Zero pivot encountered at column {}, matrix is singular", k)
                         } else {
-                            format!("Small pivot {} < threshold {} at column {}, matrix may be ill-conditioned", 
-                                   max_val, threshold, k)
+                            format!(
+                                "Small pivot {} < threshold {} at column {}, matrix may be ill-conditioned",
+                                max_val, threshold, k
+                            )
                         };
 
                         // For now, replace tiny pivot and continue, but log warning
@@ -4093,7 +4095,16 @@ pub fn solve(
     let mut solver = SuperLuDistSolver::new();
     let mut x_vec = x.to_vec();
     let b_vec = b.to_vec();
-    solver.solve(a, None, &b_vec, &mut x_vec, crate::preconditioner::PcSide::Left, comm, None, None)?;
+    solver.solve(
+        a,
+        None,
+        &b_vec,
+        &mut x_vec,
+        crate::preconditioner::PcSide::Left,
+        comm,
+        None,
+        None,
+    )?;
     x.copy_from_slice(&x_vec);
     Ok(())
 }
@@ -4105,7 +4116,9 @@ pub fn solve(
     _x: &mut [f64],
     _comm: &UniverseComm,
 ) -> Result<(), KError> {
-    Err(KError::SolveError("superlu_dist feature not enabled".into()))
+    Err(KError::SolveError(
+        "superlu_dist feature not enabled".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -4677,7 +4690,16 @@ mod tests {
 
         let comm = UniverseComm::NoComm(NoComm);
         let stats = solver
-            .solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None)
+            .solve(
+                &matrix,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
             .unwrap();
 
         // Verify solve completed
@@ -4722,7 +4744,16 @@ mod tests {
 
         let comm = UniverseComm::NoComm(NoComm);
         let stats = solver
-            .solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None)
+            .solve(
+                &matrix,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
             .unwrap();
 
         // For identity matrix, solution should equal RHS
@@ -4741,7 +4772,16 @@ mod tests {
         let mut solver = SuperLuDistSolver::new();
 
         let comm = UniverseComm::NoComm(NoComm);
-        let result = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None);
+        let result = solver.solve(
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        );
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), KError::InvalidInput(_)));
@@ -4758,7 +4798,16 @@ mod tests {
         let b1 = vec![2.0, 3.0];
         let mut x1 = vec![0.0; 2];
         let _stats1 = solver
-            .solve(&matrix, None, &b1, &mut x1, crate::preconditioner::PcSide::Left, &comm, None, None)
+            .solve(
+                &matrix,
+                None,
+                &b1,
+                &mut x1,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
             .unwrap();
 
         // Solver should now have factorization cached
@@ -4768,7 +4817,16 @@ mod tests {
         let b2 = vec![4.0, 6.0];
         let mut x2 = vec![0.0; 2];
         let _stats2 = solver
-            .solve(&matrix, None, &b2, &mut x2, crate::preconditioner::PcSide::Left, &comm, None, None)
+            .solve(
+                &matrix,
+                None,
+                &b2,
+                &mut x2,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
             .unwrap();
 
         // Factorization should be reused
@@ -5488,7 +5546,16 @@ mod tests {
         assert!(solver.data.is_none());
 
         // This should succeed and automatically set up factorization
-        let result = solver.solve(&matrix, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, None);
+        let result = solver.solve(
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        );
         assert!(result.is_ok());
 
         // After solve, factorization should exist

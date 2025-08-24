@@ -95,21 +95,24 @@ mod tests {
         // [0 1 1]
         let n = 3;
         let is_nz = |i: usize, j: usize| -> bool {
-            matches!((i, j), (0, 0) | (0, 1) | (1, 0) | (1, 1) | (1, 2) | (2, 1) | (2, 2))
+            matches!(
+                (i, j),
+                (0, 0) | (0, 1) | (1, 0) | (1, 1) | (1, 2) | (2, 1) | (2, 2)
+            )
         };
-        
+
         let adj = extract_adjacency(n, is_nz);
         assert_eq!(adj.len(), 3);
-        
+
         // Node 0 is connected to node 1
         assert!(adj[0].contains(&1));
         assert_eq!(adj[0].len(), 1);
-        
+
         // Node 1 is connected to nodes 0 and 2
         assert!(adj[1].contains(&0));
         assert!(adj[1].contains(&2));
         assert_eq!(adj[1].len(), 2);
-        
+
         // Node 2 is connected to node 1
         assert!(adj[2].contains(&1));
         assert_eq!(adj[2].len(), 1);
@@ -119,25 +122,25 @@ mod tests {
     fn test_distance2_neighbors_simple() {
         // Simple chain: 0-1-2
         let adj = vec![
-            vec![1],      // 0 connected to 1
-            vec![0, 2],   // 1 connected to 0, 2
-            vec![1],      // 2 connected to 1
+            vec![1],    // 0 connected to 1
+            vec![0, 2], // 1 connected to 0, 2
+            vec![1],    // 2 connected to 1
         ];
-        
+
         let dist2 = distance2_neighbors(&adj);
-        
+
         // Node 0: neighbors at distance ≤ 2 are {0, 1, 2}
         assert!(dist2[0].contains(&0)); // self
         assert!(dist2[0].contains(&1)); // direct neighbor
         assert!(dist2[0].contains(&2)); // distance-2 neighbor
         assert_eq!(dist2[0].len(), 3);
-        
+
         // Node 1: neighbors at distance ≤ 2 are {0, 1, 2}
         assert!(dist2[1].contains(&0)); // direct neighbor
         assert!(dist2[1].contains(&1)); // self
         assert!(dist2[1].contains(&2)); // direct neighbor
         assert_eq!(dist2[1].len(), 3);
-        
+
         // Node 2: neighbors at distance ≤ 2 are {0, 1, 2}
         assert!(dist2[2].contains(&0)); // distance-2 neighbor
         assert!(dist2[2].contains(&1)); // direct neighbor
@@ -149,16 +152,16 @@ mod tests {
     fn test_distance2_neighbors_isolated() {
         // Two isolated nodes: 0  1
         let adj = vec![
-            vec![],  // 0 has no neighbors
-            vec![],  // 1 has no neighbors
+            vec![], // 0 has no neighbors
+            vec![], // 1 has no neighbors
         ];
-        
+
         let dist2 = distance2_neighbors(&adj);
-        
+
         // Node 0: only itself
         assert!(dist2[0].contains(&0));
         assert_eq!(dist2[0].len(), 1);
-        
+
         // Node 1: only itself
         assert!(dist2[1].contains(&1));
         assert_eq!(dist2[1].len(), 1);
@@ -168,10 +171,10 @@ mod tests {
     fn test_greedy_distance2_coloring_isolated() {
         // Two isolated nodes can have the same color
         let dist2 = vec![
-            [0].iter().cloned().collect(),  // Node 0: only itself
-            [1].iter().cloned().collect(),  // Node 1: only itself
+            [0].iter().cloned().collect(), // Node 0: only itself
+            [1].iter().cloned().collect(), // Node 1: only itself
         ];
-        
+
         let colors = greedy_distance2_coloring(&dist2);
         assert_eq!(colors.len(), 2);
         assert_eq!(colors[0], 0);
@@ -182,14 +185,14 @@ mod tests {
     fn test_greedy_distance2_coloring_chain() {
         // Chain: 0-1-2, all nodes need different colors
         let dist2 = vec![
-            [0, 1, 2].iter().cloned().collect(),  // Node 0
-            [0, 1, 2].iter().cloned().collect(),  // Node 1
-            [0, 1, 2].iter().cloned().collect(),  // Node 2
+            [0, 1, 2].iter().cloned().collect(), // Node 0
+            [0, 1, 2].iter().cloned().collect(), // Node 1
+            [0, 1, 2].iter().cloned().collect(), // Node 2
         ];
-        
+
         let colors = greedy_distance2_coloring(&dist2);
         assert_eq!(colors.len(), 3);
-        
+
         // All colors should be different
         assert_ne!(colors[0], colors[1]);
         assert_ne!(colors[1], colors[2]);
@@ -201,10 +204,10 @@ mod tests {
         // Test the full pipeline with a simple 2x2 diagonal matrix
         let n = 2;
         let is_nz = |i: usize, j: usize| i == j; // Only diagonal elements
-        
+
         let colors = color_graph(n, is_nz);
         assert_eq!(colors.len(), 2);
-        
+
         // Diagonal nodes don't conflict, so they can have the same color
         assert_eq!(colors[0], colors[1]);
     }
@@ -213,16 +216,14 @@ mod tests {
     fn test_color_graph_tridiagonal() {
         // Tridiagonal matrix pattern
         let n = 4;
-        let is_nz = |i: usize, j: usize| {
-            i == j || (i + 1 == j) || (j + 1 == i)
-        };
-        
+        let is_nz = |i: usize, j: usize| i == j || (i + 1 == j) || (j + 1 == i);
+
         let colors = color_graph(n, is_nz);
         assert_eq!(colors.len(), 4);
-        
+
         // Adjacent nodes should have different colors
-        for i in 0..n-1 {
-            assert_ne!(colors[i], colors[i+1]);
+        for i in 0..n - 1 {
+            assert_ne!(colors[i], colors[i + 1]);
         }
     }
 
@@ -230,15 +231,15 @@ mod tests {
     fn test_build_blocks_from_colors() {
         let colors = vec![0, 1, 0, 2, 1];
         let blocks = build_blocks_from_colors(&colors);
-        
+
         assert_eq!(blocks.len(), 3); // 3 colors: 0, 1, 2
-        
+
         // Color 0: indices 0, 2
         assert_eq!(blocks[0], vec![0, 2]);
-        
+
         // Color 1: indices 1, 4
         assert_eq!(blocks[1], vec![1, 4]);
-        
+
         // Color 2: index 3
         assert_eq!(blocks[2], vec![3]);
     }
@@ -254,7 +255,7 @@ mod tests {
     fn test_build_blocks_single_color() {
         let colors = vec![0, 0, 0];
         let blocks = build_blocks_from_colors(&colors);
-        
+
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0], vec![0, 1, 2]);
     }
@@ -264,13 +265,20 @@ mod tests {
         // Test that adjacency is symmetric for symmetric matrices
         let n = 3;
         let is_nz = |i: usize, j: usize| (i + j) % 2 == 0; // Some pattern
-        
+
         let adj = extract_adjacency(n, is_nz);
-        
+
         // Verify symmetry: if j ∈ adj[i], then i ∈ adj[j]
         for i in 0..n {
             for &j in &adj[i] {
-                assert!(adj[j].contains(&i), "Adjacency not symmetric: {} -> {} but not {} -> {}", i, j, j, i);
+                assert!(
+                    adj[j].contains(&i),
+                    "Adjacency not symmetric: {} -> {} but not {} -> {}",
+                    i,
+                    j,
+                    j,
+                    i
+                );
             }
         }
     }
@@ -280,10 +288,10 @@ mod tests {
         // Test coloring on a small complete graph
         let n = 3;
         let is_nz = |i: usize, j: usize| i != j; // Complete graph (all off-diagonal elements)
-        
+
         let colors = color_graph(n, is_nz);
         assert_eq!(colors.len(), 3);
-        
+
         // In a complete graph, all nodes need different colors
         assert_ne!(colors[0], colors[1]);
         assert_ne!(colors[1], colors[2]);
@@ -293,16 +301,16 @@ mod tests {
     #[test]
     fn test_distance2_self_inclusion() {
         // Verify that distance-2 sets always include the node itself
-        let adj = vec![
-            vec![1, 2],
-            vec![0],
-            vec![0],
-        ];
-        
+        let adj = vec![vec![1, 2], vec![0], vec![0]];
+
         let dist2 = distance2_neighbors(&adj);
-        
+
         for i in 0..adj.len() {
-            assert!(dist2[i].contains(&i), "Node {} not in its own distance-2 set", i);
+            assert!(
+                dist2[i].contains(&i),
+                "Node {} not in its own distance-2 set",
+                i
+            );
         }
     }
 }

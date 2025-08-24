@@ -1,18 +1,40 @@
-//! Preconditioners for linear solvers.
+//! # Preconditioners
 //!
-//! This module defines the Preconditioner trait and includes implementations such as Jacobi, ILU, SOR, AMG, Additive Schwarz, and more.
+//! ## Contract
+//! - [`Preconditioner::apply`] must compute **`y = M^{-1} x`** regardless of [`PcSide`].
+//!   Side is forwarded so PCs *with internal sweep order* (e.g. SOR/SSOR) can choose
+//!   the appropriate triangular traversal. Most PCs ignore side.
+//! - [`Preconditioner::apply_mut`] is used by flexible solvers (FGMRES) to allow
+//!   iteration-varying behavior. Default forwards to [`apply`].
+//! - Direct methods may implement [`direct_solve`] and will be used by `PREONLY`.
 //!
-//! ## Flexible preconditioners
+//! ## Reuse semantics
+//! Callers may invoke [`update_numeric`] when structure is unchanged; otherwise
+//! use [`update_symbolic`]. Report truthfully via [`supports_numeric_update`].
 //!
-//! Flexible Krylov methods call [`Preconditioner::apply_mut`], allowing
-//! preconditioners to update internal state between applications.
-//! Non-flexible solvers continue to invoke [`Preconditioner::apply`].
-//! The default `apply_mut` simply forwards to `apply`, so existing
-//! implementations remain unchanged unless they opt in to mutation.
+//! ## Parallelism
+//! Preconditioners obtain the communicator via [`LinOp::comm()`] from the operator
+//! provided to [`setup`]. **Do not** thread communicators manually.
 //!
-//! Preconditioners obtain the parallel communicator from the operator via
-//! [`LinOp::comm()`], eliminating the need to thread communicator handles
-//! through solver interfaces.
+//! ## Side semantics (solver-enforced)
+//! Solvers place `M^{-1}`:
+//! - Left: build on `M^{-1} A` and monitor `||M^{-1} r||`
+//! - Right: build on `A M^{-1}` and monitor `||r||`
+//!
+//! ## Examples
+//! ```no_run
+//! # use kryst::context::ksp_context::{KspContext, SolverType};
+//! # use kryst::context::pc_context::PcType;
+//! # use faer::Mat;
+//! let a = Mat::<f64>::from_fn(100,100, |i,j| if i==j {4.0} else if (i as isize-j as isize).abs()==1 {-1.0} else {0.0});
+//! let b = vec![1.0; 100];
+//! let mut x = vec![0.0; 100];
+//! let mut ksp = KspContext::new();
+//! ksp.set_type(SolverType::Gmres).unwrap()
+//!    .set_pc_type(PcType::Jacobi, None).unwrap()
+//!    .set_operators(std::sync::Arc::new(a), None);
+//! let _stats = ksp.solve(&b, &mut x).unwrap();
+//! ```
 
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -85,12 +107,7 @@ pub trait Preconditioner: Send + Sync {
     ///
     /// By default, delegates to [`apply`], so existing preconditioners
     /// remain immutable unless they explicitly override this method.
-    fn apply_mut(
-        &mut self,
-        side: PcSide,
-        x: &[f64],
-        y: &mut [f64],
-    ) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 
@@ -110,7 +127,9 @@ pub trait Preconditioner: Send + Sync {
     }
 
     /// True if we can keep the symbolic structure and only refresh numeric values.
-    fn supports_numeric_update(&self) -> bool { false }
+    fn supports_numeric_update(&self) -> bool {
+        false
+    }
 
     /// Pattern unchanged: re-use hierarchy/structure, BUT refresh all numeric data.
     fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
@@ -150,6 +169,7 @@ pub mod legacy {
 use std::sync::Mutex;
 
 #[cfg(feature = "legacy-pc-bridge")]
+#[cfg_attr(docsrs, doc(cfg(feature = "legacy-pc-bridge")))]
 pub struct LegacyOpPreconditioner {
     inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>,
     scratch: Mutex<Scratch>,
@@ -165,13 +185,20 @@ struct Scratch {
 #[cfg(feature = "legacy-pc-bridge")]
 impl LegacyOpPreconditioner {
     pub fn new(inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>) -> Self {
-        Self { inner, scratch: Mutex::new(Scratch::default()) }
+        Self {
+            inner,
+            scratch: Mutex::new(Scratch::default()),
+        }
     }
 
     #[inline]
     fn ensure_scratch(s: &mut Scratch, n: usize) {
-        if s.x.len() != n { s.x.resize(n, 0.0); }
-        if s.y.len() != n { s.y.resize(n, 0.0); }
+        if s.x.len() != n {
+            s.x.resize(n, 0.0);
+        }
+        if s.y.len() != n {
+            s.y.resize(n, 0.0);
+        }
     }
 }
 
@@ -189,7 +216,11 @@ impl Preconditioner for LegacyOpPreconditioner {
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         use crate::error::KError;
         if x.len() != y.len() {
-            return Err(KError::InvalidInput(format!("x.len()={} != y.len()={}", x.len(), y.len())));
+            return Err(KError::InvalidInput(format!(
+                "x.len()={} != y.len()={}",
+                x.len(),
+                y.len()
+            )));
         }
         let mut s = self.scratch.lock().unwrap();
         Self::ensure_scratch(&mut s, x.len());
@@ -206,6 +237,7 @@ impl Preconditioner for LegacyOpPreconditioner {
 }
 
 #[cfg(not(feature = "legacy-pc-bridge"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "legacy-pc-bridge")))]
 pub struct LegacyOpPreconditioner {
     _private: (),
 }
@@ -227,37 +259,36 @@ impl Preconditioner for LegacyOpPreconditioner {
     }
 }
 
-
 // Submodules for various preconditioners
-pub mod block_jacobi;
-pub mod ilu;
-pub mod jacobi;
-pub mod sor;
 pub mod amg;
+pub mod approxinv;
 pub mod asm;
+pub mod block_jacobi;
+pub mod builders;
+pub mod chain;
+pub mod chebyshev;
+pub mod direct;
+pub mod ilu;
+pub mod ilup;
 pub mod ilut;
 pub mod ilutp;
-pub mod ilup;
-pub mod chebyshev;
-pub mod approxinv;
-pub mod chain;
-pub mod direct;
-pub mod builders;
+pub mod jacobi;
+pub mod sor;
 
 // Re-exports for convenience
-pub use jacobi::Jacobi;
-pub use sor::Sor;
-pub use ilu::Ilu0;
+pub use self::sor::MatSorType;
 pub use amg::AMG;
+pub use approxinv::ApproxInv;
 pub use asm::AdditiveSchwarz;
+pub use chain::PcChain;
+pub use chebyshev::{Chebyshev, ChebyshevPre};
+pub use direct::{LuPc, QrPc, SuperLuDistPc};
+pub use ilu::Ilu0;
+pub use ilup::Ilup;
 pub use ilut::Ilut;
 pub use ilutp::Ilutp;
-pub use ilup::Ilup;
-pub use chebyshev::{Chebyshev, ChebyshevPre};
-pub use approxinv::ApproxInv;
-pub use chain::PcChain;
-pub use direct::{LuPc, QrPc, SuperLuDistPc};
-pub use self::sor::MatSorType;
+pub use jacobi::Jacobi;
+pub use sor::Sor;
 
 /// Unified preconditioner enum for all supported types.
 pub use crate::context::pc_context::{PC, SparsityPattern};

@@ -36,13 +36,13 @@
 //! - Trilinos GMRES + ILU: 7 iterations, 0.326s
 //! - Without ILU: 17,000+ iterations, very slow
 
-use kryst::utils::matrix_market::read_matrix_market;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::sparse::CsrMatrix;
-use std::time::Instant;
-use std::sync::Arc;
+use kryst::utils::matrix_market::read_matrix_market;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 struct OptimalConfig {
@@ -124,58 +124,75 @@ fn test_optimal_solver(
     _matrix_name: &str,
 ) -> Result<(usize, f64, f64, bool, String), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
-    
+
     // Convert sparse matrix to dense for KspContext
     let dense_matrix = matrix.to_dense();
     let rhs_vec = rhs.to_vec();
-    
-     // Try primary configuration
-     let mut ksp = KspContext::new();
-     let st = SolverType::from_str(config.solver)?;
-     let pct = PcType::from_str(config.preconditioner)?;
-     ksp.set_type(st)?
-         .set_pc_type(pct, None)?
-         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
-     // provide operator and prepare workspace
-     ksp.set_operators(Arc::new(dense_matrix.clone()), None);
-     ksp.setup()?;
+    // Try primary configuration
+    let mut ksp = KspContext::new();
+    let st = SolverType::from_str(config.solver)?;
+    let pct = PcType::from_str(config.preconditioner)?;
+    ksp.set_type(st)?
+        .set_pc_type(pct, None)?
+        .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
-     let start = Instant::now();
-     let result = ksp.solve(&rhs_vec, &mut solution);
+    // provide operator and prepare workspace
+    ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+    ksp.setup()?;
+
+    let start = Instant::now();
+    let result = ksp.solve(&rhs_vec, &mut solution);
     let solve_time = start.elapsed().as_secs_f64();
-    
+
     match result {
         Ok(stats) => {
             let converged = stats.final_residual < 1e-6;
-            let method_used = format!("{} + {}", config.solver.to_uppercase(), 
-                                    config.preconditioner.to_uppercase());
-            Ok((stats.iterations, stats.final_residual, solve_time, converged, method_used))
-        },
+            let method_used = format!(
+                "{} + {}",
+                config.solver.to_uppercase(),
+                config.preconditioner.to_uppercase()
+            );
+            Ok((
+                stats.iterations,
+                stats.final_residual,
+                solve_time,
+                converged,
+                method_used,
+            ))
+        }
         Err(_) => {
             // Try fallback configuration
             println!("    Primary method failed, trying fallback...");
             let mut solution_fallback = vec![0.0; rhs.len()];
-            
+
             let mut ksp_fallback = KspContext::new();
             let st_fb = SolverType::from_str(config.fallback_solver)?;
             let pc_fb = PcType::from_str(config.fallback_pc)?;
-            ksp_fallback.set_type(st_fb)?
-                       .set_pc_type(pc_fb, None)?
-                       .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+            ksp_fallback
+                .set_type(st_fb)?
+                .set_pc_type(pc_fb, None)?
+                .set_tolerances(1e-6, 1e-12, 1e3, 1000);
             ksp_fallback.set_operators(Arc::new(dense_matrix.clone()), None);
             ksp_fallback.setup()?;
 
             let start_fallback = Instant::now();
             let stats_fallback = ksp_fallback.solve(&rhs_vec, &mut solution_fallback)?;
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
-            
+
             let converged = stats_fallback.final_residual < 1e-6;
-            let method_used = format!("{} + {} (fallback)", 
-                                    config.fallback_solver.to_uppercase(),
-                                    config.fallback_pc.to_uppercase());
-            Ok((stats_fallback.iterations, stats_fallback.final_residual, 
-                solve_time_fallback, converged, method_used))
+            let method_used = format!(
+                "{} + {} (fallback)",
+                config.fallback_solver.to_uppercase(),
+                config.fallback_pc.to_uppercase()
+            );
+            Ok((
+                stats_fallback.iterations,
+                stats_fallback.final_residual,
+                solve_time_fallback,
+                converged,
+                method_used,
+            ))
         }
     }
 }
@@ -185,19 +202,20 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     let n = matrix.nrows();
     let nnz = matrix.nnz();
     let density = nnz as f64 / (n * n) as f64;
-    
+
     // Estimate condition number from diagonal dominance (rough heuristic)
     let mut min_diag = f64::INFINITY;
     let mut max_off_diag_sum: f64 = 0.0;
-    
-    if n < 2000 { // Only for reasonably sized matrices
+
+    if n < 2000 {
+        // Only for reasonably sized matrices
         let dense = matrix.to_dense();
         for i in 0..n {
             let diag_val = dense[(i, i)].abs();
             if diag_val > 0.0 {
                 min_diag = min_diag.min(diag_val);
             }
-            
+
             let mut off_diag_sum = 0.0;
             for j in 0..n {
                 if i != j {
@@ -207,15 +225,15 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
             max_off_diag_sum = max_off_diag_sum.max(off_diag_sum);
         }
     }
-    
+
     let condition_estimate = if min_diag > 0.0 && min_diag.is_finite() {
         max_off_diag_sum / min_diag
     } else {
         f64::INFINITY
     };
-    
+
     let is_well_conditioned = condition_estimate < 100.0;
-    
+
     (density, condition_estimate, is_well_conditioned)
 }
 
@@ -239,23 +257,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("memplus", "Memplus matrix (if available)"),
     ];
 
-    println!("{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} {}", 
-             "Matrix", "Iters", "Residual", "Time(s)", "Status", "Method", "Performance vs Benchmark");
+    println!(
+        "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} {}",
+        "Matrix", "Iters", "Residual", "Time(s)", "Status", "Method", "Performance vs Benchmark"
+    );
     println!("{}", "=".repeat(95));
 
     for (matrix_name, _description) in test_matrices {
         let matrix_path = format!("examples/mtx/{}.mtx", matrix_name);
         let rhs_path = format!("examples/mtx/{}_rhs1.mtx", matrix_name);
-        
+
         // Try to read the matrix and RHS
         let (matrix_data, rhs_data) = match (
             read_matrix_market(&matrix_path),
-            read_matrix_market(&rhs_path)
+            read_matrix_market(&rhs_path),
         ) {
             (Ok(matrix), Ok(rhs)) => (matrix, rhs),
             _ => {
-                println!("{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Files not found", 
-                         matrix_name, "N/A", "N/A", "N/A", "⚠", "N/A");
+                println!(
+                    "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Files not found",
+                    matrix_name, "N/A", "N/A", "N/A", "⚠", "N/A"
+                );
                 continue;
             }
         };
@@ -266,22 +288,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Get optimal configuration for this matrix
         let config = get_optimal_config(matrix_name);
-        
+
         // Analyze matrix properties
         let (density, condition_est, is_well_conditioned) = analyze_matrix_properties(&matrix);
-        
+
         // Skip very large matrices for this demo
         if matrix.nrows() > 6000 {
-            println!("{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Matrix too large for demo", 
-                     matrix_name, "SKIP", "N/A", "N/A", "⚠", "N/A");
+            println!(
+                "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Matrix too large for demo",
+                matrix_name, "SKIP", "N/A", "N/A", "⚠", "N/A"
+            );
             continue;
         }
-        
+
         // Test with optimal configuration
         match test_optimal_solver(&matrix, &rhs, &config, matrix_name) {
             Ok((iters, residual, time, converged, method)) => {
                 let status = if converged { "✓" } else { "✗" };
-                
+
                 // Compare with benchmark expectations
                 let iter_performance = if iters <= config.expected_iterations {
                     "Better than expected"
@@ -290,24 +314,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     "Slower than expected"
                 };
-                
-                println!("{:<15} {:<8} {:<12.2e} {:<10.3} {:<8} {:<25} {}", 
-                         matrix_name, iters, residual, time, status, method, iter_performance);
-                
+
+                println!(
+                    "{:<15} {:<8} {:<12.2e} {:<10.3} {:<8} {:<25} {}",
+                    matrix_name, iters, residual, time, status, method, iter_performance
+                );
+
                 // Additional diagnostics for interesting cases
                 if !is_well_conditioned {
-                    println!("    → Ill-conditioned matrix (est. cond. ≈ {:.1e})", condition_est);
+                    println!(
+                        "    → Ill-conditioned matrix (est. cond. ≈ {:.1e})",
+                        condition_est
+                    );
                 }
                 if density > 0.1 {
-                    println!("    → Dense matrix ({:.1}% fill) - direct methods may be preferred", density * 100.0);
+                    println!(
+                        "    → Dense matrix ({:.1}% fill) - direct methods may be preferred",
+                        density * 100.0
+                    );
                 }
                 if converged && iters < config.expected_iterations / 2 {
-                    println!("    → Excellent performance: {} iterations vs {} expected", iters, config.expected_iterations);
+                    println!(
+                        "    → Excellent performance: {} iterations vs {} expected",
+                        iters, config.expected_iterations
+                    );
                 }
-            },
+            }
             Err(e) => {
-                println!("{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Error: {}", 
-                         matrix_name, "FAIL", "N/A", "N/A", "✗", "N/A", e);
+                println!(
+                    "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Error: {}",
+                    matrix_name, "FAIL", "N/A", "N/A", "✗", "N/A", e
+                );
             }
         }
     }

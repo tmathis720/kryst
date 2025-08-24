@@ -42,52 +42,52 @@ mod tests {
             format!("{}", KError::DivergedIndefinitePC),
             "breakdown or indefinite preconditioner detected (beta < 0)"
         );
-        
+
         assert_eq!(
             format!("{}", KError::BreakdownOrIndefinite),
             "breakdown or indefinite situation detected (beta < 0 or other)"
         );
-        
+
         assert_eq!(
             format!("{}", KError::FactorError("singular matrix".to_string())),
             "factorization error: singular matrix"
         );
-        
+
         assert_eq!(
-            format!("{}", KError::SolveError("maximum iterations reached".to_string())),
+            format!(
+                "{}",
+                KError::SolveError("maximum iterations reached".to_string())
+            ),
             "solve error: maximum iterations reached"
         );
-        
+
         assert_eq!(
             format!("{}", KError::IndefiniteMatrix),
             "indefinite matrix detected (p^T A p <= 0)"
         );
-        
+
         assert_eq!(
             format!("{}", KError::IndefinitePreconditioner),
             "indefinite preconditioner detected (beta < 0)"
         );
-        
-        assert_eq!(
-            format!("{}", KError::ZeroPivot(42)),
-            "zero pivot at row 42"
-        );
-        
+
+        assert_eq!(format!("{}", KError::ZeroPivot(42)), "zero pivot at row 42");
+
         assert_eq!(
             format!("{}", KError::Unsupported("complex arithmetic")),
             "unsupported operation: complex arithmetic"
         );
-        
+
         assert_eq!(
             format!("{}", KError::UnrecognizedSolverType("unknown".to_string())),
             "unrecognized solver type: unknown"
         );
-        
+
         assert_eq!(
             format!("{}", KError::UnrecognizedPcType("mystery".to_string())),
             "unrecognized preconditioner type: mystery"
         );
-        
+
         assert_eq!(
             format!("{}", KError::UnrecognizedPcSide("diagonal".to_string())),
             "unrecognized preconditioner side: diagonal"
@@ -106,7 +106,7 @@ mod tests {
     fn test_error_is_send_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        
+
         assert_send::<KError>();
         assert_sync::<KError>();
     }
@@ -117,11 +117,11 @@ mod tests {
         assert_eq!(KError::IndefiniteMatrix, KError::IndefiniteMatrix);
         assert_eq!(KError::ZeroPivot(5), KError::ZeroPivot(5));
         assert_ne!(KError::ZeroPivot(5), KError::ZeroPivot(6));
-        
+
         let error1 = KError::FactorError("test".to_string());
         let error2 = KError::FactorError("test".to_string());
         assert_eq!(error1, error2);
-        
+
         let error3 = KError::FactorError("different".to_string());
         assert_ne!(error1, error3);
     }
@@ -147,7 +147,7 @@ mod tests {
         let _e9 = KError::UnrecognizedSolverType("test".to_string());
         let _e10 = KError::UnrecognizedPcType("test".to_string());
         let _e11 = KError::UnrecognizedPcSide("test".to_string());
-        
+
         // All variants should be constructible
         assert!(true);
     }

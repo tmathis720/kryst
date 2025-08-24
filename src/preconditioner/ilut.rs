@@ -19,9 +19,9 @@
 //! # References
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
 
+use crate::core::traits::MatShape;
 use crate::error::KError;
 use crate::preconditioner::legacy::Preconditioner;
-use crate::core::traits::MatShape;
 
 /// Sparse row structure for storing L/U factors.
 ///
@@ -36,7 +36,10 @@ pub struct SparseRow<T> {
 impl<T> SparseRow<T> {
     /// Create an empty sparse row
     pub fn new() -> Self {
-        Self { cols: Vec::new(), vals: Vec::new() }
+        Self {
+            cols: Vec::new(),
+            vals: Vec::new(),
+        }
     }
 }
 impl<T> Default for SparseRow<T> {
@@ -63,7 +66,13 @@ pub struct Ilut<T> {
 impl<T: num_traits::Float + Clone + std::fmt::Debug> Ilut<T> {
     /// Create a new ILUT preconditioner with fill and drop tolerance.
     pub fn new(fill: usize, droptol: T) -> Self {
-        Self { fill, droptol, l: Vec::new(), u: Vec::new(), n: 0 }
+        Self {
+            fill,
+            droptol,
+            l: Vec::new(),
+            u: Vec::new(),
+            n: 0,
+        }
     }
 }
 
@@ -95,7 +104,11 @@ where
             row.retain(|&(_, v)| v.abs() >= self.droptol);
             // Keep only largest 'fill' entries by magnitude
             if row.len() > self.fill {
-                row.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+                row.sort_by(|a, b| {
+                    b.1.abs()
+                        .partial_cmp(&a.1.abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 row.truncate(self.fill);
             }
             // Partition into L (j < i) and U (j >= i)
@@ -159,11 +172,17 @@ mod tests {
         data: Vec<Vec<T>>,
     }
     impl<T: Copy> DenseMat<T> {
-        fn new(data: Vec<Vec<T>>) -> Self { Self { data } }
+        fn new(data: Vec<Vec<T>>) -> Self {
+            Self { data }
+        }
     }
     impl<T: Copy> MatShape for DenseMat<T> {
-        fn nrows(&self) -> usize { self.data.len() }
-        fn ncols(&self) -> usize { self.data[0].len() }
+        fn nrows(&self) -> usize {
+            self.data.len()
+        }
+        fn ncols(&self) -> usize {
+            self.data[0].len()
+        }
     }
     impl<T: Copy> std::ops::Index<(usize, usize)> for DenseMat<T> {
         type Output = T;
@@ -177,7 +196,9 @@ mod tests {
     {
         fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
             for i in 0..self.nrows() {
-                y[i] = (0..self.ncols()).map(|j| self[(i, j)] * x[j]).fold(T::zero(), |a, b| a + b);
+                y[i] = (0..self.ncols())
+                    .map(|j| self[(i, j)] * x[j])
+                    .fold(T::zero(), |a, b| a + b);
             }
         }
     }
@@ -190,7 +211,13 @@ mod tests {
         pc.setup(&a).unwrap();
         let r = vec![2.0f64, 3.0];
         let mut z = vec![0.0; 2];
-        Preconditioner::<Mat, Vec<f64>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
+        Preconditioner::<Mat, Vec<f64>>::apply(
+            &pc,
+            crate::preconditioner::PcSide::Left,
+            &r,
+            &mut z,
+        )
+        .unwrap();
         assert!((z[0] - 2.0).abs() < 1e-12 && (z[1] - 3.0).abs() < 1e-12);
     }
 
@@ -206,7 +233,13 @@ mod tests {
         pc.setup(&a).unwrap();
         let r = vec![1.0f64, 2.0, 3.0];
         let mut z = vec![0.0; 3];
-        Preconditioner::<Mat, Vec<f64>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
+        Preconditioner::<Mat, Vec<f64>>::apply(
+            &pc,
+            crate::preconditioner::PcSide::Left,
+            &r,
+            &mut z,
+        )
+        .unwrap();
         assert!(z.iter().all(|&zi| zi.is_finite()));
     }
 }

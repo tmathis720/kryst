@@ -31,13 +31,13 @@ pub struct CsrMatrix<T> {
 }
 
 impl<
-        T: ComplexField
-            + Copy
-            + num_traits::Zero
-            + PartialOrd
-            + std::ops::Add<Output = T>
-            + std::ops::Mul<Output = T>,
-    > CsrMatrix<T>
+    T: ComplexField
+        + Copy
+        + num_traits::Zero
+        + PartialOrd
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+> CsrMatrix<T>
 {
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
     pub fn from_csr(

@@ -24,7 +24,11 @@ use num_traits::Float;
 /// Implements matrix-vector multiplication for a matrix reference (`faer::MatRef`).
 impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
     fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        assert_eq!(self.nrows(), y.len(), "Output vector y has incorrect length");
+        assert_eq!(
+            self.nrows(),
+            y.len(),
+            "Output vector y has incorrect length"
+        );
         assert_eq!(self.ncols(), x.len(), "Input vector x has incorrect length");
         for i in 0..self.nrows() {
             y[i] = T::zero();
@@ -38,7 +42,11 @@ impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
 /// Implements matrix-transpose-vector multiplication for a matrix reference (`faer::MatRef`).
 impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
     fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        assert_eq!(self.ncols(), y.len(), "Output vector y has incorrect length");
+        assert_eq!(
+            self.ncols(),
+            y.len(),
+            "Output vector y has incorrect length"
+        );
         assert_eq!(self.nrows(), x.len(), "Input vector x has incorrect length");
         for j in 0..self.ncols() {
             y[j] = T::zero();
@@ -93,15 +101,41 @@ pub struct DistributedInnerProduct<'a, C: crate::parallel::Comm> {
 #[cfg(feature = "mpi")]
 impl<'a, C: crate::parallel::Comm> DistributedInnerProduct<'a, C> {
     /// Computes the distributed dot product of two slices, reducing across all processes.
-    pub fn dot<T: Copy + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + num_traits::FromPrimitive + num_traits::ToPrimitive + num_traits::Zero>(&self, x: &[T], y: &[T]) -> T {
+    pub fn dot<
+        T: Copy
+            + std::ops::Add<Output = T>
+            + std::ops::Mul<Output = T>
+            + num_traits::FromPrimitive
+            + num_traits::ToPrimitive
+            + num_traits::Zero,
+    >(
+        &self,
+        x: &[T],
+        y: &[T],
+    ) -> T {
         assert_eq!(x.len(), y.len(), "Vectors must have the same length");
         // Convert local dot product to f64 for reduction
-        let local: f64 = x.iter().zip(y.iter()).map(|(&a, &b)| (a * b).to_f64().unwrap_or(0.0)).sum();
+        let local: f64 = x
+            .iter()
+            .zip(y.iter())
+            .map(|(&a, &b)| (a * b).to_f64().unwrap_or(0.0))
+            .sum();
         let global = self.comm.all_reduce(local);
         T::from_f64(global).unwrap_or(T::zero())
     }
     /// Computes the distributed Euclidean norm of a slice, reducing across all processes.
-    pub fn norm<T: Copy + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + num_traits::FromPrimitive + num_traits::ToPrimitive + num_traits::Zero + num_traits::Float>(&self, x: &[T]) -> T {
+    pub fn norm<
+        T: Copy
+            + std::ops::Add<Output = T>
+            + std::ops::Mul<Output = T>
+            + num_traits::FromPrimitive
+            + num_traits::ToPrimitive
+            + num_traits::Zero
+            + num_traits::Float,
+    >(
+        &self,
+        x: &[T],
+    ) -> T {
         let local: f64 = x.iter().map(|&a| (a * a).to_f64().unwrap_or(0.0)).sum();
         let global = self.comm.all_reduce(local);
         T::from_f64(global.sqrt()).unwrap_or(T::zero())

@@ -1,6 +1,6 @@
 use crate::error::KError;
 use faer::linalg::solvers::{Qr, SolveCore};
-use faer::{Mat, MatMut, Conj};
+use faer::{Conj, Mat, MatMut};
 
 /// Solve a dense system using QR factorization.
 pub fn solve(a: &Mat<f64>, b: &[f64], x: &mut [f64]) -> Result<(), KError> {

@@ -6,7 +6,7 @@
 //! 3. Inspect convergence reasons in solve statistics
 //!
 //! # Usage
-//! 
+//!
 //! ```bash
 //! cargo run --example convergence_demo
 //! ```
@@ -21,9 +21,9 @@ fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
     Mat::from_fn(n, n, |i, j| {
         if i == j {
-            4.0  // Main diagonal
+            4.0 // Main diagonal
         } else if (i as isize - j as isize).abs() == 1 {
-            -1.0  // Super/sub diagonals
+            -1.0 // Super/sub diagonals
         } else {
             0.0
         }
@@ -139,16 +139,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, rtol, atol, dtol, maxits) in test_cases {
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Cg)?
-           .set_pc_type(PcType::None, None)?
-           .set_tolerances(rtol, atol, dtol, maxits);
+            .set_pc_type(PcType::None, None)?
+            .set_tolerances(rtol, atol, dtol, maxits);
         ksp.set_operators(Arc::new(a.clone()), None);
         ksp.setup()?;
 
         let mut x = vec![0.0; n];
         let stats = ksp.solve(&b, &mut x)?;
 
-        println!("  {}: {:?} ({} iters, res = {:.2e})", 
-                 name, stats.reason, stats.iterations, stats.final_residual);
+        println!(
+            "  {}: {:?} ({} iters, res = {:.2e})",
+            name, stats.reason, stats.iterations, stats.final_residual
+        );
     }
     println!();
 
@@ -167,7 +169,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_tolerances(1e-8, 1e-12, 1e3, 1000);
     ksp5.set_operators(Arc::new(a.clone()), None);
     ksp5.add_monitor(|iter, residual| {
-        println!("    monitor (before clear): iter={} residual={:.2e}", iter, residual);
+        println!(
+            "    monitor (before clear): iter={} residual={:.2e}",
+            iter, residual
+        );
     });
     // Clear monitors and show that none are invoked
     ksp5.clear_monitors();

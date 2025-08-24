@@ -13,20 +13,20 @@
 //! - May have zeros on diagonal from incompressibility conditions
 //! - ILU preconditioners can be unstable due to poor factorization quality
 
-use kryst::utils::matrix_market::read_matrix_market;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::sparse::CsrMatrix;
-use std::time::Instant;
-use std::sync::Arc;
+use kryst::utils::matrix_market::read_matrix_market;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// Analyze matrix properties and provide diagnostics
 fn analyze_matrix(matrix: &CsrMatrix<f64>) -> (f64, bool) {
     let n = matrix.nrows();
     let nnz = matrix.nnz();
     let density = nnz as f64 / (n * n) as f64;
-    
+
     // Convert to dense to check diagonal (for small matrices only)
     let has_diag_zeros = if n < 1000 {
         let dense = matrix.to_dense();
@@ -40,14 +40,17 @@ fn analyze_matrix(matrix: &CsrMatrix<f64>) -> (f64, bool) {
     } else {
         false // Skip check for large matrices
     };
-    
+
     println!("Matrix Analysis:");
     println!("  Dimensions: {}x{}", n, n);
     println!("  Non-zeros: {} ({:.4}% density)", nnz, density * 100.0);
     if n < 1000 {
-        println!("  Diagonal zeros: {}", if has_diag_zeros { "detected" } else { "none" });
+        println!(
+            "  Diagonal zeros: {}",
+            if has_diag_zeros { "detected" } else { "none" }
+        );
     }
-    
+
     (density, has_diag_zeros)
 }
 
@@ -59,31 +62,36 @@ fn test_solver_config(
     pc_name: &str,
 ) -> Result<(usize, f64, f64, bool), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
-    
+
     // Convert sparse matrix to dense for KspContext
     let dense_matrix = matrix.to_dense();
     let rhs_vec = rhs.to_vec();
-    
+
     // Create and configure KSP context
-     let mut ksp = KspContext::new();
-     // map string names to enums
-     let st = SolverType::from_str(solver_name)?;
-     let pct = PcType::from_str(pc_name)?;
-     ksp.set_type(st)?
-         .set_pc_type(pct, None)?
-         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+    let mut ksp = KspContext::new();
+    // map string names to enums
+    let st = SolverType::from_str(solver_name)?;
+    let pct = PcType::from_str(pc_name)?;
+    ksp.set_type(st)?
+        .set_pc_type(pct, None)?
+        .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
-     // provide operator and prepare workspace
-     ksp.set_operators(Arc::new(dense_matrix.clone()), None);
-     ksp.setup()?;
+    // provide operator and prepare workspace
+    ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+    ksp.setup()?;
 
-     let start = Instant::now();
-     let stats = ksp.solve(&rhs_vec, &mut solution)?;
+    let start = Instant::now();
+    let stats = ksp.solve(&rhs_vec, &mut solution)?;
     let solve_time = start.elapsed().as_secs_f64();
-    
+
     let converged = stats.final_residual < 1e-6;
-    
-    Ok((stats.iterations, stats.final_residual, solve_time, converged))
+
+    Ok((
+        stats.iterations,
+        stats.final_residual,
+        solve_time,
+        converged,
+    ))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -99,10 +107,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve paths relative to the crate so the example is robust to CWD.
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let raw_list = vec![
-        ("e05r0000/e05r0000.mtx", "e05r0000/e05r0000_rhs1.mtx", "Driven cavity (Re=0)"),
-        ("e05r0300/e05r0300.mtx", "e05r0300/e05r0300_rhs1.mtx", "Driven cavity (Re=300)"),
-        ("e30r0000/e30r0000.mtx", "e30r0000/e30r0000_rhs1.mtx", "Driven cavity 30x30 (Re=0)"),
-        ("e30r1000/e30r1000.mtx", "e30r1000/e30r1000_rhs1.mtx", "Driven cavity 30x30 (Re=1000)"),
+        (
+            "e05r0000/e05r0000.mtx",
+            "e05r0000/e05r0000_rhs1.mtx",
+            "Driven cavity (Re=0)",
+        ),
+        (
+            "e05r0300/e05r0300.mtx",
+            "e05r0300/e05r0300_rhs1.mtx",
+            "Driven cavity (Re=300)",
+        ),
+        (
+            "e30r0000/e30r0000.mtx",
+            "e30r0000/e30r0000_rhs1.mtx",
+            "Driven cavity 30x30 (Re=0)",
+        ),
+        (
+            "e30r1000/e30r1000.mtx",
+            "e30r1000/e30r1000_rhs1.mtx",
+            "Driven cavity 30x30 (Re=1000)",
+        ),
     ];
 
     for (mat_rel, rhs_rel, description) in raw_list {
@@ -116,7 +140,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("RHS: {}", rhs_path_s);
 
         // Try to read the matrix and RHS
-        let (matrix_data, rhs_data) = match (read_matrix_market(matrix_path_s), read_matrix_market(rhs_path_s)) {
+        let (matrix_data, rhs_data) = match (
+            read_matrix_market(matrix_path_s),
+            read_matrix_market(rhs_path_s),
+        ) {
             (Ok(matrix), Ok(rhs)) => (matrix, rhs),
             _ => {
                 println!("⚠ Files not found, skipping {}", description);
@@ -131,12 +158,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Analyze matrix properties
         let (density, has_zeros) = analyze_matrix(&matrix);
-        
+
         if has_zeros {
             println!("⚠ Matrix has zeros on diagonal - typical of driven cavity problems");
             println!("  This makes diagonal-based preconditioners unstable");
         }
-        
+
         println!();
 
         // Test different solver/preconditioner combinations
@@ -147,26 +174,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // ("bicgstab", "none", "BiCGStab (no preconditioner)"),
             // ("bicgstab", "ilu0", "BiCGStab + ILU(0)"),
             // ("tfqmr", "none", "TFQMR (no preconditioner)"),
-            
+
             // // These may fail for driven cavity matrices
             // ("gmres", "jacobi", "GMRES + Jacobi (may fail with diagonal zeros)"),
             // ("cg", "none", "CG (will fail for non-SPD)"),
-            
+
             // Direct solver as reference
             ("preonly", "lu", "Direct LU"),
         ];
 
         println!("Solver Comparison Results:");
-        println!("{:<35} {:>8} {:>12} {:>10} {:>8}", "Method", "Iters", "Residual", "Time(s)", "Status");
+        println!(
+            "{:<35} {:>8} {:>12} {:>10} {:>8}",
+            "Method", "Iters", "Residual", "Time(s)", "Status"
+        );
         println!("{}", "-".repeat(75));
 
         for (solver_type, pc_type, description) in solver_configs {
             match test_solver_config(&matrix, &rhs, solver_type, pc_type) {
                 Ok((iters, residual, time, converged)) => {
                     let status = if converged { "✓" } else { "✗" };
-                    println!("{:<35} {:>8} {:>12.2e} {:>10.3} {:>8}", 
-                             description, iters, residual, time, status);
-                    
+                    println!(
+                        "{:<35} {:>8} {:>12.2e} {:>10.3} {:>8}",
+                        description, iters, residual, time, status
+                    );
+
                     if converged && solver_type != "preonly" {
                         // Calculate iteration efficiency
                         let dof_per_sec = matrix.nrows() as f64 / time;
@@ -174,17 +206,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("    → High efficiency: {:.0} DOF/s", dof_per_sec);
                         }
                     }
-                },
+                }
                 Err(e) => {
-                    println!("{:<35} {:>8} {:>12} {:>10} {:>8}", 
-                             description, "FAIL", "N/A", "N/A", "✗");
+                    println!(
+                        "{:<35} {:>8} {:>12} {:>10} {:>8}",
+                        description, "FAIL", "N/A", "N/A", "✗"
+                    );
                     println!("    → Error: {}", e);
                 }
             }
         }
-        
+
         println!();
-        
+
         // Provide recommendations based on matrix characteristics
         println!("Recommendations for this problem:");
         if has_zeros {
@@ -198,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  • Large problem - direct methods may require excessive memory");
             println!("  • Focus on robust iterative methods (GMRES, BiCGStab, TFQMR)");
         }
-        
+
         println!();
         println!("{}", "=".repeat(80));
         println!();
@@ -210,11 +244,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  These matrices are specifically designed to test iterative solver robustness.");
     println!();
     println!("Key insights about driven cavity problems:");
-    println!("  • Non-symmetric and indefinite from incompressible Navier-Stokes");  
+    println!("  • Non-symmetric and indefinite from incompressible Navier-Stokes");
     println!("  • Diagonal zeros from incompressibility condition");
     println!("  • ILU preconditioners often unstable due to poor factorization");
     println!("  • Direct methods work but become memory-intensive for large Re");
     println!("  • Robust iterative methods: GMRES, BiCGStab, TFQMR without preconditioning");
-    
+
     Ok(())
 }

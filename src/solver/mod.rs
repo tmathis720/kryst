@@ -171,9 +171,9 @@ where
         let pc_ref = pc_adapter.as_ref().map(|p| {
             p as &dyn crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
         });
-        let stats = self
-            .inner
-            .solve(mat, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work)?;
+        let stats = self.inner.solve(
+            mat, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work,
+        )?;
         x.copy_from_slice(&x_vec);
         Ok(stats)
     }

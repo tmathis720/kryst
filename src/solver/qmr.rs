@@ -1,3 +1,7 @@
+//! # QMR side semantics
+//!
+//! Accepts [`PcSide::Left`] or [`PcSide::Right`]; monitors report the true `||r||`.
+
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;

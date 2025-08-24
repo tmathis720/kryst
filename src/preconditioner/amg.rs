@@ -1092,11 +1092,7 @@ impl AMG {
                 .into_par_iter()
                 .map(|i| {
                     let d = m[(i, i)];
-                    if d.abs() < 1e-14 {
-                        0.0
-                    } else {
-                        1.0 / d
-                    }
+                    if d.abs() < 1e-14 { 0.0 } else { 1.0 / d }
                 })
                 .collect()
         }
@@ -1106,11 +1102,7 @@ impl AMG {
                 .into_iter()
                 .map(|i| {
                     let d = m[(i, i)];
-                    if d.abs() < 1e-14 {
-                        0.0
-                    } else {
-                        1.0 / d
-                    }
+                    if d.abs() < 1e-14 { 0.0 } else { 1.0 / d }
                 })
                 .collect()
         }

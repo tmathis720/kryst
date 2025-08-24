@@ -23,6 +23,7 @@ pub enum PcType {
     ApproxInverse,
     Lu,
     Qr,
+    #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
     SuperLuDist,
 }
 
@@ -71,12 +72,7 @@ impl Preconditioner for NoOpPreconditioner {
         Ok(())
     }
 
-    fn apply_mut(
-        &mut self,
-        side: PcSide,
-        x: &[f64],
-        y: &mut [f64],
-    ) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 }
@@ -86,22 +82,49 @@ impl Preconditioner for NoOpPreconditioner {
 pub enum PcConfig {
     None,
     Jacobi,
-    BlockJacobi { block: usize },
+    BlockJacobi {
+        block: usize,
+    },
     Ilu0,
-    Iluk { level: usize },
-    Ilut { drop_tol: f64, max_fill: usize, reordering: Option<String> },
+    Iluk {
+        level: usize,
+    },
+    Ilut {
+        drop_tol: f64,
+        max_fill: usize,
+        reordering: Option<String>,
+    },
     Milu0,
-    Sor { omega: f64, sweeps: usize, mat_side: crate::preconditioner::sor::MatSorType, symmetric: bool },
-    Chebyshev { degree: usize, eig_lo: f64, eig_hi: f64 },
-    Asm { overlap: usize, subdomain_hint: Option<usize> },
-    Amg { levels: Option<usize>, smoother: Option<String> },
+    Sor {
+        omega: f64,
+        sweeps: usize,
+        mat_side: crate::preconditioner::sor::MatSorType,
+        symmetric: bool,
+    },
+    Chebyshev {
+        degree: usize,
+        eig_lo: f64,
+        eig_hi: f64,
+    },
+    Asm {
+        overlap: usize,
+        subdomain_hint: Option<usize>,
+    },
+    Amg {
+        levels: Option<usize>,
+        smoother: Option<String>,
+    },
     Lu,
     Qr,
+    #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
     SuperLuDist,
 }
 
 impl PcConfig {
-    pub fn from_type_and_options(pc_type: PcType, opts: Option<&PcOptions>) -> Result<Self, KError> {
+    pub fn from_type_and_options(
+        pc_type: PcType,
+        opts: Option<&PcOptions>,
+    ) -> Result<Self, KError> {
         use PcType::*;
         let default_opts = PcOptions::default();
         let o = opts.unwrap_or(&default_opts);
@@ -115,25 +138,31 @@ impl PcConfig {
 
             Ilu0 => PcConfig::Ilu0,
 
-            Ilu => {
-                match o.ilu_variant.as_deref() {
-                    Some("ilu0") | Option::None if o.ilu_level.is_none() && o.ilut_drop_tol.is_none() => PcConfig::Ilu0,
-                    Some("iluk") | Option::None if o.ilu_level.is_some() => {
-                        let level = o
-                            .ilu_level
-                            .ok_or_else(|| KError::InvalidInput("iluk requires PcOptions.ilu_level".into()))?;
-                        PcConfig::Iluk { level }
-                    }
-                    Some("ilut") | Option::None if o.ilut_drop_tol.is_some() => PcConfig::Ilut {
-                        drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
-                        max_fill: o.ilut_max_fill.unwrap_or(20),
-                        reordering: o.ilu_reordering.clone(),
-                    },
-                    Some("milu0") => PcConfig::Milu0,
-                    Some(other) => return Err(KError::InvalidInput(format!("unknown ilu_variant: {other}"))),
-                    Option::None => PcConfig::Ilu0,
+            Ilu => match o.ilu_variant.as_deref() {
+                Some("ilu0") | Option::None
+                    if o.ilu_level.is_none() && o.ilut_drop_tol.is_none() =>
+                {
+                    PcConfig::Ilu0
                 }
-            }
+                Some("iluk") | Option::None if o.ilu_level.is_some() => {
+                    let level = o.ilu_level.ok_or_else(|| {
+                        KError::InvalidInput("iluk requires PcOptions.ilu_level".into())
+                    })?;
+                    PcConfig::Iluk { level }
+                }
+                Some("ilut") | Option::None if o.ilut_drop_tol.is_some() => PcConfig::Ilut {
+                    drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
+                    max_fill: o.ilut_max_fill.unwrap_or(20),
+                    reordering: o.ilu_reordering.clone(),
+                },
+                Some("milu0") => PcConfig::Milu0,
+                Some(other) => {
+                    return Err(KError::InvalidInput(format!(
+                        "unknown ilu_variant: {other}"
+                    )));
+                }
+                Option::None => PcConfig::Ilu0,
+            },
             Ilut => PcConfig::Ilut {
                 drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
                 max_fill: o.ilut_max_fill.unwrap_or(20),
@@ -144,7 +173,9 @@ impl PcConfig {
                 max_fill: o.ilut_max_fill.unwrap_or(20),
                 reordering: o.ilu_reordering.clone(),
             },
-            Ilup => PcConfig::Iluk { level: o.ilu_level.unwrap_or(0) },
+            Ilup => PcConfig::Iluk {
+                level: o.ilu_level.unwrap_or(0),
+            },
 
             Sor => {
                 use crate::preconditioner::sor::MatSorType;
@@ -152,7 +183,9 @@ impl PcConfig {
                     Some("lower") | Option::None => MatSorType::APPLY_LOWER,
                     Some("upper") => MatSorType::APPLY_UPPER,
                     Some("symmetric") => MatSorType::SYMMETRIC_SWEEP,
-                    Some(s) => return Err(KError::InvalidInput(format!("unknown sor_mat_side: {s}"))),
+                    Some(s) => {
+                        return Err(KError::InvalidInput(format!("unknown sor_mat_side: {s}")));
+                    }
                 };
                 let omega = o.sor_omega.unwrap_or(1.0);
                 if !(0.0..2.0).contains(&omega) {
@@ -173,7 +206,11 @@ impl PcConfig {
                 if degree < 1 || eig_hi <= eig_lo || eig_lo < 0.0 {
                     return Err(KError::InvalidInput("invalid Chebyshev bounds".into()));
                 }
-                PcConfig::Chebyshev { degree, eig_lo, eig_hi }
+                PcConfig::Chebyshev {
+                    degree,
+                    eig_lo,
+                    eig_hi,
+                }
             }
 
             Asm => PcConfig::Asm {
@@ -193,7 +230,19 @@ impl PcConfig {
     }
 }
 
-/// Factory for creating preconditioners.
+/// # PcFactory
+///
+/// Runtime selection of preconditioners with option parsing.
+///
+/// - `PcOptions` → typed `PcConfig` → concrete builder
+/// - Feature gates:
+///   - `superlu_dist`: enables [`PcType::SuperLuDist`]
+///   - `legacy-pc-bridge`: enables adapters for legacy implementations (no per-apply allocs)
+///
+/// ## Chains
+/// - String form: `"jacobi->ilut"` via [`PcFactory::create_pc_chain_from_str`]
+/// - Structured form: `PcOptions.chain: Vec<PcOptions>`
+/// - Construction is deferred until a matrix is available (see KSP docs).
 pub struct PcFactory;
 
 impl PcFactory {
@@ -210,20 +259,30 @@ impl PcFactory {
 
             PcConfig::Ilu0 => b::build_ilu0(),
             PcConfig::Iluk { level } => b::build_iluk(level),
-            PcConfig::Ilut { drop_tol, max_fill, reordering } => {
-                b::build_ilut(drop_tol, max_fill, reordering)
-            }
+            PcConfig::Ilut {
+                drop_tol,
+                max_fill,
+                reordering,
+            } => b::build_ilut(drop_tol, max_fill, reordering),
             PcConfig::Milu0 => b::build_milu0(),
 
-            PcConfig::Sor { omega, sweeps, mat_side, symmetric } => {
-                b::build_sor(omega, sweeps, mat_side, symmetric)
-            }
+            PcConfig::Sor {
+                omega,
+                sweeps,
+                mat_side,
+                symmetric,
+            } => b::build_sor(omega, sweeps, mat_side, symmetric),
 
-            PcConfig::Chebyshev { degree, eig_lo, eig_hi } => {
-                b::build_chebyshev(degree, eig_lo, eig_hi)
-            }
+            PcConfig::Chebyshev {
+                degree,
+                eig_lo,
+                eig_hi,
+            } => b::build_chebyshev(degree, eig_lo, eig_hi),
 
-            PcConfig::Asm { overlap, subdomain_hint } => b::build_asm(overlap, subdomain_hint),
+            PcConfig::Asm {
+                overlap,
+                subdomain_hint,
+            } => b::build_asm(overlap, subdomain_hint),
             PcConfig::Amg { levels, smoother } => b::build_amg(levels, smoother),
 
             PcConfig::Lu => b::build_lu(),
@@ -254,12 +313,8 @@ impl PcFactory {
         matrix: &Mat<f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         match info.pc_type {
-            PcType::Amg => {
-                Err(KError::NotImplemented("AMG not yet implemented".into()))
-            }
-            PcType::Asm => {
-                Err(KError::NotImplemented("ASM not yet implemented".into()))
-            }
+            PcType::Amg => Err(KError::NotImplemented("AMG not yet implemented".into())),
+            PcType::Asm => Err(KError::NotImplemented("ASM not yet implemented".into())),
             _ => Self::create_preconditioner(info.pc_type, info.options.as_ref()),
         }
     }
@@ -269,10 +324,17 @@ impl PcFactory {
         opts: Option<&PcOptions>,
     ) -> Result<Vec<DeferredPcInfo>, KError> {
         let mut specs = Vec::new();
-        for token in chain.split("->").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        for token in chain
+            .split("->")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             let pct = PcType::from_str(token)?;
             let stage_opts = opts.cloned();
-            specs.push(DeferredPcInfo { pc_type: pct, options: stage_opts });
+            specs.push(DeferredPcInfo {
+                pc_type: pct,
+                options: stage_opts,
+            });
         }
         if specs.is_empty() {
             return Err(KError::InvalidInput("empty PC chain".into()));
@@ -315,7 +377,10 @@ impl PcFactory {
                     "PcOptions in chain missing pc_type".into(),
                 ));
             };
-            specs.push(DeferredPcInfo { pc_type: pct, options: Some(co.clone()) });
+            specs.push(DeferredPcInfo {
+                pc_type: pct,
+                options: Some(co.clone()),
+            });
         }
         if specs.is_empty() {
             return Err(KError::InvalidInput("empty PcOptions.chain".into()));

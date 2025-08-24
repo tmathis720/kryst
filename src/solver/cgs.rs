@@ -20,31 +20,55 @@ pub struct CgsSolver {
 
 impl CgsSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { rtol, atol: 1e-12, dtol: 1e3, maxits }
+        Self {
+            rtol,
+            atol: 1e-12,
+            dtol: 1e3,
+            maxits,
+        }
     }
 
-    #[inline] fn dot(x: &[f64], y: &[f64], _comm: &UniverseComm) -> f64 {
-        x.iter().zip(y).map(|(a,b)| a*b).sum()
+    #[inline]
+    fn dot(x: &[f64], y: &[f64], _comm: &UniverseComm) -> f64 {
+        x.iter().zip(y).map(|(a, b)| a * b).sum()
     }
-    #[inline] fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 { Self::dot(x,x,comm).sqrt() }
+    #[inline]
+    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
+        Self::dot(x, x, comm).sqrt()
+    }
 
     #[inline]
     fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
-        if buf.len() != n { buf.resize(n, 0.0); }
+        if buf.len() != n {
+            buf.resize(n, 0.0);
+        }
     }
 
     /// Acquire all CGS work vectors from `Workspace` (no steady-state allocs).
     /// We use:
     ///   tmp1 = r, tmp2 = v
     ///   q[0] = u, q[1] = p, q[2] = q, q[3] = upq, q[4] = w (A*(u+q))
-    fn acquire<'a>(n: usize, work: Option<&'a mut Workspace>)
-      -> (&'a mut [f64], &'a mut [f64], &'a mut [f64], &'a mut [f64], &'a mut [f64],
-          &'a mut [f64], &'a mut [f64]) {
+    fn acquire<'a>(
+        n: usize,
+        work: Option<&'a mut Workspace>,
+    ) -> (
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+    ) {
         if let Some(wk) = work {
             Self::take_or_resize(&mut wk.tmp1, n); // r
             Self::take_or_resize(&mut wk.tmp2, n); // v
-            while wk.q.len() < 5 { wk.q.push(Vec::new()); }
-            for k in 0..5 { Self::take_or_resize(&mut wk.q[k], n); }
+            while wk.q.len() < 5 {
+                wk.q.push(Vec::new());
+            }
+            for k in 0..5 {
+                Self::take_or_resize(&mut wk.q[k], n);
+            }
             let r = &mut wk.tmp1[..];
             let v = &mut wk.tmp2[..];
             let (u, p, q, upq, w) = {
@@ -72,10 +96,14 @@ impl CgsSolver {
 impl LinearSolver for CgsSolver {
     type Error = KError;
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn setup_workspace(&mut self, work: &mut Workspace) {
-        if work.q.len() < 5 { work.q.resize(5, Vec::new()); }
+        if work.q.len() < 5 {
+            work.q.resize(5, Vec::new());
+        }
     }
 
     fn solve(
@@ -89,12 +117,18 @@ impl LinearSolver for CgsSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        #[cfg(feature="logging")]
+        #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CGS");
 
         let (m, n) = a.dims();
-        if m != n { return Err(KError::InvalidInput("CGS requires a square operator".into())); }
-        if b.len() != n || x.len() != n { return Err(KError::InvalidInput("CGS: vector length mismatch".into())); }
+        if m != n {
+            return Err(KError::InvalidInput(
+                "CGS requires a square operator".into(),
+            ));
+        }
+        if b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput("CGS: vector length mismatch".into()));
+        }
 
         let (r, v, u, p, q, upq, w) = Self::acquire(n, work);
         let mut r_tld = vec![0.0; n]; // shadow residual (fixed)
@@ -105,7 +139,9 @@ impl LinearSolver for CgsSolver {
         // r = b - A x
         if x.iter().any(|&xi| xi != 0.0) {
             a.matvec(x, v);
-            for i in 0..n { r[i] = b[i] - v[i]; }
+            for i in 0..n {
+                r[i] = b[i] - v[i];
+            }
         } else {
             r.copy_from_slice(b);
         }
@@ -116,7 +152,9 @@ impl LinearSolver for CgsSolver {
         let mut rnorm = Self::nrm2(r, comm);
 
         if let Some(ms) = monitors {
-            for m in ms { m(0, rnorm); }
+            for m in ms {
+                m(0, rnorm);
+            }
         }
         // quick exit
         let thr = self.atol.max(self.rtol * bnorm);
@@ -124,8 +162,11 @@ impl LinearSolver for CgsSolver {
             return Ok(SolveStats {
                 iterations: 0,
                 final_residual: rnorm,
-                reason: if rnorm <= self.atol { ConvergedReason::ConvergedAtol }
-                        else                  { ConvergedReason::ConvergedRtol },
+                reason: if rnorm <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                },
             });
         }
 
@@ -154,19 +195,29 @@ impl LinearSolver for CgsSolver {
             let alpha = rho / sigma;
 
             // q = u - alpha v
-            for i in 0..n { q[i] = u[i] - alpha * v[i]; }
+            for i in 0..n {
+                q[i] = u[i] - alpha * v[i];
+            }
 
             // x += alpha * (u + q)
-            for i in 0..n { x[i] += alpha * (u[i] + q[i]); }
+            for i in 0..n {
+                x[i] += alpha * (u[i] + q[i]);
+            }
 
             // r -= alpha * A (u + q)
-            for i in 0..n { upq[i] = u[i] + q[i]; }
+            for i in 0..n {
+                upq[i] = u[i] + q[i];
+            }
             a.matvec(upq, w);
-            for i in 0..n { r[i] -= alpha * w[i]; }
+            for i in 0..n {
+                r[i] -= alpha * w[i];
+            }
 
             rnorm = Self::nrm2(r, comm);
             if let Some(ms) = monitors {
-                for m in ms { m(k, rnorm); }
+                for m in ms {
+                    m(k, rnorm);
+                }
             }
 
             // convergence / divergence tests
@@ -174,8 +225,11 @@ impl LinearSolver for CgsSolver {
                 return Ok(SolveStats {
                     iterations: k,
                     final_residual: rnorm,
-                    reason: if rnorm <= self.atol { ConvergedReason::ConvergedAtol }
-                            else                  { ConvergedReason::ConvergedRtol },
+                    reason: if rnorm <= self.atol {
+                        ConvergedReason::ConvergedAtol
+                    } else {
+                        ConvergedReason::ConvergedRtol
+                    },
                 });
             }
             if !rnorm.is_finite() || rnorm >= self.dtol {
@@ -195,12 +249,19 @@ impl LinearSolver for CgsSolver {
             let beta = rho / rho_old;
 
             // u = r + beta q
-            for i in 0..n { u[i] = r[i] + beta * q[i]; }
+            for i in 0..n {
+                u[i] = r[i] + beta * q[i];
+            }
             // p = u + beta (q + beta p)
-            for i in 0..n { p[i] = u[i] + beta * (q[i] + beta * p[i]); }
+            for i in 0..n {
+                p[i] = u[i] + beta * (q[i] + beta * p[i]);
+            }
         }
 
-        Ok(SolveStats { iterations: iters, final_residual: rnorm, reason: ConvergedReason::DivergedMaxIts })
+        Ok(SolveStats {
+            iterations: iters,
+            final_residual: rnorm,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }
-

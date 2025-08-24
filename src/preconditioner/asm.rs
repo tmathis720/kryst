@@ -3,14 +3,14 @@
 //! Based on Saad, and inspired by PETSc's PCASM. Supports Rayon in shared memory and MPI for distributed vectors.
 
 use crate::core::traits::MatVec;
-use crate::solver::legacy::LinearSolver;
-use crate::preconditioner::{legacy::Preconditioner, PcSide};
 use crate::error::KError;
-use std::sync::Mutex;
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
+use crate::preconditioner::{PcSide, legacy::Preconditioner};
+use crate::solver::legacy::LinearSolver;
 #[cfg(feature = "rayon")]
 use rayon::iter::IntoParallelRefIterator;
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+use std::sync::Mutex;
 
 /// Additive Schwarz (overlapping block Jacobi) preconditioner.
 /// Each block is solved independently (possibly in parallel), and the results are summed.
@@ -20,7 +20,10 @@ pub struct AdditiveSchwarz<M, V, T> {
     /// Local subdomain index sets (global indices) per block.
     pub subdomains: Vec<Vec<usize>>,
     /// One inner solver and submatrix per subdomain.
-    pub local_blocks: Vec<(M, Mutex<Box<dyn LinearSolver<M, V, Scalar = T, Error = KError> + Send + Sync>>)>,
+    pub local_blocks: Vec<(
+        M,
+        Mutex<Box<dyn LinearSolver<M, V, Scalar = T, Error = KError> + Send + Sync>>,
+    )>,
 }
 
 impl<M, V, T> AdditiveSchwarz<M, V, T>
@@ -32,7 +35,11 @@ where
     /// Create a new ASM with given overlap and user-defined subdomain partitions.
     /// If `subdomains` is empty, will later partition rows uniformly.
     pub fn new(overlap: usize, subdomains: Vec<Vec<usize>>) -> Self {
-        Self { overlap, subdomains, local_blocks: Vec::new() }
+        Self {
+            overlap,
+            subdomains,
+            local_blocks: Vec::new(),
+        }
     }
 
     /// Setup: extract submatrices and configure each local solver (e.g. GMRES+ILU).
@@ -56,21 +63,25 @@ where
                 .collect();
         }
         // Build per-block submatrix and setup solvers
-        self.local_blocks = self.subdomains.iter().map(|indices| {
-            let a_sub: M = a.submatrix(indices);
-            let mut ksp = solver_factory();
-            let _ = ksp.solve(
-                &a_sub,
-                None,
-                &V::from(vec![T::zero(); indices.len()]),
-                &mut V::from(vec![T::zero(); indices.len()]),
-                PcSide::Left,
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                None,
-                None,
-            );
-            (a_sub, Mutex::new(Box::new(ksp) as _))
-        }).collect();
+        self.local_blocks = self
+            .subdomains
+            .iter()
+            .map(|indices| {
+                let a_sub: M = a.submatrix(indices);
+                let mut ksp = solver_factory();
+                let _ = ksp.solve(
+                    &a_sub,
+                    None,
+                    &V::from(vec![T::zero(); indices.len()]),
+                    &mut V::from(vec![T::zero(); indices.len()]),
+                    PcSide::Left,
+                    &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                    None,
+                    None,
+                );
+                (a_sub, Mutex::new(Box::new(ksp) as _))
+            })
+            .collect();
     }
 }
 
@@ -89,12 +100,15 @@ where
     /// Apply `z = P^{-1} r` via overlapping block solves.
     /// Each block's result is summed into the global vector.
     fn apply(&self, _side: crate::preconditioner::PcSide, r: &V, z: &mut V) -> Result<(), KError> {
-        for zi in z.as_mut().iter_mut() { *zi = T::zero(); }
+        for zi in z.as_mut().iter_mut() {
+            *zi = T::zero();
+        }
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
             // Each block's result is a (indices, x_blk) pair
-            let block_results: Vec<(Vec<usize>, Vec<T>)> = self.subdomains
+            let block_results: Vec<(Vec<usize>, Vec<T>)> = self
+                .subdomains
                 .par_iter()
                 .zip(self.local_blocks.par_iter())
                 .map(|(indices, (a_sub, ksp_mutex))| {
@@ -163,7 +177,8 @@ mod tests {
         asm.setup(&a, || LuSolver::<f64>::new());
         let r = vec![1.0, 2.0, 3.0, 4.0];
         let mut z = vec![0.0; 4];
-        asm.apply(crate::preconditioner::PcSide::Left, &r, &mut z).unwrap();
+        asm.apply(crate::preconditioner::PcSide::Left, &r, &mut z)
+            .unwrap();
         // For identity, ASM should return the input
         assert_eq!(z, r);
     }

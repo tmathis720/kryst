@@ -11,7 +11,7 @@
 //!
 //! ```rust,ignore
 //! use kryst::core::mat::shell::ShellMat;
-//! 
+//!
 //! // Create a 3x3 diagonal matrix with entries [2.0, 3.0, 4.0]
 //! let shell = ShellMat::new(
 //!     3,
@@ -19,7 +19,7 @@
 //!         let x_ref = x.as_ref();
 //!         let y_mut = y.as_mut();
 //!         y_mut[0] = 2.0 * x_ref[0];
-//!         y_mut[1] = 3.0 * x_ref[1]; 
+//!         y_mut[1] = 3.0 * x_ref[1];
 //!         y_mut[2] = 4.0 * x_ref[2];
 //!     },
 //!     |x, y| {
@@ -33,7 +33,7 @@
 //! );
 //! ```
 
-use crate::core::traits::{MatVec, MatTransVec, MatShape};
+use crate::core::traits::{MatShape, MatTransVec, MatVec};
 use std::marker::PhantomData;
 /// A "shell" matrix: user-supplied callbacks for A·x and Aᵀ·x
 ///
@@ -62,7 +62,7 @@ impl<V> ShellMat<V> {
     ///
     /// ```rust,ignore
     /// use kryst::core::mat::shell::ShellMat;
-    /// 
+    ///
     /// // Identity matrix
     /// let identity = ShellMat::new(
     ///     3,
@@ -75,7 +75,7 @@ impl<V> ShellMat<V> {
     ///     },
     ///     |x, y| {
     ///         let x_ref = x.as_ref();
-    ///         let y_mut = y.as_mut(); 
+    ///         let y_mut = y.as_mut();
     ///         for i in 0..x_ref.len() {
     ///             y_mut[i] = x_ref[i];
     ///         }
@@ -107,7 +107,7 @@ impl<V> ShellMat<V> {
     ///
     /// ```rust,ignore
     /// use kryst::core::mat::shell::ShellMat;
-    /// 
+    ///
     /// // Symmetric diagonal matrix
     /// let symmetric = ShellMat::new_symmetric(
     ///     3,
@@ -173,7 +173,7 @@ impl<V> MatShape for ShellMat<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::traits::{MatVec, MatTransVec};
+    use crate::core::traits::{MatTransVec, MatVec};
 
     #[test]
     fn test_shell_identity() {
@@ -197,7 +197,7 @@ mod tests {
 
         let x = vec![1.0, 2.0, 3.0];
         let mut y = vec![0.0; 3];
-        
+
         identity.matvec(&x, &mut y);
         assert_eq!(y, vec![1.0, 2.0, 3.0]);
 
@@ -213,7 +213,7 @@ mod tests {
     fn test_shell_diagonal() {
         let diag_entries = vec![2.0, 3.0, 4.0];
         let diag_clone = diag_entries.clone();
-        
+
         let diagonal = ShellMat::new(
             3,
             move |x: &Vec<f64>, y: &mut Vec<f64>| {
@@ -234,7 +234,7 @@ mod tests {
 
         let x = vec![1.0, 1.0, 1.0];
         let mut y = vec![0.0; 3];
-        
+
         diagonal.matvec(&x, &mut y);
         assert_eq!(y, vec![2.0, 3.0, 4.0]);
 
@@ -245,20 +245,17 @@ mod tests {
 
     #[test]
     fn test_shell_symmetric() {
-        let symmetric = ShellMat::new_symmetric(
-            2,
-            |x: &Vec<f64>, y: &mut Vec<f64>| {
-                let x_ref: &[f64] = x.as_ref();
-                let y_mut: &mut [f64] = y.as_mut();
-                // Matrix [[2, 1], [1, 3]]
-                y_mut[0] = 2.0 * x_ref[0] + 1.0 * x_ref[1];
-                y_mut[1] = 1.0 * x_ref[0] + 3.0 * x_ref[1];
-            },
-        );
+        let symmetric = ShellMat::new_symmetric(2, |x: &Vec<f64>, y: &mut Vec<f64>| {
+            let x_ref: &[f64] = x.as_ref();
+            let y_mut: &mut [f64] = y.as_mut();
+            // Matrix [[2, 1], [1, 3]]
+            y_mut[0] = 2.0 * x_ref[0] + 1.0 * x_ref[1];
+            y_mut[1] = 1.0 * x_ref[0] + 3.0 * x_ref[1];
+        });
 
         let x = vec![1.0, 0.0];
         let mut y = vec![0.0; 2];
-        
+
         symmetric.matvec(&x, &mut y);
         assert_eq!(y, vec![2.0, 1.0]);
 
@@ -294,7 +291,7 @@ mod tests {
 
         let x = vec![1.0, 0.0];
         let mut y = vec![0.0; 2];
-        
+
         matrix.matvec(&x, &mut y);
         assert_eq!(y, vec![1.0, 3.0]); // First column of A
 

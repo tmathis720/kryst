@@ -1,16 +1,16 @@
 use crate::error::KError;
 use crate::preconditioner::{
-    jacobi::Jacobi,
-    sor::{Sor, MatSorType},
+    Preconditioner,
     chebyshev::ChebyshevPre,
     direct::{LuPc, QrPc, SuperLuDistPc},
-    Preconditioner,
+    jacobi::Jacobi,
+    sor::{MatSorType, Sor},
 };
 
 use faer::Mat;
 
 #[cfg(feature = "legacy-pc-bridge")]
-use crate::preconditioner::{LegacyOpPreconditioner, ilut::Ilut, ilup::Ilup, ilutp::Ilutp};
+use crate::preconditioner::{LegacyOpPreconditioner, ilup::Ilup, ilut::Ilut, ilutp::Ilutp};
 
 /// Build a Jacobi preconditioner.
 pub fn build_jacobi() -> Result<Box<dyn Preconditioner>, KError> {
@@ -22,7 +22,9 @@ pub fn build_block_jacobi(block: usize) -> Result<Box<dyn Preconditioner>, KErro
     if block <= 1 {
         return build_jacobi();
     }
-    Err(KError::NotImplemented("BlockJacobi not yet implemented".into()))
+    Err(KError::NotImplemented(
+        "BlockJacobi not yet implemented".into(),
+    ))
 }
 
 /// Build an SOR preconditioner.
@@ -137,16 +139,17 @@ pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
 
 // ---- ASM / AMG stubs -----------------------------------------------------
 
-pub fn build_asm(
-    _overlap: usize,
-    _hint: Option<usize>,
-) -> Result<Box<dyn Preconditioner>, KError> {
-    Err(KError::NotImplemented("ASM preconditioner not yet implemented".into()))
+pub fn build_asm(_overlap: usize, _hint: Option<usize>) -> Result<Box<dyn Preconditioner>, KError> {
+    Err(KError::NotImplemented(
+        "ASM preconditioner not yet implemented".into(),
+    ))
 }
 
 pub fn build_amg(
     _levels: Option<usize>,
     _smoother: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    Err(KError::NotImplemented("AMG preconditioner not yet implemented".into()))
+    Err(KError::NotImplemented(
+        "AMG preconditioner not yet implemented".into(),
+    ))
 }

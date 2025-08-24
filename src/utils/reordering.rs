@@ -13,8 +13,8 @@
 //! - Cuthill, E. and McKee, J. (1969). Reducing the bandwidth of sparse symmetric matrices
 //! - Duff, I.S. and Koster, J. (2001). On algorithms for permuting large entries to the diagonal
 
-use faer::Mat;
 use crate::error::KError;
+use faer::Mat;
 use std::collections::VecDeque;
 
 /// Matrix reordering algorithms.
@@ -28,7 +28,7 @@ pub enum ReorderingMethod {
     CuthillMckee,
     /// Column Approximate Minimum Degree (COLAMD) - placeholder
     Colamd,
-    /// Approximate Minimum Degree (AMD) - placeholder 
+    /// Approximate Minimum Degree (AMD) - placeholder
     Amd,
 }
 
@@ -165,7 +165,9 @@ pub fn preprocess_matrix(
 ) -> Result<(Mat<f64>, MatrixPreprocessing), KError> {
     let n = a.nrows();
     if n != a.ncols() {
-        return Err(KError::SolveError("Matrix must be square for preprocessing".to_string()));
+        return Err(KError::SolveError(
+            "Matrix must be square for preprocessing".to_string(),
+        ));
     }
 
     // Step 1: Compute reordering permutation
@@ -174,7 +176,10 @@ pub fn preprocess_matrix(
         ReorderingMethod::Rcm => reverse_cuthill_mckee(a)?,
         ReorderingMethod::CuthillMckee => cuthill_mckee(a)?,
         ReorderingMethod::Colamd | ReorderingMethod::Amd => {
-            return Err(KError::NotImplemented(format!("{:?} reordering not yet implemented", reorder_method)));
+            return Err(KError::NotImplemented(format!(
+                "{:?} reordering not yet implemented",
+                reorder_method
+            )));
         }
     };
 
@@ -211,7 +216,9 @@ pub fn preprocess_matrix(
             (Some(scaling.clone()), Some(scaling))
         }
         ScalingMethod::Symmetric => {
-            return Err(KError::NotImplemented("Symmetric scaling not yet implemented".to_string()));
+            return Err(KError::NotImplemented(
+                "Symmetric scaling not yet implemented".to_string(),
+            ));
         }
     };
 
@@ -230,7 +237,8 @@ pub fn preprocess_matrix(
         inv_permutation,
         left_scaling,
         right_scaling,
-        is_identity: reorder_method == ReorderingMethod::None && scaling_method == ScalingMethod::None,
+        is_identity: reorder_method == ReorderingMethod::None
+            && scaling_method == ScalingMethod::None,
     };
 
     Ok((result, preprocessing))
@@ -277,7 +285,7 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
             }
         }
     }
-    
+
     // Sort neighbors by degree (ascending) - need to do this after building all adjacencies
     for i in 0..n {
         let adj_copy = adj.clone(); // Create a copy for degree lookup
@@ -317,7 +325,7 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
                 .copied()
                 .filter(|&neighbor| !visited[neighbor])
                 .collect();
-            
+
             // Sort by current degree (need to access adj again)
             let adj_ref = &adj;
             neighbors.sort_by_key(|&neighbor| adj_ref[neighbor].len());
@@ -342,31 +350,38 @@ mod tests {
     fn create_test_matrix() -> Mat<f64> {
         // 4x4 symmetric matrix with specific sparsity pattern
         // [2  1  0  1]
-        // [1  3  1  0]  
+        // [1  3  1  0]
         // [0  1  4  1]
         // [1  0  1  5]
-        Mat::from_fn(4, 4, |i, j| {
-            match (i, j) {
-                (0, 0) => 2.0, (0, 1) => 1.0, (0, 3) => 1.0,
-                (1, 0) => 1.0, (1, 1) => 3.0, (1, 2) => 1.0,
-                (2, 1) => 1.0, (2, 2) => 4.0, (2, 3) => 1.0,
-                (3, 0) => 1.0, (3, 2) => 1.0, (3, 3) => 5.0,
-                _ => 0.0,
-            }
+        Mat::from_fn(4, 4, |i, j| match (i, j) {
+            (0, 0) => 2.0,
+            (0, 1) => 1.0,
+            (0, 3) => 1.0,
+            (1, 0) => 1.0,
+            (1, 1) => 3.0,
+            (1, 2) => 1.0,
+            (2, 1) => 1.0,
+            (2, 2) => 4.0,
+            (2, 3) => 1.0,
+            (3, 0) => 1.0,
+            (3, 2) => 1.0,
+            (3, 3) => 5.0,
+            _ => 0.0,
         })
     }
 
     #[test]
     fn test_identity_preprocessing() {
         let a = create_test_matrix();
-        let (result, info) = preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::None).unwrap();
-        
+        let (result, info) =
+            preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::None).unwrap();
+
         assert!(info.is_identity);
         assert_eq!(info.permutation, vec![0, 1, 2, 3]);
         assert_eq!(info.inv_permutation, vec![0, 1, 2, 3]);
         assert!(info.left_scaling.is_none());
         assert!(info.right_scaling.is_none());
-        
+
         // Result should be identical to input
         for i in 0..4 {
             for j in 0..4 {
@@ -378,12 +393,13 @@ mod tests {
     #[test]
     fn test_cuthill_mckee_reordering() {
         let a = create_test_matrix();
-        let (_result, info) = preprocess_matrix(&a, ReorderingMethod::CuthillMckee, ScalingMethod::None).unwrap();
-        
+        let (_result, info) =
+            preprocess_matrix(&a, ReorderingMethod::CuthillMckee, ScalingMethod::None).unwrap();
+
         assert!(!info.is_identity);
         assert_eq!(info.permutation.len(), 4);
         assert_eq!(info.inv_permutation.len(), 4);
-        
+
         // Verify permutation is valid
         let mut check = vec![false; 4];
         for &p in &info.permutation {
@@ -392,7 +408,7 @@ mod tests {
             check[p] = true;
         }
         assert!(check.iter().all(|&x| x)); // All indices covered
-        
+
         // Verify inverse permutation
         for (new_idx, &old_idx) in info.permutation.iter().enumerate() {
             assert_eq!(info.inv_permutation[old_idx], new_idx);
@@ -402,18 +418,24 @@ mod tests {
     #[test]
     fn test_diagonal_scaling() {
         let a = create_test_matrix();
-        let (_result, info) = preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::Diagonal).unwrap();
-        
+        let (_result, info) =
+            preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::Diagonal).unwrap();
+
         assert!(!info.is_identity);
         assert!(info.left_scaling.is_some());
         assert!(info.right_scaling.is_some());
-        
+
         let scaling = info.left_scaling.as_ref().unwrap();
-        
+
         // Check that diagonal entries become 1 after scaling
         for i in 0..4 {
             let scaled_diag = scaling[i] * a[(i, i)] * scaling[i];
-            assert!((scaled_diag - 1.0).abs() < 1e-12, "Diagonal entry {} not scaled to 1: {}", i, scaled_diag);
+            assert!(
+                (scaled_diag - 1.0).abs() < 1e-12,
+                "Diagonal entry {} not scaled to 1: {}",
+                i,
+                scaled_diag
+            );
         }
     }
 
@@ -421,15 +443,19 @@ mod tests {
     fn test_vector_transformation() {
         let a = create_test_matrix();
         let x = vec![1.0, 2.0, 3.0, 4.0];
-        
-        let (_, info) = preprocess_matrix(&a, ReorderingMethod::CuthillMckee, ScalingMethod::Diagonal).unwrap();
-        
+
+        let (_, info) =
+            preprocess_matrix(&a, ReorderingMethod::CuthillMckee, ScalingMethod::Diagonal).unwrap();
+
         // Transform and untransform should be inverse operations
         let transformed = info.transform_vector(&x);
         let recovered = info.untransform_vector(&transformed);
-        
+
         for i in 0..4 {
-            assert!((recovered[i] - x[i]).abs() < 1e-12, "Vector transformation not invertible");
+            assert!(
+                (recovered[i] - x[i]).abs() < 1e-12,
+                "Vector transformation not invertible"
+            );
         }
     }
 }
