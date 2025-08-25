@@ -280,3 +280,62 @@ impl LinOp for CsrMatrix<f64> {
         ValuesId(0)
     }
 }
+/// Wrap any LinOp with a communicator without changing its behavior.
+pub struct WithCommOp<T: LinOp + ?Sized> {
+    inner: Arc<T>,
+    comm: UniverseComm,
+}
+
+impl<T: LinOp + ?Sized> WithCommOp<T> {
+    pub fn new(inner: Arc<T>, comm: UniverseComm) -> Self {
+        Self { inner, comm }
+    }
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: LinOp + ?Sized> LinOp for WithCommOp<T> {
+    type S = T::S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        self.inner.dims()
+    }
+    #[inline]
+    fn matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
+        self.inner.matvec(x, y)
+    }
+    #[inline]
+    fn supports_transpose(&self) -> bool {
+        self.inner.supports_transpose()
+    }
+    #[inline]
+    fn t_matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
+        self.inner.t_matvec(x, y)
+    }
+    #[inline]
+    fn as_any(&self) -> &dyn Any {
+        self.inner.as_any()
+    }
+    #[inline]
+    fn structure_id(&self) -> StructureId {
+        self.inner.structure_id()
+    }
+    #[inline]
+    fn values_id(&self) -> ValuesId {
+        self.inner.values_id()
+    }
+    #[inline]
+    fn comm(&self) -> UniverseComm {
+        self.comm.clone()
+    }
+}
+
+/// Ergonomic helper for call sites
+pub fn wrap_with_comm<T>(op: Arc<T>, comm: UniverseComm) -> Arc<dyn LinOp<S = T::S>>
+where
+    T: LinOp + ?Sized + 'static,
+{
+    Arc::new(WithCommOp::new(op, comm)) as Arc<dyn LinOp<S = T::S>>
+}
