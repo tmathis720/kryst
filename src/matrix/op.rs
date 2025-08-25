@@ -88,6 +88,9 @@ pub struct DenseOp {
     comm: UniverseComm,
 }
 impl DenseOp {
+    /// Wrap a dense matrix so changes can be tracked via [`mark_structure_changed`] and
+    /// [`mark_values_changed`]. This enables correct caching and preconditioner reuse across
+    /// nonlinear or time-stepping updates.
     pub fn new(mat: Arc<Mat<f64>>) -> Self {
         let ids = ChangeIds::default();
         ids.bump_structure();

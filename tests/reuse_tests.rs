@@ -1,9 +1,58 @@
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
-use kryst::matrix::CsrOp;
+use kryst::matrix::op::{DenseOp, LinOp};
+use kryst::matrix::format::AsFormat;
+use kryst::matrix::{CsrOp, convert::csr_from_linop};
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::PcReusePolicy;
-use std::sync::Arc;
+use kryst::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use faer::Mat;
+use kryst::error::KError;
+
+struct CountPc {
+    numeric: Arc<AtomicUsize>,
+    symbolic: Arc<AtomicUsize>,
+}
+impl CountPc {
+    fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let n = Arc::new(AtomicUsize::new(0));
+        let s = Arc::new(AtomicUsize::new(0));
+        (Self { numeric: n.clone(), symbolic: s.clone() }, n, s)
+    }
+}
+impl Preconditioner for CountPc {
+    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
+    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> { y.copy_from_slice(x); Ok(()) }
+    fn supports_numeric_update(&self) -> bool { true }
+    fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { self.numeric.fetch_add(1, Ordering::SeqCst); Ok(()) }
+    fn update_symbolic(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { self.symbolic.fetch_add(1, Ordering::SeqCst); Ok(()) }
+}
+
+#[derive(Default)]
+struct PatternCheckPc {
+    row_ptr: Vec<usize>,
+    col_idx: Vec<usize>,
+}
+impl Preconditioner for PatternCheckPc {
+    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let csr = csr_from_linop(a, 0.0)?;
+        self.row_ptr = csr.row_ptr().to_vec();
+        self.col_idx = csr.col_idx().to_vec();
+        Ok(())
+    }
+    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> { y.copy_from_slice(x); Ok(()) }
+    fn supports_numeric_update(&self) -> bool { true }
+    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let csr = csr_from_linop(a, 0.0)?;
+        if self.row_ptr != csr.row_ptr() || self.col_idx != csr.col_idx() {
+            return Err(KError::Unsupported("pattern changed; need update_symbolic"));
+        }
+        Ok(())
+    }
+    fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        self.setup(a)
+    }
+}
 
 #[test]
 fn pc_rebuilds_on_structure_change() {
@@ -63,4 +112,76 @@ fn jacobi_numeric_update_without_rebuild() {
     ksp.setup().unwrap();
     assert_eq!(sid0, ksp.last_pc_sid());
     assert_ne!(vid0, ksp.last_pc_vid());
+}
+
+#[test]
+fn denseop_cache_invalidation() {
+    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let op = DenseOp::new(mat);
+    let csr1 = op.to_csr_cached(0.0);
+    let p1 = Arc::as_ptr(&csr1);
+    op.mark_values_changed();
+    let csr2 = op.to_csr_cached(0.0);
+    let p2 = Arc::as_ptr(&csr2);
+    assert_ne!(p1, p2);
+}
+
+#[test]
+fn unknown_vid_triggers_numeric_refresh() {
+    let (pc, numeric, _) = CountPc::new();
+    let a = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).unwrap();
+    ksp.set_pc_box_for_tests(Box::new(pc));
+    ksp.set_operators(a.clone(), None);
+    ksp.setup().unwrap();
+    ksp.setup().unwrap();
+    assert_eq!(numeric.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn pattern_mismatch_in_numeric_update() {
+    let mut pc = PatternCheckPc::default();
+    let a1 = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+    pc.setup(&a1).unwrap();
+    let a2 = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else if i == 0 && j == 1 { 0.5 } else { 0.0 });
+    let err = pc.update_numeric(&a2).unwrap_err();
+    match err {
+        KError::Unsupported(msg) => assert!(msg.contains("pattern changed")),
+        other => panic!("unexpected error: {:?}", other),
+    }
+}
+
+#[test]
+fn values_id_known_triggers_single_numeric_update() {
+    let (pc, numeric, _) = CountPc::new();
+    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let op = Arc::new(DenseOp::new(mat.clone()));
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).unwrap();
+    ksp.set_pc_box_for_tests(Box::new(pc));
+    ksp.set_operators(op.clone(), None);
+    ksp.setup().unwrap();
+    // trigger numeric refresh
+    op.mark_values_changed();
+    ksp.setup().unwrap();
+    ksp.setup().unwrap();
+    assert_eq!(numeric.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn policy_never_forces_symbolic_update() {
+    let (pc, numeric, symbolic) = CountPc::new();
+    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let op = Arc::new(DenseOp::new(mat.clone()));
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).unwrap();
+    ksp.set_pc_box_for_tests(Box::new(pc));
+    ksp.set_pc_reuse_policy(PcReusePolicy::Never);
+    ksp.set_operators(op.clone(), None);
+    ksp.setup().unwrap();
+    op.mark_values_changed();
+    ksp.setup().unwrap();
+    assert_eq!(numeric.load(Ordering::SeqCst), 0);
+    assert_eq!(symbolic.load(Ordering::SeqCst), 1);
 }

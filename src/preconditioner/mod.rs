@@ -234,6 +234,14 @@ impl Preconditioner for LegacyOpPreconditioner {
     fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
+
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+
+    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        self.setup(a)
+    }
 }
 
 #[cfg(not(feature = "legacy-pc-bridge"))]

@@ -9,6 +9,12 @@
 //!    - Else if values id changed and numeric reuse allowed → [`update_numeric`]
 //!    - Else unchanged.
 //!
+//! For efficient reuse across nonlinear iterations or time steps, wrap matrices in
+//! [`DenseOp`](crate::matrix::op::DenseOp) or [`CsrOp`](crate::matrix::op::CsrOp) and call
+//! [`mark_values_changed`](crate::matrix::op::DenseOp::mark_values_changed) or
+//! [`mark_structure_changed`](crate::matrix::op::DenseOp::mark_structure_changed) after
+//! in-place modifications. This ensures cache keys and reuse decisions reflect updates.
+//!
 //! ## Side policy
 //! [`pc_side`](struct.KspContext.html#structfield.pc_side) is passed to solvers; PCs **do not** decide left vs right placement.
 //!
@@ -431,15 +437,42 @@ impl KspContext {
                     self.last_pc_vid = Some(vid);
                 }
                 Some(_old_sid) => {
-                    if self.last_pc_vid != Some(vid)
-                        && self.pc_reuse.allow_numeric()
-                        && pc.supports_numeric_update()
-                    {
-                        pc.update_numeric(pmat.as_ref())?;
-                        self.last_pc_vid = Some(vid);
-                    } else if self.last_pc_vid != Some(vid) {
-                        pc.update_symbolic(pmat.as_ref())?;
-                        self.last_pc_vid = Some(vid);
+                    let vid_known = vid.0 != 0;
+                    let values_changed = self.last_pc_vid != Some(vid);
+                    match self.pc_reuse {
+                        PcReusePolicy::Never => {
+                            if !vid_known || values_changed {
+                                pc.update_symbolic(pmat.as_ref())?;
+                                self.last_pc_vid = Some(vid);
+                            }
+                        }
+                        PcReusePolicy::ReuseNumeric => {
+                            if pc.supports_numeric_update() {
+                                if !vid_known {
+                                    log::debug!("ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse.");
+                                }
+                                pc.update_numeric(pmat.as_ref())?;
+                                self.last_pc_vid = Some(vid);
+                            } else if !vid_known || values_changed {
+                                pc.update_symbolic(pmat.as_ref())?;
+                                self.last_pc_vid = Some(vid);
+                            }
+                        }
+                        PcReusePolicy::Auto => {
+                            if (!vid_known || values_changed)
+                                && pc.supports_numeric_update()
+                                && self.pc_reuse.allow_numeric()
+                            {
+                                if !vid_known {
+                                    log::debug!("ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse.");
+                                }
+                                pc.update_numeric(pmat.as_ref())?;
+                                self.last_pc_vid = Some(vid);
+                            } else if values_changed {
+                                pc.update_symbolic(pmat.as_ref())?;
+                                self.last_pc_vid = Some(vid);
+                            }
+                        }
                     }
                 }
             }
@@ -646,7 +679,6 @@ impl KspContext {
     }
 }
 
-#[cfg(test)]
 impl KspContext {
     /// Test-only: view current workspace (e.g., to inspect GMRES V/Z basis sizes).
     pub fn debug_workspace(&self) -> Option<&Workspace> {
