@@ -4,7 +4,7 @@ use faer::Mat;
 
 use crate::{
     error::KError,
-    matrix::{format::AsFormat, op::LinOp, sparse::CsrMatrix},
+    matrix::{csc::CscMatrix, format::AsFormat, op::LinOp, sparse::CsrMatrix},
 };
 
 /// Try to borrow a CSR matrix if the operator is already CSR.
@@ -35,6 +35,39 @@ pub fn csr_from_linop(
     drop_tol: f64,
 ) -> Result<Arc<CsrMatrix<f64>>, KError> {
     to_csr_cached(op, drop_tol)
+}
+
+/// Try to borrow a CSC matrix if the operator is already CSC.
+pub fn try_as_csc<'a>(pmat: &'a dyn LinOp<S = f64>) -> Option<&'a CscMatrix<f64>> {
+    pmat.as_any().downcast_ref::<CscMatrix<f64>>()
+}
+
+/// Convert a matrix to CSC, caching dense/CSR conversions.
+pub fn to_csc_cached(
+    pmat: &dyn LinOp<S = f64>,
+    drop_tol: f64,
+) -> Result<Arc<CscMatrix<f64>>, KError> {
+    if let Some(csc) = try_as_csc(pmat) {
+        return Ok(Arc::new(csc.clone()));
+    }
+    if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
+        return Ok(mat.to_csc_cached(drop_tol));
+    }
+    if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
+        return Ok(csr.to_csc_cached(drop_tol));
+    }
+    Err(KError::InvalidInput(
+        "to_csc_cached: unsupported LinOp type".into(),
+    ))
+}
+
+/// Obtain a CSC matrix from a [`LinOp`], converting and caching if necessary.
+#[inline]
+pub fn csc_from_linop(
+    op: &dyn LinOp<S = f64>,
+    drop_tol: f64,
+) -> Result<Arc<CscMatrix<f64>>, KError> {
+    to_csc_cached(op, drop_tol)
 }
 
 /// Obtain a dense matrix from a [`LinOp`], converting formats as needed.
