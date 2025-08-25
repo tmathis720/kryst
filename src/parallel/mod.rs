@@ -121,6 +121,8 @@ pub mod mpi_comm;
 #[cfg(feature = "mpi")]
 pub use mpi_comm::MpiComm;
 
+pub mod threads;
+
 #[cfg(feature = "rayon")]
 pub mod rayon_comm;
 #[cfg(feature = "rayon")]

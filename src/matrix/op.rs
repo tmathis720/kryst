@@ -1,4 +1,4 @@
-use crate::parallel::{NoComm, UniverseComm};
+use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
@@ -85,13 +85,19 @@ use faer::Mat;
 pub struct DenseOp {
     mat: Arc<Mat<f64>>,
     ids: ChangeIds,
+    comm: UniverseComm,
 }
 impl DenseOp {
     pub fn new(mat: Arc<Mat<f64>>) -> Self {
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
-        Self { mat, ids }
+        Self { mat, ids, comm: UniverseComm::NoComm(NoComm) }
+    }
+    /// Attach a communicator to this operator.
+    pub fn with_comm(mut self, comm: UniverseComm) -> Self {
+        self.comm = comm;
+        self
     }
     pub fn mark_structure_changed(&self) {
         self.ids.bump_structure();
@@ -134,18 +140,22 @@ impl LinOp for DenseOp {
     fn values_id(&self) -> ValuesId {
         self.ids.values_id()
     }
+    fn comm(&self) -> UniverseComm {
+        self.comm.clone()
+    }
 }
 
 pub struct CsrOp {
     csr: Arc<CsrMatrix<f64>>,
     ids: ChangeIds,
+    comm: UniverseComm,
 }
 impl CsrOp {
     pub fn new(csr: Arc<CsrMatrix<f64>>) -> Self {
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
-        Self { csr, ids }
+        Self { csr, ids, comm: UniverseComm::NoComm(NoComm) }
     }
     pub fn mark_structure_changed(&self) {
         self.ids.bump_structure();
@@ -156,6 +166,11 @@ impl CsrOp {
     pub fn inner(&self) -> &CsrMatrix<f64> {
         &self.csr
     }
+    /// Attach a communicator to this operator.
+    pub fn with_comm(mut self, comm: UniverseComm) -> Self {
+        self.comm = comm;
+        self
+    }
 }
 impl LinOp for CsrOp {
     type S = f64;
@@ -163,6 +178,18 @@ impl LinOp for CsrOp {
         (self.csr.nrows(), self.csr.ncols())
     }
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        #[cfg(feature = "rayon")]
+        {
+            let local_only = self.comm.size() == 1;
+            let threads = crate::parallel::threads::current_rayon_threads();
+            let big_enough = self.csr.nrows()
+                >= crate::parallel::threads::env_usize("KRYST_PAR_CUTOFF", 4096);
+
+            if local_only && threads > 1 && big_enough {
+                return self.csr.spmv_parallel(x, y);
+            }
+        }
+
         self.csr.spmv(x, y);
     }
     fn supports_transpose(&self) -> bool {
@@ -190,6 +217,9 @@ impl LinOp for CsrOp {
     }
     fn values_id(&self) -> ValuesId {
         self.ids.values_id()
+    }
+    fn comm(&self) -> UniverseComm {
+        self.comm.clone()
     }
 }
 
