@@ -14,14 +14,14 @@
 
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// MPI communicator wrapper for distributed parallelism.
 ///
-/// Holds the MPI universe, world communicator, the rank of the current process, and the total number of processes.
+/// Holds the MPI world communicator, the rank of the current process, and the total
+/// number of processes. MPI itself is initialized exactly once for the entire
+/// program via a global [`OnceLock`].
 pub struct MpiComm {
-    /// The MPI universe - must be kept alive for the entire duration
-    pub _universe: mpi::environment::Universe,
     /// The MPI world communicator (all processes in the job).
     pub world: SimpleCommunicator,
     /// The rank (ID) of this process within the communicator.
@@ -33,43 +33,25 @@ pub struct MpiComm {
 unsafe impl Send for MpiComm {}
 unsafe impl Sync for MpiComm {}
 
+// --- One-time MPI universe holder ---
+static MPI_UNIVERSE: OnceLock<mpi::environment::Universe> = OnceLock::new();
+
+fn universe() -> &'static mpi::environment::Universe {
+    MPI_UNIVERSE.get_or_init(|| mpi::initialize().expect("MPI initialization failed"))
+}
+
 impl MpiComm {
-    /// Initializes MPI and constructs a new `MpiComm` instance.
-    ///
-    /// # Panics
-    /// Panics if MPI initialization fails.
+    /// Initializes MPI once and constructs a new [`MpiComm`].
     pub fn new() -> Self {
-        let universe = mpi::initialize().unwrap();
-        let world = universe.world();
+        let world = universe().world().duplicate();
         let rank = world.rank() as usize;
         let size = world.size() as usize;
-        MpiComm {
-            _universe: universe,
-            world,
-            rank,
-            size,
-        }
+        MpiComm { world, rank, size }
     }
 
-    /// Attempts to initialize MPI and construct a new `MpiComm` instance.
-    ///
-    /// Returns `None` if MPI initialization fails (e.g., MPI not available or test environment).
-    /// This provides a graceful fallback for environments where MPI may not be properly configured.
+    /// Best-effort constructor that returns `None` if initialization fails.
     pub fn try_new() -> Option<Self> {
-        // Use std::panic::catch_unwind to handle potential panics during MPI initialization
-        std::panic::catch_unwind(|| {
-            let universe = mpi::initialize().unwrap();
-            let world = universe.world();
-            let rank = world.rank() as usize;
-            let size = world.size() as usize;
-            MpiComm {
-                _universe: universe,
-                world,
-                rank,
-                size,
-            }
-        })
-        .ok()
+        std::panic::catch_unwind(|| Self::new()).ok()
     }
 }
 
@@ -101,10 +83,12 @@ impl super::Comm for MpiComm {
         out: &mut [T],
         root: usize,
     ) {
-        // Only the root process provides the global array; others provide an empty slice.
-        self.world
-            .process_at_rank(root as i32)
-            .scatter_into_root(global, out);
+        let proc = self.world.process_at_rank(root as i32);
+        if self.rank == root {
+            proc.scatter_into_root(global, out);
+        } else {
+            proc.scatter_into(out);
+        }
     }
 
     /// Gathers arrays from all processes to the root process (gather operation).
@@ -118,17 +102,14 @@ impl super::Comm for MpiComm {
         out: &mut Vec<T>,
         root: usize,
     ) {
-        // Only the root process allocates the receive buffer; others use an empty Vec.
-        let mut recvbuf = if self.rank == root {
-            vec![local[0].clone(); local.len() * self.size]
-        } else {
-            Vec::new()
-        };
-        self.world
-            .process_at_rank(root as i32)
-            .gather_into_root(local, &mut recvbuf);
+        let proc = self.world.process_at_rank(root as i32);
         if self.rank == root {
-            *out = recvbuf;
+            let mut recv = vec![local[0].clone(); local.len() * self.size];
+            proc.gather_into_root(local, &mut recv);
+            *out = recv;
+        } else {
+            proc.gather_into(local);
+            out.clear();
         }
     }
 
@@ -151,13 +132,18 @@ impl super::Comm for MpiComm {
     }
 
     /// Split this communicator into sub‐colors
-    fn split(&self, _color: i32, _key: i32) -> super::UniverseComm {
-        // Placeholder: returns a duplicate of the current communicator
+    fn split(&self, color: i32, key: i32) -> super::UniverseComm {
+        use mpi::topology::Color;
+        let sub = self
+            .world
+            .split_by_color_with_key(Color::with_value(color), key)
+            .expect("MPI split failed");
+        let rank = sub.rank() as usize;
+        let size = sub.size() as usize;
         super::UniverseComm::Mpi(Arc::new(MpiComm {
-            _universe: mpi::initialize().unwrap(), // This is a workaround
-            world: self.world.duplicate(),
-            rank: self.rank,
-            size: self.size,
+            world: sub,
+            rank,
+            size,
         }))
     }
 

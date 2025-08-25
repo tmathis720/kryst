@@ -1,9 +1,7 @@
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
-use mpi::topology::{Color, Communicator};
-#[cfg(feature = "mpi")]
-use mpi::traits::*;
+use mpi::raw::AsRaw;
 #[cfg(any(feature = "mpi", feature = "rayon"))]
 use std::sync::Arc;
 
@@ -294,24 +292,9 @@ impl Comm for UniverseComm {
         match self {
             UniverseComm::NoComm(comm) => comm.split(color, key),
             #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(comm) => {
-                // Split the MPI communicator and return a new UniverseComm
-                let sub = comm
-                    .world
-                    .split_by_color_with_key(Color::with_value(color), key)
-                    .expect("Failed to split communicator");
-                let sub_rank = sub.rank() as usize;
-                let sub_size = sub.size() as usize;
-                let new_comm = MpiComm {
-                    _universe: mpi::initialize().unwrap(), // Workaround for universe sharing
-                    world: sub,
-                    rank: sub_rank,
-                    size: sub_size,
-                };
-                UniverseComm::Mpi(Arc::new(new_comm))
-            }
+            UniverseComm::Mpi(comm) => comm.split(color, key),
             #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_comm) => UniverseComm::Rayon(RayonComm::new()),
+            UniverseComm::Rayon(comm) => comm.split(color, key),
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => UniverseComm::Serial,
         }
