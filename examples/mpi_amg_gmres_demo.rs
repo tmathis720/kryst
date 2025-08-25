@@ -9,7 +9,7 @@
 //! 5. Perform convergence analysis and write results
 //!
 //! Usage:
-//!   mpirun -n 4 ./target/debug/examples/mpi_amg_gmres_demo [options]
+//!   cargo mpirun -n 4 --example mpi_amg_gmres_demo [options]
 //!   
 //! PETSc-style Options:
 //!   -ksp_type <solver>         Solver type (cg, pcg, gmres, bicgstab, cgs, qmr, tfqmr, minres, cgnr, preonly)
@@ -27,6 +27,7 @@
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
 use kryst::matrix::sparse::SparseMatrix;
+use kryst::matrix::op::CsrOp;
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::utils::matrix_market::{read_matrix_market, write_vector_market};
 use std::env;
@@ -138,8 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rhs = rhs_data.to_vector()?;
     let mut solution = vec![0.0; rhs.len()];
 
-    // Convert CSR matrix to dense faer::Mat for KspContext
-    let dense_matrix = matrix.to_dense();
+    // Wrap CSR matrix in an Arc and create a CsrOp (avoid densification)
+    let csr_arc = Arc::new(matrix);
+    let csr_op = CsrOp::new(csr_arc.clone());
 
     let io_time = start_io.elapsed();
     if rank == 0 {
@@ -193,8 +195,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Setup KSP with communicator
-    ksp.setup_with_comm(&dense_matrix, rhs.len(), comm)?;
+    // Attach operator and set up KSP (communicator is not kept inside KSP)
+    let op_arc: Arc<dyn kryst::matrix::op::LinOp<S = f64>> = Arc::new(csr_op);
+    ksp.set_operators(op_arc, None);
+    ksp.setup()?;
 
     let setup_time = start_setup.elapsed();
     if rank == 0 {
@@ -202,10 +206,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    // Barrier before solving (using the KSP context's communicator)
-    if let Some(ref comm_ref) = ksp.comm {
-        comm_ref.barrier();
-    }
+    // Barrier before solving (use our UniverseComm)
+    comm.barrier();
 
     // Solve the system using the unified KSP context
     let start_solve = Instant::now();
@@ -218,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Convergence history:");
     }
 
-    let stats = ksp.solve(&dense_matrix, &rhs, &mut solution)?;
+    let stats = ksp.solve(&rhs, &mut solution)?;
 
     let solve_time = start_solve.elapsed();
 
@@ -327,7 +329,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify the solution by computing residual A*x - b
     let mut ax = vec![0.0; rhs.len()];
-    matrix.spmv(&solution, &mut ax);
+    csr_arc.spmv(&solution, &mut ax);
 
     let mut residual = rhs.clone();
     for (r, &ax_val) in residual.iter_mut().zip(ax.iter()) {
@@ -339,14 +341,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_rhs_sq = rhs.iter().map(|x| x * x).sum::<f64>();
 
     // All-reduce to get global norms
-    let (global_residual_sq, global_rhs_sq) = if let Some(ref comm_ref) = ksp.comm {
-        (
-            comm_ref.all_reduce_f64(local_residual_sq),
-            comm_ref.all_reduce_f64(local_rhs_sq),
-        )
-    } else {
-        (local_residual_sq, local_rhs_sq)
-    };
+    let global_residual_sq = comm.all_reduce_f64(local_residual_sq);
+    let global_rhs_sq     = comm.all_reduce_f64(local_rhs_sq);
 
     let residual_norm = global_residual_sq.sqrt();
     let rhs_norm = global_rhs_sq.sqrt();
@@ -372,9 +368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Final barrier to ensure all processes complete together
-    if let Some(ref comm_ref) = ksp.comm {
-        comm_ref.barrier();
-    }
+    comm.barrier();
 
     Ok(())
 }

@@ -15,6 +15,7 @@
 
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
+use kryst::context::pc_context::PcFactory;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::utils::matrix_market::read_matrix_market;
 use std::str::FromStr;
@@ -66,6 +67,22 @@ fn test_solver_config(
     // Convert sparse matrix to dense for KspContext
     let dense_matrix = matrix.to_dense();
     let rhs_vec = rhs.to_vec();
+
+    // Special-case: preonly (direct solve via preconditioner)
+    if solver_name.to_lowercase() == "preonly" {
+        let pct = PcType::from_str(pc_name)?;
+        let mut pc = PcFactory::create_preconditioner(pct, None)?;
+        // setup expects a LinOp; Mat<f64> implements LinOp
+        let start = Instant::now();
+        pc.setup(&dense_matrix)?;
+        let solved = match pc.direct_solve(&dense_matrix, &rhs_vec, &mut solution) {
+            Ok(()) => true,
+            Err(e) => return Err(Box::new(e)),
+        };
+        let solve_time = start.elapsed().as_secs_f64();
+        let final_res = if solved { 0.0 } else { f64::NAN };
+        return Ok((if solved { 1 } else { 0 }, final_res, solve_time, solved));
+    }
 
     // Create and configure KSP context
     let mut ksp = KspContext::new();
