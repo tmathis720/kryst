@@ -2,7 +2,6 @@ use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
-use faer::Mat;
 use std::str::FromStr;
 
 /// Supported preconditioner types.
@@ -310,8 +309,9 @@ impl PcFactory {
 
     pub fn construct_deferred_preconditioner(
         info: DeferredPcInfo,
-        _matrix: &Mat<f64>,
+        _op: &dyn LinOp<S = f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
+        // The concrete operator format is deferred to the preconditioner itself.
         match info.pc_type {
             PcType::Amg => Err(KError::NotImplemented("AMG not yet implemented".into())),
             PcType::Asm => Err(KError::NotImplemented("ASM not yet implemented".into())),
@@ -344,13 +344,13 @@ impl PcFactory {
 
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
-        matrix: &Mat<f64>,
+        op: &dyn LinOp<S = f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         use crate::preconditioner::chain::PcChain;
 
         let mut stages: Vec<Box<dyn Preconditioner>> = Vec::with_capacity(specs.len());
         for spec in specs {
-            let stage = Self::construct_deferred_preconditioner(spec, matrix)?;
+            let stage = Self::construct_deferred_preconditioner(spec, op)?;
             stages.push(stage);
         }
         Ok(Box::new(PcChain::new(stages)))
@@ -358,11 +358,11 @@ impl PcFactory {
 
     pub fn create_pc_chain(
         chain: &str,
-        matrix: &Mat<f64>,
+        op: &dyn LinOp<S = f64>,
         opts: Option<PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         let specs = Self::create_pc_chain_from_str(chain, opts.as_ref())?;
-        Self::construct_deferred_pc_chain(specs, matrix)
+        Self::construct_deferred_pc_chain(specs, op)
     }
 
     pub fn create_deferred_pc_chain_from_options(
