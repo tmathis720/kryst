@@ -20,7 +20,7 @@ use rayon::prelude::*;
 /// Implements the `Comm` trait for shared-memory parallelism. All collective operations
 /// are no-ops or local, as there is no inter-process communication.
 #[derive(Clone)]
-pub struct RayonComm;
+    pub struct RayonComm;
 
 impl RayonComm {
     /// Creates a new `RayonComm` and initializes the global Rayon thread pool
@@ -28,10 +28,10 @@ impl RayonComm {
     ///
     /// If the global thread pool is already initialized, this is a no-op.
     pub fn new() -> Self {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
-            .build_global()
-            .ok();
+        #[cfg(feature = "rayon")]
+        {
+            crate::parallel::threads::init_global_rayon_pool(1);
+        }
         RayonComm
     }
 }
@@ -47,7 +47,7 @@ impl super::Comm for RayonComm {
 
     /// Returns the number of parallel workers (number of CPU cores).
     fn size(&self) -> usize {
-        num_cpus::get()
+        crate::parallel::threads::current_rayon_threads()
     }
 
     /// Synchronization barrier (no-op in shared memory, but uses a Rayon scope for API compatibility).

@@ -46,6 +46,12 @@ impl MpiComm {
         let world = universe().world().duplicate();
         let rank = world.rank() as usize;
         let size = world.size() as usize;
+
+        #[cfg(feature = "rayon")]
+        {
+            crate::parallel::threads::init_global_rayon_pool(size);
+        }
+
         MpiComm { world, rank, size }
     }
 
