@@ -10,6 +10,7 @@ use std::sync::Arc;
 /// Abstract communicator for reductions & splits
 pub trait Comm: Send + Sync + 'static {
     type Vec;
+    type Request<'a>: 'a;
     fn rank(&self) -> usize;
     fn size(&self) -> usize;
     fn barrier(&self);
@@ -27,6 +28,13 @@ pub trait Comm: Send + Sync + 'static {
 
     /// Split this communicator into sub‐colors
     fn split(&self, color: i32, key: i32) -> UniverseComm;
+
+    /// Nonblocking receive into `buf` from `src`.
+    fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a>;
+    /// Nonblocking send of `buf` to `dest`.
+    fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a>;
+    /// Wait for all requests to complete.
+    fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]);
 
     /// Legacy all_reduce method for backward compatibility
     fn all_reduce(&self, x: f64) -> f64 {
@@ -57,6 +65,7 @@ pub struct NoComm;
 
 impl Comm for NoComm {
     type Vec = Vec<f64>;
+    type Request<'a> = ();
 
     fn rank(&self) -> usize {
         0
@@ -99,6 +108,14 @@ impl Comm for NoComm {
     fn split(&self, _color: i32, _key: i32) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
     }
+
+    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {
+        ()
+    }
+    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
+        ()
+    }
+    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }
 
 #[cfg(feature = "mpi")]
@@ -172,6 +189,7 @@ impl UniverseComm {
 
 impl Comm for UniverseComm {
     type Vec = Vec<f64>; // Default, can be made generic
+    type Request<'a> = ();
     fn rank(&self) -> usize {
         match self {
             UniverseComm::NoComm(comm) => comm.rank(),
@@ -298,6 +316,42 @@ impl Comm for UniverseComm {
             UniverseComm::Serial => UniverseComm::Serial,
         }
     }
+
+    fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
+        match self {
+            UniverseComm::NoComm(comm) => {
+                let _ = comm.irecv_from(buf, src);
+                ()
+            }
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => comm.irecv_from(buf, src),
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(comm) => {
+                let _ = comm.irecv_from(buf, src);
+                ()
+            }
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => (),
+        }
+    }
+    fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
+        match self {
+            UniverseComm::NoComm(comm) => {
+                let _ = comm.isend_to(buf, dest);
+                ()
+            }
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => comm.isend_to(buf, dest),
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(comm) => {
+                let _ = comm.isend_to(buf, dest);
+                ()
+            }
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => (),
+        }
+    }
+    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }
 
 #[cfg(not(feature = "mpi"))]

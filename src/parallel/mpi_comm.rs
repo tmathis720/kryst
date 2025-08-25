@@ -75,6 +75,7 @@ impl MpiComm {
 
 impl super::Comm for MpiComm {
     type Vec = Vec<f64>;
+    type Request<'a> = ();
 
     /// Returns the rank (ID) of this process.
     fn rank(&self) -> usize {
@@ -181,4 +182,14 @@ impl super::Comm for MpiComm {
             }
         }
     }
+
+    fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
+        self.world.process_at_rank(src).receive_into(buf);
+        ()
+    }
+    fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
+        self.world.process_at_rank(dest).send(buf);
+        ()
+    }
+    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }

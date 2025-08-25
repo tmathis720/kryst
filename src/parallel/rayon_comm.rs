@@ -38,6 +38,7 @@ impl RayonComm {
 
 impl super::Comm for RayonComm {
     type Vec = Vec<f64>;
+    type Request<'a> = ();
 
     /// Returns the rank of the current process (always 0 in shared memory).
     fn rank(&self) -> usize {
@@ -116,4 +117,12 @@ impl super::Comm for RayonComm {
             *yi = (0..a.ncols()).map(|j| a[(i, j)] * x[j]).sum();
         });
     }
+
+    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {
+        ()
+    }
+    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
+        ()
+    }
+    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }
