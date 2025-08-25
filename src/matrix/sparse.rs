@@ -262,28 +262,44 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> Indexing for C
 }
 
 use crate::core::traits::SubmatrixExtract;
+use std::collections::HashMap;
 
 impl<T: ComplexField + Copy + num_traits::Zero + num_traits::One + PartialEq + PartialOrd>
     SubmatrixExtract for CsrMatrix<T>
 {
     fn submatrix(&self, indices: &[usize]) -> Self {
-        let dense = self.inner.to_dense();
+        // Efficient CSR-based submatrix extraction that selects rows and
+        // columns corresponding to `indices`, returning an n x n CSR whose
+        // local column indices are remapped to 0..n-1.
         let n = indices.len();
-        let sub = faer::Mat::from_fn(n, n, |i, j| dense[(indices[i], indices[j])]);
-        // Convert dense submatrix to CSR (inefficient fallback)
-        let mut row_ptr = vec![0; n + 1];
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        row_ptr.push(0);
         let mut col_idx = Vec::new();
         let mut values = Vec::new();
-        for i in 0..n {
-            for j in 0..n {
-                let v = sub[(i, j)];
-                if v != T::zero() {
-                    col_idx.push(j);
-                    values.push(v);
+
+        // Build a map from global column -> local column index
+        let mut g2l: HashMap<usize, usize> = HashMap::with_capacity(n);
+        for (l, &g) in indices.iter().enumerate() {
+            g2l.insert(g, l);
+        }
+
+        let rp = self.inner.row_ptr();
+        let cj = self.inner.col_idx();
+        let vv = self.inner.val();
+
+        for &g_row in indices {
+            let rs = rp[g_row];
+            let re = rp[g_row + 1];
+            for p in rs..re {
+                let gcol = cj[p];
+                if let Some(&lcol) = g2l.get(&gcol) {
+                    col_idx.push(lcol);
+                    values.push(vv[p]);
                 }
             }
-            row_ptr[i + 1] = col_idx.len();
+            row_ptr.push(col_idx.len());
         }
+
         CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
     }
 }

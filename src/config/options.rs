@@ -152,6 +152,8 @@ pub struct PcOptions {
     // ASM
     /// Hint for ASM subdomain size.
     pub asm_subdomain_size: Option<usize>,
+    /// Block solver choice for ASM: "ludense" or "csr" (default: "ludense").
+    pub asm_block_solver: Option<String>,
 
     // AMG
     /// AMG smoother name.
@@ -259,6 +261,7 @@ impl Sink for PcOptions {
             "pc_reorder" => set_opt!(&mut self.reorder, v.to_lowercase()),
             "pc_scaling" => set_opt!(&mut self.scaling, v.to_lowercase()),
             "pc_asm_overlap" => set_opt!(&mut self.asm_overlap, parse_as::<usize>(v, spec)?),
+            "pc_asm_block_solver" => set_opt!(&mut self.asm_block_solver, v.to_lowercase()),
             "pc_asm_subdomains" => {
                 let parsed: Result<Vec<usize>, _> =
                     v.split(',').map(|s| s.trim().parse()).collect();
@@ -594,6 +597,12 @@ impl PcOptions {
             match t.as_str() {
                 "jacobi" | "gs" | "gsr" | "sgs" | "hgs" | "l1jacobi" | "chebyshev" => {}
                 _ => return Err(KError::SolveError(format!("Invalid amg_relax_type: {t}"))),
+            }
+        }
+        if let Some(ref t) = me.asm_block_solver {
+            match t.as_str() {
+                "ludense" | "csr" => {}
+                _ => return Err(KError::SolveError(format!("Invalid pc_asm_block_solver: {t}"))),
             }
         }
         Ok(me)

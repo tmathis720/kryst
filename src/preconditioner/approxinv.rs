@@ -34,6 +34,10 @@ use faer::prelude::SolveLstsq;
 use num_traits::Float;
 use std::any::TypeId;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use crate::matrix::convert::csr_from_linop;
+use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::op::{StructureId, ValuesId};
 
 /// Sparse Approximate Inverse (SPAI) preconditioner
 ///
@@ -69,6 +73,14 @@ pub struct ApproxInv<M, V, T> {
     pub inv_rows: Vec<Vec<(usize, T)>>,
     /// Optionally stores the matrix A (not used in this implementation)
     pub a: Option<M>,
+    /// Cached CSR view of the last operator (if setup via LinOp)
+    pub csr: Option<Arc<CsrMatrix<f64>>>,
+    /// Last structure id (for reuse decisions)
+    pub last_sid: Option<StructureId>,
+    /// Last values id
+    pub last_vid: Option<ValuesId>,
+    /// Drop tolerance used when converting dense->CSR in setup
+    pub drop_tol: f64,
     _phantom: PhantomData<V>,
 }
 
@@ -105,6 +117,10 @@ where
             sp,
             inv_rows: Vec::new(),
             a: None,
+            csr: None,
+            last_sid: None,
+            last_vid: None,
+            drop_tol: 1e-12,
             _phantom: PhantomData,
         }
     }
@@ -294,6 +310,132 @@ where
                     sum = sum + mij * x_ref[j];
                 }
                 y_mut[i] = sum;
+            }
+        }
+        Ok(())
+    }
+}
+
+// === Object-safe Preconditioner implementation (LinOp-aware, f64 only) ===
+impl<M: 'static + Send + Sync> crate::preconditioner::Preconditioner for ApproxInv<M, Vec<f64>, f64>
+where
+    M: MatVec<Vec<f64>>,
+{
+    fn setup(&mut self, op: &dyn crate::matrix::op::LinOp<S = f64>) -> Result<(), KError> {
+        // Convert operator to CSR (cached) and then to dense for SPAI construction
+        let csr = csr_from_linop(op, self.drop_tol)?;
+        let sid = op.structure_id();
+        let vid = op.values_id();
+
+        // For simplicity, rebuild on structure change or value change
+        if self.last_sid.is_none() || self.last_sid != Some(sid) || self.last_vid != Some(vid) {
+            // Build SPAI from dense representation of CSR
+            let a_dense = csr.to_dense();
+            let n = a_dense.nrows();
+
+            // Determine n from pattern if manual
+            let n_expected = match &self.pattern {
+                SparsityPattern::Manual(pat) => pat.len(),
+                SparsityPattern::Auto => n,
+            };
+            if n != n_expected {
+                // allow mismatch only if auto
+                if let SparsityPattern::Manual(_) = &self.pattern {
+                    return Err(KError::InvalidInput("ApproxInv: operator size mismatch with manual pattern".into()));
+                }
+            }
+
+            // Build SPAI columns using dense access (reuse existing logic adapted to f64)
+            let mut cols = vec![vec![0.0f64; n]; n];
+            for j in 0..n {
+                let pattern_idx: Vec<usize> = match &self.pattern {
+                    SparsityPattern::Auto => {
+                        if let Some(rowpat) = get_row_pattern(&csr) {
+                            rowpat.row_indices(j).to_vec()
+                        } else {
+                            (0..n).collect()
+                        }
+                    }
+                    SparsityPattern::Manual(pat) => pat.get(j).cloned().unwrap_or_else(Vec::new),
+                };
+                let m = pattern_idx.len();
+                // build b as m x n: b[i_row][k] = A[k, pattern_idx[i_row]]
+                let mut b = vec![vec![0.0f64; n]; m];
+                for (row_idx, &col_i) in pattern_idx.iter().enumerate() {
+                    for k in 0..n {
+                        b[row_idx][k] = a_dense[(k, col_i)];
+                    }
+                }
+
+                // rhs e_j
+                let rhs = faer::Mat::from_fn(n, 1, |i, _| if i == j { 1.0 } else { 0.0 });
+
+                // Solve using faer for f64
+                use faer::linalg::solvers::{FullPivLu, Qr};
+                use faer::{Mat, MatMut};
+                let b_f64 = Mat::from_fn(n, m, |row, col| b[col][row]);
+                let sol: Vec<f64> = if m == n {
+                    let lu = FullPivLu::new(b_f64.as_ref());
+                    let mut x = rhs.col_as_slice(0).to_vec();
+                    let x_mat = MatMut::from_column_major_slice_mut(&mut x, n, 1);
+                    lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
+                    x
+                } else {
+                    let sol_mat = Qr::new(b_f64.as_ref()).solve_lstsq(rhs);
+                    (0..m).map(|i| sol_mat[(i, 0)]).collect()
+                };
+
+                // scatter
+                for (k, &row_i) in pattern_idx.iter().enumerate() {
+                    cols[j][row_i] = sol.get(k).cloned().unwrap_or(0.0);
+                }
+            }
+
+            // transpose to row storage
+            self.inv_rows = vec![vec![]; n];
+            for i in 0..n {
+                for j in 0..n {
+                    if cols[j][i].abs() > self.tol {
+                        self.inv_rows[i].push((j, cols[j][i]));
+                    }
+                }
+            }
+
+            // store csr and ids
+            self.csr = Some(csr);
+            self.last_sid = Some(sid);
+            self.last_vid = Some(vid);
+        }
+
+        Ok(())
+    }
+
+    fn apply(&self, _side: crate::preconditioner::PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!("ApproxInv.apply: x/y length mismatch: {} vs {}", x.len(), y.len())));
+        }
+        let n = x.len();
+        // zero y
+        for v in y.iter_mut() { *v = 0.0; }
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+                let mut sum = 0.0f64;
+                for &(j, val) in &self.inv_rows[i] {
+                    sum += val * x[j];
+                }
+                *yi = sum;
+            });
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            for i in 0..n {
+                let mut sum = 0.0f64;
+                for &(j, val) in &self.inv_rows[i] {
+                    sum += val * x[j];
+                }
+                y[i] = sum;
             }
         }
         Ok(())

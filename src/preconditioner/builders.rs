@@ -154,10 +154,23 @@ pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
 
 // ---- ASM / AMG stubs -----------------------------------------------------
 
-pub fn build_asm(_overlap: usize, _hint: Option<usize>) -> Result<Box<dyn Preconditioner>, KError> {
-    Err(KError::NotImplemented(
-        "ASM preconditioner not yet implemented".into(),
-    ))
+pub fn build_asm(
+    overlap: usize,
+    _hint: Option<usize>,
+    block_solver: Option<String>,
+) -> Result<Box<dyn Preconditioner>, KError> {
+    // Map the optional block solver string to the enum used by AdditiveSchwarz.
+    use crate::preconditioner::asm::BlockSolverFactory;
+    use crate::preconditioner::asm::AdditiveSchwarz;
+
+    let factory = match block_solver.as_deref() {
+        Some("csr") => BlockSolverFactory::CsrSolver,
+        _ => BlockSolverFactory::LuDense,
+    };
+
+    // Construct ASM with empty subdomains (will be partitioned on setup).
+    let asm = AdditiveSchwarz::<faer::Mat<f64>, Vec<f64>, f64>::new(overlap, Vec::new(), factory);
+    Ok(Box::new(asm))
 }
 
 pub fn build_amg(

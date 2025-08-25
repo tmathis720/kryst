@@ -106,8 +106,9 @@ pub enum PcConfig {
         eig_hi: f64,
     },
     Asm {
-        overlap: usize,
-        subdomain_hint: Option<usize>,
+    overlap: usize,
+    subdomain_hint: Option<usize>,
+    block_solver: Option<String>,
     },
     Amg {
         levels: Option<usize>,
@@ -215,6 +216,7 @@ impl PcConfig {
             Asm => PcConfig::Asm {
                 overlap: o.asm_overlap.unwrap_or(0),
                 subdomain_hint: o.asm_subdomain_size,
+                block_solver: o.asm_block_solver.clone(),
             },
             Amg => PcConfig::Amg {
                 levels: o.amg_levels,
@@ -281,7 +283,8 @@ impl PcFactory {
             PcConfig::Asm {
                 overlap,
                 subdomain_hint,
-            } => b::build_asm(overlap, subdomain_hint),
+                block_solver,
+            } => b::build_asm(overlap, subdomain_hint, block_solver),
             PcConfig::Amg { levels, smoother } => b::build_amg(levels, smoother),
 
             PcConfig::Lu => b::build_lu(),
@@ -455,5 +458,17 @@ mod tests {
         };
         let err = PcFactory::create_from_options(&bad).err().unwrap();
         assert!(matches!(err, KError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn factory_builds_asm_from_options() {
+        let opts = crate::config::options::PcOptions {
+            pc_type: Some("asm".into()),
+            asm_block_solver: Some("ludense".into()),
+            ..Default::default()
+        };
+        let pc = PcFactory::create_from_options(&opts).unwrap();
+        fn _is_pc(_: &Box<dyn Preconditioner>) {}
+        _is_pc(&pc);
     }
 }
