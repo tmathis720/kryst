@@ -25,7 +25,7 @@
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
-use crate::matrix::op::{LinOp, StructureId, ValuesId};
+use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
@@ -351,6 +351,17 @@ impl KspContext {
         self.pmat = Some(pmat);
         self.invalidate_setup();
         self
+    }
+
+    pub fn set_operators_with_comm(
+        &mut self,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        comm: crate::parallel::UniverseComm,
+    ) -> &mut Self {
+        let a_wrapped = wrap_with_comm(amat, comm.clone());
+        let p_wrapped = pmat.map(|p| wrap_with_comm(p, comm.clone()));
+        self.set_operators(a_wrapped, p_wrapped)
     }
 
     pub fn set_pc_reuse_policy(&mut self, policy: PcReusePolicy) -> &mut Self {

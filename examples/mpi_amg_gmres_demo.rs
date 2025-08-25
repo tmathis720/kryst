@@ -26,8 +26,8 @@
 
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
+use kryst::matrix::op::{CsrOp, wrap_with_comm};
 use kryst::matrix::sparse::SparseMatrix;
-use kryst::matrix::op::CsrOp;
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::utils::matrix_market::{read_matrix_market, write_vector_market};
 use std::env;
@@ -195,9 +195,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Attach operator and set up KSP (communicator is not kept inside KSP)
-    let op_arc: Arc<dyn kryst::matrix::op::LinOp<S = f64>> = Arc::new(csr_op);
-    ksp.set_operators(op_arc, None);
+    // Attach operator and set up KSP, attaching the communicator
+    let op_arc: Arc<dyn kryst::matrix::op::LinOp<S = f64>> =
+        wrap_with_comm(Arc::new(csr_op), comm.clone());
+    ksp.set_operators_with_comm(op_arc, None, comm.clone());
     ksp.setup()?;
 
     let setup_time = start_setup.elapsed();
@@ -342,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // All-reduce to get global norms
     let global_residual_sq = comm.all_reduce_f64(local_residual_sq);
-    let global_rhs_sq     = comm.all_reduce_f64(local_rhs_sq);
+    let global_rhs_sq = comm.all_reduce_f64(local_rhs_sq);
 
     let residual_norm = global_residual_sq.sqrt();
     let rhs_norm = global_rhs_sq.sqrt();
