@@ -79,7 +79,7 @@ impl ChangeIds {
 }
 
 // --- Optional wrappers for dense and CSR matrices -------------------------
-use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
 use faer::Mat;
 
 pub struct DenseOp {
@@ -276,6 +276,66 @@ impl LinOp for CsrMatrix<f64> {
         self.col_idx().hash(&mut h);
         StructureId(h.finish())
     }
+    fn values_id(&self) -> ValuesId {
+        ValuesId(0)
+    }
+}
+
+impl LinOp for CscMatrix<f64> {
+    type S = f64;
+
+    fn dims(&self) -> (usize, usize) {
+        (self.nrows(), self.ncols())
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.ncols());
+        assert_eq!(y.len(), self.nrows());
+        y.fill(0.0);
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+        for j in 0..self.ncols() {
+            let xj = x[j];
+            for p in cp[j]..cp[j + 1] {
+                y[ri[p]] += vv[p] * xj;
+            }
+        }
+    }
+
+    fn supports_transpose(&self) -> bool {
+        true
+    }
+
+    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.nrows());
+        assert_eq!(y.len(), self.ncols());
+        y.fill(0.0);
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+        for j in 0..self.ncols() {
+            let mut sum = 0.0;
+            for p in cp[j]..cp[j + 1] {
+                sum += vv[p] * x[ri[p]];
+            }
+            y[j] = sum;
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn structure_id(&self) -> StructureId {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.col_ptr().hash(&mut h);
+        self.row_idx().hash(&mut h);
+        StructureId(h.finish())
+    }
+
     fn values_id(&self) -> ValuesId {
         ValuesId(0)
     }

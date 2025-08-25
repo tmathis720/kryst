@@ -3,6 +3,7 @@
 pub mod dense;
 pub use dense::DenseMatrix;
 pub mod convert;
+pub mod csc;
 pub mod format;
 mod format_impls;
 pub mod op;
@@ -10,6 +11,10 @@ pub mod op_shell;
 pub mod sparse;
 pub mod utils;
 
-pub use convert::{csr_from_linop, dense_from_linop, to_csr_cached, try_as_csr};
+pub use convert::{
+    csc_from_linop, csr_from_linop, dense_from_linop, to_csc_cached, to_csr_cached, try_as_csc,
+    try_as_csr,
+};
+pub use csc::CscMatrix;
 pub use op::{ChangeIds, CsrOp, DenseOp, LinOp, StructureId, ValuesId};
 pub use op_shell::MatShell;
