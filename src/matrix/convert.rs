@@ -82,3 +82,9 @@ pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
         "Unsupported operator type for Dense conversion".into(),
     ))
 }
+
+/// Ensure we have an owned `Mat<f64>` regardless of storage (view vs owned).
+/// This clones data when necessary and returns an owned matrix.
+pub fn owned_from_mat(mat: &Mat<f64>) -> Mat<f64> {
+    mat.clone()
+}
