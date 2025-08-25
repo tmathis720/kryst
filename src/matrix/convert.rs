@@ -27,3 +27,25 @@ pub fn to_csr_cached(
         "to_csr_cached: unsupported LinOp type".into(),
     ))
 }
+
+/// Obtain a CSR matrix from a [`LinOp`], converting and caching if necessary.
+#[inline]
+pub fn csr_from_linop(
+    op: &dyn LinOp<S = f64>,
+    drop_tol: f64,
+) -> Result<Arc<CsrMatrix<f64>>, KError> {
+    to_csr_cached(op, drop_tol)
+}
+
+/// Obtain a dense matrix from a [`LinOp`], converting formats as needed.
+pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
+    if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
+        return Ok(mat.clone());
+    }
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
+        return Ok(csr.to_dense());
+    }
+    Err(KError::InvalidInput(
+        "Unsupported operator type for Dense conversion".into(),
+    ))
+}

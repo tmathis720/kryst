@@ -394,24 +394,10 @@ impl KspContext {
 
         if self.pc.is_none() {
             if let Some(specs) = self.pending_chain.take() {
-                let m = pmat
-                    .as_any()
-                    .downcast_ref::<faer::Mat<f64>>()
-                    .ok_or_else(|| {
-                        KError::InvalidInput(
-                            "expected faer::Mat<f64> for chain construction".into(),
-                        )
-                    })?;
-                let chain = PcFactory::construct_deferred_pc_chain(specs, m)?;
+                let chain = PcFactory::construct_deferred_pc_chain(specs, pmat.as_ref())?;
                 self.pc = Some(chain);
             } else if let Some(spec) = self.pending_pc.take() {
-                let m = pmat
-                    .as_any()
-                    .downcast_ref::<faer::Mat<f64>>()
-                    .ok_or_else(|| {
-                        KError::InvalidInput("expected faer::Mat<f64> for PC construction".into())
-                    })?;
-                let pc = PcFactory::construct_deferred_preconditioner(spec, m)?;
+                let pc = PcFactory::construct_deferred_preconditioner(spec, pmat.as_ref())?;
                 self.pc = Some(pc);
             }
         }
