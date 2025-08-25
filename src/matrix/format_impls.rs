@@ -5,7 +5,7 @@ use faer::Mat;
 use crate::matrix::{
     csc::CscMatrix,
     format::{AsFormat, CSC_CACHE, CSR_CACHE, csc_key_from_ptr, key_from_ptr},
-    op::LinOp,
+    op::{DenseOp, LinOp},
     sparse::CsrMatrix,
 };
 
@@ -31,7 +31,8 @@ impl AsFormat for Mat<f64> {
     fn to_csr_cached(&self, drop_tol: f64) -> Arc<CsrMatrix<f64>> {
         let base_ptr = self as *const Mat<f64> as usize;
         let structure_id = LinOp::structure_id(self).0;
-        let key = key_from_ptr(base_ptr, structure_id, drop_tol);
+        let values_id = LinOp::values_id(self).0;
+        let key = key_from_ptr(base_ptr, structure_id, values_id, drop_tol);
         if let Some(existing) = {
             let cache = CSR_CACHE.lock().unwrap();
             cache.get(&key).and_then(|w| w.upgrade())
@@ -60,6 +61,49 @@ impl AsFormat for Mat<f64> {
             return existing;
         }
         let csc = CscMatrix::from_dense(self, drop_tol);
+        let arc = Arc::new(csc);
+        let mut cache = CSC_CACHE.lock().unwrap();
+        cache.insert(key, Arc::downgrade(&arc));
+        arc
+    }
+}
+
+impl AsFormat for DenseOp {
+    fn to_csr_cached(&self, drop_tol: f64) -> Arc<CsrMatrix<f64>> {
+        let inner = self.inner();
+        let base_ptr = inner as *const Mat<f64> as usize;
+        let sid = self.structure_id().0;
+        let vid = self.values_id().0;
+        let key = key_from_ptr(base_ptr, sid, vid, drop_tol);
+        if let Some(existing) = {
+            let cache = CSR_CACHE.lock().unwrap();
+            cache.get(&key).and_then(|w| w.upgrade())
+        } {
+            return existing;
+        }
+        let csr = CsrMatrix::from_dense(inner, drop_tol);
+        let arc = Arc::new(csr);
+        let mut cache = CSR_CACHE.lock().unwrap();
+        cache.insert(key, Arc::downgrade(&arc));
+        arc
+    }
+
+    fn as_csc(&self) -> Option<&CscMatrix<f64>> {
+        None
+    }
+
+    fn to_csc_cached(&self, drop_tol: f64) -> Arc<CscMatrix<f64>> {
+        let inner = self.inner();
+        let base_ptr = inner as *const Mat<f64> as usize;
+        let sid = self.structure_id().0;
+        let key = csc_key_from_ptr(base_ptr, sid, drop_tol);
+        if let Some(existing) = {
+            let cache = CSC_CACHE.lock().unwrap();
+            cache.get(&key).and_then(|w| w.upgrade())
+        } {
+            return existing;
+        }
+        let csc = CscMatrix::from_dense(inner, drop_tol);
         let arc = Arc::new(csc);
         let mut cache = CSC_CACHE.lock().unwrap();
         cache.insert(key, Arc::downgrade(&arc));
