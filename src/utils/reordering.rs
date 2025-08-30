@@ -286,10 +286,13 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
         }
     }
 
-    // Sort neighbors by degree (ascending) - need to do this after building all adjacencies
+    // Precompute degrees once and sort neighbors by degree (ascending)
+    let degrees: Vec<usize> = adj.iter().map(|nbrs| nbrs.len()).collect();
     for i in 0..n {
-        let adj_copy = adj.clone(); // Create a copy for degree lookup
-        adj[i].sort_by_key(|&neighbor| adj_copy[neighbor].len());
+        // Stable order not required for CM; use unstable for speed
+        adj[i].sort_unstable_by_key(|&nbr| degrees[nbr]);
+        // For deterministic tie-breaks, consider:
+        // adj[i].sort_unstable_by(|&a, &b| degrees[a].cmp(&degrees[b]).then(a.cmp(&b)));
     }
 
     let mut visited = vec![false; n];
@@ -303,10 +306,10 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
 
         // Find peripheral node (node with minimum degree in unvisited component)
         let mut current_start = start;
-        let mut min_degree = adj[start].len();
+        let mut min_degree = degrees[start];
         for i in start..n {
-            if !visited[i] && adj[i].len() < min_degree {
-                min_degree = adj[i].len();
+            if !visited[i] && degrees[i] < min_degree {
+                min_degree = degrees[i];
                 current_start = i;
             }
         }
@@ -319,18 +322,8 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
         while let Some(node) = queue.pop_front() {
             permutation.push(node);
 
-            // Add unvisited neighbors sorted by degree
-            let mut neighbors: Vec<usize> = adj[node]
-                .iter()
-                .copied()
-                .filter(|&neighbor| !visited[neighbor])
-                .collect();
-
-            // Sort by current degree (need to access adj again)
-            let adj_ref = &adj;
-            neighbors.sort_by_key(|&neighbor| adj_ref[neighbor].len());
-
-            for neighbor in neighbors {
+            // Neighbors are already sorted by degree; enqueue unvisited
+            for &neighbor in &adj[node] {
                 if !visited[neighbor] {
                     visited[neighbor] = true;
                     queue.push_back(neighbor);

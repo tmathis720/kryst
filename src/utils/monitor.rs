@@ -121,10 +121,10 @@ impl IterationMonitor {
         let file = File::create(filename)?;
         let mut writer = BufWriter::new(file);
 
-        // Write CSV header
+        // Write CSV header (elapsed time since solve start in seconds)
         writeln!(
             writer,
-            "iteration,residual_norm,convergence_rate,iteration_time_ms,pc_time_ms,timestamp_ns"
+            "iteration,residual_norm,convergence_rate,iteration_time_ms,pc_time_ms,elapsed_s"
         )?;
 
         self.csv_writer = Some(writer);
@@ -201,15 +201,21 @@ impl IterationMonitor {
                 .map(|t| format!("{:.3}", t.as_secs_f64() * 1000.0))
                 .unwrap_or_else(|| "".to_string());
 
+            // Elapsed since solve start; default to 0.0s if not started
+            let elapsed_s = self
+                .solve_start_time
+                .map(|t0| t0.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+
             let _ = writeln!(
                 writer,
-                "{},{:.6e},{},{:.3},{},{}",
+                "{},{:.6e},{},{:.3},{},{:.6}",
                 iteration,
                 residual_norm,
                 rate_str,
                 iteration_time.as_secs_f64() * 1000.0,
                 pc_time_str,
-                now.elapsed().as_nanos()
+                elapsed_s
             );
             let _ = writer.flush();
         }
