@@ -137,12 +137,48 @@ pub struct KspContext {
     pub maxits: usize,
     pub restart: usize,
     pub pc_side: PcSide,
+    pc_side_explicit: bool,
     pc_reuse: PcReusePolicy,
     last_pc_sid: Option<StructureId>,
     last_pc_vid: Option<ValuesId>,
 }
 
 impl KspContext {
+    #[inline]
+    fn normalize_side(side: PcSide) -> PcSide {
+        match side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        }
+    }
+
+    /// Validate that `side` is compatible with `solver_type` (if set).
+    /// Mirrors `configure_pc_side()` logic but used at set-time to fail fast.
+    fn check_pc_side_now(&self, side: PcSide) -> Result<(), KError> {
+        let side = Self::normalize_side(side);
+        if let Some(st) = self.solver_type {
+            match st {
+                SolverType::Fgmres => {
+                    if side != PcSide::Right {
+                        return Err(KError::InvalidInput(
+                            "FGMRES only supports right preconditioning".into(),
+                        ));
+                    }
+                }
+                SolverType::Gmres | SolverType::PcaGmres => {
+                    // both left and right are fine
+                }
+                _ => {
+                    if side == PcSide::Right {
+                        return Err(KError::InvalidInput(
+                            "Selected solver only supports left preconditioning".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn new() -> Self {
         Self {
             solver: None,
@@ -161,6 +197,7 @@ impl KspContext {
             maxits: 1000,
             restart: 30,
             pc_side: PcSide::Left,
+            pc_side_explicit: false,
             pc_reuse: PcReusePolicy::Auto,
             last_pc_sid: None,
             last_pc_vid: None,
@@ -204,6 +241,12 @@ impl KspContext {
             }
         };
         self.solver = solver;
+        // Fail fast if an explicit side was set and is incompatible with the selected solver
+        if self.pc_side_explicit {
+            if let Err(e) = self.check_pc_side_now(self.pc_side) {
+                return Err(e);
+            }
+        }
         self.invalidate_setup();
         Ok(self)
     }
@@ -251,17 +294,27 @@ impl KspContext {
         Ok(self)
     }
 
-    /// Set the preconditioning side directly.
+    /// Set the preconditioning side directly (panics if incompatible with the active solver).
+    ///
+    /// Prefer `try_set_pc_side` in library code to handle errors.
     pub fn set_pc_side(&mut self, side: PcSide) -> &mut Self {
+        self.try_set_pc_side(side).unwrap()
+    }
+
+    /// Set the preconditioning side, failing early if incompatible with the current solver.
+    pub fn try_set_pc_side(&mut self, side: PcSide) -> Result<&mut Self, KError> {
+        self.check_pc_side_now(side)?;
         self.pc_side = side;
+        self.pc_side_explicit = true;
         self.invalidate_setup();
-        self
+        Ok(self)
     }
 
     /// Set the preconditioning side from a string ("left", "right", or "symmetric").
+    /// Fails fast if incompatible with the active solver.
     pub fn set_pc_side_from_str(&mut self, side: &str) -> Result<&mut Self, KError> {
         let ps = PcSide::from_str(side)?;
-        Ok(self.set_pc_side(ps))
+        self.try_set_pc_side(ps)
     }
 
     /// Configure the KSP context using parsed KSP options.
@@ -286,7 +339,7 @@ impl KspContext {
             self.restart = restart;
         }
         if let Some(ref side) = opts.pc_side {
-            self.pc_side = PcSide::from_str(side)?;
+            self.set_pc_side_from_str(side)?;
         }
 
         if let Some(s) = self
@@ -339,7 +392,7 @@ impl KspContext {
             self.set_pc_reuse_policy(pol);
         }
         if let Some(ref side) = ksp_opts.pc_side {
-            self.pc_side = PcSide::from_str(side)?;
+            self.set_pc_side_from_str(side)?;
         }
         if let Some(ref chain_opts) = pc_opts.chain {
             let specs = PcFactory::create_deferred_pc_chain_from_options(chain_opts)?;
@@ -750,6 +803,7 @@ impl KspContext {
 mod tests {
     use super::*;
     use crate::context::pc_context::PcType;
+    use crate::preconditioner::PcSide;
     use crate::matrix::op::{DenseOp, wrap_with_comm};
     use faer::Mat;
     use std::sync::Arc;
@@ -835,5 +889,40 @@ mod tests {
             KError::InvalidInput(msg) => assert!(msg.to_lowercase().contains("communicator mismatch")),
             _ => panic!("unexpected error: {:?}", err),
         }
+    }
+
+    #[test]
+    fn fgmres_rejects_left_early_via_try_set_pc_side() {
+        let mut ksp = KspContext::new();
+        // Ensure current side is compatible so set_type succeeds
+        ksp.set_pc_side(PcSide::Right);
+        ksp.set_type(SolverType::Fgmres).unwrap();
+        match ksp.try_set_pc_side(PcSide::Left) {
+            Err(KError::InvalidInput(msg)) => assert!(msg.to_lowercase().contains("fgmres")),
+            Err(other) => panic!("unexpected error type: {:?}", other),
+            Ok(_) => panic!("expected error for incompatible FGMRES side"),
+        }
+    }
+
+    #[test]
+    fn set_side_then_set_type_fails_fast() {
+        let mut ksp = KspContext::new();
+        // Start with a right side (illegal for most solvers)
+        ksp.set_pc_side(PcSide::Right); // allowed until a solver constrains it
+        // Now pick a left-only solver; we expect an unwrap panic due to Err
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ksp.set_type(SolverType::Cg).unwrap();
+        }));
+        assert!(res.is_err(), "expected panic due to incompatible side for CG");
+    }
+
+    #[test]
+    fn gmres_accepts_both_sides() {
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.try_set_pc_side(PcSide::Left).unwrap();
+        ksp.try_set_pc_side(PcSide::Right).unwrap();
+        // Symmetric is normalized to Left; should pass
+        ksp.try_set_pc_side(PcSide::Symmetric).unwrap();
     }
 }

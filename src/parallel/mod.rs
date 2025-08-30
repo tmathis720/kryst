@@ -450,7 +450,7 @@ impl Comm for UniverseComm {
     fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]) {
         #[cfg(feature = "mpi")]
         {
-            for r in reqs {
+            for r in reqs.iter_mut() {
                 if let AnyRequest::Mpi(rq) = r {
                     let rc = unsafe {
                         mpi::ffi::MPI_Wait(&mut rq.handle, mpi::ffi::RSMPI_STATUS_IGNORE)
@@ -459,7 +459,10 @@ impl Comm for UniverseComm {
                 }
             }
         }
-        // Non-MPI requests are no-ops.
+        // Clear handles so buffers can be reused immediately.
+        for r in reqs.iter_mut() {
+            *r = AnyRequest::None;
+        }
     }
 }
 
