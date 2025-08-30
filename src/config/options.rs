@@ -7,6 +7,7 @@
 //! - Boolean flags accept presence or explicit on/off/true/false/1/0
 
 use crate::error::KError;
+use crate::config::kinds as kinds;
 use std::str::FromStr;
 
 use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
@@ -622,70 +623,16 @@ impl PcOptions {
     pub fn from_args(args: &[&str]) -> Result<Self, KError> {
         let mut me = Self::default();
         registry().parse_into(args, &mut me, Some("-pc_"))?;
-        // enum validations with friendly messages
-        if let Some(ref t) = me.reorder {
-            match t.as_str() {
-                "none" | "colamd" | "amd" | "rcm" | "cuthill_mckee" => {}
-                _ => return Err(KError::SolveError(format!("Invalid reorder type: {t}"))),
-            }
-        }
-        if let Some(ref s) = me.scaling {
-            match s.as_str() {
-                "none" | "diagonal" | "symmetric" => {}
-                _ => return Err(KError::SolveError(format!("Invalid scaling type: {s}"))),
-            }
-        }
-        if let Some(ref t) = me.ilu_type {
-            match t.as_str() {
-                "ilu0" | "iluk" | "ilut" | "milu0" | "block_jacobi" | "gmres_iluk"
-                | "gmres_ilut" => {}
-                _ => return Err(KError::SolveError(format!("Invalid ilu_type: {t}"))),
-            }
-        }
-        if let Some(ref t) = me.ilu_reordering_type {
-            match t.as_str() {
-                "none" | "rcm" | "amd" | "natural" => {}
-                _ => {
-                    return Err(KError::SolveError(format!(
-                        "Invalid ilu_reordering_type: {t}"
-                    )));
-                }
-            }
-        }
-        if let Some(ref t) = me.ilu_triangular_solve {
-            match t.as_str() {
-                "exact" | "iterative" => {}
-                _ => {
-                    return Err(KError::SolveError(format!(
-                        "Invalid ilu_triangular_solve: {t}"
-                    )));
-                }
-            }
-        }
-        if let Some(ref t) = me.amg_coarsen_type {
-            match t.as_str() {
-                "rs" | "hmis" | "pmis" | "falgout" => {}
-                _ => return Err(KError::SolveError(format!("Invalid amg_coarsen_type: {t}"))),
-            }
-        }
-        if let Some(ref t) = me.amg_interp_type {
-            match t.as_str() {
-                "classical" | "direct" | "multipass" | "extended" | "standard" => {}
-                _ => return Err(KError::SolveError(format!("Invalid amg_interp_type: {t}"))),
-            }
-        }
-        if let Some(ref t) = me.amg_relax_type {
-            match t.as_str() {
-                "jacobi" | "gs" | "gsr" | "sgs" | "hgs" | "l1jacobi" | "chebyshev" => {}
-                _ => return Err(KError::SolveError(format!("Invalid amg_relax_type: {t}"))),
-            }
-        }
-        if let Some(ref t) = me.asm_block_solver {
-            match t.as_str() {
-                "ludense" | "csr" => {}
-                _ => return Err(KError::SolveError(format!("Invalid pc_asm_block_solver: {t}"))),
-            }
-        }
+        // enum validations (centralized)
+        if let Some(ref t) = me.reorder { kinds::ReorderKind::from_str(t)?; }
+        if let Some(ref s) = me.scaling { kinds::ScalingKind::from_str(s)?; }
+        if let Some(ref t) = me.ilu_type { kinds::IluTypeKind::from_str(t)?; }
+        if let Some(ref t) = me.ilu_reordering_type { kinds::IluReorderKind::from_str(t)?; }
+        if let Some(ref t) = me.ilu_triangular_solve { kinds::IluTriSolveKind::from_str(t)?; }
+        if let Some(ref t) = me.amg_coarsen_type { kinds::AmgCoarsenKind::from_str(t)?; }
+        if let Some(ref t) = me.amg_interp_type { kinds::AmgInterpKind::from_str(t)?; }
+        if let Some(ref t) = me.amg_relax_type { kinds::AmgRelaxKind::from_str(t)?; }
+        if let Some(ref t) = me.asm_block_solver { kinds::AsmBlockSolverKind::from_str(t)?; }
         Ok(me)
     }
 
@@ -1380,7 +1327,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid amg_coarsen_type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid amgcoarsenkind") || lo.contains("invalid amg_coarsen_type") || lo.contains("invalid pc_amg_coarsen_type") || lo.contains("invalid amg"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid coarsen type");
         }
@@ -1393,7 +1342,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid amg_interp_type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid amginterpkind") || lo.contains("invalid amg_interp_type") || lo.contains("invalid pc_amg_interp_type"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid interpolation type");
         }
@@ -1406,7 +1357,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid amg_relax_type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid amgrelaxkind") || lo.contains("invalid amg_relax_type") || lo.contains("invalid pc_amg_relax_type"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid relaxation type");
         }
@@ -1487,7 +1440,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid reorder type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid reorderkind") || lo.contains("invalid pc_reorder") || lo.contains("invalid reorder"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid reorder type");
         }
@@ -1500,7 +1455,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid scaling type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid scalingkind") || lo.contains("invalid pc_scaling") || lo.contains("invalid scaling"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid scaling type");
         }
@@ -1583,7 +1540,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid ilu_type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid ilutypekind") || lo.contains("invalid pc_ilu_type") || lo.contains("invalid ilu_type"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid ILU type");
         }
@@ -1596,7 +1555,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid ilu_reordering_type"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid ilureorderkind") || lo.contains("invalid pc_ilu_reordering_type") || lo.contains("invalid ilu_reordering_type"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid ILU reordering type");
         }
@@ -1609,7 +1570,9 @@ mod old_tests {
         assert!(result.is_err());
 
         if let Err(KError::SolveError(msg)) = result {
-            assert!(msg.contains("Invalid ilu_triangular_solve"));
+            let lo = msg.to_lowercase();
+            assert!(lo.contains("invalid ilutrisolvekind") || lo.contains("invalid pc_ilu_triangular_solve") || lo.contains("invalid ilu_triangular_solve"));
+            assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid ILU triangular solve type");
         }

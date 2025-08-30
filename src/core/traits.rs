@@ -173,36 +173,78 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
         y: &mut [f64],
     ) -> Result<(), crate::error::KError> {
         use crate::matrix::sparse::SparseMatrix;
+        // Dimension checks
         if x.len() != SparseMatrix::ncols(self) || y.len() != SparseMatrix::nrows(self) {
             return Err(crate::error::KError::InvalidInput(
                 "Matrix-vector dimension mismatch".to_string(),
             ));
         }
 
-        // Use the existing spmv method and scale appropriately
-        if beta == 0.0 {
-            // y = alpha * A * x (zero y first)
-            for val in y.iter_mut() {
-                *val = 0.0;
-            }
-            if alpha != 0.0 {
-                let mut temp = vec![0.0; y.len()];
-                SparseMatrix::spmv(self, x, &mut temp);
-                for (y_val, temp_val) in y.iter_mut().zip(temp.iter()) {
-                    *y_val = alpha * temp_val;
+        // Quick exits for alpha/beta
+        if alpha == 0.0 {
+            if beta == 0.0 {
+                for v in y.iter_mut() {
+                    *v = 0.0;
+                }
+            } else if beta != 1.0 {
+                for v in y.iter_mut() {
+                    *v *= beta;
                 }
             }
-        } else if alpha == 0.0 {
-            // y = beta * y
-            for val in y.iter_mut() {
-                *val *= beta;
+            return Ok(());
+        }
+
+        // Canonical CSR access (no allocations)
+        let rp = self.row_ptr();
+        let cj = self.col_idx();
+        let vv = self.values();
+
+        #[cfg(debug_assertions)]
+        {
+            // Basic CSR integrity checks
+            assert_eq!(rp.len(), self.nrows() + 1, "row_ptr length must be nrows+1");
+            assert!(rp.windows(2).all(|w| w[0] <= w[1]), "row_ptr must be non-decreasing");
+            let nnz = *rp.last().unwrap();
+            assert_eq!(cj.len(), nnz, "col_idx length must equal nnz");
+            assert_eq!(vv.len(), nnz, "values length must equal nnz");
+        }
+
+        let m = self.nrows();
+        if beta == 0.0 {
+            // y[i] = alpha * sum_j a[i,j] x[j]
+            for i in 0..m {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut acc = 0.0;
+                for p in rs..re {
+                    let j = cj[p];
+                    acc = f64::mul_add(vv[p], x[j], acc);
+                }
+                y[i] = alpha * acc;
+            }
+        } else if beta == 1.0 {
+            // y[i] += alpha * A x
+            for i in 0..m {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut acc = 0.0;
+                for p in rs..re {
+                    let j = cj[p];
+                    acc = f64::mul_add(vv[p], x[j], acc);
+                }
+                y[i] += alpha * acc;
             }
         } else {
-            // y = alpha * A * x + beta * y
-            let mut temp = vec![0.0; y.len()];
-            SparseMatrix::spmv(self, x, &mut temp);
-            for (y_val, temp_val) in y.iter_mut().zip(temp.iter()) {
-                *y_val = alpha * temp_val + beta * (*y_val);
+            // y[i] = alpha * (A x)_i + beta * y[i]
+            for i in 0..m {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut acc = 0.0;
+                for p in rs..re {
+                    let j = cj[p];
+                    acc = f64::mul_add(vv[p], x[j], acc);
+                }
+                y[i] = alpha * acc + beta * y[i];
             }
         }
         Ok(())
@@ -603,6 +645,7 @@ impl AmgKernel for DistributedAmgKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::sparse::CsrMatrix;
 
     // Simple test to verify traits can be imported and used
     #[test]
@@ -723,5 +766,28 @@ mod tests {
 
         // All method signatures should compile
         assert!(true);
+    }
+
+    #[test]
+    fn csr_matvec_happy_path() {
+        // 2x3 CSR: row_ptr=[0,2,3], col_idx=[0,2,1], val=[1,4,5]
+        // A = [1 0 4; 0 5 0]
+        let a = CsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 2, 3],
+            vec![0, 2, 1],
+            vec![1.0, 4.0, 5.0],
+        );
+        let x = [10.0, 20.0, 30.0];
+        let mut y = [0.0; 2];
+        MatVecOp::mat_vec(&a, 1.0, &x, 0.0, &mut y).unwrap();
+        assert_eq!(y, [130.0, 100.0]);
+        // with scaling
+        let mut y2 = [1.0, 2.0];
+        MatVecOp::mat_vec(&a, 2.0, &x, 3.0, &mut y2).unwrap();
+        // 2*A*x + 3*y0
+        assert!((y2[0] - (2.0 * 130.0 + 3.0 * 1.0)).abs() < 1e-12);
+        assert!((y2[1] - (2.0 * 100.0 + 3.0 * 2.0)).abs() < 1e-12);
     }
 }
