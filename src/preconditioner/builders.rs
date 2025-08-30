@@ -151,7 +151,7 @@ pub fn build_amg(
     _levels: Option<usize>,
     _smoother: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    Err(KError::NotImplemented(
-        "AMG preconditioner not yet implemented".into(),
-    ))
+    use crate::preconditioner::amg::AMG;
+    let amg = AMG::with_config(Default::default());
+    Ok(Box::new(amg))
 }

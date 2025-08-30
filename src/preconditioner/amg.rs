@@ -10,6 +10,19 @@ use faer::Mat;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
+// New sparse SA/RS submodules
+mod strength;
+mod coarsen;
+mod prolong;
+mod rap_ops;
+mod coarse_solver;
+
+use strength::Strength;
+use coarsen::{AggAlgo, build_aggregates};
+use prolong::{TentativeP, Pcsr, tentative_from_aggregates, smooth_tentative_sa, smooth_sa_values_only};
+use rap_ops::{CsrPattern, rap_symbolic, rap_numeric};
+use coarse_solver::{CoarseSolve, CoarseSolver, CoarseCg, CoarseDenseLu};
+
 // ===== Public enums (kept compatible with your old file) =====================
 
 /// Coarsening strategies.
@@ -70,6 +83,12 @@ pub struct AMGConfig {
     pub jacobi_omega: f64,
     pub chebyshev_degree: usize,
     pub drop_tol: f64,                // NEW: used for dense->CSR conversion
+    // New SA/RS controls
+    pub normalize_strength: bool,
+    pub coarse_solve: CoarseSolve,
+    pub ilu_drop_tol: f64,
+    pub ilu_fill_per_row: usize,
+    pub max_operator_complexity: Option<f64>,
 }
 
 impl Default for AMGConfig {
@@ -98,6 +117,11 @@ impl Default for AMGConfig {
             jacobi_omega: 2.0 / 3.0,
             chebyshev_degree: 0,
             drop_tol: 1e-12,
+            normalize_strength: true,
+            coarse_solve: CoarseSolve::CG,
+            ilu_drop_tol: 1e-2,
+            ilu_fill_per_row: 0,
+            max_operator_complexity: None,
         }
     }
 }
@@ -180,6 +204,12 @@ struct AMGLevel {
     r: CsrMatrix<f64>,
     /// diag(A_l)^{-1}
     diag_inv: Vec<f64>,
+    /// fine->coarse aggregate id used to rebuild P values (SA numeric refresh)
+    agg_of: Vec<usize>,
+    /// Mapping from P entry index -> index in R (transpose) values array
+    p2r_pos: Vec<usize>,
+    /// Symbolic pattern for A_{l+1}
+    a_next_pat: Option<CsrPattern>,
 }
 
 #[derive(Clone)]
@@ -188,6 +218,7 @@ struct AmgHierarchy {
     pre_sweeps: usize,
     post_sweeps: usize,
     omega: f64,
+    coarse_solve: CoarseSolve,
 }
 
 impl AmgHierarchy {
@@ -203,6 +234,7 @@ pub struct AMG {
     last_sid: Option<StructureId>,
     last_vid: Option<ValuesId>,
     cfg: AMGConfig,
+    stats: Option<AmgStats>,
 }
 
 impl Default for AMG {
@@ -213,6 +245,7 @@ impl Default for AMG {
             last_sid: None,
             last_vid: None,
             cfg: AMGConfig::default(),
+            stats: None,
         }
     }
 }
@@ -236,7 +269,7 @@ impl AMG {
     }
 
     fn refresh_numeric(&mut self, fine: &CsrMatrix<f64>) -> Result<(), KError> {
-        // Numeric refresh: keep P/R sparsity; recompute A_l via RAP using current values.
+        // Numeric refresh: keep structure; recompute diag, P values, R values and A_l via RAP.
         if self.state.is_none() {
             return self.build_symbolic(fine);
         }
@@ -249,13 +282,58 @@ impl AMG {
         h.levels[0].a = fine.clone();
         h.levels[0].diag_inv = diag_inv_from_csr(&h.levels[0].a)?;
 
-        // Recompute all coarser A_l = R_{l-1} * A_{l-1} * P_{l-1}
+        // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
-            let a_coarse = rap(&h.levels[l].r, &h.levels[l].a, &h.levels[l].p)?;
-            let diag_inv = diag_inv_from_csr(&a_coarse)?;
-            if l + 1 < h.levels.len() {
+            // Recompute P_l values in-place using SA smoother with fixed pattern
+            let tp = TentativeP { agg_of: h.levels[l].agg_of.clone(), n_coarse: h.levels[l+1].a.nrows() };
+            let d_inv = &h.levels[l].diag_inv;
+            // Recompute P values under fixed pattern without borrowing P mutably during computation
+            let pr = h.levels[l].p.row_ptr().to_vec();
+            let pc = h.levels[l].p.col_idx().to_vec();
+            let mut p_new_vals = vec![0.0f64; pc.len()];
+            smooth_sa_values_only(
+                &h.levels[l].a,
+                d_inv,
+                &tp,
+                self.cfg.jacobi_omega,
+                &pr,
+                &pc,
+                &mut p_new_vals,
+            )?;
+            h.levels[l].p.values_mut().copy_from_slice(&p_new_vals);
+            // Update R values from P via precomputed transpose mapping
+            {
+                let pvals = h.levels[l].p.values().to_vec();
+                let p2r = h.levels[l].p2r_pos.clone();
+                let rvalsm = h.levels[l].r.values_mut();
+                for (pi, &ri) in p2r.iter().enumerate() {
+                    rvalsm[ri] = pvals[pi];
+                }
+            }
+            // Recompute A_{l+1} values by RAP numeric using fixed pattern
+            if let Some(ref pat) = h.levels[l].a_next_pat {
+                let nnz = pat.col_idx.len();
+                let mut vals = vec![0.0; nnz];
+                rap_numeric(
+                    pat,
+                    &h.levels[l].r,
+                    &h.levels[l].a,
+                    &h.levels[l].p,
+                    &mut vals,
+                );
+                h.levels[l + 1].a = CsrMatrix::from_csr(
+                    h.levels[l + 1].a.nrows(),
+                    h.levels[l + 1].a.ncols(),
+                    pat.row_ptr.clone(),
+                    pat.col_idx.clone(),
+                    vals,
+                );
+                h.levels[l + 1].diag_inv = diag_inv_from_csr(&h.levels[l + 1].a)?;
+            } else {
+                // Safety fallback: full RAP (structure + values)
+                let a_coarse = rap(&h.levels[l].r, &h.levels[l].a, &h.levels[l].p)?;
+                h.levels[l + 1].diag_inv = diag_inv_from_csr(&a_coarse)?;
                 h.levels[l + 1].a = a_coarse;
-                h.levels[l + 1].diag_inv = diag_inv;
             }
         }
 
@@ -317,8 +395,22 @@ impl AMG {
         let omega = h.omega;
 
         if level == lc {
-            // Coarsest: small CG (sparse)
-            cg_sparse(a, rhs, sol, self.cfg.tolerance, a.nrows().min(50))?;
+            // Coarsest: choose solver, with heuristic to use dense when tiny
+            let use_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
+                || a.nrows() <= self.cfg.max_coarse_size;
+            if use_dense {
+                let mut solver = CoarseDenseLu::new();
+                solver.setup(a)?;
+                solver.solve(rhs, sol)?;
+            } else {
+                match h.coarse_solve {
+                    CoarseSolve::CG | CoarseSolve::ILU => {
+                        // Fallback to CG; ILU path can be added later
+                        cg_sparse(a, rhs, sol, self.cfg.tolerance, a.nrows().min(50))?;
+                    }
+                    CoarseSolve::DirectDense => unreachable!(),
+                }
+            }
             return Ok(());
         }
 
@@ -374,6 +466,7 @@ impl AMG {
     pub fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         Preconditioner::apply(self, side, x, y)
     }
+    pub fn stats(&self) -> Option<AmgStats> { self.stats.clone() }
 }
 
 // ===== Preconditioner trait (new API) =======================================
@@ -395,6 +488,10 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(sid);
         self.last_vid = Some(vid);
+        // compute stats if available
+        if let Some(h) = &self.state {
+            self.stats = Some(AmgStats::from_hierarchy(h));
+        }
         Ok(())
     }
 
@@ -425,6 +522,7 @@ impl Preconditioner for AMG {
         self.refresh_numeric(&csr)?;
         self.csr = Some(csr);
         self.last_vid = Some(op.values_id());
+        if let Some(h) = &self.state { self.stats = Some(AmgStats::from_hierarchy(h)); }
         Ok(())
     }
 
@@ -434,6 +532,7 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(op.structure_id());
         self.last_vid = Some(op.values_id());
+        if let Some(h) = &self.state { self.stats = Some(AmgStats::from_hierarchy(h)); }
         Ok(())
     }
 }
@@ -456,79 +555,75 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
     let mut a_cur = fine.clone();
 
     // Level 0 (finest)
-    let mut l0 = AMGLevel {
+    let l0 = AMGLevel {
         diag_inv: diag_inv_from_csr(&a_cur)?,
         a: a_cur.clone(),
         p: CsrMatrix::identity(a_cur.nrows()), // placeholder; updated after coarsening step
         r: CsrMatrix::identity(a_cur.nrows()),
+        agg_of: (0..a_cur.nrows()).collect(), // identity initially
+        p2r_pos: Vec::new(),
+        a_next_pat: None,
     };
-    levels.push(l0.clone());
+    levels.push(l0);
 
-    // Drive coarsening
+    // Drive coarsening: build levels 0..L (inclusive L is coarsest)
     for _level in 0..cfg.max_levels {
         let n = a_cur.nrows();
         if n <= cfg.coarse_threshold || n <= cfg.min_coarse_size { break; }
 
-        // Strength-of-connection & aggregation on dense view (robust, simple)
-        let a_dense = a_cur.to_dense();
-        let threshold = compute_adaptive_threshold(&a_dense, cfg.strong_threshold);
-        let strength = compute_strength_matrix(&a_dense, threshold);
+        // 1) Strength of connection (sparse)
+        let s = Strength::from_csr(&a_cur, cfg.strong_threshold, cfg.normalize_strength);
+        // 2) Aggregates
+        let agg = build_aggregates(&s, match cfg.coarsen_type { CoarsenType::RS => AggAlgo::RSGreedy, CoarsenType::HMIS => AggAlgo::HMIS, CoarsenType::PMIS => AggAlgo::PMIS, CoarsenType::Falgout => AggAlgo::HMIS });
+        let tp = TentativeP { n_coarse: 1 + agg.iter().copied().max().unwrap_or(0), agg_of: agg.clone() };
+        // 3) Smoothed aggregation P (sparse-only)
+        let p_csr: Pcsr = smooth_tentative_sa(
+            &a_cur,
+            &diag_inv_from_csr(&a_cur)?,
+            &tp,
+            cfg.jacobi_omega,
+            cfg.interpolation_truncation,
+            cfg.max_elements_per_row,
+        );
+        // Build owned CSR for P and R
+        let p = CsrMatrix::from_csr(p_csr.m, p_csr.n, p_csr.row_ptr.clone(), p_csr.col_idx.clone(), p_csr.vals.clone());
+        // R = P^T pattern and values
+        let (r_row_ptr, r_col_idx, r_vals, p2r_pos) = transpose_csr_with_pos(&p_csr);
+        let r = CsrMatrix::from_csr(p_csr.n, p_csr.m, r_row_ptr.clone(), r_col_idx.clone(), r_vals.clone());
 
-        let aggregates = match cfg.coarsen_type {
-            CoarsenType::HMIS | CoarsenType::PMIS | CoarsenType::Falgout => {
-                double_pairwise_aggregation(&strength)
-            }
-            CoarsenType::RS => greedy_aggregation(&strength),
-        };
+        // 4) Coarse operator A_c symbolic and numeric
+        let pat = rap_symbolic(&r, &a_cur, &p);
+        let mut a_coarse_vals = vec![0.0; pat.col_idx.len()];
+        rap_numeric(&pat, &r, &a_cur, &p, &mut a_coarse_vals);
+        let a_coarse = CsrMatrix::from_csr(pat.nrows, pat.ncols, pat.row_ptr.clone(), pat.col_idx.clone(), a_coarse_vals);
+        let diag_inv_coarse = diag_inv_from_csr(&a_coarse)?;
 
-        // Build dense prolongation and restriction, then sparsify
-        let mut p_dense = construct_prolongation(&a_dense, &aggregates);
-        match cfg.interp_type {
-            InterpType::Extended | InterpType::Standard => {
-                smooth_interpolation(&mut p_dense, &a_dense, 0.5);
-                minimize_energy(&mut p_dense, &a_dense);
-            }
-            _ => {}
+        // Replace previous temporary P/R by actual inter-level transfers and agg mapping
+        if let Some(prev) = levels.last_mut() {
+            prev.p = p.clone();
+            prev.r = r.clone();
+            prev.agg_of = tp.agg_of.clone();
+            prev.p2r_pos = p2r_pos;
+            prev.a_next_pat = Some(pat.clone());
         }
-        let p = CsrMatrix::from_dense(&p_dense, cfg.drop_tol);
-        // `p_dense.transpose()` returns a view type; build an owned transpose
-        // so `from_dense` gets an owned `Mat<f64>` as expected.
-        let mut p_t_dense = Mat::<f64>::zeros(p_dense.ncols(), p_dense.nrows());
-        for i in 0..p_dense.nrows() {
-            for j in 0..p_dense.ncols() {
-                p_t_dense[(j, i)] = p_dense[(i, j)];
-            }
-        }
-        let r = CsrMatrix::from_dense(&p_t_dense, cfg.drop_tol);
 
-        // Coarse operator via RAP
-        let a_coarse = rap(&r, &a_cur, &p)?;
-        let diag_inv = diag_inv_from_csr(&a_coarse)?;
-
-        // Append level: the last "p/r" connect this level to the next one
-        levels.pop(); // replace previous temporary P/R
-        levels.push(AMGLevel { a: a_cur.clone(), p: p.clone(), r: r.clone(), diag_inv: diag_inv_from_csr(&a_cur)? });
-
-        // Next level (coarser) placeholder; P/R will be set when/if we coarsen again
-        a_cur = a_coarse;
-        let diag_inv_next = diag_inv.clone();
+        // Next level (coarser)
+        a_cur = a_coarse.clone();
         levels.push(AMGLevel {
-            a: a_cur.clone(),
+            a: a_coarse,
             p: CsrMatrix::identity(a_cur.nrows()),
             r: CsrMatrix::identity(a_cur.nrows()),
-            diag_inv: diag_inv_next,
+            diag_inv: diag_inv_coarse,
+            agg_of: (0..a_cur.nrows()).collect(),
+            p2r_pos: Vec::new(),
+            a_next_pat: None,
         });
 
         if a_cur.nrows() >= n { break; } // stalled
         if a_cur.nrows() <= cfg.max_coarse_size { break; }
-    }
-
-    // Ensure last level is coarsest (identity transfer)
-    if let Some(last) = levels.last() {
-        if last.p.nrows() != last.p.ncols() {
-            let lc = levels.len() - 1;
-            levels[lc].p = CsrMatrix::identity(levels[lc].a.nrows());
-            levels[lc].r = CsrMatrix::identity(levels[lc].a.nrows());
+        if let Some(limit) = cfg.max_operator_complexity {
+            let oc = operator_complexity_estimate(&levels);
+            if oc > limit { break; }
         }
     }
 
@@ -536,6 +631,7 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
         pre_sweeps: cfg.pre_sweeps,
         post_sweeps: cfg.post_sweeps,
         omega: cfg.jacobi_omega,
+        coarse_solve: cfg.coarse_solve,
         levels,
     })
 }
@@ -820,4 +916,63 @@ fn cg_sparse(a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], tol: f64, maxit: usiz
 fn dot(x: &[f64], y: &[f64]) -> f64 {
     #[cfg(feature = "rayon")] { x.par_iter().zip(y.par_iter()).map(|(a,b)| a*b).sum() }
     #[cfg(not(feature = "rayon"))] { x.iter().zip(y.iter()).map(|(a,b)| a*b).sum() }
+}
+
+// ===== Helpers for transpose mapping and stats ==============================
+
+#[derive(Clone, Debug)]
+pub struct AmgStats {
+    pub grid_complexity: f64,
+    pub operator_complexity: f64,
+    pub num_levels: usize,
+}
+
+impl AmgStats {
+    fn from_hierarchy(h: &AmgHierarchy) -> Self {
+        let n0 = h.levels.first().map(|l| l.a.nrows() as f64).unwrap_or(1.0);
+        let nnz0 = h.levels.first().map(|l| l.a.nnz() as f64).unwrap_or(1.0);
+        let mut ng_sum = 0.0;
+        let mut nnz_sum = 0.0;
+        for l in &h.levels {
+            ng_sum += l.a.nrows() as f64;
+            nnz_sum += l.a.nnz() as f64;
+        }
+        Self {
+            grid_complexity: ng_sum / n0,
+            operator_complexity: nnz_sum / nnz0,
+            num_levels: h.levels.len(),
+        }
+    }
+}
+
+fn operator_complexity_estimate(levels: &[AMGLevel]) -> f64 {
+    if levels.is_empty() { return 0.0; }
+    let nnz0 = levels[0].a.nnz() as f64;
+    let nnz_sum: f64 = levels.iter().map(|l| l.a.nnz() as f64).sum();
+    nnz_sum / nnz0
+}
+
+fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>) {
+    // Compute transpose pattern and values, and mapping from P entry index -> R entry index
+    let (m, n) = (p.m, p.n);
+    let nnz = p.col_idx.len();
+    let mut r_row_counts = vec![0usize; n + 1];
+    for &cj in &p.col_idx { r_row_counts[cj + 1] += 1; }
+    for i in 0..n { r_row_counts[i + 1] += r_row_counts[i]; }
+    let mut r_col_idx = vec![0usize; nnz];
+    let mut r_vals = vec![0.0f64; nnz];
+    let mut r_row_next = r_row_counts.clone();
+    let mut p2r_pos = vec![0usize; nnz];
+    for i in 0..m {
+        let rs = p.row_ptr[i]; let re = p.row_ptr[i+1];
+        for pi in rs..re {
+            let cj = p.col_idx[pi];
+            let dest = r_row_next[cj];
+            r_col_idx[dest] = i;
+            r_vals[dest] = p.vals[pi];
+            p2r_pos[pi] = dest;
+            r_row_next[cj] += 1;
+        }
+    }
+    (r_row_counts, r_col_idx, r_vals, p2r_pos)
 }
