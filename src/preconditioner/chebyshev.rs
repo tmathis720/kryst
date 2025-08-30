@@ -29,6 +29,12 @@
 use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::preconditioner::legacy::Preconditioner;
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::matrix::op::LinOp;
+use crate::matrix::convert::csr_from_linop;
+use crate::matrix::sparse::CsrMatrix;
+use std::sync::Arc;
+use std::sync::Mutex;
 use faer::Mat;
 
 /// Chebyshev polynomial preconditioner struct
@@ -84,7 +90,8 @@ impl ChebyshevPre {
 
         for _ in 0..max_iters {
             // Apply matrix
-            matrix.matvec(&v, &mut av);
+            // Disambiguate: call the LinOp variant of matvec
+            crate::matrix::op::LinOp::matvec(matrix, &v, &mut av);
 
             // Rayleigh quotient
             let new_lambda_max: f64 = v.iter().zip(av.iter()).map(|(&vi, &avi)| vi * avi).sum();
@@ -280,6 +287,130 @@ fn chebyshev_t<T: num_traits::Float>(m: usize, x: T) -> T {
             t1 = t2;
         }
         t1
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Object-safe Chebyshev preconditioner using CSR and LinOp.
+// -----------------------------------------------------------------------------
+
+struct ChebScratch {
+    v0: Vec<f64>,
+    v1: Vec<f64>,
+    v2: Vec<f64>,
+}
+
+impl Default for ChebScratch {
+    fn default() -> Self {
+        Self { v0: Vec::new(), v1: Vec::new(), v2: Vec::new() }
+    }
+}
+
+/// Object-safe Chebyshev preconditioner
+pub struct ChebyshevPc {
+    degree: usize,
+    lambda_min: f64,
+    lambda_max: f64,
+    a_csr: Option<Arc<CsrMatrix<f64>>>,
+    n: usize,
+    scratch: Mutex<ChebScratch>,
+}
+
+impl ChebyshevPc {
+    pub fn new(degree: usize, lambda_min: f64, lambda_max: f64) -> Self {
+        Self {
+            degree,
+            lambda_min,
+            lambda_max,
+            a_csr: None,
+            n: 0,
+            scratch: Mutex::new(ChebScratch::default()),
+        }
+    }
+}
+
+impl ObjPreconditioner for ChebyshevPc {
+    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), crate::error::KError> {
+        let csr = csr_from_linop(op, 0.0)?;
+        let n = csr.nrows();
+        self.a_csr = Some(csr);
+        self.n = n;
+        // ensure scratch
+        let mut s = self.scratch.lock().unwrap();
+        if s.v0.len() != n { s.v0.resize(n, 0.0); }
+        if s.v1.len() != n { s.v1.resize(n, 0.0); }
+        if s.v2.len() != n { s.v2.resize(n, 0.0); }
+        Ok(())
+    }
+
+    fn supports_numeric_update(&self) -> bool { true }
+
+    fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), crate::error::KError> {
+        // For now, refresh CSR view and keep degree/spectrum
+        let csr = csr_from_linop(op, 0.0)?;
+        self.a_csr = Some(csr);
+        Ok(())
+    }
+
+    fn apply(&self, _side: crate::preconditioner::PcSide, r: &[f64], z: &mut [f64]) -> Result<(), crate::error::KError> {
+        use crate::error::KError;
+        let a = self.a_csr.as_ref().ok_or_else(|| KError::InvalidInput("ChebyshevPc not setup".into()))?;
+        if r.len() != self.n || z.len() != self.n {
+            return Err(KError::InvalidInput("dimension mismatch in ChebyshevPc::apply".into()));
+        }
+
+        let n = self.n;
+        let mut s = self.scratch.lock().unwrap();
+        // tau scaling to make p_m(0) ~ 1
+        let c = (self.lambda_max + self.lambda_min) / 2.0;
+        let d = (self.lambda_max - self.lambda_min) / 2.0;
+        if d.abs() < f64::EPSILON {
+            // Degenerate spectrum: copy input
+            z.copy_from_slice(r);
+            return Ok(());
+        }
+        let tau = 1.0 / chebyshev_t(self.degree, (0.0 - c) / d);
+
+        if self.degree == 0 {
+            z.copy_from_slice(r);
+            return Ok(());
+        }
+
+        // v1 = (A r - c r) / d
+        a.spmv_scaled(1.0, r, 0.0, &mut s.v1)?;
+        for i in 0..n { s.v1[i] = (s.v1[i] - c * r[i]) / d; }
+        if self.degree == 1 {
+            for i in 0..n { z[i] = tau * s.v1[i]; }
+            return Ok(());
+        }
+
+        // Set v0 = r for the recurrence
+        s.v0[..n].copy_from_slice(r);
+
+        // Recurrence for k = 2..=m
+        for _k in 2..=self.degree {
+            // v2 = 2 * ((A v1 - c v1)/d) - v0
+            // Clone v1 into a temporary to satisfy borrow checker without unsafe.
+            let v1_tmp = s.v1.clone();
+            a.spmv_scaled(1.0, &v1_tmp, 0.0, &mut s.v2)?;
+            for i in 0..n {
+                s.v2[i] = 2.0 * ((s.v2[i] - c * s.v1[i]) / d) - s.v0[i];
+            }
+            // rotate: v0 <- v1, v1 <- v2, v2 <- old v0
+            let t0 = std::mem::take(&mut s.v0);
+            let t1 = std::mem::take(&mut s.v1);
+            let t2 = std::mem::take(&mut s.v2);
+            s.v0 = t1;
+            s.v1 = t2;
+            s.v2 = t0;
+        }
+
+        for i in 0..n { z[i] = tau * s.v1[i]; }
+        Ok(())
+    }
+
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Csr
     }
 }
 

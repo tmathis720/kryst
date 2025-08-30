@@ -21,6 +21,12 @@
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
 use crate::preconditioner::{PcSide, legacy::Preconditioner};
+use crate::matrix::convert::csr_from_linop;
+use crate::matrix::op::LinOp;
+use crate::matrix::sparse::CsrMatrix;
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use std::sync::Arc;
+use std::sync::Mutex;
 use bitflags::bitflags;
 use num_traits::Float;
 use std::fmt;
@@ -225,3 +231,167 @@ where
 
 #[cfg(all(test, feature = "legacy-pc-bridge"))]
 mod tests_symmetric;
+
+// -----------------------------------------------------------------------------
+// Object-safe SOR preconditioner over LinOp + CSR
+// -----------------------------------------------------------------------------
+
+/// Object-safe SOR/SSOR preconditioner operating on `&dyn LinOp<S=f64>`.
+pub struct SorPc {
+    omega: f64,
+    sweeps: usize,
+    mat_side: MatSorType,
+    fshift: f64,
+    a_csr: Option<Arc<CsrMatrix<f64>>>,
+    inv_diag: Vec<f64>,
+    n: usize,
+    scratch: Mutex<Vec<f64>>, // reuse for symmetric sweep without heap activity
+}
+
+impl SorPc {
+    pub fn new(omega: f64, sweeps: usize, mat_side: MatSorType, fshift: f64) -> Self {
+        Self {
+            omega,
+            sweeps,
+            mat_side,
+            fshift,
+            a_csr: None,
+            inv_diag: Vec::new(),
+            n: 0,
+            scratch: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn ensure_inv_diag(&mut self, a: &CsrMatrix<f64>) -> Result<(), KError> {
+        let n = a.nrows().min(a.ncols());
+        self.inv_diag.resize(n, 0.0);
+        for i in 0..n {
+            let rs = a.row_ptr()[i];
+            let re = a.row_ptr()[i + 1];
+            let mut aii = 0.0;
+            for p in rs..re {
+                if a.col_idx()[p] == i {
+                    aii = a.values()[p];
+                    break;
+                }
+            }
+            let aii_shift = aii + self.fshift;
+            if aii_shift == 0.0 {
+                return Err(KError::ZeroPivot(i));
+            }
+            self.inv_diag[i] = 1.0 / aii_shift;
+        }
+        self.n = n;
+        // resize scratch once
+        let mut s = self.scratch.lock().unwrap();
+        if s.len() != n {
+            s.resize(n, 0.0);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn forward_sweep(&self, a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+        let n = self.n;
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let eisenstat = self.mat_side.contains(MatSorType::EISENSTAT);
+        for i in 0..n {
+            let mut sigma = 0.0;
+            let rs = rp[i];
+            let re = rp[i + 1];
+            for p in rs..re {
+                let j = cj[p];
+                if j < i {
+                    sigma = f64::mul_add(vv[p], y[j], sigma);
+                } else if !eisenstat && j > i {
+                    sigma = f64::mul_add(vv[p], x[j], sigma);
+                }
+            }
+            let xi = x[i];
+            let yi = (xi - sigma) * self.inv_diag[i];
+            y[i] = yi;
+        }
+    }
+
+    #[inline]
+    fn backward_sweep(&self, a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+        let n = self.n;
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let eisenstat = self.mat_side.contains(MatSorType::EISENSTAT);
+        for ii in (0..n).rev() {
+            let mut sigma = 0.0;
+            let rs = rp[ii];
+            let re = rp[ii + 1];
+            for p in rs..re {
+                let j = cj[p];
+                if j > ii {
+                    sigma = f64::mul_add(vv[p], y[j], sigma);
+                } else if !eisenstat && j < ii {
+                    sigma = f64::mul_add(vv[p], y[j], sigma);
+                }
+            }
+            let xi = x[ii];
+            let yi = (xi - sigma) * self.inv_diag[ii];
+            y[ii] = (1.0 - self.omega) * xi + self.omega * yi;
+        }
+    }
+}
+
+impl ObjPreconditioner for SorPc {
+    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let csr = csr_from_linop(op, 0.0)?;
+        self.a_csr = Some(csr.clone());
+        self.ensure_inv_diag(&csr)
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+
+    fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        // Re-extract CSR (values may have changed) and recompute inverse diagonal
+        let csr = csr_from_linop(op, 0.0)?;
+        self.a_csr = Some(csr.clone());
+        self.ensure_inv_diag(&csr)
+    }
+
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        let a = self
+            .a_csr
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("SOR not setup".into()))?;
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput("dimension mismatch in SorPc::apply".into()));
+        }
+        for _ in 0..self.sweeps {
+            match (side, self.mat_side) {
+                (_, s) if s.contains(MatSorType::SYMMETRIC_SWEEP) => {
+                    // forward then backward using scratch
+                    self.forward_sweep(a, x, y);
+                    let mut s = self.scratch.lock().unwrap();
+                    s.copy_from_slice(y);
+                    self.backward_sweep(a, &s, y);
+                }
+                (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_LOWER) => {
+                    self.forward_sweep(a, x, y);
+                }
+                (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_UPPER) => {
+                    self.backward_sweep(a, x, y);
+                }
+                _ => {
+                    // default to forward if unspecified
+                    self.forward_sweep(a, x, y);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Csr
+    }
+}

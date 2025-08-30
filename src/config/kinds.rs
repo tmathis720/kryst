@@ -4,7 +4,7 @@ use std::str::FromStr;
 use crate::error::KError;
 
 #[inline]
-pub fn invalid_choice(field: &'static str, value: &str, allowed: &[&'static str]) -> KError {
+pub fn invalid_choice(field: &str, value: &str, allowed: &[&'static str]) -> KError {
     KError::SolveError(format!(
         "Invalid {field}: '{value}'. Allowed: {}",
         allowed.join(", ")
@@ -31,7 +31,10 @@ macro_rules! simple_kind {
                 let s = raw.to_ascii_lowercase();
                 match s.as_str() {
                     $( $s => Ok(Self::$v), )+
-                    other => Err(invalid_choice(stringify!($Name).to_ascii_lowercase().as_str(), other, Self::allowed())),
+                    other => {
+                        let name_lower = stringify!($Name).to_ascii_lowercase();
+                        Err(invalid_choice(name_lower.as_str(), other, Self::allowed()))
+                    },
                 }
             }
         }
@@ -92,4 +95,3 @@ simple_kind! {
 simple_kind! {
     pub enum AsmBlockSolverKind { Ludense => "ludense", Csr => "csr" }
 }
-

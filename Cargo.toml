@@ -63,3 +63,23 @@ legacy-pc-bridge = []
 [[example]]
 name = "mpi_amg_gmres_demo"
 required-features = ["mpi_examples"]
+
+[[bench]]
+name = "rap"
+harness = false
+
+[[bench]]
+name = "tri_solve"
+harness = false
+
+[[bench]]
+name = "submatrix"
+harness = false
+
+[[bench]]
+name = "apply_no_alloc"
+harness = false
+
+[[bench]]
+name = "direct_vs_faer"
+harness = false

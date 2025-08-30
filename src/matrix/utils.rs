@@ -162,26 +162,27 @@ pub fn spgemm_with_drop_tol(
         let row_tail = cols.len();
         cols[row_head..row_tail].sort_unstable();
 
-        // Compact in-place while pushing values to `vals`
+        // Compact in-place while merging duplicates and applying drop tolerance.
+        // Because cols[row_head..row_tail] is sorted, equal columns are grouped.
         let mut write = row_head;
-        for read in row_head..row_tail {
-            let j = cols[read];
-            let v = acc[j];
-
-            // reset accumulator for the next row
-            acc[j] = 0.0;
-            // clear mark to avoid long-lived marks (optional; not strictly required)
-            mark[j] = usize::MAX;
-
-            if v.abs() > drop_tol {
-                cols[write] = j;
-                vals.push(v);
+        let mut read = row_head;
+        while read < row_tail {
+            let j0 = cols[read];
+            // The accumulator already holds the full sum for j0; skip any duplicates
+            let sum = acc[j0];
+            // advance read past all instances of j0
+            while read < row_tail && cols[read] == j0 { read += 1; }
+            // reset for next row
+            acc[j0] = 0.0;
+            mark[j0] = usize::MAX;
+            if sum.abs() > drop_tol {
+                cols[write] = j0;
+                vals.push(sum);
                 write += 1;
             }
-            // else: drop this column
+            // else: drop this column entirely
         }
-
-        // Remove dropped columns from `cols`
+        // Remove dropped columns from `cols` for this row
         cols.truncate(write);
 
         row_ptr.push(vals.len());
@@ -196,6 +197,59 @@ pub fn spgemm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, 
     spgemm_with_drop_tol(a, b, 1e-12)
 }
 
+/// Baseline Sparse C = A * B using per-row BTreeMap accumulation.
+///
+/// This implementation is intentionally simple and allocation-heavy to serve
+/// as a comparison baseline for optimized kernels in benchmarks.
+pub fn spgemm_btree(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, KError> {
+    use std::collections::BTreeMap;
+
+    if a.ncols() != b.nrows() {
+        return Err(KError::InvalidInput(format!(
+            "spgemm_btree: dimension mismatch A is {}x{}, B is {}x{}",
+            a.nrows(),
+            a.ncols(),
+            b.nrows(),
+            b.ncols()
+        )));
+    }
+
+    let m = a.nrows();
+    let n = b.ncols();
+    let ap = a.row_ptr();
+    let aj = a.col_idx();
+    let av = a.values();
+    let bp = b.row_ptr();
+    let bj = b.col_idx();
+    let bv = b.values();
+
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    row_ptr.push(0);
+
+    for i in 0..m {
+        let mut acc: BTreeMap<usize, f64> = BTreeMap::new();
+        for kk in ap[i]..ap[i + 1] {
+            let k = aj[kk];
+            let aik = av[kk];
+            for jj in bp[k]..bp[k + 1] {
+                let j = bj[jj];
+                *acc.entry(j).or_insert(0.0) += aik * bv[jj];
+            }
+        }
+        for (j, v) in acc.into_iter() {
+            if v != 0.0 {
+                col_idx.push(j);
+                vals.push(v);
+            }
+        }
+        row_ptr.push(col_idx.len());
+    }
+
+    Ok(CsrMatrix::from_csr(m, n, row_ptr, col_idx, vals))
+}
+
 /// Sparse Galerkin product: C = R * A * P
 /// with all inputs CSR, via two SpGEMMs.
 pub fn sparse_galerkin_product(
@@ -207,6 +261,27 @@ pub fn sparse_galerkin_product(
     let ap = spgemm(matrix, interpolation)?;
     // Step 2: C = R * T
     spgemm(restriction, &ap)
+}
+
+/// Baseline RAP (triple product) using the `spgemm_btree` baseline twice.
+pub fn rap_btree(
+    restriction: &CsrMatrix<f64>,
+    matrix: &CsrMatrix<f64>,
+    interpolation: &CsrMatrix<f64>,
+) -> Result<CsrMatrix<f64>, KError> {
+    let ap = spgemm_btree(matrix, interpolation)?;
+    spgemm_btree(restriction, &ap)
+}
+
+/// Optimized RAP wrapper to keep a stable API for benchmarks.
+/// Currently composes two calls to the optimized SpGEMM.
+#[inline]
+pub fn rap_opt(
+    restriction: &CsrMatrix<f64>,
+    matrix: &CsrMatrix<f64>,
+    interpolation: &CsrMatrix<f64>,
+) -> Result<CsrMatrix<f64>, KError> {
+    sparse_galerkin_product(restriction, matrix, interpolation)
 }
 
 /// Apply HYPRE-style truncation to interpolation matrix

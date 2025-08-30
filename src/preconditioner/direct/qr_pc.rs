@@ -20,8 +20,10 @@ impl Preconditioner for QrPc {
     }
 
     fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
-        z.copy_from_slice(r);
-        Ok(())
+        let _ = (r, z);
+        Err(KError::Unsupported(
+            "QrPc is PREONLY-only; use SolverType::Preonly or call direct_solve",
+        ))
     }
 
     fn direct_solve(

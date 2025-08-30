@@ -7,19 +7,15 @@ use crate::preconditioner::{
 };
 
 #[cfg(feature = "legacy-pc-bridge")]
-use crate::preconditioner::{
-    chebyshev::ChebyshevPre,
-    sor::Sor,
-    LegacyOpPreconditioner,
-    ilup::Ilup,
-    ilut::Ilut,
-};
+use crate::preconditioner::{ilup::Ilup, ilut::Ilut, LegacyOpPreconditioner};
+
+use crate::preconditioner::sor::SorPc;
+use crate::preconditioner::chebyshev::ChebyshevPc;
 
 #[cfg(feature = "superlu_dist")]
 use crate::preconditioner::direct::SuperLuDistPc;
 
-#[cfg(feature = "legacy-pc-bridge")]
-use faer::Mat;
+// no faer::Mat needed here for object-safe builders
 
 /// Build a Jacobi preconditioner.
 pub fn build_jacobi() -> Result<Box<dyn Preconditioner>, KError> {
@@ -43,19 +39,8 @@ pub fn build_sor(
     mat_side: MatSorType,
     _symmetric: bool,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    #[cfg(feature = "legacy-pc-bridge")]
-    {
-        let sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(omega, sweeps, 0, mat_side, 0.0);
-        return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(sor))));
-    }
-    #[cfg(not(feature = "legacy-pc-bridge"))]
-    {
-        // avoid unused parameter warnings when the legacy bridge is disabled
-        let _ = (omega, sweeps, mat_side);
-        Err(KError::Unsupported(
-            "SOR requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-        ))
-    }
+    let pc = SorPc::new(omega, sweeps, mat_side, 0.0);
+    Ok(Box::new(pc))
 }
 
 /// Build a Chebyshev preconditioner.
@@ -64,19 +49,8 @@ pub fn build_chebyshev(
     eig_lo: f64,
     eig_hi: f64,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    #[cfg(feature = "legacy-pc-bridge")]
-    {
-        let pre = ChebyshevPre::new(Mat::zeros(0, 0), degree, eig_lo, eig_hi);
-        return Ok(Box::new(LegacyOpPreconditioner::new(Box::new(pre))));
-    }
-    #[cfg(not(feature = "legacy-pc-bridge"))]
-    {
-        // avoid unused parameter warnings when the legacy bridge is disabled
-        let _ = (degree, eig_lo, eig_hi);
-        Err(KError::Unsupported(
-            "Chebyshev requires --features legacy-pc-bridge (or port to modern Preconditioner)",
-        ))
-    }
+    let pc = ChebyshevPc::new(degree, eig_lo, eig_hi);
+    Ok(Box::new(pc))
 }
 
 pub fn build_lu() -> Result<Box<dyn Preconditioner>, KError> {
