@@ -92,12 +92,40 @@ impl DistCsrOp {
             cols.sort_unstable();
             cols.dedup();
         }
-        // determine neighbors from recv lists
-        let mut neighbors: Vec<i32> = Vec::new();
-        for (r, cols) in need_from.iter().enumerate() {
-            if !cols.is_empty() && r != my_rank {
-                neighbors.push(r as i32);
+        // ---- Phase A: counts exchange with all ranks ----
+        let mut counts_out: Vec<u64> = vec![0; size];
+        for r in 0..size {
+            if r != my_rank {
+                counts_out[r] = need_from[r].len() as u64;
             }
+        }
+        let mut counts_in: Vec<u64> = vec![0; size];
+        let peers: Vec<usize> = (0..size).filter(|&r| r != my_rank).collect();
+        {
+            let mut reqs_counts: Vec<<UniverseComm as Comm>::Request<'_>> = Vec::new();
+            let mut counts_in_buf: Vec<u64> = vec![0; peers.len()];
+            // Post receives into disjoint 1-word slices using split_at_mut
+            {
+                let mut tail: &mut [u64] = counts_in_buf.as_mut_slice();
+                for &r in &peers {
+                    let (chunk, rest) = tail.split_at_mut(1);
+                    reqs_counts.push(comm.irecv_from_u64(chunk, r as i32));
+                    tail = rest;
+                }
+            }
+            // Send our counts to peers
+            for &r in &peers {
+                reqs_counts.push(comm.isend_to_u64(std::slice::from_ref(&counts_out[r]), r as i32));
+            }
+            comm.wait_all(&mut reqs_counts);
+            for (i, &r) in peers.iter().enumerate() { counts_in[r] = counts_in_buf[i]; }
+        }
+
+        // Union neighbors: ranks we need from OR ranks that need from us
+        let mut neighbors: Vec<i32> = Vec::new();
+        for r in 0..size {
+            if r == my_rank { continue; }
+            if counts_out[r] > 0 || counts_in[r] > 0 { neighbors.push(r as i32); }
         }
         // assign halo indices and build g2l mapping
         let mut g2l: HashMap<usize, usize> = HashMap::new();
@@ -119,14 +147,61 @@ impl DistCsrOp {
         }
         let n_halo = halo - n_local;
 
-        let send_lists: Vec<Vec<usize>> = vec![Vec::new(); size];
-        let mut send_idx = Vec::new();
-        let mut send_disp = Vec::with_capacity(neighbors.len() + 1);
-        send_disp.push(0);
+        // ---- Phase B: exchange the actual index vectors with neighbors ----
+        // Receive lists of columns that neighbors need from us
+        let sizes: Vec<usize> = neighbors
+            .iter()
+            .map(|&nb| counts_in[nb as usize] as usize)
+            .collect();
+        let mut recv_their_needs: Vec<Vec<u64>> = sizes.iter().map(|&n| vec![0u64; n]).collect();
+        let mut reqs: Vec<<UniverseComm as Comm>::Request<'_>> = Vec::new();
+        for (buf, &nb) in recv_their_needs.iter_mut().zip(neighbors.iter()) {
+            if !buf.is_empty() {
+                reqs.push(comm.irecv_from_u64(buf.as_mut_slice(), nb));
+            }
+        }
+        // Send our needs to neighbors; keep buffers alive until completion
+        let mut tmp_sends: Vec<Vec<u64>> = Vec::with_capacity(neighbors.len());
         for &nb in &neighbors {
-            let cols = &send_lists[nb as usize];
-            send_idx.extend_from_slice(cols);
+            let cols = &need_from[nb as usize];
+            if cols.is_empty() {
+                tmp_sends.push(Vec::new());
+            } else {
+                tmp_sends.push(cols.iter().map(|&c| c as u64).collect());
+            }
+        }
+        for (k, &nb) in neighbors.iter().enumerate() {
+            let t = &tmp_sends[k];
+            if !t.is_empty() {
+                reqs.push(comm.isend_to_u64(t.as_slice(), nb));
+            }
+        }
+        comm.wait_all(&mut reqs);
+        reqs.clear();
+
+        // Build send_idx/send_disp from the indices neighbors requested from us
+        let mut send_idx: Vec<usize> = Vec::new();
+        let mut send_disp: Vec<usize> = Vec::with_capacity(neighbors.len() + 1);
+        send_disp.push(0);
+        for (k, &nb) in neighbors.iter().enumerate() {
+            let mut v = std::mem::take(&mut recv_their_needs[k]);
+            v.sort_unstable();
+            v.dedup();
+            for g in &v {
+                debug_assert!((*g as usize) >= row_start && (*g as usize) < row_end,
+                    "Neighbor {} requested column {} not owned by rank {} [{}, {})",
+                    nb, g, my_rank, row_start, row_end);
+            }
+            send_idx.extend(v.into_iter().map(|z| z as usize));
             send_disp.push(send_idx.len());
+        }
+
+        // Minimal runtime checks
+        for &g in &send_idx {
+            debug_assert!(g >= row_start && g < row_end, "send_idx contains nonlocal col {}", g);
+        }
+        for &g in &recv_idx {
+            debug_assert!(owner_of_row(g, part_prefix) != my_rank, "recv_idx contains local col {}", g);
         }
 
         // Build CSR blocks
@@ -197,11 +272,18 @@ impl DistCsrOp {
         let mut x_halo = self.x_halo.lock().unwrap();
         let mut reqs: Vec<<UniverseComm as Comm>::Request<'_>> = Vec::new();
         let comm = &self.comm;
+        // Post nonblocking receives into disjoint, increasing slices using split_at_mut
+        let mut tail: &mut [f64] = &mut recv_buf[..];
+        let mut running_off = 0usize;
         for (k, &nb) in self.neighbors.iter().enumerate() {
             let off = self.recv_disp[k];
             let cnt = self.recv_disp[k + 1] - off;
             if cnt > 0 {
-                reqs.push(comm.irecv_from(&mut recv_buf[off..off + cnt], nb));
+                debug_assert_eq!(off, running_off);
+                let (chunk, rest) = tail.split_at_mut(cnt);
+                reqs.push(comm.irecv_from(chunk, nb));
+                tail = rest;
+                running_off += cnt;
             }
         }
         send_buf.resize(self.send_idx.len(), 0.0);
@@ -219,6 +301,8 @@ impl DistCsrOp {
         y_local.fill(0.0);
         self.a_on.spmv_scaled(1.0, x_local, 1.0, y_local)?;
         comm.wait_all(&mut reqs);
+        // Drop requests to release borrows before reading recv_buf
+        drop(reqs);
         x_halo.copy_from_slice(&recv_buf[..self.n_halo]);
         self.a_off.spmv_scaled(1.0, &x_halo, 1.0, y_local)?;
         Ok(())

@@ -14,6 +14,7 @@
 
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
+use mpi::raw::AsRaw;
 use std::sync::{Arc, OnceLock};
 
 /// MPI communicator wrapper for distributed parallelism.
@@ -63,7 +64,7 @@ impl MpiComm {
 
 impl super::Comm for MpiComm {
     type Vec = Vec<f64>;
-    type Request<'a> = ();
+    type Request<'a> = super::MpiRequest<'a>;
 
     /// Returns the rank (ID) of this process.
     fn rank(&self) -> usize {
@@ -176,12 +177,85 @@ impl super::Comm for MpiComm {
     }
 
     fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
-        self.world.process_at_rank(src).receive_into(buf);
-        ()
+        // Nonblocking receive via raw MPI
+        let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+        let count = buf.len() as i32;
+        let comm_raw = self.world.as_raw();
+        let rc = unsafe {
+            mpi::ffi::MPI_Irecv(
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                count,
+                mpi::ffi::RSMPI_DOUBLE,
+                src as i32,
+                0,
+                comm_raw,
+                &mut req,
+            )
+        };
+        debug_assert_eq!(rc, 0);
+        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
     }
     fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
-        self.world.process_at_rank(dest).send(buf);
-        ()
+        // Nonblocking send via raw MPI
+        let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+        let count = buf.len() as i32;
+        let comm_raw = self.world.as_raw();
+        let rc = unsafe {
+            mpi::ffi::MPI_Isend(
+                buf.as_ptr() as *const std::ffi::c_void,
+                count,
+                mpi::ffi::RSMPI_DOUBLE,
+                dest as i32,
+                0,
+                comm_raw,
+                &mut req,
+            )
+        };
+        debug_assert_eq!(rc, 0);
+        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
     }
-    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
+    fn irecv_from_u64<'a>(&'a self, buf: &'a mut [u64], src: i32) -> Self::Request<'a> {
+        // Nonblocking receive of u64 via raw MPI
+        let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+        let count = buf.len() as i32;
+        let comm_raw = self.world.as_raw();
+        let rc = unsafe {
+            mpi::ffi::MPI_Irecv(
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                count,
+                mpi::ffi::RSMPI_UINT64_T,
+                src as i32,
+                0,
+                comm_raw,
+                &mut req,
+            )
+        };
+        debug_assert_eq!(rc, 0);
+        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
+    }
+    fn isend_to_u64<'a>(&'a self, buf: &'a [u64], dest: i32) -> Self::Request<'a> {
+        // Nonblocking send of u64 via raw MPI
+        let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+        let count = buf.len() as i32;
+        let comm_raw = self.world.as_raw();
+        let rc = unsafe {
+            mpi::ffi::MPI_Isend(
+                buf.as_ptr() as *const std::ffi::c_void,
+                count,
+                mpi::ffi::RSMPI_UINT64_T,
+                dest as i32,
+                0,
+                comm_raw,
+                &mut req,
+            )
+        };
+        debug_assert_eq!(rc, 0);
+        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
+    }
+    fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]) {
+        for rq in reqs {
+            let rc = unsafe { mpi::ffi::MPI_Wait(&mut rq.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+            debug_assert_eq!(rc, 0);
+        }
+    }
 }

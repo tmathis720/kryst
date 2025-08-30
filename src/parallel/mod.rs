@@ -5,6 +5,19 @@ use mpi::raw::AsRaw;
 #[cfg(any(feature = "mpi", feature = "rayon"))]
 use std::sync::Arc;
 
+// Opaque request that can represent multiple backends.
+pub enum AnyRequest<'a> {
+    None,
+    #[cfg(feature = "mpi")]
+    Mpi(MpiRequest<'a>),
+}
+
+#[cfg(feature = "mpi")]
+pub struct MpiRequest<'a> {
+    pub(crate) handle: mpi::ffi::MPI_Request,
+    pub(crate) _marker: std::marker::PhantomData<&'a mut [f64]>,
+}
+
 /// Abstract communicator for reductions & splits
 pub trait Comm: Send + Sync + 'static {
     type Vec;
@@ -31,6 +44,11 @@ pub trait Comm: Send + Sync + 'static {
     fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a>;
     /// Nonblocking send of `buf` to `dest`.
     fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a>;
+
+    /// Nonblocking receive of u64 words.
+    fn irecv_from_u64<'a>(&'a self, buf: &'a mut [u64], src: i32) -> Self::Request<'a>;
+    /// Nonblocking send of u64 words.
+    fn isend_to_u64<'a>(&'a self, buf: &'a [u64], dest: i32) -> Self::Request<'a>;
     /// Wait for all requests to complete.
     fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]);
 
@@ -113,6 +131,12 @@ impl Comm for NoComm {
     fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
         ()
     }
+    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {
+        ()
+    }
+    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {
+        ()
+    }
     fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }
 
@@ -189,7 +213,7 @@ impl UniverseComm {
 
 impl Comm for UniverseComm {
     type Vec = Vec<f64>; // Default, can be made generic
-    type Request<'a> = ();
+    type Request<'a> = AnyRequest<'a>;
     fn rank(&self) -> usize {
         match self {
             UniverseComm::NoComm(comm) => comm.rank(),
@@ -304,39 +328,139 @@ impl Comm for UniverseComm {
 
     fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
         match self {
-            UniverseComm::NoComm(comm) => {
-                let _ = comm.irecv_from(buf, src);
-                ()
-            }
+            UniverseComm::NoComm(_comm) => AnyRequest::None,
             #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(comm) => comm.irecv_from(buf, src),
-            #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(comm) => {
-                let _ = comm.irecv_from(buf, src);
-                ()
+            UniverseComm::Mpi(comm) => {
+                // Post a true nonblocking receive via raw MPI and keep the handle
+                let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+                let count = buf.len() as i32;
+                let src_rank = src as i32;
+                let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
+                let rc = unsafe {
+                    mpi::ffi::MPI_Irecv(
+                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        count,
+                        mpi::ffi::RSMPI_DOUBLE,
+                        src_rank,
+                        0,
+                        comm_raw,
+                        &mut req,
+                    )
+                };
+                debug_assert_eq!(rc, 0);
+                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
             }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_comm) => AnyRequest::None,
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => (),
+            UniverseComm::Serial => AnyRequest::None,
         }
     }
     fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
         match self {
-            UniverseComm::NoComm(comm) => {
-                let _ = comm.isend_to(buf, dest);
-                ()
-            }
+            UniverseComm::NoComm(_comm) => AnyRequest::None,
             #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(comm) => comm.isend_to(buf, dest),
-            #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(comm) => {
-                let _ = comm.isend_to(buf, dest);
-                ()
+            UniverseComm::Mpi(comm) => {
+                // Post a true nonblocking send via raw MPI and keep the handle
+                let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+                let count = buf.len() as i32;
+                let dest_rank = dest as i32;
+                let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
+                let rc = unsafe {
+                    mpi::ffi::MPI_Isend(
+                        buf.as_ptr() as *const std::ffi::c_void,
+                        count,
+                        mpi::ffi::RSMPI_DOUBLE,
+                        dest_rank,
+                        0,
+                        comm_raw,
+                        &mut req,
+                    )
+                };
+                debug_assert_eq!(rc, 0);
+                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
             }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_comm) => AnyRequest::None,
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => (),
+            UniverseComm::Serial => AnyRequest::None,
         }
     }
-    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
+
+    fn irecv_from_u64<'a>(&'a self, buf: &'a mut [u64], src: i32) -> Self::Request<'a> {
+        match self {
+            UniverseComm::NoComm(_comm) => AnyRequest::None,
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => {
+                // Nonblocking receive of u64 via raw MPI
+                let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+                let count = buf.len() as i32;
+                let src_rank = src as i32;
+                let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
+                let rc = unsafe {
+                    mpi::ffi::MPI_Irecv(
+                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        count,
+                        mpi::ffi::RSMPI_UINT64_T,
+                        src_rank,
+                        0,
+                        comm_raw,
+                        &mut req,
+                    )
+                };
+                debug_assert_eq!(rc, 0);
+                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
+            }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_comm) => AnyRequest::None,
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => AnyRequest::None,
+        }
+    }
+    fn isend_to_u64<'a>(&'a self, buf: &'a [u64], dest: i32) -> Self::Request<'a> {
+        match self {
+            UniverseComm::NoComm(_comm) => AnyRequest::None,
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => {
+                // Nonblocking send of u64 via raw MPI
+                let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+                let count = buf.len() as i32;
+                let dest_rank = dest as i32;
+                let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
+                let rc = unsafe {
+                    mpi::ffi::MPI_Isend(
+                        buf.as_ptr() as *const std::ffi::c_void,
+                        count,
+                        mpi::ffi::RSMPI_UINT64_T,
+                        dest_rank,
+                        0,
+                        comm_raw,
+                        &mut req,
+                    )
+                };
+                debug_assert_eq!(rc, 0);
+                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
+            }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_comm) => AnyRequest::None,
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => AnyRequest::None,
+        }
+    }
+    fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]) {
+        #[cfg(feature = "mpi")]
+        {
+            for r in reqs {
+                if let AnyRequest::Mpi(rq) = r {
+                    let rc = unsafe {
+                        mpi::ffi::MPI_Wait(&mut rq.handle, mpi::ffi::RSMPI_STATUS_IGNORE)
+                    };
+                    debug_assert_eq!(rc, 0);
+                }
+            }
+        }
+        // Non-MPI requests are no-ops.
+    }
 }
 
 #[cfg(not(feature = "mpi"))]
