@@ -126,6 +126,7 @@ fn denseop_cache_invalidation() {
     assert_ne!(p1, p2);
 }
 
+#[cfg(not(feature = "mat-values-fingerprint"))]
 #[test]
 fn unknown_vid_triggers_numeric_refresh() {
     let (pc, numeric, _) = CountPc::new();

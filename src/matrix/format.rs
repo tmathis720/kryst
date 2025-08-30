@@ -77,6 +77,7 @@ pub(crate) fn key_from_ptr(ptr: usize, structure_id: u64, values_id: u64, drop_t
 pub(crate) struct CscKey {
     pub base_ptr: usize,
     pub structure_id: u64,
+    pub values_id: u64,
     pub drop_tol_bits: u64,
 }
 
@@ -84,6 +85,7 @@ impl PartialEq for CscKey {
     fn eq(&self, other: &Self) -> bool {
         self.base_ptr == other.base_ptr
             && self.structure_id == other.structure_id
+            && self.values_id == other.values_id
             && self.drop_tol_bits == other.drop_tol_bits
     }
 }
@@ -92,6 +94,7 @@ impl Hash for CscKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.base_ptr.hash(state);
         self.structure_id.hash(state);
+        self.values_id.hash(state);
         self.drop_tol_bits.hash(state);
     }
 }
@@ -100,10 +103,16 @@ impl Hash for CscKey {
 pub(crate) static CSC_CACHE: Lazy<Mutex<HashMap<CscKey, Weak<CscMatrix<f64>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub(crate) fn csc_key_from_ptr(ptr: usize, structure_id: u64, drop_tol: f64) -> CscKey {
+pub(crate) fn csc_key_from_ptr(
+    ptr: usize,
+    structure_id: u64,
+    values_id: u64,
+    drop_tol: f64,
+) -> CscKey {
     CscKey {
         base_ptr: ptr,
         structure_id,
+        values_id,
         drop_tol_bits: drop_tol.to_bits(),
     }
 }

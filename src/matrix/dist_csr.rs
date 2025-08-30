@@ -317,7 +317,13 @@ impl LinOp for DistCsrOp {
     }
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        let _ = self.spmv_dist_impl(x, y);
+        if let Err(e) = self.spmv_dist_impl(x, y) {
+            panic!("DistCsrOp::matvec: {}", e);
+        }
+    }
+
+    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), crate::KError> {
+        self.spmv_dist_impl(x, y)
     }
 
     fn as_any(&self) -> &dyn Any {

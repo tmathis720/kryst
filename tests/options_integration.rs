@@ -216,8 +216,8 @@ fn test_preonly_configuration() {
 
     let mut ksp = KspContext::new();
 
-    // PREONLY solver is not available and should error
-    assert!(ksp.set_type(SolverType::Preonly).is_err());
+    // PREONLY is now selectable and should succeed
+    assert!(ksp.set_type(SolverType::Preonly).is_ok());
 }
 
 #[test]
@@ -230,6 +230,6 @@ fn test_preonly_options_integration() {
     let pc_opts = PcOptions::from_args(&args).unwrap();
 
     let mut ksp = KspContext::new();
-    // PREONLY with LU is unsupported
-    assert!(ksp.set_from_all_options(&ksp_opts, &pc_opts).is_err());
+    // PREONLY with LU should configure successfully
+    assert!(ksp.set_from_all_options(&ksp_opts, &pc_opts).is_ok());
 }

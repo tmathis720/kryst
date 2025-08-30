@@ -1,4 +1,5 @@
 use crate::parallel::{Comm, NoComm, UniverseComm};
+use crate::KError;
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
@@ -18,6 +19,13 @@ pub trait LinOp: Send + Sync + Any {
 
     /// Compute y = A x.
     fn matvec(&self, x: &[Self::S], y: &mut [Self::S]);
+
+    /// Fallible matvec. Default delegates to `matvec` and returns `Ok(())`.
+    /// Implementations that can detect/return errors should override this.
+    fn try_matvec(&self, x: &[Self::S], y: &mut [Self::S]) -> Result<(), KError> {
+        self.matvec(x, y);
+        Ok(())
+    }
 
     /// Whether this operator supports `t_matvec`.
     fn supports_transpose(&self) -> bool {
@@ -50,7 +58,8 @@ pub trait LinOp: Send + Sync + Any {
     /// and solvers. Local/dense operators return [`UniverseComm::NoComm`].
     ///
     /// # Invariants
-    /// - `A.comm() == P.comm()` is enforced by [`KspContext::set_operators`].
+    /// - `A.comm() == P.comm()` is enforced by [`KspContext::try_set_operators`]
+    ///   (and `set_operators` panics on mismatch).
     /// - PCs obtain their communicator from the operator passed to [`Preconditioner::setup`].
     fn comm(&self) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
@@ -227,6 +236,10 @@ impl LinOp for CsrOp {
 }
 
 // --- Direct adapters ------------------------------------------------------
+// If the `mat-values-fingerprint` feature is enabled, `Mat<f64>::values_id()` computes an
+// O(m*n) fingerprint of the numeric values to strengthen cache invalidation for users who
+// do not wrap with `DenseOp`. By default (feature off), `values_id()` returns 0 for `Mat<f64>`
+// and callers should prefer `DenseOp` + `mark_values_changed()` for precise reuse.
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -270,7 +283,26 @@ impl LinOp for Mat<f64> {
         StructureId(h.finish())
     }
     fn values_id(&self) -> ValuesId {
-        ValuesId(0)
+        #[cfg(feature = "mat-values-fingerprint")]
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            let (m, n) = (self.nrows(), self.ncols());
+            m.hash(&mut h);
+            n.hash(&mut h);
+            // Full scan for correctness; opt-in via feature due to cost.
+            for i in 0..m {
+                for j in 0..n {
+                    self[(i, j)].to_bits().hash(&mut h);
+                }
+            }
+            ValuesId(h.finish())
+        }
+        #[cfg(not(feature = "mat-values-fingerprint"))]
+        {
+            ValuesId(0)
+        }
     }
 }
 
@@ -398,6 +430,10 @@ impl<T: LinOp + ?Sized> LinOp for WithCommOp<T> {
     #[inline]
     fn matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
         self.inner.matvec(x, y)
+    }
+    #[inline]
+    fn try_matvec(&self, x: &[Self::S], y: &mut [Self::S]) -> Result<(), KError> {
+        self.inner.try_matvec(x, y)
     }
     #[inline]
     fn supports_transpose(&self) -> bool {

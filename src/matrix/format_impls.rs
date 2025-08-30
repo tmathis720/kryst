@@ -1,7 +1,11 @@
+//! NOTE on caching and invalidation:
+//! - Dense `faer::Mat<f64>` does not track `ValuesId` (returns 0). Conversions from raw Mat
+//!   will not auto-invalidate on numeric changes.
+//! - Wrap dense matrices in `DenseOp` and call `mark_values_changed()` after in-place updates
+//!   to ensure CSC/CSR cache keys include the new `ValuesId`, triggering correct refreshes.
 use std::sync::Arc;
 
 use faer::Mat;
-
 use crate::matrix::{
     csc::CscMatrix,
     format::{AsFormat, CSC_CACHE, CSR_CACHE, csc_key_from_ptr, key_from_ptr},
@@ -53,7 +57,8 @@ impl AsFormat for Mat<f64> {
     fn to_csc_cached(&self, drop_tol: f64) -> Arc<CscMatrix<f64>> {
         let base_ptr = self as *const Mat<f64> as usize;
         let structure_id = LinOp::structure_id(self).0;
-        let key = csc_key_from_ptr(base_ptr, structure_id, drop_tol);
+        let values_id = LinOp::values_id(self).0;
+        let key = csc_key_from_ptr(base_ptr, structure_id, values_id, drop_tol);
         if let Some(existing) = {
             let cache = CSC_CACHE.lock().unwrap();
             cache.get(&key).and_then(|w| w.upgrade())
@@ -96,7 +101,8 @@ impl AsFormat for DenseOp {
         let inner = self.inner();
         let base_ptr = inner as *const Mat<f64> as usize;
         let sid = self.structure_id().0;
-        let key = csc_key_from_ptr(base_ptr, sid, drop_tol);
+        let vid = self.values_id().0;
+        let key = csc_key_from_ptr(base_ptr, sid, vid, drop_tol);
         if let Some(existing) = {
             let cache = CSC_CACHE.lock().unwrap();
             cache.get(&key).and_then(|w| w.upgrade())

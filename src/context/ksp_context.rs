@@ -2,7 +2,9 @@
 //!
 //! ## Operator/PC lifecycle
 //! 1. [`set_operators`] stores `A` and `P` (or `A` if `P` is `None`).
-//! 2. Enforces **communicator equality** via [`LinOp::comm()`]. Mismatch aborts early.
+//! 2. Enforces communicator equality via [`LinOp::comm()`]. Prefer
+//!    [`try_set_operators`] in library code: it returns an error on mismatch, while
+//!    [`set_operators`] panics for backward compatibility.
 //! 3. [`setup`] resolves any deferred PC specs (including chains), then calls
 //!    [`Preconditioner::setup`] followed by reuse logic:
 //!    - If structure id changed → [`update_symbolic`]
@@ -27,6 +29,11 @@
 //! Iteration monitors receive `(iter, residual)` where the residual is solver-specific
 //! (preconditioned norm for Left CG/GMRES, true norm for Right GMRES). Final stats
 //! always include the true residual.
+//!
+//! ## PREONLY behavior
+//! `Preonly` is a non-iterative mode: it invokes `Preconditioner::direct_solve` on the
+//! selected preconditioner using the preconditioner operator (`P`, or `A` when `P` is `None`).
+//! Use it with direct PCs such as `LU`, `QR`, or `SuperLU_DIST`.
 
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
@@ -162,39 +169,41 @@ impl KspContext {
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
         self.solver_type = Some(solver_type);
-        let solver: Box<dyn LinearSolver<Error = KError>> = match solver_type {
-            SolverType::Cg => Box::new(
+        let solver: Option<Box<dyn LinearSolver<Error = KError>>> = match solver_type {
+            SolverType::Cg => Some(Box::new(
                 CgSolver::new(self.rtol, self.maxits)
                     .with_norm(crate::solver::cg::CgNormType::Preconditioned),
-            ),
-            SolverType::Cgnr => Box::new(CgnrSolver::new(self.rtol, self.maxits)),
-            SolverType::Gmres => Box::new(GmresSolver::new(self.restart, self.rtol, self.maxits)),
-            SolverType::Fgmres => Box::new(FgmresSolver::new(self.rtol, self.maxits, self.restart)),
-            SolverType::BiCgStab => Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
+            )),
+            SolverType::Cgnr => Some(Box::new(CgnrSolver::new(self.rtol, self.maxits))),
+            SolverType::Gmres => Some(Box::new(GmresSolver::new(self.restart, self.rtol, self.maxits))),
+            SolverType::Fgmres => Some(Box::new(FgmresSolver::new(self.rtol, self.maxits, self.restart))),
+            SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
                 self.maxits,
-            ))),
-            SolverType::Cgs => Box::new(CgsSolver::new(self.rtol, self.maxits)),
-            SolverType::Pcg => Box::new(
+            )))),
+            SolverType::Cgs => Some(Box::new(CgsSolver::new(self.rtol, self.maxits))),
+            SolverType::Pcg => Some(Box::new(
                 PcgSolver::new(self.rtol, self.maxits)
                     .with_norm(crate::solver::pcg::CgNormType::Preconditioned),
-            ),
-            SolverType::Minres => Box::new(MatSolverAdapter::new(MinresSolver::new(
+            )),
+            SolverType::Minres => Some(Box::new(MatSolverAdapter::new(MinresSolver::new(
                 self.rtol,
                 self.maxits,
-            ))),
+            )))),
             SolverType::PcaGmres => {
                 let mut s = PcaGmresSolver::new(self.restart, 1, 1, self.rtol, self.maxits);
                 s.pc_mode = crate::solver::PcaPcMode::Left;
-                Box::new(s)
+                Some(Box::new(s))
             }
-            SolverType::Qmr => Box::new(crate::solver::QmrSolver::new(self.rtol, self.maxits)),
-            SolverType::Tfqmr => Box::new(crate::solver::TfqmrSolver::new(self.rtol, self.maxits)),
+            SolverType::Qmr => Some(Box::new(crate::solver::QmrSolver::new(self.rtol, self.maxits))),
+            SolverType::Tfqmr => Some(Box::new(crate::solver::TfqmrSolver::new(self.rtol, self.maxits))),
             SolverType::Preonly => {
-                return Err(KError::SolveError("Preonly solver not available".into()));
+                // PREONLY is intentionally "no iterative solver".
+                // We’ll dispatch to `pc.direct_solve()` in `solve()`.
+                None
             }
         };
-        self.solver = Some(solver);
+        self.solver = solver;
         self.invalidate_setup();
         Ok(self)
     }
@@ -229,6 +238,17 @@ impl KspContext {
     pub fn set_pc_type_from_str(&mut self, pc_type: &str) -> Result<&mut Self, KError> {
         let pct = PcType::from_str(pc_type)?;
         self.set_pc_type(pct, None)
+    }
+
+    /// Convenience for PREONLY: set solver type and a direct PC in one call.
+    pub fn set_preonly_with_pc(
+        &mut self,
+        pc_type: PcType,
+        opts: Option<&PcOptions>,
+    ) -> Result<&mut Self, KError> {
+        self.set_type(SolverType::Preonly)?;
+        self.set_pc_type(pc_type, opts)?;
+        Ok(self)
     }
 
     /// Set the preconditioning side directly.
@@ -333,41 +353,67 @@ impl KspContext {
 
     /// Assign the system and preconditioner operators.
     ///
-    /// # Panics
-    /// Panics if the communicators of `A` and `P` differ. `LinOp::comm()` is the
-    /// single source of truth for parallel context; mismatches indicate a bug.
-    pub fn set_operators(
+    /// Returns an error if the communicators of `A` and `P` differ.
+    /// `LinOp::comm()` is the single source of truth for parallel context;
+    /// mismatches indicate a caller bug.
+    ///
+    /// On success, invalidates any prior setup (PC reuse and workspace).
+    pub fn try_set_operators(
         &mut self,
         amat: Arc<dyn LinOp<S = f64>>,
         pmat: Option<Arc<dyn LinOp<S = f64>>>,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, KError> {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
         let pc = pmat.comm();
         if ac != pc {
             self.invalidate_setup();
-            let msg = format!(
+            return Err(KError::InvalidInput(format!(
                 "Amat/Pmat communicator mismatch: A={}, P={}",
                 ac.id(),
                 pc.id()
-            );
-            panic!("{}", msg);
+            )));
         }
-        self.amat = Some(amat.clone());
+        self.amat = Some(amat);
         self.pmat = Some(pmat);
         self.invalidate_setup();
-        self
+        Ok(self)
     }
 
+    /// Like `try_set_operators`, but first wraps operators with an explicit communicator.
+    pub fn try_set_operators_with_comm(
+        &mut self,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        comm: crate::parallel::UniverseComm,
+    ) -> Result<&mut Self, KError> {
+        let a_wrapped = wrap_with_comm(amat, comm.clone());
+        let p_wrapped = pmat.map(|p| wrap_with_comm(p, comm.clone()));
+        self.try_set_operators(a_wrapped, p_wrapped)
+    }
+
+    /// Assign the system and preconditioner operators.
+    ///
+    /// Panics if the communicators of `A` and `P` differ. Prefer
+    /// [`KspContext::try_set_operators`] in libraries to handle errors.
+    pub fn set_operators(
+        &mut self,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+    ) -> &mut Self {
+        self.try_set_operators(amat, pmat).unwrap()
+    }
+
+    /// Like `set_operators`, but first wraps operators with an explicit communicator.
+    /// Panics on communicator mismatch. Prefer
+    /// [`KspContext::try_set_operators_with_comm`].
     pub fn set_operators_with_comm(
         &mut self,
         amat: Arc<dyn LinOp<S = f64>>,
         pmat: Option<Arc<dyn LinOp<S = f64>>>,
         comm: crate::parallel::UniverseComm,
     ) -> &mut Self {
-        let a_wrapped = wrap_with_comm(amat, comm.clone());
-        let p_wrapped = pmat.map(|p| wrap_with_comm(p, comm.clone()));
-        self.set_operators(a_wrapped, p_wrapped)
+        self.try_set_operators_with_comm(amat, pmat, comm).unwrap()
     }
 
     pub fn set_pc_reuse_policy(&mut self, policy: PcReusePolicy) -> &mut Self {
@@ -509,6 +555,13 @@ impl KspContext {
             let pc = self.pc.as_mut().ok_or_else(|| {
                 KError::SolveError("PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into())
             })?;
+            if !pc.supports_numeric_update() {
+                // Not a reliable indicator of directness, but provides a hint if a user
+                // accidentally selects a non-direct PC like Jacobi/ILU.
+                log::debug!(
+                    "PREONLY: selected PC may not be a direct solver; expecting LU/QR/SuperLU_DIST."
+                );
+            }
             pc.direct_solve(pmat.as_ref(), b, x)?;
             return Ok(SolveStats {
                 iterations: 1,
@@ -572,7 +625,9 @@ impl KspContext {
 
         // Compute true residual r = b - A x and use its norm for reporting
         let mut residual = vec![0.0f64; b.len()];
-        amat.matvec(x, &mut residual);
+        if let Err(e) = amat.try_matvec(x, &mut residual) {
+            return Err(KError::SolveError(format!("residual matvec failed: {e}")));
+        }
         for (ri, &bi) in residual.iter_mut().zip(b.iter()) {
             *ri = bi - *ri;
         }
@@ -688,5 +743,97 @@ impl KspContext {
     /// Test-only: inject a preconditioner for controlled testing.
     pub fn set_pc_box_for_tests(&mut self, pc: Box<dyn Preconditioner>) {
         self.pc = Some(pc);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::pc_context::PcType;
+    use crate::matrix::op::{DenseOp, wrap_with_comm};
+    use faer::Mat;
+    use std::sync::Arc;
+
+    #[test]
+    fn preonly_with_lu_pc_solves() {
+        // Simple 2x2 SPD: [2 1; 1 2]
+        let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 1.0 });
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Preonly).unwrap();
+        ksp.set_pc_type(PcType::Lu, None).unwrap();
+        ksp.set_operators(Arc::new(a), None);
+
+        let b = vec![3.0, 3.0];
+        let mut x = vec![0.0; 2];
+        let stats = ksp.solve(&b, &mut x).unwrap();
+
+        // Verify Ax ≈ b using the stored operator
+        let amat = ksp.amat.as_ref().unwrap().clone();
+        let mut ax = vec![0.0; 2];
+        amat.matvec(&x, &mut ax);
+        for i in 0..2 {
+            assert!((ax[i] - b[i]).abs() < 1e-10);
+        }
+        assert_eq!(stats.iterations, 1);
+        assert_eq!(stats.reason, ConvergedReason::ConvergedAtol);
+    }
+
+    #[test]
+    fn preonly_without_direct_pc_errors() {
+        let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Preonly).unwrap();
+        // Jacobi is not a direct solver
+        ksp.set_pc_type(PcType::Jacobi, None).unwrap();
+        ksp.set_operators(Arc::new(a), None);
+
+        let b = vec![1.0, 2.0];
+        let mut x = vec![0.0; 2];
+
+        let err = ksp.solve(&b, &mut x).unwrap_err();
+        match err {
+            KError::SolveError(msg) => {
+                assert!(msg.to_lowercase().contains("direct"))
+            }
+            _ => panic!("unexpected error type: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn try_set_operators_ok_same_comm() {
+        let m = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        // NoComm for both => equal
+        let a = Arc::new(DenseOp::new(Arc::new(m)));
+        let mut ksp = KspContext::new();
+        ksp.try_set_operators(a.clone(), None).unwrap();
+        assert_eq!(ksp.is_setup(), false); // setup is invalidated but not run
+    }
+
+    // This one is only meaningful when MPI is enabled (distinct comms are possible).
+    #[cfg(feature = "mpi")]
+    #[test]
+    fn try_set_operators_err_mismatched_comm() {
+        use crate::parallel::{Comm as _, MpiComm};
+
+        // Build a small dense and wrap with different communicators
+        let m = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let op = Arc::new(DenseOp::new(Arc::new(m)));
+
+        let world = std::sync::Arc::new(MpiComm::new());
+        let comm_a = crate::parallel::UniverseComm::Mpi(world.clone());
+        let comm_b = world.split(1, world.rank() as i32); // different underlying handle
+
+        let a_comm = wrap_with_comm(op.clone(), comm_a.clone());
+        let p_comm = wrap_with_comm(op.clone(), comm_b.clone());
+
+        let mut ksp = KspContext::new();
+        let err = match ksp.try_set_operators(a_comm, Some(p_comm)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected communicator mismatch error"),
+        };
+        match err {
+            KError::InvalidInput(msg) => assert!(msg.to_lowercase().contains("communicator mismatch")),
+            _ => panic!("unexpected error: {:?}", err),
+        }
     }
 }

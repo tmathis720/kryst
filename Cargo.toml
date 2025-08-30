@@ -53,6 +53,10 @@ mpi_examples = ["mpi"]
 superlu_dist = []
 tuning = []
 
+# Opt-in: compute a fingerprint of raw Mat<f64> values to strengthen cache invalidation.
+# Off by default due to O(m*n) hashing cost on each conversion call.
+mat-values-fingerprint = []
+
 # Optional, OFF by default, so new PCs must target the modern trait.
 legacy-pc-bridge = []
 
