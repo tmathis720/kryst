@@ -70,4 +70,8 @@ impl Preconditioner for SuperLuDistPc {
             ))
         }
     }
+
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Csr
+    }
 }

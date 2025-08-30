@@ -37,4 +37,8 @@ impl Preconditioner for LuPc {
             .ok_or_else(|| KError::InvalidInput("LU PC requires faer::Mat<f64>".into()))?;
         crate::solver::dense_lu::solve(a, b, x)
     }
+
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Dense
+    }
 }

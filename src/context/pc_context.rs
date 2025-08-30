@@ -247,6 +247,100 @@ impl PcConfig {
 pub struct PcFactory;
 
 impl PcFactory {
+    #[inline]
+    fn is_direct(pc: PcType) -> bool {
+        matches!(pc, PcType::Lu | PcType::Qr | PcType::SuperLuDist)
+    }
+
+    #[inline]
+    fn chain_strict() -> bool {
+        // Opt-in strict mode via env var.
+        // KRYST_PC_CHAIN_STRICT=1|true enforces selected warnings as errors.
+        std::env::var("KRYST_PC_CHAIN_STRICT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// Validate high-level invariants for a PC chain.
+    /// - Emits log::warn! for suspect patterns.
+    /// - If KRYST_PC_CHAIN_STRICT is set, some warnings become errors.
+    fn validate_chain_specs(specs: &[DeferredPcInfo]) -> Result<(), KError> {
+        if specs.is_empty() {
+            return Err(KError::InvalidInput("empty PC chain".into()));
+        }
+
+        let strict = Self::chain_strict();
+
+        // Rule 1: multiple direct PCs
+        let direct_positions: Vec<usize> = specs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| Self::is_direct(s.pc_type).then_some(i))
+            .collect();
+        if direct_positions.len() > 1 {
+            let msg = format!(
+                "PC chain contains multiple direct PCs at positions {:?}. \
+                 Stacking direct factorizations is usually unintended.",
+                direct_positions
+            );
+            if strict {
+                return Err(KError::InvalidInput(msg));
+            } else {
+                log::warn!("{}", msg);
+            }
+        }
+
+        // Rule 2: direct PC should be last
+        if let Some((i, s)) = specs
+            .iter()
+            .enumerate()
+            .find(|(i, s)| Self::is_direct(s.pc_type) && *i + 1 != specs.len())
+        {
+            let msg = format!(
+                "Direct PC {:?} is not the last stage (index {}, chain len {}). \
+                 Subsequent stages will likely be redundant or ignored.",
+                s.pc_type, i, specs.len()
+            );
+            if strict {
+                return Err(KError::InvalidInput(msg));
+            } else {
+                log::warn!("{}", msg);
+            }
+        }
+
+        // Rule 3: consecutive duplicates (same PcType twice)
+        for w in specs.windows(2) {
+            if w[0].pc_type == w[1].pc_type {
+                let msg = format!(
+                    "Consecutive duplicate PCs: {:?} -> {:?}. \
+                     This is typically redundant unless options differ.",
+                    w[0].pc_type, w[1].pc_type
+                );
+                if strict {
+                    return Err(KError::InvalidInput(msg));
+                } else {
+                    log::warn!("{}", msg);
+                }
+            }
+        }
+
+        // Rule 4: BlockJacobi block_size <= 1 behaves like Jacobi
+        for (i, spec) in specs.iter().enumerate() {
+            if matches!(spec.pc_type, PcType::BlockJacobi) {
+                if let Some(ref o) = spec.options {
+                    if o.jacobi_block_size.unwrap_or(1) <= 1 {
+                        log::warn!(
+                            "PC chain stage {}: BlockJacobi with block_size <= 1 behaves like Jacobi; \
+                             consider using 'jacobi' instead.",
+                            i
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
     pub fn create_preconditioner(
         pc_type: PcType,
         options: Option<&PcOptions>,
@@ -342,6 +436,8 @@ impl PcFactory {
         if specs.is_empty() {
             return Err(KError::InvalidInput("empty PC chain".into()));
         }
+        // validate
+        Self::validate_chain_specs(&specs)?;
         Ok(specs)
     }
 
@@ -349,6 +445,8 @@ impl PcFactory {
         specs: Vec<DeferredPcInfo>,
         op: &dyn LinOp<S = f64>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
+        // validate again in case specs were assembled elsewhere
+        Self::validate_chain_specs(&specs)?;
         use crate::preconditioner::chain::PcChain;
 
         let mut stages: Vec<Box<dyn Preconditioner>> = Vec::with_capacity(specs.len());
@@ -388,6 +486,8 @@ impl PcFactory {
         if specs.is_empty() {
             return Err(KError::InvalidInput("empty PcOptions.chain".into()));
         }
+        // validate
+        Self::validate_chain_specs(&specs)?;
         Ok(specs)
     }
 }
@@ -470,5 +570,26 @@ mod tests {
         let pc = PcFactory::create_from_options(&opts).unwrap();
         fn _is_pc(_: &Box<dyn Preconditioner>) {}
         _is_pc(&pc);
+    }
+
+    #[test]
+    fn chain_direct_not_last_is_error_in_strict_mode() {
+        // flip strict mode via env var for this test
+        unsafe { std::env::set_var("KRYST_PC_CHAIN_STRICT", "1") };
+        let opts = crate::config::options::PcOptions::default();
+
+        // "lu->jacobi" => direct not last
+        let specs = PcFactory::create_pc_chain_from_str("lu->jacobi", Some(&opts));
+        assert!(specs.is_err(), "expected validation error in strict mode");
+        unsafe { std::env::remove_var("KRYST_PC_CHAIN_STRICT") };
+    }
+
+    #[test]
+    fn chain_duplicate_consecutive_warns_but_allows_by_default() {
+        // Default (non-strict): should allow "ilu->ilu"
+        let opts = crate::config::options::PcOptions::default();
+        let specs = PcFactory::create_pc_chain_from_str("ilu->ilu", Some(&opts))
+            .expect("duplicates allowed with warning by default");
+        assert!(!specs.is_empty());
     }
 }

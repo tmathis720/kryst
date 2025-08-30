@@ -38,6 +38,7 @@
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
+use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
@@ -141,6 +142,25 @@ pub struct KspContext {
     pc_reuse: PcReusePolicy,
     last_pc_sid: Option<StructureId>,
     last_pc_vid: Option<ValuesId>,
+    // Pending/staged solver-specific options to apply when solver type is set
+    pending_gmres: PendingGmres,
+    pending_fgmres: PendingFgmres,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingGmres {
+    restart: Option<usize>,
+    orthog: Option<crate::solver::gmres::GmresOrthog>,
+    reorthog: Option<bool>,
+    happy_breakdown: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingFgmres {
+    restart: Option<usize>,
+    orthog: Option<crate::solver::fgmres::Orthog>,
+    reorthog: Option<bool>,
+    happy_breakdown: Option<bool>,
 }
 
 impl KspContext {
@@ -201,6 +221,8 @@ impl KspContext {
             pc_reuse: PcReusePolicy::Auto,
             last_pc_sid: None,
             last_pc_vid: None,
+            pending_gmres: PendingGmres::default(),
+            pending_fgmres: PendingFgmres::default(),
         }
     }
 
@@ -212,8 +234,17 @@ impl KspContext {
                     .with_norm(crate::solver::cg::CgNormType::Preconditioned),
             )),
             SolverType::Cgnr => Some(Box::new(CgnrSolver::new(self.rtol, self.maxits))),
-            SolverType::Gmres => Some(Box::new(GmresSolver::new(self.restart, self.rtol, self.maxits))),
-            SolverType::Fgmres => Some(Box::new(FgmresSolver::new(self.rtol, self.maxits, self.restart))),
+            SolverType::Gmres => {
+                let mut s = GmresSolver::new(self.restart, self.rtol, self.maxits);
+                // Apply any staged GMRES parameters
+                self.apply_gmres_pending_to(&mut s);
+                Some(Box::new(s))
+            }
+            SolverType::Fgmres => {
+                let mut s = FgmresSolver::new(self.rtol, self.maxits, self.restart);
+                self.apply_fgmres_pending_to(&mut s);
+                Some(Box::new(s))
+            }
             SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
                 self.maxits,
@@ -342,6 +373,119 @@ impl KspContext {
             self.set_pc_side_from_str(side)?;
         }
 
+        // --- GMRES options ---
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<GmresSolver>())
+        {
+            if let Some(r) = opts.gmres_restart.or(opts.restart) {
+                s.set_restart(r);
+                self.restart = r;
+                self.pending_gmres.restart = Some(r);
+            }
+            if let Some(ref orth) = opts.gmres_orthog {
+                let o = match orth.as_str() {
+                    "mgs" => crate::solver::gmres::GmresOrthog::Mgs,
+                    "cgs" => crate::solver::gmres::GmresOrthog::Cgs,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_gmres_orthog: {other} (expected 'mgs'|'cgs')"
+                        )));
+                    }
+                };
+                s.set_orthog(o);
+                self.pending_gmres.orthog = Some(o);
+            }
+            if let Some(flag) = opts.gmres_reorthog {
+                s.set_reorthog(flag);
+                self.pending_gmres.reorthog = Some(flag);
+            }
+            if let Some(flag) = opts.gmres_happy_breakdown {
+                s.set_happy_breakdown(flag);
+                self.pending_gmres.happy_breakdown = Some(flag);
+            }
+        } else {
+            if let Some(r) = opts.gmres_restart.or(opts.restart) {
+                self.pending_gmres.restart = Some(r);
+                self.restart = r;
+            }
+            if let Some(ref orth) = opts.gmres_orthog {
+                self.pending_gmres.orthog = Some(match orth.as_str() {
+                    "mgs" => crate::solver::gmres::GmresOrthog::Mgs,
+                    "cgs" => crate::solver::gmres::GmresOrthog::Cgs,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_gmres_orthog: {other} (expected 'mgs'|'cgs')"
+                        )));
+                    }
+                });
+            }
+            if let Some(flag) = opts.gmres_reorthog {
+                self.pending_gmres.reorthog = Some(flag);
+            }
+            if let Some(flag) = opts.gmres_happy_breakdown {
+                self.pending_gmres.happy_breakdown = Some(flag);
+            }
+        }
+
+        // --- FGMRES options ---
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<FgmresSolver>())
+        {
+            if let Some(r) = opts.fgmres_restart.or(opts.restart) {
+                s.set_restart(r);
+                self.restart = r;
+                self.pending_fgmres.restart = Some(r);
+            }
+            // Map "mgs"/"cgs" to Modified/Classical
+            if let Some(ref orth) = opts.fgmres_orthog {
+                let o = match orth.as_str() {
+                    "mgs" => crate::solver::fgmres::Orthog::Modified,
+                    "cgs" => crate::solver::fgmres::Orthog::Classical,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'cgs')"
+                        )));
+                    }
+                };
+                s.set_orthog(o);
+                self.pending_fgmres.orthog = Some(o);
+            }
+            if let Some(flag) = opts.fgmres_reorthog {
+                s.set_reorthog(flag);
+                self.pending_fgmres.reorthog = Some(flag);
+            }
+            if let Some(flag) = opts.fgmres_happy_breakdown {
+                s.set_happy_breakdown(flag);
+                self.pending_fgmres.happy_breakdown = Some(flag);
+            }
+        } else {
+            if let Some(r) = opts.fgmres_restart.or(opts.restart) {
+                self.pending_fgmres.restart = Some(r);
+                self.restart = r;
+            }
+            if let Some(ref orth) = opts.fgmres_orthog {
+                self.pending_fgmres.orthog = Some(match orth.as_str() {
+                    "mgs" => crate::solver::fgmres::Orthog::Modified,
+                    "cgs" => crate::solver::fgmres::Orthog::Classical,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'cgs')"
+                        )));
+                    }
+                });
+            }
+            if let Some(flag) = opts.fgmres_reorthog {
+                self.pending_fgmres.reorthog = Some(flag);
+            }
+            if let Some(flag) = opts.fgmres_happy_breakdown {
+                self.pending_fgmres.happy_breakdown = Some(flag);
+            }
+        }
+
         if let Some(s) = self
             .solver
             .as_mut()
@@ -370,6 +514,36 @@ impl KspContext {
         }
         self.invalidate_setup();
         Ok(self)
+    }
+
+    fn apply_gmres_pending_to(&self, s: &mut GmresSolver) {
+        if let Some(r) = self.pending_gmres.restart {
+            s.set_restart(r);
+        }
+        if let Some(o) = self.pending_gmres.orthog {
+            s.set_orthog(o);
+        }
+        if let Some(f) = self.pending_gmres.reorthog {
+            s.set_reorthog(f);
+        }
+        if let Some(f) = self.pending_gmres.happy_breakdown {
+            s.set_happy_breakdown(f);
+        }
+    }
+
+    fn apply_fgmres_pending_to(&self, s: &mut FgmresSolver) {
+        if let Some(r) = self.pending_fgmres.restart {
+            s.set_restart(r);
+        }
+        if let Some(o) = self.pending_fgmres.orthog {
+            s.set_orthog(o);
+        }
+        if let Some(f) = self.pending_fgmres.reorthog {
+            s.set_reorthog(f);
+        }
+        if let Some(f) = self.pending_fgmres.happy_breakdown {
+            s.set_happy_breakdown(f);
+        }
     }
 
     /// Configure both KSP and PC from their respective option sets.
@@ -524,14 +698,19 @@ impl KspContext {
         }
 
         if let Some(pc) = self.pc.as_mut() {
+            // Pre-convert once to the PC's requested format, preserving communicator.
+            let hint = pc.required_format();
+            let tol = pc.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let pmat_view = materialize_linop_with_hint(pmat.as_ref(), hint, tol)?;
+
             match self.last_pc_sid {
                 None => {
-                    pc.setup(pmat.as_ref())?;
+                    pc.setup(pmat_view.as_ref())?;
                     self.last_pc_sid = Some(sid);
                     self.last_pc_vid = Some(vid);
                 }
                 Some(old_sid) if old_sid != sid => {
-                    pc.update_symbolic(pmat.as_ref())?;
+                    pc.update_symbolic(pmat_view.as_ref())?;
                     self.last_pc_sid = Some(sid);
                     self.last_pc_vid = Some(vid);
                 }
@@ -541,7 +720,7 @@ impl KspContext {
                     match self.pc_reuse {
                         PcReusePolicy::Never => {
                             if !vid_known || values_changed {
-                                pc.update_symbolic(pmat.as_ref())?;
+                                pc.update_symbolic(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             }
                         }
@@ -550,10 +729,10 @@ impl KspContext {
                                 if !vid_known {
                                     log::debug!("ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse.");
                                 }
-                                pc.update_numeric(pmat.as_ref())?;
+                                pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             } else if !vid_known || values_changed {
-                                pc.update_symbolic(pmat.as_ref())?;
+                                pc.update_symbolic(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             }
                         }
@@ -565,10 +744,10 @@ impl KspContext {
                                 if !vid_known {
                                     log::debug!("ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse.");
                                 }
-                                pc.update_numeric(pmat.as_ref())?;
+                                pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             } else if values_changed {
-                                pc.update_symbolic(pmat.as_ref())?;
+                                pc.update_symbolic(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             }
                         }
@@ -924,5 +1103,65 @@ mod tests {
         ksp.try_set_pc_side(PcSide::Right).unwrap();
         // Symmetric is normalized to Left; should pass
         ksp.try_set_pc_side(PcSide::Symmetric).unwrap();
+    }
+
+    #[test]
+    fn gmres_options_apply_immediately_and_when_staged() {
+        use crate::solver::gmres::{GmresOrthog, GmresSolver};
+        let mut ksp = KspContext::new();
+
+        // Stage opts before type
+        let opts = KspOptions {
+            gmres_restart: Some(47),
+            gmres_orthog: Some("mgs".into()),
+            gmres_reorthog: Some(true),
+            gmres_happy_breakdown: Some(true),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        ksp.set_type(SolverType::Gmres).unwrap();
+
+        let s = ksp
+            .solver
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<GmresSolver>()
+            .unwrap();
+
+        let (restart, orth, reo, hb) = s.debug_config();
+        assert_eq!(restart, 47);
+        assert_eq!(orth, GmresOrthog::Mgs);
+        assert!(reo);
+        assert!(hb);
+    }
+
+    #[test]
+    fn fgmres_options_apply() {
+        use crate::solver::fgmres::{FgmresSolver, Orthog};
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Fgmres).unwrap();
+
+        let opts = KspOptions {
+            fgmres_restart: Some(25),
+            fgmres_orthog: Some("cgs".into()),
+            fgmres_reorthog: Some(false),
+            fgmres_happy_breakdown: Some(true),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+
+        let s = ksp
+            .solver
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<FgmresSolver>()
+            .unwrap();
+        let (restart, orth, reo, hb) = s.debug_config();
+        assert_eq!(restart, 25);
+        assert_eq!(orth, Orthog::Classical);
+        assert!(!reo);
+        assert!(hb);
     }
 }

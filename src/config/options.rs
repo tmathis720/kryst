@@ -21,6 +21,24 @@ pub struct KspOptions {
     pub dtol: Option<f64>,
     pub maxits: Option<usize>,
     pub restart: Option<usize>,
+    // GMRES/FGMRES-specific (backward-compatible; all optional)
+    /// Override restart for GMRES; falls back to `restart` if unset
+    pub gmres_restart: Option<usize>,
+    /// Orthogonalization method for GMRES: "mgs" | "cgs"
+    pub gmres_orthog: Option<String>,
+    /// If true, perform a second orthogonalization pass (reorthogonalization)
+    pub gmres_reorthog: Option<bool>,
+    /// If true, treat near-zero residual as a happy breakdown and stop
+    pub gmres_happy_breakdown: Option<bool>,
+
+    /// Override restart for FGMRES; falls back to `restart` if unset
+    pub fgmres_restart: Option<usize>,
+    /// Orthogonalization method for FGMRES: "mgs" | "cgs"
+    pub fgmres_orthog: Option<String>,
+    /// If true, perform a second orthogonalization pass (reorthogonalization)
+    pub fgmres_reorthog: Option<bool>,
+    /// If true, treat near-zero residual as a happy breakdown and stop
+    pub fgmres_happy_breakdown: Option<bool>,
     pub pc_side: Option<String>,
     pub matrix_file: Option<String>,
     pub rhs_file: Option<String>,
@@ -194,6 +212,10 @@ impl Sink for KspOptions {
         match key {
             "ksp_skip_real_r_check" => set_opt!(&mut self.skip_real_r_check, v),
             "ksp_cg_single_reduction" => set_opt!(&mut self.cg_single_reduction, v),
+            "ksp_gmres_reorthog" => set_opt!(&mut self.gmres_reorthog, v),
+            "ksp_gmres_happy_breakdown" => set_opt!(&mut self.gmres_happy_breakdown, v),
+            "ksp_fgmres_reorthog" => set_opt!(&mut self.fgmres_reorthog, v),
+            "ksp_fgmres_happy_breakdown" => set_opt!(&mut self.fgmres_happy_breakdown, v),
             _ => Err(KError::SolveError(format!("Unknown KSP bool key: {key}"))),
         }
     }
@@ -206,6 +228,10 @@ impl Sink for KspOptions {
             "ksp_dtol" => set_opt!(&mut self.dtol, parse_as::<f64>(v, spec)?),
             "ksp_max_it" => set_opt!(&mut self.maxits, parse_as::<usize>(v, spec)?),
             "ksp_gmres_restart" => set_opt!(&mut self.restart, parse_as::<usize>(v, spec)?),
+            // Additional GMRES/FGMRES keys
+            "ksp_gmres_orthog" => set_opt!(&mut self.gmres_orthog, v.to_string()),
+            "ksp_fgmres_restart" => set_opt!(&mut self.fgmres_restart, parse_as::<usize>(v, spec)?),
+            "ksp_fgmres_orthog" => set_opt!(&mut self.fgmres_orthog, v.to_string()),
             "ksp_pc_side" => set_opt!(&mut self.pc_side, v.to_string()),
             "matrix" => set_opt!(&mut self.matrix_file, v.to_string()),
             "rhs" => set_opt!(&mut self.rhs_file, v.to_string()),

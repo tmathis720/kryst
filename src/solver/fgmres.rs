@@ -10,7 +10,7 @@ use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::any::Any;
 
 /// Orthogonalization flavor
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Orthog {
     Classical,
     Modified,
@@ -29,6 +29,8 @@ pub struct FgmresSolver {
     /// Optional hook called once per outer iteration block (after backsolve) to allow user to tweak PC.
     pub modify_pc_on_restart:
         Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
+    /// Whether to treat near-zero residual as a happy breakdown
+    pub happy_breakdown: bool,
 }
 
 impl FgmresSolver {
@@ -43,6 +45,7 @@ impl FgmresSolver {
             haptol: 1e-12,
             preallocate: false,
             modify_pc_on_restart: None,
+            happy_breakdown: true,
         }
     }
 
@@ -431,5 +434,30 @@ impl LinearSolver for FgmresSolver {
         let mut none: Option<&mut dyn Preconditioner> = None;
         let pc_mut = none.as_deref_mut();
         self.solve_flexible(a, pc_mut, b, x, pc_side, comm, monitors, work)
+    }
+}
+
+impl FgmresSolver {
+    pub fn set_restart(&mut self, restart: usize) {
+        self.restart = restart.max(1);
+    }
+    pub fn set_orthog(&mut self, o: Orthog) {
+        self.orthog = o;
+    }
+    pub fn set_reorthog(&mut self, flag: bool) {
+        self.orthog = if flag { Orthog::Modified } else { Orthog::Classical };
+    }
+    pub fn set_happy_breakdown(&mut self, flag: bool) {
+        self.happy_breakdown = flag;
+    }
+
+    #[cfg(test)]
+    pub fn debug_config(&self) -> (usize, Orthog, bool, bool) {
+        (
+            self.restart,
+            self.orthog,
+            matches!(self.orthog, Orthog::Modified),
+            self.happy_breakdown,
+        )
     }
 }

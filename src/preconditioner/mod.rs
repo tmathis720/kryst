@@ -37,6 +37,7 @@
 //! ```
 
 use crate::error::KError;
+use crate::matrix::format::FormatHint;
 use crate::matrix::op::LinOp;
 #[cfg(feature = "legacy-pc-bridge")]
 use faer::Mat;
@@ -141,6 +142,22 @@ pub trait Preconditioner: Send + Sync {
         // By default, fall back to a full setup
         self.setup(a)
     }
+
+    /// Preferred matrix format for `setup`/`update_*` calls.
+    ///
+    /// Callers will materialize a stable view of the operator in this format once per
+    /// setup/update, preserving the original communicator. Defaults to CSR.
+    fn required_format(&self) -> FormatHint {
+        FormatHint::Csr
+    }
+
+    /// Optional numerical drop tolerance to use when creating the preferred format.
+    ///
+    /// Useful for threshold-based sparsification during conversion (e.g., ILUT).
+    /// Return `None` to keep all values (treated as 0.0).
+    fn preferred_drop_tol_for_format(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// Marker trait: any [`Preconditioner`] can be treated as flexible via [`apply_mut`].
@@ -241,6 +258,11 @@ impl Preconditioner for LegacyOpPreconditioner {
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.setup(a)
+    }
+
+    fn required_format(&self) -> FormatHint {
+        // Legacy bridge adapters expect dense Mat<f64>
+        FormatHint::Dense
     }
 }
 

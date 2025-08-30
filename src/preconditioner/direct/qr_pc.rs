@@ -36,4 +36,8 @@ impl Preconditioner for QrPc {
             .ok_or_else(|| KError::InvalidInput("QR PC requires faer::Mat<f64>".into()))?;
         crate::solver::dense_qr::solve(a, b, x)
     }
+
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Dense
+    }
 }

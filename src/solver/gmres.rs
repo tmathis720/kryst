@@ -22,11 +22,23 @@ use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GmresOrthog {
+    Mgs,
+    Cgs,
+}
+
 pub struct GmresSolver {
     pub restart: usize,
     pub conv: Convergence<f64>,
     /// Happy breakdown tolerance
     pub haptol: f64,
+    /// Orthogonalization flavor (currently not altering algorithmic path)
+    pub orthog: GmresOrthog,
+    /// Whether to perform a second orthogonalization pass
+    pub reorthog: bool,
+    /// Whether to treat near-zero residual as a happy breakdown
+    pub happy_breakdown: bool,
 }
 
 impl GmresSolver {
@@ -40,6 +52,9 @@ impl GmresSolver {
                 max_iters: maxits,
             },
             haptol: 1e-12,
+            orthog: GmresOrthog::Mgs,
+            reorthog: false,
+            happy_breakdown: true,
         }
     }
 
@@ -431,5 +446,25 @@ impl LinearSolver for GmresSolver {
         let (_reason, mut s) = self.conv.check(true_res, bnorm, total_iters);
         s.final_residual = true_res;
         Ok(s)
+    }
+}
+
+impl GmresSolver {
+    pub fn set_restart(&mut self, restart: usize) {
+        self.restart = restart.max(1);
+    }
+    pub fn set_orthog(&mut self, o: GmresOrthog) {
+        self.orthog = o;
+    }
+    pub fn set_reorthog(&mut self, flag: bool) {
+        self.reorthog = flag;
+    }
+    pub fn set_happy_breakdown(&mut self, flag: bool) {
+        self.happy_breakdown = flag;
+    }
+
+    #[cfg(test)]
+    pub fn debug_config(&self) -> (usize, GmresOrthog, bool, bool) {
+        (self.restart, self.orthog, self.reorthog, self.happy_breakdown)
     }
 }

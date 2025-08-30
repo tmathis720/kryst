@@ -12,6 +12,7 @@
 //! ```
 
 use crate::error::KError;
+use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::sync::Mutex;
@@ -60,7 +61,10 @@ impl PcChain {
 impl Preconditioner for PcChain {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
-            st.setup(a)?;
+            let hint = st.required_format();
+            let tol = st.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let view = materialize_linop_with_hint(a, hint, tol)?;
+            st.setup(view.as_ref())?;
         }
         Ok(())
     }
@@ -139,10 +143,13 @@ impl Preconditioner for PcChain {
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
+            let hint = st.required_format();
+            let tol = st.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let view = materialize_linop_with_hint(a, hint, tol)?;
             if st.supports_numeric_update() {
-                st.update_numeric(a)?;
+                st.update_numeric(view.as_ref())?;
             } else {
-                st.update_symbolic(a)?;
+                st.update_symbolic(view.as_ref())?;
             }
         }
         Ok(())
@@ -150,7 +157,10 @@ impl Preconditioner for PcChain {
 
     fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
-            st.update_symbolic(a)?;
+            let hint = st.required_format();
+            let tol = st.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let view = materialize_linop_with_hint(a, hint, tol)?;
+            st.update_symbolic(view.as_ref())?;
         }
         Ok(())
     }

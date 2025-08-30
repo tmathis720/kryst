@@ -4,7 +4,12 @@ use faer::Mat;
 
 use crate::{
     error::KError,
-    matrix::{csc::CscMatrix, format::AsFormat, op::LinOp, sparse::CsrMatrix},
+    matrix::{
+        csc::CscMatrix,
+        format::{AsFormat, FormatHint},
+        op::{wrap_with_comm, DenseOp, LinOp},
+        sparse::CsrMatrix,
+    },
 };
 
 /// Try to borrow a CSR matrix if the operator is already CSR.
@@ -87,4 +92,86 @@ pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
 /// This clones data when necessary and returns an owned matrix.
 pub fn owned_from_mat(mat: &Mat<f64>) -> Mat<f64> {
     mat.clone()
+}
+
+/// Convert `op` to a LinOp view with the requested `hint`, preserving communicator.
+/// For Dense, returns an owned `faer::Mat<f64>` so preconditioners can safely factorize.
+pub fn materialize_linop_with_hint(
+    op: &dyn LinOp<S = f64>,
+    hint: FormatHint,
+    drop_tol: f64,
+) -> Result<std::sync::Arc<dyn LinOp<S = f64>>, KError> {
+    let comm = op.comm();
+
+    // Dense matrix
+    if let Some(m) = op.as_any().downcast_ref::<Mat<f64>>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = m.to_csr_cached(drop_tol);
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => {
+                let csc = m.to_csc_cached(drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let owned = owned_from_mat(m);
+                wrap_with_comm(std::sync::Arc::new(owned), comm)
+            }
+        });
+    }
+
+    // CSR matrix
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
+        return Ok(match hint {
+            FormatHint::Csr => wrap_with_comm(std::sync::Arc::new(csr.clone()), comm),
+            FormatHint::Csc => {
+                let csc = AsFormat::to_csc_cached(csr, drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let dense = csr.to_dense();
+                wrap_with_comm(std::sync::Arc::new(dense), comm)
+            }
+        });
+    }
+
+    // CSC matrix
+    if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = AsFormat::to_csr_cached(csc, drop_tol);
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => wrap_with_comm(std::sync::Arc::new(csc.clone()), comm),
+            FormatHint::Dense => {
+                let dense = csc.to_dense();
+                wrap_with_comm(std::sync::Arc::new(dense), comm)
+            }
+        });
+    }
+
+    // DenseOp wrapper
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
+        let inner = dense_op.inner();
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = AsFormat::to_csr_cached(dense_op, drop_tol);
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => {
+                let csc = AsFormat::to_csc_cached(dense_op, drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let owned = owned_from_mat(inner);
+                wrap_with_comm(std::sync::Arc::new(owned), comm)
+            }
+        });
+    }
+
+    // Unsupported operator for conversion (e.g., distributed CSR or custom LinOp)
+    Err(KError::InvalidInput(
+        "materialize_linop_with_hint: unsupported LinOp type for conversion".into(),
+    ))
 }
