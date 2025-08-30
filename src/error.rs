@@ -4,6 +4,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum KError {
+    #[error("help requested")]
+    HelpRequested(String),
     #[error("breakdown or indefinite preconditioner detected (beta < 0)")]
     DivergedIndefinitePC,
     #[error("breakdown or indefinite situation detected (beta < 0 or other)")]

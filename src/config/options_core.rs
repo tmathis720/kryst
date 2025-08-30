@@ -2,7 +2,14 @@
 //! Single pass over argv, with fuzzy suggestions, boolean toggles,
 //! options-file expansion, and help generation.
 
-use std::{collections::HashMap, fmt::Display, fs, path::Path, str::FromStr};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt::Display,
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use crate::error::KError;
 
@@ -40,7 +47,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(specs: &'static [Spec]) -> Self {
+    pub fn new(specs: &[Spec]) -> Self {
         let mut by_flag = HashMap::with_capacity(specs.len());
         for s in specs {
             by_flag.insert(s.flag, *s);
@@ -140,21 +147,14 @@ impl Registry {
     }
 }
 
-fn kind_str(k: ValueKind) -> &'static str {
+fn kind_str(k: ValueKind) -> Cow<'static, str> {
     match k {
-        ValueKind::Bool => "bool",
-        ValueKind::Int => "int",
-        ValueKind::UInt => "uint",
-        ValueKind::Float => "float",
-        ValueKind::Str => "str",
-        ValueKind::Pair(a, b) => {
-            // e.g., "uint,uint"
-            if a.is_empty() && b.is_empty() {
-                "pair"
-            } else {
-                "pair"
-            }
-        }
+        ValueKind::Bool => Cow::Borrowed("bool"),
+        ValueKind::Int => Cow::Borrowed("int"),
+        ValueKind::UInt => Cow::Borrowed("uint"),
+        ValueKind::Float => Cow::Borrowed("float"),
+        ValueKind::Str => Cow::Borrowed("str"),
+        ValueKind::Pair(a, b) => Cow::Owned(format!("{},{}", a, b)),
     }
 }
 
@@ -181,23 +181,66 @@ pub trait Sink {
 
 /// Expand `-options_file <path>` occurrences (PETSc-style).
 /// Lines starting with `#` are comments. Splits by ASCII whitespace.
-/// Returns a flattened argv vector (no recursion limit, but file includes are not re-expanded inside files).
+/// Returns a flattened argv vector after recursively expanding nested includes.
+/// Relative include paths are resolved against the including file’s directory.
+/// Detects include cycles and errors out with a friendly message.
 pub fn expand_options_files(args: Vec<String>) -> Result<Vec<String>, KError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut stack = Vec::<PathBuf>::new();
+    expand_tokens_recursive(&args, &cwd, &mut stack)
+}
+
+// Recursively expand -options_file tokens found in `tokens`,
+// using `base_dir` for resolving relative include paths.
+fn expand_tokens_recursive(
+    tokens: &[String],
+    base_dir: &Path,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Vec<String>, KError> {
     let mut out = Vec::<String>::new();
     let mut i = 0usize;
-    while i < args.len() {
-        if args[i] == "-options_file" {
-            let path = args
+
+    while i < tokens.len() {
+        if tokens[i] == "-options_file" {
+            let path_str = tokens
                 .get(i + 1)
                 .ok_or_else(|| KError::SolveError("Missing value for -options_file".into()))?;
-            let file_args = read_options_file(Path::new(path))?;
-            out.extend(file_args);
+
+            let mut path = PathBuf::from(path_str);
+            if path.is_relative() {
+                path = base_dir.join(&path);
+            }
+            // Canonicalize for reliable cycle detection, but fall back to joined path
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+            // Cycle detection: A -> B -> A
+            if let Some(pos) = stack.iter().position(|p| *p == canon) {
+                // Build a readable cycle chain
+                let mut chain: Vec<String> = stack[pos..]
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                chain.push(canon.display().to_string());
+                return Err(KError::SolveError(format!(
+                    "Cyclic -options_file include detected: {}",
+                    chain.join(" -> ")
+                )));
+            }
+
+            stack.push(canon.clone());
+            let file_tokens = read_options_file(&canon)?; // tokenize the file’s content
+            let next_base = canon.parent().unwrap_or(base_dir);
+            let expanded = expand_tokens_recursive(&file_tokens, next_base, stack)?;
+            stack.pop();
+
+            out.extend(expanded);
             i += 2;
         } else {
-            out.push(args[i].clone());
+            out.push(tokens[i].clone());
             i += 1;
         }
     }
+
     Ok(out)
 }
 
@@ -263,4 +306,39 @@ where
 pub fn is_help_requested(args: &[&str]) -> bool {
     args.iter()
         .any(|&arg| arg == "-help" || arg == "--help" || arg == "-h")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_str_simple_kinds_are_borrowed() {
+        match kind_str(ValueKind::UInt) {
+            Cow::Borrowed(s) => assert_eq!(s, "uint"),
+            Cow::Owned(_) => panic!("expected borrowed for simple kind"),
+        }
+    }
+
+    #[test]
+    fn kind_str_pair_joins_inner_strings() {
+        let k = ValueKind::Pair("uint", "uint");
+        assert_eq!(kind_str(k), "uint,uint");
+    }
+
+    #[test]
+    fn help_includes_precise_pair_kind() {
+        let specs = [Spec {
+            flag: "-example_pair",
+            key: "example_pair",
+            arity: Arity::Two,
+            kind: ValueKind::Pair("width", "height"),
+            doc: "example pair flag",
+        }];
+        let reg = Registry::new(&specs);
+        let help = reg.help_for_prefix("-example_");
+        assert!(help.contains("width,height"), "help was: {help}");
+        // Ensure generic 'pair' is not shown
+        assert!(!help.contains(" pair\n"));
+    }
 }

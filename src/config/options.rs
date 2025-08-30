@@ -10,6 +10,7 @@ use crate::error::KError;
 use std::str::FromStr;
 
 use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
+use crate::config::options_core::is_help_requested;
 use crate::config::registry::registry;
 
 /// KSP (Krylov Solver) options.
@@ -739,31 +740,34 @@ impl PcOptions {
 
 // ---- Combined parsing with precedence & generated help ----
 
-pub fn print_help() {
+pub fn help_text() -> String {
     let reg = registry();
-    println!("Kryst Linear Solver Options\n");
-    println!("KSP options:");
-    print!("{}", reg.help_for_prefix("-ksp_"));
-    println!("General:");
-    print!("{}", reg.help_for_prefix("-m")); // will include -matrix
-    print!("{}", reg.help_for_prefix("-r")); // -rhs
-    println!("PC options:");
-    print!("{}", reg.help_for_prefix("-pc_"));
-    println!("Utility:");
-    print!("  -options_file <path>              str     Read more options from file\n");
+    let mut out = String::new();
+    out.push_str("Kryst Linear Solver Options\n\n");
+    out.push_str("KSP options:\n");
+    out.push_str(&reg.help_for_prefix("-ksp_"));
+    out.push_str("General:\n");
+    out.push_str(&reg.help_for_prefix("-m")); // includes -matrix
+    out.push_str(&reg.help_for_prefix("-r")); // includes -rhs
+    out.push_str("PC options:\n");
+    out.push_str(&reg.help_for_prefix("-pc_"));
+    out.push_str("Utility:\n");
+    out.push_str("  -options_file <path>              str     Read more options from file\n");
+    out
+}
+
+pub fn print_help() {
+    println!("{}", help_text());
 }
 
 /// CLI > options file(s) > env > defaults
 pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KError> {
     let mut args = args.to_vec();
 
-    // help?
-    if args
-        .iter()
-        .any(|a| a == "-help" || a == "--help" || a == "-h")
-    {
-        print_help();
-        std::process::exit(0);
+    // Centralized help check: library never exits; return typed signal
+    let as_refs_help: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    if is_help_requested(&as_refs_help) {
+        return Err(KError::HelpRequested(help_text()));
     }
 
     // expand options files into the token stream
@@ -896,6 +900,7 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::KError;
 
     #[test]
     fn ksp_bool_toggle() {
@@ -906,6 +911,16 @@ mod tests {
         let args = vec!["-ksp_skip_real_r_check", "false"];
         let opts = KspOptions::from_args(&args).unwrap();
         assert_eq!(opts.skip_real_r_check, Some(false));
+    }
+
+    #[test]
+    fn help_is_caught_and_returned() {
+        let args = vec!["--help".to_string()];
+        let err = parse_all_options(&args).unwrap_err();
+        match err {
+            KError::HelpRequested(text) => assert!(text.contains("Kryst Linear Solver Options")),
+            _ => panic!("expected HelpRequested"),
+        }
     }
 
     #[test]
@@ -993,6 +1008,71 @@ mod tests {
         assert_eq!(ksp.ksp_type.as_deref(), Some("gmres"));
         assert_eq!(ksp.rtol, Some(1e-8));
         assert_eq!(pc.pc_type.as_deref(), Some("jacobi"));
+    }
+
+    #[test]
+    fn nested_options_file_expands_recursively() {
+        // tmpA includes tmpB; tmpB sets -pc_type amg
+        let a = tempfile::NamedTempFile::new().unwrap();
+        let b = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(b.path(), "-pc_type amg\n").unwrap();
+        std::fs::write(
+            a.path(),
+            format!("-options_file {}\n", b.path().display()),
+        )
+        .unwrap();
+
+        let args = vec![
+            "-options_file".to_string(),
+            a.path().to_string_lossy().into_owned(),
+            "-pc_ilut_max_fill".to_string(),
+            "20".to_string(),
+        ];
+        let (_ksp, pc) = parse_all_options(&args).unwrap();
+        assert_eq!(pc.pc_type.as_deref(), Some("amg"));
+        assert_eq!(pc.ilut_max_fill, Some(20)); // later CLI still overrides file order
+    }
+
+    #[test]
+    fn options_file_cycle_is_reported() {
+        // A includes B; B includes A
+        let a = tempfile::NamedTempFile::new().unwrap();
+        let b = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            a.path(),
+            format!("-options_file {}\n", b.path().display()),
+        )
+        .unwrap();
+        std::fs::write(
+            b.path(),
+            format!("-options_file {}\n", a.path().display()),
+        )
+        .unwrap();
+
+        let args = vec!["-options_file".to_string(), a.path().to_string_lossy().into_owned()];
+        let err = parse_all_options(&args).unwrap_err();
+        match err {
+            KError::SolveError(msg) => assert!(msg.to_lowercase().contains("cyclic")),
+            _ => panic!("expected SolveError for cyclic include"),
+        }
+    }
+
+    #[test]
+    fn relative_path_is_resolved_against_including_file() {
+        // create dirA/optsA that includes "nested/optsB" relative to dirA
+        let dir = tempfile::tempdir().unwrap();
+        let dir_a = dir.path().join("dirA");
+        let nested = dir_a.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let a = dir_a.join("optsA");
+        let b = nested.join("optsB");
+
+        std::fs::write(&b, "-ksp_type gmres\n").unwrap();
+        std::fs::write(&a, "  # comment\n -options_file nested/optsB \n").unwrap();
+
+        let args = vec!["-options_file".to_string(), a.display().to_string()];
+        let (ksp, _pc) = parse_all_options(&args).unwrap();
+        assert_eq!(ksp.ksp_type.as_deref(), Some("gmres"));
     }
 }
 
