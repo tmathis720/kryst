@@ -1,7 +1,39 @@
+//! Thread-pool sizing and tuning for shared-memory parallelism (Rayon).
+//!
+//! # Overview
+//! When the crate is compiled with the `rayon` feature, Kryst builds a single
+//! global Rayon pool and reuses it across calls. The effective number of threads
+//! is chosen as follows (once per process):
+//!
+//! 1. If `KRYST_THREADS` is set, use that value.
+//! 2. Else if `RAYON_NUM_THREADS` is set, use that value.
+//! 3. Else use `num_cpus::get()`.
+//!
+//! If running under MPI, we size the pool per rank as
+//! `max(1, total_threads / mpi_size)` to avoid oversubscription.
+//!
+//! # Environment variables
+//! - `KRYST_THREADS`: total Rayon threads (preferred; overrides Rayon default).
+//! - `RAYON_NUM_THREADS`: standard Rayon override (used if `KRYST_THREADS` unset).
+//! - `KRYST_PAR_CUTOFF`: row-count threshold (default `DEFAULT_PAR_CUTOFF`) used by
+//!   [`CsrOp::matvec`](crate::matrix::op::CsrOp) to decide when to use the
+//!   parallel SpMV path.
+//!
+//! # Examples
+//! ```no_run
+//! // Single-node tuning
+//! std::env::set_var("KRYST_THREADS", "32");      // prefer a bigger pool
+//! std::env::set_var("KRYST_PAR_CUTOFF", "8192"); // only parallelize big SpMVs
+//!
+//! // Under MPI (e.g., 4 ranks), each rank gets floor(32/4) = 8 threads.
+//! ```
 use std::sync::OnceLock;
 
 #[cfg(feature = "rayon")]
 use rayon::ThreadPoolBuilder;
+
+/// Default row-count cutoff for enabling parallel SpMV in `CsrOp::matvec`.
+pub const DEFAULT_PAR_CUTOFF: usize = 4096;
 
 /// Helper to read an environment variable as usize.
 /// Falls back to `default` if the variable is not set or invalid.
@@ -83,4 +115,3 @@ impl ThreadPoolGuard {
         self.threads
     }
 }
-

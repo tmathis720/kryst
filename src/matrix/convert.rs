@@ -12,12 +12,47 @@ use crate::{
     },
 };
 
+/// Build a helpful error for unsupported operator conversions.
+///
+/// `where_` is the function name (e.g., "to_csr_cached") and `target` is the
+/// desired target format ("CSR", "CSC", "dense").
+fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) -> KError {
+    let sid = op.structure_id().0;
+    let vid = op.values_id().0;
+    let has_ids = sid != 0 || vid != 0;
+
+    let mut help = String::new();
+    help.push_str(&format!(
+        "convert::{where_}: unsupported LinOp type for conversion to {target}.\n"
+    ));
+    help.push_str("- Recovery options:\n");
+    help.push_str("  • If you have a dense matrix (`faer::Mat<f64>`), wrap it with `DenseOp` so structure/values IDs are tracked and conversions can be cached:\n");
+    help.push_str("      let op = DenseOp::new(Arc::new(mat));\n");
+    help.push_str("      // after in-place updates: op.mark_values_changed() / op.mark_structure_changed()\n");
+    help.push_str("  • If you have a CSR matrix (`CsrMatrix<f64>`), wrap it with `CsrOp` likewise:\n");
+    help.push_str("      let op = CsrOp::new(Arc::new(csr));\n");
+    help.push_str("  • If this is your own LinOp type, implement `matrix::format::AsFormat` for it to enable cached conversions.\n");
+    help.push_str("  • If running distributed, attach the communicator with `wrap_with_comm(op, comm)`.\n");
+
+    if !has_ids {
+        help.push_str("\nNote: this operator reports unknown StructureId/ValuesId (both 0). \
+                       Wrapping with `DenseOp`/`CsrOp` enables precise cache keys and efficient reuse.\n");
+    }
+
+    KError::InvalidInput(help)
+}
+
 /// Try to borrow a CSR matrix if the operator is already CSR.
 pub fn try_as_csr<'a>(pmat: &'a dyn LinOp<S = f64>) -> Option<&'a CsrMatrix<f64>> {
     pmat.as_any().downcast_ref::<CsrMatrix<f64>>()
 }
 
 /// Convert a matrix to CSR, caching dense conversions.
+///
+/// # Errors
+/// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
+/// an unsupported `LinOp` type. See message for how to wrap with
+/// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
 pub fn to_csr_cached(
     pmat: &dyn LinOp<S = f64>,
     drop_tol: f64,
@@ -28,9 +63,7 @@ pub fn to_csr_cached(
     if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.to_csr_cached(drop_tol));
     }
-    Err(KError::InvalidInput(
-        "to_csr_cached: unsupported LinOp type".into(),
-    ))
+    Err(unsupported_linop_err(pmat, "to_csr_cached", "CSR"))
 }
 
 /// Obtain a CSR matrix from a [`LinOp`], converting and caching if necessary.
@@ -48,6 +81,11 @@ pub fn try_as_csc<'a>(pmat: &'a dyn LinOp<S = f64>) -> Option<&'a CscMatrix<f64>
 }
 
 /// Convert a matrix to CSC, caching dense/CSR conversions.
+///
+/// # Errors
+/// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
+/// an unsupported `LinOp` type. See message for how to wrap with
+/// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
 pub fn to_csc_cached(
     pmat: &dyn LinOp<S = f64>,
     drop_tol: f64,
@@ -61,9 +99,7 @@ pub fn to_csc_cached(
     if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(csr.to_csc_cached(drop_tol));
     }
-    Err(KError::InvalidInput(
-        "to_csc_cached: unsupported LinOp type".into(),
-    ))
+    Err(unsupported_linop_err(pmat, "to_csc_cached", "CSC"))
 }
 
 /// Obtain a CSC matrix from a [`LinOp`], converting and caching if necessary.
@@ -76,6 +112,11 @@ pub fn csc_from_linop(
 }
 
 /// Obtain a dense matrix from a [`LinOp`], converting formats as needed.
+///
+/// # Errors
+/// Returns a recoverable `KError::InvalidInput` with guidance when `op` is
+/// an unsupported `LinOp` type. See message for how to wrap with `DenseOp` to
+/// enable cached conversions.
 pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
     if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.clone());
@@ -83,9 +124,7 @@ pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(csr.to_dense());
     }
-    Err(KError::InvalidInput(
-        "Unsupported operator type for Dense conversion".into(),
-    ))
+    Err(unsupported_linop_err(op, "dense_from_linop", "dense"))
 }
 
 /// Ensure we have an owned `Mat<f64>` regardless of storage (view vs owned).
@@ -171,7 +210,37 @@ pub fn materialize_linop_with_hint(
     }
 
     // Unsupported operator for conversion (e.g., distributed CSR or custom LinOp)
-    Err(KError::InvalidInput(
-        "materialize_linop_with_hint: unsupported LinOp type for conversion".into(),
-    ))
+    let target = match hint { FormatHint::Csr => "CSR", FormatHint::Csc => "CSC", FormatHint::Dense => "dense" };
+    Err(unsupported_linop_err(op, "materialize_linop_with_hint", target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matrix::op_shell::MatShell;
+
+    #[test]
+    fn to_csr_cached_returns_guidance_on_unsupported_type() {
+        // 3x3 shell op that cannot be converted by convert::*.
+        let shell = MatShell::new(3, 3, |x, y| {
+            y.copy_from_slice(x);
+        });
+
+        let err = to_csr_cached(&shell, 0.0).err().unwrap();
+        let msg = format!("{err:?}");
+        // The guidance should mention the recovery hints:
+        assert!(msg.contains("DenseOp"), "error should suggest DenseOp");
+        assert!(msg.contains("CsrOp"), "error should suggest CsrOp");
+        assert!(msg.contains("AsFormat"), "error should suggest AsFormat");
+        assert!(msg.contains("wrap_with_comm"), "error should suggest wrapping communicator");
+    }
+
+    #[test]
+    fn dense_from_linop_guidance() {
+        let shell = MatShell::new(2, 2, |x, y| y.copy_from_slice(x));
+        let err = dense_from_linop(&shell).err().unwrap();
+        let msg = format!("{err:?}");
+        assert!(msg.to_lowercase().contains("dense"), "should reference dense target");
+        assert!(msg.contains("DenseOp"), "should suggest DenseOp");
+    }
 }

@@ -12,6 +12,13 @@
 //! - Options map to builders; no in-solver construction.
 //!
 //! See `docs/adr/` for rationale and trade-offs.
+//!
+//! ### Parallelism
+//! With the `rayon` feature, [`CsrOp::matvec`](crate::matrix::op::CsrOp) can use a
+//! parallel SpMV path for local-only matrices larger than `KRYST_PAR_CUTOFF`
+//! (default [`crate::parallel::threads::DEFAULT_PAR_CUTOFF`]). Control the pool
+//! size with `KRYST_THREADS` or `RAYON_NUM_THREADS`. See
+//! [`crate::parallel::threads`] for details.
 
 pub mod parallel;
 

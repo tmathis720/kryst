@@ -91,6 +91,8 @@ impl ChangeIds {
 use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
 use faer::Mat;
 
+/// Wrap your concrete dense matrix with `DenseOp` to provide stable
+/// `StructureId`/`ValuesId` so conversions and preconditioner reuse can be cached.
 pub struct DenseOp {
     mat: Arc<Mat<f64>>,
     ids: ChangeIds,
@@ -157,6 +159,56 @@ impl LinOp for DenseOp {
     }
 }
 
+/// CSR-backed linear operator.
+///
+/// Wrap your concrete CSR matrix with `CsrOp` to provide stable
+/// `StructureId`/`ValuesId` so conversions and preconditioner reuse can be cached.
+///
+/// # Threading policy
+///
+/// When built with the `rayon` feature, [`CsrOp::matvec`] may switch to a
+/// parallel SpMV path. The decision is:
+///
+/// 1. The operator is local-only (`self.comm.size() == 1`).
+/// 2. The current Rayon pool has > 1 threads.
+/// 3. The matrix is large enough: `nrows >= KRYST_PAR_CUTOFF`
+///    (default [`crate::parallel::threads::DEFAULT_PAR_CUTOFF`]).
+///
+/// If any of these are false, SpMV runs single-threaded.
+///
+/// ## Tuning knobs (environment variables)
+///
+/// - `KRYST_THREADS` (only with `rayon`): sets the total number of Rayon threads.
+///   If unset, we fall back to `RAYON_NUM_THREADS`, then to `num_cpus`.
+///   When using MPI, the pool is sized per rank as
+///   `max(1, total_threads / mpi_size)`.
+///
+/// - `KRYST_PAR_CUTOFF`: minimum `nrows` to enable the parallel SpMV path.
+///   Default: [`crate::parallel::threads::DEFAULT_PAR_CUTOFF`].
+///
+/// ## Examples
+/// ```no_run
+/// # // Shell example: enable a bigger pool and lower the cutoff
+/// # std::env::set_var("KRYST_THREADS", "16");
+/// # std::env::set_var("KRYST_PAR_CUTOFF", "2048");
+/// use kryst::matrix::sparse::CsrMatrix;
+/// use kryst::matrix::op::CsrOp;
+/// use std::sync::Arc;
+///
+/// // Build/own a CSR, then wrap it as a LinOp.
+/// let csr = CsrMatrix::identity(10_000);
+/// let op  = CsrOp::new(Arc::new(csr));
+///
+/// // y = A * x; will use Rayon if compiled with `rayon` and nrows>=cutoff.
+/// let x = vec![1.0; 10_000];
+/// let mut y = vec![0.0; 10_000];
+/// op.matvec(&x, &mut y);
+/// ```
+///
+/// ## Notes
+/// - If you run under MPI and the communicator has size > 1, the parallel
+///   path is disabled in [`CsrOp::matvec`] (it’s intended for shared-memory).
+/// - See [`crate::parallel::threads`] for details on pool sizing and MPI.
 pub struct CsrOp {
     csr: Arc<CsrMatrix<f64>>,
     ids: ChangeIds,
@@ -194,11 +246,30 @@ impl LinOp for CsrOp {
         {
             let local_only = self.comm.size() == 1;
             let threads = crate::parallel::threads::current_rayon_threads();
-            let big_enough = self.csr.nrows()
-                >= crate::parallel::threads::env_usize("KRYST_PAR_CUTOFF", 4096);
+            let cutoff = crate::parallel::threads::env_usize(
+                "KRYST_PAR_CUTOFF",
+                crate::parallel::threads::DEFAULT_PAR_CUTOFF,
+            );
+            let big_enough = self.csr.nrows() >= cutoff;
 
             if local_only && threads > 1 && big_enough {
+                #[cfg(feature = "logging")]
+                log::trace!(
+                    "CsrOp::matvec using Rayon (rows={}, threads={}, cutoff={})",
+                    self.csr.nrows(),
+                    threads,
+                    cutoff,
+                );
                 return self.csr.spmv_parallel(x, y);
+            } else {
+                #[cfg(feature = "logging")]
+                log::trace!(
+                    "CsrOp::matvec serial path (local_only={}, threads={}, rows={}, cutoff={})",
+                    local_only,
+                    threads,
+                    self.csr.nrows(),
+                    cutoff,
+                );
             }
         }
 
