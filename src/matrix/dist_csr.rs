@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::KError;
+use crate::error::KError;
 use crate::matrix::{
     op::{ChangeIds, LinOp, StructureId, ValuesId},
     sparse::CsrMatrix,
@@ -322,7 +322,7 @@ impl LinOp for DistCsrOp {
         }
     }
 
-    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), crate::KError> {
+    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), crate::error::KError> {
         self.spmv_dist_impl(x, y)
     }
 

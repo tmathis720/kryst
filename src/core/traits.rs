@@ -86,10 +86,10 @@ pub trait SubmatrixExtract {
 /// Sparse-aware matrix-vector operations for AMG and iterative solvers
 pub trait MatVecOp<T> {
     /// Compute y = alpha * A * x + beta * y
-    fn mat_vec(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::KError>;
+    fn mat_vec(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::error::KError>;
 
     /// Compute y = alpha * A^T * x + beta * y (transpose operation)
-    fn mat_vec_trans(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::KError>;
+    fn mat_vec_trans(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::error::KError>;
 
     /// Get the number of rows
     fn nrows(&self) -> usize;
@@ -115,9 +115,9 @@ impl MatVecOp<f64> for faer::Mat<f64> {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         if x.len() != self.ncols() || y.len() != self.nrows() {
-            return Err(crate::KError::InvalidInput(
+            return Err(crate::error::KError::InvalidInput(
                 "Matrix-vector dimension mismatch".to_string(),
             ));
         }
@@ -138,9 +138,9 @@ impl MatVecOp<f64> for faer::Mat<f64> {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         if x.len() != self.nrows() || y.len() != self.ncols() {
-            return Err(crate::KError::InvalidInput(
+            return Err(crate::error::KError::InvalidInput(
                 "Matrix-vector dimension mismatch".to_string(),
             ));
         }
@@ -171,10 +171,10 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         use crate::matrix::sparse::SparseMatrix;
         if x.len() != SparseMatrix::ncols(self) || y.len() != SparseMatrix::nrows(self) {
-            return Err(crate::KError::InvalidInput(
+            return Err(crate::error::KError::InvalidInput(
                 "Matrix-vector dimension mismatch".to_string(),
             ));
         }
@@ -214,12 +214,12 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         use crate::matrix::sparse::SparseMatrix;
 
         // Dimension checks: x is in R^{m}, y in R^{n} for A^T (A is m×n)
         if x.len() != SparseMatrix::nrows(self) || y.len() != SparseMatrix::ncols(self) {
-            return Err(crate::KError::InvalidInput(
+            return Err(crate::error::KError::InvalidInput(
                 "Matrix-vector dimension mismatch".to_string(),
             ));
         }
@@ -315,7 +315,7 @@ pub trait KernelOp<T> {
         beta: T,
         y: &mut [T],
         comm: &Self::Comm,
-    ) -> Result<(), crate::KError>;
+    ) -> Result<(), crate::error::KError>;
 
     /// Transpose matrix-vector product: y = alpha * A^T * x + beta * y
     fn kernel_mat_vec_trans(
@@ -326,7 +326,7 @@ pub trait KernelOp<T> {
         beta: T,
         y: &mut [T],
         comm: &Self::Comm,
-    ) -> Result<(), crate::KError>;
+    ) -> Result<(), crate::error::KError>;
 
     /// Global dot product with reduction across processes
     fn kernel_dot(&self, x: &[T], y: &[T], comm: &Self::Comm) -> T;
@@ -358,7 +358,7 @@ impl KernelOp<f64> for LocalKernel {
         beta: f64,
         y: &mut [f64],
         _comm: &Self::Comm,
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         // For local operations, no communication needed
         matrix.mat_vec(alpha, x, beta, y)
     }
@@ -371,7 +371,7 @@ impl KernelOp<f64> for LocalKernel {
         beta: f64,
         y: &mut [f64],
         _comm: &Self::Comm,
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         matrix.mat_vec_trans(alpha, x, beta, y)
     }
 
@@ -417,7 +417,7 @@ impl KernelOp<f64> for DistributedKernel {
         beta: f64,
         y: &mut [f64],
         _comm: &Self::Comm,
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         // TODO: Add proper distributed matrix-vector operations
         // For now, delegate to local operation
         matrix.mat_vec(alpha, x, beta, y)
@@ -431,7 +431,7 @@ impl KernelOp<f64> for DistributedKernel {
         beta: f64,
         y: &mut [f64],
         _comm: &Self::Comm,
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         // TODO: Add proper distributed transpose operations
         matrix.mat_vec_trans(alpha, x, beta, y)
     }
@@ -479,7 +479,7 @@ pub trait AmgKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError>
+    ) -> Result<(), crate::error::KError>
     where
         M: MatVecOp<f64>;
 
@@ -520,7 +520,7 @@ impl AmgKernel for LocalAmgKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError>
+    ) -> Result<(), crate::error::KError>
     where
         M: MatVecOp<f64>,
     {
@@ -567,7 +567,7 @@ impl AmgKernel for DistributedAmgKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-    ) -> Result<(), crate::KError>
+    ) -> Result<(), crate::error::KError>
     where
         M: MatVecOp<f64>,
     {

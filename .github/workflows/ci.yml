@@ -62,6 +62,15 @@ jobs:
           echo "Using feature args: ${FEAT_ARGS[*]:-<none>} (with --no-default-features)"
           cargo build --locked --verbose --no-default-features "${FEAT_ARGS[@]}"
 
+      - name: Lint error path usage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if rg -n 'crate::KError\b' src; then
+            echo "Use crate::error::KError everywhere (Option A)." >&2
+            exit 1
+          fi
+
       - name: Run unit tests (NO MPI)
         shell: bash
         run: |

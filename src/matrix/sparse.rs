@@ -173,9 +173,9 @@ impl<
         x: &[T],
         beta: T,
         y: &mut [T],
-    ) -> Result<(), crate::KError> {
+    ) -> Result<(), crate::error::KError> {
         if x.len() != self.ncols() || y.len() != self.nrows() {
-            return Err(crate::KError::InvalidInput(format!(
+            return Err(crate::error::KError::InvalidInput(format!(
                 "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len()={}",
                 self.nrows(),
                 self.ncols(),

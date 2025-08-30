@@ -30,7 +30,7 @@ fn dist_try_matvec_returns_error_on_bad_dims() {
 
     let err = op.try_matvec(&x, &mut y).unwrap_err();
     match err {
-        kryst::KError::InvalidInput(msg) => assert!(msg.to_lowercase().contains("dimension")),
+        kryst::error::KError::InvalidInput(msg) => assert!(msg.to_lowercase().contains("dimension")),
         other => panic!("unexpected error: {:?}", other),
     }
 }

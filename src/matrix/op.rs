@@ -1,5 +1,5 @@
 use crate::parallel::{Comm, NoComm, UniverseComm};
-use crate::KError;
+use crate::error::KError;
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
