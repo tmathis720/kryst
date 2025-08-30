@@ -35,7 +35,7 @@
 //! selected preconditioner using the preconditioner operator (`P`, or `A` when `P` is `None`).
 //! Use it with direct PCs such as `LU`, `QR`, or `SuperLU_DIST`.
 
-use crate::config::options::{KspOptions, PcOptions};
+use crate::config::options::{KspOptions, PcOptions, KspType};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
@@ -379,7 +379,7 @@ impl KspContext {
             .as_mut()
             .and_then(|b| b.as_any_mut().downcast_mut::<GmresSolver>())
         {
-            if let Some(r) = opts.gmres_restart.or(opts.restart) {
+            if let Some(r) = opts.effective_restart_for(KspType::GMRES) {
                 s.set_restart(r);
                 self.restart = r;
                 self.pending_gmres.restart = Some(r);
@@ -406,7 +406,7 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
         } else {
-            if let Some(r) = opts.gmres_restart.or(opts.restart) {
+            if let Some(r) = opts.effective_restart_for(KspType::GMRES) {
                 self.pending_gmres.restart = Some(r);
                 self.restart = r;
             }
@@ -435,7 +435,7 @@ impl KspContext {
             .as_mut()
             .and_then(|b| b.as_any_mut().downcast_mut::<FgmresSolver>())
         {
-            if let Some(r) = opts.fgmres_restart.or(opts.restart) {
+            if let Some(r) = opts.effective_restart_for(KspType::FGMRES) {
                 s.set_restart(r);
                 self.restart = r;
                 self.pending_fgmres.restart = Some(r);
@@ -463,7 +463,7 @@ impl KspContext {
                 self.pending_fgmres.happy_breakdown = Some(flag);
             }
         } else {
-            if let Some(r) = opts.fgmres_restart.or(opts.restart) {
+            if let Some(r) = opts.effective_restart_for(KspType::FGMRES) {
                 self.pending_fgmres.restart = Some(r);
                 self.restart = r;
             }

@@ -52,6 +52,14 @@ pub struct KspOptions {
     pub trust_region: Option<f64>,
 }
 
+/// KSP type tag for option resolution helpers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum KspType {
+    GMRES,
+    FGMRES,
+    Other,
+}
+
 /// PC options.
 #[derive(Debug, Default, Clone)]
 pub struct PcOptions {
@@ -207,6 +215,14 @@ macro_rules! set_opt {
     }};
 }
 
+fn ensure_ge_1(name: &str, val: usize) -> Result<usize, KError> {
+    if val == 0 {
+        Err(KError::SolveError(format!("{name} must be ≥ 1")))
+    } else {
+        Ok(val)
+    }
+}
+
 impl Sink for KspOptions {
     fn set_bool(&mut self, key: &str, v: bool) -> Result<(), KError> {
         match key {
@@ -227,10 +243,21 @@ impl Sink for KspOptions {
             "ksp_atol" => set_opt!(&mut self.atol, parse_as::<f64>(v, spec)?),
             "ksp_dtol" => set_opt!(&mut self.dtol, parse_as::<f64>(v, spec)?),
             "ksp_max_it" => set_opt!(&mut self.maxits, parse_as::<usize>(v, spec)?),
-            "ksp_gmres_restart" => set_opt!(&mut self.restart, parse_as::<usize>(v, spec)?),
+            // restart flags
+            "ksp_restart" => set_opt!(
+                &mut self.restart,
+                ensure_ge_1("ksp_restart", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_gmres_restart" => set_opt!(
+                &mut self.gmres_restart,
+                ensure_ge_1("ksp_gmres_restart", parse_as::<usize>(v, spec)?)?
+            ),
             // Additional GMRES/FGMRES keys
             "ksp_gmres_orthog" => set_opt!(&mut self.gmres_orthog, v.to_string()),
-            "ksp_fgmres_restart" => set_opt!(&mut self.fgmres_restart, parse_as::<usize>(v, spec)?),
+            "ksp_fgmres_restart" => set_opt!(
+                &mut self.fgmres_restart,
+                ensure_ge_1("ksp_fgmres_restart", parse_as::<usize>(v, spec)?)?
+            ),
             "ksp_fgmres_orthog" => set_opt!(&mut self.fgmres_orthog, v.to_string()),
             "ksp_pc_side" => set_opt!(&mut self.pc_side, v.to_string()),
             "matrix" => set_opt!(&mut self.matrix_file, v.to_string()),
@@ -500,10 +527,23 @@ impl KspOptions {
                     .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MAX_IT: {v}")))?,
             );
         }
+        if let Ok(v) = std::env::var("KRYST_KSP_RESTART") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_RESTART: {v}")))?;
+            me.restart = Some(ensure_ge_1("KRYST_KSP_RESTART", n)?);
+        }
         if let Ok(v) = std::env::var("KRYST_KSP_GMRES_RESTART") {
-            me.restart = Some(v.parse().map_err(|_| {
+            let n: usize = v.parse().map_err(|_| {
                 KError::SolveError(format!("Invalid KRYST_KSP_GMRES_RESTART: {v}"))
-            })?);
+            })?;
+            me.gmres_restart = Some(ensure_ge_1("KRYST_KSP_GMRES_RESTART", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_FGMRES_RESTART") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_FGMRES_RESTART: {v}"))
+            })?;
+            me.fgmres_restart = Some(ensure_ge_1("KRYST_KSP_FGMRES_RESTART", n)?);
         }
         if let Ok(v) = std::env::var("KRYST_KSP_PC_SIDE") {
             PcSide::from_str(&v)?;
@@ -556,6 +596,20 @@ impl KspOptions {
                 })?);
         }
         Ok(me)
+    }
+}
+
+impl KspOptions {
+    /// Resolve the effective restart for a given solver type following precedence:
+    /// - GMRES: gmres_restart -> restart
+    /// - FGMRES: fgmres_restart -> restart
+    /// - Others: restart
+    pub fn effective_restart_for(&self, ksp_type: KspType) -> Option<usize> {
+        match ksp_type {
+            KspType::GMRES => self.gmres_restart.or(self.restart),
+            KspType::FGMRES => self.fgmres_restart.or(self.restart),
+            KspType::Other => self.restart,
+        }
     }
 }
 
@@ -739,6 +793,14 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         dtol,
         maxits,
         restart,
+        gmres_restart,
+        gmres_orthog,
+        gmres_reorthog,
+        gmres_happy_breakdown,
+        fgmres_restart,
+        fgmres_orthog,
+        fgmres_reorthog,
+        fgmres_happy_breakdown,
         pc_side,
         matrix_file,
         rhs_file,
@@ -747,6 +809,9 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         skip_real_r_check,
         epsmac,
         guard_zero_residual,
+        cg_norm,
+        cg_single_reduction,
+        trust_region,
     );
     overlay!(
         pc_opts,
@@ -844,6 +909,77 @@ mod tests {
     }
 
     #[test]
+    fn ksp_cli_overrides_options_file_for_missing_fields() {
+        // Helper: writes an options file with given content, then parses with CLI args appended
+        fn parse_with_layers(file_body: &str, cli: &[&str]) -> KspOptions {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), file_body).unwrap();
+            let mut args: Vec<String> = vec![
+                "-options_file".to_string(),
+                tmp.path().to_str().unwrap().to_string(),
+            ];
+            args.extend(cli.iter().map(|s| s.to_string()));
+            let (ksp, _pc) = parse_all_options(&args).unwrap();
+            ksp
+        }
+
+        // GMRES
+        let k = parse_with_layers("-ksp_gmres_restart 30\n", &["-ksp_gmres_restart", "60"]);
+        assert_eq!(k.gmres_restart, Some(60));
+
+        let k = parse_with_layers("-ksp_gmres_orthog cgs\n", &["-ksp_gmres_orthog", "mgs"]);
+        assert_eq!(k.gmres_orthog.as_deref(), Some("mgs"));
+
+        let k = parse_with_layers(
+            "-ksp_gmres_reorthog true\n",
+            &["-ksp_gmres_reorthog", "false"],
+        );
+        assert_eq!(k.gmres_reorthog, Some(false));
+
+        let k = parse_with_layers(
+            "-ksp_gmres_happy_breakdown true\n",
+            &["-ksp_gmres_happy_breakdown", "false"],
+        );
+        assert_eq!(k.gmres_happy_breakdown, Some(false));
+
+        // FGMRES
+        let k = parse_with_layers("-ksp_fgmres_restart 20\n", &["-ksp_fgmres_restart", "80"]);
+        assert_eq!(k.fgmres_restart, Some(80));
+
+        let k = parse_with_layers(
+            "-ksp_fgmres_orthog mgs\n",
+            &["-ksp_fgmres_orthog", "cgs"],
+        );
+        assert_eq!(k.fgmres_orthog.as_deref(), Some("cgs"));
+
+        let k = parse_with_layers(
+            "-ksp_fgmres_reorthog true\n",
+            &["-ksp_fgmres_reorthog", "false"],
+        );
+        assert_eq!(k.fgmres_reorthog, Some(false));
+
+        let k = parse_with_layers(
+            "-ksp_fgmres_happy_breakdown false\n",
+            &["-ksp_fgmres_happy_breakdown", "true"],
+        );
+        assert_eq!(k.fgmres_happy_breakdown, Some(true));
+
+        // CG
+        let k = parse_with_layers("-ksp_cg_norm preconditioned\n", &["-ksp_cg_norm", "natural"]);
+        assert_eq!(k.cg_norm.as_deref(), Some("natural"));
+
+        let k = parse_with_layers(
+            "-ksp_cg_single_reduction false\n",
+            &["-ksp_cg_single_reduction", "true"],
+        );
+        assert_eq!(k.cg_single_reduction, Some(true));
+
+        // Trust region
+        let k = parse_with_layers("-ksp_trust_region 0.5\n", &["-ksp_trust_region", "1.5"]);
+        assert!(matches!(k.trust_region, Some(v) if (v - 1.5).abs() < 1e-12));
+    }
+
+    #[test]
     fn options_file_basic() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "-ksp_type gmres\n-ksp_rtol 1e-8\n").unwrap();
@@ -911,7 +1047,7 @@ mod old_tests {
             "1e3",
             "-ksp_max_it",
             "1000",
-            "-ksp_gmres_restart",
+            "-ksp_restart",
             "30",
             "-ksp_pc_side",
             "left",
@@ -951,12 +1087,64 @@ mod old_tests {
 
         assert_eq!(opts.ksp_type, Some("gmres".to_string()));
         assert_eq!(opts.rtol, Some(1e-8));
-        assert_eq!(opts.restart, Some(50));
+        assert_eq!(opts.gmres_restart, Some(50));
         assert_eq!(opts.min_iter, Some(5));
         assert_eq!(opts.cf_tol, Some(0.9));
         assert_eq!(opts.skip_real_r_check, Some(true));
         assert_eq!(opts.epsmac, Some(1e-15));
         assert_eq!(opts.guard_zero_residual, Some(1e-14));
+    }
+
+    #[test]
+    fn cli_gmres_restart_sets_gmres_field_only() {
+        let args = vec!["-ksp_gmres_restart", "50"];
+        let opts = KspOptions::from_args(&args).unwrap();
+        assert_eq!(opts.gmres_restart, Some(50));
+        assert_eq!(opts.restart, None);
+        assert_eq!(opts.fgmres_restart, None);
+    }
+
+    #[test]
+    fn generic_then_specific_precedence() {
+        let args = vec![
+            "-ksp_restart",
+            "30",
+            "-ksp_gmres_restart",
+            "60",
+        ];
+        let opts = KspOptions::from_args(&args).unwrap();
+        assert_eq!(opts.restart, Some(30));
+        assert_eq!(opts.gmres_restart, Some(60));
+        assert_eq!(opts.effective_restart_for(KspType::GMRES), Some(60));
+        assert_eq!(opts.effective_restart_for(KspType::FGMRES), Some(30));
+    }
+
+    #[test]
+    fn options_file_and_cli_overlay() {
+        // Simulate options file with generic restart, and CLI with fgmres-specific restart
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "-ksp_restart 20\n").unwrap();
+        let args = vec![
+            "-options_file".to_string(),
+            tmp.path().to_str().unwrap().to_string(),
+            "-ksp_fgmres_restart".to_string(),
+            "40".to_string(),
+        ];
+        let (ksp, _pc) = parse_all_options(&args).unwrap();
+        assert_eq!(ksp.restart, Some(20));
+        assert_eq!(ksp.fgmres_restart, Some(40));
+        assert_eq!(ksp.effective_restart_for(KspType::FGMRES), Some(40));
+        assert_eq!(ksp.effective_restart_for(KspType::GMRES), Some(20));
+    }
+
+    #[test]
+    fn rejects_zero_restart_values() {
+        let bad1 = KspOptions::from_args(&["-ksp_restart", "0"]).err();
+        assert!(bad1.is_some());
+        let bad2 = KspOptions::from_args(&["-ksp_gmres_restart", "0"]).err();
+        assert!(bad2.is_some());
+        let bad3 = KspOptions::from_args(&["-ksp_fgmres_restart", "0"]).err();
+        assert!(bad3.is_some());
     }
 
     #[test]

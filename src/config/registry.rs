@@ -49,11 +49,18 @@ pub static SPECS: &[Spec] = &[
         doc: "max iterations",
     },
     Spec {
+        flag: "-ksp_restart",
+        key: "ksp_restart",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "Generic restart for restarted KSPs",
+    },
+    Spec {
         flag: "-ksp_gmres_restart",
         key: "ksp_gmres_restart",
         arity: Arity::One,
         kind: ValueKind::UInt,
-        doc: "GMRES restart",
+        doc: "GMRES-specific restart (overrides -ksp_restart)",
     },
     // GMRES/FGMRES orthogonalization and extras
     Spec {
@@ -82,7 +89,7 @@ pub static SPECS: &[Spec] = &[
         key: "ksp_fgmres_restart",
         arity: Arity::One,
         kind: ValueKind::UInt,
-        doc: "FGMRES restart",
+        doc: "FGMRES-specific restart (overrides -ksp_restart)",
     },
     Spec {
         flag: "-ksp_fgmres_orthog",
