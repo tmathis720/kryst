@@ -6,7 +6,7 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
-use crate::preconditioner::{self, PcSide, Preconditioner};
+use crate::preconditioner::{self, PcSide};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
@@ -105,6 +105,10 @@ impl LinearSolver for MinresSolver {
             ));
         }
 
+        // Treat preconditioner as immutable; apply() only needs &self
+        let pc: Option<&dyn preconditioner::Preconditioner> =
+            pc.map(|m| m as &dyn preconditioner::Preconditioner);
+
         // 2) Workspace
         let mut owned;
         let w = if let Some(w) = work {
@@ -122,11 +126,10 @@ impl LinearSolver for MinresSolver {
             (&mut a1[0][..], &mut a2[0][..], &mut rest[0][..])
         };
 
-        // Borrow w_{k-1}, w_k without aliasing (fixes E0499)
-        let (w_prev, w_k) = {
-            let (first, tail) = w.z.split_at_mut(1);
-            (&mut first[0][..], &mut tail[0][..])
-        };
+        // Borrow w_{k-1} and w_k without aliasing
+        let (z0, z1) = w.z.split_at_mut(1);
+        let w_prev = &mut z0[0][..];
+        let w_k = &mut z1[0][..];
 
         // 3) r = b - A x ; z = M^{-1} r ; beta1 = ||z||
         a.matvec(x, &mut w.tmp1);
