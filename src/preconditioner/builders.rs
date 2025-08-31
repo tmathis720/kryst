@@ -75,32 +75,32 @@ pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {
 // ---- ILU family builders -------------------------------------------------
 
 pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
-    #[cfg(feature = "legacy-pc-bridge")]
-    {
-        let ilup = Ilup::new(0);
-        Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))))
-    }
-    #[cfg(not(feature = "legacy-pc-bridge"))]
-    {
-        Err(KError::Unsupported(
-            "ILU0 requires port or legacy-pc-bridge feature",
-        ))
-    }
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    let cfg = IluCsrConfig {
+            kind: IluKind::Ilu0,
+            pivot: PivotStrategy::DiagonalPerturbation,
+            pivot_threshold: 1e-12,
+            diag_perturb_factor: 1e-10,
+            level_sched: cfg!(feature = "rayon"),
+            numeric_update_fixed: true,
+            logging: 0,
+        };
+    let pc = IluCsr::new_with_config(cfg);
+    Ok(Box::new(pc))
 }
 
 pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
-    #[cfg(feature = "legacy-pc-bridge")]
-    {
-        let ilup = Ilup::new(level);
-        Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilup))))
-    }
-    #[cfg(not(feature = "legacy-pc-bridge"))]
-    {
-        let _ = level;
-        Err(KError::Unsupported(
-            "ILU(k) requires port or legacy-pc-bridge feature",
-        ))
-    }
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    let cfg = IluCsrConfig {
+        kind: IluKind::Iluk { k: level },
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: cfg!(feature = "rayon"),
+        numeric_update_fixed: true,
+        logging: 0,
+    };
+    Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
 
 pub fn build_ilut(
@@ -108,18 +108,18 @@ pub fn build_ilut(
     max_fill: usize,
     _reordering: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    #[cfg(feature = "legacy-pc-bridge")]
-    {
-        let ilut = Ilut::new(max_fill, drop_tol);
-        Ok(Box::new(LegacyOpPreconditioner::new(Box::new(ilut))))
-    }
-    #[cfg(not(feature = "legacy-pc-bridge"))]
-    {
-        let _ = (drop_tol, max_fill);
-        Err(KError::Unsupported(
-            "ILUT requires port or legacy-pc-bridge feature",
-        ))
-    }
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    let cfg = IluCsrConfig {
+        kind: IluKind::Ilut { drop_tol, max_per_row: max_fill },
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: cfg!(feature = "rayon"),
+        // For ILUT, fast numeric update requires fixed pattern. Let callers override later if needed.
+        numeric_update_fixed: true,
+        logging: 0,
+    };
+    Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
 
 pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {

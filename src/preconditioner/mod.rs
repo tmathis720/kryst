@@ -304,6 +304,7 @@ pub mod ilut;
 pub mod ilutp;
 pub mod jacobi;
 pub mod sor;
+pub mod ilu_csr;
 
 // Re-exports for convenience
 pub use self::sor::MatSorType;

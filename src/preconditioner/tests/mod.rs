@@ -52,3 +52,4 @@ fn default_apply_mut_forwards_to_apply() {
 
 mod legacy_bridge;
 mod direct_apply;
+mod ilu_csr;
