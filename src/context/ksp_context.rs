@@ -60,10 +60,17 @@ pub struct Workspace {
     pub cs: Vec<f64>,
     pub sn: Vec<f64>,
     pub g: Vec<f64>,
-    /// Preconditioned basis vectors (Z) used by right-preconditioned solvers
-    /// or flexible methods like FGMRES. Left-preconditioned solvers leave this
-    /// empty.
+    /// Legacy preconditioned basis vectors (Z) used by right-preconditioned
+    /// solvers or flexible methods like FGMRES. Left-preconditioned solvers
+    /// leave this empty. Kept for backward compatibility with solvers that
+    /// haven't yet migrated to flat storage.
     pub z: Vec<Vec<f64>>,
+    /// Column-major storage for GMRES/FGMRES basis vectors. `q_mem` stores the
+    /// Krylov basis `V` with `(m+1)` columns, each of length `n`. `z_mem` stores
+    /// the preconditioned directions for right-preconditioned methods with `m`
+    /// columns, each of length `n`.
+    pub q_mem: Vec<f64>,
+    pub z_mem: Vec<f64>,
 }
 
 impl Workspace {
@@ -77,7 +84,58 @@ impl Workspace {
             sn: Vec::new(),
             g: Vec::new(),
             z: Vec::new(),
+            q_mem: Vec::new(),
+            z_mem: Vec::new(),
         }
+    }
+
+    /// Ensure flat slabs sized for GMRES. `V` has `(m+1)` columns, `Z` has `m`
+    /// columns when required by right-preconditioned or flexible variants.
+    pub fn ensure_gmres_slabs(&mut self, n: usize, m: usize, need_z: bool) {
+        let v_cols = m + 1;
+        let v_len = v_cols * n;
+        if self.q_mem.len() != v_len {
+            self.q_mem.clear();
+            self.q_mem.resize(v_len, 0.0);
+        }
+        if need_z {
+            let z_cols = m;
+            let z_len = z_cols * n;
+            if self.z_mem.len() != z_len {
+                self.z_mem.clear();
+                self.z_mem.resize(z_len, 0.0);
+            }
+        } else {
+            self.z_mem.clear();
+        }
+    }
+
+    /// Mutable column slice into the `V` basis matrix.
+    #[inline]
+    pub fn vcol_mut(&mut self, n: usize, j: usize) -> &mut [f64] {
+        let start = j * n;
+        &mut self.q_mem[start..start + n]
+    }
+
+    /// Immutable column slice into the `V` basis matrix.
+    #[inline]
+    pub fn vcol(&self, n: usize, j: usize) -> &[f64] {
+        let start = j * n;
+        &self.q_mem[start..start + n]
+    }
+
+    /// Mutable column slice into the `Z` preconditioned basis matrix.
+    #[inline]
+    pub fn zcol_mut(&mut self, n: usize, j: usize) -> &mut [f64] {
+        let start = j * n;
+        &mut self.z_mem[start..start + n]
+    }
+
+    /// Immutable column slice into the `Z` preconditioned basis matrix.
+    #[inline]
+    pub fn zcol(&self, n: usize, j: usize) -> &[f64] {
+        let start = j * n;
+        &self.z_mem[start..start + n]
     }
 }
 
