@@ -44,6 +44,8 @@ rand = "0.8"
 approx = "0.5"
 criterion = "0.4"
 env_logger = "0.11"
+proptest = "1"
+iai-callgrind = "0.14"
 
 [features]
 default = ["mpi","rayon","logging"]
@@ -53,6 +55,7 @@ logging = ["dep:log"]
 mpi_examples = ["mpi"]
 superlu_dist = []
 tuning = []
+iai = []
 
 # Opt-in: compute a fingerprint of raw Mat<f64> values to strengthen cache invalidation.
 # Off by default due to O(m*n) hashing cost on each conversion call.
@@ -83,4 +86,12 @@ harness = false
 
 [[bench]]
 name = "direct_vs_faer"
+harness = false
+
+[[bench]]
+name = "ksp_core"
+harness = false
+
+[[bench]]
+name = "iai"
 harness = false

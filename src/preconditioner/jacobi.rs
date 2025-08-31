@@ -2,17 +2,21 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::stats::{PcIntrospect, PcStats};
+use std::sync::atomic::{AtomicU64, Ordering};
 use faer::Mat;
 
 pub struct Jacobi {
     pub(crate) diag_inv: Vec<f64>,
     n: usize,
+    applies: AtomicU64,
 }
 impl Jacobi {
     pub fn new() -> Self {
         Self {
             diag_inv: Vec::new(),
             n: 0,
+            applies: AtomicU64::new(0),
         }
     }
 
@@ -60,11 +64,16 @@ impl Preconditioner for Jacobi {
         self.recompute(pmat)
     }
     fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
-        assert_eq!(r.len(), self.n);
-        assert_eq!(z.len(), self.n);
+        if r.len() != self.n || z.len() != self.n {
+            return Err(KError::InvalidInput(format!(
+                "Jacobi::apply dimension mismatch: n={}, r.len()={}, z.len()={}",
+                self.n, r.len(), z.len()
+            )));
+        }
         for i in 0..self.n {
             z[i] = self.diag_inv[i] * r[i];
         }
+        self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -75,5 +84,18 @@ impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacob
     }
     fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         crate::preconditioner::Preconditioner::apply(self, side, r.as_slice(), z.as_mut_slice())
+    }
+}
+
+impl PcIntrospect for Jacobi {
+    fn stats(&self) -> PcStats {
+        PcStats {
+            name: "Jacobi",
+            n: self.n,
+            build_ms: 0.0,
+            nnz_pc: self.n,
+            fill_ratio: 0.0,
+            applies: self.applies.load(Ordering::Relaxed),
+        }
     }
 }

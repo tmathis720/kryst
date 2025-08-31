@@ -15,7 +15,11 @@ use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
-use std::sync::Mutex;
+use std::cell::RefCell;
+
+thread_local! {
+    static TLS_BUF: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+}
 
 /// A simple compositional preconditioner:
 /// y = P_k( ... P_2(P_1(x)) ... ) for all PcSide variants.
@@ -23,31 +27,11 @@ use std::sync::Mutex;
 ///
 pub struct PcChain {
     stages: Vec<Box<dyn Preconditioner>>,
-    scratch: Mutex<ChainScratch>,
-}
-
-#[derive(Default)]
-struct ChainScratch {
-    buf1: Vec<f64>,
-    buf2: Vec<f64>,
 }
 
 impl PcChain {
     pub fn new(stages: Vec<Box<dyn Preconditioner>>) -> Self {
-        Self {
-            stages,
-            scratch: Mutex::new(ChainScratch::default()),
-        }
-    }
-
-    #[inline]
-    fn ensure_bufs(s: &mut ChainScratch, n: usize) {
-        if s.buf1.len() != n {
-            s.buf1.resize(n, 0.0);
-        }
-        if s.buf2.len() != n {
-            s.buf2.resize(n, 0.0);
-        }
+        Self { stages }
     }
 
     pub fn len(&self) -> usize {
@@ -66,6 +50,9 @@ impl Preconditioner for PcChain {
             let view = materialize_linop_with_hint(a, hint, tol)?;
             st.setup(view.as_ref())?;
         }
+        // Best-effort pre-size TLS buffer for apply hot path
+        let (n, _) = a.dims();
+        TLS_BUF.with(|b| b.borrow_mut().resize(n, 0.0));
         Ok(())
     }
 
@@ -77,30 +64,18 @@ impl Preconditioner for PcChain {
         if self.stages.len() == 1 {
             return self.stages[0].apply(side, x, y);
         }
-
-        let n = x.len();
-        let mut s = self.scratch.lock().unwrap();
-        Self::ensure_bufs(&mut s, n);
-        let ChainScratch { buf1, buf2 } = &mut *s;
-
-        self.stages[0].apply(side, x, buf1)?;
-        let mut in_is_buf1 = true;
-        let m = self.stages.len();
-        for st in self.stages.iter().skip(1).take(m - 2) {
-            if in_is_buf1 {
-                st.apply(side, &*buf1, buf2)?;
-            } else {
-                st.apply(side, &*buf2, buf1)?;
+        TLS_BUF.with(|b| -> Result<(), KError> {
+            let mut tmp = b.borrow_mut();
+            if tmp.len() < x.len() {
+                tmp.resize(x.len(), 0.0);
             }
-            in_is_buf1 = !in_is_buf1;
-        }
-        let last = self.stages.last().unwrap();
-        if in_is_buf1 {
-            last.apply(side, &*buf1, y)?;
-        } else {
-            last.apply(side, &*buf2, y)?;
-        }
-        Ok(())
+            tmp.copy_from_slice(x);
+            for st in &self.stages {
+                st.apply(side, &*tmp, y)?;
+                tmp.copy_from_slice(y);
+            }
+            Ok(())
+        })
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
@@ -111,30 +86,18 @@ impl Preconditioner for PcChain {
         if self.stages.len() == 1 {
             return self.stages[0].apply_mut(side, x, y);
         }
-
-        let n = x.len();
-        let mut s = self.scratch.lock().unwrap();
-        Self::ensure_bufs(&mut s, n);
-        let ChainScratch { buf1, buf2 } = &mut *s;
-
-        self.stages[0].apply_mut(side, x, buf1)?;
-        let mut in_is_buf1 = true;
-        let m = self.stages.len();
-        for st in self.stages.iter_mut().skip(1).take(m - 2) {
-            if in_is_buf1 {
-                st.apply_mut(side, &*buf1, buf2)?;
-            } else {
-                st.apply_mut(side, &*buf2, buf1)?;
+        TLS_BUF.with(|b| -> Result<(), KError> {
+            let mut tmp = b.borrow_mut();
+            if tmp.len() < x.len() {
+                tmp.resize(x.len(), 0.0);
             }
-            in_is_buf1 = !in_is_buf1;
-        }
-        let last = self.stages.last_mut().unwrap();
-        if in_is_buf1 {
-            last.apply_mut(side, &*buf1, y)?;
-        } else {
-            last.apply_mut(side, &*buf2, y)?;
-        }
-        Ok(())
+            tmp.copy_from_slice(x);
+            for st in self.stages.iter_mut() {
+                st.apply_mut(side, &*tmp, y)?;
+                tmp.copy_from_slice(y);
+            }
+            Ok(())
+        })
     }
 
     fn supports_numeric_update(&self) -> bool {

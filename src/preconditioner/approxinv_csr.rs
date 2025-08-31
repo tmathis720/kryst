@@ -321,8 +321,12 @@ impl Preconditioner for FsaiCsr {
 
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         // y = G (G^T x)
-        assert_eq!(x.len(), self.g.nrows());
-        assert_eq!(y.len(), self.g.nrows());
+        if x.len() != self.g.nrows() || y.len() != self.g.nrows() {
+            return Err(KError::InvalidInput(format!(
+                "FsaiCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.g.nrows(), x.len(), y.len()
+            )));
+        }
         let n = x.len();
         let mut t = vec![0.0f64; n];
         spmv_csr_transpose(&self.g, x, &mut t);
@@ -493,8 +497,12 @@ impl Preconditioner for SpaiCsr {
     }
 
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        assert_eq!(x.len(), self.m.ncols());
-        assert_eq!(y.len(), self.m.nrows());
+        if x.len() != self.m.ncols() || y.len() != self.m.nrows() {
+            return Err(KError::InvalidInput(format!(
+                "SpaiCsr::apply dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                self.m.nrows(), self.m.ncols(), x.len(), y.len()
+            )));
+        }
         spmv_csr(&self.m, x, y);
         Ok(())
     }

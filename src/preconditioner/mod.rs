@@ -164,6 +164,8 @@ pub trait Preconditioner: Send + Sync {
 pub trait FlexiblePreconditioner: Preconditioner {}
 impl<T: Preconditioner + ?Sized> FlexiblePreconditioner for T {}
 
+pub mod stats;
+
 /// Legacy generic preconditioner traits retained for transitional adapters.
 pub mod legacy {
     use super::PcSide;
