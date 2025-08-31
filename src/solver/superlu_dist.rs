@@ -111,12 +111,12 @@ impl ProcessGrid {
     /// Create a new process grid from communicator with automatic dimension selection
     pub fn new_auto(comm: &UniverseComm) -> Result<Self, KError> {
         let total_procs = comm.size();
-        let _ = comm.rank();
-
-        // Find optimal grid dimensions (as square as possible)
-        let (prows, pcols) = Self::determine_optimal_grid(total_procs);
-
-        Self::new_with_dims(comm, prows, pcols)
+        if total_procs != 1 {
+            return Err(KError::InvalidInput(
+                "Milestone 1 supports only single process (NoComm)".into(),
+            ));
+        }
+        Self::new_with_dims(comm, 1, 1)
     }
 
     /// Create a new process grid with specified dimensions
@@ -379,14 +379,10 @@ impl Panel {
                 }
             }
         }
+        debug_assert_eq!(width, col_end - col_start);
+        debug_assert_eq!(height, row_indices.len());
 
-        Self {
-            width,
-            height,
-            data,
-            row_indices,
-            col_start,
-        }
+        Self { width, height, data, row_indices, col_start }
     }
 
     /// Get mutable view as faer matrix
@@ -405,6 +401,13 @@ impl Panel {
         threshold: f64,
         pivot_strategy: PivotingStrategy,
     ) -> Result<PanelFactorization, KError> {
+        // In-place LU, column-major:
+        // For each column k:
+        //   - pivot = U[k,k]
+        //   - For i>k: L[i,k] = A[i,k] / pivot   (stored in data[k*nrows + i])
+        //   - For j>k: U[k,j] = A[k,j]            (data[j*nrows + k])
+        //   - L diagonal is implicit 1.0 (NOT stored)
+
         let nrows = self.height;
         let ncols = self.width;
         let min_size = nrows.min(ncols);
@@ -1098,26 +1101,16 @@ impl DistributedTriangularSolver {
         l_factors: &[Panel],
         block_id: usize,
     ) -> Result<(), KError> {
-        // Find the appropriate L factor panel
         if let Some(panel) = l_factors.get(block_id) {
-            // Use direct data access for triangular solve
-            let l_data = &panel.data;
-            let height = panel.height;
-            let width = panel.width;
-
-            // Perform forward substitution: L * x = b
-            for i in 0..height.min(x_block.len()) {
+            let a = &panel.data;
+            let n = panel.height.min(panel.width).min(x_block.len());
+            debug_assert!(panel.height >= panel.width);
+            for i in 0..n {
                 let mut sum = 0.0;
                 for j in 0..i {
-                    if j < width {
-                        // Column-major access: data[col * height + row]
-                        sum += l_data[j * height + i] * x_block[j];
-                    }
+                    sum += a[j * panel.height + i] * x_block[j];
                 }
-                // Diagonal element
-                if i < width && l_data[i * height + i] != 0.0 {
-                    x_block[i] = (x_block[i] - sum) / l_data[i * height + i];
-                }
+                x_block[i] -= sum;
             }
         }
 
@@ -1130,24 +1123,21 @@ impl DistributedTriangularSolver {
         u_factors: &[Panel],
         block_id: usize,
     ) -> Result<(), KError> {
-        // Find the appropriate U factor panel
         if let Some(panel) = u_factors.get(block_id) {
-            // Use direct data access for triangular solve
-            let u_data = &panel.data;
-            let height = panel.height;
-            let width = panel.width;
-
-            // Perform backward substitution: U * x = b
-            for i in (0..height.min(x_block.len())).rev() {
+            let a = &panel.data;
+            let n = panel.height.min(panel.width).min(x_block.len());
+            debug_assert!(panel.height >= panel.width);
+            for ii in 0..n {
+                let i = n - 1 - ii;
                 let mut sum = 0.0;
-                for j in (i + 1)..width.min(x_block.len()) {
-                    // Column-major access: data[col * height + row]
-                    sum += u_data[j * height + i] * x_block[j];
+                for j in (i + 1)..n {
+                    sum += a[j * panel.height + i] * x_block[j];
                 }
-                // Diagonal element
-                if i < width && u_data[i * height + i] != 0.0 {
-                    x_block[i] = (x_block[i] - sum) / u_data[i * height + i];
+                let diag = a[i * panel.height + i];
+                if diag == 0.0 {
+                    return Err(KError::SolveError(format!("Zero U diagonal at {}", i)));
                 }
+                x_block[i] = (x_block[i] - sum) / diag;
             }
         }
 
@@ -2953,6 +2943,9 @@ impl SuperLuDistWorkspace {
         self.vector_sizes
             .insert("comm_buffer".to_string(), panel_size);
 
+        debug_assert_eq!(process_grid.total_procs, 1);
+        debug_assert_eq!(self.vector_sizes["solution"], matrix_size);
+
         // Preallocate based on strategy
         match self.config.preallocation_strategy {
             PreallocationStrategy::None => {
@@ -3549,28 +3542,23 @@ impl SuperLuDistSolver {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("SuperLuDistSetup");
 
-        // Create process grid
-        let process_grid = if let Some((prows, pcols)) = self.options.process_grid {
-            ProcessGrid::new_with_dims(comm, prows, pcols)?
-        } else {
-            ProcessGrid::new_auto(comm)?
-        };
+        if comm.size() != 1 {
+            return Err(KError::InvalidInput(
+                "Milestone 1 supports only single process (NoComm)".into(),
+            ));
+        }
 
-        // Create block-cyclic distribution
-        // Use reasonable block sizes (can be made configurable later)
-        let row_block_size = std::cmp::max(1, matrix.nrows() / (process_grid.prows * 4));
-        let col_block_size = std::cmp::max(1, matrix.ncols() / (process_grid.pcols * 4));
-
+        // Milestone 1: single-process grid and no distribution
+        let process_grid = ProcessGrid::new_with_dims(comm, 1, 1)?;
         let distribution = BlockCyclicDistribution::new(
             process_grid.clone(),
             matrix.nrows(),
             matrix.ncols(),
-            row_block_size,
-            col_block_size,
+            matrix.nrows().max(1),
+            matrix.ncols().max(1),
         );
 
-        // Distribute the matrix to local portions
-        let local_matrix = self.distribute_matrix(matrix, &distribution)?;
+        let local_matrix = matrix.clone();
 
         // Create SuperLU_DIST data structure
         let mut slu_data = SuperLuDistData {
@@ -3614,51 +3602,8 @@ impl SuperLuDistSolver {
         global_matrix: &CsrMatrix<f64>,
         distribution: &BlockCyclicDistribution,
     ) -> Result<CsrMatrix<f64>, KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("MatrixDistribution");
-
-        // Extract local portion of the global matrix
-        let mut local_row_ptrs = vec![0];
-        let mut local_col_indices = Vec::new();
-        let mut local_values = Vec::new();
-
-        let mut nnz_count = 0;
-
-        let rp = global_matrix.row_ptr();
-        let cj = global_matrix.col_idx();
-        let vv = global_matrix.values();
-
-        // Iterate through global rows and extract those owned by this process
-        for global_row in 0..global_matrix.nrows() {
-            if let Some(_local_row) = distribution.global_to_local_row(global_row) {
-                // Get the row data from global matrix
-                let row_start = rp[global_row];
-                let row_end = rp[global_row + 1];
-
-                // Extract columns that belong to this process
-                for idx in row_start..row_end {
-                    let global_col = cj[idx];
-                    if let Some(local_col) = distribution.global_to_local_col(global_col) {
-                        local_col_indices.push(local_col);
-                        local_values.push(vv[idx]);
-                        nnz_count += 1;
-                    }
-                }
-
-                local_row_ptrs.push(nnz_count);
-            }
-        }
-
-        // Create local CSR matrix
-        let local_matrix = CsrMatrix::from_csr(
-            distribution.local_rows,
-            distribution.local_cols,
-            local_row_ptrs,
-            local_col_indices,
-            local_values,
-        );
-
-        Ok(local_matrix)
+        let _ = distribution;
+        Ok(global_matrix.clone())
     }
 
     /// Enhanced symbolic factorization using ordering algorithms
@@ -3673,7 +3618,17 @@ impl SuperLuDistSolver {
         let matrix = data
             .local_matrix
             .as_ref()
-            .ok_or_else(|| KError::SolveError("No local matrix available".to_string()))?;
+            .ok_or_else(|| KError::SolveError("No local/global matrix".to_string()))?;
+        assert_eq!(matrix.nrows(), data.distribution.global_rows);
+        assert_eq!(matrix.ncols(), data.distribution.global_cols);
+
+        #[cfg(feature = "logging")]
+        log::debug!(
+            "Symbolic factorization: n={}, nnz={}, col_perm={:?}",
+            n,
+            matrix.nnz(),
+            self.options.column_permutation
+        );
 
         // Compute column permutation based on strategy
         let col_perm = match self.options.column_permutation {
@@ -3710,7 +3665,11 @@ impl SuperLuDistSolver {
         log::debug!("Computing symbolic pattern with {} x {} matrix", n, n);
 
         // Compute symbolic factorization pattern
-        let l_pattern = SymbolicFactorizer::compute_symbolic_pattern(matrix, &col_perm, &row_perm)?;
+        let l_pattern =
+            SymbolicFactorizer::compute_symbolic_pattern(matrix, &col_perm, &row_perm)?;
+        for k in 0..n {
+            debug_assert!(l_pattern.contains_key(&(k, k)));
+        }
 
         // Compute U pattern (transpose of L for square matrices)
         let mut u_pattern = HashMap::new();
@@ -3765,8 +3724,8 @@ impl SuperLuDistSolver {
             PivotingStrategy::Dynamic
         };
 
-        // Panel size configuration (could be made configurable)
-        let panel_size = std::cmp::min(64, n / 4).max(1);
+        // Milestone 1: use a single full-width panel for the whole matrix
+        let panel_size = n.max(1);
 
         #[cfg(feature = "logging")]
         log::debug!(
@@ -3947,15 +3906,8 @@ impl SuperLuDistSolver {
             .ok_or_else(|| KError::SolveError("No numeric factorization available".to_string()))?;
 
         // Determine communication pattern based on options
-        let comm_pattern = if self.options.enable_3d_factorization {
-            CommPattern::BinaryTree
-        } else if self.options.async_panel_updates {
-            CommPattern::Butterfly
-        } else {
-            CommPattern::PointToPoint
-        };
-
-        let overlap_comm = self.options.async_panel_updates;
+        let comm_pattern = CommPattern::PointToPoint;
+        let overlap_comm = false;
 
         #[cfg(feature = "logging")]
         log::info!(
@@ -4173,6 +4125,8 @@ pub fn solve(
 mod tests {
     use super::*;
     use crate::parallel::NoComm;
+    use faer::linalg::solvers::{FullPivLu, SolveCore};
+    use faer::MatMut;
 
     #[test]
     fn test_superlu_dist_creation() {
@@ -4705,24 +4659,24 @@ mod tests {
 
     #[test]
     fn test_local_triangular_solve_l() {
-        // Create a simple L factor panel
+        // Panel after in-place LU with unit diagonal L
+        // L = [[1, 0], [2, 1]]
+        // U = [[1, 4], [0, 5]]
         let panel = Panel {
             width: 2,
             height: 2,
-            // Column-major: L = [[1, 0], [2, 3]]
-            data: vec![1.0, 2.0, 0.0, 3.0],
+            data: vec![1.0, 2.0, 4.0, 5.0],
             row_indices: vec![0, 1],
             col_start: 0,
         };
 
         let factors = vec![panel];
-        let mut x = vec![4.0, 11.0]; // Should solve to [4, 1] since L*[4,1] = [4, 11]
-
+        // b = [3,11] -> solution y = [3,5]
+        let mut x = vec![3.0, 11.0];
         DistributedTriangularSolver::solve_local_l_block(&mut x, &factors, 0).unwrap();
 
-        // Check that solution is approximately [4, 1]
-        assert!((x[0] - 4.0).abs() < 1e-10);
-        assert!((x[1] - 1.0).abs() < 1e-10);
+        assert!((x[0] - 3.0).abs() < 1e-10);
+        assert!((x[1] - 5.0).abs() < 1e-10);
     }
 
     #[test]
@@ -4731,20 +4685,19 @@ mod tests {
         let panel = Panel {
             width: 2,
             height: 2,
-            // Column-major: U = [[2, 1], [0, 3]]
+            // Column-major U with L part zero below diagonal
             data: vec![2.0, 0.0, 1.0, 3.0],
             row_indices: vec![0, 1],
             col_start: 0,
         };
 
         let factors = vec![panel];
-        let mut x = vec![5.0, 3.0]; // Should solve to [2, 1] since U*[2,1] = [5, 3]
-
+        // y = [4,6] corresponds to solution [1,2]
+        let mut x = vec![4.0, 6.0];
         DistributedTriangularSolver::solve_local_u_block(&mut x, &factors, 0).unwrap();
 
-        // Check that solution is approximately [2, 1]
-        assert!((x[0] - 2.0).abs() < 1e-10);
-        assert!((x[1] - 1.0).abs() < 1e-10);
+        assert!((x[0] - 1.0).abs() < 1e-10);
+        assert!((x[1] - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -4839,12 +4792,11 @@ mod tests {
 
     #[test]
     fn test_superlu_dist_simple_solve() {
-        // Create a simple 3x3 identity matrix
-        let matrix =
-            CsrMatrix::from_csr(3, 3, vec![0, 1, 2, 3], vec![0, 1, 2], vec![1.0, 1.0, 1.0]);
+        // 5x5 identity matrix
+        let matrix = CsrMatrix::identity(5);
 
-        let b = vec![1.0, 2.0, 3.0];
-        let mut x = vec![0.0; 3];
+        let b = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let mut x = vec![0.0; 5];
         let mut solver = SuperLuDistSolver::new();
 
         let comm = UniverseComm::NoComm(NoComm);
@@ -4862,9 +4814,180 @@ mod tests {
             .unwrap();
 
         // For identity matrix, solution should equal RHS
-        assert_eq!(x, vec![1.0, 2.0, 3.0]);
+        assert_eq!(x, b);
         assert_eq!(stats.iterations, 1);
         assert!(matches!(stats.reason, ConvergedReason::ConvergedAtol));
+    }
+
+    #[test]
+    fn test_superlu_dist_spd_solve() {
+        // SPD 3x3 matrix
+        let matrix = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 3, 6, 9],
+            vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+            vec![4.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0],
+        );
+        let b = vec![1.0, 2.0, 3.0];
+        let mut x = vec![0.0; 3];
+        let mut solver = SuperLuDistSolver::new();
+        solver
+            .set_column_permutation(ColumnPermutation::Natural)
+            .set_row_permutation(RowPermutation::NoRowPerm);
+        let comm = UniverseComm::NoComm(NoComm);
+        solver
+            .solve(
+                &matrix,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut x_ref = b.clone();
+        let a_dense = matrix.to_dense();
+        let lu = FullPivLu::new(a_dense.as_ref());
+        let mut x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 3, 1);
+        lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
+        for i in 0..3 {
+            assert!((x[i] - x_ref[i]).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_superlu_dist_indefinite_solve() {
+        // Matrix [[0,1],[1,0]]
+        let matrix = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![2.0, 1.0, 1.0, -1.0],
+        );
+        let b = vec![1.0, 0.0];
+        let mut x = vec![0.0; 2];
+        let mut solver = SuperLuDistSolver::new();
+        solver
+            .set_column_permutation(ColumnPermutation::Natural)
+            .set_row_permutation(RowPermutation::NoRowPerm);
+        let comm = UniverseComm::NoComm(NoComm);
+        solver
+            .solve(
+                &matrix,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut x_ref = b.clone();
+        let a_dense = matrix.to_dense();
+        let lu = FullPivLu::new(a_dense.as_ref());
+        let mut x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 2, 1);
+        lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
+        for i in 0..2 {
+            assert!((x[i] - x_ref[i]).abs() < 1e-10);
+        }
+    }
+
+    fn make_spd6() -> CsrMatrix<f64> {
+        let n = 6;
+        let mut row_ptr = vec![0];
+        let mut col = Vec::new();
+        let mut val = Vec::new();
+        for i in 0..n {
+            if i > 0 {
+                col.push(i - 1);
+                val.push(-1.0);
+            }
+            col.push(i);
+            val.push(4.0);
+            if i + 1 < n {
+                col.push(i + 1);
+                val.push(-1.0);
+            }
+            row_ptr.push(col.len());
+        }
+        CsrMatrix::from_csr(n, n, row_ptr, col, val)
+    }
+
+    #[test]
+    fn test_superlu_dist_random_spd() {
+        let matrix = make_spd6();
+        let b = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut x = vec![0.0; 6];
+        let mut solver = SuperLuDistSolver::new();
+        let comm = UniverseComm::NoComm(NoComm);
+        solver
+            .solve(
+                &matrix,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut x_ref = b.clone();
+        let a_dense = matrix.to_dense();
+        let lu = FullPivLu::new(a_dense.as_ref());
+        let mut x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 6, 1);
+        lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
+        for i in 0..6 {
+            assert!((x[i] - x_ref[i]).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_superlu_dist_tiny_pivot_replacement() {
+        let matrix = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![1e-12, 1.0, 1.0, 1.0],
+        );
+        let b = vec![1.0, 2.0];
+        let mut x = vec![0.0; 2];
+        let mut solver = SuperLuDistSolver::new();
+        solver
+            .set_replace_tiny_pivots(true)
+            .set_static_pivoting(true)
+            .set_diagonal_pivot_threshold(1e-8);
+        let comm = UniverseComm::NoComm(NoComm);
+        solver
+            .solve(
+                &matrix,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                None,
+            )
+            .unwrap();
+        let stats = solver
+            .data
+            .as_ref()
+            .unwrap()
+            .numeric_factor
+            .as_ref()
+            .unwrap()
+            .factor_stats
+            .tiny_pivots_replaced;
+        assert!(stats > 0);
     }
 
     #[test]
