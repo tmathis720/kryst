@@ -7,10 +7,11 @@
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::solver::common::recompute_true_residual_norm;
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
 #[cfg(feature = "logging")]
@@ -27,10 +28,7 @@ pub enum CgNormType {
 }
 
 pub struct CgSolver {
-    rtol: f64,
-    atol: f64,
-    dtol: f64,
-    maxits: usize,
+    pub(crate) conv: Convergence<f64>,
     norm_type: CgNormType,
     single_reduction: bool,
     trust_region: Option<f64>,
@@ -39,11 +37,9 @@ pub struct CgSolver {
 impl CgSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
         Self {
-            rtol,
-            atol: 1e-12,
-            dtol: 1e3,
-            maxits,
-            norm_type: CgNormType::Unpreconditioned,
+            conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits },
+            // Default monitors use preconditioned norm per policy
+            norm_type: CgNormType::Preconditioned,
             single_reduction: false,
             trust_region: None,
         }
@@ -73,8 +69,8 @@ impl CgSolver {
     }
 
     #[inline]
-    fn dot(u: &[f64], v: &[f64], _comm: &UniverseComm) -> f64 {
-        u.iter().zip(v).map(|(a, b)| a * b).sum()
+    fn dot(u: &[f64], v: &[f64], comm: &UniverseComm) -> f64 {
+        comm.dot(u, v)
     }
     #[inline]
     fn nrm2(u: &[f64], comm: &UniverseComm) -> f64 {
@@ -184,43 +180,39 @@ impl LinearSolver for CgSolver {
             return Err(KError::IndefinitePreconditioner);
         }
         let rsq = Self::dot(r, r, comm);
-        let bnorm = Self::nrm2(b, comm).max(1e-32);
         let mut xnorm = Self::nrm2(x, comm);
 
-        let res0 = match self.norm_type {
-            CgNormType::Preconditioned => rho.abs().sqrt(),
+        // Reported residual for CG (Left) defaults to preconditioned norm sqrt(r^T z)
+        let res0_reported = match self.norm_type {
+            CgNormType::Preconditioned | CgNormType::Natural => rho.abs().sqrt(),
             CgNormType::Unpreconditioned => rsq.sqrt(),
-            CgNormType::Natural => rho.abs().sqrt(),
             CgNormType::None => 0.0,
         };
 
         if let Some(ms) = monitors {
             for m in ms {
-                m(0, res0);
+                m(0, res0_reported);
             }
         }
         #[cfg(feature = "logging")]
-        trace!("CG initial residual: {:.3e}", res0);
+        trace!("CG initial residual: {:.3e}", res0_reported);
 
         p.copy_from_slice(z);
 
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res0,
-            reason: ConvergedReason::Continued,
-        };
+        let mut stats = SolveStats { iterations: 0, final_residual: res0_reported, reason: ConvergedReason::Continued };
 
-        let thresh = self.atol.max(self.rtol * bnorm);
-        if res0 <= thresh {
-            stats.reason = if res0 <= self.atol {
-                ConvergedReason::ConvergedAtol
-            } else {
-                ConvergedReason::ConvergedRtol
-            };
-            return Ok(stats);
+        // Convergence check at iteration 0 (baseline = res0_reported)
+        let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            // On early exit, recompute true residual for final reporting
+            let mut tmp = vec![0.0; n];
+            let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+            let mut s = s0;
+            s.final_residual = true_res;
+            return Ok(s);
         }
 
-        for k in 1..=self.maxits {
+        for k in 1..=self.conv.max_iters {
             a.matvec(p, ap);
 
             let p_ap = Self::dot(p, ap, comm);
@@ -264,34 +256,26 @@ impl LinearSolver for CgSolver {
             }
             let rsq_new = Self::dot(r, r, comm);
 
-            let res = match self.norm_type {
-                CgNormType::Preconditioned => rho_new.abs().sqrt(),
+            let res_reported = match self.norm_type {
+                CgNormType::Preconditioned | CgNormType::Natural => rho_new.abs().sqrt(),
                 CgNormType::Unpreconditioned => rsq_new.sqrt(),
-                CgNormType::Natural => rho_new.abs().sqrt(),
                 CgNormType::None => 0.0,
             };
 
             if let Some(ms) = monitors {
                 for m in ms {
-                    m(k, res);
+                    m(k, res_reported);
                 }
             }
 
-            if res <= self.atol || res <= self.rtol * bnorm {
-                stats.iterations = k;
-                stats.final_residual = res;
-                stats.reason = if res <= self.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                };
-                return Ok(stats);
-            }
-            if !res.is_finite() || res >= self.dtol {
-                stats.iterations = k;
-                stats.final_residual = res;
-                stats.reason = ConvergedReason::DivergedDtol;
-                return Ok(stats);
+            // Use standardized convergence policy against res0_reported baseline
+            let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
+            if !matches!(reason, ConvergedReason::Continued) {
+                // Exit: recompute true residual and override final_residual
+                let mut tmp = vec![0.0; n];
+                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                s.final_residual = true_res;
+                return Ok(s);
             }
 
             let beta = rho_new / rho;
@@ -301,10 +285,12 @@ impl LinearSolver for CgSolver {
 
             rho = rho_new;
             stats.iterations = k;
-            stats.final_residual = res;
+            stats.final_residual = res_reported;
         }
 
-        stats.reason = ConvergedReason::DivergedMaxIts;
-        Ok(stats)
+        // Max-its reached: recompute true residual and return divergence
+        let mut tmp = vec![0.0; n];
+        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+        Ok(SolveStats { iterations: self.conv.max_iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
     }
 }

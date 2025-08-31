@@ -401,14 +401,35 @@ where
             if reason == crate::utils::convergence::ConvergedReason::ConvergedRtol
                 || reason == crate::utils::convergence::ConvergedReason::ConvergedAtol
             {
+                // Adopt best iterate and recompute true residual norm for final stats
                 *x = x_best.clone();
-                stats.final_residual = phi_min;
+                let mut r_true = V::from(vec![T::zero(); n]);
+                a.matvec(x, &mut r_true);
+                for i in 0..n {
+                    r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i];
+                }
+                let true_res = ip.norm(&r_true, comm);
+                stats.final_residual = true_res;
                 return Ok(stats);
             }
         }
 
+        // Max-iterations or breakdown: use best iterate and recompute true residual
         *x = x_best;
-        stats.final_residual = phi_min;
+        let mut r_true = V::from(vec![T::zero(); n]);
+        a.matvec(x, &mut r_true);
+        for i in 0..n {
+            r_true.as_mut()[i] = b.as_ref()[i] - r_true.as_ref()[i];
+        }
+        let true_res = ip.norm(&r_true, comm);
+        stats.final_residual = true_res;
+
+        // If reason not yet final, normalize it based on true residual vs initial baseline
+        if matches!(stats.reason, crate::utils::convergence::ConvergedReason::Continued) {
+            let (reason2, mut s2) = self.conv.check(true_res, beta1, stats.iterations);
+            s2.final_residual = true_res;
+            return Ok(s2);
+        }
 
         #[cfg(feature = "logging")]
         trace!(

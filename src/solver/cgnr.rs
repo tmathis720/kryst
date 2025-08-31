@@ -4,26 +4,19 @@ use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::solver::common::recompute_true_residual_norm;
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 
 pub struct CgnrSolver {
-    rtol: f64,
-    atol: f64,
-    dtol: f64,
-    maxits: usize,
+    pub(crate) conv: Convergence<f64>,
 }
 
 impl CgnrSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self {
-            rtol,
-            atol: 1e-12,
-            dtol: 1e3,
-            maxits,
-        }
+        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits } }
     }
 
     #[inline]
@@ -151,8 +144,8 @@ impl LinearSolver for CgnrSolver {
         p.copy_from_slice(zhat_slice);
 
         let mut rz = Self::dot(&z[..], zhat_slice, comm);
-        let bnorm = Self::nrm2(b, comm).max(1e-32);
         let mut rnow = Self::nrm2(r, comm);
+        let res0_reported = rnow;
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -160,21 +153,13 @@ impl LinearSolver for CgnrSolver {
             }
         }
 
-        let thr = self.atol.max(self.rtol * bnorm);
-        if rnow <= thr {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: rnow,
-                reason: if rnow <= self.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                },
-            });
+        let (reason0, s0) = self.conv.check(rnow, res0_reported, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            return Ok(SolveStats { iterations: 0, final_residual: rnow, reason: s0.reason });
         }
 
         let mut iters = 0usize;
-        for k in 1..=self.maxits {
+        for k in 1..=self.conv.max_iters {
             iters = k;
 
             a.matvec(p, ap);
@@ -207,23 +192,9 @@ impl LinearSolver for CgnrSolver {
                 }
             }
 
-            if rnow <= thr {
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: rnow,
-                    reason: if rnow <= self.atol {
-                        ConvergedReason::ConvergedAtol
-                    } else {
-                        ConvergedReason::ConvergedRtol
-                    },
-                });
-            }
-            if rnow >= self.dtol || !rnow.is_finite() {
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: rnow,
-                    reason: ConvergedReason::DivergedDtol,
-                });
+            let (reason, s) = self.conv.check(rnow, res0_reported, k);
+            if !matches!(reason, ConvergedReason::Continued) {
+                return Ok(SolveStats { iterations: k, final_residual: rnow, reason: s.reason });
             }
 
             let beta = rz_new / rz;
@@ -233,10 +204,8 @@ impl LinearSolver for CgnrSolver {
             rz = rz_new;
         }
 
-        Ok(SolveStats {
-            iterations: iters,
-            final_residual: rnow,
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        let mut tmp = vec![0.0; ncols];
+        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+        Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
     }
 }

@@ -19,6 +19,7 @@ use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
+use crate::solver::common::recompute_true_residual_norm;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -438,14 +439,21 @@ impl LinearSolver for GmresSolver {
             }
         }
 
-        // Compute true residual for reporting
-        a.matvec(x, &mut ws.tmp1);
-        for i in 0..n {
-            ws.tmp1[i] = b[i] - ws.tmp1[i];
-        }
-        let true_res = Self::nrm2(&ws.tmp1);
-        let (_reason, mut s) = self.conv.check(true_res, bnorm, total_iters);
+        // Compute true residual for reporting using the communicator
+        let true_res = recompute_true_residual_norm(a, b, x, _comm, &mut ws.tmp1);
+        let (mut reason, mut s) = self.conv.check(true_res, bnorm, total_iters);
         s.final_residual = true_res;
+        if matches!(reason, ConvergedReason::Continued) {
+            // Normalize reason based on absolute/relative thresholds
+            reason = if true_res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else if true_res <= self.conv.rtol * bnorm {
+                ConvergedReason::ConvergedRtol
+            } else {
+                ConvergedReason::DivergedMaxIts
+            };
+            s.reason = reason;
+        }
         Ok(s)
     }
 }

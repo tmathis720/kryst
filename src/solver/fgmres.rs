@@ -7,6 +7,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::solver::common::recompute_true_residual_norm;
 use std::any::Any;
 
 /// Orthogonalization flavor
@@ -150,6 +151,7 @@ impl FgmresSolver {
         };
 
         let mut owned_ws;
+        let had_ws = work.is_some();
         let ws = if let Some(ws) = work {
             ws
         } else {
@@ -379,9 +381,21 @@ impl FgmresSolver {
         }
 
         stats.iterations = total_iters;
-        stats.final_residual = res;
+
+        // Compute true residual at exit for reporting
+        let true_res = if had_ws {
+            // `ws.tmp1` has length n; safe to reuse for recompute
+            recompute_true_residual_norm(a, b, x, comm, &mut ws.tmp1)
+        } else {
+            let mut tmp = vec![0.0; n];
+            recompute_true_residual_norm(a, b, x, comm, &mut tmp)
+        };
+        stats.final_residual = true_res;
+
         if matches!(stats.reason, ConvergedReason::Continued) {
-            stats.reason = if res <= thr {
+            stats.reason = if true_res <= self.atol {
+                ConvergedReason::ConvergedAtol
+            } else if true_res <= self.rtol * bnorm {
                 ConvergedReason::ConvergedRtol
             } else {
                 ConvergedReason::DivergedMaxIts

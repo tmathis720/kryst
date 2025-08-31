@@ -9,6 +9,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::solver::common::recompute_true_residual_norm;
 
 pub struct QmrSolver {
     pub conv: Convergence<f64>,
@@ -206,9 +207,14 @@ impl LinearSolver for QmrSolver {
             }
         }
 
-        stats.final_residual = res;
+        // Compute true residual for final reporting
+        let mut tmp = vec![0.0; ncols];
+        let true_res = recompute_true_residual_norm(a, b, x, _comm, &mut tmp);
+        stats.final_residual = true_res;
         if stats.reason == ConvergedReason::Continued {
-            stats.reason = if res <= self.conv.rtol * res0 {
+            stats.reason = if true_res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else if true_res <= self.conv.rtol * res0 {
                 ConvergedReason::ConvergedRtol
             } else {
                 ConvergedReason::DivergedMaxIts

@@ -4,25 +4,18 @@ use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::solver::common::recompute_true_residual_norm;
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 pub struct CgsSolver {
-    rtol: f64,
-    atol: f64,
-    dtol: f64,
-    maxits: usize,
+    pub(crate) conv: Convergence<f64>,
 }
 
 impl CgsSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self {
-            rtol,
-            atol: 1e-12,
-            dtol: 1e3,
-            maxits,
-        }
+        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits } }
     }
 
     #[inline]
@@ -146,26 +139,19 @@ impl LinearSolver for CgsSolver {
         r_tld.copy_from_slice(r);
 
         // initial values
-        let bnorm = Self::nrm2(b, comm).max(1e-32);
         let mut rnorm = Self::nrm2(r, comm);
+        let res0_reported = rnorm;
 
         if let Some(ms) = monitors {
             for m in ms {
                 m(0, rnorm);
             }
         }
-        // quick exit
-        let thr = self.atol.max(self.rtol * bnorm);
-        if rnorm <= thr {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: rnorm,
-                reason: if rnorm <= self.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                },
-            });
+        // quick exit via convergence policy against res0_reported baseline
+        let (reason0, s0) = self.conv.check(rnorm, res0_reported, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            // ensure final_residual is true residual (already computed as rnorm)
+            return Ok(SolveStats { iterations: 0, final_residual: rnorm, reason: s0.reason });
         }
 
         // CGS parameters
@@ -180,7 +166,7 @@ impl LinearSolver for CgsSolver {
 
         let mut rho_old: f64;
         let mut iters = 0usize;
-        for k in 1..=self.maxits {
+        for k in 1..=self.conv.max_iters {
             iters = k;
 
             // v = A p
@@ -218,24 +204,10 @@ impl LinearSolver for CgsSolver {
                 }
             }
 
-            // convergence / divergence tests
-            if rnorm <= thr {
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: rnorm,
-                    reason: if rnorm <= self.atol {
-                        ConvergedReason::ConvergedAtol
-                    } else {
-                        ConvergedReason::ConvergedRtol
-                    },
-                });
-            }
-            if !rnorm.is_finite() || rnorm >= self.dtol {
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: rnorm,
-                    reason: ConvergedReason::DivergedDtol,
-                });
+            // convergence / divergence tests against res0_reported
+            let (reason, s) = self.conv.check(rnorm, res0_reported, k);
+            if !matches!(reason, ConvergedReason::Continued) {
+                return Ok(SolveStats { iterations: k, final_residual: rnorm, reason: s.reason });
             }
 
             // rho, beta updates
@@ -256,10 +228,9 @@ impl LinearSolver for CgsSolver {
             }
         }
 
-        Ok(SolveStats {
-            iterations: iters,
-            final_residual: rnorm,
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        // Max-its: recompute true residual and report divergence
+        let mut tmp = vec![0.0; n];
+        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+        Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
     }
 }
