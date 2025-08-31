@@ -425,8 +425,11 @@ where
         stats.final_residual = true_res;
 
         // If reason not yet final, normalize it based on true residual vs initial baseline
-        if matches!(stats.reason, crate::utils::convergence::ConvergedReason::Continued) {
-            let (reason2, mut s2) = self.conv.check(true_res, beta1, stats.iterations);
+        if matches!(
+            stats.reason,
+            crate::utils::convergence::ConvergedReason::Continued
+        ) {
+            let (_reason2, mut s2) = self.conv.check(true_res, beta1, stats.iterations);
             s2.final_residual = true_res;
             return Ok(s2);
         }
@@ -445,7 +448,9 @@ where
 impl crate::solver::LinearSolver for MinresSolver<f64> {
     type Error = KError;
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
 

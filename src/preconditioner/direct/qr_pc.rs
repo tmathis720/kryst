@@ -1,3 +1,5 @@
+#![cfg(feature = "dense-direct")]
+
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
@@ -43,4 +45,3 @@ impl Preconditioner for QrPc {
         crate::matrix::format::FormatHint::Dense
     }
 }
-#![cfg(feature = "dense-direct")]

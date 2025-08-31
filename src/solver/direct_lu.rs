@@ -1,3 +1,5 @@
+#![cfg(feature = "dense-direct")]
+
 //! Direct dense solvers using Faer: LU and QR factorizations.
 //!
 //! This module provides wrappers for direct dense linear solvers using the Faer library.
@@ -336,4 +338,3 @@ mod tests {
         );
     }
 }
-#![cfg(feature = "dense-direct")]

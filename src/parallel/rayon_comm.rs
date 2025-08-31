@@ -20,7 +20,7 @@ use rayon::prelude::*;
 /// Implements the `Comm` trait for shared-memory parallelism. All collective operations
 /// are no-ops or local, as there is no inter-process communication.
 #[derive(Clone)]
-    pub struct RayonComm;
+pub struct RayonComm;
 
 impl RayonComm {
     /// Creates a new `RayonComm` and initializes the global Rayon thread pool
@@ -118,17 +118,9 @@ impl super::Comm for RayonComm {
         });
     }
 
-    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {
-        ()
-    }
-    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
-        ()
-    }
-    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {
-        ()
-    }
-    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {
-        ()
-    }
+    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {}
+    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {}
+    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {}
+    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {}
     fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }

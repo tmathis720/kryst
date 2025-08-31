@@ -125,18 +125,10 @@ impl Comm for NoComm {
         UniverseComm::NoComm(NoComm)
     }
 
-    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {
-        ()
-    }
-    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
-        ()
-    }
-    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {
-        ()
-    }
-    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {
-        ()
-    }
+    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {}
+    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {}
+    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {}
+    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {}
     fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }
 
@@ -348,7 +340,10 @@ impl Comm for UniverseComm {
                     )
                 };
                 debug_assert_eq!(rc, 0);
-                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
+                AnyRequest::Mpi(MpiRequest {
+                    handle: req,
+                    _marker: std::marker::PhantomData,
+                })
             }
             #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_comm) => AnyRequest::None,
@@ -378,7 +373,10 @@ impl Comm for UniverseComm {
                     )
                 };
                 debug_assert_eq!(rc, 0);
-                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
+                AnyRequest::Mpi(MpiRequest {
+                    handle: req,
+                    _marker: std::marker::PhantomData,
+                })
             }
             #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_comm) => AnyRequest::None,
@@ -409,7 +407,10 @@ impl Comm for UniverseComm {
                     )
                 };
                 debug_assert_eq!(rc, 0);
-                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
+                AnyRequest::Mpi(MpiRequest {
+                    handle: req,
+                    _marker: std::marker::PhantomData,
+                })
             }
             #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_comm) => AnyRequest::None,
@@ -439,7 +440,10 @@ impl Comm for UniverseComm {
                     )
                 };
                 debug_assert_eq!(rc, 0);
-                AnyRequest::Mpi(MpiRequest { handle: req, _marker: std::marker::PhantomData })
+                AnyRequest::Mpi(MpiRequest {
+                    handle: req,
+                    _marker: std::marker::PhantomData,
+                })
             }
             #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_comm) => AnyRequest::None,

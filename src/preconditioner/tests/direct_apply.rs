@@ -1,12 +1,12 @@
 #[cfg(feature = "dense-direct")]
 use crate::error::KError;
-use crate::matrix::op::LinOp;
 use crate::matrix::op::CsrOp;
+use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::builders as b;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::PcSide;
 use std::sync::Arc;
 
 #[cfg(feature = "dense-direct")]
@@ -41,8 +41,13 @@ fn builders_sor_and_chebyshev_object_safe() {
     let op = CsrOp::new(Arc::new(csr));
 
     // SOR
-    let mut sor = b::build_sor(1.0, 1, crate::preconditioner::sor::MatSorType::APPLY_LOWER, false)
-        .expect("build_sor should succeed");
+    let mut sor = b::build_sor(
+        1.0,
+        1,
+        crate::preconditioner::sor::MatSorType::APPLY_LOWER,
+        false,
+    )
+    .expect("build_sor should succeed");
     sor.setup(&op as &dyn LinOp<S = f64>).unwrap();
     let x = vec![1.0; 5];
     let mut y = vec![0.0; 5];
