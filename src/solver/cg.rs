@@ -210,8 +210,7 @@ impl LinearSolver for CgSolver {
         let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             // On early exit, recompute true residual for final reporting
-            let mut tmp = vec![0.0; n];
-            let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+            let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
             let mut s = s0;
             s.final_residual = true_res;
             return Ok(s);
@@ -220,7 +219,13 @@ impl LinearSolver for CgSolver {
         for k in 1..=self.conv.max_iters {
             a.matvec(p, ap);
 
-            let p_ap = Self::dot(p, ap, comm);
+            let p_ap = if !self.single_reduction {
+                // classic: one reduction for <p,Ap>
+                Self::dot(p, ap, comm)
+            } else {
+                // placeholder for fused-reduction or pipelined CG path
+                Self::dot(p, ap, comm)
+            };
             if p_ap <= 0.0 || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
@@ -235,8 +240,9 @@ impl LinearSolver for CgSolver {
                         x[i] += step * p[i];
                     }
                     stats.iterations = k;
-                    stats.final_residual = Self::nrm2(r, comm);
                     stats.reason = ConvergedReason::DivergedMaxIts;
+                    // ensure final_residual is true ||b - A x|| at exit
+                    stats.final_residual = recompute_true_residual_norm(a, b, x, comm, tmp);
                     return Ok(stats);
                 }
             }
@@ -255,7 +261,12 @@ impl LinearSolver for CgSolver {
                 z.copy_from_slice(r);
             }
 
-            let rho_new = Self::dot(r, z, comm);
+            let rho_new = if !self.single_reduction {
+                Self::dot(r, z, comm)
+            } else {
+                // placeholder for fused-reduction or pipelined CG path
+                Self::dot(r, z, comm)
+            };
             if rho_new <= 0.0 || !rho_new.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
             }
@@ -277,8 +288,7 @@ impl LinearSolver for CgSolver {
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 // Exit: recompute true residual and override final_residual
-                let mut tmp = vec![0.0; n];
-                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
                 s.final_residual = true_res;
                 return Ok(s);
             }
@@ -294,8 +304,7 @@ impl LinearSolver for CgSolver {
         }
 
         // Max-its reached: recompute true residual and return divergence
-        let mut tmp = vec![0.0; n];
-        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+        let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
         Ok(SolveStats { iterations: self.conv.max_iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
     }
 }
