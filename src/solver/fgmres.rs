@@ -27,6 +27,8 @@ pub struct FgmresSolver {
     pub haptol: f64,
     /// If true, size basis/H for maxits; otherwise per-restart sizing.
     pub preallocate: bool,
+    /// Optional hook called once per restart (after backsolve) so caller can adapt the PC.
+    pub on_restart: Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
     /// Whether to treat near-zero residual as a happy breakdown
     pub happy_breakdown: bool,
 }
@@ -42,6 +44,7 @@ impl FgmresSolver {
             orthog: Orthog::Classical,
             haptol: 1e-12,
             preallocate: false,
+            on_restart: None,
             happy_breakdown: true,
         }
     }
@@ -56,29 +59,14 @@ impl FgmresSolver {
     }
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, m: usize) {
-        // Need tmp1/tmp2, V basis q[0..=m], Z basis z[0..m-1]
+        // Need tmp1/tmp2, slab V with (m+1) cols, slab Z with m cols
         if w.tmp1.len() != n {
             w.tmp1.resize(n, 0.0);
         }
         if w.tmp2.len() != n {
             w.tmp2.resize(n, 0.0);
         }
-        if w.q.len() < m + 1 {
-            w.q.resize(m + 1, Vec::new());
-        }
-        for q in &mut w.q[..m + 1] {
-            if q.len() != n {
-                q.resize(n, 0.0);
-            }
-        }
-        if w.z.len() < m {
-            w.z.resize(m, Vec::new());
-        }
-        for z in &mut w.z[..m] {
-            if z.len() != n {
-                z.resize(n, 0.0);
-            }
-        }
+        w.ensure_gmres_slabs(n, m, true);
         if w.h.len() < m + 1 {
             w.h.resize(m + 1, Vec::new());
         }
@@ -145,25 +133,9 @@ impl FgmresSolver {
             self.restart
         };
 
-        let mut owned_ws;
-        let had_ws = work.is_some();
-        let ws = if let Some(ws) = work {
-            ws
-        } else {
-            owned_ws = Workspace {
-                tmp1: vec![0.0; n],
-                tmp2: vec![0.0; n],
-                q: vec![vec![0.0; n]; block_m + 1],
-                h: vec![vec![0.0; block_m]; block_m + 1],
-                cs: vec![0.0; block_m],
-                sn: vec![0.0; block_m],
-                g: vec![0.0; block_m + 1],
-                z: vec![vec![0.0; n]; block_m],
-                q_mem: Vec::new(),
-                z_mem: Vec::new(),
-            };
-            &mut owned_ws
-        };
+        let ws = work.ok_or_else(|| {
+            KError::InvalidInput("FGMRES requires caller-provided Workspace".into())
+        })?;
         self.ensure_workspace(ws, n, block_m);
 
         a.matvec(x, &mut ws.tmp1);
@@ -175,10 +147,12 @@ impl FgmresSolver {
         let thr = self.atol.max(self.rtol * bnorm);
 
         if beta0 > 0.0 {
-            let v0 = &mut ws.q[0][..];
             for i in 0..n {
-                v0[i] = ws.tmp1[i] / beta0;
+                ws.tmp2[i] = ws.tmp1[i] / beta0;
             }
+            ws.q_mem[0..n].copy_from_slice(&ws.tmp2[..n]);
+        } else {
+            ws.q_mem[0..n].fill(0.0);
         }
 
         ws.g.fill(0.0);
@@ -219,8 +193,8 @@ impl FgmresSolver {
 
             for j in 0..m_this {
                 {
-                    let vj = &ws.q[j][..];
-                    let zj = &mut ws.z[j][..];
+                    let vj = &ws.q_mem[j * n..(j + 1) * n];
+                    let zj = &mut ws.z_mem[j * n..(j + 1) * n];
                     if let Some(pc_) = pc.as_deref_mut() {
                         pc_.apply_mut(pc_side, vj, zj)?;
                     } else {
@@ -228,12 +202,12 @@ impl FgmresSolver {
                     }
                 }
                 {
-                    let zj = &ws.z[j][..];
+                    let zj = &ws.z_mem[j * n..(j + 1) * n];
                     a.matvec(zj, &mut ws.tmp2);
                 }
 
                 for i in 0..=j {
-                    let vi = &ws.q[i][..];
+                    let vi = &ws.q_mem[i * n..(i + 1) * n];
                     let hij = Self::dot(&ws.tmp2, vi, comm);
                     ws.h[i][j] = hij;
                     for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
@@ -243,7 +217,7 @@ impl FgmresSolver {
 
                 if matches!(self.orthog, Orthog::Modified) {
                     for i in 0..=j {
-                        let vi = &ws.q[i][..];
+                        let vi = &ws.q_mem[i * n..(i + 1) * n];
                         let corr = Self::dot(&ws.tmp2, vi, comm);
                         if corr.abs() > 1e-12 {
                             ws.h[i][j] += corr;
@@ -257,15 +231,15 @@ impl FgmresSolver {
                 let hij1 = Self::nrm2(&ws.tmp2, comm);
                 ws.h[j + 1][j] = hij1;
 
-                {
-                    let v_next = &mut ws.q[j + 1][..];
-                    if hij1 > 0.0 {
-                        for i in 0..n {
-                            v_next[i] = ws.tmp2[i] / hij1;
-                        }
-                    } else {
-                        v_next.fill(0.0);
+                if hij1 > 0.0 {
+                    for i in 0..n {
+                        ws.tmp2[i] /= hij1;
                     }
+                    let start = (j + 1) * n;
+                    ws.q_mem[start..start + n].copy_from_slice(&ws.tmp2[..n]);
+                } else {
+                    let start = (j + 1) * n;
+                    ws.q_mem[start..start + n].fill(0.0);
                 }
 
                 for i in 0..j {
@@ -333,7 +307,7 @@ impl FgmresSolver {
             }
 
             for i in 0..k {
-                let zi = &ws.z[i][..];
+                let zi = &ws.z_mem[i * n..(i + 1) * n];
                 for (xj, &zij) in x.iter_mut().zip(zi) {
                     *xj += y[i] * zij;
                 }
@@ -360,13 +334,18 @@ impl FgmresSolver {
             beta0 = Self::nrm2(&ws.tmp1, comm);
             ws.g.fill(0.0);
             ws.g[0] = beta0;
-            let v0 = &mut ws.q[0][..];
             if beta0 > 0.0 {
                 for i in 0..n {
-                    v0[i] = ws.tmp1[i] / beta0;
+                    ws.tmp2[i] = ws.tmp1[i] / beta0;
                 }
+                ws.q_mem[0..n].copy_from_slice(&ws.tmp2[..n]);
             } else {
-                v0.fill(0.0);
+                ws.q_mem[0..n].fill(0.0);
+            }
+
+            // Allow both legacy hook and the new Preconditioner::on_restart to adjust PC
+            if let Some(hook) = self.on_restart.as_mut() {
+                hook(total_iters, beta0)?;
             }
             if let Some(pc_) = pc.as_deref_mut() {
                 pc_.on_restart(total_iters, beta0)?;
@@ -376,13 +355,7 @@ impl FgmresSolver {
         stats.iterations = total_iters;
 
         // Compute true residual at exit for reporting
-        let true_res = if had_ws {
-            // `ws.tmp1` has length n; safe to reuse for recompute
-            recompute_true_residual_norm(a, b, x, comm, &mut ws.tmp1)
-        } else {
-            let mut tmp = vec![0.0; n];
-            recompute_true_residual_norm(a, b, x, comm, &mut tmp)
-        };
+        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut ws.tmp1);
         stats.final_residual = true_res;
 
         if matches!(stats.reason, ConvergedReason::Continued) {
@@ -406,25 +379,8 @@ impl LinearSolver for FgmresSolver {
     }
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
-        let m = self.restart;
-        if w.q.len() < m + 1 {
-            w.q.resize(m + 1, Vec::new());
-        }
-        if w.z.len() < m {
-            w.z.resize(m, Vec::new());
-        }
-        if w.h.len() < m + 1 {
-            w.h.resize(m + 1, Vec::new());
-        }
-        if w.cs.len() < m {
-            w.cs.resize(m, 0.0);
-        }
-        if w.sn.len() < m {
-            w.sn.resize(m, 0.0);
-        }
-        if w.g.len() < m + 1 {
-            w.g.resize(m + 1, 0.0);
-        }
+        // Sizing is performed in solve_flexible() once n is known.
+        let _ = w;
     }
 
     fn solve(

@@ -65,10 +65,10 @@ pub struct Workspace {
     /// leave this empty. Kept for backward compatibility with solvers that
     /// haven't yet migrated to flat storage.
     pub z: Vec<Vec<f64>>,
-    /// Column-major storage for GMRES/FGMRES basis vectors. `q_mem` stores the
-    /// Krylov basis `V` with `(m+1)` columns, each of length `n`. `z_mem` stores
-    /// the preconditioned directions for right-preconditioned methods with `m`
-    /// columns, each of length `n`.
+    /// Column-major slabs for GMRES/FGMRES bases. Optional for legacy solvers.
+    ///
+    /// `q_mem` stores (m+1) columns of length `n` in column-major layout.
+    /// `z_mem` stores `m` columns of length `n` in column-major layout.
     pub q_mem: Vec<f64>,
     pub z_mem: Vec<f64>,
 }
@@ -89,20 +89,19 @@ impl Workspace {
         }
     }
 
-    /// Ensure flat slabs sized for GMRES. `V` has `(m+1)` columns, `Z` has `m`
-    /// columns when required by right-preconditioned or flexible variants.
+    /// Ensure column-major slabs for GMRES-like solvers are allocated.
+    ///
+    /// - `n`: vector length (rows)
+    /// - `m`: restart size (number of inner iterations)
+    /// - `need_z`: if true, also allocate `z_mem` for right/FGMRES
     pub fn ensure_gmres_slabs(&mut self, n: usize, m: usize, need_z: bool) {
-        let v_cols = m + 1;
-        let v_len = v_cols * n;
+        let v_len = (m + 1) * n;
         if self.q_mem.len() != v_len {
-            self.q_mem.clear();
             self.q_mem.resize(v_len, 0.0);
         }
         if need_z {
-            let z_cols = m;
-            let z_len = z_cols * n;
+            let z_len = m * n;
             if self.z_mem.len() != z_len {
-                self.z_mem.clear();
                 self.z_mem.resize(z_len, 0.0);
             }
         } else {
@@ -110,33 +109,26 @@ impl Workspace {
         }
     }
 
-    /// Mutable column slice into the `V` basis matrix.
+    #[inline]
+    pub fn vcol(&self, n: usize, j: usize) -> &[f64] {
+        &self.q_mem[j * n..(j + 1) * n]
+    }
     #[inline]
     pub fn vcol_mut(&mut self, n: usize, j: usize) -> &mut [f64] {
         let start = j * n;
         &mut self.q_mem[start..start + n]
     }
 
-    /// Immutable column slice into the `V` basis matrix.
     #[inline]
-    pub fn vcol(&self, n: usize, j: usize) -> &[f64] {
-        let start = j * n;
-        &self.q_mem[start..start + n]
+    pub fn zcol(&self, n: usize, j: usize) -> &[f64] {
+        &self.z_mem[j * n..(j + 1) * n]
     }
-
-    /// Mutable column slice into the `Z` preconditioned basis matrix.
     #[inline]
     pub fn zcol_mut(&mut self, n: usize, j: usize) -> &mut [f64] {
         let start = j * n;
         &mut self.z_mem[start..start + n]
     }
 
-    /// Immutable column slice into the `Z` preconditioned basis matrix.
-    #[inline]
-    pub fn zcol(&self, n: usize, j: usize) -> &[f64] {
-        let start = j * n;
-        &self.z_mem[start..start + n]
-    }
 }
 
 /// Supported solver types.

@@ -177,18 +177,7 @@ impl LinearSolver for PcaGmresSolver {
         let ws = if let Some(w) = work {
             w
         } else {
-            owned = Workspace {
-                tmp1: vec![0.0; n],
-                tmp2: vec![0.0; n],
-                q: vec![vec![0.0; n]; m_restart + 1],
-                h: vec![vec![0.0; m_restart]; m_restart + 1],
-                cs: vec![0.0; m_restart],
-                sn: vec![0.0; m_restart],
-                g: vec![0.0; m_restart + 1],
-                z: Vec::new(),
-                q_mem: Vec::new(),
-                z_mem: Vec::new(),
-            };
+            owned = Workspace::new(n);
             &mut owned
         };
         self.ensure_workspace(ws, n);

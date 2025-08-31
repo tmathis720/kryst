@@ -8,6 +8,7 @@ use kryst::matrix::op::LinOp;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::solver::FgmresSolver;
+use kryst::context::ksp_context::Workspace;
 
 struct MutableCountPc {
     hits: Arc<AtomicUsize>,
@@ -37,6 +38,7 @@ fn fgmres_uses_apply_mut() {
     let mut solver = FgmresSolver::new(1e-6, 10, 2);
     let b = [1.0, 2.0];
     let mut x = [0.0, 0.0];
+    let mut work = Workspace::new(2);
     solver
         .solve_flexible(
             amat,
@@ -46,7 +48,7 @@ fn fgmres_uses_apply_mut() {
             PcSide::Right,
             &UniverseComm::NoComm(kryst::parallel::NoComm),
             None,
-            None,
+            Some(&mut work),
         )
         .unwrap();
 
