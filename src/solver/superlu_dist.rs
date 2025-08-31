@@ -223,6 +223,28 @@ impl BlockCyclicDistribution {
         }
     }
 
+    /// Number of row blocks for an external block size
+    pub fn n_row_blocks(&self, block_size: usize) -> usize {
+        (self.global_rows + block_size - 1) / block_size
+    }
+
+    /// Number of column blocks for an external block size
+    pub fn n_col_blocks(&self, block_size: usize) -> usize {
+        (self.global_cols + block_size - 1) / block_size
+    }
+
+    /// Owner rank of a given (row-block, col-block)
+    pub fn owner_rank_of_block(&self, brow: usize, bcol: usize) -> usize {
+        let prow = brow % self.grid.prows;
+        let pcol = bcol % self.grid.pcols;
+        self.grid.coords_to_rank(prow, pcol)
+    }
+
+    /// Owner rank of diagonal block (k, k)
+    pub fn owner_rank_of_diag_block(&self, k: usize) -> usize {
+        self.owner_rank_of_block(k, k)
+    }
+
     /// Calculate local dimension for block-cyclic distribution
     /// Fixed to handle edge cases correctly
     fn calculate_local_dimension(
@@ -693,6 +715,8 @@ pub struct TriangularSolveData {
     pub pending_requests: Vec<CommRequest>,
     /// Block ownership mapping
     pub block_owners: Vec<usize>,
+    /// Exact sizes for each diagonal block
+    pub block_sizes: Vec<usize>,
     /// Local dense triangular factors
     pub local_l_factors: Vec<Panel>,
     /// Local dense triangular factors (U)
@@ -709,27 +733,36 @@ impl TriangularSolveData {
         distribution: &BlockCyclicDistribution,
         numeric_factor: &NumericFactorization,
     ) -> Self {
-        let num_blocks = (n + block_size - 1) / block_size;
-        let _local_blocks = num_blocks / distribution.grid.total_procs;
+        // Number of diagonal blocks to process
+        let num_blocks = distribution.n_col_blocks(block_size);
 
-        let mut local_solution_blocks = Vec::new();
-        let mut block_owners = vec![0; num_blocks];
-
-        // Determine block ownership based on block-cyclic distribution
-        for block_id in 0..num_blocks {
-            let owner = block_id % distribution.grid.total_procs;
-            block_owners[block_id] = owner;
-
-            if owner == distribution.grid.my_rank {
-                local_solution_blocks.push(vec![0.0; block_size]);
+        // Exact per-block sizes
+        let mut block_sizes = vec![block_size; num_blocks];
+        if num_blocks > 0 {
+            let rem = n % block_size;
+            if rem != 0 {
+                block_sizes[num_blocks - 1] = rem;
             }
         }
 
-        // Build dependency graph for proper ordering
+        // Owner rank for each diagonal block
+        let mut block_owners = vec![0; num_blocks];
+        for k in 0..num_blocks {
+            block_owners[k] = distribution.owner_rank_of_diag_block(k);
+        }
+
+        // Allocate local solution blocks for blocks owned by this rank
+        let mut local_solution_blocks = Vec::new();
+        for k in 0..num_blocks {
+            if block_owners[k] == distribution.grid.my_rank {
+                local_solution_blocks.push(vec![0.0; block_sizes[k]]);
+            }
+        }
+
+        // Simple dependency graph: block i depends on all previous blocks
         let mut dependency_graph = vec![Vec::new(); num_blocks];
         for i in 0..num_blocks {
             for j in 0..i {
-                // Block i depends on block j if there's a dependency in the factorization
                 dependency_graph[i].push(j);
             }
         }
@@ -739,6 +772,7 @@ impl TriangularSolveData {
             comm_buffer: vec![0.0; block_size * distribution.grid.total_procs],
             pending_requests: Vec::new(),
             block_owners,
+            block_sizes,
             local_l_factors: numeric_factor.panels.clone(),
             local_u_factors: numeric_factor.panels.clone(), // Simplified - would separate L and U
             dependency_graph,
@@ -855,6 +889,9 @@ impl DistributedTriangularSolver {
         let _guard = StageGuard::new("DistributedForwardSolve");
 
         let n = b.len();
+        if n == 0 {
+            return Ok(());
+        }
         let block_size = 64; // Could be made configurable
         let num_blocks = (n + block_size - 1) / block_size;
 
@@ -875,8 +912,8 @@ impl DistributedTriangularSolver {
         // Process blocks in dependency order
         for block_id in 0..num_blocks {
             let block_start = block_id * block_size;
-            let block_end = std::cmp::min(block_start + block_size, n);
-            let current_block_size = block_end - block_start;
+            let current_block_size = solve_data.block_sizes[block_id];
+            let block_end = block_start + current_block_size;
 
             // Check if this process owns the current block
             if solve_data.block_owners[block_id] == distribution.grid.my_rank {
@@ -961,6 +998,9 @@ impl DistributedTriangularSolver {
         let _guard = StageGuard::new("DistributedBackwardSolve");
 
         let n = y.len();
+        if n == 0 {
+            return Ok(());
+        }
         let block_size = 64; // Could be made configurable
         let num_blocks = (n + block_size - 1) / block_size;
 
@@ -981,8 +1021,8 @@ impl DistributedTriangularSolver {
         // Process blocks in reverse dependency order (backward substitution)
         for block_id in (0..num_blocks).rev() {
             let block_start = block_id * block_size;
-            let block_end = std::cmp::min(block_start + block_size, n);
-            let current_block_size = block_end - block_start;
+            let current_block_size = solve_data.block_sizes[block_id];
+            let block_end = block_start + current_block_size;
 
             // Apply updates from later blocks first
             for dep_block in (block_id + 1)..num_blocks {
@@ -1123,13 +1163,15 @@ impl DistributedTriangularSolver {
         comm_pattern: CommPattern,
         comm: &UniverseComm,
     ) -> Result<(), KError> {
+        let root_rank = solve_data.block_owners[block_id];
+
+        if distribution.grid.my_rank != root_rank {
+            return Ok(());
+        }
+
         match comm_pattern {
             CommPattern::BinaryTree => {
-                // Implement binary tree broadcast pattern
-                let root_rank = distribution.grid.my_rank;
                 let total_procs = distribution.grid.total_procs;
-
-                // Send to children in binary tree
                 let left_child = 2 * root_rank + 1;
                 let right_child = 2 * root_rank + 2;
 
@@ -1141,14 +1183,12 @@ impl DistributedTriangularSolver {
                 }
             }
             CommPattern::Ring => {
-                // Implement ring communication pattern
-                let next_rank = (distribution.grid.my_rank + 1) % distribution.grid.total_procs;
+                let next_rank = (root_rank + 1) % distribution.grid.total_procs;
                 solve_data.isend(data, next_rank, block_id, block_id, comm)?;
             }
             _ => {
-                // Default point-to-point broadcast
                 for rank in 0..distribution.grid.total_procs {
-                    if rank != distribution.grid.my_rank {
+                    if rank != root_rank {
                         solve_data.isend(data, rank, block_id, block_id * 100 + rank, comm)?;
                     }
                 }
@@ -4584,6 +4624,63 @@ mod tests {
         assert_eq!(solve_data.block_owners.len(), 2); // 8/4 = 2 blocks
         assert_eq!(solve_data.dependency_graph.len(), 2);
         assert!(!solve_data.comm_buffer.is_empty());
+    }
+
+    #[test]
+    fn diag_owner_is_mod_coords() {
+        let grid = ProcessGrid {
+            prows: 2,
+            pcols: 3,
+            my_prow: 0,
+            my_pcol: 0,
+            my_rank: 0,
+            total_procs: 6,
+        };
+        let dist = BlockCyclicDistribution::new(grid, 128, 128, 4, 4);
+        for k in 0..12 {
+            let prow = k % dist.grid.prows;
+            let pcol = k % dist.grid.pcols;
+            let expect = dist.grid.coords_to_rank(prow, pcol);
+            assert_eq!(dist.owner_rank_of_diag_block(k), expect);
+        }
+    }
+
+    #[test]
+    fn block_sizes_are_exact() {
+        let grid = ProcessGrid {
+            prows: 2,
+            pcols: 2,
+            my_prow: 0,
+            my_pcol: 0,
+            my_rank: 0,
+            total_procs: 4,
+        };
+        let dist = BlockCyclicDistribution::new(grid, 130, 130, 64, 64);
+        let n = 130usize;
+        let bs = 64usize;
+        let nf = NumericFactorization {
+            n,
+            nnz: 0,
+            panels: vec![],
+            panel_factors: vec![],
+            global_row_perm: vec![],
+            global_col_perm: vec![],
+            row_scale: vec![],
+            col_scale: vec![],
+            pivot_strategy: PivotingStrategy::Static,
+            pivot_threshold: 1.0,
+            replaced_tiny_pivots: false,
+            factor_stats: FactorizationStats {
+                num_panels: 0,
+                total_row_swaps: 0,
+                tiny_pivots_replaced: 0,
+                max_pivot_growth: 1.0,
+                condition_estimate: None,
+                memory_usage: 0,
+            },
+        };
+        let t = TriangularSolveData::new(n, bs, &dist, &nf);
+        assert_eq!(t.block_sizes, vec![64, 64, 2]);
     }
 
     #[test]
