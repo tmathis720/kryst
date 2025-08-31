@@ -106,7 +106,7 @@ impl LinearSolver for CgsSolver {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        pc: Option<&dyn Preconditioner>,
+        pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
@@ -114,6 +114,7 @@ impl LinearSolver for CgsSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
+        let pc: Option<&dyn Preconditioner> = pc.as_deref();
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CGS");
 

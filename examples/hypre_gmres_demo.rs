@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut x_pc = vec![0.0; 4];
     let stats_pc = solver.solve(
         &a,
-        Some(&pc),
+        Some(&mut pc),
         &b,
         &mut x_pc,
         PcSide::Left,

@@ -45,7 +45,7 @@ fn pcagmres_solves_dd_nonsym_right_pc() {
             Ok(())
         }
     }
-    let pc = RJ {
+    let mut pc = RJ {
         d: [10.0, 15.0, 8.0, 7.0, 12.0],
     };
 
@@ -60,7 +60,7 @@ fn pcagmres_solves_dd_nonsym_right_pc() {
     let stats = solver
         .solve(
             aop.as_ref(),
-            Some(&pc),
+            Some(&mut pc),
             &b,
             &mut x,
             PcSide::Right,

@@ -232,7 +232,7 @@ impl LinearSolver for GmresSolver {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        pc: Option<&dyn Preconditioner>,
+        pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
@@ -240,6 +240,7 @@ impl LinearSolver for GmresSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
+        let pc: Option<&dyn Preconditioner> = pc.as_deref();
         let (m, n) = a.dims();
         if m != n || b.len() != n || x.len() != n {
             return Err(KError::InvalidInput(

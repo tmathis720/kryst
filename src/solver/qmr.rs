@@ -65,7 +65,7 @@ impl LinearSolver for QmrSolver {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        _pc: Option<&dyn Preconditioner>,
+        _pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,

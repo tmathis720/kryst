@@ -818,36 +818,16 @@ impl KspContext {
             .solver
             .as_mut()
             .ok_or_else(|| KError::SolveError("No solver".into()))?;
-
-        // Some solvers (e.g. FGMRES) require a mutable preconditioner and have
-        // a specialised entry point. Handle this before computing the final
-        // residual below.
-        let mut stats = if let Some(fgmres) = solver
-            .as_any_mut()
-            .downcast_mut::<crate::solver::FgmresSolver>()
-        {
-            fgmres.solve_flexible(
-                amat.as_ref(),
-                pc.as_deref_mut(),
-                b,
-                x,
-                self.pc_side,
-                &comm,
-                monitors,
-                self.work.as_mut(),
-            )?
-        } else {
-            solver.solve(
-                amat.as_ref(),
-                pc.map(|p| p as &dyn Preconditioner),
-                b,
-                x,
-                self.pc_side,
-                &comm,
-                monitors,
-                self.work.as_mut(),
-            )?
-        };
+        let mut stats = solver.solve(
+            amat.as_ref(),
+            pc.as_deref_mut(),
+            b,
+            x,
+            self.pc_side,
+            &comm,
+            monitors,
+            self.work.as_mut(),
+        )?;
 
         // Compute true residual r = b - A x and use its norm for reporting
         let mut residual = vec![0.0f64; b.len()];
@@ -981,6 +961,7 @@ mod tests {
     use faer::Mat;
     use std::sync::Arc;
 
+    #[cfg(feature = "dense-direct")]
     #[test]
     fn preonly_with_lu_pc_solves() {
         // Simple 2x2 SPD: [2 1; 1 2]

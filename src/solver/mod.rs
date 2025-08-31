@@ -21,7 +21,7 @@ pub trait LinearSolver: Send + Any {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        pc: Option<&dyn Preconditioner>,
+        pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
@@ -153,7 +153,7 @@ where
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        pc: Option<&dyn Preconditioner>,
+        pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
@@ -163,7 +163,8 @@ where
     ) -> Result<SolveStats<f64>, Self::Error> {
         let mut x_vec = x.to_vec();
         let b_vec = b.to_vec();
-        let pc_adapter = pc.map(|p| OpPcAdapter { inner: p });
+        // Coerce &mut dyn Preconditioner -> &dyn Preconditioner for the legacy adapter.
+        let pc_adapter = pc.as_deref().map(|p| OpPcAdapter { inner: p });
         let pc_ref = pc_adapter.as_ref().map(
             |p| p as &dyn crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + '_, Vec<f64>>,
         );

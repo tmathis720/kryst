@@ -64,7 +64,7 @@ impl LinearSolver for TfqmrSolver {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        pc: Option<&dyn Preconditioner>,
+        pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
@@ -72,6 +72,7 @@ impl LinearSolver for TfqmrSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
+        let pc: Option<&dyn Preconditioner> = pc.as_deref();
         let (m, n) = a.dims();
         if m != n {
             return Err(KError::InvalidInput("TFQMR requires square A".into()));
@@ -427,7 +428,7 @@ mod tests {
         let mut x = [0.0, 0.0];
         let mut w = Workspace::new(2);
         let mut solver = TfqmrSolver::new(1e-12, 200);
-        let pc = IdentityPc;
+        let mut pc = IdentityPc;
         let residuals: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
         let res_clone = residuals.clone();
         let monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>> = vec![Box::new(move |_, r| {
@@ -436,7 +437,7 @@ mod tests {
         let _stats = solver
             .solve(
                 &a,
-                Some(&pc),
+                Some(&mut pc),
                 &b,
                 &mut x,
                 PcSide::Left,

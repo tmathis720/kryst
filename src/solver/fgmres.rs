@@ -27,6 +27,7 @@ pub struct FgmresSolver {
     /// If true, size basis/H for maxits; otherwise per-restart sizing.
     pub preallocate: bool,
     /// Optional hook called once per outer iteration block (after backsolve) to allow user to tweak PC.
+    #[deprecated(note = "Use Preconditioner::on_restart(iter, res) instead")]
     pub modify_pc_on_restart:
         Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
     /// Whether to treat near-zero residual as a happy breakdown
@@ -368,8 +369,12 @@ impl FgmresSolver {
             } else {
                 v0.fill(0.0);
             }
+            // Allow both legacy hook and the new Preconditioner::on_restart to adjust PC
             if let Some(hook) = self.modify_pc_on_restart.as_mut() {
                 hook(total_iters, beta0)?;
+            }
+            if let Some(pc_) = pc.as_deref_mut() {
+                pc_.on_restart(total_iters, beta0)?;
             }
         }
 
@@ -418,7 +423,7 @@ impl LinearSolver for FgmresSolver {
     fn solve(
         &mut self,
         a: &dyn LinOp<S = f64>,
-        _pc: Option<&dyn Preconditioner>,
+        pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
@@ -426,14 +431,8 @@ impl LinearSolver for FgmresSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        // The object-safe `LinearSolver` interface only provides an immutable
-        // preconditioner reference. FGMRES requires mutable access, so when
-        // invoked through this path we fall back to using no preconditioner.
-        // Users needing a mutable preconditioner should call `solve_flexible`
-        // directly (as done by the KSP context).
-        let mut none: Option<&mut dyn Preconditioner> = None;
-        let pc_mut = none.as_deref_mut();
-        self.solve_flexible(a, pc_mut, b, x, pc_side, comm, monitors, work)
+        // Delegate directly to the flexible path with mutable PC support.
+        self.solve_flexible(a, pc, b, x, pc_side, comm, monitors, work)
     }
 }
 

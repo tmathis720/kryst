@@ -431,7 +431,7 @@ impl crate::solver::LinearSolver for MinresSolver<f64> {
     fn solve(
         &mut self,
         a: &dyn crate::matrix::op::LinOp<S = f64>,
-        _pc: Option<&dyn crate::preconditioner::Preconditioner>,
+        _pc: Option<&mut dyn crate::preconditioner::Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: crate::preconditioner::PcSide,

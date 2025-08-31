@@ -11,6 +11,7 @@ fn random_strictly_diag_dominant_csr(n: usize, bandwidth: usize) -> CsrMatrix<f6
     let mut vals: Vec<f64> = Vec::new();
     row_ptr.push(0);
     for i in 0..n {
+        // Assemble candidate column indices within the bandwidth
         let mut row_cols = Vec::new();
         row_cols.push(i);
         for k in 1..=bandwidth {
@@ -23,22 +24,26 @@ fn random_strictly_diag_dominant_csr(n: usize, bandwidth: usize) -> CsrMatrix<f6
         }
         row_cols.sort_unstable();
         row_cols.dedup();
+
+        // Build (col, val) entries, compute off-diagonal sum for strict diagonal dominance
+        let mut entries: Vec<(usize, f64)> = Vec::with_capacity(row_cols.len());
         let mut sum_abs = 0.0f64;
-        let mut diag = 0.0f64;
         for &j in &row_cols {
             if j == i {
-                diag = 0.0;
-            } else {
-                let v = rng.gen_range(-0.5..0.5);
-                col_idx.push(j);
-                vals.push(v);
-                sum_abs += v.abs();
+                continue; // defer diagonal until after off-diagonal sum
             }
+            let v = rng.gen_range(-0.5..0.5);
+            entries.push((j, v));
+            sum_abs += v.abs();
         }
         // strictly dominant diagonal
-        diag = sum_abs + 1.0;
-        col_idx.push(i);
-        vals.push(diag);
+        entries.push((i, sum_abs + 1.0));
+        // Ensure CSR row has sorted column indices
+        entries.sort_unstable_by_key(|e| e.0);
+        for (j, v) in entries {
+            col_idx.push(j);
+            vals.push(v);
+        }
         row_ptr.push(col_idx.len());
     }
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
@@ -57,4 +62,3 @@ proptest! {
     prop_assert!(y.iter().all(|v| v.is_finite()));
   }
 }
-

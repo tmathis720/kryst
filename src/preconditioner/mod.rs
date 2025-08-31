@@ -6,6 +6,8 @@
 //!   the appropriate triangular traversal. Most PCs ignore side.
 //! - [`Preconditioner::apply_mut`] is used by flexible solvers (FGMRES) to allow
 //!   iteration-varying behavior. Default forwards to [`apply`].
+//! - [`Preconditioner::on_restart`] is an optional hook invoked at solver restarts
+//!   (e.g., by FGMRES) to allow adaptive tuning. Default is a no-op.
 //! - Direct methods may implement [`direct_solve`] and will be used by `PREONLY`.
 //!
 //! ## Reuse semantics
@@ -110,6 +112,15 @@ pub trait Preconditioner: Send + Sync {
     /// remain immutable unless they explicitly override this method.
     fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
+    }
+
+    /// Optional hook called at solver restarts (e.g., by FGMRES).
+    ///
+    /// The `outer_iter` is the total number of iterations completed so far,
+    /// and `residual_norm` is the norm of the current (true) residual. The
+    /// default implementation does nothing.
+    fn on_restart(&mut self, _outer_iter: usize, _residual_norm: f64) -> Result<(), KError> {
+        Ok(())
     }
 
     /// Attempt to solve `op * x = b` directly using the preconditioner.
