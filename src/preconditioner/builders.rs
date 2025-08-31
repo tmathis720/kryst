@@ -3,9 +3,6 @@ use crate::preconditioner::{Preconditioner, jacobi::Jacobi, sor::MatSorType};
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
 
-#[cfg(feature = "legacy-pc-bridge")]
-use crate::preconditioner::{ilup::Ilup, ilut::Ilut, LegacyOpPreconditioner};
-
 use crate::preconditioner::sor::SorPc;
 use crate::preconditioner::chebyshev::ChebyshevPc;
 
