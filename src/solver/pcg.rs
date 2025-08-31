@@ -26,6 +26,14 @@ impl PcgSolver {
         Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits }, norm_type: CgNormType::Preconditioned }
     }
 
+    /// Optional runtime update of solver tolerances
+    pub fn set_tolerances(&mut self, rtol: f64, atol: f64, dtol: f64, maxits: usize) {
+        self.conv.rtol = rtol;
+        self.conv.atol = atol;
+        self.conv.dtol = dtol;
+        self.conv.max_iters = maxits;
+    }
+
     pub fn with_norm(mut self, norm_type: CgNormType) -> Self {
         self.norm_type = norm_type;
         self
@@ -145,8 +153,8 @@ impl LinearSolver for PcgSolver {
             CgNormType::Natural => Self::dot(r, z, comm),
             CgNormType::None => 0.0,
         };
-        let res0_reported = res;
-        // b-norm not needed under standardized convergence policy
+        // Use ||b|| as the reference norm for relative tolerances
+        let bnorm = Self::nrm2(b, comm).max(1e-32);
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -157,8 +165,14 @@ impl LinearSolver for PcgSolver {
         p.copy_from_slice(z);
         let mut rz = Self::dot(r, z, comm);
 
-        // Standard convergence policy at k=0 (baseline = res0_reported)
-        let (reason0, s0) = self.conv.check(res, res, 0);
+        // Residual norm used for convergence checks (ensure units are ||.||_2)
+        let res_check0 = match self.norm_type {
+            CgNormType::Preconditioned | CgNormType::Natural => rz.sqrt(),
+            CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+        };
+
+        // Standard convergence policy at k=0 against ||b||
+        let (reason0, s0) = self.conv.check(res_check0, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             // On early exit, final residual should be true residual
             let mut tmp = vec![0.0; n];
@@ -173,11 +187,9 @@ impl LinearSolver for PcgSolver {
             a.matvec(p, w);
             let pw = Self::dot(p, w, comm);
             if pw <= 0.0 || !pw.is_finite() {
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: res,
-                    reason: ConvergedReason::DivergedDtol,
-                });
+                let mut tmp = vec![0.0; n];
+                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
             }
             let alpha = rz / pw;
 
@@ -194,11 +206,9 @@ impl LinearSolver for PcgSolver {
 
             let rz_new = Self::dot(r, z, comm);
             if rz_new < 0.0 || !rz_new.is_finite() {
-                return Ok(SolveStats {
-                    iterations: k + 1,
-                    final_residual: res,
-                    reason: ConvergedReason::DivergedDtol,
-                });
+                let mut tmp = vec![0.0; n];
+                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                return Ok(SolveStats { iterations: k + 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
             }
 
             res = match self.norm_type {
@@ -214,8 +224,12 @@ impl LinearSolver for PcgSolver {
                 }
             }
 
-            // Convergence/divergence check vs initial reported residual
-            let (reason, mut s) = self.conv.check(res, res0_reported, k + 1);
+            // Convergence/divergence check vs ||b|| (use 2-norm units)
+            let res_check = match self.norm_type {
+                CgNormType::Preconditioned | CgNormType::Natural => rz_new.sqrt(),
+                CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+            };
+            let (reason, mut s) = self.conv.check(res_check, bnorm, k + 1);
             if !matches!(reason, ConvergedReason::Continued) {
                 // Recompute true residual for final reporting
                 let mut tmp = vec![0.0; n];
