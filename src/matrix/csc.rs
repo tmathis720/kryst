@@ -8,7 +8,7 @@ pub struct CscMatrix<T> {
     inner: SparseColMat<usize, T>,
 }
 
-impl<T: ComplexField + Copy + num_traits::Zero> CscMatrix<T> {
+impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscMatrix<T> {
     /// Build a CSC from raw col-pointer, row-index, and values.
     pub fn from_csc(
         nrows: usize,
@@ -75,5 +75,77 @@ impl<T: ComplexField + Copy + num_traits::Zero> CscMatrix<T> {
     #[inline]
     pub fn values_mut(&mut self) -> &mut [T] {
         self.inner.val_mut()
+    }
+
+    /// Sparse matrix-vector multiply: `y = A * x`.
+    ///
+    /// Sequential implementation that updates `y` in place.
+    /// Requires `x.len() == ncols` and `y.len() == nrows`.
+    pub fn spmv(&self, x: &[T], y: &mut [T]) {
+        assert_eq!(x.len(), self.ncols());
+        assert_eq!(y.len(), self.nrows());
+        y.fill(T::zero());
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+        for j in 0..self.ncols() {
+            let xj = x[j];
+            for p in cp[j]..cp[j + 1] {
+                let row = ri[p];
+                y[row] = y[row] + vv[p] * xj;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+impl<T> CscMatrix<T>
+where
+    T: ComplexField
+        + Copy
+        + num_traits::Zero
+        + Send
+        + Sync
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+{
+    /// Parallel sparse matrix-vector multiply: `y = A * x`.
+    ///
+    /// Each thread accumulates into a private buffer to avoid write conflicts
+    /// on the output vector.
+    pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
+        assert_eq!(x.len(), self.ncols());
+        assert_eq!(y.len(), self.nrows());
+        use rayon::prelude::*;
+
+        let m = self.nrows();
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+
+        let result = (0..self.ncols())
+            .into_par_iter()
+            .fold(
+                || vec![T::zero(); m],
+                |mut accum, j| {
+                    let xj = x[j];
+                    for p in cp[j]..cp[j + 1] {
+                        let row = ri[p];
+                        accum[row] = accum[row] + vv[p] * xj;
+                    }
+                    accum
+                },
+            )
+            .reduce(
+                || vec![T::zero(); m],
+                |mut a, b| {
+                    for i in 0..m {
+                        a[i] = a[i] + b[i];
+                    }
+                    a
+                },
+            );
+
+        y.copy_from_slice(&result);
     }
 }
