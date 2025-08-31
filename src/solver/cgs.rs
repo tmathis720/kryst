@@ -1,7 +1,17 @@
+//! Conjugate Gradient Squared (CGS).
+//!
+//! Expert method: CGS often exhibits volatile, non-monotone residuals and can
+//! amplify round-off. Prefer (F)GMRES/BiCGStab for robustness. Use CGS when
+//! you specifically want short recurrences and can handle breakdowns.
+//!
+//! - Preconditioning: currently not applied (API accepts `pc` but it is ignored).
+//! - Monitors report the true residual `||r||_2`.
+//! - Parallel safety: all inner products/norms use `UniverseComm`.
+
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::recompute_true_residual_norm;
@@ -13,14 +23,20 @@ pub struct CgsSolver {
     pub(crate) conv: Convergence<f64>,
 }
 
+/// Relative threshold for CGS breakdown detection.
+/// Trigger when |rho| or |sigma| is smaller than BRK_REL * scale.
+const BRK_REL: f64 = 1e-12;
+/// Absolute floor to guard subnormals.
+const BRK_ABS: f64 = 1e-300;
+
 impl CgsSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
         Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits } }
     }
 
     #[inline]
-    fn dot(x: &[f64], y: &[f64], _comm: &UniverseComm) -> f64 {
-        x.iter().zip(y).map(|(a, b)| a * b).sum()
+    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 {
+        comm.dot(x, y)
     }
     #[inline]
     fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
@@ -135,6 +151,9 @@ impl LinearSolver for CgsSolver {
         }
         r_tld.copy_from_slice(r);
 
+        // Norm of shadow residual used to scale breakdown thresholds
+        let rtld_norm = Self::nrm2(&r_tld, comm);
+
         // initial values
         let mut rnorm = Self::nrm2(r, comm);
         let res0_reported = rnorm;
@@ -153,7 +172,11 @@ impl LinearSolver for CgsSolver {
 
         // CGS parameters
         let mut rho = Self::dot(&r_tld, r, comm); // (r~, r)
-        if rho.abs() <= f64::EPSILON {
+        // Robust breakdown check for rho
+        let r_norm = Self::nrm2(r, comm);
+        let rho_abs = rho.abs();
+        let rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
+        if rho_abs <= rho_thr {
             return Err(KError::IndefiniteMatrix); // classic breakdown
         }
 
@@ -170,7 +193,11 @@ impl LinearSolver for CgsSolver {
             a.matvec(p, v);
 
             let sigma = Self::dot(&r_tld, v, comm); // (r~, v)
-            if sigma.abs() <= f64::EPSILON {
+            // Robust breakdown check for sigma
+            let v_norm = Self::nrm2(v, comm);
+            let sigma_abs = sigma.abs();
+            let sigma_thr = BRK_ABS.max(BRK_REL * rtld_norm * v_norm);
+            if sigma_abs <= sigma_thr {
                 return Err(KError::IndefiniteMatrix); // breakdown
             }
             let alpha = rho / sigma;
@@ -210,7 +237,11 @@ impl LinearSolver for CgsSolver {
             // rho, beta updates
             rho_old = rho;
             rho = Self::dot(&r_tld, r, comm);
-            if rho.abs() <= f64::EPSILON {
+            // Robust breakdown check for rho update
+            let r_norm = Self::nrm2(r, comm);
+            let rho_abs = rho.abs();
+            let rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
+            if rho_abs <= rho_thr {
                 return Err(KError::IndefiniteMatrix); // breakdown
             }
             let beta = rho / rho_old;
