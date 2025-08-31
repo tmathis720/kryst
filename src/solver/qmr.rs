@@ -5,11 +5,10 @@
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-use crate::solver::common::recompute_true_residual_norm;
 
 pub struct QmrSolver {
     pub conv: Convergence<f64>,
@@ -28,8 +27,13 @@ impl QmrSolver {
     }
 
     #[inline]
-    fn dot(x: &[f64], y: &[f64]) -> f64 {
-        x.iter().zip(y).map(|(a, b)| a * b).sum()
+    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 {
+        comm.dot(x, y)
+    }
+
+    #[inline]
+    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
+        Self::dot(x, x, comm).sqrt()
     }
 
     fn ensure_workspace(work: &mut Workspace, n: usize) {
@@ -85,12 +89,16 @@ impl LinearSolver for QmrSolver {
             return Err(KError::InvalidInput("QMR requires A^T".into()));
         }
 
-        let mons = monitors.unwrap_or(&[]);
-        let pc_side = match pc_side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
-        };
+        if matches!(pc_side, PcSide::Symmetric) {
+            return Err(KError::InvalidInput(
+                "QMR: symmetric preconditioning not supported".into(),
+            ));
+        }
+        let _pc: Option<&dyn Preconditioner> = _pc.as_deref();
+        let _ = _pc;
         let _ = pc_side;
+
+        let mons = monitors.unwrap_or(&[]);
         let mut local_work;
         let w = match work {
             Some(w) => w,
@@ -122,26 +130,30 @@ impl LinearSolver for QmrSolver {
         }
         r_tld.copy_from_slice(r);
 
-        let mut res = Self::dot(r, r).sqrt();
-        let res0 = res;
+        let mut res = Self::nrm2(r, _comm);
+        let bnorm = Self::nrm2(b, _comm).max(1e-32);
+        let thr = self.conv.atol.max(self.conv.rtol * bnorm);
         if !mons.is_empty() {
             for m in mons {
                 m(0, res);
             }
         }
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res,
-            reason: ConvergedReason::Continued,
-        };
-        let (reason, s0) = self.conv.check(res, res0, 0);
-        if reason != ConvergedReason::Continued {
-            return Ok(s0);
+        if res <= thr {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: res,
+                reason: if res <= self.conv.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                },
+            });
         }
 
-        let mut rho = Self::dot(r_tld, r);
-        if rho == 0.0 {
-            return Ok(s0);
+        let eps = 1e-300_f64;
+        let mut rho = Self::dot(r_tld, r, _comm);
+        if rho.abs() <= eps {
+            return Err(KError::IndefiniteMatrix);
         }
 
         for k in 0..self.conv.max_iters {
@@ -149,9 +161,9 @@ impl LinearSolver for QmrSolver {
                 p.copy_from_slice(r);
                 p_tld.copy_from_slice(r_tld);
             } else {
-                let rho_new = Self::dot(r_tld, r);
-                if rho_new == 0.0 {
-                    break;
+                let rho_new = Self::dot(r_tld, r, _comm);
+                if rho_new.abs() <= eps {
+                    return Err(KError::IndefiniteMatrix);
                 }
                 let beta = rho_new / rho;
                 for i in 0..ncols {
@@ -164,9 +176,9 @@ impl LinearSolver for QmrSolver {
             a.matvec(p, v);
             a.t_matvec(p_tld, v_tld);
 
-            let sigma = Self::dot(p_tld, v);
-            if sigma == 0.0 {
-                break;
+            let sigma = Self::dot(p_tld, v, _comm);
+            if sigma.abs() <= eps {
+                return Err(KError::IndefiniteMatrix);
             }
             let alpha = rho / sigma;
 
@@ -174,9 +186,13 @@ impl LinearSolver for QmrSolver {
                 s[i] = r[i] - alpha * v[i];
             }
             a.matvec(s, t);
-            let ts = Self::dot(t, s);
-            let tt = Self::dot(t, t);
-            let omega = if tt != 0.0 { ts / tt } else { 0.0 };
+
+            let tt = Self::dot(t, t, _comm);
+            if tt <= eps || !tt.is_finite() {
+                return Err(KError::IndefiniteMatrix);
+            }
+            let ts = Self::dot(t, s, _comm);
+            let omega = ts / tt;
 
             for i in 0..ncols {
                 x[i] += alpha * p[i] + omega * s[i];
@@ -190,36 +206,28 @@ impl LinearSolver for QmrSolver {
             for i in 0..ncols {
                 t[i] = b[i] - t[i];
             }
-            res = Self::dot(t, t).sqrt();
+            res = Self::nrm2(t, _comm);
 
             if !mons.is_empty() {
                 for m in mons {
                     m(k + 1, res);
                 }
             }
-            let (reason, st) = self.conv.check(res, res0, k + 1);
-            stats = st;
+
+            let (reason, mut st) = self.conv.check(res, bnorm, k + 1);
             if matches!(
                 reason,
                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
             ) {
-                return Ok(stats);
+                st.final_residual = res;
+                return Ok(st);
             }
         }
 
-        // Compute true residual for final reporting
-        let mut tmp = vec![0.0; ncols];
-        let true_res = recompute_true_residual_norm(a, b, x, _comm, &mut tmp);
-        stats.final_residual = true_res;
-        if stats.reason == ConvergedReason::Continued {
-            stats.reason = if true_res <= self.conv.atol {
-                ConvergedReason::ConvergedAtol
-            } else if true_res <= self.conv.rtol * res0 {
-                ConvergedReason::ConvergedRtol
-            } else {
-                ConvergedReason::DivergedMaxIts
-            };
-        }
-        Ok(stats)
+        Ok(SolveStats {
+            iterations: self.conv.max_iters,
+            final_residual: res,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }
