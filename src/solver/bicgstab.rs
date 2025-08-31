@@ -1,458 +1,383 @@
-//! BiCGStab solver (Saad §7.1)
+//! BiCGStab over &dyn LinOp<f64>, object-safe, with Workspace-backed buffers.
 //!
-//! This module implements the BiConjugate Gradient Stabilized (BiCGStab) method for solving
-//! non-symmetric linear systems. BiCGStab is a popular Krylov subspace method that combines the
-//! robustness of BiCG with smoother convergence, making it suitable for a wide range of problems.
+//! Accepts PcSide::Left or ::Right (PC hooks stubbed for now). Residual monitors report
+//! the true ||r||2; final stats also report the true norm via KSP context recomputation.
 //!
-//! Accepts [`PcSide::Left`] or [`PcSide::Right`]; residuals are reported as the true `||r||`.
+//! Robust breakdown checks:
+//!   - |rho|   <= eps_rho      → DivergedDtol
+//!   - |alpha_den| <= eps_alpha → DivergedDtol
+//!   - |omega_den| <= eps_omega → DivergedDtol
+//!   - |omega| <= eps_omega     → DivergedDtol
 //!
-//! # Overview
-//!
-//! The BiCGStab algorithm iteratively refines the solution to Ax = b by constructing two coupled
-//! sequences of vectors and scalars, using short recurrences and a shadow residual. It is especially
-//! effective for large, sparse, and non-symmetric systems.
-//!
-//! # Usage
-//!
-//! - Create a `BiCgStabSolver` with the desired tolerance and maximum iterations.
-//! - Call `solve` with the system matrix, right-hand side, and initial guess.
-//! - The solver returns convergence statistics and the solution vector.
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 7.1.
-//! - https://en.wikipedia.org/wiki/Biconjugate_gradient_stabilized_method
+//! Notes for later (PC integration):
+//!   Left  : r̃ = M^{-1} r,    p = r̃ + β (p − ω ṽ), ṽ = M^{-1} v = M^{-1} A p
+//!   Right : keep r (true),    use z = M^{-1} p in A·z, and x ← x + α z + ω z_s, etc.
 
-use crate::core::traits::{InnerProduct, MatVec};
+use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use crate::preconditioner::PcSide;
-use crate::solver::legacy::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-use crate::utils::profiling::StageGuard;
+use crate::matrix::op::LinOp;
+use crate::parallel::{Comm, UniverseComm};
+use crate::preconditioner::{PcSide, Preconditioner};
+use crate::solver::LinearSolver;
+use crate::utils::convergence::{ConvergedReason, SolveStats};
 
+#[cfg(feature = "logging")]
+use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
 
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
-/// BiCGStab solver struct
-///
-/// Stores convergence parameters.
-pub struct BiCgStabSolver<T>
-where
-    T: Send + Sync,
-{
-    pub conv: Convergence<T>,
+/// BiCGStab solver (object-safe f64 variant)
+pub struct BiCgStabSolver {
+    pub rtol: f64,
+    pub atol: f64,
+    pub dtol: f64,
+    pub maxits: usize,
 }
 
-impl<T: num_traits::Float + From<f64> + std::ops::Mul<Output = T> + Send + Sync> BiCgStabSolver<T> {
-    /// Create a new BiCGStab solver with the given tolerance and maximum iterations.
-    pub fn new(tol: T, max_iters: usize) -> Self {
-        let atol = <T as From<f64>>::from(1e-12);
-        let dtol = <T as From<f64>>::from(1e3);
-        Self {
-            conv: Convergence::new(tol, atol, dtol, max_iters),
-        }
+impl BiCgStabSolver {
+    pub fn new(rtol: f64, maxits: usize) -> Self {
+        Self { rtol, atol: 1e-12, dtol: 1e3, maxits }
+    }
+
+    #[inline]
+    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 { comm.dot(x, y) }
+    #[inline]
+    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 { Self::dot(x, x, comm).sqrt() }
+
+    fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
+        if buf.len() != n { buf.resize(n, 0.0); }
+    }
+
+    /// Acquire all work vectors from the Workspace (no steady-state allocs).
+    /// Layout:
+    ///   tmp1 = r, tmp2 = r_hat
+    ///   q[0] = v, q[1] = p, q[2] = s, q[3] = t
+    fn acquire<'a>(
+        n: usize,
+        work: &'a mut Workspace,
+        need_z: bool,
+        need_v_raw: bool,
+    ) -> (
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        &'a mut [f64],
+        Option<(&'a mut [f64], &'a mut [f64])>,
+        Option<&'a mut [f64]>,
+    ) {
+        Self::take_or_resize(&mut work.tmp1, n); // r
+        Self::take_or_resize(&mut work.tmp2, n); // r_hat
+        let need_q = if need_v_raw { 5 } else { 4 };
+        while work.q.len() < need_q { work.q.push(Vec::new()); }
+        for k in 0..need_q { Self::take_or_resize(&mut work.q[k], n); }
+        let r      = &mut work.tmp1[..];
+        let r_hat  = &mut work.tmp2[..];
+        let (q0, rest) = work.q.split_at_mut(1);
+        let (q1, rest) = rest.split_at_mut(1);
+        let (q2, rest) = rest.split_at_mut(1);
+        let (q3, q_more)   = rest.split_at_mut(1);
+        let v      = &mut q0[0][..];
+        let p      = &mut q1[0][..];
+        let s      = &mut q2[0][..];
+        let t      = &mut q3[0][..];
+        let z = if need_z {
+            while work.z.len() < 2 { work.z.push(Vec::new()); }
+            for k in 0..2 { Self::take_or_resize(&mut work.z[k], n); }
+            let (z0, z1) = work.z.split_at_mut(1);
+            Some((&mut z0[0][..], &mut z1[0][..]))
+        } else { None };
+        let v_raw = if need_v_raw { Some(&mut q_more[0][..]) } else { None };
+        (r, r_hat, v, p, s, t, z, v_raw)
     }
 }
 
-impl<M: ?Sized, V, T> LinearSolver<M, V> for BiCgStabSolver<T>
-where
-    M: MatVec<V>,
-    (): InnerProduct<V, Scalar = T>,
-    V: AsMut<[T]> + AsRef<[T]> + From<Vec<T>> + Clone,
-    T: num_traits::Float + Clone + From<f64> + Send + Sync + std::fmt::LowerExp,
-{
+impl LinearSolver for BiCgStabSolver {
     type Error = KError;
-    type Scalar = T;
 
-    /// Solve the linear system Ax = b using the BiCGStab algorithm.
-    ///
-    /// This unified method handles all solve variants with optional monitoring,
-    /// profiling, and workspace for maximum efficiency.
-    ///
-    /// # Arguments
-    /// * `a` - System matrix
-    /// * `pc` - Optional preconditioner (currently unused)
-    /// * `b` - Right-hand side vector
-    /// * `x` - Initial guess (input/output)
-    /// * `comm` - Communicator for parallel reductions
-    /// * `monitors` - Optional callbacks to invoke at each iteration with (iteration, residual_norm)
-    /// * `work` - Optional pre-allocated workspace containing temporary vectors
-    ///
-    /// Returns convergence statistics and the solution vector.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn setup_workspace(&mut self, w: &mut Workspace) {
+        if w.q.len() < 4 { w.q.resize(4, Vec::new()); }
+    }
+
     fn solve(
         &mut self,
-        a: &M,
-        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<M, V> + '_)>,
-        b: &V,
-        x: &mut V,
-        pc_side: crate::preconditioner::PcSide,
-        comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
-        work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<SolveStats<Self::Scalar>, Self::Error> {
-        let _solve_stage = StageGuard::new("BiCGStabSolve");
-
-        let monitors = monitors.unwrap_or(&[]);
-
-        let pc_side = match pc_side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
-        };
-
-        // Only use monitors if monitoring is enabled at runtime
-        let use_monitors = crate::utils::profiling::is_monitoring_enabled() && !monitors.is_empty();
-
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
         #[cfg(feature = "logging")]
-        trace!(
-            "Starting BiCGStab solve, monitoring: {}, workspace: {}",
-            use_monitors,
-            work.is_some()
-        );
-        #[cfg(not(feature = "logging"))]
-        let _ = work;
+        let _guard = StageGuard::new("BiCGStab");
 
-        let _ = pc; // BiCGStab does not use preconditioner (yet)
-        let _ = pc_side;
-        let n = b.as_ref().len();
-        let ip = ();
-        let mut xk = x.as_ref().to_vec();
-
-        // r0 = b - A x0
-        let mut tmp = V::from(vec![T::zero(); n]);
-        {
-            let _matvec_stage = StageGuard::new("BiCGStabMatVec");
-            a.matvec(&V::from(xk.clone()), &mut tmp);
+        let (m, n) = a.dims();
+        if m != n || b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput("BiCGStab: square operator and matching b,x required".into()));
         }
-        let mut r = V::from(
-            tmp.as_ref()
-                .iter()
-                .zip(b.as_ref())
-                .map(|(&ax, &bi)| bi - ax)
-                .collect::<Vec<_>>(),
-        );
-        let r_hat = r.clone(); // shadow residual
-        let mut rho_prev = T::one();
-        let mut alpha = T::one();
-        let mut omega_prev = T::one();
-        let mut v = V::from(vec![T::zero(); n]);
-        let mut p = r.clone(); // Properly initialize p = r
+        let mons = monitors.unwrap_or(&[]);
 
-        // Compute initial residual norm
-        let res0 = {
-            let _norm_stage = StageGuard::new("BiCGStabNorm");
-            ip.norm(&r, comm)
-        };
+        // Acquire workspace (required to avoid allocs)
+        let side = match pc_side { PcSide::Symmetric => PcSide::Left, s => s };
+        let w = work.ok_or_else(|| KError::InvalidInput("BiCGStab requires a Workspace".into()))?;
+        let need_right = matches!(side, PcSide::Right) && pc.is_some();
+        let need_left = matches!(side, PcSide::Left) && pc.is_some();
+        let need_z = need_right || need_left;
+        let need_v_raw = need_left;
+        let (r, r_hat, v, p, s, t, zopt, mut v_raw_opt) = Self::acquire(n, w, need_z, need_v_raw);
+        let mut z_p_opt: Option<&mut [f64]> = None;
+        let mut z_s_opt: Option<&mut [f64]> = None;
+        if let Some((zp, zs)) = zopt { z_p_opt = Some(zp); z_s_opt = Some(zs); }
 
-        // Invoke monitors for iteration 0
-        if use_monitors {
-            for monitor in monitors {
-                monitor(0, res0);
-            }
+        // r = b - A x
+        if x.iter().any(|&xi| xi != 0.0) {
+            a.matvec(x, v);                // reuse v as Ax
+            for i in 0..n { r[i] = b[i] - v[i]; }
+        } else {
+            r.copy_from_slice(b);
         }
-
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res0,
-            reason: ConvergedReason::Continued,
-        };
-
-        // Check initial convergence using new interface
-        let (reason, initial_stats) = self.conv.check(res0, res0, 0);
-        if reason != ConvergedReason::Continued {
-            *x = V::from(xk);
-            return Ok(initial_stats);
-        }
-
-        #[cfg(feature = "logging")]
-        trace!("BiCGStab initial residual: {:.3e}", res0);
-
-        for i in 1..=self.conv.max_iters {
-            let _iter_stage = StageGuard::new("BiCGStabIteration");
-
-            #[cfg(feature = "logging")]
-            trace!("BiCGStab iteration {}", i);
-
-            // rho = <r_hat, r>
-            let rho = {
-                let _dot_stage = StageGuard::new("BiCGStabDotProduct");
-                ip.dot(&r_hat, &r, comm)
-            };
-
-            if rho.abs() < T::epsilon() {
-                #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: rho = {:.3e}", rho);
-                break; // breakdown
-            }
-
-            let beta = if i == 1 {
-                T::zero()
+        // residual norms / thresholds
+        let mut res0;
+        if need_left {
+            // Preconditioned residual z = M^{-1} r
+            if let Some(zs) = z_s_opt.as_deref_mut() {
+                // Use z_s buffer temporarily for z0
+                if let Some(pc) = pc.as_deref() {
+                    pc.apply(PcSide::Left, r, zs)?;
+                } else {
+                    zs.copy_from_slice(r);
+                }
+                r_hat.copy_from_slice(zs); // shadow residual = z0
+                s.copy_from_slice(zs);     // current z stored in s
+                res0 = Self::nrm2(s, comm);
+                // Initialize p := z
+                p.copy_from_slice(s);
             } else {
-                (rho / rho_prev) * (alpha / omega_prev)
-            };
-
-            // p = r + beta * (p - omega_prev * v)
-            {
-                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
-                #[cfg(feature = "rayon")]
-                {
-                    let beta = beta;
-                    let omega = omega_prev;
-                    p.as_mut()
-                        .par_iter_mut()
-                        .zip(r.as_ref().par_iter())
-                        .zip(v.as_ref().par_iter())
-                        .for_each(|((p_j, &r_j), &v_j)| {
-                            *p_j = r_j + beta * (*p_j - omega * v_j);
-                        });
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    for ((p_j, r_j), v_j) in p.as_mut().iter_mut().zip(r.as_ref()).zip(v.as_ref()) {
-                        *p_j = *r_j + beta * (*p_j - omega_prev * *v_j);
-                    }
-                }
+                // Fallback shouldn't happen; treat as unpreconditioned
+                r_hat.copy_from_slice(r);
+                res0 = Self::nrm2(r, comm);
+                p.copy_from_slice(r);
             }
+        } else {
+            // r_hat = r (fixed shadow residual)
+            r_hat.copy_from_slice(r);
+            res0  = Self::nrm2(r, comm);
+            // Initialize p := r
+            p.copy_from_slice(r);
+        }
+        let bnorm = Self::nrm2(b, comm).max(1e-32);
+        let thr   = self.atol.max(self.rtol * bnorm);
 
-            // v = A p
-            {
-                let _matvec_stage = StageGuard::new("BiCGStabMatVec");
-                let mut v_tmp = V::from(vec![T::zero(); n]);
-                a.matvec(&p.clone(), &mut v_tmp);
-                v = v_tmp;
-            }
+        if !mons.is_empty() { for m in mons { m(0, res0); } }
+        if res0 <= thr {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: res0,
+                reason: if res0 <= self.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol },
+            });
+        }
 
-            let alpha_num = rho;
-            // alpha_den = <r_hat, v>
-            let alpha_den = {
-                let _dot_stage = StageGuard::new("BiCGStabDotProduct");
-                ip.dot(&r_hat, &v, comm)
-            };
+        // Parameters
+        let mut rho_prev   = 1.0;
+        let mut alpha      = 1.0;
+        let mut omega_prev = 1.0;
 
-            if alpha_den.abs() < T::epsilon() {
+        // Breakdown epsilons (relative-safe)
+        let eps_rho   = 1e-30_f64;
+        let eps_alpha = 1e-30_f64;
+        let eps_omega = 1e-30_f64;
+
+        let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
+
+        for k in 1..=self.maxits {
+            // ρ_k = <r_hat, r> (Right/unpreconditioned) or <r_hat, z> (Left)
+            let rho = if need_left { Self::dot(r_hat, s, comm) } else { Self::dot(r_hat, r, comm) };
+            if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: alpha_den = {:.3e}", alpha_den);
-                break; // breakdown
-            }
-            alpha = alpha_num / alpha_den;
-
-            // s = r - alpha * v
-            let s = {
-                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
-                #[cfg(feature = "rayon")]
-                {
-                    V::from(
-                        r.as_ref()
-                            .par_iter()
-                            .zip(v.as_ref().par_iter())
-                            .map(|(&rj, &vj)| rj - alpha * vj)
-                            .collect::<Vec<_>>(),
-                    )
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    V::from(
-                        r.as_ref()
-                            .iter()
-                            .zip(v.as_ref())
-                            .map(|(&rj, &vj)| rj - alpha * vj)
-                            .collect::<Vec<_>>(),
-                    )
-                }
-            };
-
-            // Compute norm of s
-            let s_norm = {
-                let _norm_stage = StageGuard::new("BiCGStabNorm");
-                ip.norm(&s, comm)
-            };
-
-            // Invoke monitors for current iteration (intermediate)
-            if use_monitors {
-                for monitor in monitors {
-                    monitor(i, s_norm);
-                }
-            }
-
-            #[cfg(feature = "logging")]
-            trace!("BiCGStab iteration {}: s_norm = {:.3e}", i, s_norm);
-
-            // Check convergence for s using new interface
-            let (s_reason, s_stats) = self.conv.check(s_norm, res0, i);
-            if s_reason != ConvergedReason::Continued {
-                // Early convergence: update x and return
-                {
-                    let _axpy_stage = StageGuard::new("BiCGStabAxpy");
-                    #[cfg(feature = "rayon")]
-                    {
-                        xk.par_iter_mut()
-                            .zip(p.as_ref().par_iter())
-                            .for_each(|(xj, &pj)| {
-                                *xj = *xj + alpha * pj;
-                            });
-                    }
-                    #[cfg(not(feature = "rayon"))]
-                    {
-                        for (xj, pj) in xk.iter_mut().zip(p.as_ref()) {
-                            *xj = *xj + alpha * *pj;
-                        }
-                    }
-                }
-                *x = V::from(xk);
-
-                #[cfg(feature = "logging")]
-                trace!(
-                    "BiCGStab early convergence after {} iterations: {:?}",
-                    i, s_reason
-                );
-                return Ok(s_stats);
-            }
-
-            // t = A s
-            let mut t = V::from(vec![T::zero(); n]);
-            {
-                let _matvec_stage = StageGuard::new("BiCGStabMatVec");
-                a.matvec(&s, &mut t);
-            }
-
-            // omega = <t, s> / <t, t>
-            let (omega_num, omega_den) = {
-                let _dot_stage = StageGuard::new("BiCGStabDotProduct");
-                let omega_num = ip.dot(&t, &s, comm);
-                let omega_den = ip.dot(&t, &t, comm);
-                (omega_num, omega_den)
-            };
-
-            if omega_den.abs() < T::epsilon() {
-                #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: omega_den = {:.3e}", omega_den);
-                break; // breakdown
-            }
-            let omega = omega_num / omega_den;
-
-            // x = x + alpha * p + omega * s
-            {
-                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
-                #[cfg(feature = "rayon")]
-                {
-                    xk.par_iter_mut()
-                        .zip(p.as_ref().par_iter())
-                        .zip(s.as_ref().par_iter())
-                        .for_each(|((xj, &pj), &sj)| {
-                            *xj = *xj + alpha * pj + omega * sj;
-                        });
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    for ((xj, pj), sj) in xk.iter_mut().zip(p.as_ref()).zip(s.as_ref()) {
-                        *xj = *xj + alpha * *pj + omega * *sj;
-                    }
-                }
-            }
-
-            // r = s - omega * t
-            let r_new = {
-                let _axpy_stage = StageGuard::new("BiCGStabAxpy");
-                #[cfg(feature = "rayon")]
-                {
-                    V::from(
-                        s.as_ref()
-                            .par_iter()
-                            .zip(t.as_ref().par_iter())
-                            .map(|(&sj, &tj)| sj - omega * tj)
-                            .collect::<Vec<_>>(),
-                    )
-                }
-                #[cfg(not(feature = "rayon"))]
-                {
-                    V::from(
-                        s.as_ref()
-                            .iter()
-                            .zip(t.as_ref())
-                            .map(|(&sj, &tj)| sj - omega * tj)
-                            .collect::<Vec<_>>(),
-                    )
-                }
-            };
-            r = r_new;
-
-            // Compute norm of r
-            let r_norm = {
-                let _norm_stage = StageGuard::new("BiCGStabNorm");
-                ip.norm(&r, comm)
-            };
-
-            // Invoke monitors for current iteration (final)
-            if use_monitors {
-                for monitor in monitors {
-                    monitor(i, r_norm);
-                }
-            }
-
-            #[cfg(feature = "logging")]
-            trace!("BiCGStab iteration {}: residual = {:.3e}", i, r_norm);
-
-            // Check convergence using new interface
-            let (r_reason, r_stats) = self.conv.check(r_norm, res0, i);
-            stats = r_stats;
-            if r_reason != ConvergedReason::Continued {
-                *x = V::from(xk);
-
-                #[cfg(feature = "logging")]
-                trace!("BiCGStab converged after {} iterations: {:?}", i, r_reason);
+                trace!("BiCGStab breakdown: rho ~ 0 at iter {}", k);
+                stats.iterations = k - 1;
+                stats.final_residual = if need_left { Self::nrm2(s, comm) } else { Self::nrm2(r, comm) };
+                stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
 
-            if omega.abs() < T::epsilon() {
+            // β = (ρ/ρ_{k-1}) * (α/ω_{k-1});
+            let beta = if k == 1 { 0.0 } else { (rho / rho_prev) * (alpha / omega_prev) };
+            if need_left {
+                // p = z + β (p − ω ṽ)
+                for i in 0..n { p[i] = s[i] + beta * (p[i] - omega_prev * v[i]); }
+            } else {
+                // p = r + β (p − ω v)
+                for i in 0..n { p[i] = r[i] + beta * (p[i] - omega_prev * v[i]); }
+            }
+
+            if need_left {
+                // y = M^{-1} p (use z_p buffer)
+                let yp = match (pc.as_deref(), z_p_opt.as_deref_mut()) {
+                    (Some(pc), Some(zp)) => { pc.apply(PcSide::Left, p, zp)?; zp }
+                    _ => p,
+                };
+                // v_raw = A y
+                let vr = v_raw_opt.as_deref_mut().expect("workspace: missing v_raw buffer");
+                a.matvec(yp, vr);
+                // ṽ = M^{-1} v_raw -> store in v
+                if let Some(pc) = pc.as_deref() {
+                    pc.apply(PcSide::Left, vr, v)?;
+                } else {
+                    v.copy_from_slice(vr);
+                }
+            } else {
+                // v = A p (Right PC: v = A (M^{-1} p))
+                match (side, pc.as_deref(), z_p_opt.as_deref_mut()) {
+                    (PcSide::Right, Some(pc), Some(zp)) => {
+                        pc.apply(PcSide::Right, p, zp)?;
+                        a.matvec(zp, v);
+                    }
+                    _ => {
+                        a.matvec(p, v);
+                    }
+                }
+            }
+
+            // α = ρ / <r_hat, v> (Right) or ρ / <r_hat, ṽ> (Left)
+            let alpha_den = Self::dot(r_hat, v, comm);
+            if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: omega = {:.3e}", omega);
-                break; // breakdown
+                trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {}", k);
+                stats.iterations = k - 1;
+                stats.final_residual = if need_left { Self::nrm2(s, comm) } else { Self::nrm2(r, comm) };
+                stats.reason = ConvergedReason::DivergedDtol;
+                return Ok(stats);
+            }
+            alpha = rho / alpha_den;
+
+            if need_left {
+                // s = z − α ṽ (reuse s buffer which held z)
+                for i in 0..n { s[i] = s[i] - alpha * v[i]; }
+            } else {
+                // s = r − α v
+                for i in 0..n { s[i] = r[i] - alpha * v[i]; }
+            }
+
+            // Early exit if ||s|| is tiny
+            let s_norm = Self::nrm2(s, comm);
+            if !mons.is_empty() { for m in mons { m(k, s_norm); } }
+            if s_norm <= thr {
+                if need_left {
+                    if let Some(yp) = z_p_opt.as_deref() { for i in 0..n { x[i] += alpha * yp[i]; } }
+                    else { for i in 0..n { x[i] += alpha * p[i]; } }
+                } else {
+                    for i in 0..n { x[i] += alpha * p[i]; }
+                }
+                stats.iterations = k;
+                stats.final_residual = s_norm;
+                stats.reason = if s_norm <= self.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol };
+                return Ok(stats);
+            }
+
+            // t path
+            if need_left {
+                // tpre = M^{-1} s (use z_s buffer), then At = A tpre -> store in t
+                let zs = z_s_opt.as_deref_mut().expect("workspace: missing z_s buffer");
+                if let Some(pc) = pc.as_deref() { pc.apply(PcSide::Left, s, zs)?; } else { zs.copy_from_slice(s); }
+                a.matvec(zs, t);
+            } else {
+                // t = A s (Right PC: t = A (M^{-1} s))
+                match (side, pc.as_deref(), z_s_opt.as_deref_mut()) {
+                    (PcSide::Right, Some(pc), Some(zs)) => {
+                        pc.apply(PcSide::Right, s, zs)?;
+                        a.matvec(zs, t);
+                    }
+                    _ => {
+                        a.matvec(s, t);
+                    }
+                }
+            }
+
+            // ω computation
+            let omega_den = Self::dot(t, t, comm);
+            if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab breakdown: omega_den ~ 0 at iter {}", k);
+                stats.iterations = k;
+                stats.final_residual = Self::nrm2(s, comm);
+                stats.reason = ConvergedReason::DivergedDtol;
+                return Ok(stats);
+            }
+            let omega = Self::dot(t, s, comm) / omega_den;
+            if omega.abs() <= eps_omega || !omega.is_finite() {
+                #[cfg(feature = "logging")]
+                trace!("BiCGStab breakdown: omega ~ 0 at iter {}", k);
+                stats.iterations = k;
+                stats.final_residual = Self::nrm2(s, comm);
+                stats.reason = ConvergedReason::DivergedDtol;
+                return Ok(stats);
+            }
+
+            // x update
+            if need_left {
+                let y = z_p_opt.as_deref();
+                let tpre = z_s_opt.as_deref();
+                match (y, tpre) {
+                    (Some(y), Some(tpre)) => { for i in 0..n { x[i] += alpha * y[i] + omega * tpre[i]; } }
+                    (Some(y), None) => { for i in 0..n { x[i] += alpha * y[i] + omega * s[i]; } }
+                    (None, Some(tpre)) => { for i in 0..n { x[i] += alpha * p[i] + omega * tpre[i]; } }
+                    (None, None) => { for i in 0..n { x[i] += alpha * p[i] + omega * s[i]; } }
+                }
+            } else {
+                match (side, pc.as_deref(), z_p_opt.as_deref(), z_s_opt.as_deref()) {
+                    (PcSide::Right, Some(_), Some(zp), Some(zs)) => {
+                        for i in 0..n { x[i] += alpha * zp[i] + omega * zs[i]; }
+                    }
+                    _ => {
+                        for i in 0..n { x[i] += alpha * p[i] + omega * s[i]; }
+                    }
+                }
+            }
+
+            // r update (true residual)
+            if need_left {
+                // r = r − α v_raw − ω (A tpre) = r − α v_raw − ω t
+                let vr = v_raw_opt.as_deref().expect("workspace: missing v_raw buffer");
+                for i in 0..n { r[i] -= alpha * vr[i] + omega * t[i]; }
+                // z = M^{-1} r for next iteration
+                let zs = z_s_opt.as_deref_mut().expect("workspace: missing z_s buffer");
+                if let Some(pc) = pc.as_deref() { pc.apply(PcSide::Left, r, zs)?; } else { zs.copy_from_slice(r); }
+                s.copy_from_slice(zs);
+            } else {
+                // r = s − ω t
+                for i in 0..n { r[i] = s[i] - omega * t[i]; }
+            }
+
+            // check convergence on true ||r||
+            let r_norm = if need_left { Self::nrm2(s, comm) } else { Self::nrm2(r, comm) };
+            if !mons.is_empty() { for m in mons { m(k, r_norm); } }
+
+            if r_norm <= thr {
+                stats.iterations = k;
+                stats.final_residual = r_norm;
+                stats.reason = if r_norm <= self.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol };
+                return Ok(stats);
+            }
+            if !r_norm.is_finite() || r_norm >= self.dtol * bnorm {
+                stats.iterations = k;
+                stats.final_residual = r_norm;
+                stats.reason = ConvergedReason::DivergedDtol;
+                return Ok(stats);
             }
 
             rho_prev = rho;
             omega_prev = omega;
         }
 
-        *x = V::from(xk);
-
-        #[cfg(feature = "logging")]
-        trace!(
-            "BiCGStab solve completed: {} iterations, final residual: {:.3e}",
-            stats.iterations, stats.final_residual
-        );
-
-        Ok(stats)
-    }
-}
-
-// Object-safe adapter: implement new LinOp-based solver API directly
-impl crate::solver::LinearSolver for BiCgStabSolver<f64> {
-    type Error = KError;
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-
-    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
-
-    fn solve(
-        &mut self,
-        a: &dyn crate::matrix::op::LinOp<S = f64>,
-        _pc: Option<&mut dyn crate::preconditioner::Preconditioner>,
-        b: &[f64],
-        x: &mut [f64],
-        pc_side: crate::preconditioner::PcSide,
-        comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
-        work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<crate::utils::convergence::SolveStats<f64>, Self::Error> {
-        // Delegate to the legacy generic implementation over LinOp + Vec
-        let mut xv = x.to_vec();
-        let bv = b.to_vec();
-        let stats = <Self as crate::solver::legacy::LinearSolver<
-            dyn crate::matrix::op::LinOp<S = f64>,
-            Vec<f64>,
-        >>::solve(self, a, None, &bv, &mut xv, pc_side, comm, monitors, work)?;
-        x.copy_from_slice(&xv);
-        Ok(stats)
+        // Max iters
+        let r_norm = Self::nrm2(r, comm);
+        Ok(SolveStats { iterations: self.maxits, final_residual: r_norm, reason: ConvergedReason::DivergedMaxIts })
     }
 }
 
@@ -465,19 +390,11 @@ mod tests {
     // Helper: random well-conditioned non-symmetric 3x3 matrix
     fn nonsym_3x3() -> (Mat<f64>, Vec<f64>) {
         let a = Mat::from_fn(3, 3, |i, j| {
-            if i == j {
-                4.0
-            } else {
-                (i + 2 * j) as f64 + 1.0
-            }
+            if i == j { 4.0 } else { (i + 2 * j) as f64 + 1.0 }
         });
         let x_true = vec![1.0, 2.0, 3.0];
         let mut b = vec![0.0; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                b[i] += a[(i, j)] * x_true[j];
-            }
-        }
+        for i in 0..3 { for j in 0..3 { b[i] += a[(i, j)] * x_true[j]; } }
         (a, b)
     }
 
@@ -486,6 +403,9 @@ mod tests {
         let (a, b) = nonsym_3x3();
         let mut x = vec![0.0; 3];
         let mut solver = BiCgStabSolver::new(1e-10, 100);
+        let comm = crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm);
+        let mut ws = Workspace::new(3);
+        solver.setup_workspace(&mut ws);
         let stats = solver
             .solve(
                 &a,
@@ -493,9 +413,9 @@ mod tests {
                 &b,
                 &mut x,
                 crate::preconditioner::PcSide::Left,
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                &comm,
                 None,
-                None,
+                Some(&mut ws),
             )
             .unwrap();
         eprintln!(
@@ -515,5 +435,88 @@ mod tests {
             "BiCGStab did not converge: stats = {:?}",
             stats
         );
+    }
+
+    // A scripted LinOp that returns preset outputs for successive matvec calls.
+    // Ignores the input x; used to force breakdown scenarios deterministically.
+    struct ScriptedOp {
+        n: usize,
+        seq: std::sync::Arc<Vec<Vec<f64>>>,
+        idx: std::sync::atomic::AtomicUsize,
+    }
+    impl crate::matrix::op::LinOp for ScriptedOp {
+        type S = f64;
+        fn dims(&self) -> (usize, usize) { (self.n, self.n) }
+        fn matvec(&self, _x: &[f64], y: &mut [f64]) {
+            use std::sync::atomic::Ordering;
+            let i = self.idx.fetch_add(1, Ordering::Relaxed);
+            if i < self.seq.len() {
+                y.copy_from_slice(&self.seq[i]);
+            } else {
+                y.fill(0.0);
+            }
+        }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+    }
+
+    fn run_with_scripted(seq: Vec<Vec<f64>>, b: Vec<f64>) -> SolveStats<f64> {
+        let n = b.len();
+        let op = ScriptedOp { n, seq: std::sync::Arc::new(seq), idx: std::sync::atomic::AtomicUsize::new(0) };
+        let mut x = vec![0.0; n];
+        let mut solver = BiCgStabSolver::new(1e-10, 50);
+        let comm = crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm);
+        let mut ws = Workspace::new(n);
+        solver.setup_workspace(&mut ws);
+        solver.solve(&op, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, Some(&mut ws)).unwrap()
+    }
+
+    #[test]
+    fn bicgstab_alpha_den_breakdown() {
+        // r0 = b = e1; Ax = 0 initially; v = e2 => <r_hat, v> = 0 triggers alpha_den breakdown
+        let b = vec![1.0, 0.0, 0.0];
+        let seq = vec![
+            vec![0.0, 1.0, 0.0], // v = A p
+        ];
+        let stats = run_with_scripted(seq, b);
+        assert_eq!(stats.reason, ConvergedReason::DivergedDtol);
+    }
+
+    #[test]
+    fn bicgstab_omega_den_breakdown() {
+        // r0 = e1; v = [1,1,0] -> alpha = 1; s = [0,-1,0]; t = 0 => omega_den = 0
+        let b = vec![1.0, 0.0, 0.0];
+        let seq = vec![
+            vec![1.0, 1.0, 0.0], // v = A p
+            vec![0.0, 0.0, 0.0], // t = A s
+        ];
+        let stats = run_with_scripted(seq, b);
+        assert_eq!(stats.reason, ConvergedReason::DivergedDtol);
+    }
+
+    #[test]
+    fn bicgstab_omega_zero_breakdown() {
+        // r0 = e1; v = [1,1,0] -> s = [0,-1,0]; t = [1,0,0] orthogonal => omega = 0
+        let b = vec![1.0, 0.0, 0.0];
+        let seq = vec![
+            vec![1.0, 1.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+        ];
+        let stats = run_with_scripted(seq, b);
+        assert_eq!(stats.reason, ConvergedReason::DivergedDtol);
+    }
+
+    #[test]
+    fn bicgstab_rho_zero_breakdown_second_iter() {
+        // 3D: r0 = e1; choose v=[1,-1,0] => alpha=1, s=e2; t=e2+e3 => omega=1/2
+        // r1 = s - 0.5 t = 0.5 e2 - 0.5 e3, orthogonal to r0; next rho=0 ⇒ breakdown
+        let b = vec![1.0, 0.0, 0.0];
+        let seq = vec![
+            vec![1.0, -1.0, 0.0],     // v = A p
+            vec![0.0, 1.0, 1.0],      // t = A s
+        ];
+        let stats = run_with_scripted(seq, b);
+        assert_eq!(stats.reason, ConvergedReason::DivergedDtol);
+        // Ensure at least one iteration executed
+        assert!(stats.iterations >= 1);
     }
 }

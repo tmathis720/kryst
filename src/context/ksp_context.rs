@@ -235,8 +235,8 @@ impl KspContext {
                         ));
                     }
                 }
-                SolverType::Gmres | SolverType::PcaGmres => {
-                    // both left and right are fine
+                SolverType::BiCgStab | SolverType::Gmres | SolverType::PcaGmres => {
+                    // both left and right are fine for these
                 }
                 _ => {
                     if side == PcSide::Right {
