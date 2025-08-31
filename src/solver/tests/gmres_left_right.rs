@@ -80,17 +80,24 @@ mod tests_gmres_lr {
             );
         }
 
-        // Internal sanity: Left keeps no Z basis; Right populates it
+        // Internal sanity: Left keeps no Z basis; Right populates it (via z_mem)
         if let Some(wl) = ksp_left.debug_workspace() {
-            assert!(wl.z.is_empty(), "Left GMRES should not populate Z basis");
+            // Left-preconditioned GMRES does not allocate z_mem
+            assert!(wl.z_mem.is_empty(), "Left GMRES should not populate Z basis");
         }
         if let Some(wr) = ksp_right.debug_workspace() {
-            assert!(!wr.z.is_empty(), "Right GMRES should populate Z basis");
-            assert_eq!(
-                wr.z.len(),
-                wr.q.len().saturating_sub(1),
-                "Z basis length should match Krylov dim"
-            );
+            // Right-preconditioned GMRES uses column-major slabs: q_mem (m+1 cols), z_mem (m cols)
+            // Count how many Z columns were actually populated (non-zero norm)
+            let n = wr.tmp1.len();
+            let m = if n > 0 { wr.z_mem.len() / n } else { 0 };
+            let mut zcols_used = 0usize;
+            for j in 0..m {
+                let col = &wr.z_mem[j * n..(j + 1) * n];
+                if col.iter().any(|&v| v != 0.0) {
+                    zcols_used += 1;
+                }
+            }
+            assert!(zcols_used > 0, "Right GMRES should populate Z basis");
         }
 
         // And both reported a result

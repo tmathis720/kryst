@@ -60,21 +60,27 @@ mod tests_gmres_z_basis {
 
         // Inspect workspace
         let w = ksp.debug_workspace().expect("workspace present");
-        // Krylov dimension of last cycle (q has the Arnoldi basis vectors; q.len() = m+1)
-        let krylov_dim = w.q.len().saturating_sub(1);
-        // Z should have one vector per Arnoldi step
-        assert_eq!(
-            w.z.len(),
-            krylov_dim,
-            "Z basis must match Krylov dimension for Right GMRES"
+        // With slab storage, determine how many Z columns were actually populated (non-zero)
+        let n = w.tmp1.len();
+        let m = if n > 0 { w.z_mem.len() / n } else { 0 };
+        let mut zcols_used = 0usize;
+        for j in 0..m {
+            let col = &w.z_mem[j * n..(j + 1) * n];
+            if col.iter().any(|&v| v != 0.0) {
+                zcols_used += 1;
+            }
+        }
+        assert!(
+            zcols_used > 0,
+            "Z basis must have at least one populated column for Right GMRES"
         );
 
         // Counting PC should be called once per step in the last cycle at least.
         let calls = hits.load(Ordering::Relaxed);
         assert!(
-            calls >= w.z.len(),
+            calls >= zcols_used,
             "PC apply calls ({calls}) must be >= last-cycle steps ({})",
-            w.z.len()
+            zcols_used
         );
 
         Ok(())

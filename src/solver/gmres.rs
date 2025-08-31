@@ -11,7 +11,9 @@
 //!   - Store `Z_k = u` and update via `x += Z y`
 //!   - Monitors report true `||r||`.
 //!
-//! Implementation detail: `Workspace.z` holds the `Z_k` basis for Right and FGMRES.
+//! Implementation detail: `Workspace.z_mem` holds the `Z_k` basis for Right and FGMRES
+//! in column-major form. The legacy `Workspace.z` (Vec<Vec<_>>) is not used by
+//! GMRES/FGMRES.
 
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
