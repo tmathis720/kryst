@@ -1,6 +1,6 @@
 //! Simple test to debug the matrix loading and solver issues
 //!
-//! This is a minimal test to identify why the optimized demo is hanging.
+//! This version keeps the CSR path only (no dense transformation).
 
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Debug Matrix Market Test");
-    println!("========================");
+    println!("Debug Matrix Market Test (CSR-only)");
+    println!("===================================");
 
     // Check sizes of different matrices (paths resolved relative to crate dir so the example
     // works regardless of the current working directory when the binary is run).
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Converting to CSR format...");
     let matrix = matrix_data.to_csr_matrix()?;
-    let rhs = rhs_data.to_vector()?;
+    let rhs: Vec<f64> = rhs_data.to_vector()?;
 
     println!("Matrix size: {}x{}", matrix.nrows(), matrix.ncols());
     println!("Matrix nnz: {}", matrix.nnz());
@@ -76,25 +76,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("Converting to dense format...");
-    let dense_matrix = matrix.to_dense();
-
     let mut solution = vec![0.0; rhs.len()];
-    let rhs_vec = rhs.to_vec();
 
-    println!("Setting up KSP context...");
+    println!("Setting up KSP context (CSR operator)...");
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Cg)? // Try CG instead of GMRES
-        .set_pc_type(PcType::None, None)?
-        .set_tolerances(1e-6, 1e-12, 1e3, 50); // Very low iteration limit
+    // Replace your GMRES/Jacobi block with:
+    ksp.set_type(SolverType::Cg)?
+        .set_pc_type(PcType::None, None)?       // Start with no PC
+        .set_tolerances(1e-6, 1e-12, 2000.0, 0);  // (rtol, atol, maxit, restart=unused for CG)
 
-    // Provide the operator and prepare workspace
-    ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+    // Keep the CSR operator:
+    ksp.set_operators(Arc::new(matrix), None);
     ksp.setup()?;
 
-    println!("Starting solve...");
+    println!("Starting solve (CSR)...");
     let start = Instant::now();
-    let result = ksp.solve(&rhs_vec, &mut solution);
+    let result = ksp.solve(&rhs, &mut solution);
     let solve_time = start.elapsed().as_secs_f64();
 
     match result {

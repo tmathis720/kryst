@@ -292,6 +292,7 @@ impl Preconditioner for LegacyOpPreconditioner {
 // Submodules for various preconditioners
 pub mod amg;
 pub mod approxinv;
+pub mod approxinv_csr;
 pub mod asm;
 pub mod block_jacobi;
 pub mod builders;
@@ -310,6 +311,7 @@ pub mod ilu_csr;
 pub use self::sor::MatSorType;
 pub use amg::AMG;
 pub use approxinv::ApproxInv;
+pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCsr, SpaiCsr};
 pub use asm::AdditiveSchwarz;
 pub use chain::PcChain;
 pub use chebyshev::{Chebyshev, ChebyshevPre};

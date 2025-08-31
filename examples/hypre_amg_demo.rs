@@ -1,13 +1,13 @@
+//! HYPRE-Inspired AMG Preconditioner Demo (updated API, no legacy bridge)
+
 use faer::Mat;
 use kryst::error::KError;
-use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarsenType, InterpType, RelaxType};
-use kryst::preconditioner::{
-    LegacyOpPreconditioner, PcSide, Preconditioner, legacy::Preconditioner as LegacyPreconditioner,
-};
+use kryst::preconditioner::amg::{AMGBuilder, CoarsenType, InterpType, RelaxType};
+use kryst::preconditioner::{PcSide, Preconditioner};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("    HYPRE-Inspired AMG Preconditioner Demo");
-    println!("==========================================\n");
+    println!("    HYPRE-Inspired AMG Preconditioner Demo (dense faer::Mat)");
+    println!("============================================================\n");
 
     // Create test problems of varying difficulty
     demo_symmetric_positive_definite()?;
@@ -19,10 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Create a 2D Laplacian matrix directly
+/// Create a 2D Laplacian matrix directly (5-point stencil) and add I for better conditioning.
 fn create_2d_laplacian(nx: usize, ny: usize) -> Mat<f64> {
     let n = nx * ny;
-    let mut matrix = Mat::zeros(n, n);
+    let mut a = Mat::zeros(n, n);
 
     for i in 0..ny {
         for j in 0..nx {
@@ -31,89 +31,87 @@ fn create_2d_laplacian(nx: usize, ny: usize) -> Mat<f64> {
 
             // Left neighbor
             if j > 0 {
-                matrix[(idx, idx - 1)] = -1.0;
+                a[(idx, idx - 1)] = -1.0;
                 diag += 1.0;
             }
-
             // Right neighbor
-            if j < nx - 1 {
-                matrix[(idx, idx + 1)] = -1.0;
+            if j + 1 < nx {
+                a[(idx, idx + 1)] = -1.0;
                 diag += 1.0;
             }
-
             // Top neighbor
             if i > 0 {
-                matrix[(idx, idx - nx)] = -1.0;
+                a[(idx, idx - nx)] = -1.0;
                 diag += 1.0;
             }
-
             // Bottom neighbor
-            if i < ny - 1 {
-                matrix[(idx, idx + nx)] = -1.0;
+            if i + 1 < ny {
+                a[(idx, idx + nx)] = -1.0;
                 diag += 1.0;
             }
 
-            matrix[(idx, idx)] = diag + 1.0; // Add identity for better conditioning
+            a[(idx, idx)] = diag + 1.0;
         }
     }
 
-    matrix
+    a
 }
 
-/// Create an anisotropic diffusion matrix
+/// Create an anisotropic diffusion matrix: strong horizontal (−1), weak vertical (−anisotropy).
 fn create_anisotropic_matrix(nx: usize, ny: usize, anisotropy: f64) -> Mat<f64> {
     let n = nx * ny;
-    let mut matrix = Mat::zeros(n, n);
+    let mut a = Mat::zeros(n, n);
 
     for i in 0..ny {
         for j in 0..nx {
             let idx = i * nx + j;
             let mut diag = 0.0;
 
-            // Strong horizontal coupling
+            // Horizontal (strong)
             if j > 0 {
-                matrix[(idx, idx - 1)] = -1.0;
+                a[(idx, idx - 1)] = -1.0;
                 diag += 1.0;
             }
-            if j < nx - 1 {
-                matrix[(idx, idx + 1)] = -1.0;
+            if j + 1 < nx {
+                a[(idx, idx + 1)] = -1.0;
                 diag += 1.0;
             }
 
-            // Weak vertical coupling
+            // Vertical (weak)
             if i > 0 {
-                matrix[(idx, idx - nx)] = -anisotropy;
+                a[(idx, idx - nx)] = -anisotropy;
                 diag += anisotropy;
             }
-            if i < ny - 1 {
-                matrix[(idx, idx + nx)] = -anisotropy;
+            if i + 1 < ny {
+                a[(idx, idx + nx)] = -anisotropy;
                 diag += anisotropy;
             }
 
-            matrix[(idx, idx)] = diag + 0.1; // Small regularization
+            a[(idx, idx)] = diag + 0.1; // small regularization
         }
     }
 
-    matrix
+    a
 }
 
-/// Demonstrate AMG on symmetric positive definite problems
+/// Demonstrate AMG on symmetric positive definite problems (dense Mat + new Preconditioner API)
 fn demo_symmetric_positive_definite() -> Result<(), KError> {
     println!("Testing AMG on Symmetric Positive Definite Problem");
-    println!("-----------------------------------------------------");
+    println!("--------------------------------------------------");
 
-    // Create a 2D Laplacian matrix (5x5 grid)
-    let matrix = create_2d_laplacian(5, 5);
-    let n = matrix.nrows();
+    // 2D Laplacian (5×5 grid)
+    let a = create_2d_laplacian(5, 5);
+    let n = a.nrows();
 
-    println!("Matrix size: {}x{}", matrix.nrows(), matrix.ncols());
+    println!("Matrix size: {}x{}", a.nrows(), a.ncols());
 
-    // Test default AMG configuration
-    let _amg_default = AMG::new(&matrix, 10, 0.25);
-    println!("  Default AMG construction successful");
+    // Default AMG using builder
+    let mut amg_default = AMGBuilder::new().build(&a)?;
+    amg_default.setup(&a)?;
+    println!("  Default AMG construction & setup successful");
 
-    // Test HYPRE-inspired configuration
-    let amg_hypre = AMGBuilder::new()
+    // HYPRE-style AMG configuration
+    let mut amg_hypre = AMGBuilder::new()
         .max_levels(15)
         .strong_threshold(0.25)
         .coarsening_type(CoarsenType::HMIS)
@@ -121,18 +119,14 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
         .relaxation_type(RelaxType::GaussSeidel)
         .smoothing_sweeps(2, 2)
         .enable_logging()
-        .build(&matrix)?;
+        .build(&a)?;
+    amg_hypre.setup(&a)?;
+    println!("  HYPRE-style AMG construction & setup successful");
 
-    println!("  HYPRE-style AMG construction successful");
-
-    // Test preconditioning with correct API
+    // Apply preconditioner (no legacy bridge; AMG implements `Preconditioner`)
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    // Wrap legacy AMG (which implements the legacy Preconditioner trait) with
-    // the object-safe adapter so we can use the new `Preconditioner` API.
-    let mut pc = LegacyOpPreconditioner::new(Box::new(amg_hypre));
-    pc.setup(&matrix)?;
-    pc.apply(PcSide::Left, &x, &mut y)?;
+    amg_hypre.apply(PcSide::Left, &x, &mut y)?;
     println!("  AMG preconditioning applied successfully");
 
     println!("   Preconditioning effect:");
@@ -144,26 +138,18 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
         "   Output norm: {:.6}",
         y.iter().map(|v| v * v).sum::<f64>().sqrt()
     );
-
     println!();
     Ok(())
 }
 
-/// Demonstrate AMG on anisotropic problems
+/// Demonstrate AMG on anisotropic problems (dense Mat)
 fn demo_anisotropic_problem() -> Result<(), KError> {
     println!("   Testing AMG on Anisotropic Problem");
     println!("-------------------------------------");
 
-    // Create anisotropic problem (4x4 grid)
-    let matrix = create_anisotropic_matrix(4, 4, 0.01);
+    let a = create_anisotropic_matrix(4, 4, 0.01);
+    println!("Anisotropic matrix size: {}x{}", a.nrows(), a.ncols());
 
-    println!(
-        "Anisotropic matrix size: {}x{}",
-        matrix.nrows(),
-        matrix.ncols()
-    );
-
-    // Test different coarsening strategies
     let strategies = [
         ("HMIS", CoarsenType::HMIS),
         ("RS", CoarsenType::RS),
@@ -172,37 +158,38 @@ fn demo_anisotropic_problem() -> Result<(), KError> {
     ];
 
     for (name, strategy) in &strategies {
-        let _amg = AMGBuilder::new()
+        let mut amg = AMGBuilder::new()
             .max_levels(5)
-            .strong_threshold(0.5) // Higher threshold for anisotropic problems
+            .strong_threshold(0.5) // higher threshold for anisotropy
             .coarsening_type(*strategy)
             .interpolation_type(InterpType::Extended)
-            .build(&matrix)?;
-
-        println!("  {} coarsening strategy successful", name);
+            .build(&a)?;
+        amg.setup(&a)?;
+        println!("  {name} coarsening strategy successful");
     }
 
     println!();
     Ok(())
 }
 
-/// Demonstrate the configuration builder pattern
+/// Demonstrate the configuration builder pattern (dense Mat)
 fn demo_configuration_builder() -> Result<(), KError> {
     println!("    Testing AMG Configuration Builder");
     println!("------------------------------------");
 
+    // Simple 1D 3-point stencil (n = 9)
     let n = 9;
-    let matrix = Mat::from_fn(n, n, |i, j| {
+    let a = Mat::from_fn(n, n, |i, j| {
         if i == j {
             4.0
-        } else if (i as i32 - j as i32).abs() == 1 {
+        } else if (i as isize - j as isize).abs() == 1 {
             -1.0
         } else {
             0.0
         }
     });
 
-    // Test various configurations
+    // Variants
     let configs = [
         (
             "Conservative",
@@ -234,9 +221,12 @@ fn demo_configuration_builder() -> Result<(), KError> {
     ];
 
     for (name, builder) in configs {
-        match builder.build(&matrix) {
-            Ok(_amg) => println!("  {} configuration successful", name),
-            Err(e) => println!("   {} configuration failed: {}", name, e),
+        match builder.build(&a) {
+            Ok(mut amg) => {
+                amg.setup(&a)?;
+                println!("  {name} configuration successful");
+            }
+            Err(e) => println!("   {name} configuration failed: {e}"),
         }
     }
 
@@ -244,51 +234,46 @@ fn demo_configuration_builder() -> Result<(), KError> {
     Ok(())
 }
 
-/// Demonstrate safety features and error handling
+/// Demonstrate safety features and error handling (dense Mat)
 fn demo_safety_features() -> Result<(), KError> {
     println!("    Testing AMG Safety Features");
     println!("-------------------------------");
 
-    // Test empty matrix handling
+    // Empty matrix handling
     let empty_matrix = Mat::zeros(0, 0);
     match AMGBuilder::new().build(&empty_matrix) {
         Ok(_) => println!("   Empty matrix should have failed"),
         Err(_) => println!("  Empty matrix correctly rejected"),
     }
 
-    // Test non-square matrix handling
+    // Non-square matrix handling
     let non_square = Mat::zeros(3, 4);
     match AMGBuilder::new().build(&non_square) {
         Ok(_) => println!("   Non-square matrix should have failed"),
         Err(_) => println!("  Non-square matrix correctly rejected"),
     }
 
-    // Test invalid configuration
+    // Invalid configuration
     let valid_matrix = Mat::identity(5, 5);
-    match AMGBuilder::new()
-        .max_levels(0) // Invalid!
-        .build(&valid_matrix)
-    {
+    match AMGBuilder::new().max_levels(0).build(&valid_matrix) {
         Ok(_) => println!("   Invalid config should have failed"),
         Err(_) => println!("  Invalid configuration correctly rejected"),
     }
 
-    // Test invalid strong threshold
+    // Invalid strong threshold
     match AMGBuilder::new()
-        .strong_threshold(1.5) // Invalid!
+        .strong_threshold(1.5)
         .build(&valid_matrix)
     {
         Ok(_) => println!("   Invalid threshold should have failed"),
         Err(_) => println!("  Invalid threshold correctly rejected"),
     }
 
-    // Test matrix with NaN (if IEEE checks enabled)
-    let _nan_matrix: Mat<f64> = Mat::identity(3, 3);
-    // Note: We can't easily create NaN in this context, so we skip this test
+    // Note: We can't easily create NaN in this context, so we skip that test here.
     println!("ℹ️  IEEE NaN/Inf checks would be tested with problematic matrices");
 
-    // Test successful configuration with all safety checks
-    let robust_amg = AMGBuilder::new()
+    // Robust build + apply
+    let mut robust_amg = AMGBuilder::new()
         .max_levels(5)
         .strong_threshold(0.25)
         .coarsening_type(CoarsenType::HMIS)
@@ -296,15 +281,14 @@ fn demo_safety_features() -> Result<(), KError> {
         .smoothing_sweeps(1, 1)
         .enable_logging()
         .build(&valid_matrix)?;
-
+    robust_amg.setup(&valid_matrix)?;
     println!("  Robust AMG with safety checks successful");
 
-    // Test preconditioning operation
+    // Preconditioning operation
     let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let mut y = vec![0.0; 5];
     robust_amg.apply(PcSide::Left, &x, &mut y)?;
-    println!("  Safe preconditioning operation completed");
+    println!("  Safe preconditioning operation completed\n");
 
-    println!();
     Ok(())
 }

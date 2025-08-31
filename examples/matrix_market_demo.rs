@@ -1,53 +1,69 @@
-//! Comprehensive example demonstrating Matrix Market I/O with iterative vs direct solver comparison.
+//! Comprehensive example demonstrating Matrix Market I/O with iterative vs direct solver comparison (CSR-only).
 //!
 //! This example shows how to:
 //! 1. Read challenging sparse matrices from Matrix Market files (e.g., driven cavity problems)
-//! 2. Analyze matrix properties and conditioning
+//! 2. Analyze matrix properties and conditioning (without dense conversions)
 //! 3. Compare iterative methods with different preconditioners
-//! 4. Compare with direct methods when available
+//! 4. Use a "preonly" direct solve through KSP + PC (still via CSR operator)
 //! 5. Provide robust solver recommendations based on matrix characteristics
 //!
-//! The driven cavity matrices (e05r0000, e30r0000, etc.) are particularly challenging:
-//! - Non-symmetric and indefinite from 2D fluid flow modeling
-//! - Difficult for iterative methods due to poor conditioning
-//! - May have zeros on diagonal from incompressibility conditions
-//! - ILU preconditioners can be unstable due to poor factorization quality
+//! Notes on driven cavity matrices (e05r0000, e30r0000, etc.):
+//! - Often non-symmetric / indefinite (from incompressible flow discretizations)
+//! - May contain zeros on the diagonal
+//! - Diagonal-based preconditioners (Jacobi/SOR) can fail
+//! - ILU may be unstable depending on ordering & fill strategy
 
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
-use kryst::context::pc_context::PcFactory;
+use kryst::matrix::op::CsrOp; // CSR -> LinOp wrapper
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::utils::matrix_market::read_matrix_market;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Analyze matrix properties and provide diagnostics
+/// Analyze matrix properties and provide diagnostics (CSR-only)
 fn analyze_matrix(matrix: &CsrMatrix<f64>) -> (f64, bool) {
     let n = matrix.nrows();
     let nnz = matrix.nnz();
     let density = nnz as f64 / (n * n) as f64;
 
-    // Convert to dense to check diagonal (for small matrices only)
-    let has_diag_zeros = if n < 1000 {
-        let dense = matrix.to_dense();
-        let mut zeros = 0;
+    // Check diagonal directly from CSR structure for modest sizes
+    let mut has_diag_zeros = false;
+    if n > 0 && n <= 20000 {
+        // Access CSR internals
+        let rp = matrix.row_ptr();
+        let ci = matrix.col_idx();
+        let va = matrix.values();
+
+        let mut diag_zero_or_missing = 0usize;
         for i in 0..n {
-            if dense[(i, i)].abs() < 1e-15 {
-                zeros += 1;
+            let start = rp[i];
+            let end = rp[i + 1];
+            let mut found = false;
+            for k in start..end {
+                if ci[k] == i {
+                    found = true;
+                    if va[k].abs() < 1e-15 {
+                        diag_zero_or_missing += 1;
+                    }
+                    break;
+                }
+            }
+            if !found {
+                // Missing diagonal is effectively a zero diagonal entry
+                diag_zero_or_missing += 1;
             }
         }
-        zeros > 0
-    } else {
-        false // Skip check for large matrices
-    };
+        has_diag_zeros = diag_zero_or_missing > 0;
+    }
 
-    println!("Matrix Analysis:");
+    println!("Matrix Analysis (CSR):");
     println!("  Dimensions: {}x{}", n, n);
     println!("  Non-zeros: {} ({:.4}% density)", nnz, density * 100.0);
-    if n < 1000 {
+    if n <= 20000 {
         println!(
-            "  Diagonal zeros: {}",
+            "  Diagonal zeros/missing: {}",
             if has_diag_zeros { "detected" } else { "none" }
         );
     }
@@ -55,7 +71,7 @@ fn analyze_matrix(matrix: &CsrMatrix<f64>) -> (f64, bool) {
     (density, has_diag_zeros)
 }
 
-/// Test a solver configuration and return timing/convergence results
+/// Test a solver configuration (CSR operator end-to-end)
 fn test_solver_config(
     matrix: &CsrMatrix<f64>,
     rhs: &[f64],
@@ -64,45 +80,26 @@ fn test_solver_config(
 ) -> Result<(usize, f64, f64, bool), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
 
-    // Convert sparse matrix to dense for KspContext
-    let dense_matrix = matrix.to_dense();
-    let rhs_vec = rhs.to_vec();
-
-    // Special-case: preonly (direct solve via preconditioner)
-    if solver_name.to_lowercase() == "preonly" {
-        let pct = PcType::from_str(pc_name)?;
-        let mut pc = PcFactory::create_preconditioner(pct, None)?;
-        // setup expects a LinOp; Mat<f64> implements LinOp
-        let start = Instant::now();
-        pc.setup(&dense_matrix)?;
-        let solved = match pc.direct_solve(&dense_matrix, &rhs_vec, &mut solution) {
-            Ok(()) => true,
-            Err(e) => return Err(Box::new(e)),
-        };
-        let solve_time = start.elapsed().as_secs_f64();
-        let final_res = if solved { 0.0 } else { f64::NAN };
-        return Ok((if solved { 1 } else { 0 }, final_res, solve_time, solved));
-    }
-
-    // Create and configure KSP context
+    // KSP + PC configured to operate on CSR via CsrOp wrapper (no dense conversion)
     let mut ksp = KspContext::new();
-    // map string names to enums
+
     let st = SolverType::from_str(solver_name)?;
     let pct = PcType::from_str(pc_name)?;
     ksp.set_type(st)?
         .set_pc_type(pct, None)?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
-    // provide operator and prepare workspace
-    ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+    // Provide CSR operator and prepare workspace
+    let op = CsrOp::new(matrix.clone().into());
+    ksp.set_operators(Arc::new(op), None);
     ksp.setup()?;
 
+    // Solve
     let start = Instant::now();
-    let stats = ksp.solve(&rhs_vec, &mut solution)?;
+    let stats = ksp.solve(rhs, &mut solution)?;
     let solve_time = start.elapsed().as_secs_f64();
 
     let converged = stats.final_residual < 1e-6;
-
     Ok((
         stats.iterations,
         stats.final_residual,
@@ -116,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "logging")]
     env_logger::init();
 
-    println!("Comprehensive Matrix Market Solver Comparison");
-    println!("============================================");
+    println!("Comprehensive Matrix Market Solver Comparison (CSR-only)");
+    println!("========================================================");
     println!();
 
     // Test multiple matrix files, focusing on driven cavity problems.
@@ -169,57 +166,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // Convert to Kryst formats
+        // Convert to Kryst formats (CSR + vector)
         let matrix = matrix_data.to_csr_matrix()?;
         let rhs = rhs_data.to_vector()?;
 
-        // Analyze matrix properties
+        // Analyze matrix properties (CSR-only)
         let (density, has_zeros) = analyze_matrix(&matrix);
-
         if has_zeros {
-            println!("⚠ Matrix has zeros on diagonal - typical of driven cavity problems");
-            println!("  This makes diagonal-based preconditioners unstable");
+            println!("⚠ Matrix has zeros or missing entries on the diagonal (common in driven cavity)");
+            println!("  → Diagonal-based preconditioners (Jacobi/SOR) may fail.");
         }
-
         println!();
 
-        // Test different solver/preconditioner combinations
+        // Solver/preconditioner combinations (all via CSR operator)
         let solver_configs = vec![
-            // // Robust combinations for difficult problems
-            // ("gmres", "none", "GMRES (no preconditioner)"),
-            // ("gmres", "ilu0", "GMRES + ILU(0)"),
-            // ("bicgstab", "none", "BiCGStab (no preconditioner)"),
-            // ("bicgstab", "ilu0", "BiCGStab + ILU(0)"),
-            // ("tfqmr", "none", "TFQMR (no preconditioner)"),
-
-            // // These may fail for driven cavity matrices
-            // ("gmres", "jacobi", "GMRES + Jacobi (may fail with diagonal zeros)"),
-            // ("cg", "none", "CG (will fail for non-SPD)"),
-
-            // Direct solver as reference
-            ("preonly", "lu", "Direct LU"),
+            // Iterative baselines
+            ("gmres", "none", "GMRES (no preconditioner)"),
+            ("bicgstab", "none", "BiCGStab (no preconditioner)"),
+            // Safer ILU when available; may still struggle on highly indefinite cases
+            ("gmres", "ilu0", "GMRES + ILU(0)"),
+            ("bicgstab", "ilu0", "BiCGStab + ILU(0)"),
+            // Direct solve through KSP pipeline (no explicit dense path)
+            ("preonly", "lu", "Direct LU (preonly)"),
         ];
 
-        println!("Solver Comparison Results:");
+        println!("Solver Comparison Results (CSR operator):");
         println!(
             "{:<35} {:>8} {:>12} {:>10} {:>8}",
             "Method", "Iters", "Residual", "Time(s)", "Status"
         );
         println!("{}", "-".repeat(75));
 
-        for (solver_type, pc_type, description) in solver_configs {
+        for (solver_type, pc_type, label) in solver_configs {
             match test_solver_config(&matrix, &rhs, solver_type, pc_type) {
                 Ok((iters, residual, time, converged)) => {
                     let status = if converged { "✓" } else { "✗" };
                     println!(
                         "{:<35} {:>8} {:>12.2e} {:>10.3} {:>8}",
-                        description, iters, residual, time, status
+                        label, iters, residual, time, status
                     );
 
                     if converged && solver_type != "preonly" {
-                        // Calculate iteration efficiency
-                        let dof_per_sec = matrix.nrows() as f64 / time;
-                        if dof_per_sec > 1000.0 {
+                        let dof_per_sec = matrix.nrows() as f64 / time.max(1e-12);
+                        if dof_per_sec > 1_000.0 {
                             println!("    → High efficiency: {:.0} DOF/s", dof_per_sec);
                         }
                     }
@@ -227,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     println!(
                         "{:<35} {:>8} {:>12} {:>10} {:>8}",
-                        description, "FAIL", "N/A", "N/A", "✗"
+                        label, "FAIL", "N/A", "N/A", "✗"
                     );
                     println!("    → Error: {}", e);
                 }
@@ -239,15 +228,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Provide recommendations based on matrix characteristics
         println!("Recommendations for this problem:");
         if has_zeros {
-            println!("  • Avoid Jacobi, SOR preconditioners (diagonal zeros)");
-            println!("  • ILU(0) may be unstable - consider GMRES without preconditioning");
+            println!("  • Avoid Jacobi / SOR (diagonal zeros or missing diagonal entries).");
+            println!("  • ILU(0) may be unstable; GMRES without PC can be a safer baseline.");
         }
         if density < 0.001 {
-            println!("  • Very sparse matrix - iterative methods preferred over direct");
+            println!("  • Very sparse: prefer iterative methods over dense/direct approaches.");
         }
         if matrix.nrows() > 10000 {
-            println!("  • Large problem - direct methods may require excessive memory");
-            println!("  • Focus on robust iterative methods (GMRES, BiCGStab, TFQMR)");
+            println!("  • Large problem size: direct methods may require excessive memory.");
+            println!("  • Focus on GMRES / BiCGStab with robust PC (ILU, AMG where available).");
         }
 
         println!();
@@ -255,17 +244,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    // If no test matrices were found, generate a simple test case
     println!("Note: For driven cavity matrices, download from Matrix Market:");
     println!("  https://math.nist.gov/MatrixMarket/data/Harwell-Boeing/drivcav/");
-    println!("  These matrices are specifically designed to test iterative solver robustness.");
-    println!();
     println!("Key insights about driven cavity problems:");
-    println!("  • Non-symmetric and indefinite from incompressible Navier-Stokes");
-    println!("  • Diagonal zeros from incompressibility condition");
-    println!("  • ILU preconditioners often unstable due to poor factorization");
-    println!("  • Direct methods work but become memory-intensive for large Re");
-    println!("  • Robust iterative methods: GMRES, BiCGStab, TFQMR without preconditioning");
+    println!("  • Non-symmetric and indefinite from incompressible Navier–Stokes.");
+    println!("  • Diagonal zeros/missing entries are common.");
+    println!("  • ILU preconditioners can be fragile depending on fill/ordering.");
+    println!("  • Direct methods can work but often become memory-bound at scale.");
+    println!("  • Robust iterative methods: GMRES, BiCGStab, TFQMR (with careful PC).");
 
     Ok(())
 }

@@ -2,6 +2,7 @@ use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::approxinv_csr::ApproxInvKind;
 use std::str::FromStr;
 
 /// Supported preconditioner types.
@@ -116,6 +117,15 @@ pub enum PcConfig {
         levels: Option<usize>,
         smoother: Option<String>,
     },
+    ApproxInv {
+        kind: ApproxInvKind,
+        levels: usize,
+        max_per_col: usize,
+        drop_tol: f64,
+        reg: f64,
+        max_cond: f64,
+        parallel: bool,
+    },
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
@@ -227,10 +237,26 @@ impl PcConfig {
                 smoother: o.amg_smoother.clone(),
             },
 
+            ApproxInverse => {
+                // Interpret options for CSR-based SPAI/FSAI
+                let kind = match o.approxinv_kind.as_deref().unwrap_or("fsai").to_lowercase().as_str() {
+                    "fsai" => ApproxInvKind::FSAI,
+                    "spai" => ApproxInvKind::SPAI,
+                    other => return Err(KError::InvalidInput(format!("unknown pc_approxinv_kind: {other}"))),
+                };
+                let levels = o.approxinv_levels.unwrap_or(1);
+                let max_per_col = o.approxinv_max_per_col.unwrap_or(20);
+                let drop_tol = o.approxinv_drop_tol.or(o.drop_tol).unwrap_or(1e-3);
+                let reg = o.approxinv_reg.unwrap_or(1e-12);
+                let max_cond = o.approxinv_max_cond.unwrap_or(1e12);
+                let parallel = o.approxinv_parallel.unwrap_or(cfg!(feature = "rayon"));
+                PcConfig::ApproxInv { kind, levels, max_per_col, drop_tol, reg, max_cond, parallel }
+            }
+
             Lu => PcConfig::Lu,
             Qr => PcConfig::Qr,
             SuperLuDist => PcConfig::SuperLuDist,
-            ApproxInverse | BlockJacobi => unreachable!(),
+            BlockJacobi => unreachable!(),
         })
     }
 }
@@ -386,6 +412,14 @@ impl PcFactory {
                 weighting,
             } => b::build_asm(overlap, subdomain_hint, block_solver, mode, weighting),
             PcConfig::Amg { levels, smoother } => b::build_amg(levels, smoother),
+            PcConfig::ApproxInv { kind, levels, max_per_col, drop_tol, reg, max_cond, parallel } => {
+                use crate::preconditioner::approxinv_csr::{ApproxInvParams, FsaiCsr, SpaiCsr};
+                let params = ApproxInvParams { kind, levels, max_per_col, drop_tol, reg, max_cond, parallel };
+                match kind {
+                    ApproxInvKind::FSAI => Ok(Box::new(FsaiCsr::new_with_params(params))),
+                    ApproxInvKind::SPAI => Ok(Box::new(SpaiCsr::new_with_params(params))),
+                }
+            }
 
             PcConfig::Lu => b::build_lu(),
             PcConfig::Qr => b::build_qr(),

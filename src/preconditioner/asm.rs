@@ -312,24 +312,48 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         // 4) Compute weights per strategy
         self.cover_count = compute_weights(&mut self.blocks_meta, &self.owner_of, &adj, self.weighting, n);
 
-        // 5) Build per-block dense submatrices and solvers aligned with blocks_meta
+        // 5) Build per-block solvers according to factory
         self.local_blocks.clear();
-        for meta in self.blocks_meta.iter() {
-            let idx = &meta.indices;
-            let a_sub_csr = csr.as_ref().submatrix(idx);
-            let dense = a_sub_csr.to_dense();
-            let mut ksp = LuSolver::<f64>::new();
-            let _ = ksp.solve(
-                &dense,
-                None,
-                &vec![0.0; idx.len()],
-                &mut vec![0.0; idx.len()],
-                PcSide::Left,
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                None,
-                None,
-            );
-            self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+        self.local_blocks_csr.clear();
+        match self.block_solver_factory {
+            BlockSolverFactory::LuDense => {
+                for meta in self.blocks_meta.iter() {
+                    let idx = &meta.indices;
+                    let a_sub_csr = csr.as_ref().submatrix(idx);
+                    let dense = a_sub_csr.to_dense();
+                    let mut ksp = LuSolver::<f64>::new();
+                    let _ = ksp.solve(
+                        &dense,
+                        None,
+                        &vec![0.0; idx.len()],
+                        &mut vec![0.0; idx.len()],
+                        PcSide::Left,
+                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                        None,
+                        None,
+                    );
+                    self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                }
+            }
+            BlockSolverFactory::CsrSolver => {
+                let cfg = IluCsrConfig {
+                    kind: IluKind::Ilu0,
+                    pivot: PivotStrategy::DiagonalPerturbation,
+                    pivot_threshold: 1e-12,
+                    diag_perturb_factor: 1e-10,
+                    level_sched: cfg!(feature = "rayon"),
+                    numeric_update_fixed: true,
+                    logging: 0,
+                };
+                for meta in self.blocks_meta.iter() {
+                    let idx = &meta.indices;
+                    let a_sub_csr = Arc::new(csr.as_ref().submatrix(idx));
+                    let mut ilu = IluCsr::new_with_config(cfg.clone());
+                    let op = CsrOp::new(a_sub_csr.clone());
+                    ilu.setup(&op)?;
+                    self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                }
+            }
         }
 
         // Bookkeeping for reuse semantics
@@ -357,33 +381,56 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            let block_results: Vec<(Vec<usize>, Vec<f64>, Vec<bool>, Vec<f64>)> = self
-                .blocks_meta
-                .par_iter()
-                .zip(self.local_blocks.par_iter())
-                .map(|(meta, (a_sub_any, ksp_mutex))| {
-                    let indices = &meta.indices;
-                    let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-                    let mut x_blk = vec![0.0; indices.len()];
-                    let mut ksp = ksp_mutex.lock().unwrap();
-                    let _ = ksp.solve(
-                        a_sub_any,
-                        None,
-                        &r_blk,
-                        &mut x_blk,
-                        PcSide::Left,
-                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                        None,
-                        None,
-                    );
-                    (
-                        indices.clone(),
-                        x_blk,
-                        meta.interior_mask.clone(),
-                        meta.weights.clone(),
-                    )
-                })
-                .collect();
+            let block_results: Vec<(Vec<usize>, Vec<f64>, Vec<bool>, Vec<f64>)> = match self.block_solver_factory {
+                BlockSolverFactory::LuDense => {
+                    self
+                        .blocks_meta
+                        .par_iter()
+                        .zip(self.local_blocks.par_iter())
+                        .map(|(meta, (a_sub_any, ksp_mutex))| {
+                            let indices = &meta.indices;
+                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![0.0; indices.len()];
+                            let mut ksp = ksp_mutex.lock().unwrap();
+                            let _ = ksp.solve(
+                                a_sub_any,
+                                None,
+                                &r_blk,
+                                &mut x_blk,
+                                PcSide::Left,
+                                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                                None,
+                                None,
+                            );
+                            (
+                                indices.clone(),
+                                x_blk,
+                                meta.interior_mask.clone(),
+                                meta.weights.clone(),
+                            )
+                        })
+                        .collect()
+                }
+                BlockSolverFactory::CsrSolver => {
+                    self
+                        .blocks_meta
+                        .par_iter()
+                        .zip(self.local_blocks_csr.par_iter())
+                        .map(|(meta, (_a_sub, ilu))| {
+                            let indices = &meta.indices;
+                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![0.0; indices.len()];
+                            let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
+                            (
+                                indices.clone(),
+                                x_blk,
+                                meta.interior_mask.clone(),
+                                meta.weights.clone(),
+                            )
+                        })
+                        .collect()
+                }
+            };
             match self.asm_mode {
                 AsmMode::ASM => {
                     for (indices, x_blk, _mask, w) in block_results {
@@ -409,42 +456,74 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
 
         #[cfg(not(feature = "rayon"))]
         {
-            self.blocks_meta
-                .iter()
-                .zip(self.local_blocks.iter())
-                .for_each(|(meta, (a_sub_any, ksp_mutex))| {
-                    let indices = &meta.indices;
-                    let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-                    let mut x_blk = vec![0.0; indices.len()];
-                    let mut ksp = ksp_mutex.lock().unwrap();
-                    let _ = ksp.solve(
-                        a_sub_any,
-                        None,
-                        &r_blk,
-                        &mut x_blk,
-                        PcSide::Left,
-                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                        None,
-                        None,
-                    );
-                    match self.asm_mode {
-                        AsmMode::ASM => {
-                            if matches!(self.weighting, Weighting::None) {
-                                for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
-                            } else {
-                                for (j, &gi) in indices.iter().enumerate() { y[gi] += meta.weights[j] * x_blk[j]; }
-                            }
-                        }
-                        AsmMode::RAS => {
-                            for (j, &gi) in indices.iter().enumerate() {
-                                if meta.interior_mask[j] {
-                                    let wij = match self.weighting { Weighting::None => 1.0, _ => meta.weights[j] };
-                                    y[gi] += wij * x_blk[j];
+            match self.block_solver_factory {
+                BlockSolverFactory::LuDense => {
+                    self.blocks_meta
+                        .iter()
+                        .zip(self.local_blocks.iter())
+                        .for_each(|(meta, (a_sub_any, ksp_mutex))| {
+                            let indices = &meta.indices;
+                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![0.0; indices.len()];
+                            let mut ksp = ksp_mutex.lock().unwrap();
+                            let _ = ksp.solve(
+                                a_sub_any,
+                                None,
+                                &r_blk,
+                                &mut x_blk,
+                                PcSide::Left,
+                                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                                None,
+                                None,
+                            );
+                            match self.asm_mode {
+                                AsmMode::ASM => {
+                                    if matches!(self.weighting, Weighting::None) {
+                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                                    } else {
+                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += meta.weights[j] * x_blk[j]; }
+                                    }
+                                }
+                                AsmMode::RAS => {
+                                    for (j, &gi) in indices.iter().enumerate() {
+                                        if meta.interior_mask[j] {
+                                            let wij = match self.weighting { Weighting::None => 1.0, _ => meta.weights[j] };
+                                            y[gi] += wij * x_blk[j];
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    }
-                });
+                        });
+                }
+                BlockSolverFactory::CsrSolver => {
+                    self.blocks_meta
+                        .iter()
+                        .zip(self.local_blocks_csr.iter())
+                        .for_each(|(meta, (_a_sub, ilu))| {
+                            let indices = &meta.indices;
+                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![0.0; indices.len()];
+                            let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
+                            match self.asm_mode {
+                                AsmMode::ASM => {
+                                    if matches!(self.weighting, Weighting::None) {
+                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                                    } else {
+                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += meta.weights[j] * x_blk[j]; }
+                                    }
+                                }
+                                AsmMode::RAS => {
+                                    for (j, &gi) in indices.iter().enumerate() {
+                                        if meta.interior_mask[j] {
+                                            let wij = match self.weighting { Weighting::None => 1.0, _ => meta.weights[j] };
+                                            y[gi] += wij * x_blk[j];
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                }
+            }
         }
 
         Ok(())
@@ -466,25 +545,48 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         let csr = csr_from_linop(op, self.drop_tol)?;
         self.csr = Some(csr.clone());
 
-        // Recreate local dense blocks and solvers from CSR
+        // Recreate local blocks and solvers according to factory
         self.local_blocks.clear();
-        // Reuse existing overlapped subdomains and metadata
-        for meta in self.blocks_meta.iter() {
-            let indices = &meta.indices;
-            let a_sub_csr = csr.as_ref().submatrix(indices);
-            let dense = a_sub_csr.to_dense();
-            let mut ksp = LuSolver::<f64>::new();
-            let _ = ksp.solve(
-                &dense,
-                None,
-                &vec![0.0; indices.len()],
-                &mut vec![0.0; indices.len()],
-                PcSide::Left,
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                None,
-                None,
-            );
-            self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+        self.local_blocks_csr.clear();
+        match self.block_solver_factory {
+            BlockSolverFactory::LuDense => {
+                for meta in self.blocks_meta.iter() {
+                    let indices = &meta.indices;
+                    let a_sub_csr = csr.as_ref().submatrix(indices);
+                    let dense = a_sub_csr.to_dense();
+                    let mut ksp = LuSolver::<f64>::new();
+                    let _ = ksp.solve(
+                        &dense,
+                        None,
+                        &vec![0.0; indices.len()],
+                        &mut vec![0.0; indices.len()],
+                        PcSide::Left,
+                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                        None,
+                        None,
+                    );
+                    self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                }
+            }
+            BlockSolverFactory::CsrSolver => {
+                let cfg = IluCsrConfig {
+                    kind: IluKind::Ilu0,
+                    pivot: PivotStrategy::DiagonalPerturbation,
+                    pivot_threshold: 1e-12,
+                    diag_perturb_factor: 1e-10,
+                    level_sched: cfg!(feature = "rayon"),
+                    numeric_update_fixed: true,
+                    logging: 0,
+                };
+                for meta in self.blocks_meta.iter() {
+                    let indices = &meta.indices;
+                    let a_sub_csr = Arc::new(csr.as_ref().submatrix(indices));
+                    let mut ilu = IluCsr::new_with_config(cfg.clone());
+                    let op = CsrOp::new(a_sub_csr.clone());
+                    ilu.setup(&op)?;
+                    self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                }
+            }
         }
 
         self.last_vid = Some(op.values_id());
@@ -524,24 +626,48 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
             .collect();
         self.cover_count = compute_weights(&mut self.blocks_meta, &self.owner_of, &adj, self.weighting, n);
 
-        // Recreate local dense blocks and solvers from CSR
+        // Recreate local blocks and solvers according to factory
         self.local_blocks.clear();
-        for meta in self.blocks_meta.iter() {
-            let indices = &meta.indices;
-            let a_sub_csr = csr.as_ref().submatrix(indices);
-            let dense = a_sub_csr.to_dense();
-            let mut ksp = LuSolver::<f64>::new();
-            let _ = ksp.solve(
-                &dense,
-                None,
-                &vec![0.0; indices.len()],
-                &mut vec![0.0; indices.len()],
-                PcSide::Left,
-                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                None,
-                None,
-            );
-            self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+        self.local_blocks_csr.clear();
+        match self.block_solver_factory {
+            BlockSolverFactory::LuDense => {
+                for meta in self.blocks_meta.iter() {
+                    let indices = &meta.indices;
+                    let a_sub_csr = csr.as_ref().submatrix(indices);
+                    let dense = a_sub_csr.to_dense();
+                    let mut ksp = LuSolver::<f64>::new();
+                    let _ = ksp.solve(
+                        &dense,
+                        None,
+                        &vec![0.0; indices.len()],
+                        &mut vec![0.0; indices.len()],
+                        PcSide::Left,
+                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                        None,
+                        None,
+                    );
+                    self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                }
+            }
+            BlockSolverFactory::CsrSolver => {
+                let cfg = IluCsrConfig {
+                    kind: IluKind::Ilu0,
+                    pivot: PivotStrategy::DiagonalPerturbation,
+                    pivot_threshold: 1e-12,
+                    diag_perturb_factor: 1e-10,
+                    level_sched: cfg!(feature = "rayon"),
+                    numeric_update_fixed: true,
+                    logging: 0,
+                };
+                for meta in self.blocks_meta.iter() {
+                    let indices = &meta.indices;
+                    let a_sub_csr = Arc::new(csr.as_ref().submatrix(indices));
+                    let mut ilu = IluCsr::new_with_config(cfg.clone());
+                    let op = CsrOp::new(a_sub_csr.clone());
+                    ilu.setup(&op)?;
+                    self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                }
+            }
         }
 
         self.last_sid = Some(op.structure_id());

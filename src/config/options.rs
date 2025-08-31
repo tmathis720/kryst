@@ -135,6 +135,14 @@ pub struct PcOptions {
     pub ilu_pivot_monitoring: Option<bool>,
     pub ilu_optimize_workspace: Option<bool>,
     pub ilu_pivot_threshold: Option<f64>,
+    // ---- Approximate inverse (CSR) ----
+    pub approxinv_kind: Option<String>,        // "fsai" | "spai"
+    pub approxinv_levels: Option<usize>,
+    pub approxinv_max_per_col: Option<usize>,
+    pub approxinv_drop_tol: Option<f64>,
+    pub approxinv_reg: Option<f64>,
+    pub approxinv_max_cond: Option<f64>,
+    pub approxinv_parallel: Option<bool>,
 
     pub superlu_pivot_threshold: Option<f64>,
     pub superlu_replace_tiny_pivots: Option<bool>,
@@ -303,6 +311,8 @@ impl Sink for PcOptions {
             "pc_superlu_aggressive_memory_reuse" => {
                 set_opt!(&mut self.superlu_aggressive_memory_reuse, v)
             }
+            // Approximate inverse (CSR) options
+            "pc_approxinv_parallel" => set_opt!(&mut self.approxinv_parallel, v),
             _ => Err(KError::SolveError(format!("Unknown PC bool key: {key}"))),
         }
     }
@@ -460,6 +470,22 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.superlu_preallocation_strategy, v.to_lowercase())
             }
             "pc_reuse_policy" => set_opt!(&mut self.reuse_policy, v.to_string()),
+            // Approximate inverse (CSR) numeric/structure controls
+            "pc_approxinv_kind" => set_opt!(&mut self.approxinv_kind, v.to_lowercase()),
+            "pc_approxinv_levels" => set_opt!(&mut self.approxinv_levels, parse_as::<usize>(v, spec)?),
+            "pc_approxinv_max_per_col" => set_opt!(
+                &mut self.approxinv_max_per_col,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_approxinv_drop_tol" => set_opt!(
+                &mut self.approxinv_drop_tol,
+                parse_as::<f64>(v, spec)?
+            ),
+            "pc_approxinv_reg" => set_opt!(&mut self.approxinv_reg, parse_as::<f64>(v, spec)?),
+            "pc_approxinv_max_cond" => set_opt!(
+                &mut self.approxinv_max_cond,
+                parse_as::<f64>(v, spec)?
+            ),
             "options_file" => Ok(()), // consumed earlier
             _ => Err(KError::SolveError(format!("Unknown PC key: {}", spec.key))),
         }
@@ -810,6 +836,13 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         pc_chain,
         omega,
         drop_tol,
+        approxinv_kind,
+        approxinv_levels,
+        approxinv_max_per_col,
+        approxinv_drop_tol,
+        approxinv_reg,
+        approxinv_max_cond,
+        approxinv_parallel,
         ilu_type,
         ilu_level_of_fill,
         ilu_max_fill_per_row,
