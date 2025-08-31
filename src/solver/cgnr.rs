@@ -20,8 +20,8 @@ impl CgnrSolver {
     }
 
     #[inline]
-    fn dot(x: &[f64], y: &[f64], _comm: &UniverseComm) -> f64 {
-        x.iter().zip(y).map(|(a, b)| a * b).sum()
+    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 {
+        comm.dot(x, y)
     }
     #[inline]
     fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
@@ -43,20 +43,25 @@ impl CgnrSolver {
         &'a mut [f64],
         &'a mut [f64],
         &'a mut [f64],
+        &'a mut [f64],
     ) {
+        // tmp1=r (len>=m), tmp2=z (len>=n)
         Self::take_or_resize(&mut work.tmp1, n);
         Self::take_or_resize(&mut work.tmp2, n);
-        while work.q.len() < 3 { work.q.push(Vec::new()); }
-        for k in 0..3 { Self::take_or_resize(&mut work.q[k], n); }
+        // q: p, Ap, AtAp (optional), zhat
+        while work.q.len() < 4 { work.q.push(Vec::new()); }
+        for k in 0..4 { Self::take_or_resize(&mut work.q[k], n); }
         let (p_slice, rest) = work.q.split_at_mut(1);
         let (ap_slice, rest) = rest.split_at_mut(1);
-        let (atap_slice, _) = rest.split_at_mut(1);
+        let (atap_slice, rest) = rest.split_at_mut(1);
+        let (zhat_slice, _) = rest.split_at_mut(1);
         let r = &mut work.tmp1[..];
         let z = &mut work.tmp2[..];
         let p = &mut p_slice[0][..];
         let ap = &mut ap_slice[0][..];
         let atap = &mut atap_slice[0][..];
-        (r, z, p, ap, atap)
+        let zhat = &mut zhat_slice[0][..];
+        (r, z, p, ap, atap, zhat)
     }
 }
 
@@ -68,8 +73,8 @@ impl LinearSolver for CgnrSolver {
     }
 
     fn setup_workspace(&mut self, work: &mut Workspace) {
-        if work.q.len() < 3 {
-            work.q.resize(3, Vec::new());
+        if work.q.len() < 4 {
+            work.q.resize(4, Vec::new());
         }
     }
 
@@ -102,6 +107,13 @@ impl LinearSolver for CgnrSolver {
             ));
         }
 
+        // Enforce Left preconditioning semantics for CGNR
+        if pc_side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "CGNR only supports Left preconditioning on the normal equations".into(),
+            ));
+        }
+
         // Require a Workspace to avoid heap leaks and repeated allocs.
         let work = work.ok_or_else(|| {
             KError::InvalidInput("CGNR requires a Workspace; use KSP or Workspace::new(n)".into())
@@ -115,13 +127,14 @@ impl LinearSolver for CgnrSolver {
             });
         }
 
-        let (r, z, p, ap, _atap) = Self::acquire(ncols.max(m), work);
-        let (r, z, p, ap, _atap) = (
-            &mut r[..m],
-            &mut z[..ncols],
-            &mut p[..ncols],
-            &mut ap[..m],
-            &mut _atap[..ncols],
+        let (r_store, z_store, p_store, ap_store, _atap_store, zhat_store) = Self::acquire(ncols.max(m), work);
+        let (r, z, p, ap, _atap, zhat) = (
+            &mut r_store[..m],
+            &mut z_store[..ncols],
+            &mut p_store[..ncols],
+            &mut ap_store[..m],
+            &mut _atap_store[..ncols],
+            &mut zhat_store[..ncols],
         );
 
         if x.iter().any(|&xi| xi != 0.0) {
@@ -135,21 +148,18 @@ impl LinearSolver for CgnrSolver {
 
         a.t_matvec(r, z);
 
-        let mut zhat_buf: Vec<f64> = if pc.is_some() {
-            vec![0.0; ncols]
-        } else {
-            Vec::new()
-        };
+        // zhat = M^{-1} z (or copy of z if no PC)
         if let Some(pc) = pc {
-            pc.apply(pc_side, z, &mut zhat_buf)?;
+            pc.apply(PcSide::Left, z, zhat)?;
+        } else {
+            zhat.copy_from_slice(z);
         }
-        let zhat_slice: &[f64] = if pc.is_some() { &zhat_buf[..] } else { &z[..] };
 
-        p.copy_from_slice(zhat_slice);
+        p.copy_from_slice(zhat);
 
-        let mut rz = Self::dot(&z[..], zhat_slice, comm);
+        let mut rz = Self::dot(&z[..], zhat, comm);
         let mut rnow = Self::nrm2(r, comm);
-        let res0_reported = rnow;
+        let bnorm = Self::nrm2(b, comm).max(1e-32);
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -157,9 +167,13 @@ impl LinearSolver for CgnrSolver {
             }
         }
 
-        let (reason0, s0) = self.conv.check(rnow, res0_reported, 0);
+        let (reason0, mut s0) = self.conv.check(rnow, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            return Ok(SolveStats { iterations: 0, final_residual: rnow, reason: s0.reason });
+            // Recompute true residual for consistency
+            let mut tmp = vec![0.0; m];
+            let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+            s0.final_residual = true_res;
+            return Ok(SolveStats { iterations: 0, final_residual: s0.final_residual, reason: s0.reason });
         }
 
         let mut iters = 0usize;
@@ -170,7 +184,10 @@ impl LinearSolver for CgnrSolver {
 
             let denom = Self::dot(ap, ap, comm);
             if denom <= 0.0 || !denom.is_finite() {
-                return Err(KError::IndefiniteMatrix);
+                // Gracefully declare divergence on breakdown
+                let mut tmp = vec![0.0; m];
+                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
             }
             let alpha = rz / denom;
 
@@ -183,11 +200,12 @@ impl LinearSolver for CgnrSolver {
 
             a.t_matvec(r, z);
             if let Some(pc) = pc {
-                pc.apply(pc_side, z, &mut zhat_buf)?;
+                pc.apply(PcSide::Left, z, zhat)?;
+            } else {
+                zhat.copy_from_slice(z);
             }
-            let zhat_slice: &[f64] = if pc.is_some() { &zhat_buf[..] } else { &z[..] };
 
-            let rz_new = Self::dot(&z[..], zhat_slice, comm);
+            let rz_new = Self::dot(&z[..], zhat, comm);
             rnow = Self::nrm2(r, comm);
 
             if let Some(ms) = monitors {
@@ -196,19 +214,23 @@ impl LinearSolver for CgnrSolver {
                 }
             }
 
-            let (reason, s) = self.conv.check(rnow, res0_reported, k);
+            let (reason, mut s) = self.conv.check(rnow, bnorm, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                return Ok(SolveStats { iterations: k, final_residual: rnow, reason: s.reason });
+                // Report true residual (matches rnow but recompute for consistency)
+                let mut tmp = vec![0.0; m];
+                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                s.final_residual = true_res;
+                return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
             }
 
             let beta = rz_new / rz;
             for i in 0..ncols {
-                p[i] = zhat_slice[i] + beta * p[i];
+                p[i] = zhat[i] + beta * p[i];
             }
             rz = rz_new;
         }
 
-        let mut tmp = vec![0.0; ncols];
+        let mut tmp = vec![0.0; m];
         let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
         Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
     }
