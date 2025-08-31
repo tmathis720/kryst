@@ -36,7 +36,7 @@ impl CgnrSolver {
 
     fn acquire<'a>(
         n: usize,
-        work: Option<&'a mut Workspace>,
+        work: &'a mut Workspace,
     ) -> (
         &'a mut [f64],
         &'a mut [f64],
@@ -44,28 +44,19 @@ impl CgnrSolver {
         &'a mut [f64],
         &'a mut [f64],
     ) {
-        if let Some(wk) = work {
-            Self::take_or_resize(&mut wk.tmp1, n);
-            Self::take_or_resize(&mut wk.tmp2, n);
-            while wk.q.len() < 3 {
-                wk.q.push(Vec::new());
-            }
-            for k in 0..3 {
-                Self::take_or_resize(&mut wk.q[k], n);
-            }
-            let (p_slice, rest) = wk.q.split_at_mut(1);
-            let (ap_slice, rest) = rest.split_at_mut(1);
-            let (atap_slice, _) = rest.split_at_mut(1);
-            let r = &mut wk.tmp1[..];
-            let z = &mut wk.tmp2[..];
-            let p = &mut p_slice[0][..];
-            let ap = &mut ap_slice[0][..];
-            let atap = &mut atap_slice[0][..];
-            (r, z, p, ap, atap)
-        } else {
-            let mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
-            (mk(n), mk(n), mk(n), mk(n), mk(n))
-        }
+        Self::take_or_resize(&mut work.tmp1, n);
+        Self::take_or_resize(&mut work.tmp2, n);
+        while work.q.len() < 3 { work.q.push(Vec::new()); }
+        for k in 0..3 { Self::take_or_resize(&mut work.q[k], n); }
+        let (p_slice, rest) = work.q.split_at_mut(1);
+        let (ap_slice, rest) = rest.split_at_mut(1);
+        let (atap_slice, _) = rest.split_at_mut(1);
+        let r = &mut work.tmp1[..];
+        let z = &mut work.tmp2[..];
+        let p = &mut p_slice[0][..];
+        let ap = &mut ap_slice[0][..];
+        let atap = &mut atap_slice[0][..];
+        (r, z, p, ap, atap)
     }
 }
 
@@ -109,6 +100,19 @@ impl LinearSolver for CgnrSolver {
             return Err(KError::InvalidInput(
                 "CGNR requires t_matvec; provide an operator that implements A^T·x".into(),
             ));
+        }
+
+        // Require a Workspace to avoid heap leaks and repeated allocs.
+        let work = work.ok_or_else(|| {
+            KError::InvalidInput("CGNR requires a Workspace; use KSP or Workspace::new(n)".into())
+        })?;
+        // Zero-length fast path
+        if b.is_empty() {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: 0.0,
+                reason: ConvergedReason::ConvergedAtol,
+            });
         }
 
         let (r, z, p, ap, _atap) = Self::acquire(ncols.max(m), work);

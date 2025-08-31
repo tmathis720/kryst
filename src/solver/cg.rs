@@ -85,7 +85,7 @@ impl CgSolver {
 
     fn acquire<'a>(
         n: usize,
-        work: Option<&'a mut Workspace>,
+        work: &'a mut Workspace,
     ) -> (
         &'a mut [f64],
         &'a mut [f64],
@@ -93,28 +93,19 @@ impl CgSolver {
         &'a mut [f64],
         &'a mut [f64],
     ) {
-        if let Some(wk) = work {
-            while wk.q.len() < 4 {
-                wk.q.push(vec![0.0; n]);
-            }
-            for v in &mut wk.q[0..4] {
-                Self::take_or_resize(v, n);
-            }
-            Self::take_or_resize(&mut wk.tmp1, n);
-            let (r_slice, rest) = wk.q.split_at_mut(1);
-            let (z_slice, rest) = rest.split_at_mut(1);
-            let (p_slice, rest) = rest.split_at_mut(1);
-            let (ap_slice, _) = rest.split_at_mut(1);
-            let r = &mut r_slice[0][..];
-            let z = &mut z_slice[0][..];
-            let p = &mut p_slice[0][..];
-            let ap = &mut ap_slice[0][..];
-            let tmp = &mut wk.tmp1[..];
-            (r, z, p, ap, tmp)
-        } else {
-            let mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
-            (mk(n), mk(n), mk(n), mk(n), mk(n))
-        }
+        while work.q.len() < 4 { work.q.push(Vec::new()); }
+        for v in &mut work.q[0..4] { Self::take_or_resize(v, n); }
+        Self::take_or_resize(&mut work.tmp1, n);
+        let (r_slice, rest) = work.q.split_at_mut(1);
+        let (z_slice, rest) = rest.split_at_mut(1);
+        let (p_slice, rest) = rest.split_at_mut(1);
+        let (ap_slice, _) = rest.split_at_mut(1);
+        let r = &mut r_slice[0][..];
+        let z = &mut z_slice[0][..];
+        let p = &mut p_slice[0][..];
+        let ap = &mut ap_slice[0][..];
+        let tmp = &mut work.tmp1[..];
+        (r, z, p, ap, tmp)
     }
 }
 
@@ -156,6 +147,20 @@ impl LinearSolver for CgSolver {
         let n = b.len();
         if x.len() != n {
             return Err(KError::InvalidInput("dimension mismatch x,b".into()));
+        }
+
+        // Require a Workspace to avoid heap leaks and repeated allocs.
+        let work = work.ok_or_else(|| {
+            KError::InvalidInput("CG requires a Workspace; use KSP or Workspace::new(n)".into())
+        })?;
+
+        // Zero-length fast path
+        if b.is_empty() {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: 0.0,
+                reason: ConvergedReason::ConvergedAtol,
+            });
         }
 
         let (r, z, p, ap, tmp) = Self::acquire(n, work);

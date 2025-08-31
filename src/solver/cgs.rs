@@ -40,7 +40,7 @@ impl CgsSolver {
     ///   q[0] = u, q[1] = p, q[2] = q, q[3] = upq, q[4] = w (A*(u+q))
     fn acquire<'a>(
         n: usize,
-        work: Option<&'a mut Workspace>,
+        work: &'a mut Workspace,
     ) -> (
         &'a mut [f64],
         &'a mut [f64],
@@ -50,36 +50,20 @@ impl CgsSolver {
         &'a mut [f64],
         &'a mut [f64],
     ) {
-        if let Some(wk) = work {
-            Self::take_or_resize(&mut wk.tmp1, n); // r
-            Self::take_or_resize(&mut wk.tmp2, n); // v
-            while wk.q.len() < 5 {
-                wk.q.push(Vec::new());
-            }
-            for k in 0..5 {
-                Self::take_or_resize(&mut wk.q[k], n);
-            }
-            let r = &mut wk.tmp1[..];
-            let v = &mut wk.tmp2[..];
-            let (u, p, q, upq, w) = {
-                let (q0, rest) = wk.q.split_at_mut(1);
-                let (q1, rest) = rest.split_at_mut(1);
-                let (q2, rest) = rest.split_at_mut(1);
-                let (q3, q4) = rest.split_at_mut(1);
-                (
-                    &mut q0[0][..],
-                    &mut q1[0][..],
-                    &mut q2[0][..],
-                    &mut q3[0][..],
-                    &mut q4[0][..],
-                )
-            };
-            (r, v, u, p, q, upq, w)
-        } else {
-            // Fallback for unit tests when no Workspace supplied
-            let mk = |n| -> &'static mut [f64] { Box::leak(vec![0.0; n].into_boxed_slice()) };
-            (mk(n), mk(n), mk(n), mk(n), mk(n), mk(n), mk(n))
-        }
+        Self::take_or_resize(&mut work.tmp1, n); // r
+        Self::take_or_resize(&mut work.tmp2, n); // v
+        while work.q.len() < 5 { work.q.push(Vec::new()); }
+        for k in 0..5 { Self::take_or_resize(&mut work.q[k], n); }
+        let r = &mut work.tmp1[..];
+        let v = &mut work.tmp2[..];
+        let (u, p, q, upq, w) = {
+            let (q0, rest) = work.q.split_at_mut(1);
+            let (q1, rest) = rest.split_at_mut(1);
+            let (q2, rest) = rest.split_at_mut(1);
+            let (q3, q4) = rest.split_at_mut(1);
+            (&mut q0[0][..], &mut q1[0][..], &mut q2[0][..], &mut q3[0][..], &mut q4[0][..])
+        };
+        (r, v, u, p, q, upq, w)
     }
 }
 
@@ -119,6 +103,19 @@ impl LinearSolver for CgsSolver {
         }
         if b.len() != n || x.len() != n {
             return Err(KError::InvalidInput("CGS: vector length mismatch".into()));
+        }
+
+        // Require a Workspace to avoid heap leaks and repeated allocs.
+        let work = work.ok_or_else(|| {
+            KError::InvalidInput("CGS requires a Workspace; use KSP or Workspace::new(n)".into())
+        })?;
+        // Zero-length fast path
+        if b.is_empty() {
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: 0.0,
+                reason: ConvergedReason::ConvergedAtol,
+            });
         }
 
         let (r, v, u, p, q, upq, w) = Self::acquire(n, work);
