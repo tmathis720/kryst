@@ -709,8 +709,8 @@ impl Preconditioner for IluCsr {
         let sid = op.structure_id();
         let vid = op.values_id();
 
-        let structure_changed = self.last_sid.map_or(true, |s| s != sid);
-        let values_changed = self.last_vid.map_or(true, |v| v != vid);
+        let structure_changed = self.last_sid != Some(sid);
+        let values_changed = self.last_vid != Some(vid);
 
         if structure_changed || !self.cfg.numeric_update_fixed {
             self.factor_symbolic_and_numeric(&a)?;

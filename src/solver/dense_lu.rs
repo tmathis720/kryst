@@ -1,5 +1,3 @@
-#![cfg(feature = "dense-direct")]
-
 use crate::error::KError;
 use faer::linalg::solvers::{FullPivLu, SolveCore};
 use faer::{Conj, Mat, MatMut};

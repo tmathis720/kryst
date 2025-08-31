@@ -27,10 +27,6 @@ pub struct FgmresSolver {
     pub haptol: f64,
     /// If true, size basis/H for maxits; otherwise per-restart sizing.
     pub preallocate: bool,
-    /// Optional hook called once per outer iteration block (after backsolve) to allow user to tweak PC.
-    #[deprecated(note = "Use Preconditioner::on_restart(iter, res) instead")]
-    pub modify_pc_on_restart:
-        Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
     /// Whether to treat near-zero residual as a happy breakdown
     pub happy_breakdown: bool,
 }
@@ -46,7 +42,6 @@ impl FgmresSolver {
             orthog: Orthog::Classical,
             haptol: 1e-12,
             preallocate: false,
-            modify_pc_on_restart: None,
             happy_breakdown: true,
         }
     }
@@ -164,6 +159,8 @@ impl FgmresSolver {
                 sn: vec![0.0; block_m],
                 g: vec![0.0; block_m + 1],
                 z: vec![vec![0.0; n]; block_m],
+                q_mem: Vec::new(),
+                z_mem: Vec::new(),
             };
             &mut owned_ws
         };
@@ -370,10 +367,6 @@ impl FgmresSolver {
                 }
             } else {
                 v0.fill(0.0);
-            }
-            // Allow both legacy hook and the new Preconditioner::on_restart to adjust PC
-            if let Some(hook) = self.modify_pc_on_restart.as_mut() {
-                hook(total_iters, beta0)?;
             }
             if let Some(pc_) = pc.as_deref_mut() {
                 pc_.on_restart(total_iters, beta0)?;
