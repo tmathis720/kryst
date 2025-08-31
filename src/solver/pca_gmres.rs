@@ -186,6 +186,8 @@ impl LinearSolver for PcaGmresSolver {
                 sn: vec![0.0; m_restart],
                 g: vec![0.0; m_restart + 1],
                 z: Vec::new(),
+                q_mem: Vec::new(),
+                z_mem: Vec::new(),
             };
             &mut owned
         };

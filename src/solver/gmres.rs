@@ -238,11 +238,12 @@ impl LinearSolver for GmresSolver {
         let beta = match pc_side {
             PcSide::Left => {
                 self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
-                let beta = Self::nrm2(&ws.tmp2);
+                let tmp2 = ws.tmp2.clone();
+                let beta = Self::nrm2(&tmp2);
                 let v0 = ws.vcol_mut(n, 0);
                 if beta > 0.0 {
-                    for i in 0..n {
-                        v0[i] = ws.tmp2[i] / beta;
+                    for (v, &t) in v0.iter_mut().zip(&tmp2) {
+                        *v = t / beta;
                     }
                 } else {
                     v0.fill(0.0);
@@ -250,11 +251,12 @@ impl LinearSolver for GmresSolver {
                 beta
             }
             PcSide::Right => {
-                let beta = Self::nrm2(&ws.tmp1);
+                let tmp1 = ws.tmp1.clone();
+                let beta = Self::nrm2(&tmp1);
                 let v0 = ws.vcol_mut(n, 0);
                 if beta > 0.0 {
-                    for i in 0..n {
-                        v0[i] = ws.tmp1[i] / beta;
+                    for (v, &t) in v0.iter_mut().zip(&tmp1) {
+                        *v = t / beta;
                     }
                 } else {
                     v0.fill(0.0);
@@ -296,42 +298,50 @@ impl LinearSolver for GmresSolver {
             for k in 0..self.restart {
                 match pc_side {
                     PcSide::Left => {
-                        a.matvec(ws.vcol(n, k), &mut ws.tmp1);
+                        let vk = ws.vcol(n, k).to_vec();
+                        a.matvec(&vk, &mut ws.tmp1);
                         self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                         for i in 0..=k {
-                            let hij = Self::dot(&ws.tmp2, ws.vcol(n, i));
+                            let vi = ws.vcol(n, i).to_vec();
+                            let hij = Self::dot(&ws.tmp2, &vi);
                             ws.h[i][k] = hij;
-                            Self::axpy(&mut ws.tmp2, hij, ws.vcol(n, i));
+                            Self::axpy(&mut ws.tmp2, hij, &vi);
                         }
-                        let hkp1k = Self::nrm2(&ws.tmp2);
+                        let tmp2 = ws.tmp2.clone();
+                        let hkp1k = Self::nrm2(&tmp2);
                         ws.h[k + 1][k] = hkp1k;
                         let vnext = ws.vcol_mut(n, k + 1);
                         if hkp1k > 0.0 {
-                            for i in 0..n {
-                                vnext[i] = ws.tmp2[i] / hkp1k;
+                            for (v, &t) in vnext.iter_mut().zip(&tmp2) {
+                                *v = t / hkp1k;
                             }
                         } else {
                             vnext.fill(0.0);
                         }
                     }
                     PcSide::Right => {
-                        self.apply_precond(pc, PcSide::Right, ws.vcol(n, k), &mut ws.tmp2)?;
+                        let vk = ws.vcol(n, k).to_vec();
+                        self.apply_precond(pc, PcSide::Right, &vk, &mut ws.tmp2)?;
                         {
+                            let tmp = ws.tmp2.clone();
                             let zk = ws.zcol_mut(n, k);
-                            zk.copy_from_slice(&ws.tmp2);
+                            zk.copy_from_slice(&tmp);
                         }
-                        a.matvec(ws.zcol(n, k), &mut ws.tmp1);
+                        let zk = ws.zcol(n, k).to_vec();
+                        a.matvec(&zk, &mut ws.tmp1);
                         for i in 0..=k {
-                            let hij = Self::dot(&ws.tmp1, ws.vcol(n, i));
+                            let vi = ws.vcol(n, i).to_vec();
+                            let hij = Self::dot(&ws.tmp1, &vi);
                             ws.h[i][k] = hij;
-                            Self::axpy(&mut ws.tmp1, hij, ws.vcol(n, i));
+                            Self::axpy(&mut ws.tmp1, hij, &vi);
                         }
-                        let hkp1k = Self::nrm2(&ws.tmp1);
+                        let tmp1 = ws.tmp1.clone();
+                        let hkp1k = Self::nrm2(&tmp1);
                         ws.h[k + 1][k] = hkp1k;
                         let vnext = ws.vcol_mut(n, k + 1);
                         if hkp1k > 0.0 {
-                            for i in 0..n {
-                                vnext[i] = ws.tmp1[i] / hkp1k;
+                            for (v, &t) in vnext.iter_mut().zip(&tmp1) {
+                                *v = t / hkp1k;
                             }
                         } else {
                             vnext.fill(0.0);
@@ -409,11 +419,12 @@ impl LinearSolver for GmresSolver {
             match pc_side {
                 PcSide::Left => {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
-                    let beta = Self::nrm2(&ws.tmp2);
+                    let tmp2 = ws.tmp2.clone();
+                    let beta = Self::nrm2(&tmp2);
                     let v0 = ws.vcol_mut(n, 0);
                     if beta > 0.0 {
-                        for i in 0..n {
-                            v0[i] = ws.tmp2[i] / beta;
+                        for (v, &t) in v0.iter_mut().zip(&tmp2) {
+                            *v = t / beta;
                         }
                     } else {
                         v0.fill(0.0);
@@ -421,11 +432,12 @@ impl LinearSolver for GmresSolver {
                     ws.g[0] = beta;
                 }
                 PcSide::Right => {
-                    let beta = Self::nrm2(&ws.tmp1);
+                    let tmp1 = ws.tmp1.clone();
+                    let beta = Self::nrm2(&tmp1);
                     let v0 = ws.vcol_mut(n, 0);
                     if beta > 0.0 {
-                        for i in 0..n {
-                            v0[i] = ws.tmp1[i] / beta;
+                        for (v, &t) in v0.iter_mut().zip(&tmp1) {
+                            *v = t / beta;
                         }
                     } else {
                         v0.fill(0.0);
