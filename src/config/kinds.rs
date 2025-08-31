@@ -95,3 +95,8 @@ simple_kind! {
 simple_kind! {
     pub enum AsmBlockSolverKind { Ludense => "ludense", Csr => "csr" }
 }
+
+// pc_asm_mode
+simple_kind! {
+    pub enum AsmModeKind { Asm => "asm", Ras => "ras" }
+}

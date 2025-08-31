@@ -8,3 +8,4 @@ pub mod profiling;
 pub mod reordering;
 #[cfg(feature = "tuning")]
 pub mod tuning;
+pub mod partition;

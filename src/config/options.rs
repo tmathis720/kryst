@@ -80,6 +80,10 @@ pub struct PcOptions {
     pub scaling: Option<String>,
     /// Overlap for Additive Schwarz.
     pub asm_overlap: Option<usize>,
+    /// ASM mode: "asm" (classical) or "ras" (restricted).
+    pub asm_mode: Option<String>,
+    /// ASM weighting: "none"|"uniform"|"linear"|"poly:k".
+    pub asm_weighting: Option<String>,
     /// Explicit subdomain sizes for ASM.
     pub asm_subdomains: Option<Vec<usize>>,
     pub asm_inner_pc: Option<String>,
@@ -316,6 +320,8 @@ impl Sink for PcOptions {
             "pc_reorder" => set_opt!(&mut self.reorder, v.to_lowercase()),
             "pc_scaling" => set_opt!(&mut self.scaling, v.to_lowercase()),
             "pc_asm_overlap" => set_opt!(&mut self.asm_overlap, parse_as::<usize>(v, spec)?),
+            "pc_asm_mode" => set_opt!(&mut self.asm_mode, v.to_lowercase()),
+            "pc_asm_weighting" => set_opt!(&mut self.asm_weighting, v.to_lowercase()),
             "pc_asm_block_solver" => set_opt!(&mut self.asm_block_solver, v.to_lowercase()),
             "pc_asm_subdomains" => {
                 let parsed: Result<Vec<usize>, _> =
@@ -633,6 +639,7 @@ impl PcOptions {
         if let Some(ref t) = me.amg_interp_type { kinds::AmgInterpKind::from_str(t)?; }
         if let Some(ref t) = me.amg_relax_type { kinds::AmgRelaxKind::from_str(t)?; }
         if let Some(ref t) = me.asm_block_solver { kinds::AsmBlockSolverKind::from_str(t)?; }
+        if let Some(ref t) = me.asm_mode { kinds::AsmModeKind::from_str(t)?; }
         Ok(me)
     }
 

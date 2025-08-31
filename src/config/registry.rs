@@ -254,6 +254,20 @@ pub static SPECS: &[Spec] = &[
         doc: "ASM overlap",
     },
     Spec {
+        flag: "-pc_asm_mode",
+        key: "pc_asm_mode",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "asm|ras",
+    },
+    Spec {
+        flag: "-pc_asm_weighting",
+        key: "pc_asm_weighting",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "none|uniform|linear|poly:k",
+    },
+    Spec {
         flag: "-pc_asm_subdomains",
         key: "pc_asm_subdomains",
         arity: Arity::One,

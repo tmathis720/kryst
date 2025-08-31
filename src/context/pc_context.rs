@@ -109,6 +109,8 @@ pub enum PcConfig {
     overlap: usize,
     subdomain_hint: Option<usize>,
     block_solver: Option<String>,
+    mode: Option<String>,
+    weighting: Option<String>,
     },
     Amg {
         levels: Option<usize>,
@@ -217,6 +219,8 @@ impl PcConfig {
                 overlap: o.asm_overlap.unwrap_or(0),
                 subdomain_hint: o.asm_subdomain_size,
                 block_solver: o.asm_block_solver.clone(),
+                mode: o.asm_mode.clone(),
+                weighting: o.asm_weighting.clone(),
             },
             Amg => PcConfig::Amg {
                 levels: o.amg_levels,
@@ -378,7 +382,9 @@ impl PcFactory {
                 overlap,
                 subdomain_hint,
                 block_solver,
-            } => b::build_asm(overlap, subdomain_hint, block_solver),
+                mode,
+                weighting,
+            } => b::build_asm(overlap, subdomain_hint, block_solver, mode, weighting),
             PcConfig::Amg { levels, smoother } => b::build_amg(levels, smoother),
 
             PcConfig::Lu => b::build_lu(),

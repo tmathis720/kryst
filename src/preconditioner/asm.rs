@@ -15,6 +15,9 @@ use crate::preconditioner::Preconditioner as ObjPreconditioner;
 use crate::matrix::sparse::CsrMatrix;
 use std::sync::Arc;
 use crate::solver::direct_lu::LuSolver;
+use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
+use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+use crate::matrix::op::CsrOp;
 
 /// Additive Schwarz (overlapping block Jacobi) preconditioner.
 /// Each block is solved independently (possibly in parallel), and the results are summed.
@@ -37,6 +40,22 @@ pub struct AdditiveSchwarz<M, V, T> {
     /// Per-block solver factory stored as an enum so it can be serialized in options
     /// or swapped at runtime. Default: LU on dense sub-blocks (used for tests).
     pub block_solver_factory: BlockSolverFactory,
+    /// ASM variant: ASM (sum) or RAS (interior injection)
+    pub asm_mode: AsmMode,
+    /// Weighting strategy for overlaps.
+    pub weighting: Weighting,
+    /// Optional hint: number of primary partitions to build when `subdomains` empty.
+    pub nparts_hint: Option<usize>,
+    /// Dense threshold heuristic for per-block solver selection (currently not switching paths).
+    pub dense_threshold: usize,
+    /// Computed: owner subdomain id for each global row.
+    pub owner_of: Vec<usize>,
+    /// Computed: coverage count for each global row (how many blocks include it).
+    pub cover_count: Vec<usize>,
+    /// Per-block metadata aligned with `subdomains`/`local_blocks`.
+    pub blocks_meta: Vec<SubdomainMeta>,
+    /// CSR + ILU(0) blocks for the f64 specialization (used when block solver = CSR path).
+    pub local_blocks_csr: Vec<(Arc<CsrMatrix<f64>>, std::sync::Arc<IluCsr>)>,
 }
 
 /// Lightweight enum to configure per-block solver factory.
@@ -46,6 +65,39 @@ pub enum BlockSolverFactory {
     LuDense,
     /// Use a legacy LinearSolver specialized for CSR matrices (requires solver impl)
     CsrSolver, // placeholder for future extensions
+}
+
+/// ASM mode selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsmMode {
+    /// Classical ASM: restrict to overlapped blocks and sum (optionally weighted) results.
+    ASM,
+    /// Restricted ASM: inject only on primary-owner (interior) DOFs.
+    RAS,
+}
+
+/// Partition-of-unity weighting variants for overlaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weighting {
+    /// No weighting; plain sum. Safe for 0-overlap or RAS with interior-only.
+    None,
+    /// Uniform PoU: each covered node gets weight = 1 / cover_count.
+    Uniform,
+    /// Smooth linear: phi = dist_to_boundary + 1.
+    SmoothLinear,
+    /// Smooth polynomial: phi = (dist_to_boundary + 1)^p, p >= 2
+    SmoothPoly(u32),
+}
+
+/// Per-subdomain metadata used during apply.
+#[derive(Clone, Default)]
+pub struct SubdomainMeta {
+    /// Overlapped index set (sorted).
+    pub indices: Vec<usize>,
+    /// Marks primary-owner DOFs inside the overlapped set.
+    pub interior_mask: Vec<bool>,
+    /// Weights aligned with `indices` (PoU weights for ASM; masked in RAS if desired).
+    pub weights: Vec<f64>,
 }
 
 impl<M, V, T> AdditiveSchwarz<M, V, T>
@@ -70,6 +122,14 @@ where
             last_vid: None,
             drop_tol: 0.0,
             block_solver_factory,
+            asm_mode: AsmMode::ASM,
+            weighting: if overlap == 0 { Weighting::None } else { Weighting::Uniform },
+            nparts_hint: None,
+            dense_threshold: 192,
+            owner_of: Vec::new(),
+            cover_count: Vec::new(),
+            blocks_meta: Vec::new(),
+            local_blocks_csr: Vec::new(),
         }
     }
 
@@ -206,22 +266,64 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         // Store CSR handle for reuse
         self.csr = Some(csr.clone());
 
-        // Build per-block dense submatrices from CSR efficiently and configure per-block solvers
-        let subdomains = &self.subdomains;
-        self.local_blocks.clear();
+        // 1) Build/validate primary partition (owner_of)
+        let n = csr.nrows();
+        if self.subdomains.is_empty() {
+            // Auto partition by rows using a greedy nnz-balanced heuristic
+            let p = self
+                .nparts_hint
+                .unwrap_or_else(|| crate::parallel::threads::current_rayon_threads().max(1));
+            let rp = csr.row_ptr();
+            let mut nnz_per_row = vec![0usize; n];
+            for i in 0..n { nnz_per_row[i] = rp[i + 1] - rp[i]; }
+            self.owner_of = greedy_nnz_balanced_partition(n, p, Some(&nnz_per_row));
+        } else {
+            // Infer owners from provided subdomains (assume non-overlapping; if overlapping,
+            // first-declared owner wins deterministically).
+            let p = self.subdomains.len();
+            self.owner_of.clear();
+            self.owner_of.resize(n, p);
+            for (s, set) in self.subdomains.iter().enumerate() {
+                for &gi in set { if gi < n && self.owner_of[gi] == p { self.owner_of[gi] = s; } }
+            }
+            if self.owner_of.iter().any(|&o| o == p) {
+                let fallback = contiguous_partition(n, p.max(1));
+                for i in 0..n { if self.owner_of[i] == p { self.owner_of[i] = fallback[i]; } }
+            }
+        }
 
-        for indices in subdomains.iter() {
-            // Extract local CSR submatrix efficiently from Arc by borrowing
-            let a_sub_csr = csr.as_ref().submatrix(indices);
-            // Convert to dense for the legacy dense solvers
+        // 2) Expand overlap (k layers) to construct overlapped blocks
+        let adj = build_adjacency(csr.as_ref());
+        let overlapped = expand_overlap(&adj, &self.owner_of, self.overlap);
+        self.subdomains = overlapped;
+
+        // 3) Build per-block metadata (interior mask + placeholder weights)
+        self.blocks_meta = self
+            .subdomains
+            .iter()
+            .enumerate()
+            .map(|(s, idx)| SubdomainMeta {
+                indices: idx.clone(),
+                interior_mask: idx.iter().map(|&gi| self.owner_of[gi] == s).collect(),
+                weights: vec![1.0; idx.len()],
+            })
+            .collect();
+
+        // 4) Compute weights per strategy
+        self.cover_count = compute_weights(&mut self.blocks_meta, &self.owner_of, &adj, self.weighting, n);
+
+        // 5) Build per-block dense submatrices and solvers aligned with blocks_meta
+        self.local_blocks.clear();
+        for meta in self.blocks_meta.iter() {
+            let idx = &meta.indices;
+            let a_sub_csr = csr.as_ref().submatrix(idx);
             let dense = a_sub_csr.to_dense();
-            // Create LU solver for this block and initialize it
             let mut ksp = LuSolver::<f64>::new();
             let _ = ksp.solve(
                 &dense,
                 None,
-                &vec![0.0; indices.len()],
-                &mut vec![0.0; indices.len()],
+                &vec![0.0; idx.len()],
+                &mut vec![0.0; idx.len()],
                 PcSide::Left,
                 &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                 None,
@@ -255,19 +357,15 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            let block_results: Vec<(Vec<usize>, Vec<f64>)> = self
-                .subdomains
+            let block_results: Vec<(Vec<usize>, Vec<f64>, Vec<bool>, Vec<f64>)> = self
+                .blocks_meta
                 .par_iter()
                 .zip(self.local_blocks.par_iter())
-                .map(|(indices, (a_sub_any, ksp_mutex))| {
-                    // a_sub_any is a CsrMatrix stored in the M slot
+                .map(|(meta, (a_sub_any, ksp_mutex))| {
+                    let indices = &meta.indices;
                     let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
                     let mut x_blk = vec![0.0; indices.len()];
                     let mut ksp = ksp_mutex.lock().unwrap();
-                    // The legacy solver expects a concrete matrix; we give it the
-                    // dense representation if it was built that way during setup.
-                    // Here we attempt to downcast to a CsrMatrix and if not present
-                    // we cannot do better than invoking the solver stored.
                     let _ = ksp.solve(
                         a_sub_any,
                         None,
@@ -278,23 +376,44 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         None,
                         None,
                     );
-                    (indices.clone(), x_blk)
+                    (
+                        indices.clone(),
+                        x_blk,
+                        meta.interior_mask.clone(),
+                        meta.weights.clone(),
+                    )
                 })
                 .collect();
-
-            for (indices, x_blk) in block_results {
-                for (j, &gi) in indices.iter().enumerate() {
-                    y[gi] = y[gi] + x_blk[j];
+            match self.asm_mode {
+                AsmMode::ASM => {
+                    for (indices, x_blk, _mask, w) in block_results {
+                        if matches!(self.weighting, Weighting::None) {
+                            for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                        } else {
+                            for (j, &gi) in indices.iter().enumerate() { y[gi] += w[j] * x_blk[j]; }
+                        }
+                    }
+                }
+                AsmMode::RAS => {
+                    for (indices, x_blk, mask, w) in block_results {
+                        for (j, &gi) in indices.iter().enumerate() {
+                            if mask[j] {
+                                let wij = match self.weighting { Weighting::None => 1.0, _ => w[j] };
+                                y[gi] += wij * x_blk[j];
+                            }
+                        }
+                    }
                 }
             }
         }
 
         #[cfg(not(feature = "rayon"))]
         {
-            self.subdomains
+            self.blocks_meta
                 .iter()
                 .zip(self.local_blocks.iter())
-                .for_each(|(indices, (a_sub_any, ksp_mutex))| {
+                .for_each(|(meta, (a_sub_any, ksp_mutex))| {
+                    let indices = &meta.indices;
                     let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
                     let mut x_blk = vec![0.0; indices.len()];
                     let mut ksp = ksp_mutex.lock().unwrap();
@@ -308,8 +427,22 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         None,
                         None,
                     );
-                    for (j, &gi) in indices.iter().enumerate() {
-                        y[gi] = y[gi] + x_blk[j];
+                    match self.asm_mode {
+                        AsmMode::ASM => {
+                            if matches!(self.weighting, Weighting::None) {
+                                for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                            } else {
+                                for (j, &gi) in indices.iter().enumerate() { y[gi] += meta.weights[j] * x_blk[j]; }
+                            }
+                        }
+                        AsmMode::RAS => {
+                            for (j, &gi) in indices.iter().enumerate() {
+                                if meta.interior_mask[j] {
+                                    let wij = match self.weighting { Weighting::None => 1.0, _ => meta.weights[j] };
+                                    y[gi] += wij * x_blk[j];
+                                }
+                            }
+                        }
                     }
                 });
         }
@@ -335,7 +468,9 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
 
         // Recreate local dense blocks and solvers from CSR
         self.local_blocks.clear();
-        for indices in self.subdomains.iter() {
+        // Reuse existing overlapped subdomains and metadata
+        for meta in self.blocks_meta.iter() {
+            let indices = &meta.indices;
             let a_sub_csr = csr.as_ref().submatrix(indices);
             let dense = a_sub_csr.to_dense();
             let mut ksp = LuSolver::<f64>::new();
@@ -357,12 +492,42 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     }
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        // For ASM symbolic change we also reconstruct blocks/subdomains from CSR
+        // Re-run full setup steps on the new structure
         let csr = csr_from_linop(op, self.drop_tol)?;
         self.csr = Some(csr.clone());
 
+        let n = csr.nrows();
+        // Preserve existing owner_of if provided subdomains were explicitly set; otherwise rebuild
+        if self.subdomains.is_empty() || self.owner_of.is_empty() {
+            let p = self
+                .nparts_hint
+                .unwrap_or_else(|| crate::parallel::threads::current_rayon_threads().max(1));
+            let rp = csr.row_ptr();
+            let mut nnz_per_row = vec![0usize; n];
+            for i in 0..n { nnz_per_row[i] = rp[i + 1] - rp[i]; }
+            self.owner_of = greedy_nnz_balanced_partition(n, p, Some(&nnz_per_row));
+        }
+
+        // Overlap and metadata
+        let adj = build_adjacency(csr.as_ref());
+        let overlapped = expand_overlap(&adj, &self.owner_of, self.overlap);
+        self.subdomains = overlapped;
+        self.blocks_meta = self
+            .subdomains
+            .iter()
+            .enumerate()
+            .map(|(s, idx)| SubdomainMeta {
+                indices: idx.clone(),
+                interior_mask: idx.iter().map(|&gi| self.owner_of[gi] == s).collect(),
+                weights: vec![1.0; idx.len()],
+            })
+            .collect();
+        self.cover_count = compute_weights(&mut self.blocks_meta, &self.owner_of, &adj, self.weighting, n);
+
+        // Recreate local dense blocks and solvers from CSR
         self.local_blocks.clear();
-        for indices in self.subdomains.iter() {
+        for meta in self.blocks_meta.iter() {
+            let indices = &meta.indices;
             let a_sub_csr = csr.as_ref().submatrix(indices);
             let dense = a_sub_csr.to_dense();
             let mut ksp = LuSolver::<f64>::new();
@@ -407,4 +572,140 @@ mod tests {
     // For identity, ASM should return the input
     assert_eq!(z, r);
     }
+}
+
+// ---------------- f64-only helpers (private) ----------------
+
+fn build_adjacency(csr: &CsrMatrix<f64>) -> Vec<Vec<usize>> {
+    let n = csr.nrows();
+    let rp = csr.row_ptr();
+    let cj = csr.col_idx();
+    let mut adj = vec![Vec::<usize>::new(); n];
+    for i in 0..n {
+        for p in rp[i]..rp[i + 1] {
+            let j = cj[p];
+            if i != j {
+                adj[i].push(j);
+            }
+        }
+    }
+    // Make symmetric
+    for i in 0..n {
+        for &j in adj[i].clone().iter() {
+            if !adj[j].contains(&i) { adj[j].push(i); }
+        }
+    }
+    for i in 0..n { adj[i].sort_unstable(); adj[i].dedup(); }
+    adj
+}
+
+fn expand_overlap(adj: &[Vec<usize>], owner_of: &[usize], k: usize) -> Vec<Vec<usize>> {
+    let n = owner_of.len();
+    let p = owner_of.iter().copied().max().unwrap_or(0) + 1;
+    use std::collections::BTreeSet;
+    let mut blocks: Vec<BTreeSet<usize>> = vec![Default::default(); p];
+    for i in 0..n { blocks[owner_of[i]].insert(i); }
+    let mut frontier = blocks.clone();
+    for _ in 0..k {
+        let mut next = blocks.clone();
+        for s in 0..p {
+            for &u in &frontier[s] {
+                for &v in &adj[u] { next[s].insert(v); }
+            }
+        }
+        frontier = next.clone();
+        blocks = next;
+    }
+    blocks.into_iter().map(|b| b.into_iter().collect()).collect()
+}
+
+fn compute_weights(
+    blocks: &mut [SubdomainMeta],
+    _owner_of: &[usize],
+    adj: &[Vec<usize>],
+    weighting: Weighting,
+    n: usize,
+) -> Vec<usize> {
+    let mut cover_count = vec![0usize; n];
+    for b in blocks.iter() { for &gi in &b.indices { cover_count[gi] += 1; } }
+
+    if matches!(weighting, Weighting::None) {
+        for b in blocks.iter_mut() { b.weights.resize(b.indices.len(), 1.0); }
+        return cover_count;
+    }
+
+    let mut phi: Vec<Vec<f64>> = vec![Vec::new(); blocks.len()];
+    for (s, b) in blocks.iter().enumerate() {
+        let mut dist = vec![0usize; b.indices.len()];
+        if !matches!(weighting, Weighting::Uniform) {
+            // membership map
+            let mut in_s = vec![false; n];
+            for &gi in &b.indices { in_s[gi] = true; }
+            use std::collections::{HashMap, VecDeque};
+            let mut q = VecDeque::new();
+            let mut dmap: HashMap<usize, usize> = Default::default();
+            for &gi in &b.indices {
+                if adj[gi].iter().any(|&v| !in_s[v]) { q.push_back(gi); dmap.insert(gi, 0); }
+            }
+            while let Some(u) = q.pop_front() {
+                let du = dmap[&u];
+                for &v in &adj[u] {
+                    if in_s[v] && !dmap.contains_key(&v) {
+                        dmap.insert(v, du + 1);
+                        q.push_back(v);
+                    }
+                }
+            }
+            for (j, &gi) in b.indices.iter().enumerate() { dist[j] = *dmap.get(&gi).unwrap_or(&0); }
+        }
+        let phi_s: Vec<f64> = match weighting {
+            Weighting::Uniform => vec![1.0; b.indices.len()],
+            Weighting::SmoothLinear => dist.iter().map(|&d| (d as f64) + 1.0).collect(),
+            Weighting::SmoothPoly(p) => dist.iter().map(|&d| ((d as f64) + 1.0).powi(p as i32)).collect(),
+            Weighting::None => unreachable!(),
+        };
+        phi[s] = phi_s;
+    }
+    // Build coverer index: for each global index, which (block, local_pos) cover it
+    let mut coverers: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    for (t, bt) in blocks.iter().enumerate() {
+        for (pos, &gi) in bt.indices.iter().enumerate() { coverers[gi].push((t, pos)); }
+    }
+
+    for (s, b) in blocks.iter_mut().enumerate() {
+        b.weights.resize(b.indices.len(), 1.0);
+        for (j, &gi) in b.indices.iter().enumerate() {
+            let denom = match weighting {
+                Weighting::Uniform => cover_count[gi] as f64,
+                _ => {
+                    let mut sum = 0.0;
+                    for &(t, pos) in &coverers[gi] { sum += phi[t][pos]; }
+                    if sum <= 0.0 { 1.0 } else { sum }
+                }
+            };
+            let num = match weighting {
+                Weighting::Uniform => 1.0,
+                _ => { let pos = b.indices.binary_search(&gi).unwrap(); phi[s][pos] }
+            };
+            b.weights[j] = num / denom;
+        }
+    }
+    cover_count
+}
+
+impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
+    /// Select ASM mode (ASM or RAS)
+    pub fn set_mode(&mut self, mode: AsmMode) -> &mut Self { self.asm_mode = mode; self }
+    /// Select PoU weighting strategy.
+    pub fn set_weighting(&mut self, w: Weighting) -> &mut Self { self.weighting = w; self }
+    /// Set overlap layers; adjusts default weighting if currently None.
+    pub fn set_overlap(&mut self, k: usize) -> &mut Self {
+        self.overlap = k;
+        if matches!(self.weighting, Weighting::None) && k > 0 { self.weighting = Weighting::Uniform; }
+        self
+    }
+    /// Set number of primary partitions if subdomains are not provided.
+    pub fn set_num_parts(&mut self, p: usize) -> &mut Self { self.nparts_hint = Some(p.max(1)); self }
+    /// Set dense threshold for per-block solver selection (placeholder for future CSR path).
+    pub fn set_dense_threshold(&mut self, n: usize) -> &mut Self { self.dense_threshold = n; self }
 }
