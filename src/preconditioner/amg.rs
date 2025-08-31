@@ -19,9 +19,9 @@ mod coarse_solver;
 
 use strength::Strength;
 use coarsen::{AggAlgo, build_aggregates};
-use prolong::{TentativeP, Pcsr, tentative_from_aggregates, smooth_tentative_sa, smooth_sa_values_only};
+use prolong::{TentativeP, Pcsr, smooth_tentative_sa, smooth_sa_values_only};
 use rap_ops::{CsrPattern, rap_symbolic, rap_numeric};
-use coarse_solver::{CoarseSolve, CoarseSolver, CoarseCg, CoarseDenseLu};
+use coarse_solver::{CoarseSolve, CoarseSolver, CoarseDenseLu};
 
 // ===== Public enums (kept compatible with your old file) =====================
 

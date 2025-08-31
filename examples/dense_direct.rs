@@ -1,11 +1,17 @@
 // Example: Solve a random SPD system using LU and QR direct solvers from kryst.
 
+#[cfg(feature = "dense-direct")]
 use faer::Mat;
+#[cfg(feature = "dense-direct")]
 use kryst::preconditioner::PcSide;
+#[cfg(feature = "dense-direct")]
 use kryst::solver::legacy::LinearSolver;
+#[cfg(feature = "dense-direct")]
 use kryst::solver::{LuSolver, QrSolver};
+#[cfg(feature = "dense-direct")]
 use rand::Rng;
 
+#[cfg(feature = "dense-direct")]
 fn main() {
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
@@ -39,3 +45,6 @@ fn main() {
         .unwrap();
     println!("QR x = {:?}, stats = {:?}", x, stats_qr);
 }
+
+#[cfg(not(feature = "dense-direct"))]
+fn main() {}

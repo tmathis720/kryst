@@ -13,8 +13,6 @@ use crate::preconditioner::{PcSide, Preconditioner};
 
 use faer::Mat;
 use faer::prelude::SolveLstsq;
-use std::cmp::min;
-use std::sync::Arc;
 
 /// Which approximate inverse to build.
 #[derive(Clone, Copy, Debug)]

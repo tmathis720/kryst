@@ -481,7 +481,7 @@ impl IluCsr {
         self.iluk_numeric_only(a, k_limit, max_diag_abs)
     }
 
-    fn iluk_numeric_only(&mut self, a: &CsrMatrix<f64>, k_limit: usize, max_diag_abs: f64) -> Result<(), KError> {
+    fn iluk_numeric_only(&mut self, a: &CsrMatrix<f64>, _k_limit: usize, max_diag_abs: f64) -> Result<(), KError> {
         use symbolic::RowWork;
         let n = self.n;
         let rp = a.row_ptr();

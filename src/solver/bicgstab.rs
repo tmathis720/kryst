@@ -425,6 +425,37 @@ where
     }
 }
 
+// Object-safe adapter: implement new LinOp-based solver API directly
+impl crate::solver::LinearSolver for BiCgStabSolver<f64> {
+    type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
+    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
+
+    fn solve(
+        &mut self,
+        a: &dyn crate::matrix::op::LinOp<S = f64>,
+        _pc: Option<&dyn crate::preconditioner::Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: crate::preconditioner::PcSide,
+        comm: &crate::parallel::UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut crate::context::ksp_context::Workspace>,
+    ) -> Result<crate::utils::convergence::SolveStats<f64>, Self::Error> {
+        // Delegate to the legacy generic implementation over LinOp + Vec
+        let mut xv = x.to_vec();
+        let bv = b.to_vec();
+        let stats = <Self as crate::solver::legacy::LinearSolver<
+            dyn crate::matrix::op::LinOp<S = f64>,
+            Vec<f64>,
+        >>::solve(self, a, None, &bv, &mut xv, pc_side, comm, monitors, work)?;
+        x.copy_from_slice(&xv);
+        Ok(stats)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

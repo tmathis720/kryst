@@ -22,7 +22,12 @@ use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrateg
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::op::CsrOp;
+#[cfg(not(feature = "dense-direct"))]
+use crate::preconditioner::Preconditioner; // bring trait into scope for IluCsr::setup/apply
+#[cfg(feature = "dense-direct")]
 use crate::solver::legacy::LinearSolver;
+#[cfg(not(feature = "dense-direct"))]
+use std::marker::PhantomData;
 
 /// Block-Jacobi preconditioner
 ///
@@ -38,6 +43,8 @@ pub struct BlockJacobi<T> {
     pub block_factors: Vec<(Vec<usize>, LuSolver<T>)>, // (indices, LU solver)
     #[cfg(not(feature = "dense-direct"))]
     pub block_factors_ilu: Vec<(Vec<usize>, std::sync::Arc<IluCsr>)>,
+    #[cfg(not(feature = "dense-direct"))]
+    _marker: PhantomData<T>,
 }
 
 impl BlockJacobi<f64> {

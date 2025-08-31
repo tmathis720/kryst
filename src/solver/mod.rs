@@ -119,14 +119,14 @@ impl<S> OpSolverAdapter<S> {
     }
 }
 
-struct OpPcAdapter<'a> {
-    inner: &'a dyn Preconditioner,
+struct OpPcAdapter<'p> {
+    inner: &'p dyn Preconditioner,
 }
 
-impl<'a> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 'a, Vec<f64>>
-    for OpPcAdapter<'a>
+impl<'p, 'm> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 'm, Vec<f64>>
+    for OpPcAdapter<'p>
 {
-    fn setup(&mut self, _a: &(dyn LinOp<S = f64> + 'a)) -> Result<(), KError> {
+    fn setup(&mut self, _a: &(dyn LinOp<S = f64> + 'm)) -> Result<(), KError> {
         Ok(())
     }
     fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
@@ -136,7 +136,7 @@ impl<'a> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 'a, 
 
 impl<S> LinearSolver for OpSolverAdapter<S>
 where
-    S: legacy::LinearSolver<dyn LinOp<S = f64> + 'static, Vec<f64>, Scalar = f64, Error = KError>
+    S: for<'a> legacy::LinearSolver<dyn LinOp<S = f64> + 'a, Vec<f64>, Scalar = f64, Error = KError>
         + Send
         + 'static,
 {
@@ -164,9 +164,9 @@ where
         let mut x_vec = x.to_vec();
         let b_vec = b.to_vec();
         let pc_adapter = pc.map(|p| OpPcAdapter { inner: p });
-        let pc_ref = pc_adapter
-            .as_ref()
-            .map(|p| p as &dyn crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64>, Vec<f64>>);
+        let pc_ref = pc_adapter.as_ref().map(
+            |p| p as &dyn crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + '_, Vec<f64>>,
+        );
         let stats = self
             .inner
             .solve(a, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work)?;

@@ -44,7 +44,7 @@ use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MinresSolver, OpSolverAdapter, PcaGmresSolver, PcaPcMode, PcgSolver,
+    MinresSolver, PcaGmresSolver, PcaPcMode, PcgSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -122,7 +122,7 @@ impl FromStr for SolverType {
 
 /// Minimal KSP context holding solver, preconditioner, and operators.
 pub struct KspContext {
-    solver: Option<Box<dyn LinearSolver<Error = KError>>>,
+    solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>>,
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
@@ -228,7 +228,7 @@ impl KspContext {
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
         self.solver_type = Some(solver_type);
-        let solver: Option<Box<dyn LinearSolver<Error = KError>>> = match solver_type {
+        let solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>> = match solver_type {
             SolverType::Cg => Some(Box::new(
                 CgSolver::new(self.rtol, self.maxits)
                     .with_norm(crate::solver::cg::CgNormType::Preconditioned),
@@ -245,19 +245,13 @@ impl KspContext {
                 self.apply_fgmres_pending_to(&mut s);
                 Some(Box::new(s))
             }
-            SolverType::BiCgStab => Some(Box::new(OpSolverAdapter::new(BiCgStabSolver::new(
-                self.rtol,
-                self.maxits,
-            )))),
+            SolverType::BiCgStab => Some(Box::new(BiCgStabSolver::new(self.rtol, self.maxits))),
             SolverType::Cgs => Some(Box::new(CgsSolver::new(self.rtol, self.maxits))),
             SolverType::Pcg => Some(Box::new(
                 PcgSolver::new(self.rtol, self.maxits)
                     .with_norm(crate::solver::pcg::CgNormType::Preconditioned),
             )),
-            SolverType::Minres => Some(Box::new(OpSolverAdapter::new(MinresSolver::new(
-                self.rtol,
-                self.maxits,
-            )))),
+            SolverType::Minres => Some(Box::new(MinresSolver::new(self.rtol, self.maxits))),
             SolverType::PcaGmres => {
                 let mut s = PcaGmresSolver::new(self.restart, 1, 1, self.rtol, self.maxits);
                 s.pc_mode = crate::solver::PcaPcMode::Left;

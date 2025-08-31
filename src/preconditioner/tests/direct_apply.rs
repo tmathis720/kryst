@@ -1,3 +1,4 @@
+#[cfg(feature = "dense-direct")]
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::op::CsrOp;

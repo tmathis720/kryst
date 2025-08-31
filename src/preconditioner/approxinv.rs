@@ -414,7 +414,6 @@ where
         if x.len() != y.len() {
             return Err(KError::InvalidInput(format!("ApproxInv.apply: x/y length mismatch: {} vs {}", x.len(), y.len())));
         }
-        let n = x.len();
         // zero y
         for v in y.iter_mut() { *v = 0.0; }
         #[cfg(feature = "rayon")]
@@ -430,6 +429,7 @@ where
         }
         #[cfg(not(feature = "rayon"))]
         {
+            let n = x.len();
             for i in 0..n {
                 let mut sum = 0.0f64;
                 for &(j, val) in &self.inv_rows[i] {

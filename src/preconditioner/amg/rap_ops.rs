@@ -81,7 +81,7 @@ pub fn rap_numeric(
         // scratch map: col -> value (we'll flush in pattern order)
         // For simplicity and small rows, use Vec lookup
         let len = row_end - row_start;
-        let mut cols: Vec<usize> = pc[row_start..row_end].to_vec();
+        let cols: Vec<usize> = pc[row_start..row_end].to_vec();
         let mut vals: Vec<f64> = vec![0.0; len];
 
         let rs_r = rp_r[i]; let re_r = rp_r[i + 1];
@@ -108,4 +108,3 @@ pub fn rap_numeric(
         out_vals[row_start..row_end].copy_from_slice(&vals);
     }
 }
-
