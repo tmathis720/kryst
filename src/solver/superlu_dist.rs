@@ -77,6 +77,52 @@ use std::collections::HashMap;
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 
+fn validate_local_csr(m: &CsrMatrix<f64>) -> Result<(), KError> {
+    let rp = m.row_ptr();
+    let cj = m.col_idx();
+    let vv = m.values();
+
+    if rp.len() != m.nrows() + 1 {
+        return Err(KError::InvalidInput(format!(
+            "CSR row_ptr length {} != nrows+1 = {}",
+            rp.len(),
+            m.nrows() + 1
+        )));
+    }
+    if rp.first().copied() != Some(0) {
+        return Err(KError::InvalidInput("CSR row_ptr[0] must be 0".into()));
+    }
+    for k in 0..m.nrows() {
+        if rp[k] > rp[k + 1] {
+            return Err(KError::InvalidInput(format!(
+                "CSR row_ptr not nondecreasing at row {}",
+                k
+            )));
+        }
+    }
+    let nnz = *rp.last().unwrap();
+    if nnz != cj.len() || nnz != vv.len() {
+        return Err(KError::InvalidInput(format!(
+            "CSR nnz mismatch: row_ptr last={}, col_idx={}, values={}",
+            nnz,
+            cj.len(),
+            vv.len()
+        )));
+    }
+    let ncols = m.ncols();
+    for i in 0..m.nrows() {
+        for p in rp[i]..rp[i + 1] {
+            if cj[p] >= ncols {
+                return Err(KError::InvalidInput(format!(
+                    "CSR col index {} out of range (ncols={}) at local row {} pos {}",
+                    cj[p], ncols, i, p
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 2D process grid for distributed SuperLU operations
 #[derive(Debug)]
 pub struct ProcessGrid {
@@ -321,6 +367,139 @@ impl BlockCyclicDistribution {
         let global_block_id = local_block_id * self.grid.pcols + self.grid.my_pcol;
         global_block_id * self.col_block_size + block_offset
     }
+
+    #[inline]
+    pub fn row_block_of(&self, global_row: usize) -> usize {
+        global_row / self.row_block_size
+    }
+
+    #[inline]
+    pub fn col_block_of(&self, global_col: usize) -> usize {
+        global_col / self.col_block_size
+    }
+
+    /// (prow, pcol) that owns (i,j) in block-cyclic sense
+    #[inline]
+    pub fn owner_coords_of(&self, global_row: usize, global_col: usize) -> (usize, usize) {
+        let br = self.row_block_of(global_row) % self.grid.prows;
+        let bc = self.col_block_of(global_col) % self.grid.pcols;
+        (br, bc)
+    }
+
+    /// Global rank that owns (i,j)
+    #[inline]
+    pub fn owner_of(&self, global_row: usize, global_col: usize) -> usize {
+        let (pr, pc) = self.owner_coords_of(global_row, global_col);
+        self.grid.coords_to_rank(pr, pc)
+    }
+
+    /// Local row index if this proc owns `global_row`, else None
+    #[inline]
+    pub fn local_row_from_global(&self, global_row: usize) -> Option<usize> {
+        if !self.owns_global_row(global_row, self.row_block_size) {
+            return None;
+        }
+        let block_id_g = self.row_block_of(global_row);
+        let block_id_l = block_id_g / self.grid.prows;
+        let offset_in_block = global_row % self.row_block_size;
+        Some(block_id_l * self.row_block_size + offset_in_block)
+    }
+
+    /// Local col index if this proc owns `global_col`, else None
+    #[inline]
+    pub fn local_col_from_global(&self, global_col: usize) -> Option<usize> {
+        if !self.owns_global_col(global_col, self.col_block_size) {
+            return None;
+        }
+        let block_id_g = self.col_block_of(global_col);
+        let block_id_l = block_id_g / self.grid.pcols;
+        let offset_in_block = global_col % self.col_block_size;
+        Some(block_id_l * self.col_block_size + offset_in_block)
+    }
+
+    #[inline]
+    pub fn owns_global_row(&self, global_row: usize, block_size: usize) -> bool {
+        self.grid.owns_global_row(global_row, block_size)
+    }
+
+    #[inline]
+    pub fn owns_global_col(&self, global_col: usize, block_size: usize) -> bool {
+        self.grid.owns_global_col(global_col, block_size)
+    }
+}
+
+#[cfg(test)]
+mod dist_tests {
+    use super::*;
+
+    fn make_grid(total: usize, prows: usize, pcols: usize, my_rank: usize) -> ProcessGrid {
+        ProcessGrid {
+            prows,
+            pcols,
+            my_prow: my_rank / pcols,
+            my_pcol: my_rank % pcols,
+            my_rank,
+            total_procs: total,
+        }
+    }
+
+    #[test]
+    fn roundtrip_owned_indices() {
+        let cases = [
+            (5, 7, (2, 2), (2, 3)),  // non-square, block < n
+            (0, 0, (1, 1), (2, 2)),  // empty
+            (8, 8, (2, 3), (3, 2)),  // wider than tall
+            (17, 9, (3, 1), (4, 4)), // tall, skinny grid
+        ];
+        for &(nr, nc, (pr, pc), (br, bc)) in &cases {
+            let total = pr * pc;
+            for rank in 0..total {
+                let grid = make_grid(total, pr, pc, rank);
+                let dist = BlockCyclicDistribution::new(grid.clone(), nr, nc, br.max(1), bc.max(1));
+                for i in 0..nr {
+                    let owns = dist.owns_global_row(i, dist.row_block_size);
+                    match (owns, dist.local_row_from_global(i)) {
+                        (true, Some(loc)) => {
+                            let back = dist.local_to_global_row(loc);
+                            assert_eq!(back, i, "row round-trip failed (i={i}, rank={rank:?})");
+                        }
+                        (false, None) => {}
+                        other => panic!("inconsistent row ownership: {other:?}"),
+                    }
+                }
+                for j in 0..nc {
+                    let owns = dist.owns_global_col(j, dist.col_block_size);
+                    match (owns, dist.local_col_from_global(j)) {
+                        (true, Some(loc)) => {
+                            let back = dist.local_to_global_col(loc);
+                            assert_eq!(back, j, "col round-trip failed (j={j}, rank={rank:?})");
+                        }
+                        (false, None) => {}
+                        other => panic!("inconsistent col ownership: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owner_rank_agrees_with_coords() {
+        let grid = ProcessGrid {
+            prows: 2,
+            pcols: 3,
+            my_prow: 0,
+            my_pcol: 0,
+            my_rank: 0,
+            total_procs: 6,
+        };
+        let dist = BlockCyclicDistribution::new(grid, 10, 11, 4, 3);
+        for i in 0..10 {
+            for j in 0..11 {
+                let (pr, pc) = dist.owner_coords_of(i, j);
+                assert_eq!(dist.owner_of(i, j), pr * dist.grid.pcols + pc);
+            }
+        }
+    }
 }
 
 /// Pivoting strategies for SuperLU_DIST
@@ -382,7 +561,13 @@ impl Panel {
         debug_assert_eq!(width, col_end - col_start);
         debug_assert_eq!(height, row_indices.len());
 
-        Self { width, height, data, row_indices, col_start }
+        Self {
+            width,
+            height,
+            data,
+            row_indices,
+            col_start,
+        }
     }
 
     /// Get mutable view as faer matrix
@@ -600,6 +785,10 @@ pub struct NumericFactorization {
     pub replaced_tiny_pivots: bool,
     /// Factorization statistics
     pub factor_stats: FactorizationStats,
+    /// Block dependency graph for forward solve (L)
+    pub l_block_graph: Vec<Vec<usize>>,
+    /// Block dependency graph for backward solve (U)
+    pub u_block_graph: Vec<Vec<usize>>,
 }
 
 /// Statistics from numerical factorization
@@ -735,6 +924,7 @@ impl TriangularSolveData {
         block_size: usize,
         distribution: &BlockCyclicDistribution,
         numeric_factor: &NumericFactorization,
+        deps: Vec<Vec<usize>>,
     ) -> Self {
         // Number of diagonal blocks to process
         let num_blocks = distribution.n_col_blocks(block_size);
@@ -762,13 +952,11 @@ impl TriangularSolveData {
             }
         }
 
-        // Simple dependency graph: block i depends on all previous blocks
-        let mut dependency_graph = vec![Vec::new(); num_blocks];
-        for i in 0..num_blocks {
-            for j in 0..i {
-                dependency_graph[i].push(j);
-            }
-        }
+        let dependency_graph = if deps.len() == num_blocks {
+            deps
+        } else {
+            vec![Vec::new(); num_blocks]
+        };
 
         Self {
             local_solution_blocks,
@@ -907,7 +1095,13 @@ impl DistributedTriangularSolver {
         );
 
         // Initialize solve data structure
-        let mut solve_data = TriangularSolveData::new(n, block_size, distribution, numeric_factor);
+        let mut solve_data = TriangularSolveData::new(
+            n,
+            block_size,
+            distribution,
+            numeric_factor,
+            numeric_factor.l_block_graph.clone(),
+        );
 
         // Copy RHS to solution vector
         x.copy_from_slice(b);
@@ -1016,7 +1210,13 @@ impl DistributedTriangularSolver {
         );
 
         // Initialize solve data structure
-        let mut solve_data = TriangularSolveData::new(n, block_size, distribution, numeric_factor);
+        let mut solve_data = TriangularSolveData::new(
+            n,
+            block_size,
+            distribution,
+            numeric_factor,
+            numeric_factor.u_block_graph.clone(),
+        );
 
         // Copy intermediate result to solution vector
         x.copy_from_slice(y);
@@ -1028,14 +1228,12 @@ impl DistributedTriangularSolver {
             let block_end = block_start + current_block_size;
 
             // Apply updates from later blocks first
-            for dep_block in (block_id + 1)..num_blocks {
+            let dependency_blocks = solve_data.dependency_graph[block_id].clone();
+            for dep_block in dependency_blocks {
                 if solve_data.block_owners[dep_block] != distribution.grid.my_rank {
-                    // Wait for dependency to arrive
                     if overlap_comm {
                         solve_data.wait(dep_block)?;
                     }
-
-                    // Apply update from dependency block
                     Self::apply_block_update_backward(
                         &mut x[block_start..block_end],
                         &solve_data.comm_buffer,
@@ -3602,8 +3800,47 @@ impl SuperLuDistSolver {
         global_matrix: &CsrMatrix<f64>,
         distribution: &BlockCyclicDistribution,
     ) -> Result<CsrMatrix<f64>, KError> {
-        let _ = distribution;
-        Ok(global_matrix.clone())
+        let rp = global_matrix.row_ptr();
+        let cj = global_matrix.col_idx();
+        let vv = global_matrix.values();
+
+        let local_rows = distribution.local_rows;
+        let local_cols = distribution.local_cols;
+        let mut tmp_cols = vec![Vec::new(); local_rows];
+        let mut tmp_vals = vec![Vec::new(); local_rows];
+
+        for i in 0..global_matrix.nrows() {
+            for p in rp[i]..rp[i + 1] {
+                let j = cj[p];
+                if distribution.owner_of(i, j) == distribution.grid.my_rank {
+                    let li = distribution.local_row_from_global(i).unwrap();
+                    let lj = distribution.local_col_from_global(j).unwrap();
+                    tmp_cols[li].push(lj);
+                    tmp_vals[li].push(vv[p]);
+                }
+            }
+        }
+
+        let mut local_row_ptrs = Vec::with_capacity(local_rows + 1);
+        local_row_ptrs.push(0);
+        let mut local_col_indices = Vec::new();
+        let mut local_values = Vec::new();
+        for r in 0..local_rows {
+            local_col_indices.extend_from_slice(&tmp_cols[r]);
+            local_values.extend_from_slice(&tmp_vals[r]);
+            let last = *local_row_ptrs.last().unwrap();
+            local_row_ptrs.push(last + tmp_cols[r].len());
+        }
+
+        let local_matrix = CsrMatrix::from_csr(
+            local_rows,
+            local_cols,
+            local_row_ptrs,
+            local_col_indices,
+            local_values,
+        );
+        validate_local_csr(&local_matrix)?;
+        Ok(local_matrix)
     }
 
     /// Enhanced symbolic factorization using ordering algorithms
@@ -3665,8 +3902,7 @@ impl SuperLuDistSolver {
         log::debug!("Computing symbolic pattern with {} x {} matrix", n, n);
 
         // Compute symbolic factorization pattern
-        let l_pattern =
-            SymbolicFactorizer::compute_symbolic_pattern(matrix, &col_perm, &row_perm)?;
+        let l_pattern = SymbolicFactorizer::compute_symbolic_pattern(matrix, &col_perm, &row_perm)?;
         for k in 0..n {
             debug_assert!(l_pattern.contains_key(&(k, k)));
         }
@@ -3828,6 +4064,35 @@ impl SuperLuDistSolver {
             factor_stats.max_pivot_growth
         );
 
+        let bs = std::cmp::min(64, n / 4).max(1);
+        let nb = (n + bs - 1) / bs;
+        let mut lbg = vec![Vec::<usize>::new(); nb];
+        let mut ubg = vec![Vec::<usize>::new(); nb];
+        let mut add_edge = |graph: &mut [Vec<usize>], s: usize, t: usize| {
+            if s != t && !graph[s].contains(&t) {
+                graph[s].push(t);
+            }
+        };
+        for (&(i, j), _) in &symbolic.l_pattern {
+            let bi = i / bs;
+            let bj = j / bs;
+            if bj < bi {
+                add_edge(&mut lbg, bi, bj);
+            }
+        }
+        for (&(i, j), _) in &symbolic.u_pattern {
+            let bi = i / bs;
+            let bj = j / bs;
+            if bj > bi {
+                add_edge(&mut ubg, bi, bj);
+            }
+        }
+        for g in [&mut lbg, &mut ubg] {
+            for v in g.iter_mut() {
+                v.sort_unstable();
+            }
+        }
+
         Ok(NumericFactorization {
             n,
             nnz: panels.iter().map(|p| p.data.len()).sum(),
@@ -3841,6 +4106,8 @@ impl SuperLuDistSolver {
             pivot_threshold: self.options.diagonal_pivot_threshold,
             replaced_tiny_pivots: tiny_pivots_replaced > 0,
             factor_stats,
+            l_block_graph: lbg,
+            u_block_graph: ubg,
         })
     }
 
@@ -4213,6 +4480,53 @@ mod tests {
     }
 
     #[test]
+    fn distribute_handles_empty() {
+        let a = CsrMatrix::from_csr(0, 0, vec![0], vec![], vec![]);
+        let grid = ProcessGrid {
+            prows: 1,
+            pcols: 1,
+            my_prow: 0,
+            my_pcol: 0,
+            my_rank: 0,
+            total_procs: 1,
+        };
+        let dist = BlockCyclicDistribution::new(grid, 0, 0, 4, 4);
+        let local = SuperLuDistSolver::new()
+            .distribute_matrix(&a, &dist)
+            .unwrap();
+        assert_eq!(local.nrows(), 0);
+        assert_eq!(local.ncols(), 0);
+        assert_eq!(local.row_ptr(), &[0]);
+    }
+
+    #[test]
+    fn distribute_non_square_and_small_blocks() {
+        let a = CsrMatrix::from_csr(
+            5,
+            3,
+            vec![0, 1, 2, 2, 3, 3],
+            vec![0, 1, 2],
+            vec![1.0, 2.0, 3.0],
+        );
+        let grid = ProcessGrid {
+            prows: 2,
+            pcols: 2,
+            my_prow: 0,
+            my_pcol: 0,
+            my_rank: 0,
+            total_procs: 4,
+        };
+        let dist = BlockCyclicDistribution::new(grid, 5, 3, 2, 2);
+        let local = SuperLuDistSolver::new()
+            .distribute_matrix(&a, &dist)
+            .unwrap();
+        assert!(validate_local_csr(&local).is_ok());
+        for &c in local.col_idx() {
+            assert!(c < local.ncols());
+        }
+    }
+
+    #[test]
     fn test_graph_creation() {
         // Create a simple 3x3 tridiagonal matrix
         let matrix = CsrMatrix::from_csr(
@@ -4571,9 +4885,12 @@ mod tests {
                 condition_estimate: None,
                 memory_usage: 0,
             },
+            l_block_graph: vec![vec![], vec![]],
+            u_block_graph: vec![vec![], vec![]],
         };
 
-        let solve_data = TriangularSolveData::new(8, 4, &distribution, &numeric_factor);
+        let solve_data =
+            TriangularSolveData::new(8, 4, &distribution, &numeric_factor, vec![vec![], vec![]]);
 
         assert_eq!(solve_data.block_owners.len(), 2); // 8/4 = 2 blocks
         assert_eq!(solve_data.dependency_graph.len(), 2);
@@ -4632,8 +4949,10 @@ mod tests {
                 condition_estimate: None,
                 memory_usage: 0,
             },
+            l_block_graph: vec![vec![], vec![], vec![]],
+            u_block_graph: vec![vec![], vec![], vec![]],
         };
-        let t = TriangularSolveData::new(n, bs, &dist, &nf);
+        let t = TriangularSolveData::new(n, bs, &dist, &nf, vec![vec![], vec![], vec![]]);
         assert_eq!(t.block_sizes, vec![64, 64, 2]);
     }
 
@@ -4655,6 +4974,52 @@ mod tests {
 
         assert_eq!(request.request_id, 1);
         assert_eq!(request.comm_type, CommType::Send);
+    }
+
+    #[test]
+    fn l_block_graph_coarsens_symbolic() {
+        use std::collections::HashMap;
+        let mut lpat = HashMap::new();
+        for i in 0..6 {
+            for j in 0..=i {
+                lpat.insert((i, j), true);
+            }
+        }
+        for &(i, j) in &[(4, 1), (5, 1), (4, 0), (5, 0)] {
+            lpat.remove(&(i, j));
+        }
+        let symbolic = SymbolicFactorization {
+            col_perm: (0..6).collect(),
+            row_perm: (0..6).collect(),
+            etree: EliminationTree {
+                parent: vec![6; 6],
+                children: vec![vec![]; 6],
+                post_order: vec![],
+            },
+            l_pattern: lpat,
+            u_pattern: HashMap::new(),
+        };
+        let bs = 2;
+        let nb = 3;
+        let mut lbg = vec![Vec::<usize>::new(); nb];
+        let mut add_edge = |g: &mut [Vec<usize>], s: usize, t: usize| {
+            if s != t && !g[s].contains(&t) {
+                g[s].push(t);
+            }
+        };
+        for (&(i, j), _) in &symbolic.l_pattern {
+            let bi = i / bs;
+            let bj = j / bs;
+            if bj < bi {
+                add_edge(&mut lbg, bi, bj);
+            }
+        }
+        for v in lbg.iter_mut() {
+            v.sort_unstable();
+        }
+        assert_eq!(lbg[0], vec![]);
+        assert_eq!(lbg[1], vec![0]);
+        assert_eq!(lbg[2], vec![1]);
     }
 
     #[test]
