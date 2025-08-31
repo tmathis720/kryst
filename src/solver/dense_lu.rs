@@ -21,3 +21,4 @@ pub fn solve(a: &Mat<f64>, b: &[f64], x: &mut [f64]) -> Result<(), KError> {
     lu.solve_in_place_with_conj(Conj::No, x_mat);
     Ok(())
 }
+#![cfg(feature = "dense-direct")]

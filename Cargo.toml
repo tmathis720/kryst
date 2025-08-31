@@ -57,6 +57,9 @@ superlu_dist = []
 tuning = []
 iai = []
 
+# Gate top-level re-exports of dense-direct solvers (LU/QR)
+dense-direct = []
+
 # Opt-in: compute a fingerprint of raw Mat<f64> values to strengthen cache invalidation.
 # Off by default due to O(m*n) hashing cost on each conversion call.
 mat-values-fingerprint = []

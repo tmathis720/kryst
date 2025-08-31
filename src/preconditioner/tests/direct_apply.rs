@@ -3,10 +3,12 @@ use crate::matrix::op::LinOp;
 use crate::matrix::op::CsrOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::builders as b;
+#[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::sync::Arc;
 
+#[cfg(feature = "dense-direct")]
 #[test]
 fn direct_pc_apply_is_not_identity() {
     // LU apply should return a clear Unsupported error (PREONLY-only)
@@ -53,4 +55,3 @@ fn builders_sor_and_chebyshev_object_safe() {
     cheb.apply(PcSide::Left, &x, &mut z).unwrap();
     assert!(z.iter().all(|v| v.is_finite()));
 }
-

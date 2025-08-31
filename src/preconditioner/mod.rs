@@ -317,7 +317,9 @@ pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCs
 pub use asm::AdditiveSchwarz;
 pub use chain::PcChain;
 pub use chebyshev::{Chebyshev, ChebyshevPre};
-pub use direct::{LuPc, QrPc, SuperLuDistPc};
+#[cfg(feature = "dense-direct")]
+pub use direct::{LuPc, QrPc};
+pub use direct::SuperLuDistPc;
 pub use ilu::Ilu0;
 pub use ilup::Ilup;
 pub use ilut::Ilut;

@@ -1,10 +1,7 @@
 use crate::error::KError;
-use crate::preconditioner::{
-    Preconditioner,
-    direct::{LuPc, QrPc},
-    jacobi::Jacobi,
-    sor::MatSorType,
-};
+use crate::preconditioner::{Preconditioner, jacobi::Jacobi, sor::MatSorType};
+#[cfg(feature = "dense-direct")]
+use crate::preconditioner::direct::{LuPc, QrPc};
 
 #[cfg(feature = "legacy-pc-bridge")]
 use crate::preconditioner::{ilup::Ilup, ilut::Ilut, LegacyOpPreconditioner};
@@ -54,11 +51,17 @@ pub fn build_chebyshev(
 }
 
 pub fn build_lu() -> Result<Box<dyn Preconditioner>, KError> {
-    Ok(Box::new(LuPc::new()))
+    #[cfg(feature = "dense-direct")]
+    { return Ok(Box::new(LuPc::new())); }
+    #[cfg(not(feature = "dense-direct"))]
+    { return Err(KError::Unsupported("dense-direct feature not enabled")); }
 }
 
 pub fn build_qr() -> Result<Box<dyn Preconditioner>, KError> {
-    Ok(Box::new(QrPc::new()))
+    #[cfg(feature = "dense-direct")]
+    { return Ok(Box::new(QrPc::new())); }
+    #[cfg(not(feature = "dense-direct"))]
+    { return Err(KError::Unsupported("dense-direct feature not enabled")); }
 }
 
 pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {

@@ -103,13 +103,13 @@ pub mod legacy {
     }
 }
 
-/// Adapter allowing legacy matrix-based solvers to be used with the new
-/// object-safe [`LinearSolver`] trait.
-pub struct MatSolverAdapter<S> {
+/// Adapter allowing legacy generic solvers (MatVec/Vec) to be used with the
+/// new object-safe [`LinearSolver`] trait over [`LinOp`].
+pub struct OpSolverAdapter<S> {
     inner: S,
 }
 
-impl<S> MatSolverAdapter<S> {
+impl<S> OpSolverAdapter<S> {
     pub fn new(inner: S) -> Self {
         Self { inner }
     }
@@ -119,14 +119,14 @@ impl<S> MatSolverAdapter<S> {
     }
 }
 
-struct MatPcAdapter<'a> {
+struct OpPcAdapter<'a> {
     inner: &'a dyn Preconditioner,
 }
 
-impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
-    for MatPcAdapter<'a>
+impl<'a> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 'a, Vec<f64>>
+    for OpPcAdapter<'a>
 {
-    fn setup(&mut self, _a: &faer::Mat<f64>) -> Result<(), KError> {
+    fn setup(&mut self, _a: &(dyn LinOp<S = f64> + 'a)) -> Result<(), KError> {
         Ok(())
     }
     fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
@@ -134,9 +134,9 @@ impl<'a> crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
     }
 }
 
-impl<S> LinearSolver for MatSolverAdapter<S>
+impl<S> LinearSolver for OpSolverAdapter<S>
 where
-    S: legacy::LinearSolver<faer::Mat<f64>, Vec<f64>, Scalar = f64, Error = KError>
+    S: legacy::LinearSolver<dyn LinOp<S = f64> + 'static, Vec<f64>, Scalar = f64, Error = KError>
         + Send
         + 'static,
 {
@@ -161,19 +161,15 @@ where
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        let mat = a
-            .as_any()
-            .downcast_ref::<faer::Mat<f64>>()
-            .ok_or_else(|| KError::InvalidInput("solver requires faer::Mat<f64>".into()))?;
         let mut x_vec = x.to_vec();
         let b_vec = b.to_vec();
-        let pc_adapter = pc.map(|p| MatPcAdapter { inner: p });
-        let pc_ref = pc_adapter.as_ref().map(|p| {
-            p as &dyn crate::preconditioner::legacy::Preconditioner<faer::Mat<f64>, Vec<f64>>
-        });
-        let stats = self.inner.solve(
-            mat, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work,
-        )?;
+        let pc_adapter = pc.map(|p| OpPcAdapter { inner: p });
+        let pc_ref = pc_adapter
+            .as_ref()
+            .map(|p| p as &dyn crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64>, Vec<f64>>);
+        let stats = self
+            .inner
+            .solve(a, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work)?;
         x.copy_from_slice(&x_vec);
         Ok(stats)
     }
@@ -197,10 +193,16 @@ pub mod pcg;
 pub use pcg::PcgSolver;
 pub mod minres;
 pub use minres::MinresSolver;
+// Dense direct modules are gated; opt-in via `dense-direct`.
+#[cfg(feature = "dense-direct")]
 pub mod direct_lu;
-pub use direct_lu::{LuSolver, QrSolver};
+#[cfg(feature = "dense-direct")]
 pub mod dense_lu;
+#[cfg(feature = "dense-direct")]
 pub mod dense_qr;
+
+#[cfg(feature = "dense-direct")]
+pub use direct_lu::{LuSolver, QrSolver};
 pub mod superlu_dist;
 pub use superlu_dist::SuperLuDistSolver;
 

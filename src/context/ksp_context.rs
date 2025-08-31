@@ -44,7 +44,7 @@ use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MatSolverAdapter, MinresSolver, PcaGmresSolver, PcaPcMode, PcgSolver,
+    MinresSolver, OpSolverAdapter, PcaGmresSolver, PcaPcMode, PcgSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -245,7 +245,7 @@ impl KspContext {
                 self.apply_fgmres_pending_to(&mut s);
                 Some(Box::new(s))
             }
-            SolverType::BiCgStab => Some(Box::new(MatSolverAdapter::new(BiCgStabSolver::new(
+            SolverType::BiCgStab => Some(Box::new(OpSolverAdapter::new(BiCgStabSolver::new(
                 self.rtol,
                 self.maxits,
             )))),
@@ -254,7 +254,7 @@ impl KspContext {
                 PcgSolver::new(self.rtol, self.maxits)
                     .with_norm(crate::solver::pcg::CgNormType::Preconditioned),
             )),
-            SolverType::Minres => Some(Box::new(MatSolverAdapter::new(MinresSolver::new(
+            SolverType::Minres => Some(Box::new(OpSolverAdapter::new(MinresSolver::new(
                 self.rtol,
                 self.maxits,
             )))),

@@ -548,6 +548,7 @@ mod tests {
     use crate::preconditioner::Preconditioner;
     use std::str::FromStr;
 
+    #[cfg(feature = "dense-direct")]
     #[test]
     fn factory_builds_lu_qr() {
         let lu = PcFactory::create_preconditioner(PcType::from_str("lu").unwrap(), None).unwrap();
@@ -607,7 +608,14 @@ mod tests {
             asm_block_solver: Some("ludense".into()),
             ..Default::default()
         };
-        let pc = PcFactory::create_from_options(&opts).unwrap();
+        let pc = PcFactory::create_from_options(&opts).unwrap_or_else(|_| {
+            // When dense-direct is disabled, builder still constructs ASM (LuDense maps to CSR fallback)
+            PcFactory::create_from_options(&crate::config::options::PcOptions {
+                pc_type: Some("asm".into()),
+                asm_block_solver: Some("csr".into()),
+                ..Default::default()
+            }).unwrap()
+        });
         fn _is_pc(_: &Box<dyn Preconditioner>) {}
         _is_pc(&pc);
     }

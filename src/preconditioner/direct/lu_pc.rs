@@ -43,3 +43,4 @@ impl Preconditioner for LuPc {
         crate::matrix::format::FormatHint::Dense
     }
 }
+#![cfg(feature = "dense-direct")]

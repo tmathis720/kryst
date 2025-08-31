@@ -14,6 +14,7 @@ use crate::core::traits::SubmatrixExtract;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
 use crate::matrix::sparse::CsrMatrix;
 use std::sync::Arc;
+#[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
 use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
@@ -317,22 +318,46 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         self.local_blocks_csr.clear();
         match self.block_solver_factory {
             BlockSolverFactory::LuDense => {
-                for meta in self.blocks_meta.iter() {
-                    let idx = &meta.indices;
-                    let a_sub_csr = csr.as_ref().submatrix(idx);
-                    let dense = a_sub_csr.to_dense();
-                    let mut ksp = LuSolver::<f64>::new();
-                    let _ = ksp.solve(
-                        &dense,
-                        None,
-                        &vec![0.0; idx.len()],
-                        &mut vec![0.0; idx.len()],
-                        PcSide::Left,
-                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                        None,
-                        None,
-                    );
-                    self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                #[cfg(not(feature = "dense-direct"))]
+                {
+                    // Fallback: treat LuDense as CSR solver when dense-direct is disabled
+                    let cfg = IluCsrConfig {
+                        kind: IluKind::Ilu0,
+                        pivot: PivotStrategy::DiagonalPerturbation,
+                        pivot_threshold: 1e-12,
+                        diag_perturb_factor: 1e-10,
+                        level_sched: cfg!(feature = "rayon"),
+                        numeric_update_fixed: true,
+                        logging: 0,
+                    };
+                    for meta in self.blocks_meta.iter() {
+                        let idx = &meta.indices;
+                        let a_sub_csr = Arc::new(csr.as_ref().submatrix(idx));
+                        let mut ilu = IluCsr::new_with_config(cfg.clone());
+                        let op = CsrOp::new(a_sub_csr.clone());
+                        ilu.setup(&op)?;
+                        self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                    }
+                }
+                #[cfg(feature = "dense-direct")]
+                {
+                    for meta in self.blocks_meta.iter() {
+                        let idx = &meta.indices;
+                        let a_sub_csr = csr.as_ref().submatrix(idx);
+                        let dense = a_sub_csr.to_dense();
+                        let mut ksp = LuSolver::<f64>::new();
+                        let _ = ksp.solve(
+                            &dense,
+                            None,
+                            &vec![0.0; idx.len()],
+                            &mut vec![0.0; idx.len()],
+                            PcSide::Left,
+                            &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                            None,
+                            None,
+                        );
+                        self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                    }
                 }
             }
             BlockSolverFactory::CsrSolver => {
@@ -676,7 +701,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dense-direct"))]
 mod tests {
     use super::*;
     use crate::solver::direct_lu::LuSolver;

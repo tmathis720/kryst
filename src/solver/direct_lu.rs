@@ -336,3 +336,4 @@ mod tests {
         );
     }
 }
+#![cfg(feature = "dense-direct")]
