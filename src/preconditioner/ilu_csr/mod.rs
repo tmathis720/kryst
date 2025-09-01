@@ -796,8 +796,10 @@ impl IluCsr {
     pub(crate) fn u_val(&self) -> &[f64] { &self.u_val }
     #[inline]
     pub(crate) fn u_diag_ix(&self) -> &[usize] { &self.u_diag_ix }
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn tmp(&self) -> &[f64] { &self.tmp }
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn tmp_mut(&mut self) -> &mut [f64] { &mut self.tmp }
 

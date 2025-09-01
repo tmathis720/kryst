@@ -142,7 +142,7 @@ impl LinearSolver for BiCgStabSolver {
             r.copy_from_slice(b);
         }
         // residual norms / thresholds
-        let mut res0;
+        let res0;
         if need_left {
             // Preconditioned residual z = M^{-1} r
             if let Some(zs) = z_s_opt.as_deref_mut() {

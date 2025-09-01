@@ -1,6 +1,7 @@
 use faer::Mat;
 use kryst::matrix::op::LinOp;
 use kryst::parallel::{NoComm, UniverseComm};
+#[cfg(not(any(feature = "mpi", feature = "rayon")))]
 use std::sync::Arc;
 
 #[test]

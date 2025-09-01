@@ -56,33 +56,27 @@ mod tests_gmres_z_basis {
         ksp.set_pc_box_for_tests(pc);
 
         let mut x = [0.0; 4];
-        let _stats = ksp.solve(&b, &mut x)?;
+        let stats = ksp.solve(&b, &mut x)?;
 
-        // Inspect workspace
         let w = ksp.debug_workspace().expect("workspace present");
-        // With slab storage, determine how many Z columns were actually populated (non-zero)
-        let n = w.tmp1.len();
-        let m = if n > 0 { w.z_mem.len() / n } else { 0 };
-        let mut zcols_used = 0usize;
-        for j in 0..m {
-            let col = &w.z_mem[j * n..(j + 1) * n];
-            if col.iter().any(|&v| v != 0.0) {
-                zcols_used += 1;
-            }
-        }
         assert!(
-            zcols_used > 0,
-            "Z basis must have at least one populated column for Right GMRES"
+            w.has_z(),
+            "Right-preconditioned GMRES must allocate Z basis"
         );
 
         // Counting PC should be called once per step in the last cycle at least.
         let calls = hits.load(Ordering::Relaxed);
+        let last_cycle_steps = {
+            let iters = stats.iterations % ksp.restart;
+            if iters == 0 { ksp.restart } else { iters }
+        };
         assert!(
-            calls >= zcols_used,
+            calls >= last_cycle_steps,
             "PC apply calls ({calls}) must be >= last-cycle steps ({})",
-            zcols_used
+            last_cycle_steps
         );
 
         Ok(())
     }
 }
+

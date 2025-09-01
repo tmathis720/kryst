@@ -8,11 +8,11 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _ = layout; // ignore size details
         ALLOCS.fetch_add(1, AcqRel);
-        System.alloc(layout)
+        unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let _ = (ptr, layout);
-        System.dealloc(ptr, layout)
+        unsafe { System.dealloc(ptr, layout) }
     }
 }
 
