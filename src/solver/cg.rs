@@ -235,20 +235,32 @@ impl LinearSolver for CgSolver {
         }
 
         for k in 1..=self.conv.max_iters {
+            if self.single_reduction && k > 1 {
+                let beta = rho / rho_prev;
+                for i in 0..n {
+                    p[i] = z_prev[i] + beta * p[i];
+                }
+            }
+
             a.matvec(p, ap);
 
-            let p_ap = if !self.single_reduction {
-                // classic: one reduction for <p,Ap>
-                Self::dot(p, ap, comm)
+            let (p_ap, rho_k) = if !self.single_reduction {
+                let p_ap = Self::dot(p, ap, comm);
+                (p_ap, rho)
+            } else if has_pending_rz {
+                let p_ap_local = Self::local_dot(p, ap);
+                let (p_ap_g, rho_g) = comm.allreduce_sum2(p_ap_local, pending_rz_local);
+                (p_ap_g, rho_g)
             } else {
-                // placeholder for fused-reduction or pipelined CG path
-                Self::dot(p, ap, comm)
+                let p_ap_local = Self::local_dot(p, ap);
+                let p_ap_g = comm.allreduce_sum(p_ap_local);
+                (p_ap_g, rho)
             };
             if p_ap <= 0.0 || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
 
-            let alpha = rho / p_ap;
+            let alpha = rho_k / p_ap;
 
             if let Some(rmax) = self.trust_region {
                 let pnorm = Self::nrm2(p, comm);
@@ -279,15 +291,12 @@ impl LinearSolver for CgSolver {
                 z.copy_from_slice(r);
             }
 
-            let rho_new = if !self.single_reduction {
-                Self::dot(r, z, comm)
-            } else {
-                // placeholder for fused-reduction or pipelined CG path
-                Self::dot(r, z, comm)
-            };
-            if rho_new <= 0.0 || !rho_new.is_finite() {
+            let rz_local_next = Self::local_dot(r, z);
+            if rz_local_next <= 0.0 || !rz_local_next.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
             }
+            pending_rz_local = rz_local_next;
+            has_pending_rz = true;
 
             let rsq_new = if matches!(self.norm_type, CgNormType::Unpreconditioned) {
                 Some(Self::dot(r, r, comm))
@@ -296,7 +305,7 @@ impl LinearSolver for CgSolver {
             };
 
             let res_reported = match self.norm_type {
-                CgNormType::Preconditioned | CgNormType::Natural => rho_new.abs().sqrt(),
+                CgNormType::Preconditioned | CgNormType::Natural => rho_k.abs().sqrt(),
                 CgNormType::Unpreconditioned => rsq_new.unwrap().sqrt(),
                 CgNormType::None => 0.0,
             };
@@ -307,21 +316,16 @@ impl LinearSolver for CgSolver {
                 }
             }
 
-            // Use standardized convergence policy against res0_reported baseline
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                // Exit: recompute true residual and override final_residual
                 let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
                 s.final_residual = true_res;
                 return Ok(s);
             }
 
-            let beta = rho_new / rho;
-            for i in 0..n {
-                p[i] = z[i] + beta * p[i];
-            }
-
-            rho = rho_new;
+            z_prev.swap_with_slice(z);
+            rho_prev = rho;
+            rho = rho_k;
             stats.iterations = k;
             stats.final_residual = res_reported;
         }
