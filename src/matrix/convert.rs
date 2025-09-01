@@ -43,7 +43,7 @@ fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) ->
 }
 
 /// Try to borrow a CSR matrix if the operator is already CSR.
-pub fn try_as_csr<'a>(pmat: &'a dyn LinOp<S = f64>) -> Option<&'a CsrMatrix<f64>> {
+pub fn try_as_csr(pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
     pmat.as_any().downcast_ref::<CsrMatrix<f64>>()
 }
 
@@ -76,7 +76,7 @@ pub fn csr_from_linop(
 }
 
 /// Try to borrow a CSC matrix if the operator is already CSC.
-pub fn try_as_csc<'a>(pmat: &'a dyn LinOp<S = f64>) -> Option<&'a CscMatrix<f64>> {
+pub fn try_as_csc(pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
     pmat.as_any().downcast_ref::<CscMatrix<f64>>()
 }
 

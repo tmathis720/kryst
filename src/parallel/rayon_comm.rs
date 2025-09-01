@@ -22,6 +22,12 @@ use rayon::prelude::*;
 #[derive(Clone)]
 pub struct RayonComm;
 
+impl Default for RayonComm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RayonComm {
     /// Creates a new `RayonComm` and initializes the global Rayon thread pool
     /// to use all available CPU cores.

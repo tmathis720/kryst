@@ -52,6 +52,7 @@ static EFFECTIVE_THREADS: OnceLock<usize> = OnceLock::new();
 /// - If env `KRYST_THREADS` is set, it overrides the global CPU count.
 /// - If not set, we fall back to `RAYON_NUM_THREADS`, then `num_cpus::get()`.
 /// - Per-rank threads = floor(total / mpi_size), clamped to >= 1.
+///
 /// Returns the number of threads actually used for Rayon.
 pub fn init_global_rayon_pool(mpi_size: usize) -> usize {
     #[cfg(not(feature = "rayon"))]

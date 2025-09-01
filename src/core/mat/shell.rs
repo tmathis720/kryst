@@ -35,6 +35,8 @@
 
 use crate::core::traits::{MatShape, MatTransVec, MatVec};
 use std::marker::PhantomData;
+
+type ShellFn<V> = dyn Fn(&V, &mut V) + Send + Sync;
 /// A "shell" matrix: user-supplied callbacks for A·x and Aᵀ·x
 ///
 /// `ShellMat` provides a matrix-free interface where matrix operations are defined
@@ -42,8 +44,8 @@ use std::marker::PhantomData;
 /// that don't need to be stored explicitly.
 pub struct ShellMat<V> {
     pub dim: usize,
-    mult: Box<dyn Fn(&V, &mut V) + Send + Sync>,
-    mult_trans: Box<dyn Fn(&V, &mut V) + Send + Sync>,
+    mult: Box<ShellFn<V>>,
+    mult_trans: Box<ShellFn<V>>,
     // Makes the dependency on V explicit without requiring V: Send/Sync.
     // Using `fn(&V)` (not `V`) avoids imposing Send/Sync bounds on V.
     _marker: PhantomData<fn(&V)>,

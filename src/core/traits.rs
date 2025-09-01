@@ -552,6 +552,12 @@ impl LocalAmgKernel {
     }
 }
 
+impl Default for LocalAmgKernel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AmgKernel for LocalAmgKernel {
     type Comm = crate::parallel::NoComm;
 
@@ -596,6 +602,12 @@ pub struct DistributedAmgKernel;
 impl DistributedAmgKernel {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for DistributedAmgKernel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

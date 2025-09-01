@@ -141,12 +141,12 @@ impl LinOp for DenseOp {
     fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
         assert_eq!(x.len(), self.mat.nrows());
         assert_eq!(y.len(), self.mat.ncols());
-        for j in 0..self.mat.ncols() {
+        for (j, yj) in y.iter_mut().enumerate().take(self.mat.ncols()) {
             let mut sum = 0.0;
-            for i in 0..self.mat.nrows() {
-                sum += self.mat[(i, j)] * x[i];
+            for (i, xi) in x.iter().enumerate().take(self.mat.nrows()) {
+                sum += self.mat[(i, j)] * *xi;
             }
-            y[j] = sum;
+            *yj = sum;
         }
     }
     fn as_any(&self) -> &dyn Any {
