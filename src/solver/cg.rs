@@ -236,101 +236,182 @@ impl CgSolver {
         }
 
         for k in 1..=self.conv.max_iters {
-            if self.single_reduction && k > 1 {
+            if self.single_reduction {
+                if k > 1 {
+                    let beta = rho / rho_prev;
+                    for i in 0..n {
+                        p[i] = z_prev[i] + beta * p[i];
+                    }
+                }
+            } else if k > 1 {
                 let beta = rho / rho_prev;
                 for i in 0..n {
-                    p[i] = z_prev[i] + beta * p[i];
+                    p[i] = z[i] + beta * p[i];
                 }
             }
 
             a.matvec(p, ap);
 
-            let (p_ap, rho_k) = if !self.single_reduction {
-                let p_ap = Self::dot(p, ap, comm);
-                (p_ap, rho)
-            } else if has_pending_rz {
-                let p_ap_local = Self::local_dot(p, ap);
-                let (p_ap_g, rho_g) = comm.allreduce_sum2(p_ap_local, pending_rz_local);
-                (p_ap_g, rho_g)
-            } else {
-                let p_ap_local = Self::local_dot(p, ap);
-                let p_ap_g = comm.allreduce_sum(p_ap_local);
-                (p_ap_g, rho)
-            };
-            if p_ap <= 0.0 || !p_ap.is_finite() {
-                return Err(KError::IndefiniteMatrix);
-            }
+            if self.single_reduction {
+                let (p_ap, rho_k) = if has_pending_rz {
+                    let p_ap_local = Self::local_dot(p, ap);
+                    let (p_ap_g, rho_g) = comm.allreduce_sum2(p_ap_local, pending_rz_local);
+                    (p_ap_g, rho_g)
+                } else {
+                    let p_ap_local = Self::local_dot(p, ap);
+                    let p_ap_g = comm.allreduce_sum(p_ap_local);
+                    (p_ap_g, rho)
+                };
+                if p_ap <= 0.0 || !p_ap.is_finite() {
+                    return Err(KError::IndefiniteMatrix);
+                }
 
-            let alpha = rho_k / p_ap;
+                let alpha = rho_k / p_ap;
 
-            if let Some(rmax) = self.trust_region {
-                let pnorm = Self::nrm2(p, comm);
-                if xnorm + alpha.abs() * pnorm > rmax {
-                    let step = (rmax - xnorm) / (pnorm + 1e-300);
-                    for i in 0..n {
-                        x[i] += step * p[i];
+                if let Some(rmax) = self.trust_region {
+                    let pnorm = Self::nrm2(p, comm);
+                    if xnorm + alpha.abs() * pnorm > rmax {
+                        let step = (rmax - xnorm) / (pnorm + 1e-300);
+                        for i in 0..n {
+                            x[i] += step * p[i];
+                        }
+                        stats.iterations = k;
+                        stats.reason = ConvergedReason::DivergedMaxIts;
+                        stats.final_residual = recompute_true_residual_norm(a, b, x, comm, tmp);
+                        return Ok(stats);
                     }
-                    stats.iterations = k;
-                    stats.reason = ConvergedReason::DivergedMaxIts;
-                    // ensure final_residual is true ||b - A x|| at exit
-                    stats.final_residual = recompute_true_residual_norm(a, b, x, comm, tmp);
-                    return Ok(stats);
                 }
-            }
 
-            for i in 0..n {
-                x[i] += alpha * p[i];
-            }
-            for i in 0..n {
-                r[i] -= alpha * ap[i];
-            }
-            if self.trust_region.is_some() {
-                xnorm = Self::nrm2(x, comm);
-            }
-
-            if let Some(m) = pc {
-                m.apply(pc_side, r, z)?;
-            } else {
-                z.copy_from_slice(r);
-            }
-
-            let rz_local_next = Self::local_dot(r, z);
-            if rz_local_next <= 0.0 || !rz_local_next.is_finite() {
-                return Err(KError::IndefinitePreconditioner);
-            }
-            pending_rz_local = rz_local_next;
-            has_pending_rz = true;
-
-            let rsq_new = if matches!(self.norm_type, CgNormType::Unpreconditioned) {
-                Some(Self::dot(r, r, comm))
-            } else {
-                None
-            };
-
-            let res_reported = match self.norm_type {
-                CgNormType::Preconditioned | CgNormType::Natural => rho_k.abs().sqrt(),
-                CgNormType::Unpreconditioned => rsq_new.unwrap().sqrt(),
-                CgNormType::None => 0.0,
-            };
-
-            if let Some(ms) = monitors {
-                for m in ms {
-                    m(k, res_reported);
+                for i in 0..n {
+                    x[i] += alpha * p[i];
                 }
-            }
+                for i in 0..n {
+                    r[i] -= alpha * ap[i];
+                }
+                if self.trust_region.is_some() {
+                    xnorm = Self::nrm2(x, comm);
+                }
 
-            let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
-            if !matches!(reason, ConvergedReason::Continued) {
-                let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
-                s.final_residual = true_res;
-                return Ok(s);
-            }
+                if let Some(m) = pc {
+                    m.apply(pc_side, r, z)?;
+                } else {
+                    z.copy_from_slice(r);
+                }
 
-            z_prev.swap_with_slice(z);
-            rho_prev = rho;
-            rho = rho_k;
-            stats.iterations = k;
-            stats.final_residual = res_reported;
+                let rz_local_next = Self::local_dot(r, z);
+                if rz_local_next <= 0.0 || !rz_local_next.is_finite() {
+                    return Err(KError::IndefinitePreconditioner);
+                }
+                pending_rz_local = rz_local_next;
+                has_pending_rz = true;
+
+                let rsq_new = if matches!(self.norm_type, CgNormType::Unpreconditioned) {
+                    Some(Self::dot(r, r, comm))
+                } else {
+                    None
+                };
+
+                let res_reported = match self.norm_type {
+                    CgNormType::Preconditioned | CgNormType::Natural => rho_k.abs().sqrt(),
+                    CgNormType::Unpreconditioned => rsq_new.unwrap().sqrt(),
+                    CgNormType::None => 0.0,
+                };
+
+                if let Some(ms) = monitors {
+                    for m in ms {
+                        m(k, res_reported);
+                    }
+                }
+
+                let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
+                if !matches!(reason, ConvergedReason::Continued) {
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+                    s.final_residual = true_res;
+                    return Ok(s);
+                }
+
+                z_prev.swap_with_slice(z);
+                rho_prev = rho;
+                rho = rho_k;
+                stats.iterations = k;
+                stats.final_residual = res_reported;
+            } else {
+                let p_ap = Self::dot(p, ap, comm);
+                if p_ap <= 0.0 || !p_ap.is_finite() {
+                    return Err(KError::IndefiniteMatrix);
+                }
+
+                let alpha = rho / p_ap;
+
+                if let Some(rmax) = self.trust_region {
+                    let pnorm = Self::nrm2(p, comm);
+                    if xnorm + alpha.abs() * pnorm > rmax {
+                        let step = (rmax - xnorm) / (pnorm + 1e-300);
+                        for i in 0..n {
+                            x[i] += step * p[i];
+                        }
+                        stats.iterations = k;
+                        stats.reason = ConvergedReason::DivergedMaxIts;
+                        stats.final_residual = recompute_true_residual_norm(a, b, x, comm, tmp);
+                        return Ok(stats);
+                    }
+                }
+
+                for i in 0..n {
+                    x[i] += alpha * p[i];
+                }
+                for i in 0..n {
+                    r[i] -= alpha * ap[i];
+                }
+                if self.trust_region.is_some() {
+                    xnorm = Self::nrm2(x, comm);
+                }
+
+                if let Some(m) = pc {
+                    m.apply(pc_side, r, z)?;
+                } else {
+                    z.copy_from_slice(r);
+                }
+
+                let rho_new = Self::dot(r, z, comm);
+                if rho_new <= 0.0 || !rho_new.is_finite() {
+                    return Err(KError::IndefinitePreconditioner);
+                }
+
+                let rsq_new = if matches!(self.norm_type, CgNormType::Unpreconditioned) {
+                    Some(Self::dot(r, r, comm))
+                } else {
+                    None
+                };
+
+                let res_reported = match self.norm_type {
+                    CgNormType::Preconditioned | CgNormType::Natural => rho_new.abs().sqrt(),
+                    CgNormType::Unpreconditioned => rsq_new.unwrap().sqrt(),
+                    CgNormType::None => 0.0,
+                };
+
+                if let Some(ms) = monitors {
+                    for m in ms {
+                        m(k, res_reported);
+                    }
+                }
+
+                let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
+                if !matches!(reason, ConvergedReason::Continued) {
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+                    s.final_residual = true_res;
+                    return Ok(s);
+                }
+
+                let beta = rho_new / rho;
+                for i in 0..n {
+                    p[i] = z[i] + beta * p[i];
+                }
+                rho_prev = rho;
+                rho = rho_new;
+                stats.iterations = k;
+                stats.final_residual = res_reported;
+            }
         }
 
         // Max-its reached: recompute true residual and return divergence

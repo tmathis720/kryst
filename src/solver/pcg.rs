@@ -203,82 +203,146 @@ impl PcgSolver {
         for k in 1..=self.conv.max_iters {
             iters = k;
 
-            if self.single_reduction && k > 1 {
+            if self.single_reduction {
+                if k > 1 {
+                    let beta = rho / rho_prev;
+                    for i in 0..n {
+                        p[i] = z_prev[i] + beta * p[i];
+                    }
+                }
+            } else if k > 1 {
                 let beta = rho / rho_prev;
                 for i in 0..n {
-                    p[i] = z_prev[i] + beta * p[i];
+                    p[i] = z[i] + beta * p[i];
                 }
             }
 
             a.matvec(p, w);
 
-            let (pw, rho_k) = if !self.single_reduction {
-                let pw = Self::dot(p, w, comm);
-                (pw, rho)
-            } else if has_pending_rz {
-                let pw_local = Self::local_dot(p, w);
-                let (pw_g, rho_g) = comm.allreduce_sum2(pw_local, pending_rz_local);
-                (pw_g, rho_g)
-            } else {
-                let pw_local = Self::local_dot(p, w);
-                let pw_g = comm.allreduce_sum(pw_local);
-                (pw_g, rho)
-            };
-            if pw <= 0.0 || !pw.is_finite() {
-                let mut tmp = vec![0.0; n];
-                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
-            }
-
-            let alpha = rho_k / pw;
-            for i in 0..n {
-                x[i] += alpha * p[i];
-                r[i] -= alpha * w[i];
-            }
-
-            if let Some(pc) = pc {
-                pc.apply(pc_side, r, z)?;
-            } else {
-                z.copy_from_slice(r);
-            }
-
-            let rz_local_next = Self::local_dot(r, z);
-            if rz_local_next < 0.0 || !rz_local_next.is_finite() {
-                let mut tmp = vec![0.0; n];
-                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
-            }
-            pending_rz_local = rz_local_next;
-            has_pending_rz = true;
-
-            res = match self.norm_type {
-                CgNormType::Preconditioned => rho_k.sqrt(),
-                CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                CgNormType::Natural => rho_k,
-                CgNormType::None => res,
-            };
-
-            if let Some(ms) = monitors {
-                for m in ms {
-                    m(k, res);
+            if self.single_reduction {
+                let (pw, rho_k) = if has_pending_rz {
+                    let pw_local = Self::local_dot(p, w);
+                    let (pw_g, rho_g) = comm.allreduce_sum2(pw_local, pending_rz_local);
+                    (pw_g, rho_g)
+                } else {
+                    let pw_local = Self::local_dot(p, w);
+                    let pw_g = comm.allreduce_sum(pw_local);
+                    (pw_g, rho)
+                };
+                if pw <= 0.0 || !pw.is_finite() {
+                    let mut tmp = vec![0.0; n];
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                    return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
                 }
-            }
 
-            let res_check = match self.norm_type {
-                CgNormType::Preconditioned | CgNormType::Natural => rho_k.sqrt(),
-                CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
-            };
-            let (reason, mut s) = self.conv.check(res_check, bnorm, k);
-            if !matches!(reason, ConvergedReason::Continued) {
-                let mut tmp = vec![0.0; n];
-                let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                s.final_residual = true_res;
-                return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
-            }
+                let alpha = rho_k / pw;
+                for i in 0..n {
+                    x[i] += alpha * p[i];
+                    r[i] -= alpha * w[i];
+                }
 
-            z_prev.swap_with_slice(z);
-            rho_prev = rho;
-            rho = rho_k;
+                if let Some(pc) = pc {
+                    pc.apply(pc_side, r, z)?;
+                } else {
+                    z.copy_from_slice(r);
+                }
+
+                let rz_local_next = Self::local_dot(r, z);
+                if rz_local_next < 0.0 || !rz_local_next.is_finite() {
+                    let mut tmp = vec![0.0; n];
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                    return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                }
+                pending_rz_local = rz_local_next;
+                has_pending_rz = true;
+
+                res = match self.norm_type {
+                    CgNormType::Preconditioned => rho_k.sqrt(),
+                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+                    CgNormType::Natural => rho_k,
+                    CgNormType::None => res,
+                };
+
+                if let Some(ms) = monitors {
+                    for m in ms {
+                        m(k, res);
+                    }
+                }
+
+                let res_check = match self.norm_type {
+                    CgNormType::Preconditioned | CgNormType::Natural => rho_k.sqrt(),
+                    CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+                };
+                let (reason, mut s) = self.conv.check(res_check, bnorm, k);
+                if !matches!(reason, ConvergedReason::Continued) {
+                    let mut tmp = vec![0.0; n];
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                    s.final_residual = true_res;
+                    return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
+                }
+
+                z_prev.swap_with_slice(z);
+                rho_prev = rho;
+                rho = rho_k;
+            } else {
+                let pw = Self::dot(p, w, comm);
+                if pw <= 0.0 || !pw.is_finite() {
+                    let mut tmp = vec![0.0; n];
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                    return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                }
+
+                let alpha = rho / pw;
+                for i in 0..n {
+                    x[i] += alpha * p[i];
+                    r[i] -= alpha * w[i];
+                }
+
+                if let Some(pc) = pc {
+                    pc.apply(pc_side, r, z)?;
+                } else {
+                    z.copy_from_slice(r);
+                }
+
+                let rho_new = Self::dot(r, z, comm);
+                if rho_new < 0.0 || !rho_new.is_finite() {
+                    let mut tmp = vec![0.0; n];
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                    return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                }
+
+                res = match self.norm_type {
+                    CgNormType::Preconditioned => rho_new.sqrt(),
+                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+                    CgNormType::Natural => rho_new,
+                    CgNormType::None => res,
+                };
+
+                if let Some(ms) = monitors {
+                    for m in ms {
+                        m(k, res);
+                    }
+                }
+
+                let res_check = match self.norm_type {
+                    CgNormType::Preconditioned | CgNormType::Natural => rho_new.sqrt(),
+                    CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+                };
+                let (reason, mut s) = self.conv.check(res_check, bnorm, k);
+                if !matches!(reason, ConvergedReason::Continued) {
+                    let mut tmp = vec![0.0; n];
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
+                    s.final_residual = true_res;
+                    return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
+                }
+
+                let beta = rho_new / rho;
+                for i in 0..n {
+                    p[i] = z[i] + beta * p[i];
+                }
+                rho_prev = rho;
+                rho = rho_new;
+            }
         }
 
         let mut tmp = vec![0.0; n];
