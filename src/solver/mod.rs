@@ -8,6 +8,11 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::convergence::SolveStats;
 use std::any::Any;
 
+pub mod api;
+pub use api::Solver;
+pub mod adapters;
+pub use adapters::LegacyDirectAdapter;
+
 /// Object-safe linear solver operating on `f64` slices and [`LinOp`] operators.
 pub trait LinearSolver: Send + Any {
     type Error;
