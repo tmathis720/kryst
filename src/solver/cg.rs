@@ -37,6 +37,7 @@ pub struct CgSolver {
     norm_type: CgNormType,
     single_reduction: bool,
     trust_region: Option<f64>,
+    true_residual_monitor: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
 }
 
 impl CgSolver {
@@ -47,6 +48,7 @@ impl CgSolver {
             norm_type: CgNormType::Preconditioned,
             single_reduction: false,
             trust_region: None,
+            true_residual_monitor: None,
         }
     }
 
@@ -62,6 +64,13 @@ impl CgSolver {
         self.trust_region = Some(r);
         self
     }
+    pub fn with_true_residual_monitor(
+        mut self,
+        m: Box<dyn Fn(usize, f64) + Send + Sync>,
+    ) -> Self {
+        self.true_residual_monitor = Some(m);
+        self
+    }
 
     pub fn set_norm(&mut self, n: CgNormType) {
         self.norm_type = n;
@@ -71,6 +80,12 @@ impl CgSolver {
     }
     pub fn set_trust_region(&mut self, r: f64) {
         self.trust_region = Some(r);
+    }
+    pub fn set_true_residual_monitor(
+        &mut self,
+        m: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
+    ) {
+        self.true_residual_monitor = m;
     }
 
     #[inline]
@@ -224,6 +239,10 @@ impl CgSolver {
                 m(0, res0_reported);
             }
         }
+        if let Some(m) = &self.true_residual_monitor {
+            let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+            m(0, true_res);
+        }
         #[cfg(feature = "logging")]
         trace!("CG initial residual: {:.3e}", res0_reported);
 
@@ -232,14 +251,14 @@ impl CgSolver {
         let mut stats = SolveStats { iterations: 0, final_residual: res0_reported, reason: ConvergedReason::Continued };
 
         // Convergence check at iteration 0 (baseline = res0_reported)
-        let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
-        if !matches!(reason0, ConvergedReason::Continued) {
-            // On early exit, recompute true residual for final reporting
-            let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
-            let mut s = s0;
-            s.final_residual = true_res;
-            return Ok(s);
-        }
+            let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
+            if !matches!(reason0, ConvergedReason::Continued) {
+                // On early exit, recompute true residual for final reporting
+                let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+                let mut s = s0;
+                s.final_residual = true_res;
+                return Ok(s);
+            }
 
         for k in 1..=self.conv.max_iters {
             if k > 1 {
@@ -315,6 +334,10 @@ impl CgSolver {
                 for m in ms {
                     m(k, res_reported);
                 }
+            }
+            if let Some(m) = &self.true_residual_monitor {
+                let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+                m(k, true_res);
             }
 
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
