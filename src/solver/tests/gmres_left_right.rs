@@ -86,7 +86,7 @@ mod tests_gmres_lr {
             assert!(wl.z_mem.is_empty(), "Left GMRES should not populate Z basis");
         }
         if let Some(wr) = ksp_right.debug_workspace() {
-            // Right-preconditioned GMRES uses column-major slabs: q_mem (m+1 cols), z_mem (m cols)
+            // Right-preconditioned GMRES uses column-major slabs: v_mem (m+1 cols), z_mem (m cols)
             // Count how many Z columns were actually populated (non-zero norm)
             let n = wr.tmp1.len();
             let m = if n > 0 { wr.z_mem.len() / n } else { 0 };
