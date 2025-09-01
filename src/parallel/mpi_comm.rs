@@ -34,6 +34,12 @@ pub struct MpiComm {
 unsafe impl Send for MpiComm {}
 unsafe impl Sync for MpiComm {}
 
+impl Default for MpiComm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // --- One-time MPI universe holder ---
 static MPI_UNIVERSE: OnceLock<mpi::environment::Universe> = OnceLock::new();
 
@@ -58,7 +64,7 @@ impl MpiComm {
 
     /// Best-effort constructor that returns `None` if initialization fails.
     pub fn try_new() -> Option<Self> {
-        std::panic::catch_unwind(|| Self::new()).ok()
+        std::panic::catch_unwind(Self::new).ok()
     }
 }
 
@@ -129,7 +135,7 @@ impl super::Comm for MpiComm {
         use mpi::collective::SystemOperation;
         let mut y = x;
         self.world
-            .all_reduce_into(&x, &mut y, &SystemOperation::sum());
+            .all_reduce_into(&x, &mut y, SystemOperation::sum());
         y
     }
 
@@ -143,7 +149,7 @@ impl super::Comm for MpiComm {
         let send = [a, b];
         let mut recv = [0.0f64; 2];
         self.world
-            .all_reduce_into(&send, &mut recv, &SystemOperation::sum());
+            .all_reduce_into(&send, &mut recv, SystemOperation::sum());
         (recv[0], recv[1])
     }
 
@@ -151,7 +157,7 @@ impl super::Comm for MpiComm {
         use mpi::collective::SystemOperation;
         let mut out = vec![0.0f64; v.len()];
         self.world
-            .all_reduce_into(v, &mut out[..], &SystemOperation::sum());
+            .all_reduce_into(v, &mut out[..], SystemOperation::sum());
         v.copy_from_slice(&out);
     }
 
@@ -203,7 +209,7 @@ impl super::Comm for MpiComm {
                 buf.as_mut_ptr() as *mut std::ffi::c_void,
                 count,
                 mpi::ffi::RSMPI_DOUBLE,
-                src as i32,
+                src,
                 0,
                 comm_raw,
                 &mut req,
@@ -222,7 +228,7 @@ impl super::Comm for MpiComm {
                 buf.as_ptr() as *const std::ffi::c_void,
                 count,
                 mpi::ffi::RSMPI_DOUBLE,
-                dest as i32,
+                dest,
                 0,
                 comm_raw,
                 &mut req,
@@ -241,7 +247,7 @@ impl super::Comm for MpiComm {
                 buf.as_mut_ptr() as *mut std::ffi::c_void,
                 count,
                 mpi::ffi::RSMPI_UINT64_T,
-                src as i32,
+                src,
                 0,
                 comm_raw,
                 &mut req,
@@ -260,7 +266,7 @@ impl super::Comm for MpiComm {
                 buf.as_ptr() as *const std::ffi::c_void,
                 count,
                 mpi::ffi::RSMPI_UINT64_T,
-                dest as i32,
+                dest,
                 0,
                 comm_raw,
                 &mut req,
