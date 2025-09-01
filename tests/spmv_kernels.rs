@@ -1,5 +1,6 @@
 #[cfg(feature = "rayon")]
-use kryst::matrix::{spmv, CsrMatrix};
+use kryst::matrix::{format::AsFormat, spmv, sparse::SparseMatrix, CsrMatrix};
+use kryst::LinOp;
 
 #[cfg(feature = "rayon")]
 #[test]

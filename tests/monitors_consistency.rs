@@ -64,6 +64,7 @@ fn monitors_reported_norms_and_final_true_residual() {
 
     // CG (Left) with no PC: monitors fall back to true residual, final is true
     let mut ksp = KspContext::new();
+    ksp.set_tolerances(1e-8, 1e-50, 1e5, 10000);
     ksp.set_type(SolverType::Cg).unwrap();
     ksp.set_pc_type(PcType::None, None).unwrap();
     ksp.pc_side = PcSide::Left;

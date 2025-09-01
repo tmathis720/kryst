@@ -211,10 +211,10 @@ Run your program with PETSc-style options:
 
 ### KSP (Krylov Solver) Options
 - `-ksp_type <solver>` - Solver type: `cg`, `pcg`, `gmres`, `fgmres`, `bicgstab`, `cgs`, `qmr`, `tfqmr`, `minres`, `cgnr`, `preonly`
-- `-ksp_rtol <float>` - Relative convergence tolerance (default: 1e-6)
-- `-ksp_atol <float>` - Absolute convergence tolerance (default: 1e-12)
-- `-ksp_dtol <float>` - Divergence tolerance (default: 1e3)
-- `-ksp_max_it <int>` - Maximum number of iterations (default: 1000)
+- `-ksp_rtol <float>` - Relative convergence tolerance (default: 1e-5)
+- `-ksp_atol <float>` - Absolute convergence tolerance (default: 1e-50)
+- `-ksp_dtol <float>` - Divergence tolerance (default: 1e5)
+- `-ksp_max_it <int>` - Maximum number of iterations (default: 10000)
 - `-ksp_gmres_restart <int>` - GMRES restart parameter (default: 50)
 - `-ksp_pc_side <side>` - Preconditioning side: `left`, `right`, `symmetric`
 

@@ -33,11 +33,11 @@ fn cg_on_spd_converges_with_tight_tol() {
 
     let aop = CsrOp::new(Arc::new(a.clone()));
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Pcg)
+    ksp.set_tolerances(1e-8, 1e-14, 1e6, 2000)
+        .set_type(SolverType::Pcg)
         .unwrap()
         .set_pc_type(PcType::Jacobi, None)
-        .unwrap()
-        .set_tolerances(1e-8, 1e-14, 1e6, 2000);
+        .unwrap();
     ksp.try_set_pc_side(kryst::preconditioner::PcSide::Left).unwrap();
 
     ksp.set_operators(Arc::new(aop), None);

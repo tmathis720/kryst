@@ -154,7 +154,7 @@ impl CgSolver {
 
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
-                "CG/MINRES require Left preconditioning (SPD M)".into(),
+                "CG requires left preconditioning with SPD M; use MINRES or GMRES otherwise".into(),
             ));
         }
 

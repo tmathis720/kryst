@@ -14,10 +14,10 @@
 //! PETSc-style Options:
 //!   -ksp_type <solver>         Solver type (cg, pcg, gmres, bicgstab, cgs, qmr, tfqmr, minres, cgnr, preonly)
 //!   -pc_type <precond>         Preconditioner type (jacobi, ilu0, none, ilu, ilut, ilup, blockjacobi, sor, asm, chebyshev, amg, approxinverse, lu, qr)
-//!   -ksp_rtol <tol>            Relative tolerance [default: 1e-6]
-//!   -ksp_atol <tol>            Absolute tolerance [default: 1e-12]
-//!   -ksp_dtol <tol>            Divergence tolerance [default: 1e3]
-//!   -ksp_max_it <iters>        Maximum iterations [default: 1000]
+//!   -ksp_rtol <tol>            Relative tolerance [default: 1e-5]
+//!   -ksp_atol <tol>            Absolute tolerance [default: 1e-50]
+//!   -ksp_dtol <tol>            Divergence tolerance [default: 1e5]
+//!   -ksp_max_it <iters>        Maximum iterations [default: 10000]
 //!   -ksp_gmres_restart <n>     GMRES restart parameter [default: 50]
 //!   -ksp_pc_side <side>        Preconditioning side (left, right, symmetric) [default: left]
 //!   -matrix <path>             Matrix file path [default: examples/e05r0300/e05r0300.mtx]

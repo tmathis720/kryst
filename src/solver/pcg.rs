@@ -105,7 +105,7 @@ impl PcgSolver {
         let pc: Option<&dyn Preconditioner> = pc.as_deref();
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
-                "CG/MINRES require Left preconditioning (SPD M)".into(),
+                "CG requires left preconditioning with SPD M; use MINRES or GMRES otherwise".into(),
             ));
         }
 
