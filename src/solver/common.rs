@@ -6,18 +6,24 @@ use crate::parallel::{Comm, UniverseComm};
 /// This uses the provided `comm` for the dot-product reduction so it works in
 /// both serial and distributed settings.
 #[inline]
-pub fn recompute_true_residual_norm(
+pub fn recompute_true_residual_norm<C: Comm>(
     a: &dyn LinOp<S = f64>,
     b: &[f64],
     x: &[f64],
-    comm: &UniverseComm,
+    comm: &C,
     tmp: &mut [f64], // length = ncols
 ) -> f64 {
     a.matvec(x, tmp);
+    let mut local = 0.0;
     for i in 0..tmp.len() {
         tmp[i] = b[i] - tmp[i];
+        local += tmp[i] * tmp[i];
     }
-    comm.dot(tmp, tmp).sqrt()
+    if comm.size() == 1 {
+        local.sqrt()
+    } else {
+        comm.allreduce_sum(local).sqrt()
+    }
 }
 
 /// Compute the residual norm used for iteration monitors (the "reported" norm):

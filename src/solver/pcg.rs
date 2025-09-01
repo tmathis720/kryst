@@ -46,12 +46,17 @@ impl PcgSolver {
     }
 
     #[inline]
-    fn dot(u: &[f64], v: &[f64], comm: &UniverseComm) -> f64 {
+    fn dot<C: Comm>(u: &[f64], v: &[f64], comm: &C) -> f64 {
         comm.dot(u, v)
     }
 
     #[inline]
-    fn nrm2(u: &[f64], comm: &UniverseComm) -> f64 {
+    fn local_dot(u: &[f64], v: &[f64]) -> f64 {
+        u.iter().zip(v).map(|(a, b)| a * b).sum::<f64>()
+    }
+
+    #[inline]
+    fn nrm2<C: Comm>(u: &[f64], comm: &C) -> f64 {
         Self::dot(u, u, comm).sqrt()
     }
 
@@ -64,32 +69,34 @@ impl PcgSolver {
     pub fn set_single_reduction(&mut self, f: bool) {
         self.single_reduction = f;
     }
-}
 
-impl LinearSolver for PcgSolver {
-    type Error = KError;
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn setup_workspace(&mut self, work: &mut Workspace) {
-        if work.q.len() < 2 {
-            work.q.resize(2, Vec::new());
-        }
-    }
-
-    fn solve(
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_comm<C: Comm>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
-        comm: &UniverseComm,
+        comm: &C,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
-    ) -> Result<SolveStats<f64>, Self::Error> {
+    ) -> Result<SolveStats<f64>, KError> {
+        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_impl<C: Comm>(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &C,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
         let pc: Option<&dyn Preconditioner> = pc.as_deref();
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
@@ -107,35 +114,37 @@ impl LinearSolver for PcgSolver {
         let mut z_store = Vec::new();
         let mut p_store = Vec::new();
         let mut w_store = Vec::new();
+        let mut zprev_store = Vec::new();
 
-        let r: &mut [f64];
-        let z: &mut [f64];
-        let p: &mut [f64];
-        let w: &mut [f64];
+        let (r, z, p, w, z_prev): (&mut [f64], &mut [f64], &mut [f64], &mut [f64], &mut [f64]);
 
         if let Some(wk) = work {
             Self::take_or_resize(&mut wk.tmp1, n);
             Self::take_or_resize(&mut wk.tmp2, n);
-            while wk.q.len() < 2 {
+            while wk.q.len() < 3 {
                 wk.q.push(vec![0.0; n]);
             }
-            for v in &mut wk.q[0..2] {
+            for v in &mut wk.q[0..3] {
                 Self::take_or_resize(v, n);
             }
             r = wk.tmp1.as_mut_slice();
             z = wk.tmp2.as_mut_slice();
-            let (pbuf, wbuf) = wk.q.split_at_mut(1);
+            let (pbuf, rest) = wk.q.split_at_mut(1);
+            let (wbuf, rest2) = rest.split_at_mut(1);
             p = pbuf[0].as_mut_slice();
             w = wbuf[0].as_mut_slice();
+            z_prev = rest2[0].as_mut_slice();
         } else {
             r_store.resize(n, 0.0);
             z_store.resize(n, 0.0);
             p_store.resize(n, 0.0);
             w_store.resize(n, 0.0);
+            zprev_store.resize(n, 0.0);
             r = r_store.as_mut_slice();
             z = z_store.as_mut_slice();
             p = p_store.as_mut_slice();
             w = w_store.as_mut_slice();
+            z_prev = zprev_store.as_mut_slice();
         }
 
         // r = b - A x
@@ -157,14 +166,18 @@ impl LinearSolver for PcgSolver {
             z.copy_from_slice(r);
         }
 
+        let bnorm = Self::nrm2(b, comm).max(1e-32);
+        let mut rho = Self::dot(r, z, comm);
+        let mut rho_prev = rho;
+        let mut pending_rz_local = 0.0f64;
+        let mut has_pending_rz = false;
+
         let mut res = match self.norm_type {
-            CgNormType::Preconditioned => Self::dot(r, z, comm).sqrt(),
+            CgNormType::Preconditioned => rho.sqrt(),
             CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-            CgNormType::Natural => Self::dot(r, z, comm),
+            CgNormType::Natural => rho,
             CgNormType::None => 0.0,
         };
-        // Use ||b|| as the reference norm for relative tolerances
-        let bnorm = Self::nrm2(b, comm).max(1e-32);
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -173,36 +186,51 @@ impl LinearSolver for PcgSolver {
         }
 
         p.copy_from_slice(z);
-        let mut rz = Self::dot(r, z, comm);
 
-        // Residual norm used for convergence checks (ensure units are ||.||_2)
+        // Convergence check at k=0
         let res_check0 = match self.norm_type {
-            CgNormType::Preconditioned | CgNormType::Natural => rz.sqrt(),
+            CgNormType::Preconditioned | CgNormType::Natural => rho.sqrt(),
             CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
         };
-
-        // Standard convergence policy at k=0 against ||b||
         let (reason0, s0) = self.conv.check(res_check0, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            // On early exit, final residual should be true residual
             let mut tmp = vec![0.0; n];
             let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
             return Ok(SolveStats { iterations: 0, final_residual: true_res, reason: s0.reason });
         }
 
         let mut iters = 0usize;
-        for k in 0..self.conv.max_iters {
-            iters = k + 1;
+        for k in 1..=self.conv.max_iters {
+            iters = k;
+
+            if self.single_reduction && k > 1 {
+                let beta = rho / rho_prev;
+                for i in 0..n {
+                    p[i] = z_prev[i] + beta * p[i];
+                }
+            }
 
             a.matvec(p, w);
-            let pw = Self::dot(p, w, comm);
+
+            let (pw, rho_k) = if !self.single_reduction {
+                let pw = Self::dot(p, w, comm);
+                (pw, rho)
+            } else if has_pending_rz {
+                let pw_local = Self::local_dot(p, w);
+                let (pw_g, rho_g) = comm.allreduce_sum2(pw_local, pending_rz_local);
+                (pw_g, rho_g)
+            } else {
+                let pw_local = Self::local_dot(p, w);
+                let pw_g = comm.allreduce_sum(pw_local);
+                (pw_g, rho)
+            };
             if pw <= 0.0 || !pw.is_finite() {
                 let mut tmp = vec![0.0; n];
                 let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
             }
-            let alpha = rz / pw;
 
+            let alpha = rho_k / pw;
             for i in 0..n {
                 x[i] += alpha * p[i];
                 r[i] -= alpha * w[i];
@@ -214,50 +242,75 @@ impl LinearSolver for PcgSolver {
                 z.copy_from_slice(r);
             }
 
-            let rz_new = Self::dot(r, z, comm);
-            if rz_new < 0.0 || !rz_new.is_finite() {
+            let rz_local_next = Self::local_dot(r, z);
+            if rz_local_next < 0.0 || !rz_local_next.is_finite() {
                 let mut tmp = vec![0.0; n];
                 let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                return Ok(SolveStats { iterations: k + 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
             }
+            pending_rz_local = rz_local_next;
+            has_pending_rz = true;
 
             res = match self.norm_type {
-                CgNormType::Preconditioned => rz_new.sqrt(),
+                CgNormType::Preconditioned => rho_k.sqrt(),
                 CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                CgNormType::Natural => rz_new,
+                CgNormType::Natural => rho_k,
                 CgNormType::None => res,
             };
 
             if let Some(ms) = monitors {
                 for m in ms {
-                    m(k + 1, res);
+                    m(k, res);
                 }
             }
 
-            // Convergence/divergence check vs ||b|| (use 2-norm units)
             let res_check = match self.norm_type {
-                CgNormType::Preconditioned | CgNormType::Natural => rz_new.sqrt(),
+                CgNormType::Preconditioned | CgNormType::Natural => rho_k.sqrt(),
                 CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
             };
-            let (reason, mut s) = self.conv.check(res_check, bnorm, k + 1);
+            let (reason, mut s) = self.conv.check(res_check, bnorm, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                // Recompute true residual for final reporting
                 let mut tmp = vec![0.0; n];
                 let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
                 s.final_residual = true_res;
-                return Ok(SolveStats { iterations: k + 1, final_residual: s.final_residual, reason: s.reason });
+                return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
             }
 
-            let beta = rz_new / rz;
-            for i in 0..n {
-                p[i] = z[i] + beta * p[i];
-            }
-            rz = rz_new;
+            z_prev.swap_with_slice(z);
+            rho_prev = rho;
+            rho = rho_k;
         }
 
-        // Max-its reached: compute true residual
         let mut tmp = vec![0.0; n];
         let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
         Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
+    }
+}
+
+impl LinearSolver for PcgSolver {
+    type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        if work.q.len() < 3 {
+            work.q.resize(3, Vec::new());
+        }
+    }
+
+    fn solve(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
+        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
     }
 }
