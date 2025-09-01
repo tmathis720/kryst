@@ -40,13 +40,19 @@ unsafe fn fallback_lane_dot(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
     acc
 }
 
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2")))]
+#[cfg(not(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "avx2"
+)))]
 #[inline]
 unsafe fn lane_dot_gather_unchecked(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
     unsafe { fallback_lane_dot(vals, cols, x) }
 }
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "avx2"
+))]
 #[inline]
 unsafe fn lane_dot_gather_unchecked(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
     // placeholder for AVX2 gather implementation
@@ -60,11 +66,7 @@ pub enum TBackend<'a> {
 }
 
 #[cfg(feature = "rayon")]
-fn t_spmv_csr_parallel_csc(
-    csc: &CscMatrix<f64>,
-    x: &[f64],
-    y: &mut [f64],
-) -> Result<(), KError> {
+fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
     if x.len() != csc.nrows() || y.len() != csc.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -84,11 +86,7 @@ fn t_spmv_csr_parallel_csc(
 }
 
 #[cfg(not(feature = "rayon"))]
-fn t_spmv_csr_parallel_csc(
-    csc: &CscMatrix<f64>,
-    x: &[f64],
-    y: &mut [f64],
-) -> Result<(), KError> {
+fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
     if x.len() != csc.nrows() || y.len() != csc.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -97,11 +95,7 @@ fn t_spmv_csr_parallel_csc(
 }
 
 #[cfg(feature = "rayon")]
-fn t_spmv_csr_parallel_gather(
-    a: &CsrMatrix<f64>,
-    x: &[f64],
-    y: &mut [f64],
-) -> Result<(), KError> {
+fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
     let (m, n) = (a.nrows(), a.ncols());
     if x.len() != m || y.len() != n {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
@@ -143,11 +137,7 @@ fn t_spmv_csr_parallel_gather(
 }
 
 #[cfg(not(feature = "rayon"))]
-fn t_spmv_csr_parallel_gather(
-    a: &CsrMatrix<f64>,
-    x: &[f64],
-    y: &mut [f64],
-) -> Result<(), KError> {
+fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
     if x.len() != a.nrows() || y.len() != a.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -201,9 +191,10 @@ pub fn spmm_csr_block(
     let cj = a.col_idx();
     let vv = a.values();
 
+    let mut acc = vec![0.0f64; s];
     for i in 0..m {
+        acc.fill(0.0);
         let (rs, re) = (rp[i], rp[i + 1]);
-        let mut acc = vec![0.0f64; s];
         for p in rs..re {
             let j = cj[p];
             let aij = vv[p];
@@ -217,3 +208,6 @@ pub fn spmm_csr_block(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
