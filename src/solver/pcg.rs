@@ -25,6 +25,7 @@ pub struct PcgSolver {
     pub(crate) conv: Convergence<f64>,
     norm_type: CgNormType,
     single_reduction: bool,
+    reproducible: bool,
     /// Whether the initial guess in `x` should be treated as nonzero.
     ///
     /// PETSc zeroes the initial guess by default unless told otherwise via
@@ -45,6 +46,7 @@ impl PcgSolver {
             },
             norm_type: CgNormType::Preconditioned,
             single_reduction: false,
+            reproducible: false,
             initial_guess_nonzero: false,
         }
     }
@@ -67,6 +69,14 @@ impl PcgSolver {
         self
     }
 
+    /// Enable a more reproducible (but slightly slower) local dot product using
+    /// Kahan summation. When combined with a deterministic MPI reduction this
+    /// yields bitwise-identical results across runs.
+    pub fn with_reproducible_dot(mut self, f: bool) -> Self {
+        self.reproducible = f;
+        self
+    }
+
     /// Indicate whether the supplied initial guess is nonzero.
     ///
     /// By default `x` is assumed to be zero, which avoids an extra matvec on
@@ -82,9 +92,23 @@ impl PcgSolver {
         self.initial_guess_nonzero = f;
     }
 
+    /// Toggle reproducible local dot products after construction.
+    pub fn set_reproducible_dot(&mut self, f: bool) {
+        self.reproducible = f;
+    }
+
     #[inline]
-    fn dot<C: Comm>(u: &[f64], v: &[f64], comm: &C) -> f64 {
-        comm.dot(u, v)
+    fn dot<C: Comm>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
+        if self.reproducible {
+            let local = Self::local_dot_kahan(u, v);
+            if comm.size() == 1 {
+                local
+            } else {
+                comm.allreduce_sum(local)
+            }
+        } else {
+            comm.dot(u, v)
+        }
     }
 
     #[inline]
@@ -93,8 +117,21 @@ impl PcgSolver {
     }
 
     #[inline]
-    fn nrm2<C: Comm>(u: &[f64], comm: &C) -> f64 {
-        Self::dot(u, u, comm).sqrt()
+    fn local_dot_kahan(u: &[f64], v: &[f64]) -> f64 {
+        let mut sum = 0.0f64;
+        let mut c = 0.0f64;
+        for (a, b) in u.iter().zip(v.iter()) {
+            let y = a * b - c;
+            let t = sum + y;
+            c = (t - sum) - y;
+            sum = t;
+        }
+        sum
+    }
+
+    #[inline]
+    fn nrm2<C: Comm>(&self, u: &[f64], comm: &C) -> f64 {
+        self.dot(u, u, comm).sqrt()
     }
 
     fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
@@ -203,16 +240,16 @@ impl PcgSolver {
             z.copy_from_slice(r);
         }
 
-        let bnorm = Self::nrm2(b, comm).max(1e-32);
-        let mut rho = Self::dot(r, z, comm);
+        let bnorm = self.nrm2(b, comm).max(1e-32);
+        let mut rho = self.dot(r, z, comm);
         let mut rho_prev = rho;
         let mut pending_rz_local = 0.0f64;
         let mut has_pending_rz = false;
 
         let mut res = match self.norm_type {
             CgNormType::Preconditioned => rho.sqrt(),
-            CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-            CgNormType::Natural => Self::nrm2(z, comm),
+            CgNormType::Unpreconditioned => self.nrm2(r, comm),
+            CgNormType::Natural => self.nrm2(z, comm),
             CgNormType::None => 0.0,
         };
 
@@ -227,9 +264,9 @@ impl PcgSolver {
         // Convergence check at k=0
         let res_check0 = match self.norm_type {
             CgNormType::Preconditioned => rho.sqrt(),
-            CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-            CgNormType::Natural => Self::nrm2(z, comm),
-            CgNormType::None => Self::nrm2(r, comm),
+            CgNormType::Unpreconditioned => self.nrm2(r, comm),
+            CgNormType::Natural => self.nrm2(z, comm),
+            CgNormType::None => self.nrm2(r, comm),
         };
         let (reason0, s0) = self.conv.check(res_check0, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
@@ -264,11 +301,19 @@ impl PcgSolver {
 
             if self.single_reduction {
                 let (pw, rho_k) = if has_pending_rz {
-                    let pw_local = Self::local_dot(p, w);
+                    let pw_local = if self.reproducible {
+                        Self::local_dot_kahan(p, w)
+                    } else {
+                        Self::local_dot(p, w)
+                    };
                     let (pw_g, rho_g) = comm.allreduce_sum2(pw_local, pending_rz_local);
                     (pw_g, rho_g)
                 } else {
-                    let pw_local = Self::local_dot(p, w);
+                    let pw_local = if self.reproducible {
+                        Self::local_dot_kahan(p, w)
+                    } else {
+                        Self::local_dot(p, w)
+                    };
                     let pw_g = comm.allreduce_sum(pw_local);
                     (pw_g, rho)
                 };
@@ -294,7 +339,11 @@ impl PcgSolver {
                     z.copy_from_slice(r);
                 }
 
-                let rz_local_next = Self::local_dot(r, z);
+                let rz_local_next = if self.reproducible {
+                    Self::local_dot_kahan(r, z)
+                } else {
+                    Self::local_dot(r, z)
+                };
                 if rz_local_next < 0.0 || !rz_local_next.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
@@ -309,8 +358,8 @@ impl PcgSolver {
 
                 res = match self.norm_type {
                     CgNormType::Preconditioned => rho_k.sqrt(),
-                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                    CgNormType::Natural => Self::nrm2(z, comm),
+                    CgNormType::Unpreconditioned => self.nrm2(r, comm),
+                    CgNormType::Natural => self.nrm2(z, comm),
                     CgNormType::None => res,
                 };
 
@@ -322,9 +371,9 @@ impl PcgSolver {
 
                 let res_check = match self.norm_type {
                     CgNormType::Preconditioned => rho_k.sqrt(),
-                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                    CgNormType::Natural => Self::nrm2(z, comm),
-                    CgNormType::None => Self::nrm2(r, comm),
+                    CgNormType::Unpreconditioned => self.nrm2(r, comm),
+                    CgNormType::Natural => self.nrm2(z, comm),
+                    CgNormType::None => self.nrm2(r, comm),
                 };
                 let (reason, mut s) = self.conv.check(res_check, bnorm, k);
                 if !matches!(reason, ConvergedReason::Continued) {
@@ -342,7 +391,7 @@ impl PcgSolver {
                 rho_prev = rho;
                 rho = rho_k;
             } else {
-                let pw = Self::dot(p, w, comm);
+                let pw = self.dot(p, w, comm);
                 if pw <= 0.0 || !pw.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
@@ -365,7 +414,7 @@ impl PcgSolver {
                     z.copy_from_slice(r);
                 }
 
-                let rho_new = Self::dot(r, z, comm);
+                let rho_new = self.dot(r, z, comm);
                 if rho_new < 0.0 || !rho_new.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
@@ -378,8 +427,8 @@ impl PcgSolver {
 
                 res = match self.norm_type {
                     CgNormType::Preconditioned => rho_new.sqrt(),
-                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                    CgNormType::Natural => Self::nrm2(z, comm),
+                    CgNormType::Unpreconditioned => self.nrm2(r, comm),
+                    CgNormType::Natural => self.nrm2(z, comm),
                     CgNormType::None => res,
                 };
 
@@ -391,9 +440,9 @@ impl PcgSolver {
 
                 let res_check = match self.norm_type {
                     CgNormType::Preconditioned => rho_new.sqrt(),
-                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                    CgNormType::Natural => Self::nrm2(z, comm),
-                    CgNormType::None => Self::nrm2(r, comm),
+                    CgNormType::Unpreconditioned => self.nrm2(r, comm),
+                    CgNormType::Natural => self.nrm2(z, comm),
+                    CgNormType::None => self.nrm2(r, comm),
                 };
                 let (reason, mut s) = self.conv.check(res_check, bnorm, k);
                 if !matches!(reason, ConvergedReason::Continued) {
