@@ -929,7 +929,7 @@ mod tests {
     use super::*;
     use crate::context::pc_context::PcType;
     use crate::preconditioner::PcSide;
-    use crate::matrix::op::{DenseOp, wrap_with_comm};
+    use crate::matrix::op::DenseOp;
     use faer::Mat;
     use std::sync::Arc;
 

@@ -1,5 +1,5 @@
 use crate::error::KError;
-use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
+use crate::matrix::{csc::CscMatrix, op::LinOp, sparse::CsrMatrix};
 
 /// y = A * x using CSR; parallel when `rayon` is enabled.
 #[cfg(feature = "rayon")]
@@ -27,6 +27,7 @@ pub fn spmv_csr_parallel(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result
     a.spmv_scaled(1.0, x, 0.0, y)
 }
 
+#[cfg(feature = "rayon")]
 #[inline]
 unsafe fn fallback_lane_dot(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
     debug_assert_eq!(vals.len(), cols.len());
@@ -40,6 +41,7 @@ unsafe fn fallback_lane_dot(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
     acc
 }
 
+#[cfg(feature = "rayon")]
 #[cfg(not(all(
     any(target_arch = "x86", target_arch = "x86_64"),
     target_feature = "avx2"
@@ -49,6 +51,7 @@ unsafe fn lane_dot_gather_unchecked(vals: &[f64], cols: &[usize], x: &[f64]) -> 
     unsafe { fallback_lane_dot(vals, cols, x) }
 }
 
+#[cfg(feature = "rayon")]
 #[cfg(all(
     any(target_arch = "x86", target_arch = "x86_64"),
     target_feature = "avx2"

@@ -1,3 +1,4 @@
+#[cfg(feature = "mpi")]
 use std::sync::Arc;
 
 use kryst::LinOp;

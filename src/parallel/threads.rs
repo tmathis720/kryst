@@ -27,6 +27,7 @@
 //!
 //! // Under MPI (e.g., 4 ranks), each rank gets floor(32/4) = 8 threads.
 //! ```
+#[cfg(feature = "rayon")]
 use std::sync::OnceLock;
 
 #[cfg(feature = "rayon")]
@@ -45,6 +46,7 @@ pub fn env_usize(key: &str, default: usize) -> usize {
 }
 
 /// One-time computed number of Rayon worker threads we actually use.
+#[cfg(feature = "rayon")]
 static EFFECTIVE_THREADS: OnceLock<usize> = OnceLock::new();
 
 /// Decide and initialize the global Rayon thread pool exactly once.
