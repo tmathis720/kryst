@@ -67,20 +67,8 @@ impl FgmresSolver {
         });
     }
 
-    fn apply_givens(hij: &mut f64, hij1: &mut f64, c: f64, s: f64) {
-        let t = c * (*hij) + s * (*hij1);
-        *hij1 = -s * (*hij) + c * (*hij1);
-        *hij = t;
-    }
-
-    fn givens(a: f64, b: f64) -> (f64, f64) {
-        if b == 0.0 {
-            (1.0, 0.0)
-        } else {
-            let r = (a * a + b * b).sqrt();
-            (a / r, b / r)
-        }
-    }
+    // legacy helpers for in-place Givens rotations removed; Workspace now handles
+    // orthogonalization and updating of the Hessenberg system.
 
     pub fn solve_flexible(
         &mut self,
@@ -131,7 +119,7 @@ impl FgmresSolver {
             for i in 0..n {
                 ws.tmp2[i] = ws.tmp1[i] / beta0;
             }
-            ws.v_col(0).copy_from_slice(&ws.tmp2[..n]);
+            ws.copy_tmp2_into_vcol(0);
         } else {
             ws.v_col(0).fill(0.0);
         }
@@ -177,8 +165,7 @@ impl FgmresSolver {
 
             for j in 0..m_this {
                 {
-                    let vj = &ws.v_mem[j * n..(j + 1) * n];
-                    let zj = ws.z_col(j);
+                    let (vj, zj) = ws.v_and_z_mut(j);
                     if let Some(pc_) = pc.as_deref_mut() {
                         pc_.apply_mut(pc_side, vj, zj)?;
                     } else {
@@ -186,28 +173,36 @@ impl FgmresSolver {
                     }
                 }
                 {
-                    let zj = &ws.z_mem[j * n..(j + 1) * n];
-                    a.matvec(zj, &mut ws.tmp2);
+                    let (zj, tmp2) = ws.z_and_tmp2_mut(j);
+                    a.matvec(zj, tmp2);
                 }
 
                 for i in 0..=j {
-                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                    let hij = Self::dot(&ws.tmp2, vi, comm);
+                    let hij = {
+                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                        let hij = Self::dot(&ws.tmp2, vi, comm);
+                        for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
+                            *w_i -= hij * vi_val;
+                        }
+                        hij
+                    };
                     *ws.h_at_mut(i, j) = hij;
-                    for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
-                        *w_i -= hij * vi_val;
-                    }
                 }
 
                 if matches!(self.orthog, Orthog::Modified) {
                     for i in 0..=j {
-                        let vi = &ws.v_mem[i * n..(i + 1) * n];
-                        let corr = Self::dot(&ws.tmp2, vi, comm);
+                        let corr = {
+                            let vi = &ws.v_mem[i * n..(i + 1) * n];
+                            let corr = Self::dot(&ws.tmp2, vi, comm);
+                            if corr.abs() > 1e-12 {
+                                for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
+                                    *w_i -= corr * vi_val;
+                                }
+                            }
+                            corr
+                        };
                         if corr.abs() > 1e-12 {
                             *ws.h_at_mut(i, j) += corr;
-                            for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
-                                *w_i -= corr * vi_val;
-                            }
                         }
                     }
                 }
@@ -215,36 +210,17 @@ impl FgmresSolver {
                 let hij1 = Self::nrm2(&ws.tmp2, comm);
                 *ws.h_at_mut(j + 1, j) = hij1;
 
-                let vnext = ws.v_col(j + 1);
                 if hij1 > 0.0 {
                     for i in 0..n {
                         ws.tmp2[i] /= hij1;
                     }
-                    vnext.copy_from_slice(&ws.tmp2[..n]);
+                    ws.copy_tmp2_into_vcol(j + 1);
                 } else {
-                    vnext.fill(0.0);
+                    ws.v_col(j + 1).fill(0.0);
                 }
 
-                for i in 0..j {
-                    let hij = ws.h_at_mut(i, j);
-                    let hij1 = ws.h_at_mut(i + 1, j);
-                    Self::apply_givens(hij, hij1, ws.cs[i], ws.sn[i]);
-                }
-                let (c, s) = {
-                    let hjj = ws.h_at(j, j);
-                    let hj1j = ws.h_at(j + 1, j);
-                    Self::givens(hjj, hj1j)
-                };
-                ws.cs[j] = c;
-                ws.sn[j] = s;
-                {
-                    let hjj = ws.h_at_mut(j, j);
-                    let hj1j = ws.h_at_mut(j + 1, j);
-                    Self::apply_givens(hjj, hj1j, c, s);
-                }
-                let t = c * ws.g[j] + s * ws.g[j + 1];
-                ws.g[j + 1] = -s * ws.g[j] + c * ws.g[j + 1];
-                ws.g[j] = t;
+                ws.apply_prev_givens_to_col(j, j);
+                ws.apply_final_givens_and_update_g(j);
 
                 res = ws.g[j + 1].abs();
                 total_iters += 1;
@@ -321,7 +297,7 @@ impl FgmresSolver {
                 for i in 0..n {
                     ws.tmp2[i] = ws.tmp1[i] / beta0;
                 }
-                ws.v_col(0).copy_from_slice(&ws.tmp2[..n]);
+                ws.copy_tmp2_into_vcol(0);
             } else {
                 ws.v_col(0).fill(0.0);
             }
