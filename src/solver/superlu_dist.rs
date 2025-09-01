@@ -2692,89 +2692,16 @@ impl RefinementEngine {
     /// Compute norm of residual vector (distributed) (static version)
     /// Compute residual norm with proper MPI reduction for distributed matrices
     fn compute_residual_norm_static(residual: &[f64], comm: &UniverseComm) -> Result<f64, KError> {
-        use crate::parallel::UniverseComm::*;
-
-        // Compute local contribution to norm squared
         let local_norm_sq: f64 = residual.iter().map(|x| x * x).sum();
-
-        match comm {
-            NoComm(_) => {
-                // Serial case - just return local norm
-                Ok(local_norm_sq.sqrt())
-            }
-            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => Ok(local_norm_sq.sqrt()),
-            #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(_mpi_comm) => {
-                // Parallel case - need to sum across all processes
-                // TODO: Replace with actual MPI_Allreduce when rsmpi integration is available
-                // For now, simulate the behavior
-
-                #[cfg(feature = "logging")]
-                log::debug!(
-                    "Computing distributed residual norm, local contribution: {}",
-                    local_norm_sq.sqrt()
-                );
-
-                // In a real implementation, this would be:
-                // let mut global_norm_sq = 0.0;
-                // mpi_comm.all_reduce_into(&local_norm_sq, &mut global_norm_sq, MPI_SUM)?;
-                // Ok(global_norm_sq.sqrt())
-
-                // For now, return local norm with warning
-                #[cfg(feature = "logging")]
-                log::warn!("MPI reduction not implemented - using local residual norm only");
-
-                Ok(local_norm_sq.sqrt())
-            }
-            #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_rayon_comm) => {
-                // Rayon parallel case - return local norm (no reduction needed for shared memory)
-                #[cfg(feature = "logging")]
-                log::debug!(
-                    "Computing residual norm in Rayon context: {}",
-                    local_norm_sq.sqrt()
-                );
-
-                Ok(local_norm_sq.sqrt())
-            }
-        }
+        let global_norm_sq = comm.all_reduce_f64(local_norm_sq);
+        Ok(global_norm_sq.sqrt())
     }
 
     /// Compute norm of a vector with proper MPI reduction for distributed vectors
     fn compute_vector_norm_static(vector: &[f64], comm: &UniverseComm) -> Result<f64, KError> {
-        use crate::parallel::UniverseComm::*;
-
         let local_norm_sq: f64 = vector.iter().map(|x| x * x).sum();
-
-        match comm {
-            NoComm(_) => Ok(local_norm_sq.sqrt()),
-            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => Ok(local_norm_sq.sqrt()),
-            #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(_mpi_comm) => {
-                // In real implementation:
-                // let mut global_norm_sq = 0.0;
-                // mpi_comm.all_reduce_into(&local_norm_sq, &mut global_norm_sq, MPI_SUM)?;
-                // Ok(global_norm_sq.sqrt())
-
-                #[cfg(feature = "logging")]
-                log::warn!("MPI reduction not implemented - using local vector norm only");
-
-                Ok(local_norm_sq.sqrt())
-            }
-            #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_rayon_comm) => {
-                // Rayon parallel case - return local norm (no reduction needed for shared memory)
-                #[cfg(feature = "logging")]
-                log::debug!(
-                    "Computing vector norm in Rayon context: {}",
-                    local_norm_sq.sqrt()
-                );
-
-                Ok(local_norm_sq.sqrt())
-            }
-        }
+        let global_norm_sq = comm.all_reduce_f64(local_norm_sq);
+        Ok(global_norm_sq.sqrt())
     }
 
     /// Check convergence criteria
