@@ -1,9 +1,9 @@
-use crate::parallel::{Comm, NoComm, UniverseComm};
 use crate::error::KError;
+use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StructureId(pub u64);
@@ -106,7 +106,11 @@ impl DenseOp {
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
-        Self { mat, ids, comm: UniverseComm::NoComm(NoComm) }
+        Self {
+            mat,
+            ids,
+            comm: UniverseComm::NoComm(NoComm),
+        }
     }
     /// Attach a communicator to this operator.
     pub fn with_comm(mut self, comm: UniverseComm) -> Self {
@@ -290,7 +294,7 @@ impl LinOp for CsrOp {
     fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
         #[cfg(feature = "transpose-cache")]
         {
-            if let Some(csc) = self.ensure_csc_for_t() {
+            if let Some(csc) = self.ensure_csc_view() {
                 let _ = crate::matrix::spmv::t_spmv_csr_parallel(
                     self.csr.as_ref(),
                     crate::matrix::spmv::TBackend::Csc(&csc),
@@ -323,7 +327,7 @@ impl LinOp for CsrOp {
 
 #[cfg(feature = "transpose-cache")]
 impl CsrOp {
-    fn ensure_csc_for_t(&self) -> Option<Arc<CscMatrix<f64>>> {
+    pub fn ensure_csc_view(&self) -> Option<Arc<CscMatrix<f64>>> {
         use crate::matrix::format::AsFormat;
         let vid = self.values_id();
         {
