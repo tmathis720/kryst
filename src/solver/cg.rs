@@ -73,6 +73,10 @@ impl CgSolver {
         comm.dot(u, v)
     }
     #[inline]
+    fn local_dot(u: &[f64], v: &[f64]) -> f64 {
+        u.iter().zip(v).map(|(a, b)| a * b).sum::<f64>()
+    }
+    #[inline]
     fn nrm2(u: &[f64], comm: &UniverseComm) -> f64 {
         Self::dot(u, u, comm).sqrt()
     }
@@ -92,10 +96,12 @@ impl CgSolver {
         &'a mut [f64],
         &'a mut [f64],
         &'a mut [f64],
+        &'a mut [f64],
     ) {
         while work.q.len() < 4 { work.q.push(Vec::new()); }
         for v in &mut work.q[0..4] { Self::take_or_resize(v, n); }
         Self::take_or_resize(&mut work.tmp1, n);
+        Self::take_or_resize(&mut work.tmp2, n);
         let (r_slice, rest) = work.q.split_at_mut(1);
         let (z_slice, rest) = rest.split_at_mut(1);
         let (p_slice, rest) = rest.split_at_mut(1);
@@ -105,7 +111,8 @@ impl CgSolver {
         let p = &mut p_slice[0][..];
         let ap = &mut ap_slice[0][..];
         let tmp = &mut work.tmp1[..];
-        (r, z, p, ap, tmp)
+        let z_prev = &mut work.tmp2[..];
+        (r, z, p, ap, tmp, z_prev)
     }
 }
 
@@ -163,7 +170,7 @@ impl LinearSolver for CgSolver {
             });
         }
 
-        let (r, z, p, ap, tmp) = Self::acquire(n, work);
+        let (r, z, p, ap, tmp, z_prev) = Self::acquire(n, work);
 
         if x.iter().any(|&xi| xi != 0.0) {
             a.matvec(x, tmp);
@@ -181,6 +188,9 @@ impl LinearSolver for CgSolver {
         }
 
         let mut rho = Self::dot(r, z, comm);
+        let mut rho_prev = rho;
+        let mut pending_rz_local = 0.0f64;
+        let mut has_pending_rz = false;
         if rho <= 0.0 || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
