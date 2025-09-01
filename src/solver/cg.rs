@@ -21,9 +21,15 @@ use log::trace;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CgNormType {
+    /// Monitor the preconditioned residual `sqrt(rᵀz)` (default for left PCG)
     Preconditioned,
+    /// Monitor the unpreconditioned residual `||r||₂`
     Unpreconditioned,
+    /// Monitor the "natural" norm induced by the operator.  For SPD systems
+    /// with left preconditioning this is also `sqrt(rᵀz)` and is provided for
+    /// PETSc parity.
     Natural,
+    /// Do not compute or report a residual norm
     None,
 }
 
@@ -37,7 +43,7 @@ pub struct CgSolver {
 impl CgSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
         Self {
-            conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits },
+            conv: Convergence { rtol, atol: 1e-50, dtol: 1e5, max_iters: maxits },
             // Default monitors use preconditioned norm per policy
             norm_type: CgNormType::Preconditioned,
             single_reduction: false,
@@ -276,7 +282,7 @@ impl CgSolver {
                             x[i] += step * p[i];
                         }
                         stats.iterations = k;
-                        stats.reason = ConvergedReason::DivergedMaxIts;
+                        stats.reason = ConvergedReason::ConvergedTrustRegion;
                         stats.final_residual = recompute_true_residual_norm(a, b, x, comm, tmp);
                         return Ok(stats);
                     }
@@ -351,7 +357,7 @@ impl CgSolver {
                             x[i] += step * p[i];
                         }
                         stats.iterations = k;
-                        stats.reason = ConvergedReason::DivergedMaxIts;
+                        stats.reason = ConvergedReason::ConvergedTrustRegion;
                         stats.final_residual = recompute_true_residual_norm(a, b, x, comm, tmp);
                         return Ok(stats);
                     }

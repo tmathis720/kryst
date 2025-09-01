@@ -10,9 +10,14 @@ use std::any::Any;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CgNormType {
+    /// Monitor the preconditioned residual `sqrt(rᵀz)` (default)
     Preconditioned,
+    /// Monitor the unpreconditioned residual `||r||₂`
     Unpreconditioned,
+    /// Monitor the natural norm induced by the operator (also `sqrt(rᵀz)` for
+    /// SPD systems). Included for compatibility with PETSc semantics.
     Natural,
+    /// Do not compute or report a residual norm
     None,
 }
 
@@ -24,7 +29,7 @@ pub struct PcgSolver {
 
 impl PcgSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits }, norm_type: CgNormType::Preconditioned, single_reduction: false }
+        Self { conv: Convergence { rtol, atol: 1e-50, dtol: 1e5, max_iters: maxits }, norm_type: CgNormType::Preconditioned, single_reduction: false }
     }
 
     /// Optional runtime update of solver tolerances

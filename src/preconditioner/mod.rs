@@ -99,6 +99,14 @@ impl PcReusePolicy {
 /// implementations that are true direct methods should override it. The default
 /// implementation returns a clear [`KError`], so existing preconditioners
 /// continue to work unchanged.
+///
+/// # SPD contract
+///
+/// Solvers such as Conjugate Gradient and MINRES **require** that left
+/// preconditioners behave like a symmetric positive definite operator so that
+/// `z = M^{-1} r` preserves symmetry.  These solvers check `rᵀz > 0` at runtime
+/// and may return [`KError::IndefinitePreconditioner`] if the contract is
+/// violated.
 pub trait Preconditioner: Send + Sync {
     /// Build any factorization/hierarchy once from the system matrix.
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
