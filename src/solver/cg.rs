@@ -69,7 +69,7 @@ impl CgSolver {
     }
 
     #[inline]
-    fn dot(u: &[f64], v: &[f64], comm: &UniverseComm) -> f64 {
+    fn dot<C: Comm>(u: &[f64], v: &[f64], comm: &C) -> f64 {
         comm.dot(u, v)
     }
     #[inline]
@@ -77,7 +77,7 @@ impl CgSolver {
         u.iter().zip(v).map(|(a, b)| a * b).sum::<f64>()
     }
     #[inline]
-    fn nrm2(u: &[f64], comm: &UniverseComm) -> f64 {
+    fn nrm2<C: Comm>(u: &[f64], comm: &C) -> f64 {
         Self::dot(u, u, comm).sqrt()
     }
 
@@ -114,33 +114,34 @@ impl CgSolver {
         let z_prev = &mut work.tmp2[..];
         (r, z, p, ap, tmp, z_prev)
     }
-}
-
-impl LinearSolver for CgSolver {
-    type Error = KError;
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn setup_workspace(&mut self, work: &mut Workspace) {
-        if work.q.len() < 4 {
-            work.q.resize(4, Vec::new());
-        }
-    }
 
     #[allow(clippy::too_many_arguments)]
-    fn solve(
+    pub fn solve_with_comm<C: Comm>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
         b: &[f64],
         x: &mut [f64],
         pc_side: PcSide,
-        comm: &UniverseComm,
+        comm: &C,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
-    ) -> Result<SolveStats<f64>, Self::Error> {
+    ) -> Result<SolveStats<f64>, KError> {
+        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_impl<C: Comm>(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &C,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
         let pc: Option<&dyn Preconditioner> = pc.as_deref();
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CG");
@@ -283,7 +284,9 @@ impl LinearSolver for CgSolver {
             for i in 0..n {
                 r[i] -= alpha * ap[i];
             }
-            xnorm = Self::nrm2(x, comm);
+            if self.trust_region.is_some() {
+                xnorm = Self::nrm2(x, comm);
+            }
 
             if let Some(m) = pc {
                 m.apply(pc_side, r, z)?;
@@ -333,5 +336,34 @@ impl LinearSolver for CgSolver {
         // Max-its reached: recompute true residual and return divergence
         let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
         Ok(SolveStats { iterations: self.conv.max_iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
+    }
+}
+
+impl LinearSolver for CgSolver {
+    type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        if work.q.len() < 4 {
+            work.q.resize(4, Vec::new());
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
+        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
     }
 }
