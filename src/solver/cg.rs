@@ -194,13 +194,21 @@ impl LinearSolver for CgSolver {
         if rho <= 0.0 || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
-        let rsq = Self::dot(r, r, comm);
-        let mut xnorm = Self::nrm2(x, comm);
+        let rsq = if matches!(self.norm_type, CgNormType::Unpreconditioned) {
+            Some(Self::dot(r, r, comm))
+        } else {
+            None
+        };
+        let mut xnorm = if self.trust_region.is_some() {
+            Self::nrm2(x, comm)
+        } else {
+            0.0
+        };
 
         // Reported residual for CG (Left) defaults to preconditioned norm sqrt(r^T z)
         let res0_reported = match self.norm_type {
             CgNormType::Preconditioned | CgNormType::Natural => rho.abs().sqrt(),
-            CgNormType::Unpreconditioned => rsq.sqrt(),
+            CgNormType::Unpreconditioned => rsq.unwrap().sqrt(),
             CgNormType::None => 0.0,
         };
 
