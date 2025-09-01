@@ -4,12 +4,14 @@ use mpi::datatype::Equivalence;
 use mpi::raw::AsRaw;
 #[cfg(any(feature = "mpi", feature = "rayon"))]
 use std::sync::Arc;
+use std::marker::PhantomData;
 
-// Opaque request that can represent multiple backends.
+// Opaque request that can represent multiple backends. Use a `PhantomData`
+// to tie the lifetime when MPI support is disabled.
 pub enum AnyRequest<'a> {
-    None,
     #[cfg(feature = "mpi")]
     Mpi(MpiRequest<'a>),
+    None(PhantomData<&'a ()>),
 }
 
 #[cfg(feature = "mpi")]
@@ -320,7 +322,7 @@ impl Comm for UniverseComm {
 
     fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
         match self {
-            UniverseComm::NoComm(_comm) => AnyRequest::None,
+            UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Post a true nonblocking receive via raw MPI and keep the handle
@@ -346,14 +348,14 @@ impl Comm for UniverseComm {
                 })
             }
             #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_comm) => AnyRequest::None,
+            UniverseComm::Rayon(_comm) => AnyRequest::None(PhantomData),
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => AnyRequest::None,
+            UniverseComm::Serial => AnyRequest::None(PhantomData),
         }
     }
     fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
         match self {
-            UniverseComm::NoComm(_comm) => AnyRequest::None,
+            UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Post a true nonblocking send via raw MPI and keep the handle
@@ -379,15 +381,15 @@ impl Comm for UniverseComm {
                 })
             }
             #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_comm) => AnyRequest::None,
+            UniverseComm::Rayon(_comm) => AnyRequest::None(PhantomData),
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => AnyRequest::None,
+            UniverseComm::Serial => AnyRequest::None(PhantomData),
         }
     }
 
     fn irecv_from_u64<'a>(&'a self, buf: &'a mut [u64], src: i32) -> Self::Request<'a> {
         match self {
-            UniverseComm::NoComm(_comm) => AnyRequest::None,
+            UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Nonblocking receive of u64 via raw MPI
@@ -413,14 +415,14 @@ impl Comm for UniverseComm {
                 })
             }
             #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_comm) => AnyRequest::None,
+            UniverseComm::Rayon(_comm) => AnyRequest::None(PhantomData),
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => AnyRequest::None,
+            UniverseComm::Serial => AnyRequest::None(PhantomData),
         }
     }
     fn isend_to_u64<'a>(&'a self, buf: &'a [u64], dest: i32) -> Self::Request<'a> {
         match self {
-            UniverseComm::NoComm(_comm) => AnyRequest::None,
+            UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Nonblocking send of u64 via raw MPI
@@ -446,9 +448,9 @@ impl Comm for UniverseComm {
                 })
             }
             #[cfg(feature = "rayon")]
-            UniverseComm::Rayon(_comm) => AnyRequest::None,
+            UniverseComm::Rayon(_comm) => AnyRequest::None(PhantomData),
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
-            UniverseComm::Serial => AnyRequest::None,
+            UniverseComm::Serial => AnyRequest::None(PhantomData),
         }
     }
     fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]) {
@@ -465,7 +467,7 @@ impl Comm for UniverseComm {
         }
         // Clear handles so buffers can be reused immediately.
         for r in reqs.iter_mut() {
-            *r = AnyRequest::None;
+            *r = AnyRequest::None(PhantomData);
         }
     }
 }
