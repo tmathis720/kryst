@@ -236,7 +236,7 @@ impl Workspace {
     // --- Hessenberg helpers -----------------------------------------------------
     #[inline]
     pub fn h2_mut(&mut self, i: usize, j: usize) -> (&mut f64, &mut f64) {
-        debug_assert!(i + 1 <= self.m && j < self.m);
+        debug_assert!(i < self.m && j < self.m);
         let ld = self.ld_h();
         let base = j * ld + i;
         let (left, right) = self.h_mem.split_at_mut(base + 1);
