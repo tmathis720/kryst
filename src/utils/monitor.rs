@@ -195,11 +195,11 @@ impl IterationMonitor {
             let rate_str = iter_data
                 .convergence_rate
                 .map(|r| format!("{:.6e}", r))
-                .unwrap_or_else(|| "".to_string());
+                .unwrap_or_default();
             let pc_time_str = iter_data
                 .pc_time
                 .map(|t| format!("{:.3}", t.as_secs_f64() * 1000.0))
-                .unwrap_or_else(|| "".to_string());
+                .unwrap_or_default();
 
             // Elapsed since solve start; default to 0.0s if not started
             let elapsed_s = self

@@ -9,10 +9,10 @@ where
     F: Fn(usize, usize) -> bool,
 {
     let mut adj = vec![Vec::new(); n];
-    for i in 0..n {
+    for (i, row) in adj.iter_mut().enumerate() {
         for j in 0..n {
             if i != j && (is_nz(i, j) || is_nz(j, i)) {
-                adj[i].push(j);
+                row.push(j);
             }
         }
     }
@@ -23,8 +23,8 @@ where
 pub fn distance2_neighbors(adj: &[Vec<usize>]) -> Vec<HashSet<usize>> {
     let n = adj.len();
     let mut dist2 = vec![HashSet::new(); n];
-    for i in 0..n {
-        for &j in &adj[i] {
+    for (i, neighbors) in adj.iter().enumerate() {
+        for &j in neighbors {
             dist2[i].insert(j);
             for &k in &adj[j] {
                 dist2[i].insert(k);
@@ -39,9 +39,9 @@ pub fn distance2_neighbors(adj: &[Vec<usize>]) -> Vec<HashSet<usize>> {
 pub fn greedy_distance2_coloring(dist2: &[HashSet<usize>]) -> Vec<usize> {
     let n = dist2.len();
     let mut color_of = vec![None; n];
-    for i in 0..n {
+    for (i, neighbors) in dist2.iter().enumerate() {
         let mut banned = HashSet::new();
-        for &k in &dist2[i] {
+        for &k in neighbors {
             if let Some(c) = color_of[k] {
                 banned.insert(c);
             }

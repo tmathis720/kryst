@@ -345,19 +345,19 @@ impl Comm for UniverseComm {
         }
     }
 
-    fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
+    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {
         match self {
             UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Post a true nonblocking receive via raw MPI and keep the handle
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
-                let count = buf.len() as i32;
-                let src_rank = src as i32;
+                let count = _buf.len() as i32;
+                let src_rank = _src as i32;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Irecv(
-                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        _buf.as_mut_ptr() as *mut std::ffi::c_void,
                         count,
                         mpi::ffi::RSMPI_DOUBLE,
                         src_rank,
@@ -378,19 +378,19 @@ impl Comm for UniverseComm {
             UniverseComm::Serial => AnyRequest::None(PhantomData),
         }
     }
-    fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
+    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
         match self {
             UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Post a true nonblocking send via raw MPI and keep the handle
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
-                let count = buf.len() as i32;
-                let dest_rank = dest as i32;
+                let count = _buf.len() as i32;
+                let dest_rank = _dest as i32;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Isend(
-                        buf.as_ptr() as *const std::ffi::c_void,
+                        _buf.as_ptr() as *const std::ffi::c_void,
                         count,
                         mpi::ffi::RSMPI_DOUBLE,
                         dest_rank,
@@ -412,19 +412,19 @@ impl Comm for UniverseComm {
         }
     }
 
-    fn irecv_from_u64<'a>(&'a self, buf: &'a mut [u64], src: i32) -> Self::Request<'a> {
+    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {
         match self {
             UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Nonblocking receive of u64 via raw MPI
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
-                let count = buf.len() as i32;
-                let src_rank = src as i32;
+                let count = _buf.len() as i32;
+                let src_rank = _src as i32;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Irecv(
-                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        _buf.as_mut_ptr() as *mut std::ffi::c_void,
                         count,
                         mpi::ffi::RSMPI_UINT64_T,
                         src_rank,
@@ -445,19 +445,19 @@ impl Comm for UniverseComm {
             UniverseComm::Serial => AnyRequest::None(PhantomData),
         }
     }
-    fn isend_to_u64<'a>(&'a self, buf: &'a [u64], dest: i32) -> Self::Request<'a> {
+    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {
         match self {
             UniverseComm::NoComm(_comm) => AnyRequest::None(PhantomData),
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 // Nonblocking send of u64 via raw MPI
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
-                let count = buf.len() as i32;
-                let dest_rank = dest as i32;
+                let count = _buf.len() as i32;
+                let dest_rank = _dest as i32;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Isend(
-                        buf.as_ptr() as *const std::ffi::c_void,
+                        _buf.as_ptr() as *const std::ffi::c_void,
                         count,
                         mpi::ffi::RSMPI_UINT64_T,
                         dest_rank,
