@@ -293,7 +293,7 @@ fn example_builder_pattern(
     let matrices = get_available_matrices();
     let matrix_info = matrices
         .iter()
-        .find(|m| m.name == "fidap005") // Use smaller matrix for detailed demo
+        .find(|m| m.name == "fidapm05") // Use smaller matrix for detailed demo
         .unwrap_or(&matrices[0]);
 
     if is_rank_0 {

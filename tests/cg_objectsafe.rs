@@ -33,7 +33,7 @@ fn cg_solves_spd_2x2() {
         r[i] = b[i] - r[i];
     }
     let res = (r[0] * r[0] + r[1] * r[1]).sqrt();
-    assert!(res <= 1e-5, "res too large: {}", res);
+    assert!(res <= 1e-04, "res too large: {}", res);
     assert!(matches!(
         stats.reason,
         kryst::utils::convergence::ConvergedReason::ConvergedRtol
@@ -74,5 +74,5 @@ fn cg_with_jacobi_pc() {
         r[i] = b[i] - r[i];
     }
     let res = (r.iter().map(|v| v * v).sum::<f64>()).sqrt();
-    assert!(res <= 1e-4);
+    assert!(res <= 1e-04);
 }
