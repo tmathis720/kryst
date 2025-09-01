@@ -280,11 +280,16 @@ impl LinearSolver for CgSolver {
             if rho_new <= 0.0 || !rho_new.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
             }
-            let rsq_new = Self::dot(r, r, comm);
+
+            let rsq_new = if matches!(self.norm_type, CgNormType::Unpreconditioned) {
+                Some(Self::dot(r, r, comm))
+            } else {
+                None
+            };
 
             let res_reported = match self.norm_type {
                 CgNormType::Preconditioned | CgNormType::Natural => rho_new.abs().sqrt(),
-                CgNormType::Unpreconditioned => rsq_new.sqrt(),
+                CgNormType::Unpreconditioned => rsq_new.unwrap().sqrt(),
                 CgNormType::None => 0.0,
             };
 
