@@ -48,7 +48,7 @@ use std::time::Instant;
 struct OptimalConfig {
     solver: &'static str,
     preconditioner: &'static str,
-    description: &'static str,
+    _description: &'static str,
     expected_iterations: usize,
     fallback_solver: &'static str,
     fallback_pc: &'static str,
@@ -60,7 +60,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         "fidap005" => OptimalConfig {
             solver: "cg",
             preconditioner: "none",
-            description: "CG (no precond) - small structural problem",
+            _description: "CG (no precond) - small structural problem",
             expected_iterations: 30,
             fallback_solver: "gmres",
             fallback_pc: "none",
@@ -68,7 +68,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         "e05r0100" => OptimalConfig {
             solver: "gmres",
             preconditioner: "none",
-            description: "GMRES (no precond) - best for E05r0100 based on benchmarks",
+            _description: "GMRES (no precond) - best for E05r0100 based on benchmarks",
             expected_iterations: 210,
             fallback_solver: "bicgstab",
             fallback_pc: "none",
@@ -76,7 +76,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         "fidap001" => OptimalConfig {
             solver: "cg",
             preconditioner: "none",
-            description: "CG (no precond) - medium structural problem",
+            _description: "CG (no precond) - medium structural problem",
             expected_iterations: 100,
             fallback_solver: "gmres",
             fallback_pc: "none",
@@ -84,7 +84,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         "sherman3" => OptimalConfig {
             solver: "gmres",
             preconditioner: "none",
-            description: "GMRES (no precond) - large sparse matrix",
+            _description: "GMRES (no precond) - large sparse matrix",
             expected_iterations: 500,
             fallback_solver: "bicgstab",
             fallback_pc: "none",
@@ -92,7 +92,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         "add20" => OptimalConfig {
             solver: "cg",
             preconditioner: "none",
-            description: "CG (no precond) - should be SPD matrix",
+            _description: "CG (no precond) - should be SPD matrix",
             expected_iterations: 200,
             fallback_solver: "bicgstab",
             fallback_pc: "none",
@@ -100,7 +100,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         "memplus" => OptimalConfig {
             solver: "bicgstab",
             preconditioner: "none",
-            description: "BiCGStab (no precond) - will need ILU for best performance",
+            _description: "BiCGStab (no precond) - will need ILU for best performance",
             expected_iterations: 1000,
             fallback_solver: "gmres",
             fallback_pc: "none",
@@ -108,7 +108,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         _ => OptimalConfig {
             solver: "gmres",
             preconditioner: "none",
-            description: "GMRES (no precond) - general robust choice",
+            _description: "GMRES (no precond) - general robust choice",
             expected_iterations: 500,
             fallback_solver: "bicgstab",
             fallback_pc: "none",

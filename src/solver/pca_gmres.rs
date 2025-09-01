@@ -117,6 +117,7 @@ impl PcaGmresSolver {
 
     /// Map pc_mode to the *expected* PcSide for Arnoldi semantics.
     /// (None doesn't care; we return Left for convenience.)
+    #[allow(dead_code)]
     fn expected_side(&self) -> PcSide {
         match self.pc_mode {
             PcaPcMode::None | PcaPcMode::Left => PcSide::Left,

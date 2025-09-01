@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::matrix::sparse::CsrMatrix;
 
 #[derive(Clone, Debug)]

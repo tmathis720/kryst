@@ -22,6 +22,7 @@ pub fn csr_poisson_1d(n: usize) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
 
+#[allow(dead_code)]
 pub fn csr_identity(n: usize) -> CsrMatrix<f64> {
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::with_capacity(n);

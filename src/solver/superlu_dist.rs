@@ -79,6 +79,7 @@ use std::collections::HashMap;
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 
+#[allow(dead_code)]
 fn validate_local_csr(m: &CsrMatrix<f64>) -> Result<(), KError> {
     let rp = m.row_ptr();
     let cj = m.col_idx();
@@ -194,6 +195,7 @@ impl ProcessGrid {
     }
 
     /// Determine optimal process grid dimensions
+    #[allow(dead_code)]
     fn determine_optimal_grid(size: usize) -> (usize, usize) {
         // Find prows and pcols such that prows * pcols = size
         // and the grid is as square as possible
@@ -720,7 +722,9 @@ impl Panel {
             // 2) TRSM: apply L^{-1} to the right block for the current jb block
             let right_cols = n - (j + jb);
             if n > j {
+                #[allow(unused_mut)]
                 let mut sub = a.rb_mut().submatrix_mut(j, j, m - j, n - j);
+                #[allow(unused_mut)]
                 let (mut l_block_and_l21, mut right) = sub.split_at_col_mut(jb);
 
                 if right_cols > 0 {
@@ -733,7 +737,9 @@ impl Panel {
 
                 // 3) GEMM: trailing update
                 if (m > j + jb) && (n > j + jb) {
+                    #[allow(unused_mut)]
                     let (_, mut l21) = l_block_and_l21.split_at_row_mut(jb);
+                    #[allow(unused_mut)]
                     let (mut u12, mut trailing) = right.split_at_row_mut(jb);
                     faer::linalg::matmul::matmul(
                         trailing.rb_mut(),
@@ -3873,6 +3879,7 @@ impl SuperLuDistSolver {
     }
 
     /// Distribute global matrix to local portions using block-cyclic distribution
+    #[allow(dead_code)]
     fn distribute_matrix(
         &self,
         global_matrix: &CsrMatrix<f64>,
@@ -4152,7 +4159,7 @@ impl SuperLuDistSolver {
         let nb = (n + bs - 1) / bs;
         let mut lbg = vec![Vec::<usize>::new(); nb];
         let mut ubg = vec![Vec::<usize>::new(); nb];
-        let mut add_edge = |graph: &mut [Vec<usize>], s: usize, t: usize| {
+        let add_edge = |graph: &mut [Vec<usize>], s: usize, t: usize| {
             if s != t && !graph[s].contains(&t) {
                 graph[s].push(t);
             }
@@ -5136,7 +5143,7 @@ mod tests {
         let bs = 2;
         let nb = 3;
         let mut lbg = vec![Vec::<usize>::new(); nb];
-        let mut add_edge = |g: &mut [Vec<usize>], s: usize, t: usize| {
+    let add_edge = |g: &mut [Vec<usize>], s: usize, t: usize| {
             if s != t && !g[s].contains(&t) {
                 g[s].push(t);
             }
@@ -5352,7 +5359,7 @@ mod tests {
         let mut x_ref = b.clone();
         let a_dense = matrix.to_dense();
         let lu = FullPivLu::new(a_dense.as_ref());
-        let mut x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 3, 1);
+        let x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 3, 1);
         lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
         for i in 0..3 {
             assert!((x[i] - x_ref[i]).abs() < 1e-8);
@@ -5392,7 +5399,7 @@ mod tests {
         let mut x_ref = b.clone();
         let a_dense = matrix.to_dense();
         let lu = FullPivLu::new(a_dense.as_ref());
-        let mut x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 2, 1);
+        let x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 2, 1);
         lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
         for i in 0..2 {
             assert!((x[i] - x_ref[i]).abs() < 1e-8);
@@ -5444,7 +5451,7 @@ mod tests {
         let mut x_ref = b.clone();
         let a_dense = matrix.to_dense();
         let lu = FullPivLu::new(a_dense.as_ref());
-        let mut x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 6, 1);
+        let x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 6, 1);
         lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
         for i in 0..6 {
             assert!((x[i] - x_ref[i]).abs() < 1e-8);
@@ -6377,6 +6384,7 @@ mod send_sync_checks {
     use super::*;
 
     fn assert_send<T: Send>() {}
+    #[allow(dead_code)]
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]

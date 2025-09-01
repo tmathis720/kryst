@@ -6,7 +6,7 @@ use std::time::Instant;
 fn faer_trsm_gemm_microbench() {
     let m = 256usize;
     let n = 64usize;
-    let mut data: Vec<f64> = (0..m * n).map(|i| (i % 97) as f64 / 97.0).collect();
+    let data: Vec<f64> = (0..m * n).map(|i| (i % 97) as f64 / 97.0).collect();
     let mut panel_old = Panel {
         width: n,
         height: m,
