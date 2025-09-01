@@ -70,6 +70,7 @@ use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm};
 use crate::solver::legacy::LinearSolver;
+use crate::solver::api::Solver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use faer::MatMut;
 use faer::prelude::*;
@@ -1615,6 +1616,50 @@ impl Default for SuperLuDistOptions {
             max_concurrent_panels: 1,
             async_panel_updates: false,
         }
+    }
+}
+
+impl SuperLuDistOptions {
+    #[inline]
+    pub fn enabled(&self, level: u8, required: u8) -> bool {
+        self.print_level >= required && level <= self.print_level
+    }
+
+    pub fn validate(&self, comm: Option<&UniverseComm>) -> Result<(), KError> {
+        if !(0.0..=1.0).contains(&self.diagonal_pivot_threshold) {
+            return Err(KError::InvalidInput(format!(
+                "diagonal_pivot_threshold={} must be in [0,1]",
+                self.diagonal_pivot_threshold
+            )));
+        }
+        if let Some(sz) = self.panel_size {
+            if sz == 0 {
+                return Err(KError::InvalidInput("panel_size must be > 0".into()));
+            }
+        }
+        if self.enable_3d_factorization && self.process_grid_3d_depth == Some(0) {
+            return Err(KError::InvalidInput("3D depth must be > 0".into()));
+        }
+        if let Some((r, c)) = self.process_grid {
+            if r == 0 || c == 0 {
+                return Err(KError::InvalidInput("process_grid dims must be > 0".into()));
+            }
+            if let Some(comm) = comm {
+                let sz = comm.size();
+                if r * c != sz {
+                    return Err(KError::InvalidInput(format!(
+                        "process_grid {}x{} does not match comm size {}",
+                        r, c, sz
+                    )));
+                }
+            }
+        }
+        if self.memory_tradeoff_factor.is_nan() || self.memory_tradeoff_factor < 0.1 {
+            return Err(KError::InvalidInput(
+                "memory_tradeoff_factor must be >= 0.1".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -3508,6 +3553,8 @@ impl SuperLuDistBuilder {
             workspace_config: self.workspace_config,
         };
 
+        let _ = solver.options.validate(None);
+
         // Set up refinement engine if configured
         if let Some(config) = self.refinement_config {
             let method = self.residual_method.unwrap_or(ResidualMethod::Standard);
@@ -3768,6 +3815,8 @@ impl SuperLuDistSolver {
     ) -> Result<(), KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("SuperLuDistSetup");
+
+        self.options.validate(Some(comm))?;
 
         if comm.size() != 1 {
             return Err(KError::InvalidInput(
@@ -4088,14 +4137,16 @@ impl SuperLuDistSolver {
         };
 
         #[cfg(feature = "logging")]
-        log::info!(
-            "Numerical factorization completed: {} panels, {} row swaps, {} panels replaced {} tiny pivots, max pivot growth {:.2e}",
-            factor_stats.num_panels,
-            factor_stats.total_row_swaps,
-            panels_with_replacements,
-            factor_stats.tiny_pivots_replaced,
-            factor_stats.max_pivot_growth
-        );
+        if self.options.enabled(1, 1) {
+            log::info!(
+                "Numerical factorization completed: {} panels, {} row swaps, {} panels replaced {} tiny pivots, max pivot growth {:.2e}",
+                factor_stats.num_panels,
+                factor_stats.total_row_swaps,
+                panels_with_replacements,
+                factor_stats.tiny_pivots_replaced,
+                factor_stats.max_pivot_growth
+            );
+        }
 
         let bs = std::cmp::min(64, n / 4).max(1);
         let nb = (n + bs - 1) / bs;
@@ -4210,11 +4261,13 @@ impl SuperLuDistSolver {
         let overlap_comm = false;
 
         #[cfg(feature = "logging")]
-        log::info!(
-            "Starting distributed triangular solve with pattern {:?}, overlap_comm={}",
-            comm_pattern,
-            overlap_comm
-        );
+        if self.options.enabled(1, 1) {
+            log::info!(
+                "Starting distributed triangular solve with pattern {:?}, overlap_comm={}",
+                comm_pattern,
+                overlap_comm
+            );
+        }
 
         // Phase 1: Forward substitution (solve Ly = Pb)
         // Apply row permutation to RHS
@@ -4287,18 +4340,22 @@ impl SuperLuDistSolver {
                 let _refinement_stats = engine.refine_solution(local_matrix, b, x, data, comm)?;
 
                 #[cfg(feature = "logging")]
-                if let Some(stats) = engine.last_stats() {
-                    log::info!(
-                        "Iterative refinement completed: {} iterations, final residual: {:.2e}",
-                        stats.iterations,
-                        stats.final_residual_norm
-                    );
+                if self.options.enabled(1, 1) {
+                    if let Some(stats) = engine.last_stats() {
+                        log::info!(
+                            "Iterative refinement completed: {} iterations, final residual: {:.2e}",
+                            stats.iterations,
+                            stats.final_residual_norm
+                        );
+                    }
                 }
             }
         }
 
         #[cfg(feature = "logging")]
-        log::info!("Distributed triangular solve completed successfully");
+        if self.options.enabled(1, 1) {
+            log::info!("Distributed triangular solve completed successfully");
+        }
 
         Ok(())
     }
@@ -4308,6 +4365,17 @@ impl SuperLuDistSolver {
         self.data = None;
         self.refinement_engine = None;
     }
+
+    pub fn clear_factors(&mut self) {
+        if let Some(d) = &mut self.data {
+            d.numeric_factor = None;
+            d.factored = false;
+        }
+    }
+
+    pub fn has_factors(&self) -> bool {
+        self.data.as_ref().map(|d| d.factored).unwrap_or(false)
+    }
 }
 
 impl Default for SuperLuDistSolver {
@@ -4316,24 +4384,84 @@ impl Default for SuperLuDistSolver {
     }
 }
 
+impl Solver<CsrMatrix<f64>> for SuperLuDistSolver {
+    type Error = KError;
+
+    fn setup(&mut self, a: &CsrMatrix<f64>, comm: &UniverseComm) -> Result<(), Self::Error> {
+        self.options.validate(Some(comm))?;
+        if self.data.is_none() {
+            self.setup_factorization(a, comm)?;
+        }
+        Ok(())
+    }
+
+    fn factor(&mut self, a: &CsrMatrix<f64>) -> Result<(), Self::Error> {
+        {
+            let data = self
+                .data
+                .as_ref()
+                .ok_or_else(|| KError::SolveError("call setup(&A, &comm) before factor(&A)".into()))?;
+            if a.nrows() != data.distribution.global_rows
+                || a.ncols() != data.distribution.global_cols
+            {
+                return Err(KError::InvalidInput(
+                    "factor(): matrix dims changed since setup".into(),
+                ));
+            }
+        }
+
+        let numeric = {
+            let data_ref = self
+                .data
+                .as_ref()
+                .ok_or_else(|| KError::SolveError("call setup(&A, &comm) before factor(&A)".into()))?;
+            self.numerical_factorization(data_ref)?
+        };
+        if let Some(data_mut) = self.data.as_mut() {
+            data_mut.numeric_factor = Some(numeric);
+            data_mut.factored = true;
+        }
+        Ok(())
+    }
+
+    fn solve(
+        &mut self,
+        b: &[f64],
+        x: &mut [f64],
+        comm: &UniverseComm,
+    ) -> Result<SolveStats<f64>, Self::Error> {
+        if self.data.is_none() {
+            return Err(KError::SolveError(
+                "solve() called before setup()/factor()".into(),
+            ));
+        }
+        let data = self.data.as_ref().unwrap();
+        if b.len() != data.distribution.global_rows {
+            return Err(KError::InvalidInput("RHS size mismatch".into()));
+        }
+        if x.len() != data.distribution.global_cols {
+            return Err(KError::InvalidInput("solution size mismatch".into()));
+        }
+
+        let mut xb = x.to_vec();
+        self.solve_factored(&b.to_vec(), &mut xb, comm)?;
+        x.copy_from_slice(&xb);
+        Ok(SolveStats {
+            iterations: 1,
+            final_residual: 0.0,
+            reason: ConvergedReason::ConvergedAtol,
+        })
+    }
+
+    fn reuse_factorization(&self) -> bool {
+        self.has_factors()
+    }
+}
+
 impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
     type Error = KError;
     type Scalar = f64;
 
-    /// Solve the linear system A·x = b using distributed SuperLU factorization
-    ///
-    /// # Arguments
-    /// * `a` - Sparse matrix in CSR format
-    /// * `pc` - Preconditioner (unused for direct solvers)
-    /// * `b` - Right-hand side vector
-    /// * `x` - On input: ignored; on output: solution vector
-    /// * `comm` - MPI communicator for distributed computation
-    /// * `monitors` - Optional callbacks for progress monitoring
-    /// * `work` - Optional workspace (unused for direct solvers)
-    ///
-    /// # Returns
-    /// * `Ok(SolveStats)` with convergence information (always converged in 1 iteration for direct solvers)
-    /// * `Err(KError)` on factorization or solve failure
     fn solve(
         &mut self,
         a: &CsrMatrix<f64>,
@@ -4346,54 +4474,13 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
         comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<crate::utils::convergence::SolveStats<f64>, KError> {
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("SuperLuDistSolve");
-
-        let _ = pc; // Direct solvers do not use preconditioners
+    ) -> Result<SolveStats<f64>, KError> {
+        let _ = pc;
         let _ = pc_side;
-
-        // Validate input dimensions
-        if b.len() != a.nrows() {
-            return Err(KError::InvalidInput(format!(
-                "RHS length {} doesn't match matrix rows {}",
-                b.len(),
-                a.nrows()
-            )));
-        }
-
-        if x.len() != a.ncols() {
-            x.resize(a.ncols(), 0.0);
-        }
-
-        // Call monitors at start if provided
-        if let Some(monitors) = monitors {
-            for monitor in monitors {
-                monitor(0, 0.0);
-            }
-        }
-
-        // Setup factorization if not already done
-        if self.data.is_none() {
-            self.setup_factorization(a, comm)?;
-        }
-
-        // Solve using the factorization
-        self.solve_factored(b, x, comm)?;
-
-        // Call monitors at end if provided
-        if let Some(monitors) = monitors {
-            for monitor in monitors {
-                monitor(1, 0.0);
-            }
-        }
-
-        // Direct solvers always converge in 1 iteration
-        Ok(SolveStats {
-            iterations: 1,
-            final_residual: 0.0,
-            reason: ConvergedReason::ConvergedAtol,
-        })
+        let _ = monitors;
+        self.setup(a, comm)?;
+        self.factor(a)?;
+        <SuperLuDistSolver as Solver<CsrMatrix<f64>>>::solve(self, b.as_slice(), x.as_mut_slice(), comm)
     }
 }
 
@@ -4408,7 +4495,8 @@ pub fn solve(
     let mut solver = SuperLuDistSolver::new();
     let mut x_vec = x.to_vec();
     let b_vec = b.to_vec();
-    solver.solve(
+    crate::solver::legacy::LinearSolver::solve(
+        &mut solver,
         a,
         None,
         &b_vec,
@@ -5158,25 +5246,25 @@ mod tests {
             .set_max_concurrent_panels(2);
 
         let comm = UniverseComm::NoComm(NoComm);
-        let stats = solver
-            .solve(
-                &matrix,
-                None,
-                &b,
-                &mut x,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        let stats = crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Verify solve completed
         assert_eq!(stats.iterations, 1);
         assert!(matches!(stats.reason, ConvergedReason::ConvergedAtol));
 
         // For a diagonal-dominant matrix, solution should be reasonable
-        assert!(x.iter().all(|&val| val.is_finite()));
+        assert!(x.iter().all(|val: &f64| val.is_finite()));
     }
 
     #[test]
@@ -5211,18 +5299,18 @@ mod tests {
         let mut solver = SuperLuDistSolver::new();
 
         let comm = UniverseComm::NoComm(NoComm);
-        let stats = solver
-            .solve(
-                &matrix,
-                None,
-                &b,
-                &mut x,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        let stats = crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
 
         // For identity matrix, solution should equal RHS
         assert_eq!(x, b);
@@ -5248,18 +5336,18 @@ mod tests {
             .set_column_permutation(ColumnPermutation::Natural)
             .set_row_permutation(RowPermutation::NoRowPerm);
         let comm = UniverseComm::NoComm(NoComm);
-        solver
-            .solve(
-                &matrix,
-                None,
-                &b,
-                &mut x,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
 
         let mut x_ref = b.clone();
         let a_dense = matrix.to_dense();
@@ -5289,18 +5377,18 @@ mod tests {
             .set_column_permutation(ColumnPermutation::Natural)
             .set_row_permutation(RowPermutation::NoRowPerm);
         let comm = UniverseComm::NoComm(NoComm);
-        solver
-            .solve(
-                &matrix,
-                None,
-                &b,
-                &mut x,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
         let mut x_ref = b.clone();
         let a_dense = matrix.to_dense();
         let lu = FullPivLu::new(a_dense.as_ref());
@@ -5340,18 +5428,18 @@ mod tests {
         let mut x = vec![0.0; 6];
         let mut solver = SuperLuDistSolver::new();
         let comm = UniverseComm::NoComm(NoComm);
-        solver
-            .solve(
-                &matrix,
-                None,
-                &b,
-                &mut x,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
 
         let mut x_ref = b.clone();
         let a_dense = matrix.to_dense();
@@ -5380,18 +5468,18 @@ mod tests {
             .set_static_pivoting(true)
             .set_diagonal_pivot_threshold(1e-8);
         let comm = UniverseComm::NoComm(NoComm);
-        solver
-            .solve(
-                &matrix,
-                None,
-                &b,
-                &mut x,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b,
+            &mut x,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
         let stats = solver
             .data
             .as_ref()
@@ -5414,7 +5502,8 @@ mod tests {
         let mut solver = SuperLuDistSolver::new();
 
         let comm = UniverseComm::NoComm(NoComm);
-        let result = solver.solve(
+        let result = crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
             &matrix,
             None,
             &b,
@@ -5439,18 +5528,18 @@ mod tests {
         // First solve
         let b1 = vec![2.0, 3.0];
         let mut x1 = vec![0.0; 2];
-        let _stats1 = solver
-            .solve(
-                &matrix,
-                None,
-                &b1,
-                &mut x1,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        let _stats1 = crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b1,
+            &mut x1,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Solver should now have factorization cached
         assert!(solver.data.is_some());
@@ -5458,18 +5547,18 @@ mod tests {
         // Second solve with different RHS
         let b2 = vec![4.0, 6.0];
         let mut x2 = vec![0.0; 2];
-        let _stats2 = solver
-            .solve(
-                &matrix,
-                None,
-                &b2,
-                &mut x2,
-                crate::preconditioner::PcSide::Left,
-                &comm,
-                None,
-                None,
-            )
-            .unwrap();
+        let _stats2 = crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
+            &matrix,
+            None,
+            &b2,
+            &mut x2,
+            crate::preconditioner::PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Factorization should be reused
         assert!(solver.data.is_some());
@@ -6188,7 +6277,8 @@ mod tests {
         assert!(solver.data.is_none());
 
         // This should succeed and automatically set up factorization
-        let result = solver.solve(
+        let result = crate::solver::legacy::LinearSolver::solve(
+            &mut solver,
             &matrix,
             None,
             &b,
@@ -6280,4 +6370,28 @@ mod tests {
         let expected = vec![(block_id << 8) + 1, (block_id << 8) + 2];
         assert_eq!(tags, expected);
     }
+}
+
+#[cfg(test)]
+mod send_sync_checks {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn superlu_types_send() {
+        assert_send::<SuperLuDistSolver>();
+        assert_send::<SuperLuDistData>();
+        assert_send::<SuperLuDistWorkspace>();
+        assert_send::<MemoryPool>();
+        assert_send::<CommBufferManager>();
+    }
+
+    // Uncomment if Sync should be guaranteed in future.
+    // #[test]
+    // fn superlu_types_send_sync() {
+    //     assert_send_sync::<SuperLuDistSolver>();
+    //     assert_send_sync::<SuperLuDistWorkspace>();
+    // }
 }
