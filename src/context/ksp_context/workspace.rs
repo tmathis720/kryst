@@ -67,6 +67,9 @@ impl Workspace {
     #[inline]
     pub fn has_z(&self) -> bool { self.need_z }
 
+    #[inline]
+    pub fn ld_h(&self) -> usize { self.m + 1 }
+
     /// Ensure capacity for a (F)GMRES run. Idempotent and allocation-friendly.
     pub fn acquire_gmres(&mut self, spec: GmresSpec) {
         // Remember shape for indexers
@@ -157,6 +160,123 @@ impl Workspace {
         let (_, lo_slice) = lo_part.split_at_mut(lo_off);
         let (hi_slice, _) = rest.split_at_mut(n);
         if a < b { (&mut lo_slice[..n], hi_slice) } else { (hi_slice, &mut lo_slice[..n]) }
+    }
+
+    // --- Composite view helpers -------------------------------------------------
+    #[inline]
+    pub fn v_and_z_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+        debug_assert!(self.need_z && j < self.m);
+        let n = self.n;
+        let off = j * n;
+        let vj: &[f64] = &self.v_mem[off..off + n];
+        let zj: &mut [f64] = &mut self.z_mem[off..off + n];
+        (vj, zj)
+    }
+
+    #[inline]
+    pub fn tmp1_and_z_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+        debug_assert!(self.need_z && j < self.m);
+        let n = self.n;
+        let tmp: &[f64] = &self.tmp1[..n];
+        let z: &mut [f64] = &mut self.z_mem[j * n..(j + 1) * n];
+        (tmp, z)
+    }
+
+    #[inline]
+    pub fn tmp2_and_z_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+        debug_assert!(self.need_z && j < self.m);
+        let n = self.n;
+        let tmp: &[f64] = &self.tmp2[..n];
+        let z: &mut [f64] = &mut self.z_mem[j * n..(j + 1) * n];
+        (tmp, z)
+    }
+
+    #[inline]
+    pub fn z_and_tmp2_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+        debug_assert!(self.need_z && j < self.m);
+        let n = self.n;
+        let z: &[f64] = &self.z_mem[j * n..(j + 1) * n];
+        let tmp: &mut [f64] = &mut self.tmp2[..n];
+        (z, tmp)
+    }
+
+    // --- Copy helpers -----------------------------------------------------------
+    #[inline]
+    pub fn copy_tmp2_into_vcol(&mut self, j: usize) {
+        let n = self.n;
+        let dst = &mut self.v_mem[j * n..(j + 1) * n];
+        let src = &self.tmp2[..n];
+        dst.copy_from_slice(src);
+    }
+
+    #[inline]
+    pub fn copy_tmp1_into_vcol(&mut self, j: usize) {
+        let n = self.n;
+        let dst = &mut self.v_mem[j * n..(j + 1) * n];
+        let src = &self.tmp1[..n];
+        dst.copy_from_slice(src);
+    }
+
+    #[inline]
+    pub fn copy_vcol_into_zcol(&mut self, j: usize) {
+        debug_assert!(self.need_z && j < self.m);
+        let n = self.n;
+        let src = &self.v_mem[j * n..(j + 1) * n];
+        let dst = &mut self.z_mem[j * n..(j + 1) * n];
+        dst.copy_from_slice(src);
+    }
+
+    #[inline]
+    pub fn copy_vcol_into_tmp1(&mut self, j: usize) {
+        let n = self.n;
+        let src = &self.v_mem[j * n..(j + 1) * n];
+        self.tmp1[..n].copy_from_slice(src);
+    }
+
+    // --- Hessenberg helpers -----------------------------------------------------
+    #[inline]
+    pub fn h2_mut(&mut self, i: usize, j: usize) -> (&mut f64, &mut f64) {
+        debug_assert!(i + 1 <= self.m && j < self.m);
+        let ld = self.ld_h();
+        let base = j * ld + i;
+        let (left, right) = self.h_mem.split_at_mut(base + 1);
+        let hij = &mut left[base];
+        let hij1 = &mut right[0];
+        (hij, hij1)
+    }
+
+    #[inline]
+    pub fn apply_prev_givens_to_col(&mut self, j: usize, upto: usize) {
+        for i in 0..upto {
+            let c = self.cs[i];
+            let s = self.sn[i];
+            let (hij, hij1) = self.h2_mut(i, j);
+            let t = c * *hij + s * *hij1;
+            *hij1 = -s * *hij + c * *hij1;
+            *hij = t;
+        }
+    }
+
+    #[inline]
+    pub fn apply_final_givens_and_update_g(&mut self, j: usize) {
+        let ld = self.ld_h();
+        let hkk = self.h_mem[j * ld + j];
+        let hk1k = self.h_mem[j * ld + j + 1];
+        let (c, s) = if hk1k == 0.0 {
+            (1.0, 0.0)
+        } else {
+            let r = (hkk * hkk + hk1k * hk1k).sqrt();
+            (hkk / r, hk1k / r)
+        };
+        self.cs[j] = c;
+        self.sn[j] = s;
+        let (hjj, hj1j) = self.h2_mut(j, j);
+        let t = c * *hjj + s * *hj1j;
+        *hj1j = -s * *hjj + c * *hj1j;
+        *hjj = t;
+        let t = c * self.g[j] + s * self.g[j + 1];
+        self.g[j + 1] = -s * self.g[j] + c * self.g[j + 1];
+        self.g[j] = t;
     }
 }
 

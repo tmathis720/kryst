@@ -97,44 +97,6 @@ impl GmresSolver {
     }
 
 
-    // legacy vector-returning orthonormalize removed; slabs path writes in-place
-    fn apply_givens_and_update(
-        h: &mut [f64],
-        cs: &mut [f64],
-        sn: &mut [f64],
-        g: &mut [f64],
-        k: usize,
-    ) {
-        let ld = cs.len() + 1;
-        for i in 0..k {
-            let c = cs[i];
-            let s = sn[i];
-            let idx = k * ld + i;
-            let hij = h[idx];
-            let hij1 = h[idx + 1];
-            let t = c * hij + s * hij1;
-            h[idx + 1] = -s * hij + c * hij1;
-            h[idx] = t;
-        }
-
-        let idx = k * ld + k;
-        let hkk = h[idx];
-        let hk1k = h[idx + 1];
-        let (c, s) = if hk1k == 0.0 {
-            (1.0, 0.0)
-        } else {
-            let r = (hkk * hkk + hk1k * hk1k).sqrt();
-            (hkk / r, hk1k / r)
-        };
-        cs[k] = c;
-        sn[k] = s;
-        let t = c * hkk + s * hk1k;
-        h[idx + 1] = -s * hkk + c * hk1k;
-        h[idx] = t;
-        let t = c * g[k] + s * g[k + 1];
-        g[k + 1] = -s * g[k] + c * g[k + 1];
-        g[k] = t;
-    }
 
     fn backsolve(h: &[f64], g: &[f64], k: usize) -> Vec<f64> {
         let ld = g.len();
@@ -230,18 +192,12 @@ impl LinearSolver for GmresSolver {
         let beta = match pc_side {
             PcSide::Left => {
                 self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
-                let tmp2 = ws.tmp2.clone();
-                let beta = Self::nrm2(&tmp2);
+                let beta = Self::nrm2(&ws.tmp2);
                 if beta > 0.0 {
                     for i in 0..n { ws.tmp2[i] /= beta; }
-                }
-                {
-                    let v0 = ws.v_col(0);
-                    if beta > 0.0 {
-                        v0.copy_from_slice(&ws.tmp2[..n]);
-                    } else {
-                        v0.fill(0.0);
-                    }
+                    ws.copy_tmp2_into_vcol(0);
+                } else {
+                    ws.v_col(0).fill(0.0);
                 }
                 beta
             }
@@ -249,14 +205,9 @@ impl LinearSolver for GmresSolver {
                 let beta = Self::nrm2(&ws.tmp1);
                 if beta > 0.0 {
                     for i in 0..n { ws.tmp2[i] = ws.tmp1[i] / beta; }
-                }
-                {
-                    let v0 = ws.v_col(0);
-                    if beta > 0.0 {
-                        v0.copy_from_slice(&ws.tmp2[..n]);
-                    } else {
-                        v0.fill(0.0);
-                    }
+                    ws.copy_tmp2_into_vcol(0);
+                } else {
+                    ws.v_col(0).fill(0.0);
                 }
                 beta
             }
@@ -311,14 +262,9 @@ impl LinearSolver for GmresSolver {
                         *ws.h_at_mut(k + 1, k) = hnext;
                         if hnext > 0.0 {
                             for i in 0..n { ws.tmp2[i] /= hnext; }
-                        }
-                        {
-                            let vnext = ws.v_col(k + 1);
-                            if hnext > 0.0 {
-                                vnext.copy_from_slice(&ws.tmp2[..n]);
-                            } else {
-                                vnext.fill(0.0);
-                            }
+                            ws.copy_tmp2_into_vcol(k + 1);
+                        } else {
+                            ws.v_col(k + 1).fill(0.0);
                         }
                     }
                     PcSide::Right => {
@@ -342,20 +288,16 @@ impl LinearSolver for GmresSolver {
                         *ws.h_at_mut(k + 1, k) = hnext;
                         if hnext > 0.0 {
                             for i in 0..n { ws.tmp1[i] /= hnext; }
-                        }
-                        {
-                            let vnext = ws.v_col(k + 1);
-                            if hnext > 0.0 {
-                                vnext.copy_from_slice(&ws.tmp1[..n]);
-                            } else {
-                                vnext.fill(0.0);
-                            }
+                            ws.copy_tmp1_into_vcol(k + 1);
+                        } else {
+                            ws.v_col(k + 1).fill(0.0);
                         }
                     }
                     PcSide::Symmetric => unreachable!(),
                 }
 
-                Self::apply_givens_and_update(&mut ws.h_mem, &mut ws.cs, &mut ws.sn, &mut ws.g, k);
+                ws.apply_prev_givens_to_col(k, k);
+                ws.apply_final_givens_and_update_g(k);
 
                 res = ws.g[k + 1].abs();
                 total_iters += 1;
@@ -410,18 +352,12 @@ impl LinearSolver for GmresSolver {
             match pc_side {
                 PcSide::Left => {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
-                    let tmp2 = ws.tmp2.clone();
-                    let beta = Self::nrm2(&tmp2);
+                    let beta = Self::nrm2(&ws.tmp2);
                     if beta > 0.0 {
                         for i in 0..n { ws.tmp2[i] /= beta; }
-                    }
-                    {
-                        let v0 = ws.v_col(0);
-                        if beta > 0.0 {
-                            v0.copy_from_slice(&ws.tmp2[..n]);
-                        } else {
-                            v0.fill(0.0);
-                        }
+                        ws.copy_tmp2_into_vcol(0);
+                    } else {
+                        ws.v_col(0).fill(0.0);
                     }
                     ws.g[0] = beta;
                 }
@@ -429,14 +365,9 @@ impl LinearSolver for GmresSolver {
                     let beta = Self::nrm2(&ws.tmp1);
                     if beta > 0.0 {
                         for i in 0..n { ws.tmp2[i] = ws.tmp1[i] / beta; }
-                    }
-                    {
-                        let v0 = ws.v_col(0);
-                        if beta > 0.0 {
-                            v0.copy_from_slice(&ws.tmp2[..n]);
-                        } else {
-                            v0.fill(0.0);
-                        }
+                        ws.copy_tmp2_into_vcol(0);
+                    } else {
+                        ws.v_col(0).fill(0.0);
                     }
                     ws.g[0] = beta;
                 }
