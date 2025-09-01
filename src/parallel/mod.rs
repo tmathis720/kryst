@@ -39,6 +39,25 @@ pub trait Comm: Send + Sync + 'static {
     /// All‐reduce a scalar (sum) across ranks
     fn all_reduce_f64(&self, local: f64) -> f64;
 
+    /// Reduce one scalar (sum) across ranks.
+    fn allreduce_sum(&self, x: f64) -> f64 {
+        self.all_reduce_f64(x)
+    }
+
+    /// Reduce two scalars (sum) in a single collective. Default: two single reductions.
+    fn allreduce_sum2(&self, a: f64, b: f64) -> (f64, f64) {
+        let a = self.allreduce_sum(a);
+        let b = self.allreduce_sum(b);
+        (a, b)
+    }
+
+    /// Reduce a slice of scalars in place (sum).
+    fn allreduce_sum_slice(&self, v: &mut [f64]) {
+        for x in v.iter_mut() {
+            *x = self.allreduce_sum(*x);
+        }
+    }
+
     /// Split this communicator into sub‐colors
     fn split(&self, color: i32, key: i32) -> UniverseComm;
 
