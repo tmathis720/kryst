@@ -19,11 +19,12 @@ pub enum CgNormType {
 pub struct PcgSolver {
     pub(crate) conv: Convergence<f64>,
     norm_type: CgNormType,
+    single_reduction: bool,
 }
 
 impl PcgSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits }, norm_type: CgNormType::Preconditioned }
+        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits }, norm_type: CgNormType::Preconditioned, single_reduction: false }
     }
 
     /// Optional runtime update of solver tolerances
@@ -36,6 +37,11 @@ impl PcgSolver {
 
     pub fn with_norm(mut self, norm_type: CgNormType) -> Self {
         self.norm_type = norm_type;
+        self
+    }
+
+    pub fn with_single_reduction(mut self, f: bool) -> Self {
+        self.single_reduction = f;
         self
     }
 
@@ -53,6 +59,10 @@ impl PcgSolver {
         if buf.len() != n {
             buf.resize(n, 0.0);
         }
+    }
+
+    pub fn set_single_reduction(&mut self, f: bool) {
+        self.single_reduction = f;
     }
 }
 
