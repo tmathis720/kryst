@@ -3430,8 +3430,24 @@ impl SuperLuDistBuilder {
 
     /// Enable 3D communication-avoiding factorization
     pub fn enable_3d_factorization(mut self, enable: bool, depth: Option<usize>) -> Self {
-        self.options.enable_3d_factorization = enable;
-        self.options.process_grid_3d_depth = depth;
+        if enable {
+            let d = depth.unwrap_or(0);
+            if d < 2 {
+                #[cfg(feature = "logging")]
+                log::warn!(
+                    "process_grid_3d_depth={} is too small, falling back to 2D factorization",
+                    d
+                );
+                self.options.enable_3d_factorization = false;
+                self.options.process_grid_3d_depth = None;
+            } else {
+                self.options.enable_3d_factorization = true;
+                self.options.process_grid_3d_depth = Some(d);
+            }
+        } else {
+            self.options.enable_3d_factorization = false;
+            self.options.process_grid_3d_depth = depth;
+        }
         self
     }
 
@@ -3561,8 +3577,24 @@ impl SuperLuDistSolver {
 
     /// Enable 3D communication-avoiding factorization
     pub fn set_3d_factorization(&mut self, enable: bool, depth: Option<usize>) -> &mut Self {
-        self.options.enable_3d_factorization = enable;
-        self.options.process_grid_3d_depth = depth;
+        if enable {
+            let d = depth.unwrap_or(0);
+            if d < 2 {
+                #[cfg(feature = "logging")]
+                log::warn!(
+                    "process_grid_3d_depth={} is too small, falling back to 2D factorization",
+                    d
+                );
+                self.options.enable_3d_factorization = false;
+                self.options.process_grid_3d_depth = None;
+            } else {
+                self.options.enable_3d_factorization = true;
+                self.options.process_grid_3d_depth = Some(d);
+            }
+        } else {
+            self.options.enable_3d_factorization = false;
+            self.options.process_grid_3d_depth = depth;
+        }
         self
     }
 
@@ -3970,7 +4002,8 @@ impl SuperLuDistSolver {
         let mut panels = Vec::new();
         let mut panel_factors = Vec::new();
         let mut total_row_swaps = 0;
-        let mut tiny_pivots_replaced = 0usize;
+        let mut tiny_pivots_replaced_total = 0usize;
+        let mut panels_with_replacements = 0usize;
         let mut max_pivot_growth = 1.0;
 
         // Process matrix in panels
@@ -4005,7 +4038,10 @@ impl SuperLuDistSolver {
             match panel.factorize_lu(self.options.diagonal_pivot_threshold, pivot_strategy) {
                 Ok(factor) => {
                     total_row_swaps += factor.num_row_swaps;
-                    tiny_pivots_replaced += factor.tiny_pivots_replaced;
+                    tiny_pivots_replaced_total += factor.tiny_pivots_replaced;
+                    if factor.tiny_pivots_replaced > 0 {
+                        panels_with_replacements += 1;
+                    }
 
                     // Estimate pivot growth (simplified)
                     for i in 0..panel.width.min(panel.height) {
@@ -4045,7 +4081,7 @@ impl SuperLuDistSolver {
         let factor_stats = FactorizationStats {
             num_panels: panels.len(),
             total_row_swaps,
-            tiny_pivots_replaced,
+            tiny_pivots_replaced: tiny_pivots_replaced_total,
             max_pivot_growth,
             condition_estimate: None, // Would require more sophisticated analysis
             memory_usage,
@@ -4053,9 +4089,11 @@ impl SuperLuDistSolver {
 
         #[cfg(feature = "logging")]
         log::info!(
-            "Numerical factorization completed: {} panels, {} row swaps, max pivot growth {:.2e}",
+            "Numerical factorization completed: {} panels, {} row swaps, {} panels replaced {} tiny pivots, max pivot growth {:.2e}",
             factor_stats.num_panels,
             factor_stats.total_row_swaps,
+            panels_with_replacements,
+            factor_stats.tiny_pivots_replaced,
             factor_stats.max_pivot_growth
         );
 
@@ -4099,7 +4137,7 @@ impl SuperLuDistSolver {
             col_scale,
             pivot_strategy,
             pivot_threshold: self.options.diagonal_pivot_threshold,
-            replaced_tiny_pivots: tiny_pivots_replaced > 0,
+            replaced_tiny_pivots: tiny_pivots_replaced_total > 0,
             factor_stats,
             l_block_graph: lbg,
             u_block_graph: ubg,
@@ -6190,5 +6228,56 @@ mod tests {
         assert_eq!(solver.options.max_concurrent_panels, 1);
         assert_eq!(solver.options.async_panel_updates, false);
         assert!(solver.refinement_engine.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "superlu3d")]
+    fn test_request_schedule_3d() {
+        use crate::parallel::NoComm;
+        let comm = UniverseComm::NoComm(NoComm);
+        let grid2d = ProcessGrid {
+            prows: 1,
+            pcols: 1,
+            my_prow: 0,
+            my_pcol: 0,
+            my_rank: 0,
+            total_procs: 1,
+        };
+        let dist = BlockCyclicDistribution::new(grid2d.clone(), 0, 0, 1, 1);
+        let grid3d = ProcessGrid3D {
+            prows: 1,
+            pcols: 1,
+            pdepth: 3,
+            my_prow: 0,
+            my_pcol: 0,
+            my_pdepth: 0,
+            my_rank: 0,
+            total_procs: 1,
+        };
+        let mut solve_data = TriangularSolveData {
+            local_solution_blocks: vec![],
+            comm_buffer: vec![],
+            pending_requests: vec![],
+            block_owners: vec![0],
+            block_sizes: vec![],
+            local_l_factors: vec![],
+            local_u_factors: vec![],
+            dependency_graph: vec![],
+        };
+        let block_id = 5usize;
+        DistributedTriangularSolver::start_nonblocking_broadcast(
+            &mut solve_data,
+            &[0.0],
+            block_id,
+            &dist,
+            CommPattern::PointToPoint,
+            &comm,
+            Some(&grid3d),
+        )
+        .unwrap();
+        let mut tags: Vec<usize> = solve_data.pending_requests.iter().map(|r| r.tag).collect();
+        tags.sort_unstable();
+        let expected = vec![(block_id << 8) + 1, (block_id << 8) + 2];
+        assert_eq!(tags, expected);
     }
 }
