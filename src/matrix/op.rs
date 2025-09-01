@@ -1,5 +1,5 @@
 use crate::error::KError;
-use crate::parallel::{NoComm, UniverseComm};
+use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
