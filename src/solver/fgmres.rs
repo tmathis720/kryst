@@ -1,6 +1,6 @@
 //! Flexible GMRES (FGMRES) over &dyn LinOp<f64>, right-preconditioned, object-safe.
 
-use crate::context::ksp_context::Workspace;
+use crate::context::ksp_context::{Workspace, GmresSpec};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
@@ -59,7 +59,12 @@ impl FgmresSolver {
     }
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, m: usize) {
-        w.ensure_size(n, m, true);
+        w.acquire_gmres(GmresSpec {
+            n,
+            m,
+            need_z: true,
+            block_s: 0,
+        });
     }
 
     fn apply_givens(hij: &mut f64, hij1: &mut f64, c: f64, s: f64) {
