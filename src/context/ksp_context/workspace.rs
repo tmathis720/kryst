@@ -9,6 +9,7 @@ pub struct Workspace {
     pub h: Vec<Vec<f64>>,
     pub v_mem: Vec<f64>,
     pub z_mem: Vec<f64>,
+    // Column-major Hessenberg storage for GMRES/FGMRES
     pub h_mem: Vec<f64>,
     pub cs: Vec<f64>,
     pub sn: Vec<f64>,
@@ -17,6 +18,15 @@ pub struct Workspace {
     n: usize,
     m: usize,
     need_z: bool,
+}
+
+/// Specification for sizing GMRES/FGMRES workspaces.
+#[derive(Debug, Clone, Copy)]
+pub struct GmresSpec {
+    pub n: usize,
+    pub m: usize,
+    pub need_z: bool,
+    pub block_s: usize,
 }
 
 impl Default for Workspace {
@@ -57,25 +67,44 @@ impl Workspace {
     #[inline]
     pub fn has_z(&self) -> bool { self.need_z }
 
-    pub fn ensure_size(&mut self, n: usize, m: usize, need_z: bool) {
-        self.n = n;
-        self.m = m;
-        self.need_z = need_z;
-        if self.tmp1.len() != n { self.tmp1.resize(n, 0.0); }
-        if self.tmp2.len() != n { self.tmp2.resize(n, 0.0); }
-        let v_len = (m + 1).checked_mul(n).expect("v_mem overflow");
-        if self.v_mem.len() != v_len { self.v_mem.resize(v_len, 0.0); }
-        if need_z {
-            let z_len = m.checked_mul(n).expect("z_mem overflow");
-            if self.z_mem.len() != z_len { self.z_mem.resize(z_len, 0.0); }
+    /// Ensure capacity for a (F)GMRES run. Idempotent and allocation-friendly.
+    pub fn acquire_gmres(&mut self, spec: GmresSpec) {
+        // Remember shape for indexers
+        self.n = spec.n;
+        self.m = spec.m;
+        self.need_z = spec.need_z;
+
+        let n = spec.n;
+        let m = spec.m;
+
+        let v_len = (m + 1).checked_mul(n).expect("v_len overflow");
+        let z_len = if spec.need_z {
+            m.checked_mul(n).expect("z_len overflow")
+        } else {
+            0
+        };
+        let h_len = (m + 1).checked_mul(m).expect("h_len overflow");
+        let g_len = m + 1;
+
+        ensure_len(&mut self.tmp1, n);
+        ensure_len(&mut self.tmp2, n);
+        ensure_len(&mut self.v_mem, v_len);
+        if spec.need_z {
+            ensure_len(&mut self.z_mem, z_len);
         } else {
             self.z_mem.clear();
+            self.z_mem.shrink_to_fit();
         }
-        let h_len = (m + 1).checked_mul(m).expect("h overflow");
-        if self.h_mem.len() != h_len { self.h_mem.resize(h_len, 0.0); }
-        if self.cs.len() != m { self.cs.resize(m, 0.0); }
-        if self.sn.len() != m { self.sn.resize(m, 0.0); }
-        if self.g.len() != m + 1 { self.g.resize(m + 1, 0.0); }
+        ensure_len(&mut self.h_mem, h_len);
+        ensure_len(&mut self.cs, m);
+        ensure_len(&mut self.sn, m);
+        ensure_len(&mut self.g, g_len);
+
+        if spec.block_s > 0 {
+            ensure_len(&mut self.blk_scratch, n * spec.block_s);
+        } else {
+            self.blk_scratch.clear();
+        }
     }
 
     #[inline]
@@ -128,6 +157,17 @@ impl Workspace {
         let (_, lo_slice) = lo_part.split_at_mut(lo_off);
         let (hi_slice, _) = rest.split_at_mut(n);
         if a < b { (&mut lo_slice[..n], hi_slice) } else { (hi_slice, &mut lo_slice[..n]) }
+    }
+}
+
+/// Grow vector to `need` length without zeroing. Never shrinks silently.
+#[inline]
+fn ensure_len(v: &mut Vec<f64>, need: usize) {
+    if v.len() != need {
+        if v.capacity() < need {
+            v.reserve_exact(need - v.capacity());
+        }
+        unsafe { v.set_len(need); }
     }
 }
 

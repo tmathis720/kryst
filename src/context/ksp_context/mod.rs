@@ -50,7 +50,7 @@ use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
-pub use workspace::Workspace;
+pub use workspace::{Workspace, GmresSpec};
 
 
 /// Supported solver types.

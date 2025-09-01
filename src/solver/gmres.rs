@@ -15,7 +15,7 @@
 //! in column-major form. The legacy `Workspace.z` (Vec<Vec<_>>) is not used by
 //! GMRES/FGMRES.
 
-use crate::context::ksp_context::Workspace;
+use crate::context::ksp_context::{Workspace, GmresSpec};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
@@ -72,9 +72,13 @@ impl GmresSolver {
 
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, side: PcSide) {
-        let m = self.restart;
-        let need_z = matches!(side, PcSide::Right);
-        w.ensure_size(n, m, need_z);
+        let spec = GmresSpec {
+            n,
+            m: self.restart,
+            need_z: matches!(side, PcSide::Right),
+            block_s: 0,
+        };
+        w.acquire_gmres(spec);
     }
 
     fn apply_precond(
@@ -105,26 +109,28 @@ impl GmresSolver {
         for i in 0..k {
             let c = cs[i];
             let s = sn[i];
-            let hij = &mut h[k * ld + i];
-            let hij1 = &mut h[k * ld + i + 1];
-            let t = c * *hij + s * *hij1;
-            *hij1 = -s * *hij + c * *hij1;
-            *hij = t;
+            let idx = k * ld + i;
+            let hij = h[idx];
+            let hij1 = h[idx + 1];
+            let t = c * hij + s * hij1;
+            h[idx + 1] = -s * hij + c * hij1;
+            h[idx] = t;
         }
 
-        let hkk = &mut h[k * ld + k];
-        let hk1k = &mut h[k * ld + k + 1];
-        let (c, s) = if *hk1k == 0.0 {
+        let idx = k * ld + k;
+        let hkk = h[idx];
+        let hk1k = h[idx + 1];
+        let (c, s) = if hk1k == 0.0 {
             (1.0, 0.0)
         } else {
-            let r = (*hkk * *hkk + *hk1k * *hk1k).sqrt();
-            (*hkk / r, *hk1k / r)
+            let r = (hkk * hkk + hk1k * hk1k).sqrt();
+            (hkk / r, hk1k / r)
         };
         cs[k] = c;
         sn[k] = s;
-        let t = c * *hkk + s * *hk1k;
-        *hk1k = -s * *hkk + c * *hk1k;
-        *hkk = t;
+        let t = c * hkk + s * hk1k;
+        h[idx + 1] = -s * hkk + c * hk1k;
+        h[idx] = t;
         let t = c * g[k] + s * g[k + 1];
         g[k + 1] = -s * g[k] + c * g[k + 1];
         g[k] = t;
@@ -226,23 +232,31 @@ impl LinearSolver for GmresSolver {
                 self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                 let tmp2 = ws.tmp2.clone();
                 let beta = Self::nrm2(&tmp2);
-                let v0 = ws.v_col(0);
                 if beta > 0.0 {
                     for i in 0..n { ws.tmp2[i] /= beta; }
-                    v0.copy_from_slice(&ws.tmp2[..n]);
-                } else {
-                    v0.fill(0.0);
+                }
+                {
+                    let v0 = ws.v_col(0);
+                    if beta > 0.0 {
+                        v0.copy_from_slice(&ws.tmp2[..n]);
+                    } else {
+                        v0.fill(0.0);
+                    }
                 }
                 beta
             }
             PcSide::Right => {
                 let beta = Self::nrm2(&ws.tmp1);
-                let v0 = ws.v_col(0);
                 if beta > 0.0 {
                     for i in 0..n { ws.tmp2[i] = ws.tmp1[i] / beta; }
-                    v0.copy_from_slice(&ws.tmp2[..n]);
-                } else {
-                    v0.fill(0.0);
+                }
+                {
+                    let v0 = ws.v_col(0);
+                    if beta > 0.0 {
+                        v0.copy_from_slice(&ws.tmp2[..n]);
+                    } else {
+                        v0.fill(0.0);
+                    }
                 }
                 beta
             }
@@ -284,43 +298,58 @@ impl LinearSolver for GmresSolver {
                         let vk = &ws.v_mem[k * n..(k + 1) * n];
                         a.matvec(vk, &mut ws.tmp1);
                         self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
-                        // w buffer is tmp2 here
                         for i in 0..=k {
-                            let vi = &ws.v_mem[i * n..(i + 1) * n];
-                            let hij = Self::dot(&ws.tmp2, vi);
+                            let hij;
+                            {
+                                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                hij = Self::dot(&ws.tmp2, vi);
+                                for (w, &vi_j) in ws.tmp2.iter_mut().zip(vi) { *w -= hij * vi_j; }
+                            }
                             *ws.h_at_mut(i, k) = hij;
-                            for (w, &vi_j) in ws.tmp2.iter_mut().zip(vi) { *w -= hij * vi_j; }
                         }
                         let hnext = Self::nrm2(&ws.tmp2);
                         *ws.h_at_mut(k + 1, k) = hnext;
-                        let vnext = ws.v_col(k + 1);
                         if hnext > 0.0 {
-                            for i in 0..n { vnext[i] = ws.tmp2[i] / hnext; }
-                        } else {
-                            vnext.fill(0.0);
+                            for i in 0..n { ws.tmp2[i] /= hnext; }
+                        }
+                        {
+                            let vnext = ws.v_col(k + 1);
+                            if hnext > 0.0 {
+                                vnext.copy_from_slice(&ws.tmp2[..n]);
+                            } else {
+                                vnext.fill(0.0);
+                            }
                         }
                     }
                     PcSide::Right => {
                         let vk = &ws.v_mem[k * n..(k + 1) * n];
                         self.apply_precond(pc, PcSide::Right, vk, &mut ws.tmp2)?;
-                        // store z_k (even if pc is None) for consistent update
-                        let zk = &mut ws.z_mem[k * n..(k + 1) * n];
-                        zk.copy_from_slice(&ws.tmp2[..n]);
+                        {
+                            let zk = &mut ws.z_mem[k * n..(k + 1) * n];
+                            zk.copy_from_slice(&ws.tmp2[..n]);
+                        }
                         a.matvec(&ws.tmp2, &mut ws.tmp1);
-                        // w buffer is tmp1 here
                         for i in 0..=k {
-                            let vi = &ws.v_mem[i * n..(i + 1) * n];
-                            let hij = Self::dot(&ws.tmp1, vi);
+                            let hij;
+                            {
+                                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                hij = Self::dot(&ws.tmp1, vi);
+                                for (w, &vi_j) in ws.tmp1.iter_mut().zip(vi) { *w -= hij * vi_j; }
+                            }
                             *ws.h_at_mut(i, k) = hij;
-                            for (w, &vi_j) in ws.tmp1.iter_mut().zip(vi) { *w -= hij * vi_j; }
                         }
                         let hnext = Self::nrm2(&ws.tmp1);
                         *ws.h_at_mut(k + 1, k) = hnext;
-                        let vnext = ws.v_col(k + 1);
                         if hnext > 0.0 {
-                            for i in 0..n { vnext[i] = ws.tmp1[i] / hnext; }
-                        } else {
-                            vnext.fill(0.0);
+                            for i in 0..n { ws.tmp1[i] /= hnext; }
+                        }
+                        {
+                            let vnext = ws.v_col(k + 1);
+                            if hnext > 0.0 {
+                                vnext.copy_from_slice(&ws.tmp1[..n]);
+                            } else {
+                                vnext.fill(0.0);
+                            }
                         }
                     }
                     PcSide::Symmetric => unreachable!(),
@@ -383,23 +412,31 @@ impl LinearSolver for GmresSolver {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                     let tmp2 = ws.tmp2.clone();
                     let beta = Self::nrm2(&tmp2);
-                    let v0 = ws.v_col(0);
                     if beta > 0.0 {
                         for i in 0..n { ws.tmp2[i] /= beta; }
-                        v0.copy_from_slice(&ws.tmp2[..n]);
-                    } else {
-                        v0.fill(0.0);
+                    }
+                    {
+                        let v0 = ws.v_col(0);
+                        if beta > 0.0 {
+                            v0.copy_from_slice(&ws.tmp2[..n]);
+                        } else {
+                            v0.fill(0.0);
+                        }
                     }
                     ws.g[0] = beta;
                 }
                 PcSide::Right => {
                     let beta = Self::nrm2(&ws.tmp1);
-                    let v0 = ws.v_col(0);
                     if beta > 0.0 {
                         for i in 0..n { ws.tmp2[i] = ws.tmp1[i] / beta; }
-                        v0.copy_from_slice(&ws.tmp2[..n]);
-                    } else {
-                        v0.fill(0.0);
+                    }
+                    {
+                        let v0 = ws.v_col(0);
+                        if beta > 0.0 {
+                            v0.copy_from_slice(&ws.tmp2[..n]);
+                        } else {
+                            v0.fill(0.0);
+                        }
                     }
                     ws.g[0] = beta;
                 }
