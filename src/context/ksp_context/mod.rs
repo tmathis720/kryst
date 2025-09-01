@@ -49,87 +49,9 @@ use crate::solver::{
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
 use std::sync::Arc;
+mod workspace;
+pub use workspace::Workspace;
 
-/// Workspace placeholder reused by solvers.
-#[derive(Debug)]
-pub struct Workspace {
-    pub tmp1: Vec<f64>,
-    pub tmp2: Vec<f64>,
-    pub q: Vec<Vec<f64>>,
-    pub h: Vec<Vec<f64>>,
-    pub cs: Vec<f64>,
-    pub sn: Vec<f64>,
-    pub g: Vec<f64>,
-    /// Legacy preconditioned basis vectors (Z) used by right-preconditioned
-    /// solvers or flexible methods like FGMRES. Left-preconditioned solvers
-    /// leave this empty. Kept for backward compatibility with solvers that
-    /// haven't yet migrated to flat storage.
-    pub z: Vec<Vec<f64>>,
-    /// Column-major slabs for GMRES/FGMRES bases. Optional for legacy solvers.
-    ///
-    /// `q_mem` stores (m+1) columns of length `n` in column-major layout.
-    /// `z_mem` stores `m` columns of length `n` in column-major layout.
-    pub q_mem: Vec<f64>,
-    pub z_mem: Vec<f64>,
-}
-
-impl Workspace {
-    pub fn new(n: usize) -> Self {
-        Self {
-            tmp1: vec![0.0; n],
-            tmp2: vec![0.0; n],
-            q: Vec::new(),
-            h: Vec::new(),
-            cs: Vec::new(),
-            sn: Vec::new(),
-            g: Vec::new(),
-            z: Vec::new(),
-            q_mem: Vec::new(),
-            z_mem: Vec::new(),
-        }
-    }
-
-    /// Ensure column-major slabs for GMRES-like solvers are allocated.
-    ///
-    /// - `n`: vector length (rows)
-    /// - `m`: restart size (number of inner iterations)
-    /// - `need_z`: if true, also allocate `z_mem` for right/FGMRES
-    pub fn ensure_gmres_slabs(&mut self, n: usize, m: usize, need_z: bool) {
-        let v_len = (m + 1) * n;
-        if self.q_mem.len() != v_len {
-            self.q_mem.resize(v_len, 0.0);
-        }
-        if need_z {
-            let z_len = m * n;
-            if self.z_mem.len() != z_len {
-                self.z_mem.resize(z_len, 0.0);
-            }
-        } else {
-            self.z_mem.clear();
-        }
-    }
-
-    #[inline]
-    pub fn vcol(&self, n: usize, j: usize) -> &[f64] {
-        &self.q_mem[j * n..(j + 1) * n]
-    }
-    #[inline]
-    pub fn vcol_mut(&mut self, n: usize, j: usize) -> &mut [f64] {
-        let start = j * n;
-        &mut self.q_mem[start..start + n]
-    }
-
-    #[inline]
-    pub fn zcol(&self, n: usize, j: usize) -> &[f64] {
-        &self.z_mem[j * n..(j + 1) * n]
-    }
-    #[inline]
-    pub fn zcol_mut(&mut self, n: usize, j: usize) -> &mut [f64] {
-        let start = j * n;
-        &mut self.z_mem[start..start + n]
-    }
-
-}
 
 /// Supported solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
