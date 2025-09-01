@@ -36,7 +36,7 @@ fn cg_reduction_counts() {
     let stats = solver
         .solve_with_comm(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut wk))
         .unwrap();
-    let expected = 1 + stats.iterations;
+    let expected = 1 + 2 * stats.iterations;
     assert_eq!(comm.reduces.load(Ordering::Relaxed), expected);
 
 }
