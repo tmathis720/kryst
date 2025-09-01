@@ -38,6 +38,11 @@ pub struct CgSolver {
     single_reduction: bool,
     trust_region: Option<f64>,
     true_residual_monitor: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
+    /// Whether the supplied initial guess in `x` should be treated as
+    /// nonzero. When `false` (the default) and `x` is numerically the zero
+    /// vector, the solver skips the initial matvec and assumes `x = 0`.
+    /// This mirrors PETSc's `KSPSetInitialGuessNonzero` semantics.
+    initial_guess_nonzero: bool,
 }
 
 impl CgSolver {
@@ -49,6 +54,7 @@ impl CgSolver {
             single_reduction: false,
             trust_region: None,
             true_residual_monitor: None,
+            initial_guess_nonzero: false,
         }
     }
 
@@ -62,6 +68,15 @@ impl CgSolver {
     }
     pub fn with_trust_region(mut self, r: f64) -> Self {
         self.trust_region = Some(r);
+        self
+    }
+    /// Indicate whether the supplied initial guess is nonzero.
+    ///
+    /// By default `x` is assumed to be the zero vector, avoiding an extra
+    /// matvec on entry. Calling this with `true` forces the solver to compute
+    /// the initial residual `b - A x` even if `x` happens to be zero.
+    pub fn with_nonzero_guess(mut self, f: bool) -> Self {
+        self.initial_guess_nonzero = f;
         self
     }
     pub fn with_true_residual_monitor(
@@ -80,6 +95,10 @@ impl CgSolver {
     }
     pub fn set_trust_region(&mut self, r: f64) {
         self.trust_region = Some(r);
+    }
+    /// Set the nonzero initial guess flag after construction.
+    pub fn set_nonzero_guess(&mut self, f: bool) {
+        self.initial_guess_nonzero = f;
     }
     pub fn set_true_residual_monitor(
         &mut self,
@@ -190,7 +209,9 @@ impl CgSolver {
 
         let (r, z, p, ap, tmp) = Self::acquire(n, work);
 
-        if x.iter().any(|&xi| xi != 0.0) {
+        let guess_nonzero =
+            self.initial_guess_nonzero || x.iter().any(|&xi| xi != 0.0);
+        if guess_nonzero {
             a.matvec(x, tmp);
             for i in 0..n {
                 r[i] = b[i] - tmp[i];
