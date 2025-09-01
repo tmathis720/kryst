@@ -138,6 +138,23 @@ impl super::Comm for MpiComm {
         self.all_reduce(local)
     }
 
+    fn allreduce_sum2(&self, a: f64, b: f64) -> (f64, f64) {
+        use mpi::collective::SystemOperation;
+        let send = [a, b];
+        let mut recv = [0.0f64; 2];
+        self.world
+            .all_reduce_into(&send, &mut recv, &SystemOperation::sum());
+        (recv[0], recv[1])
+    }
+
+    fn allreduce_sum_slice(&self, v: &mut [f64]) {
+        use mpi::collective::SystemOperation;
+        let mut out = vec![0.0f64; v.len()];
+        self.world
+            .all_reduce_into(v, &mut out[..], &SystemOperation::sum());
+        v.copy_from_slice(&out);
+    }
+
     /// Split this communicator into sub‐colors
     fn split(&self, color: i32, key: i32) -> super::UniverseComm {
         use mpi::topology::Color;
