@@ -3,8 +3,8 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::LinearSolver;
 use crate::solver::common::recompute_true_residual_norm;
+use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -25,11 +25,28 @@ pub struct PcgSolver {
     pub(crate) conv: Convergence<f64>,
     norm_type: CgNormType,
     single_reduction: bool,
+    /// Whether the initial guess in `x` should be treated as nonzero.
+    ///
+    /// PETSc zeroes the initial guess by default unless told otherwise via
+    /// `KSPSetInitialGuessNonzero`. We follow the same policy; when this flag is
+    /// `false` and the provided `x` is numerically zero, the solver skips the
+    /// initial matvec and assumes a zero guess.
+    initial_guess_nonzero: bool,
 }
 
 impl PcgSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { conv: Convergence { rtol, atol: 1e-50, dtol: 1e5, max_iters: maxits }, norm_type: CgNormType::Preconditioned, single_reduction: false }
+        Self {
+            conv: Convergence {
+                rtol,
+                atol: 1e-50,
+                dtol: 1e5,
+                max_iters: maxits,
+            },
+            norm_type: CgNormType::Preconditioned,
+            single_reduction: false,
+            initial_guess_nonzero: false,
+        }
     }
 
     /// Optional runtime update of solver tolerances
@@ -48,6 +65,21 @@ impl PcgSolver {
     pub fn with_single_reduction(mut self, f: bool) -> Self {
         self.single_reduction = f;
         self
+    }
+
+    /// Indicate whether the supplied initial guess is nonzero.
+    ///
+    /// By default `x` is assumed to be zero, which avoids an extra matvec on
+    /// entry. Calling this with `true` forces the solver to compute the initial
+    /// residual `b - A x` even if `x` happens to be the zero vector.
+    pub fn with_nonzero_guess(mut self, f: bool) -> Self {
+        self.initial_guess_nonzero = f;
+        self
+    }
+
+    /// Set the nonzero initial guess flag after construction.
+    pub fn set_nonzero_guess(&mut self, f: bool) {
+        self.initial_guess_nonzero = f;
     }
 
     #[inline]
@@ -153,7 +185,7 @@ impl PcgSolver {
         }
 
         // r = b - A x
-        let zero_guess = x.iter().all(|&xi| xi == 0.0);
+        let zero_guess = !self.initial_guess_nonzero && x.iter().all(|&xi| xi == 0.0);
         if zero_guess {
             r.copy_from_slice(b);
         } else {
@@ -178,9 +210,8 @@ impl PcgSolver {
         let mut has_pending_rz = false;
 
         let mut res = match self.norm_type {
-            CgNormType::Preconditioned => rho.sqrt(),
+            CgNormType::Preconditioned | CgNormType::Natural => rho.sqrt(),
             CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-            CgNormType::Natural => rho,
             CgNormType::None => 0.0,
         };
 
@@ -201,7 +232,11 @@ impl PcgSolver {
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut tmp = vec![0.0; n];
             let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-            return Ok(SolveStats { iterations: 0, final_residual: true_res, reason: s0.reason });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: true_res,
+                reason: s0.reason,
+            });
         }
 
         let mut iters = 0usize;
@@ -237,7 +272,11 @@ impl PcgSolver {
                 if pw <= 0.0 || !pw.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                    return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                    return Ok(SolveStats {
+                        iterations: k - 1,
+                        final_residual: true_res,
+                        reason: ConvergedReason::DivergedDtol,
+                    });
                 }
 
                 let alpha = rho_k / pw;
@@ -256,15 +295,18 @@ impl PcgSolver {
                 if rz_local_next < 0.0 || !rz_local_next.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                    return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                    return Ok(SolveStats {
+                        iterations: k,
+                        final_residual: true_res,
+                        reason: ConvergedReason::DivergedDtol,
+                    });
                 }
                 pending_rz_local = rz_local_next;
                 has_pending_rz = true;
 
                 res = match self.norm_type {
-                    CgNormType::Preconditioned => rho_k.sqrt(),
+                    CgNormType::Preconditioned | CgNormType::Natural => rho_k.sqrt(),
                     CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                    CgNormType::Natural => rho_k,
                     CgNormType::None => res,
                 };
 
@@ -283,7 +325,11 @@ impl PcgSolver {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
                     s.final_residual = true_res;
-                    return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
+                    return Ok(SolveStats {
+                        iterations: k,
+                        final_residual: s.final_residual,
+                        reason: s.reason,
+                    });
                 }
 
                 z_prev.swap_with_slice(z);
@@ -294,7 +340,11 @@ impl PcgSolver {
                 if pw <= 0.0 || !pw.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                    return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                    return Ok(SolveStats {
+                        iterations: k - 1,
+                        final_residual: true_res,
+                        reason: ConvergedReason::DivergedDtol,
+                    });
                 }
 
                 let alpha = rho / pw;
@@ -313,13 +363,16 @@ impl PcgSolver {
                 if rho_new < 0.0 || !rho_new.is_finite() {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                    return Ok(SolveStats { iterations: k, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                    return Ok(SolveStats {
+                        iterations: k,
+                        final_residual: true_res,
+                        reason: ConvergedReason::DivergedDtol,
+                    });
                 }
 
                 res = match self.norm_type {
-                    CgNormType::Preconditioned => rho_new.sqrt(),
+                    CgNormType::Preconditioned | CgNormType::Natural => rho_new.sqrt(),
                     CgNormType::Unpreconditioned => Self::nrm2(r, comm),
-                    CgNormType::Natural => rho_new,
                     CgNormType::None => res,
                 };
 
@@ -338,7 +391,11 @@ impl PcgSolver {
                     let mut tmp = vec![0.0; n];
                     let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
                     s.final_residual = true_res;
-                    return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
+                    return Ok(SolveStats {
+                        iterations: k,
+                        final_residual: s.final_residual,
+                        reason: s.reason,
+                    });
                 }
 
                 let beta = rho_new / rho;
@@ -352,7 +409,11 @@ impl PcgSolver {
 
         let mut tmp = vec![0.0; n];
         let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-        Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
+        Ok(SolveStats {
+            iterations: iters,
+            final_residual: true_res,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }
 
