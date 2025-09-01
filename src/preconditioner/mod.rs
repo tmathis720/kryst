@@ -112,6 +112,9 @@ pub trait Preconditioner: Send + Sync {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
 
     /// Apply M⁻¹ to input vector, writing result to output slice.
+    ///
+    /// When used with CG and [`PcSide::Left`], this operation must represent an
+    /// SPD preconditioner `M` so that `rᵀ M⁻¹ r > 0` holds.
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 
     /// Mutable application (flexible/nonlinear preconditioners).

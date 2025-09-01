@@ -14,8 +14,8 @@ pub enum CgNormType {
     Preconditioned,
     /// Monitor the unpreconditioned residual `||r||₂`
     Unpreconditioned,
-    /// Monitor the natural norm induced by the operator (also `sqrt(rᵀz)` for
-    /// SPD systems). Included for compatibility with PETSc semantics.
+    /// Monitor the "natural" norm of the preconditioned residual vector
+    /// `||z||₂`, matching PETSc's `-ksp_norm_type natural` semantics.
     Natural,
     /// Do not compute or report a residual norm
     None,
@@ -210,8 +210,9 @@ impl PcgSolver {
         let mut has_pending_rz = false;
 
         let mut res = match self.norm_type {
-            CgNormType::Preconditioned | CgNormType::Natural => rho.sqrt(),
+            CgNormType::Preconditioned => rho.sqrt(),
             CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+            CgNormType::Natural => Self::nrm2(z, comm),
             CgNormType::None => 0.0,
         };
 
@@ -225,8 +226,10 @@ impl PcgSolver {
 
         // Convergence check at k=0
         let res_check0 = match self.norm_type {
-            CgNormType::Preconditioned | CgNormType::Natural => rho.sqrt(),
-            CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+            CgNormType::Preconditioned => rho.sqrt(),
+            CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+            CgNormType::Natural => Self::nrm2(z, comm),
+            CgNormType::None => Self::nrm2(r, comm),
         };
         let (reason0, s0) = self.conv.check(res_check0, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
@@ -305,8 +308,9 @@ impl PcgSolver {
                 has_pending_rz = true;
 
                 res = match self.norm_type {
-                    CgNormType::Preconditioned | CgNormType::Natural => rho_k.sqrt(),
+                    CgNormType::Preconditioned => rho_k.sqrt(),
                     CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+                    CgNormType::Natural => Self::nrm2(z, comm),
                     CgNormType::None => res,
                 };
 
@@ -317,8 +321,10 @@ impl PcgSolver {
                 }
 
                 let res_check = match self.norm_type {
-                    CgNormType::Preconditioned | CgNormType::Natural => rho_k.sqrt(),
-                    CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+                    CgNormType::Preconditioned => rho_k.sqrt(),
+                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+                    CgNormType::Natural => Self::nrm2(z, comm),
+                    CgNormType::None => Self::nrm2(r, comm),
                 };
                 let (reason, mut s) = self.conv.check(res_check, bnorm, k);
                 if !matches!(reason, ConvergedReason::Continued) {
@@ -371,8 +377,9 @@ impl PcgSolver {
                 }
 
                 res = match self.norm_type {
-                    CgNormType::Preconditioned | CgNormType::Natural => rho_new.sqrt(),
+                    CgNormType::Preconditioned => rho_new.sqrt(),
                     CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+                    CgNormType::Natural => Self::nrm2(z, comm),
                     CgNormType::None => res,
                 };
 
@@ -383,8 +390,10 @@ impl PcgSolver {
                 }
 
                 let res_check = match self.norm_type {
-                    CgNormType::Preconditioned | CgNormType::Natural => rho_new.sqrt(),
-                    CgNormType::Unpreconditioned | CgNormType::None => Self::nrm2(r, comm),
+                    CgNormType::Preconditioned => rho_new.sqrt(),
+                    CgNormType::Unpreconditioned => Self::nrm2(r, comm),
+                    CgNormType::Natural => Self::nrm2(z, comm),
+                    CgNormType::None => Self::nrm2(r, comm),
                 };
                 let (reason, mut s) = self.conv.check(res_check, bnorm, k);
                 if !matches!(reason, ConvergedReason::Continued) {
