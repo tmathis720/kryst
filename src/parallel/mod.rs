@@ -142,6 +142,12 @@ impl Comm for NoComm {
         local
     }
 
+    fn allreduce_sum2(&self, a: f64, b: f64) -> (f64, f64) {
+        (a, b)
+    }
+
+    fn allreduce_sum_slice(&self, _v: &mut [f64]) {}
+
     fn split(&self, _color: i32, _key: i32) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
     }
