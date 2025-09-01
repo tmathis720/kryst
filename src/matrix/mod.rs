@@ -10,6 +10,7 @@ mod format_impls;
 pub mod op;
 pub mod op_shell;
 pub mod sparse;
+pub mod spmv;
 pub mod utils;
 
 pub use convert::owned_from_mat;

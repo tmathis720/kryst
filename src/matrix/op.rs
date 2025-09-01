@@ -213,13 +213,21 @@ pub struct CsrOp {
     csr: Arc<CsrMatrix<f64>>,
     ids: ChangeIds,
     comm: UniverseComm,
+    #[cfg(feature = "transpose-cache")]
+    t_cache: parking_lot::RwLock<Option<(ValuesId, Arc<CscMatrix<f64>>)>>,
 }
 impl CsrOp {
     pub fn new(csr: Arc<CsrMatrix<f64>>) -> Self {
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
-        Self { csr, ids, comm: UniverseComm::NoComm(NoComm) }
+        Self {
+            csr,
+            ids,
+            comm: UniverseComm::NoComm(NoComm),
+            #[cfg(feature = "transpose-cache")]
+            t_cache: parking_lot::RwLock::new(None),
+        }
     }
     pub fn mark_structure_changed(&self) {
         self.ids.bump_structure();
@@ -260,7 +268,8 @@ impl LinOp for CsrOp {
                     threads,
                     cutoff,
                 );
-                return self.csr.spmv_parallel(x, y);
+                let _ = crate::matrix::spmv::spmv_csr_parallel(self.csr.as_ref(), x, y);
+                return;
             } else {
                 #[cfg(feature = "logging")]
                 log::trace!(
@@ -279,18 +288,24 @@ impl LinOp for CsrOp {
         true
     }
     fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.csr.nrows());
-        assert_eq!(y.len(), self.csr.ncols());
-        y.fill(0.0);
-        let rp = self.csr.row_ptr();
-        let ci = self.csr.col_idx();
-        let vv = self.csr.values();
-        for i in 0..self.csr.nrows() {
-            let xi = x[i];
-            for idx in rp[i]..rp[i + 1] {
-                y[ci[idx]] += vv[idx] * xi;
+        #[cfg(feature = "transpose-cache")]
+        {
+            if let Some(csc) = self.ensure_csc_for_t() {
+                let _ = crate::matrix::spmv::t_spmv_csr_parallel(
+                    self.csr.as_ref(),
+                    crate::matrix::spmv::TBackend::Csc(&csc),
+                    x,
+                    y,
+                );
+                return;
             }
         }
+        let _ = crate::matrix::spmv::t_spmv_csr_parallel(
+            self.csr.as_ref(),
+            crate::matrix::spmv::TBackend::CsrGather,
+            x,
+            y,
+        );
     }
     fn as_any(&self) -> &dyn Any {
         &*self.csr
@@ -303,6 +318,28 @@ impl LinOp for CsrOp {
     }
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+}
+
+#[cfg(feature = "transpose-cache")]
+impl CsrOp {
+    fn ensure_csc_for_t(&self) -> Option<Arc<CscMatrix<f64>>> {
+        use crate::matrix::format::AsFormat;
+        let vid = self.values_id();
+        {
+            let guard = self.t_cache.read();
+            if let Some((cached_vid, csc)) = &*guard {
+                if *cached_vid == vid {
+                    return Some(csc.clone());
+                }
+            }
+        }
+        let csc = AsFormat::to_csc_cached(self.csr.as_ref(), 0.0);
+        {
+            let mut guard = self.t_cache.write();
+            *guard = Some((vid, csc.clone()));
+        }
+        Some(csc)
     }
 }
 
