@@ -71,7 +71,8 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm};
 use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
-use faer::MatMut;
+use faer::{MatMut, MatRef};
+use faer::prelude::*;
 use std::collections::HashMap;
 
 #[cfg(feature = "logging")]
@@ -223,6 +224,54 @@ impl ProcessGrid {
     pub fn owns_global_col(&self, global_col: usize, block_size: usize) -> bool {
         let block_col = global_col / block_size;
         block_col % self.pcols == self.my_pcol
+    }
+}
+
+#[cfg(feature = "superlu3d")]
+/// Simple 3D process grid built from stacking 2D grids
+#[derive(Debug, Clone)]
+pub struct ProcessGrid3D {
+    pub prows: usize,
+    pub pcols: usize,
+    pub pdepth: usize,
+    pub my_prow: usize,
+    pub my_pcol: usize,
+    pub my_pdepth: usize,
+    pub my_rank: usize,
+    pub total_procs: usize,
+}
+
+#[cfg(feature = "superlu3d")]
+impl ProcessGrid3D {
+    pub fn from_2d_with_depth(g2d: &ProcessGrid, depth: usize) -> Result<Self, KError> {
+        let total = g2d.total_procs;
+        if depth == 0 || total % depth != 0 {
+            return Err(KError::InvalidInput(format!(
+                "invalid 3D depth {}",
+                depth
+            )));
+        }
+        let layer_size = total / depth;
+        let my_layer = g2d.my_rank / layer_size;
+        let my_inlayer = g2d.my_rank % layer_size;
+        let prow = my_inlayer / g2d.pcols;
+        let pcol = my_inlayer % g2d.pcols;
+        Ok(Self {
+            prows: g2d.prows,
+            pcols: g2d.pcols,
+            pdepth: depth,
+            my_prow: prow,
+            my_pcol: pcol,
+            my_pdepth: my_layer,
+            my_rank: g2d.my_rank,
+            total_procs: total,
+        })
+    }
+
+    #[inline]
+    pub fn coords_to_rank(&self, prow: usize, pcol: usize, pdepth: usize) -> usize {
+        let layer_size = self.prows * self.pcols;
+        pdepth * layer_size + (prow * self.pcols + pcol)
     }
 }
 
@@ -580,165 +629,112 @@ impl Panel {
         faer::MatRef::from_column_major_slice(&self.data, self.height, self.width)
     }
 
-    /// Apply LU factorization to the panel using basic Gaussian elimination
+    /// Apply LU factorization to the panel using blocked Gaussian elimination with BLAS updates
     pub fn factorize_lu(
         &mut self,
         threshold: f64,
         pivot_strategy: PivotingStrategy,
     ) -> Result<PanelFactorization, KError> {
-        // In-place LU, column-major:
-        // For each column k:
-        //   - pivot = U[k,k]
-        //   - For i>k: L[i,k] = A[i,k] / pivot   (stored in data[k*nrows + i])
-        //   - For j>k: U[k,j] = A[k,j]            (data[j*nrows + k])
-        //   - L diagonal is implicit 1.0 (NOT stored)
+        let m = self.height;
+        let n = self.width;
+        let mut tiny_pivots_replaced = 0usize;
 
-        let nrows = self.height;
-        let ncols = self.width;
-        let min_size = nrows.min(ncols);
+        // Column blocking for cache-friendly updates
+        let kb = core::cmp::min(64, n.max(1));
 
-        let mut row_permutation: Vec<usize> = (0..nrows).collect();
-        let mut num_row_swaps = 0;
+        let mut row_perm: Vec<usize> = (0..m).collect();
+        let mut num_row_swaps = 0usize;
         let mut is_singular = false;
 
-        match pivot_strategy {
-            PivotingStrategy::Dynamic => {
-                // Use partial pivoting - find largest element in each column
-                for k in 0..min_size {
-                    // Find pivot row
-                    let mut max_val = 0.0;
-                    let mut pivot_row = k;
+        let mut a = self.as_faer_mut();
+        let mut j = 0;
+        while j < n {
+            let jb = core::cmp::min(kb, n - j);
 
-                    for i in k..nrows {
-                        let val = self.data[k * nrows + i].abs(); // Column-major access
-                        if val > max_val {
-                            max_val = val;
-                            pivot_row = i;
-                        }
+            // Factor current block column by column
+            for col in 0..jb {
+                let gcol = j + col;
+
+                // --- pivot search ---
+                let mut max_val = 0.0;
+                let mut piv = gcol;
+                for r in gcol..m {
+                    let val = a[(r, gcol)].abs();
+                    if val > max_val {
+                        max_val = val;
+                        piv = r;
                     }
+                }
+                if max_val < threshold {
+                    let old = a[(gcol, gcol)];
+                    tiny_pivots_replaced += 1;
+                    is_singular = true;
+                    a[(gcol, gcol)] = if old == 0.0 {
+                        threshold
+                    } else {
+                        threshold.copysign(old)
+                    };
+                }
 
-                    if max_val < threshold {
-                        let _error_msg = if max_val == 0.0 {
-                            format!("Zero pivot encountered at column {}, matrix is singular", k)
-                        } else {
-                            format!(
-                                "Small pivot {} < threshold {} at column {}, matrix may be ill-conditioned",
-                                max_val, threshold, k
-                            )
-                        };
-
-                        // For now, replace tiny pivot and continue, but log warning
-                        #[cfg(feature = "logging")]
-                        log::warn!("{}", _error_msg);
-
-                        is_singular = true;
-                        if max_val == 0.0 {
-                            // Replace zero pivot
-                            self.data[k * nrows + k] = threshold;
-                        }
-
-                        // In future versions, could return KError::SingularMatrix(error_msg)
-                        // when strict error handling is desired
+                // --- row interchange if needed ---
+                if piv != gcol {
+                    for c in j..n {
+                        let t = a[(gcol, c)];
+                        a[(gcol, c)] = a[(piv, c)];
+                        a[(piv, c)] = t;
                     }
+                    row_perm.swap(gcol, piv);
+                    num_row_swaps += 1;
+                }
 
-                    // Swap rows if needed
-                    if pivot_row != k {
-                        for j in 0..ncols {
-                            let temp = self.data[j * nrows + k];
-                            self.data[j * nrows + k] = self.data[j * nrows + pivot_row];
-                            self.data[j * nrows + pivot_row] = temp;
-                        }
-                        row_permutation.swap(k, pivot_row);
-                        num_row_swaps += 1;
-                    }
-
-                    let pivot = self.data[k * nrows + k];
-                    if pivot.abs() < threshold {
-                        continue; // Skip elimination for tiny pivot
-                    }
-
-                    // Perform elimination
-                    for i in (k + 1)..nrows {
-                        let factor = self.data[k * nrows + i] / pivot;
-                        self.data[k * nrows + i] = factor; // Store L factor
-
-                        for j in (k + 1)..ncols {
-                            self.data[j * nrows + i] -= factor * self.data[j * nrows + k];
-                        }
+                // --- compute multipliers below the diagonal ---
+                let diag = a[(gcol, gcol)];
+                if diag != 0.0 {
+                    for r in (gcol + 1)..m {
+                        a[(r, gcol)] = a[(r, gcol)] / diag;
                     }
                 }
             }
-            PivotingStrategy::Static => {
-                // Static pivoting: no row exchanges, replace tiny pivots
-                for k in 0..min_size {
-                    let mut pivot = self.data[k * nrows + k];
 
-                    if pivot.abs() < threshold {
-                        // Replace tiny pivot
-                        pivot = if pivot == 0.0 {
-                            threshold
-                        } else {
-                            threshold.copysign(pivot)
-                        };
-                        self.data[k * nrows + k] = pivot;
-                        is_singular = true;
-                    }
-
-                    // Perform elimination
-                    for i in (k + 1)..nrows {
-                        let factor = self.data[k * nrows + i] / pivot;
-                        self.data[k * nrows + i] = factor; // Store L factor
-
-                        for j in (k + 1)..ncols {
-                            self.data[j * nrows + i] -= factor * self.data[j * nrows + k];
-                        }
-                    }
-                }
+            // 2) TRSM: apply L^{-1} to the right block for the current jb block
+            let right_cols = n - (j + jb);
+            if right_cols > 0 {
+                let l_block = a.rb().submatrix(j, j, m - j, jb);
+                let mut right = a.rb_mut().submatrix_mut(j, j + jb, m - j, right_cols);
+                faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(
+                    l_block,
+                    right.rb_mut(),
+                    faer::Par::Seq,
+                );
             }
-            PivotingStrategy::ThresholdWithFallback => {
-                // Try static first, fall back to dynamic if too many tiny pivots
-                let mut tiny_count = 0;
-                let max_tiny = min_size / 10; // Allow up to 10% tiny pivots
 
-                for k in 0..min_size {
-                    let mut pivot = self.data[k * nrows + k];
+            // 3) GEMM: trailing update
+            if (m > j + jb) && (n > j + jb) {
+                let l21 = a.rb().submatrix(j + jb, j, m - (j + jb), jb);
+                let u12 = a.rb().submatrix(j, j + jb, jb, n - (j + jb));
+                let mut trailing =
+                    a.rb_mut().submatrix_mut(j + jb, j + jb, m - (j + jb), n - (j + jb));
 
-                    if pivot.abs() < threshold {
-                        tiny_count += 1;
-                        if tiny_count > max_tiny {
-                            // Fall back to dynamic pivoting
-                            return self.factorize_lu(threshold, PivotingStrategy::Dynamic);
-                        }
-
-                        // Replace tiny pivot
-                        pivot = if pivot == 0.0 {
-                            threshold
-                        } else {
-                            threshold.copysign(pivot)
-                        };
-                        self.data[k * nrows + k] = pivot;
-                        is_singular = true;
-                    }
-
-                    // Perform elimination
-                    for i in (k + 1)..nrows {
-                        let factor = self.data[k * nrows + i] / pivot;
-                        self.data[k * nrows + i] = factor; // Store L factor
-
-                        for j in (k + 1)..ncols {
-                            self.data[j * nrows + i] -= factor * self.data[j * nrows + k];
-                        }
-                    }
-                }
+                faer::linalg::matmul::matmul(
+                    trailing.rb_mut(),
+                    faer::Accum::Add,
+                    l21,
+                    u12,
+                    -1.0,
+                    faer::Par::Seq,
+                );
             }
+
+            j += jb;
         }
 
         Ok(PanelFactorization {
-            row_permutation,
+            row_permutation: row_perm,
             pivot_strategy,
             diagonal_threshold: threshold,
             num_row_swaps,
             is_singular,
+            tiny_pivots_replaced,
         })
     }
 }
@@ -756,6 +752,8 @@ pub struct PanelFactorization {
     pub num_row_swaps: usize,
     /// Whether matrix was detected as singular
     pub is_singular: bool,
+    /// Number of tiny pivots that were replaced during factorization
+    pub tiny_pivots_replaced: usize,
 }
 
 /// Enhanced numerical factorization data
@@ -1075,6 +1073,8 @@ impl DistributedTriangularSolver {
         comm: &UniverseComm,
         comm_pattern: CommPattern,
         overlap_comm: bool,
+        #[cfg(feature = "superlu3d")]
+        grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("DistributedForwardSolve");
@@ -1130,6 +1130,8 @@ impl DistributedTriangularSolver {
                         distribution,
                         comm_pattern,
                         comm,
+                        #[cfg(feature = "superlu3d")]
+                        grid3d,
                     )?;
                 }
             } else if overlap_comm {
@@ -1166,6 +1168,8 @@ impl DistributedTriangularSolver {
                     block_id,
                     comm,
                     comm_pattern,
+                    #[cfg(feature = "superlu3d")]
+                    grid3d,
                 )?;
             }
         }
@@ -1190,6 +1194,8 @@ impl DistributedTriangularSolver {
         comm: &UniverseComm,
         comm_pattern: CommPattern,
         overlap_comm: bool,
+        #[cfg(feature = "superlu3d")]
+        grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("DistributedBackwardSolve");
@@ -1262,6 +1268,8 @@ impl DistributedTriangularSolver {
                         distribution,
                         comm_pattern,
                         comm,
+                        #[cfg(feature = "superlu3d")]
+                        grid3d,
                     )?;
                 }
             } else if overlap_comm {
@@ -1278,6 +1286,8 @@ impl DistributedTriangularSolver {
                     block_id,
                     comm,
                     comm_pattern,
+                    #[cfg(feature = "superlu3d")]
+                    grid3d,
                 )?;
             }
         }
@@ -1300,16 +1310,18 @@ impl DistributedTriangularSolver {
         block_id: usize,
     ) -> Result<(), KError> {
         if let Some(panel) = l_factors.get(block_id) {
-            let a = &panel.data;
-            let n = panel.height.min(panel.width).min(x_block.len());
-            debug_assert!(panel.height >= panel.width);
-            for i in 0..n {
-                let mut sum = 0.0;
-                for j in 0..i {
-                    sum += a[j * panel.height + i] * x_block[j];
-                }
-                x_block[i] -= sum;
-            }
+            let m = panel.height;
+            let n = panel.width;
+            let mut x = faer::MatMut::from_column_major_slice_mut(x_block, x_block.len(), 1);
+            let l = panel.as_faer();
+            let k = x_block.len().min(n).min(m);
+            let l_square = l.submatrix(0, 0, k, k);
+            let mut x_sub = x.rb_mut().submatrix_mut(0, 0, k, 1);
+            faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place(
+                l_square,
+                x_sub.rb_mut(),
+                faer::Par::Seq,
+            );
         }
 
         Ok(())
@@ -1322,21 +1334,18 @@ impl DistributedTriangularSolver {
         block_id: usize,
     ) -> Result<(), KError> {
         if let Some(panel) = u_factors.get(block_id) {
-            let a = &panel.data;
-            let n = panel.height.min(panel.width).min(x_block.len());
-            debug_assert!(panel.height >= panel.width);
-            for ii in 0..n {
-                let i = n - 1 - ii;
-                let mut sum = 0.0;
-                for j in (i + 1)..n {
-                    sum += a[j * panel.height + i] * x_block[j];
-                }
-                let diag = a[i * panel.height + i];
-                if diag == 0.0 {
-                    return Err(KError::SolveError(format!("Zero U diagonal at {}", i)));
-                }
-                x_block[i] = (x_block[i] - sum) / diag;
-            }
+            let m = panel.height;
+            let n = panel.width;
+            let mut x = faer::MatMut::from_column_major_slice_mut(x_block, x_block.len(), 1);
+            let u = panel.as_faer();
+            let k = x_block.len().min(n).min(m);
+            let u_square = u.submatrix(0, 0, k, k);
+            let mut x_sub = x.rb_mut().submatrix_mut(0, 0, k, 1);
+            faer::linalg::triangular_solve::solve_upper_triangular_in_place(
+                u_square,
+                x_sub.rb_mut(),
+                faer::Par::Seq,
+            );
         }
 
         Ok(())
@@ -1350,36 +1359,41 @@ impl DistributedTriangularSolver {
         distribution: &BlockCyclicDistribution,
         comm_pattern: CommPattern,
         comm: &UniverseComm,
+        #[cfg(feature = "superlu3d")]
+        grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         let root_rank = solve_data.block_owners[block_id];
 
-        if distribution.grid.my_rank != root_rank {
-            return Ok(());
+        #[cfg(feature = "logging")]
+        log::debug!(
+            "Starting nonblocking broadcast from rank {} for block {} using {:?}",
+            root_rank,
+            block_id,
+            comm_pattern
+        );
+
+        // Simplified broadcast: root sends to all other ranks
+        if distribution.grid.my_rank == root_rank {
+            for rank in 0..distribution.grid.total_procs {
+                if rank != root_rank {
+                    solve_data.isend(data, rank, block_id, block_id, comm)?;
+                }
+            }
         }
 
-        match comm_pattern {
-            CommPattern::BinaryTree => {
-                let total_procs = distribution.grid.total_procs;
-                let left_child = 2 * root_rank + 1;
-                let right_child = 2 * root_rank + 2;
-
-                if left_child < total_procs {
-                    solve_data.isend(data, left_child, block_id, block_id * 2 + 1, comm)?;
-                }
-                if right_child < total_procs {
-                    solve_data.isend(data, right_child, block_id, block_id * 2 + 2, comm)?;
-                }
+        #[cfg(feature = "superlu3d")]
+        if let Some(g3) = grid3d {
+            // Additional tree along depth dimension
+            let layers = g3.pdepth;
+            let left = 2 * g3.my_pdepth + 1;
+            let right = 2 * g3.my_pdepth + 2;
+            if left < layers {
+                let r = g3.coords_to_rank(g3.my_prow, g3.my_pcol, left);
+                solve_data.isend(data, r, block_id, (block_id << 8) + left, comm)?;
             }
-            CommPattern::Ring => {
-                let next_rank = (root_rank + 1) % distribution.grid.total_procs;
-                solve_data.isend(data, next_rank, block_id, block_id, comm)?;
-            }
-            _ => {
-                for rank in 0..distribution.grid.total_procs {
-                    if rank != root_rank {
-                        solve_data.isend(data, rank, block_id, block_id * 100 + rank, comm)?;
-                    }
-                }
+            if right < layers {
+                let r = g3.coords_to_rank(g3.my_prow, g3.my_pcol, right);
+                solve_data.isend(data, r, block_id, (block_id << 8) + right, comm)?;
             }
         }
 
@@ -1393,6 +1407,8 @@ impl DistributedTriangularSolver {
         block_id: usize,
         comm: &UniverseComm,
         comm_pattern: CommPattern,
+        #[cfg(feature = "superlu3d")]
+        grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         // In real implementation, would use MPI_Bcast or implement custom patterns
         #[cfg(feature = "logging")]
@@ -1405,6 +1421,20 @@ impl DistributedTriangularSolver {
 
         // Simulate broadcast operation
         let _ = (data, root_rank, block_id, comm, comm_pattern);
+
+        #[cfg(feature = "superlu3d")]
+        if let Some(g3) = grid3d {
+            let layers = g3.pdepth;
+            let left = 2 * g3.my_pdepth + 1;
+            let right = 2 * g3.my_pdepth + 2;
+            if left < layers {
+                let _ = g3.coords_to_rank(g3.my_prow, g3.my_pcol, left);
+            }
+            if right < layers {
+                let _ = g3.coords_to_rank(g3.my_prow, g3.my_pcol, right);
+            }
+        }
+
         Ok(())
     }
 
@@ -1416,18 +1446,25 @@ impl DistributedTriangularSolver {
         target_block: usize,
         l_factors: &[Panel],
     ) -> Result<(), KError> {
-        // Apply the update: x_target -= L[target,source] * x_source
         if let Some(l_panel) = l_factors.get(target_block) {
-            let l_data = &l_panel.data;
-            let height = l_panel.height;
-            let width = l_panel.width;
-
-            // Simplified update - in real implementation would use BLAS operations
-            for i in 0..x_block.len() {
-                if source_block < width && i < height {
-                    // Column-major access: data[col * height + row]
-                    x_block[i] -= l_data[source_block * height + i] * update_data[i];
-                }
+            let m = x_block.len();
+            let l = l_panel.as_faer();
+            if source_block < l.ncols() && source_block < update_data.len() {
+                let col = l.submatrix(0, source_block, m, 1);
+                let scalar = faer::MatRef::from_column_major_slice(
+                    &update_data[source_block..source_block + 1],
+                    1,
+                    1,
+                );
+                let mut x = MatMut::from_column_major_slice_mut(x_block, m, 1);
+                faer::linalg::matmul::matmul(
+                    x.rb_mut(),
+                    faer::Accum::Add,
+                    col,
+                    scalar,
+                    -1.0,
+                    faer::Par::Seq,
+                );
             }
         }
 
@@ -1442,18 +1479,25 @@ impl DistributedTriangularSolver {
         target_block: usize,
         u_factors: &[Panel],
     ) -> Result<(), KError> {
-        // Apply the update: x_target -= U[target,source] * x_source
         if let Some(u_panel) = u_factors.get(target_block) {
-            let u_data = &u_panel.data;
-            let height = u_panel.height;
-            let width = u_panel.width;
-
-            // Simplified update - in real implementation would use BLAS operations
-            for i in 0..x_block.len() {
-                if source_block < width && i < height {
-                    // Column-major access: data[col * height + row]
-                    x_block[i] -= u_data[source_block * height + i] * update_data[i];
-                }
+            let m = x_block.len();
+            let u = u_panel.as_faer();
+            if source_block < u.ncols() && source_block < update_data.len() {
+                let col = u.submatrix(0, source_block, m, 1);
+                let scalar = faer::MatRef::from_column_major_slice(
+                    &update_data[source_block..source_block + 1],
+                    1,
+                    1,
+                );
+                let mut x = MatMut::from_column_major_slice_mut(x_block, m, 1);
+                faer::linalg::matmul::matmul(
+                    x.rb_mut(),
+                    faer::Accum::Add,
+                    col,
+                    scalar,
+                    -1.0,
+                    faer::Par::Seq,
+                );
             }
         }
 
@@ -2673,6 +2717,8 @@ impl RefinementEngine {
             comm,
             CommPattern::PointToPoint,
             false,
+            #[cfg(feature = "superlu3d")]
+            None,
         )?;
 
         // Backward solve: U * dx = y
@@ -2684,6 +2730,8 @@ impl RefinementEngine {
             comm,
             CommPattern::PointToPoint,
             false,
+            #[cfg(feature = "superlu3d")]
+            None,
         )?;
 
         Ok(())
@@ -3900,7 +3948,7 @@ impl SuperLuDistSolver {
         let mut panels = Vec::new();
         let mut panel_factors = Vec::new();
         let mut total_row_swaps = 0;
-        let mut tiny_pivots_replaced = 0;
+        let mut tiny_pivots_replaced = 0usize;
         let mut max_pivot_growth = 1.0;
 
         // Process matrix in panels
@@ -3935,9 +3983,7 @@ impl SuperLuDistSolver {
             match panel.factorize_lu(self.options.diagonal_pivot_threshold, pivot_strategy) {
                 Ok(factor) => {
                     total_row_swaps += factor.num_row_swaps;
-                    if factor.is_singular {
-                        tiny_pivots_replaced += 1;
-                    }
+                    tiny_pivots_replaced += factor.tiny_pivots_replaced;
 
                     // Estimate pivot growth (simplified)
                     for i in 0..panel.width.min(panel.height) {
@@ -4120,6 +4166,15 @@ impl SuperLuDistSolver {
             }
         }
 
+        #[cfg(feature = "superlu3d")]
+        let grid3d = if self.options.enable_3d_factorization {
+            self.options
+                .process_grid_3d_depth
+                .and_then(|d| ProcessGrid3D::from_2d_with_depth(&data.process_grid, d).ok())
+        } else {
+            None
+        };
+
         let mut y = vec![0.0; x.len()];
         DistributedTriangularSolver::forward_solve(
             &permuted_b,
@@ -4129,6 +4184,8 @@ impl SuperLuDistSolver {
             comm,
             comm_pattern,
             overlap_comm,
+            #[cfg(feature = "superlu3d")]
+            grid3d.as_ref(),
         )?;
 
         // Phase 2: Backward substitution (solve Ux = y)
@@ -4140,6 +4197,8 @@ impl SuperLuDistSolver {
             comm,
             comm_pattern,
             overlap_comm,
+            #[cfg(feature = "superlu3d")]
+            grid3d.as_ref(),
         )?;
 
         // Apply column permutation to solution
@@ -4944,9 +5003,9 @@ mod tests {
         for v in lbg.iter_mut() {
             v.sort_unstable();
         }
-        assert_eq!(lbg[0], vec![]);
-        assert_eq!(lbg[1], vec![0]);
-        assert_eq!(lbg[2], vec![1]);
+        assert_eq!(lbg[0], Vec::<usize>::new());
+        assert_eq!(lbg[1], vec![0usize]);
+        assert_eq!(lbg[2], vec![1usize]);
     }
 
     #[test]

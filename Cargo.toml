@@ -54,6 +54,7 @@ mpi = ["dep:mpi"]
 logging = ["dep:log"]
 mpi_examples = ["mpi"]
 superlu_dist = []
+superlu3d = []
 tuning = []
 iai = []
 
