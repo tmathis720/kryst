@@ -218,6 +218,17 @@ impl<
         self.inner.val()
     }
 
+    /// Borrow a row of the matrix as CSR slices `(col_idx, values)`.
+    #[inline]
+    pub fn row(&self, i: usize) -> (&[usize], &[T]) {
+        let start = self.inner.row_ptr()[i];
+        let end = self.inner.row_ptr()[i + 1];
+        (
+            &self.inner.col_idx()[start..end],
+            &self.inner.val()[start..end],
+        )
+    }
+
     /// Mutably borrow the CSR value array (length = nnz).
     #[inline]
     pub fn values_mut(&mut self) -> &mut [T] {
