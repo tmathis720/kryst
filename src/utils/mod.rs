@@ -3,11 +3,12 @@
 pub mod coloring;
 pub mod convergence;
 pub mod matrix_market;
+pub mod merge;
+pub mod metrics;
 pub mod monitor;
+pub mod partition;
+pub mod permutation;
 pub mod profiling;
 pub mod reordering;
-pub mod permutation;
-pub mod metrics;
 #[cfg(feature = "tuning")]
 pub mod tuning;
-pub mod partition;
