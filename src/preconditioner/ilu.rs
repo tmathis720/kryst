@@ -73,9 +73,9 @@
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
-use crate::preconditioner::{PcSide, legacy::Preconditioner};
-use faer::Mat;
+use crate::preconditioner::{legacy::Preconditioner, pivot::*, PcSide};
 use faer::traits::ComplexField;
+use faer::Mat;
 use num_traits::Float;
 use std::cell::RefCell;
 
@@ -99,17 +99,6 @@ pub enum IluType {
     GmresIluk = 20,
     /// GMRES with ILUT preconditioning
     GmresIlut = 21,
-}
-
-/// HYPRE-inspired pivot handling strategy
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PivotStrategy {
-    /// Fail on zero/small pivots
-    Strict,
-    /// Replace small pivots with threshold value
-    Threshold,
-    /// Add diagonal perturbation based on max diagonal
-    DiagonalPerturbation,
 }
 
 /// HYPRE-inspired reordering strategies
@@ -169,16 +158,10 @@ pub struct IluConfig {
     pub print_level: usize,
     /// Enable IEEE safety checks
     pub ieee_checks: bool,
-    /// Enable pivot monitoring
-    pub pivot_monitoring: bool,
     /// Enable workspace optimization
     pub optimize_workspace: bool,
-    /// Pivot threshold for stability
-    pub pivot_threshold: f64,
-    /// Pivot handling strategy
-    pub pivot_strategy: PivotStrategy,
-    /// Diagonal perturbation factor (for PivotStrategy::DiagonalPerturbation)
-    pub perturbation_factor: f64,
+    /// Pivot handling policy
+    pub pivot_policy: PivotPolicy,
     /// Enable parallel factorization (requires rayon feature)
     pub enable_parallel_factorization: bool,
     /// Enable parallel triangular solves (requires rayon feature)
@@ -208,15 +191,12 @@ impl Default for IluConfig {
             logging_level: 0,                      // No logging by default
             print_level: 0,                        // No printing by default
             ieee_checks: true,                     // Safety first
-            pivot_monitoring: true,                // Monitor for numerical issues
             optimize_workspace: true,              // Performance optimization
-            pivot_threshold: 1e-12,                // HYPRE-style pivot threshold
-            pivot_strategy: PivotStrategy::DiagonalPerturbation, // Modern default
-            perturbation_factor: 1e-10,            // Small perturbation factor
-            enable_parallel_factorization: false,  // Conservative default
+            pivot_policy: PivotPolicy::default(),
+            enable_parallel_factorization: false, // Conservative default
             enable_parallel_triangular_solve: false, // Conservative default
-            parallel_chunk_size: 64,               // Reasonable chunk size for cache efficiency
-            enable_distributed: false,             // Conservative default
+            parallel_chunk_size: 64,              // Reasonable chunk size for cache efficiency
+            enable_distributed: false,            // Conservative default
         }
     }
 }
@@ -301,15 +281,9 @@ impl IluBuilder {
         self
     }
 
-    /// Set pivot handling strategy
-    pub fn pivot_strategy(mut self, strategy: PivotStrategy) -> Self {
-        self.config.pivot_strategy = strategy;
-        self
-    }
-
-    /// Set diagonal perturbation factor
-    pub fn perturbation_factor(mut self, factor: f64) -> Self {
-        self.config.perturbation_factor = factor;
+    /// Set pivot handling policy
+    pub fn pivot_policy(mut self, policy: PivotPolicy) -> Self {
+        self.config.pivot_policy = policy;
         self
     }
 
@@ -381,6 +355,16 @@ pub struct Ilu<T> {
     nnz_l: usize,
     nnz_u: usize,
     num_zero_pivots: usize,
+    /// Pivot handling statistics
+    pivot_stats: PivotStats,
+    /// Global scaling from A's diagonal
+    max_diag_a: T,
+    /// Row-wise infinity norm of A
+    row_inf_a: Vec<T>,
+    /// Row-wise Gershgorin estimate of A
+    row_gersh_a: Vec<T>,
+    /// Running maximum of |U_kk|
+    running_max_u: T,
     /// Performance timing
     setup_time: f64,
     solve_time: f64,
@@ -490,6 +474,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             nnz_l: 0,
             nnz_u: 0,
             num_zero_pivots: 0,
+            pivot_stats: PivotStats::default(),
+            max_diag_a: T::zero(),
+            row_inf_a: Vec::new(),
+            row_gersh_a: Vec::new(),
+            running_max_u: T::zero(),
             setup_time: 0.0,
             solve_time: 0.0,
             solve_count: 0,
@@ -506,12 +495,6 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
         if config.tolerance <= 0.0 {
             return Err(KError::InvalidInput("tolerance must be > 0".to_string()));
-        }
-
-        if config.pivot_threshold < 0.0 {
-            return Err(KError::InvalidInput(
-                "pivot_threshold must be >= 0".to_string(),
-            ));
         }
 
         Ok(())
@@ -589,62 +572,36 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         nnz
     }
 
-    /// Enhanced pivot handling with different strategies
+    /// Pivot stabilization using configurable policy
     fn handle_pivot(&mut self, pivot: &mut T, row: usize, matrix: &Mat<T>) -> Result<(), KError> {
-        let pivot_abs = pivot.abs();
-        let threshold = T::from(self.config.pivot_threshold).unwrap();
+        let policy = &self.config.pivot_policy;
 
-        match self.config.pivot_strategy {
-            PivotStrategy::Strict => {
-                if pivot_abs < threshold {
-                    self.num_zero_pivots += 1;
-                    return Err(KError::ZeroPivot(row));
-                }
-            }
-            PivotStrategy::Threshold => {
-                if pivot_abs < threshold {
-                    self.num_zero_pivots += 1;
-                    *pivot = if *pivot >= T::zero() {
-                        threshold
-                    } else {
-                        -threshold
-                    };
+        // determine scaling value
+        let s_i = match policy.scale {
+            PivotScale::MaxDiagA => self.max_diag_a,
+            PivotScale::LocalDiagA => matrix[(row, row)].abs(),
+            PivotScale::RowInfA => self.row_inf_a[row],
+            PivotScale::RowGershgorin => self.row_gersh_a[row],
+            PivotScale::RunningMaxU => self.running_max_u,
+        };
 
-                    #[cfg(feature = "logging")]
-                    if self.config.logging_level > 1 {
-                        warn!(
-                            "ILU: Small pivot {} replaced with threshold at row {}",
-                            pivot_abs, row
-                        );
-                    }
-                }
-            }
-            PivotStrategy::DiagonalPerturbation => {
-                if pivot_abs < threshold {
-                    self.num_zero_pivots += 1;
+        let tau = T::from(policy.tau).unwrap();
+        if let Err(e) = stabilize_pivot_in_place(
+            pivot,
+            s_i,
+            tau,
+            policy.sign,
+            policy.mode,
+            &mut self.pivot_stats,
+            row,
+        ) {
+            self.num_zero_pivots += 1;
+            return Err(e);
+        }
 
-                    // Find max diagonal magnitude for adaptive perturbation
-                    let mut max_diag = T::zero();
-                    for i in 0..matrix.nrows() {
-                        max_diag = max_diag.max(matrix[(i, i)].abs());
-                    }
-
-                    let perturbation = T::from(self.config.perturbation_factor).unwrap() * max_diag;
-                    *pivot = if *pivot >= T::zero() {
-                        perturbation
-                    } else {
-                        -perturbation
-                    };
-
-                    #[cfg(feature = "logging")]
-                    if self.config.logging_level > 1 {
-                        warn!(
-                            "ILU: Small pivot {} perturbed to {} at row {}",
-                            pivot_abs, *pivot, row
-                        );
-                    }
-                }
-            }
+        let abs = pivot.abs();
+        if abs > self.running_max_u {
+            self.running_max_u = abs;
         }
 
         Ok(())
@@ -726,11 +683,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         self.nnz_u = u.nnz();
 
         // Cache inverse diagonal of U for fast solves
-        self.inv_diag_u = u
-            .diagonal()
-            .into_iter()
-            .map(|v| T::one() / v)
-            .collect();
+        self.inv_diag_u = u.diagonal().into_iter().map(|v| T::one() / v).collect();
 
         self.l = l;
         self.u = u;
@@ -803,11 +756,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
 
-        self.inv_diag_u = u
-            .diagonal()
-            .into_iter()
-            .map(|v| T::one() / v)
-            .collect();
+        self.inv_diag_u = u.diagonal().into_iter().map(|v| T::one() / v).collect();
 
         self.l = l;
         self.u = u;
@@ -1173,6 +1122,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             solve_count: self.solve_count,
         }
     }
+
+    /// Access pivot handling statistics
+    pub fn pivot_stats(&self) -> &PivotStats {
+        &self.pivot_stats
+    }
 }
 
 impl Ilu<f64> {
@@ -1274,6 +1228,30 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
         let n = matrix.nrows();
         let original_nnz = Self::count_nnz(matrix);
 
+        // Precompute scaling terms for pivoting
+        let mut max_diag = T::zero();
+        self.row_inf_a.resize(n, T::zero());
+        self.row_gersh_a.resize(n, T::zero());
+        for i in 0..n {
+            let mut row_inf = T::zero();
+            let mut row_gersh = matrix[(i, i)].abs();
+            for j in 0..n {
+                let val_abs = matrix[(i, j)].abs();
+                if j != i {
+                    row_gersh = row_gersh + val_abs;
+                }
+                if val_abs > row_inf {
+                    row_inf = val_abs;
+                }
+            }
+            self.row_inf_a[i] = row_inf;
+            self.row_gersh_a[i] = row_gersh;
+            max_diag = max_diag.max(matrix[(i, i)].abs());
+        }
+        self.max_diag_a = max_diag;
+        self.running_max_u = T::zero();
+        self.pivot_stats = PivotStats::default();
+
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
             info!(
@@ -1317,6 +1295,12 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
             info!(
                 "ILU Setup Complete: complexity={:.2}, L_nnz={}, U_nnz={}, setup_time={:.3}s",
                 self.setup_complexity, self.nnz_l, self.nnz_u, self.setup_time
+            );
+
+            debug!(
+                "Pivot floors: {} (max shift {:.3e})",
+                self.pivot_stats.num_floors,
+                self.pivot_stats.max_abs_shift
             );
 
             if self.num_zero_pivots > 0 {
@@ -1393,7 +1377,8 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
         if self.config.logging_level > 2 {
             trace!(
                 "ILU Apply: solve_time={:.6}s, workspace_size={}",
-                _solve_time, self.workspace.size
+                _solve_time,
+                self.workspace.size
             );
         }
 
@@ -1406,7 +1391,7 @@ pub type Ilu0<T> = Ilu<T>;
 
 #[cfg(test)]
 mod tests {
-    use super::{Ilu, IluBuilder, IluConfig, IluType, PivotStrategy, TriSolveType};
+    use super::{Ilu, IluBuilder, IluConfig, IluType, TriSolveType};
 
     #[test]
     fn test_ilu_default_creation() {
@@ -1471,16 +1456,13 @@ mod tests {
             }
         });
 
-        // Test diagonal perturbation strategy
-        let mut config = IluConfig::default();
-        config.pivot_strategy = PivotStrategy::DiagonalPerturbation;
-        config.perturbation_factor = 1e-10;
-
+        // Test pivot policy with default settings
+        let config = IluConfig::default();
         let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
-        assert!(ilu.get_stats().num_zero_pivots > 0);
+        assert!(ilu.pivot_stats().num_floors > 0);
     }
 
     #[test]

@@ -330,6 +330,7 @@ pub mod ilutp;
 pub mod jacobi;
 pub mod sor;
 pub mod ilu_csr;
+pub mod pivot;
 
 // Re-exports for convenience
 pub use self::sor::MatSorType;
