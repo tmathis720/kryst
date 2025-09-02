@@ -31,6 +31,7 @@ pub mod preconditioner;
 pub mod solver;
 pub mod utils;
 pub mod algebra;
+pub mod reduction;
 
 // Re-exports for convenience
 pub use config::*;
@@ -40,6 +41,7 @@ pub use error::*;
 pub use matrix::*;
 pub use utils::*;
 pub use algebra::*;
+pub use reduction::*;
 
 // Re-export SolveStats at the crate root for convenience
 pub use utils::convergence::SolveStats;

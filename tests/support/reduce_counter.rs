@@ -1,6 +1,7 @@
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 use kryst::parallel::{Comm, UniverseComm};
+use kryst::reduction::{CommDeterministic, Packet, ReproMode};
 
 #[derive(Clone)]
 pub struct CountingComm<C> {
@@ -80,5 +81,12 @@ impl<C: Comm + Clone> Comm for CountingComm<C> {
 
     fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]) {
         self.inner.wait_all(reqs)
+    }
+}
+
+impl<C: Comm + CommDeterministic + Clone> CommDeterministic for CountingComm<C> {
+    fn allreduce_det<const N: usize>(&self, local: &Packet<N>, mode: ReproMode) -> Packet<N> {
+        self.reduces.fetch_add(1, Ordering::Relaxed);
+        self.inner.allreduce_det(local, mode)
     }
 }
