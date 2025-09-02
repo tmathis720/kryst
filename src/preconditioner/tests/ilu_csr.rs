@@ -1,9 +1,10 @@
 use crate::matrix::sparse::CsrMatrix;
-use crate::preconditioner::Preconditioner;
+use crate::matrix::utils::poisson_2d;
 use crate::preconditioner::ilu_csr::{
-    IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting,
-    ReorderingOptions, ReorderingKind,
+    IluCsr, IluCsrConfig, IluKind, IlutParams, PivotPolicy, PivotStrategy, Pivoting,
+    ReorderingKind, ReorderingOptions,
 };
+use crate::preconditioner::Preconditioner;
 
 fn tridiag_csr(n: usize, a: f64, b: f64, c: f64) -> CsrMatrix<f64> {
     // main diag b, subdiag a, superdiag c
@@ -25,6 +26,49 @@ fn tridiag_csr(n: usize, a: f64, b: f64, c: f64) -> CsrMatrix<f64> {
         row_ptr.push(col_idx.len());
     }
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
+#[test]
+fn ilu0_single_rank_matches_serial_ref() {
+    use crate::preconditioner::PcSide;
+    use oorandom::Rand64;
+
+    let a = poisson_2d(10, 10);
+
+    let cfg_serial = IluCsrConfig {
+        kind: IluKind::Ilu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: false,
+        numeric_update_fixed: true,
+        logging: 0,
+        reordering: ReorderingOptions::default(),
+    };
+    let mut cfg_par = cfg_serial.clone();
+    cfg_par.level_sched = cfg!(feature = "rayon");
+
+    let mut ilu_ref = IluCsr::new_with_config(cfg_serial);
+    ilu_ref.setup(&a).unwrap();
+    let mut ilu_par = IluCsr::new_with_config(cfg_par);
+    ilu_par.setup(&a).unwrap();
+
+    let mut rng = Rand64::new(123);
+    for _ in 0..4 {
+        let b: Vec<f64> = (0..a.nrows()).map(|_| rng.rand_float() - 0.5).collect();
+        let mut y_ref = vec![0.0; b.len()];
+        let mut y_par = vec![0.0; b.len()];
+        ilu_ref.apply(PcSide::Left, &b, &mut y_ref).unwrap();
+        ilu_par.apply(PcSide::Left, &b, &mut y_par).unwrap();
+        let num = y_ref
+            .iter()
+            .zip(&y_par)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt();
+        let den = y_ref.iter().map(|a| a * a).sum::<f64>().sqrt().max(1e-30);
+        assert!(num / den < 5e-14, "relative diff {}", num / den);
+    }
 }
 
 #[test]
@@ -191,12 +235,17 @@ fn ilu0_with_rcm_setup() {
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
-        reordering: ReorderingOptions { kind: ReorderingKind::Rcm, symmetric: true, deterministic: true },
+        reordering: ReorderingOptions {
+            kind: ReorderingKind::Rcm,
+            symmetric: true,
+            deterministic: true,
+        },
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
     let x = vec![1.0; n];
     let mut y = vec![0.0; n];
-    pc.apply(crate::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+    pc.apply(crate::preconditioner::PcSide::Left, &x, &mut y)
+        .unwrap();
     assert!(y.iter().all(|v| v.is_finite()));
 }

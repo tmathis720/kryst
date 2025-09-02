@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "kryst"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "approx",
  "bitflags 2.9.1",
@@ -1021,6 +1021,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "once_cell",
+ "oorandom",
  "parking_lot",
  "proptest",
  "rand 0.8.5",
