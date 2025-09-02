@@ -1,10 +1,10 @@
 use crate::error::KError;
-use crate::preconditioner::{Preconditioner, jacobi::Jacobi, sor::MatSorType};
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
+use crate::preconditioner::{Preconditioner, jacobi::Jacobi, sor::MatSorType};
 
-use crate::preconditioner::sor::SorPc;
 use crate::preconditioner::chebyshev::ChebyshevPc;
+use crate::preconditioner::sor::SorPc;
 
 #[cfg(feature = "superlu_dist")]
 use crate::preconditioner::direct::SuperLuDistPc;
@@ -49,16 +49,24 @@ pub fn build_chebyshev(
 
 pub fn build_lu() -> Result<Box<dyn Preconditioner>, KError> {
     #[cfg(feature = "dense-direct")]
-    { return Ok(Box::new(LuPc::new())); }
+    {
+        return Ok(Box::new(LuPc::new()));
+    }
     #[cfg(not(feature = "dense-direct"))]
-    { return Err(KError::Unsupported("dense-direct feature not enabled")); }
+    {
+        return Err(KError::Unsupported("dense-direct feature not enabled"));
+    }
 }
 
 pub fn build_qr() -> Result<Box<dyn Preconditioner>, KError> {
     #[cfg(feature = "dense-direct")]
-    { return Ok(Box::new(QrPc::new())); }
+    {
+        return Ok(Box::new(QrPc::new()));
+    }
     #[cfg(not(feature = "dense-direct"))]
-    { return Err(KError::Unsupported("dense-direct feature not enabled")); }
+    {
+        return Err(KError::Unsupported("dense-direct feature not enabled"));
+    }
 }
 
 pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {
@@ -77,14 +85,14 @@ pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {
 pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
     let cfg = IluCsrConfig {
-            kind: IluKind::Ilu0,
-            pivot: PivotStrategy::DiagonalPerturbation,
-            pivot_threshold: 1e-12,
-            diag_perturb_factor: 1e-10,
-            level_sched: cfg!(feature = "rayon"),
-            numeric_update_fixed: true,
-            logging: 0,
-        };
+        kind: IluKind::Ilu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: cfg!(feature = "rayon"),
+        numeric_update_fixed: true,
+        logging: 0,
+    };
     let pc = IluCsr::new_with_config(cfg);
     Ok(Box::new(pc))
 }
@@ -110,7 +118,10 @@ pub fn build_ilut(
 ) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
     let cfg = IluCsrConfig {
-        kind: IluKind::Ilut { drop_tol, max_per_row: max_fill },
+        kind: IluKind::Ilut {
+            drop_tol,
+            max_per_row: max_fill,
+        },
         pivot: PivotStrategy::DiagonalPerturbation,
         pivot_threshold: 1e-12,
         diag_perturb_factor: 1e-10,
@@ -123,7 +134,17 @@ pub fn build_ilut(
 }
 
 pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
-    build_ilu0()
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    let cfg = IluCsrConfig {
+        kind: IluKind::Milu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: cfg!(feature = "rayon"),
+        numeric_update_fixed: true,
+        logging: 0,
+    };
+    Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
 
 // ---- ASM / AMG stubs -----------------------------------------------------
@@ -145,14 +166,19 @@ pub fn build_asm(
     };
 
     // Construct ASM with empty subdomains (will be partitioned on setup).
-    let mut asm = AdditiveSchwarz::<faer::Mat<f64>, Vec<f64>, f64>::new(overlap, Vec::new(), factory);
+    let mut asm =
+        AdditiveSchwarz::<faer::Mat<f64>, Vec<f64>, f64>::new(overlap, Vec::new(), factory);
 
     // Mode
     if let Some(m) = mode.as_deref() {
         let m = match m {
             "asm" => AsmMode::ASM,
             "ras" => AsmMode::RAS,
-            other => return Err(KError::InvalidInput(format!("unknown pc_asm_mode: {other}"))),
+            other => {
+                return Err(KError::InvalidInput(format!(
+                    "unknown pc_asm_mode: {other}"
+                )));
+            }
         };
         asm.set_mode(m);
     }
@@ -165,11 +191,19 @@ pub fn build_asm(
             "linear" => Weighting::SmoothLinear,
             s if s.starts_with("poly:") => {
                 let pstr = &s[5..];
-                let p: u32 = pstr.parse().map_err(|_| KError::InvalidInput(format!("invalid poly exponent in pc_asm_weighting: {s}")))?;
-                if p < 2 { return Err(KError::InvalidInput("poly exponent must be >= 2".into())); }
+                let p: u32 = pstr.parse().map_err(|_| {
+                    KError::InvalidInput(format!("invalid poly exponent in pc_asm_weighting: {s}"))
+                })?;
+                if p < 2 {
+                    return Err(KError::InvalidInput("poly exponent must be >= 2".into()));
+                }
                 Weighting::SmoothPoly(p)
             }
-            other => return Err(KError::InvalidInput(format!("unknown pc_asm_weighting: {other}"))),
+            other => {
+                return Err(KError::InvalidInput(format!(
+                    "unknown pc_asm_weighting: {other}"
+                )));
+            }
         };
         asm.set_weighting(w);
     }
