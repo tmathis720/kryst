@@ -6,17 +6,18 @@ use crate::matrix::format::FormatHint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
-use crate::utils::permutation::{rcm_csr, permute_csr_symmetric, Permutation};
+use crate::utils::permutation::{permute_csr_symmetric, rcm_csr, Permutation};
 use once_cell::sync::OnceCell;
 
-mod pivot;
-mod tri_solve;
-mod ilut_params;
 mod csr_builder;
+mod ilut_params;
+mod pivot;
+mod pos_map;
 mod row_work;
+mod tri_solve;
 
-pub use pivot::PivotStrategy;
 pub use ilut_params::{IlutParams, PivotPolicy, Pivoting};
+pub use pivot::PivotStrategy;
 
 use csr_builder::CsrBuilder;
 use row_work::RowWork;
@@ -119,7 +120,11 @@ pub struct ReorderingOptions {
 
 impl Default for ReorderingOptions {
     fn default() -> Self {
-        Self { kind: ReorderingKind::None, symmetric: true, deterministic: true }
+        Self {
+            kind: ReorderingKind::None,
+            symmetric: true,
+            deterministic: true,
+        }
     }
 }
 
@@ -1067,8 +1072,12 @@ impl Preconditioner for IluCsr {
                 }
             }
             Op::Trans | Op::ConjTrans => {
-                let ut = self.ut.get_or_init(|| transpose_csr(self.n, &self.u_row, &self.u_col, &self.u_val));
-                let lt = self.lt.get_or_init(|| transpose_csr(self.n, &self.l_row, &self.l_col, &self.l_val));
+                let ut = self
+                    .ut
+                    .get_or_init(|| transpose_csr(self.n, &self.u_row, &self.u_col, &self.u_val));
+                let lt = self
+                    .lt
+                    .get_or_init(|| transpose_csr(self.n, &self.l_row, &self.l_col, &self.l_val));
                 tri_solve::tri_solve_transpose_serial(
                     self,
                     &ut.0,
