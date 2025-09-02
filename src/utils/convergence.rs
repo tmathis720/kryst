@@ -1,5 +1,7 @@
 //! Convergence tracking & tolerance checks for iterative solvers.
 
+use crate::algebra::scalar::RealScalar;
+
 /// Convergence criteria for iterative solvers.
 ///
 /// This struct defines four types of stopping criteria:
@@ -7,13 +9,13 @@
 /// - **Absolute tolerance**: `‖r‖ ≤ atol`
 /// - **Divergence threshold**: `‖r‖ ≥ dtol * ‖b‖`
 /// - **Maximum iterations**: `iterations ≥ max_iters`
-pub struct Convergence<T> {
+pub struct Convergence<R: RealScalar> {
     /// Relative tolerance: ‖r‖/‖b‖ ≤ rtol ⇒ converge
-    pub rtol: T,
+    pub rtol: R,
     /// Absolute tolerance: ‖r‖ ≤ atol ⇒ converge
-    pub atol: T,
+    pub atol: R,
     /// Divergence threshold: ‖r‖ ≥ dtol * ‖b‖ ⇒ diverge
-    pub dtol: T,
+    pub dtol: R,
     /// Maximum iterations
     pub max_iters: usize,
 }
@@ -39,18 +41,21 @@ pub enum ConvergedReason {
 
 /// Statistics from a solve operation.
 #[derive(Clone, Debug)]
-pub struct SolveStats<T> {
+pub struct SolveStats<R> {
     /// Number of iterations performed
     pub iterations: usize,
     /// Final residual norm
-    pub final_residual: T,
+    pub final_residual: R,
     /// Reason for stopping
     pub reason: ConvergedReason,
 }
 
-impl<T: Copy + PartialOrd + From<f64> + std::ops::Mul<Output = T>> Convergence<T> {
+impl<R> Convergence<R>
+where
+    R: RealScalar + core::ops::Mul<Output = R>,
+{
     /// Create new convergence criteria.
-    pub fn new(rtol: T, atol: T, dtol: T, max_iters: usize) -> Self {
+    pub fn new(rtol: R, atol: R, dtol: R, max_iters: usize) -> Self {
         Self {
             rtol,
             atol,
@@ -70,7 +75,7 @@ impl<T: Copy + PartialOrd + From<f64> + std::ops::Mul<Output = T>> Convergence<T
     ///
     /// # Returns
     /// Tuple of (ConvergedReason, SolveStats) indicating the stopping reason.
-    pub fn check(&self, rnorm: T, bnorm: T, iters: usize) -> (ConvergedReason, SolveStats<T>) {
+    pub fn check(&self, rnorm: R, bnorm: R, iters: usize) -> (ConvergedReason, SolveStats<R>) {
         // Absolute tolerance test first (most restrictive)
         if rnorm <= self.atol {
             let stats = SolveStats {
@@ -122,13 +127,16 @@ impl<T: Copy + PartialOrd + From<f64> + std::ops::Mul<Output = T>> Convergence<T
 }
 
 // Legacy convenience method for backward compatibility
-impl<T: Copy + num_traits::Float + std::ops::Mul<Output = T> + From<f64>> Convergence<T> {
+impl<R> Convergence<R>
+where
+    R: RealScalar + core::ops::Mul<Output = R>,
+{
     /// Legacy method for backward compatibility.
     /// Returns (should_stop, stats) given current `res_norm` and iteration `i`.
     ///
     /// **Deprecated**: Use `check()` instead for more detailed convergence information.
     #[deprecated(since = "0.1.0", note = "use check() method instead")]
-    pub fn check_legacy(&self, res_norm: T, res0_norm: T, i: usize) -> (bool, SolveStats<T>) {
+    pub fn check_legacy(&self, res_norm: R, res0_norm: R, i: usize) -> (bool, SolveStats<R>) {
         let (reason, stats) = self.check(res_norm, res0_norm, i);
         let converged = matches!(
             reason,
