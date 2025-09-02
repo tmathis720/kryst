@@ -3,8 +3,8 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::common::recompute_true_residual_norm;
 use crate::solver::LinearSolver;
+use crate::solver::common::recompute_true_residual_norm;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -26,6 +26,7 @@ pub struct PcgSolver {
     norm_type: CgNormType,
     single_reduction: bool,
     reproducible: bool,
+    true_residual_monitor: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
     /// Whether the initial guess in `x` should be treated as nonzero.
     ///
     /// PETSc zeroes the initial guess by default unless told otherwise via
@@ -47,6 +48,7 @@ impl PcgSolver {
             norm_type: CgNormType::Preconditioned,
             single_reduction: false,
             reproducible: false,
+            true_residual_monitor: None,
             initial_guess_nonzero: false,
         }
     }
@@ -77,6 +79,14 @@ impl PcgSolver {
         self
     }
 
+    /// Install a monitor that receives the true residual norm `||b - A x||₂`
+    /// at each iteration. This incurs an extra matvec per iteration and is
+    /// intended for debugging.
+    pub fn with_true_residual_monitor(mut self, m: Box<dyn Fn(usize, f64) + Send + Sync>) -> Self {
+        self.true_residual_monitor = Some(m);
+        self
+    }
+
     /// Indicate whether the supplied initial guess is nonzero.
     ///
     /// By default `x` is assumed to be zero, which avoids an extra matvec on
@@ -95,6 +105,11 @@ impl PcgSolver {
     /// Toggle reproducible local dot products after construction.
     pub fn set_reproducible_dot(&mut self, f: bool) {
         self.reproducible = f;
+    }
+
+    /// Set or clear the true residual monitor after construction.
+    pub fn set_true_residual_monitor(&mut self, m: Option<Box<dyn Fn(usize, f64) + Send + Sync>>) {
+        self.true_residual_monitor = m;
     }
 
     #[inline]
@@ -221,6 +236,12 @@ impl PcgSolver {
             z_prev = zprev_store.as_mut_slice();
         }
 
+        let mut tmp_true = if self.true_residual_monitor.is_some() {
+            vec![0.0; n]
+        } else {
+            Vec::new()
+        };
+
         // r = b - A x
         let zero_guess = !self.initial_guess_nonzero && x.iter().all(|&xi| xi == 0.0);
         if zero_guess {
@@ -257,6 +278,10 @@ impl PcgSolver {
             for m in ms {
                 m(0, res);
             }
+        }
+        if let Some(m) = &self.true_residual_monitor {
+            let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp_true);
+            m(0, true_res);
         }
 
         p.copy_from_slice(z);
@@ -368,6 +393,10 @@ impl PcgSolver {
                         m(k, res);
                     }
                 }
+                if let Some(m) = &self.true_residual_monitor {
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp_true);
+                    m(k, true_res);
+                }
 
                 let res_check = match self.norm_type {
                     CgNormType::Preconditioned => rho_k.sqrt(),
@@ -436,6 +465,10 @@ impl PcgSolver {
                     for m in ms {
                         m(k, res);
                     }
+                }
+                if let Some(m) = &self.true_residual_monitor {
+                    let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp_true);
+                    m(k, true_res);
                 }
 
                 let res_check = match self.norm_type {
