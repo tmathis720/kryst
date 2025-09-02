@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
-use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
 use crate::matrix::op::CsrOp;
 
 /// Additive Schwarz (overlapping block Jacobi) preconditioner.
@@ -329,6 +329,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         level_sched: cfg!(feature = "rayon"),
                         numeric_update_fixed: true,
                         logging: 0,
+                        reordering: ReorderingOptions::default(),
                     };
                     for meta in self.blocks_meta.iter() {
                         let idx = &meta.indices;
@@ -369,6 +370,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     level_sched: cfg!(feature = "rayon"),
                     numeric_update_fixed: true,
                     logging: 0,
+                    reordering: ReorderingOptions::default(),
                 };
                 for meta in self.blocks_meta.iter() {
                     let idx = &meta.indices;
@@ -606,6 +608,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         level_sched: cfg!(feature = "rayon"),
                         numeric_update_fixed: true,
                         logging: 0,
+                        reordering: ReorderingOptions::default(),
                     };
                     for meta in self.blocks_meta.iter() {
                         let indices = &meta.indices;
@@ -626,6 +629,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     level_sched: cfg!(feature = "rayon"),
                     numeric_update_fixed: true,
                     logging: 0,
+                    reordering: ReorderingOptions::default(),
                 };
                 for meta in self.blocks_meta.iter() {
                     let indices = &meta.indices;
@@ -711,6 +715,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         level_sched: cfg!(feature = "rayon"),
                         numeric_update_fixed: true,
                         logging: 0,
+                        reordering: ReorderingOptions::default(),
                     };
                     for meta in self.blocks_meta.iter() {
                         let indices = &meta.indices;
@@ -731,6 +736,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     level_sched: cfg!(feature = "rayon"),
                     numeric_update_fixed: true,
                     logging: 0,
+                    reordering: ReorderingOptions::default(),
                 };
                 for meta in self.blocks_meta.iter() {
                     let indices = &meta.indices;

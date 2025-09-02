@@ -17,7 +17,7 @@ use crate::preconditioner::PcSide;
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 #[cfg(not(feature = "dense-direct"))]
-use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(not(feature = "dense-direct"))]
@@ -102,6 +102,7 @@ impl BlockJacobi<f64> {
             level_sched: cfg!(feature = "rayon"),
             numeric_update_fixed: true,
             logging: 0,
+            reordering: ReorderingOptions::default(),
         };
         for block in &self.blocks {
             let n = block.len();
