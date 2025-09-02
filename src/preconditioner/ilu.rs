@@ -74,7 +74,9 @@ use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
 use crate::preconditioner::{legacy::Preconditioner, pivot::*, PcSide};
+use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::utils::metrics::{Counters, SolveTimer};
+use crate::utils::monitor::{Event, Monitor};
 use faer::traits::ComplexField;
 use faer::Mat;
 use num_traits::Float;
@@ -200,6 +202,28 @@ impl Default for IluConfig {
             enable_distributed: false,            // Conservative default
         }
     }
+}
+
+#[cfg(feature = "logging")]
+fn print_ilu_banner(cfg: &IluConfig) {
+    if cfg.logging_level == 0 { return; }
+    info!("ILU Setup:");
+    info!("  kind                 : {:?}", cfg.ilu_type);
+    info!("  reordering           : {:?}", cfg.reordering_type);
+    let tri = match cfg.triangular_solve {
+        TriSolveType::Exact => "Exact".to_string(),
+        TriSolveType::Jacobi => format!("Jacobi (L:{} U:{})", cfg.lower_jacobi_iters, cfg.upper_jacobi_iters),
+        TriSolveType::GaussSeidel => "GaussSeidel".to_string(),
+    };
+    info!("  triangular solve     : {}", tri);
+    info!("  iterative setup      : tol={:.2e}, max_iter={}", cfg.tolerance, cfg.max_iterations);
+    info!(
+        "  exec                 : distributed={}, par_factorization={}, par_trisolve={}",
+        cfg.enable_distributed,
+        cfg.enable_parallel_factorization,
+        cfg.enable_parallel_triangular_solve
+    );
+    info!("  pivot                : {:?}", cfg.pivot_policy);
 }
 
 /// HYPRE-inspired ILU builder for advanced configuration
@@ -375,6 +399,10 @@ pub struct Ilu<T> {
     /// Performance timing
     setup_time: f64,
     solve_ctrs: Counters,
+    /// Optional ParILU iteration history
+    history: Option<ParIluHistory>,
+    /// Optional event monitor
+    monitor: Option<Box<dyn Monitor>>,
 }
 
 /// Consolidated workspace for all ILU operations to minimize allocations
@@ -567,6 +595,8 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             running_max_u: T::zero(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
+            history: None,
+            monitor: None,
         })
     }
 
@@ -1317,6 +1347,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
     fn setup(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
         let setup_start = std::time::Instant::now();
 
+        if let Some(m) = &self.monitor {
+            m.on_event(Event::IluSetupBegin { opts_hash: 0 });
+        }
+
         // HYPRE-style validation and safety checks
         Self::validate_matrix(matrix)?;
 
@@ -1331,6 +1365,9 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
         let n = matrix.nrows();
         let original_nnz = Self::count_nnz(matrix);
+
+        #[cfg(feature = "logging")]
+        print_ilu_banner(&self.config);
 
         // Precompute scaling terms for pivoting
         let mut max_diag = T::zero();
@@ -1429,6 +1466,13 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
                 );
             }
         }
+        if let Some(m) = &self.monitor {
+            m.on_event(Event::IluSetupEnd {
+                iters: 0,
+                converged: true,
+                setup_time_s: self.setup_time,
+            });
+        }
 
         Ok(())
     }
@@ -1477,6 +1521,16 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
         }
 
         Ok(())
+    }
+}
+
+impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
+    pub fn parilu_history(&self) -> Option<&[ParIluIterSample]> {
+        self.history.as_ref().map(|h| h.as_slice())
+    }
+
+    pub fn set_monitor(&mut self, m: Option<Box<dyn Monitor>>) {
+        self.monitor = m;
     }
 }
 
