@@ -5,7 +5,8 @@ use crate::matrix::convert::csr_from_linop;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
+use once_cell::sync::OnceCell;
 
 mod pivot;
 mod tri_solve;
@@ -122,6 +123,10 @@ pub struct IluCsr {
     l_lev: Vec<usize>,
     u_lev: Vec<usize>,
 
+    // cached transposes, built lazily
+    lt: OnceCell<(Vec<usize>, Vec<usize>, Vec<f64>)>,
+    ut: OnceCell<(Vec<usize>, Vec<usize>, Vec<f64>)>,
+
     // optional level scheduling
     levels_fwd: Vec<usize>,
     levels_bwd: Vec<usize>,
@@ -153,6 +158,8 @@ impl IluCsr {
             buckets_fwd: Vec::new(),
             buckets_bwd: Vec::new(),
             tmp: Vec::new(),
+            lt: OnceCell::new(),
+            ut: OnceCell::new(),
         }
     }
 
@@ -1000,6 +1007,10 @@ impl Preconditioner for IluCsr {
     }
 
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        self.apply_op(Op::NoTrans, x, y)
+    }
+
+    fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         if x.len() != self.n || y.len() != self.n {
             return Err(KError::InvalidInput(format!(
                 "IluCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
@@ -1008,10 +1019,29 @@ impl Preconditioner for IluCsr {
                 y.len()
             )));
         }
-        if self.cfg.level_sched {
-            tri_solve::tri_solve_level_scheduled(self, x, y)
-        } else {
-            tri_solve::tri_solve_serial(self, x, y)
+        match op {
+            Op::NoTrans => {
+                if self.cfg.level_sched {
+                    tri_solve::tri_solve_level_scheduled(self, x, y)
+                } else {
+                    tri_solve::tri_solve_serial(self, x, y)
+                }
+            }
+            Op::Trans | Op::ConjTrans => {
+                let ut = self.ut.get_or_init(|| transpose_csr(self.n, &self.u_row, &self.u_col, &self.u_val));
+                let lt = self.lt.get_or_init(|| transpose_csr(self.n, &self.l_row, &self.l_col, &self.l_val));
+                tri_solve::tri_solve_transpose_serial(
+                    self,
+                    &ut.0,
+                    &ut.1,
+                    &ut.2,
+                    &lt.0,
+                    &lt.1,
+                    &lt.2,
+                    x,
+                    y,
+                )
+            }
         }
     }
 
@@ -1047,6 +1077,15 @@ impl Preconditioner for IluCsr {
 
     fn required_format(&self) -> FormatHint {
         FormatHint::Csr
+    }
+
+    fn capabilities(&self) -> PcCaps {
+        PcCaps {
+            supports_transpose: true,
+            supports_conj_trans: false,
+            is_spd: false,
+            side_restriction: None,
+        }
     }
 }
 
@@ -1103,4 +1142,33 @@ impl IluCsr {
     pub(crate) fn buckets_bwd(&self) -> &[Vec<usize>] {
         &self.buckets_bwd
     }
+}
+
+fn transpose_csr(
+    n: usize,
+    row: &[usize],
+    col: &[usize],
+    val: &[f64],
+) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let nnz = col.len();
+    let mut t_row = vec![0usize; n + 1];
+    for &j in col {
+        t_row[j + 1] += 1;
+    }
+    for i in 0..n {
+        t_row[i + 1] += t_row[i];
+    }
+    let mut t_col = vec![0usize; nnz];
+    let mut t_val = vec![0f64; nnz];
+    let mut offset = t_row.clone();
+    for i in 0..n {
+        for p in row[i]..row[i + 1] {
+            let j = col[p];
+            let dest = offset[j];
+            t_col[dest] = i;
+            t_val[dest] = val[p];
+            offset[j] += 1;
+        }
+    }
+    (t_row, t_col, t_val)
 }
