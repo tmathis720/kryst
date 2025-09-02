@@ -1,6 +1,8 @@
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::Preconditioner;
-use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+use crate::preconditioner::ilu_csr::{
+    IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting,
+};
 
 fn tridiag_csr(n: usize, a: f64, b: f64, c: f64) -> CsrMatrix<f64> {
     // main diag b, subdiag a, superdiag c
@@ -60,11 +62,19 @@ fn iluk_basic_pivots_nonzero() {
 fn ilut_basic_and_numeric_update_keeps_pattern() {
     let n = 10;
     let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let params = IlutParams {
+        droptol_abs: 1e-6,
+        droptol_rel: 0.0,
+        p_l: 2,
+        p_u: 2,
+        early_drop: true,
+        pivot: PivotPolicy::DiagonalPerturbation,
+        pivot_tau: 1e-12,
+        reproducible_order: true,
+        pivoting: Pivoting::None,
+    };
     let cfg = IluCsrConfig {
-        kind: IluKind::Ilut {
-            drop_tol: 1e-6,
-            max_per_row: 2,
-        },
+        kind: IluKind::Ilut { params },
         pivot: PivotStrategy::DiagonalPerturbation,
         pivot_threshold: 1e-12,
         diag_perturb_factor: 1e-10,
