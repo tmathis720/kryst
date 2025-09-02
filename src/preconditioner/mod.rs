@@ -382,6 +382,7 @@ pub mod builders;
 pub mod chain;
 pub mod chebyshev;
 pub mod direct;
+pub mod ilu_options;
 pub mod ilu;
 pub mod ilup;
 pub mod ilut;

@@ -13,6 +13,7 @@ use std::str::FromStr;
 use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
 use crate::config::options_core::is_help_requested;
 use crate::config::registry::registry;
+use crate::preconditioner::ilu_options::{IluOptions, IluKind, ReorderingType, TriSolveType, PivotPolicy, IterativeSetupType, Overlay};
 
 /// KSP (Krylov Solver) options.
 #[derive(Debug, Default, Clone)]
@@ -135,6 +136,8 @@ pub struct PcOptions {
     pub ilu_pivot_monitoring: Option<bool>,
     pub ilu_optimize_workspace: Option<bool>,
     pub ilu_pivot_threshold: Option<f64>,
+    /// Structured ILU options (new schema).
+    pub ilu: IluOptions,
     // ---- Approximate inverse (CSR) ----
     pub approxinv_kind: Option<String>,        // "fsai" | "spai"
     pub approxinv_levels: Option<usize>,
@@ -394,43 +397,83 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.amg_min_iterations, parse_as::<usize>(v, spec)?)
             }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
-            "pc_ilu_type" => set_opt!(&mut self.ilu_type, v.to_lowercase()),
+            "pc_ilu_type" => {
+                set_opt!(&mut self.ilu_type, v.to_lowercase())?;
+                self.update_ilu_kind();
+                Ok(())
+            }
             "pc_ilu_level_of_fill" => {
-                set_opt!(&mut self.ilu_level_of_fill, parse_as::<usize>(v, spec)?)
+                let val = parse_as::<usize>(v, spec)?;
+                set_opt!(&mut self.ilu_level_of_fill, val)?;
+                self.update_ilu_kind();
+                Ok(())
             }
             "pc_ilu_max_fill_per_row" => {
-                set_opt!(&mut self.ilu_max_fill_per_row, parse_as::<usize>(v, spec)?)
+                let val = parse_as::<usize>(v, spec)?;
+                set_opt!(&mut self.ilu_max_fill_per_row, val)?;
+                self.update_ilu_kind();
+                Ok(())
             }
-            "pc_ilu_offdiag_drop_tolerance" => set_opt!(
-                &mut self.ilu_offdiag_drop_tolerance,
-                parse_as::<f64>(v, spec)?
-            ),
-            "pc_ilu_schur_drop_tolerance" => set_opt!(
-                &mut self.ilu_schur_drop_tolerance,
-                parse_as::<f64>(v, spec)?
-            ),
-            "pc_ilu_reordering_type" => set_opt!(&mut self.ilu_reordering_type, v.to_lowercase()),
-            "pc_ilu_triangular_solve" => set_opt!(&mut self.ilu_triangular_solve, v.to_lowercase()),
-            "pc_ilu_lower_jacobi_iters" => set_opt!(
-                &mut self.ilu_lower_jacobi_iters,
-                parse_as::<usize>(v, spec)?
-            ),
-            "pc_ilu_upper_jacobi_iters" => set_opt!(
-                &mut self.ilu_upper_jacobi_iters,
-                parse_as::<usize>(v, spec)?
-            ),
-            "pc_ilu_tolerance" => set_opt!(&mut self.ilu_tolerance, parse_as::<f64>(v, spec)?),
+            "pc_ilu_offdiag_drop_tolerance" => {
+                let val = parse_as::<f64>(v, spec)?;
+                set_opt!(&mut self.ilu_offdiag_drop_tolerance, val)?;
+                self.update_ilu_kind();
+                Ok(())
+            }
+            "pc_ilu_schur_drop_tolerance" => {
+                let val = parse_as::<f64>(v, spec)?;
+                set_opt!(&mut self.ilu_schur_drop_tolerance, val)?;
+                self.update_ilu_schur();
+                Ok(())
+            }
+            "pc_ilu_reordering_type" => {
+                set_opt!(&mut self.ilu_reordering_type, v.to_lowercase())?;
+                self.update_ilu_reordering();
+                Ok(())
+            }
+            "pc_ilu_triangular_solve" => {
+                set_opt!(&mut self.ilu_triangular_solve, v.to_lowercase())?;
+                self.update_ilu_tri_solve();
+                Ok(())
+            }
+            "pc_ilu_lower_jacobi_iters" => {
+                let val = parse_as::<usize>(v, spec)?;
+                set_opt!(&mut self.ilu_lower_jacobi_iters, val)?;
+                self.update_ilu_tri_solve();
+                Ok(())
+            }
+            "pc_ilu_upper_jacobi_iters" => {
+                let val = parse_as::<usize>(v, spec)?;
+                set_opt!(&mut self.ilu_upper_jacobi_iters, val)?;
+                self.update_ilu_tri_solve();
+                Ok(())
+            }
+            "pc_ilu_tolerance" => {
+                let val = parse_as::<f64>(v, spec)?;
+                set_opt!(&mut self.ilu_tolerance, val)?;
+                self.update_ilu_iterative();
+                Ok(())
+            }
             "pc_ilu_max_iterations" => {
-                set_opt!(&mut self.ilu_max_iterations, parse_as::<usize>(v, spec)?)
+                let val = parse_as::<usize>(v, spec)?;
+                set_opt!(&mut self.ilu_max_iterations, val)?;
+                self.update_ilu_iterative();
+                Ok(())
             }
             "pc_ilu_logging_level" => {
-                set_opt!(&mut self.ilu_logging_level, parse_as::<usize>(v, spec)?)
+                let val = parse_as::<usize>(v, spec)?;
+                set_opt!(&mut self.ilu_logging_level, val)?;
+                self.update_ilu_logging();
+                Ok(())
             }
             "pc_ilu_print_level" => {
                 set_opt!(&mut self.ilu_print_level, parse_as::<usize>(v, spec)?)
             }
             "pc_ilu_pivot_threshold" => {
-                set_opt!(&mut self.ilu_pivot_threshold, parse_as::<f64>(v, spec)?)
+                let val = parse_as::<f64>(v, spec)?;
+                set_opt!(&mut self.ilu_pivot_threshold, val)?;
+                self.update_ilu_pivot();
+                Ok(())
             }
             "pc_superlu_pivot_threshold" => {
                 set_opt!(&mut self.superlu_pivot_threshold, parse_as::<f64>(v, spec)?)
@@ -648,6 +691,90 @@ impl KspOptions {
 }
 
 impl PcOptions {
+    fn update_ilu_kind(&mut self) {
+        if let Some(ref ty) = self.ilu_type {
+            match ty.as_str() {
+                "ilu0" => self.ilu.kind = IluKind::ILU0,
+                "iluk" => {
+                    let k = self.ilu_level_of_fill.unwrap_or(0) as u32;
+                    self.ilu.kind = IluKind::ILUK { k };
+                }
+                "ilut" => {
+                    let droptol = self.ilu_offdiag_drop_tolerance.unwrap_or(0.0);
+                    let max_fill = self.ilu_max_fill_per_row.unwrap_or(0) as u32;
+                    self.ilu.kind = IluKind::ILUT { droptol, max_fill_per_row: max_fill };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn update_ilu_reordering(&mut self) {
+        if let Some(ref t) = self.ilu_reordering_type {
+            self.ilu.reordering = match t.as_str() {
+                "none" | "natural" => ReorderingType::None,
+                "rcm" => ReorderingType::RCM,
+                "amd" => ReorderingType::AMD,
+                _ => self.ilu.reordering,
+            };
+        }
+    }
+
+    fn update_ilu_tri_solve(&mut self) {
+        if let Some(ref t) = self.ilu_triangular_solve {
+            if t == "iterative" {
+                let l = self.ilu_lower_jacobi_iters.unwrap_or(0) as u32;
+                let u = self.ilu_upper_jacobi_iters.unwrap_or(0) as u32;
+                self.ilu.tri_solve.kind = TriSolveType::Iterative { lower_jacobi_iters: l, upper_jacobi_iters: u };
+            } else {
+                self.ilu.tri_solve.kind = TriSolveType::Exact;
+            }
+        }
+    }
+
+    fn update_ilu_iterative(&mut self) {
+        if let Some(tol) = self.ilu_tolerance {
+            self.ilu.iterative_setup.tol = tol;
+            if matches!(self.ilu.iterative_setup.ty, IterativeSetupType::Disabled) {
+                self.ilu.iterative_setup.ty = IterativeSetupType::ParILUFixedPoint;
+            }
+        }
+        if let Some(maxit) = self.ilu_max_iterations {
+            self.ilu.iterative_setup.max_iter = maxit as u32;
+            if matches!(self.ilu.iterative_setup.ty, IterativeSetupType::Disabled) {
+                self.ilu.iterative_setup.ty = IterativeSetupType::ParILUFixedPoint;
+            }
+        }
+    }
+
+    fn update_ilu_logging(&mut self) {
+        if let Some(level) = self.ilu_logging_level {
+            self.ilu.logging_level = level as u8;
+        }
+    }
+
+    fn update_ilu_pivot(&mut self) {
+        if let Some(tau) = self.ilu_pivot_threshold {
+            self.ilu.pivot = PivotPolicy::Threshold { tau };
+        }
+    }
+
+    fn update_ilu_schur(&mut self) {
+        if let Some(dt) = self.ilu_schur_drop_tolerance {
+            self.ilu.schur.droptol_s = dt;
+        }
+    }
+
+    fn sync_ilu_all(&mut self) {
+        self.update_ilu_kind();
+        self.update_ilu_reordering();
+        self.update_ilu_tri_solve();
+        self.update_ilu_iterative();
+        self.update_ilu_logging();
+        self.update_ilu_pivot();
+        self.update_ilu_schur();
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -666,6 +793,7 @@ impl PcOptions {
         if let Some(ref t) = me.amg_relax_type { kinds::AmgRelaxKind::from_str(t)?; }
         if let Some(ref t) = me.asm_block_solver { kinds::AsmBlockSolverKind::from_str(t)?; }
         if let Some(ref t) = me.asm_mode { kinds::AsmModeKind::from_str(t)?; }
+        me.sync_ilu_all();
         Ok(me)
     }
 
@@ -714,6 +842,7 @@ impl PcOptions {
         if let Ok(v) = std::env::var("KRYST_PC_SCALING") {
             me.scaling = Some(v.to_lowercase());
         }
+        me.sync_ilu_all();
         Ok(me)
     }
 }
@@ -879,6 +1008,8 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         superlu_preallocation_strategy,
     );
 
+    pc_opts.ilu = pc_opts.ilu.overlay(&cli_pc.ilu);
+
     Ok((ksp_opts, pc_opts))
 }
 
@@ -888,6 +1019,7 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 mod tests {
     use super::*;
     use crate::error::KError;
+    use crate::preconditioner::ilu_options::{IluKind, ReorderingType, TriSolveType, PivotPolicy};
 
     #[test]
     fn ksp_bool_toggle() {
@@ -1571,6 +1703,13 @@ mod old_tests {
         assert_eq!(opts.ilu_pivot_monitoring, Some(false));
         assert_eq!(opts.ilu_optimize_workspace, Some(true));
         assert_eq!(opts.ilu_pivot_threshold, Some(1e-10));
+        assert!(matches!(opts.ilu.kind, IluKind::ILUT { droptol, max_fill_per_row } if (droptol - 1e-5).abs() < 1e-12 && max_fill_per_row == 50));
+        assert_eq!(opts.ilu.reordering, ReorderingType::RCM);
+        assert!(matches!(opts.ilu.tri_solve.kind, TriSolveType::Iterative { lower_jacobi_iters: 2, upper_jacobi_iters: 3 }));
+        assert!((opts.ilu.iterative_setup.tol - 1e-8).abs() < 1e-12);
+        assert_eq!(opts.ilu.iterative_setup.max_iter, 10);
+        assert_eq!(opts.ilu.logging_level, 2);
+        assert!(matches!(opts.ilu.pivot, PivotPolicy::Threshold { tau } if (tau - 1e-10).abs() < 1e-12));
     }
 
     #[test]
@@ -1652,6 +1791,8 @@ mod old_tests {
         assert_eq!(opts.pc_type, Some("ilu".to_string()));
         assert_eq!(opts.ilu_type, Some("ilu0".to_string()));
         assert_eq!(opts.ilu_reordering_type, Some("none".to_string()));
+        assert!(matches!(opts.ilu.kind, IluKind::ILU0));
+        assert_eq!(opts.ilu.reordering, ReorderingType::None);
     }
 
     #[test]
