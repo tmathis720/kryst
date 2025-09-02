@@ -6,6 +6,7 @@ use crate::matrix::format::FormatHint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
+use crate::utils::permutation::{rcm_csr, permute_csr_symmetric, Permutation};
 use once_cell::sync::OnceCell;
 
 mod pivot;
@@ -85,6 +86,7 @@ pub struct IluCsrConfig {
     pub level_sched: bool,
     pub numeric_update_fixed: bool,
     pub logging: usize,
+    pub reordering: ReorderingOptions,
 }
 
 impl Default for IluCsrConfig {
@@ -97,7 +99,27 @@ impl Default for IluCsrConfig {
             level_sched: cfg!(feature = "rayon"),
             numeric_update_fixed: true,
             logging: 0,
+            reordering: ReorderingOptions::default(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReorderingKind {
+    None,
+    Rcm,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReorderingOptions {
+    pub kind: ReorderingKind,
+    pub symmetric: bool,
+    pub deterministic: bool,
+}
+
+impl Default for ReorderingOptions {
+    fn default() -> Self {
+        Self { kind: ReorderingKind::None, symmetric: true, deterministic: true }
     }
 }
 
@@ -135,6 +157,7 @@ pub struct IluCsr {
 
     // scratch for apply
     tmp: Vec<f64>,
+    perm: Permutation,
 }
 
 impl IluCsr {
@@ -160,6 +183,7 @@ impl IluCsr {
             tmp: Vec::new(),
             lt: OnceCell::new(),
             ut: OnceCell::new(),
+            perm: Permutation::identity(0),
         }
     }
 
@@ -990,15 +1014,27 @@ impl Preconditioner for IluCsr {
         let values_changed = self.last_vid != Some(vid);
 
         if structure_changed || !self.cfg.numeric_update_fixed {
-            self.factor_symbolic_and_numeric(&a)?;
+            // compute permutation
+            let perm = match self.cfg.reordering.kind {
+                ReorderingKind::None => Permutation::identity(a.nrows()),
+                ReorderingKind::Rcm => rcm_csr(&a),
+            };
+            let a_perm = if self.cfg.reordering.symmetric {
+                permute_csr_symmetric(&a, &perm)
+            } else {
+                // nonsymmetric not yet supported
+                permute_csr_symmetric(&a, &perm)
+            };
+            self.perm = perm;
+            self.factor_symbolic_and_numeric(&a_perm)?;
             self.build_levels_if_enabled();
             self.last_sid = Some(sid);
             self.last_vid = Some(vid);
-            // scratch
-            self.tmp.resize(a.nrows(), 0.0);
+            self.tmp.resize(a_perm.nrows(), 0.0);
             Ok(())
         } else if values_changed {
-            self.factor_numeric_only(&a)?;
+            let a_perm = permute_csr_symmetric(&a, &self.perm);
+            self.factor_numeric_only(&a_perm)?;
             self.last_vid = Some(vid);
             Ok(())
         } else {
@@ -1019,12 +1055,15 @@ impl Preconditioner for IluCsr {
                 y.len()
             )));
         }
-        match op {
+        let mut x_perm = vec![0.0; self.n];
+        let mut y_perm = vec![0.0; self.n];
+        self.perm.apply_vec(x, &mut x_perm);
+        let res = match op {
             Op::NoTrans => {
                 if self.cfg.level_sched {
-                    tri_solve::tri_solve_level_scheduled(self, x, y)
+                    tri_solve::tri_solve_level_scheduled(self, &x_perm, &mut y_perm)
                 } else {
-                    tri_solve::tri_solve_serial(self, x, y)
+                    tri_solve::tri_solve_serial(self, &x_perm, &mut y_perm)
                 }
             }
             Op::Trans | Op::ConjTrans => {
@@ -1038,11 +1077,13 @@ impl Preconditioner for IluCsr {
                     &lt.0,
                     &lt.1,
                     &lt.2,
-                    x,
-                    y,
+                    &x_perm,
+                    &mut y_perm,
                 )
             }
-        }
+        };
+        self.perm.apply_vec_t(&y_perm, y);
+        res
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {

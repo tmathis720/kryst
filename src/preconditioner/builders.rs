@@ -83,7 +83,7 @@ pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {
 // ---- ILU family builders -------------------------------------------------
 
 pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
     let cfg = IluCsrConfig {
         kind: IluKind::Ilu0,
         pivot: PivotStrategy::DiagonalPerturbation,
@@ -92,13 +92,14 @@ pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
         level_sched: cfg!(feature = "rayon"),
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     let pc = IluCsr::new_with_config(cfg);
     Ok(Box::new(pc))
 }
 
 pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
     let cfg = IluCsrConfig {
         kind: IluKind::Iluk { k: level },
         pivot: PivotStrategy::DiagonalPerturbation,
@@ -107,6 +108,7 @@ pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
         level_sched: cfg!(feature = "rayon"),
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
@@ -117,7 +119,7 @@ pub fn build_ilut(
     _reordering: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
-        IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting,
+        IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting, ReorderingOptions,
     };
     let params = IlutParams {
         droptol_abs: drop_tol,
@@ -139,12 +141,13 @@ pub fn build_ilut(
         // For ILUT, fast numeric update requires fixed pattern. Let callers override later if needed.
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
 
 pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
     let cfg = IluCsrConfig {
         kind: IluKind::Milu0,
         pivot: PivotStrategy::DiagonalPerturbation,
@@ -153,6 +156,7 @@ pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
         level_sched: cfg!(feature = "rayon"),
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
 }

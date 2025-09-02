@@ -2,6 +2,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::Preconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting,
+    ReorderingOptions, ReorderingKind,
 };
 
 fn tridiag_csr(n: usize, a: f64, b: f64, c: f64) -> CsrMatrix<f64> {
@@ -38,6 +39,7 @@ fn iluk_basic_pivots_nonzero() {
         level_sched: cfg!(feature = "rayon"),
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -81,6 +83,7 @@ fn ilut_basic_and_numeric_update_keeps_pattern() {
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -146,6 +149,7 @@ fn milu0_preserves_row_sums() {
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
+        reordering: ReorderingOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -173,4 +177,26 @@ fn milu0_preserves_row_sums() {
         let diff = (y[i] - a_row_sum[i]).abs();
         assert!(diff < 1e-9, "row {} diff {}", i, diff);
     }
+}
+
+#[test]
+fn ilu0_with_rcm_setup() {
+    let n = 8;
+    let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let cfg = IluCsrConfig {
+        kind: IluKind::Ilu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: false,
+        numeric_update_fixed: true,
+        logging: 0,
+        reordering: ReorderingOptions { kind: ReorderingKind::Rcm, symmetric: true, deterministic: true },
+    };
+    let mut pc = IluCsr::new_with_config(cfg);
+    pc.setup(&a).unwrap();
+    let x = vec![1.0; n];
+    let mut y = vec![0.0; n];
+    pc.apply(crate::preconditioner::PcSide::Left, &x, &mut y).unwrap();
+    assert!(y.iter().all(|v| v.is_finite()));
 }

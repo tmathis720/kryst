@@ -6,6 +6,7 @@ pub mod matrix_market;
 pub mod monitor;
 pub mod profiling;
 pub mod reordering;
+pub mod permutation;
 #[cfg(feature = "tuning")]
 pub mod tuning;
 pub mod partition;
