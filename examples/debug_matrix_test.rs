@@ -50,13 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matrix_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join("mtx")
-        .join("e05r0100.mtx");
+        .join("add20.mtx");
     let rhs_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join("mtx")
-        .join("e05r0100_rhs1.mtx");
+        .join("add20_rhs1.mtx");
 
-    println!("\nTesting with e05r0100 matrix:");
+    println!("\nTesting with add20 matrix:");
     println!("Loading matrix: {}", matrix_path.display());
     let matrix_data = read_matrix_market(matrix_path.to_str().unwrap())?;
 
@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ksp = KspContext::new();
     // Replace your GMRES/Jacobi block with:
     ksp.set_type(SolverType::Gmres)?
-        .set_pc_type(PcType::None, None)?       // Start with no PC
+        .set_pc_type(PcType::Ilu, None)?       // Start with no PC
         .set_tolerances(1e-6, 1e-12, 2000.0, 50);  // (rtol, atol, maxit, restart=unused for CG)
 
     // Keep the CSR operator:
