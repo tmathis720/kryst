@@ -10,5 +10,6 @@ pub mod partition;
 pub mod permutation;
 pub mod profiling;
 pub mod reordering;
+pub mod buffer_pool;
 #[cfg(feature = "tuning")]
 pub mod tuning;

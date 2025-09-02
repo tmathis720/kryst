@@ -15,6 +15,10 @@ pub struct Workspace {
     pub sn: Vec<f64>,
     pub g: Vec<f64>,
     pub blk_scratch: Vec<f64>,
+    // Shared communication arenas
+    pub send_arena: crate::utils::buffer_pool::BufferPool<u8>,
+    pub recv_arena: crate::utils::buffer_pool::BufferPool<u8>,
+    pub packet_arena: crate::utils::buffer_pool::BufferPool<u8>,
     n: usize,
     m: usize,
     need_z: bool,
@@ -44,6 +48,9 @@ impl Default for Workspace {
             sn: Vec::new(),
             g: Vec::new(),
             blk_scratch: Vec::new(),
+            send_arena: crate::utils::buffer_pool::BufferPool::default(),
+            recv_arena: crate::utils::buffer_pool::BufferPool::default(),
+            packet_arena: crate::utils::buffer_pool::BufferPool::default(),
             n: 0,
             m: 0,
             need_z: false,
@@ -58,6 +65,12 @@ impl Workspace {
         ws.tmp2.resize(n, 0.0);
         ws.n = n;
         ws
+    }
+
+    /// Ensure communication buffers have enough bytes for upcoming operations.
+    pub fn ensure_comm_bytes(&mut self, max_send: usize, max_recv: usize) {
+        self.send_arena.ensure_len(max_send);
+        self.recv_arena.ensure_len(max_recv);
     }
 
     #[inline]
