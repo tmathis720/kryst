@@ -350,6 +350,12 @@ pub struct Ilu<T> {
     col_perm: Vec<usize>,
     /// Consolidated preallocated workspace vectors for all operations
     workspace: IluWorkspace<T>,
+    #[cfg(feature = "rayon")]
+    /// Level scheduling for lower triangular solves
+    levels_l: Levels,
+    #[cfg(feature = "rayon")]
+    /// Level scheduling for upper triangular solves
+    levels_u: Levels,
     /// Setup complexity metrics (HYPRE: operator_complexity)
     setup_complexity: f64,
     /// Factorization statistics
@@ -442,6 +448,80 @@ impl<T: Clone> IluWorkspace<T> {
     }
 }
 
+#[cfg(feature = "rayon")]
+#[derive(Clone, Debug, Default)]
+struct Levels {
+    /// Rows grouped by level
+    buckets: Vec<Vec<usize>>,
+    /// Maximum level
+    max_level: u32,
+}
+
+#[cfg(feature = "rayon")]
+#[cfg(feature = "rayon")]
+fn build_levels_lower<T>(l: &CsrMatrix<T>) -> Levels
+where
+    T: ComplexField
+        + Copy
+        + num_traits::Zero
+        + PartialOrd
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+{
+    let n = l.nrows();
+    let mut lev = vec![0u32; n];
+    let mut maxl = 0u32;
+    for i in 0..n {
+        let (cols, _vals) = l.row(i);
+        let mut li = 0u32;
+        for &j in cols {
+            if j >= i {
+                break;
+            }
+            li = li.max(lev[j] + 1);
+        }
+        lev[i] = li;
+        maxl = maxl.max(li);
+    }
+    let mut buckets = vec![Vec::new(); (maxl as usize) + 1];
+    for (i, &l) in lev.iter().enumerate() {
+        buckets[l as usize].push(i);
+    }
+    Levels { buckets, max_level: maxl }
+}
+
+#[cfg(feature = "rayon")]
+fn build_levels_upper<T>(u: &CsrMatrix<T>) -> Levels
+where
+    T: ComplexField
+        + Copy
+        + num_traits::Zero
+        + PartialOrd
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+{
+    let n = u.nrows();
+    let mut lev = vec![0u32; n];
+    let mut maxl = 0u32;
+    for i in (0..n).rev() {
+        let (cols, _vals) = u.row(i);
+        let mut li = 0u32;
+        for &j in cols {
+            if j <= i {
+                continue;
+            }
+            li = li.max(lev[j] + 1);
+        }
+        lev[i] = li;
+        maxl = maxl.max(li);
+    }
+    let mut buckets = vec![Vec::new(); (maxl as usize) + 1];
+    for (i, &l) in lev.iter().enumerate() {
+        buckets[l as usize].push(i);
+    }
+    Levels { buckets, max_level: maxl }
+}
+
 impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     /// Create new ILU with HYPRE defaults
     pub fn new() -> Self {
@@ -472,6 +552,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             row_perm: Vec::new(),
             col_perm: Vec::new(),
             workspace: IluWorkspace::new(0),
+            #[cfg(feature = "rayon")]
+            levels_l: Levels::default(),
+            #[cfg(feature = "rayon")]
+            levels_u: Levels::default(),
             setup_complexity: 0.0,
             nnz_l: 0,
             nnz_u: 0,
@@ -965,8 +1049,17 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
     /// Exact sparse triangular solve operating in-place on the provided buffer.
     fn solve_triangular_exact(&self, lower: bool, x: &mut [T]) {
-        let n = x.len();
+        #[cfg(feature = "rayon")]
+        if self.config.enable_parallel_triangular_solve {
+            if lower {
+                self.solve_triangular_parallel_forward(x);
+            } else {
+                self.solve_triangular_parallel_backward(x);
+            }
+            return;
+        }
 
+        let n = x.len();
         if lower {
             // Forward substitution: L * x = b (unit diagonal) using x as both rhs and solution
             for i in 0..n {
@@ -995,47 +1088,41 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     }
 
     #[cfg(feature = "rayon")]
-    /// Parallel forward substitution using level scheduling
-    #[allow(dead_code)]
-    fn solve_triangular_parallel_forward(&self, b: &[T], x: &mut [T]) {
-        let n = b.len();
-        x.copy_from_slice(b);
-
-        // For forward substitution, we process by levels (dependency chains)
-        // Level scheduling would require dependency analysis, so we use a simpler approach
-        // with fine-grained synchronization via atomic operations for dense matrices
-
-        // For now, fall back to serial since proper level scheduling is complex
-        for i in 0..n {
-            for j in 0..i {
-                let l_ij = self.sparse_get(&self.l, i, j);
-                if l_ij != T::zero() {
-                    x[i] = x[i] - l_ij * x[j];
+    /// Level-scheduled forward substitution (currently executes sequentially).
+    fn solve_triangular_parallel_forward(&self, x: &mut [T]) {
+        let levels = &self.levels_l;
+        for rows in &levels.buckets {
+            for &i in rows {
+                let mut sum = x[i];
+                let (cols, vals) = self.l.row(i);
+                for (&j, &val) in cols.iter().zip(vals.iter()) {
+                    if j >= i {
+                        break;
+                    }
+                    sum = sum - val * x[j];
                 }
+                x[i] = sum;
             }
-            // L has unit diagonal
         }
     }
 
     #[cfg(feature = "rayon")]
-    /// Parallel backward substitution using level scheduling
-    #[allow(dead_code)]
-    fn solve_triangular_parallel_backward(&self, b: &[T], x: &mut [T]) {
-        let n = b.len();
-        x.copy_from_slice(b);
-
-        // For backward substitution, we can use similar level scheduling
-        // For dense matrices, the dependency chains make true parallelism challenging
-
-        // For now, fall back to serial since proper level scheduling is complex
-        for i in (0..n).rev() {
-            for j in (i + 1)..n {
-                let u_ij = self.sparse_get(&self.u, i, j);
-                if u_ij != T::zero() {
-                    x[i] = x[i] - u_ij * x[j];
+    /// Level-scheduled backward substitution (currently executes sequentially).
+    fn solve_triangular_parallel_backward(&self, x: &mut [T]) {
+        let levels = &self.levels_u;
+        for ell in (0..=levels.max_level).rev() {
+            let rows = &levels.buckets[ell as usize];
+            for &i in rows {
+                let mut sum = x[i];
+                let (cols, vals) = self.u.row(i);
+                for (&j, &val) in cols.iter().zip(vals.iter()) {
+                    if j <= i {
+                        continue;
+                    }
+                    sum = sum - val * x[j];
                 }
+                x[i] = sum * self.inv_diag_u[i];
             }
-            x[i] = x[i] * self.inv_diag_u[i];
         }
     }
 
@@ -1306,6 +1393,12 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
         // Calculate metrics
         self.setup_complexity = self.calculate_complexity(original_nnz);
         self.setup_time = setup_start.elapsed().as_secs_f64();
+
+        #[cfg(feature = "rayon")]
+        if self.config.enable_parallel_triangular_solve {
+            self.levels_l = build_levels_lower(&self.l);
+            self.levels_u = build_levels_upper(&self.u);
+        }
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
