@@ -27,6 +27,8 @@ pub enum ConvergedReason {
     ConvergedAtol,
     /// Converged because the step reached a trust-region bound
     ConvergedTrustRegion,
+    /// Converged due to a happy breakdown (e.g., `pᵀAp` ≈ 0)
+    ConvergedHappyBreakdown,
     /// Diverged due to divergence tolerance: ‖r‖ ≥ dtol * ‖b‖
     DivergedDtol,
     /// Diverged due to maximum iterations reached

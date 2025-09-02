@@ -29,8 +29,8 @@ pub struct PcgSolver {
     ///
     /// PETSc zeroes the initial guess by default unless told otherwise via
     /// `KSPSetInitialGuessNonzero`. We follow the same policy; when this flag is
-    /// `false` and the provided `x` is numerically zero, the solver skips the
-    /// initial matvec and assumes a zero guess.
+    /// `false` and the provided `x` is exactly the zero vector, the solver
+    /// skips the initial matvec and assumes a zero guess.
     initial_guess_nonzero: bool,
 }
 
@@ -224,10 +224,9 @@ impl PcgSolver {
         if zero_guess {
             r.copy_from_slice(b);
         } else {
-            let mut ax = vec![0.0; n];
-            a.matvec(x, &mut ax);
+            a.matvec(x, ap);
             for i in 0..n {
-                r[i] = b[i] - ax[i];
+                r[i] = b[i] - ap[i];
             }
         }
 
@@ -238,16 +237,16 @@ impl PcgSolver {
             z.copy_from_slice(r);
         }
 
-        let bnorm = self.nrm2(b, comm).max(1e-32);
         let mut rho = self.dot(r, z, comm);
         let mut rho_prev = rho;
 
-        let mut res = match self.norm_type {
+        let res0 = match self.norm_type {
             CgNormType::Preconditioned => rho.sqrt(),
             CgNormType::Unpreconditioned => self.nrm2(r, comm),
             CgNormType::Natural => self.nrm2(z, comm),
-            CgNormType::None => 0.0,
+            CgNormType::None => self.nrm2(r, comm),
         };
+        let mut res = res0;
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -262,13 +261,7 @@ impl PcgSolver {
         p.copy_from_slice(z);
 
         // Convergence check at k=0
-        let res_check0 = match self.norm_type {
-            CgNormType::Preconditioned => rho.sqrt(),
-            CgNormType::Unpreconditioned => self.nrm2(r, comm),
-            CgNormType::Natural => self.nrm2(z, comm),
-            CgNormType::None => self.nrm2(r, comm),
-        };
-        let (reason0, s0) = self.conv.check(res_check0, bnorm, 0);
+        let (reason0, s0) = self.conv.check(res0, res0, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             let true_res = self.nrm2(r, comm);
             return Ok(SolveStats {
@@ -298,7 +291,7 @@ impl PcgSolver {
                 return Ok(SolveStats {
                     iterations: k - 1,
                     final_residual: self.nrm2(r, comm),
-                    reason: ConvergedReason::ConvergedAtol,
+                    reason: ConvergedReason::ConvergedHappyBreakdown,
                 });
             }
 
@@ -344,7 +337,7 @@ impl PcgSolver {
                 CgNormType::Natural => self.nrm2(z, comm),
                 CgNormType::None => self.nrm2(r, comm),
             };
-            let (reason, mut s) = self.conv.check(res_check, bnorm, k);
+            let (reason, mut s) = self.conv.check(res_check, res0, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 s.final_residual = self.nrm2(r, comm);
                 return Ok(SolveStats {

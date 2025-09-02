@@ -471,9 +471,6 @@ impl KspContext {
                 };
                 s.set_norm(n);
             }
-            if let Some(flag) = opts.cg_single_reduction {
-                s.set_single_reduction(flag);
-            }
             if let Some(r) = opts.trust_region {
                 s.set_trust_region(r);
             }
