@@ -8,10 +8,57 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{PcSide, Preconditioner};
 
 mod pivot;
-mod symbolic;
 mod tri_solve;
 
 pub use pivot::PivotStrategy;
+
+// Workspace for fast lookups of U(i, j) positions within a row during
+// numeric factorization. Uses the marker/epoch trick to provide O(1)
+// amortized access without clearing the entire array each iteration.
+#[derive(Clone, Debug)]
+struct URowMap {
+    epoch: usize,
+    mark: Vec<usize>,
+    pos: Vec<usize>,
+}
+
+impl URowMap {
+    fn new() -> Self {
+        Self {
+            epoch: 0,
+            mark: Vec::new(),
+            pos: Vec::new(),
+        }
+    }
+
+    fn ensure_size(&mut self, n: usize) {
+        if self.mark.len() < n {
+            self.mark.resize(n, 0);
+            self.pos.resize(n, 0);
+        }
+    }
+
+    fn prime(&mut self, u_row: &[usize], u_col: &[usize], i: usize) {
+        self.epoch = self.epoch.wrapping_add(1);
+        let rs = u_row[i];
+        let re = u_row[i + 1];
+        for (offset, &col) in u_col[rs..re].iter().enumerate() {
+            self.mark[col] = self.epoch;
+            self.pos[col] = rs + offset;
+        }
+    }
+
+    #[inline]
+    fn get(&self, j: usize) -> Option<usize> {
+        if self.mark.get(j).copied().unwrap_or(0) == self.epoch {
+            Some(self.pos[j])
+        } else {
+            None
+        }
+    }
+}
+
+mod symbolic;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IluKind {
@@ -64,8 +111,6 @@ pub struct IluCsr {
     u_col: Vec<usize>,
     u_val: Vec<f64>,
     u_diag_ix: Vec<usize>,
-    // Accumulated MILU(0) diagonal corrections per row
-    delta_diag: Vec<f64>,
     // Optional per-entry levels for ILUK
     l_lev: Vec<usize>,
     u_lev: Vec<usize>,
@@ -94,7 +139,6 @@ impl IluCsr {
             u_col: Vec::new(),
             u_val: Vec::new(),
             u_diag_ix: Vec::new(),
-            delta_diag: Vec::new(),
             l_lev: Vec::new(),
             u_lev: Vec::new(),
             levels_fwd: Vec::new(),
@@ -256,9 +300,6 @@ impl IluCsr {
         // not used in ILU0
         self.l_lev.resize(self.l_col.len(), 0);
         self.u_lev.resize(self.u_col.len(), 0);
-        // Prepare MILU(0) correction storage
-        self.delta_diag.resize(n, 0.0);
-
         // Numeric factorization using work row over A's pattern only (no fill added).
         let milu = matches!(self.cfg.kind, IluKind::Milu0);
         self.ilu0_numeric(a, milu)
@@ -273,26 +314,20 @@ impl IluCsr {
                 "ILU0 numeric update: size/shape mismatch".into(),
             ));
         }
-        // Prepare MILU(0) correction storage
-        self.delta_diag.resize(self.n, 0.0);
         // Keep pattern intact; just recompute numeric values.
         let milu = matches!(self.cfg.kind, IluKind::Milu0);
         self.ilu0_numeric(a, milu)
     }
 
     fn ilu0_numeric(&mut self, a: &CsrMatrix<f64>, milu: bool) -> Result<(), KError> {
-        use symbolic::RowWork;
         let n = self.n;
         let rp = a.row_ptr();
         let cj = a.col_idx();
         let vv = a.values();
 
-        let mut w = RowWork {
-            mark: Vec::new(),
-            idx: Vec::new(),
-            val: Vec::new(),
-        };
-        symbolic::ensure_rowwork(&mut w, n);
+        // Workspace for locating U(i, j) quickly
+        let mut map = URowMap::new();
+        map.ensure_size(n);
 
         // Precompute max |A_ii| for pivot handling
         let mut max_diag_abs = 0.0f64;
@@ -308,100 +343,71 @@ impl IluCsr {
         }
 
         for i in 0..n {
-            // Load row i of A into work row
-            symbolic::ensure_rowwork(&mut w, n);
-            for p in rp[i]..rp[i + 1] {
-                let j = cj[p];
-                let pos = symbolic::find_or_insert(&mut w, j);
-                w.val[pos] = vv[p];
-            }
-            // Ensure diagonal slot exists and commit any prior MILU correction
-            let diag_pos = symbolic::find_or_insert(&mut w, i);
-            w.val[diag_pos] += self.delta_diag[i];
-            self.delta_diag[i] = 0.0;
+            map.prime(&self.u_row, &self.u_col, i);
 
-            // Eliminate against previously computed rows, restricted to L pattern of row i
+            // Initialize L and U values from A for this row
+            let mut p = rp[i];
+            while p < rp[i + 1] {
+                let j = cj[p];
+                let val = vv[p];
+                if j < i {
+                    // L part
+                    let ls = self.l_row[i];
+                    if let Ok(off) = self.l_col[ls..self.l_row[i + 1]].binary_search(&j) {
+                        self.l_val[ls + off] = val;
+                    }
+                } else {
+                    // U part (including diagonal)
+                    if let Some(pos) = map.get(j) {
+                        self.u_val[pos] = val;
+                    }
+                }
+                p += 1;
+            }
+
+            // Eliminate using previous rows
             let ls = self.l_row[i];
             let le = self.l_row[i + 1];
             for pos in ls..le {
-                let j = self.l_col[pos];
-                // work value at column j (0 if not present)
-                let lij_num = if w.mark[j] >= 0 {
-                    w.val[w.mark[j] as usize]
-                } else {
-                    0.0
-                };
-                if lij_num == 0.0 {
-                    self.l_val[pos] = 0.0;
-                    continue;
-                }
-                // divide by U(j,j)
-                let djj = self.u_val[self.u_diag_ix[j]];
-                if djj == 0.0 {
-                    // row j diagonal not yet set means j<i and we should have a pivot; if 0.0, treat as error
+                let k = self.l_col[pos];
+                let ukk = self.u_val[self.u_diag_ix[k]];
+                if ukk == 0.0 {
                     return Err(KError::FactorError(format!(
                         "zero U(j,j) encountered at row {}",
-                        j
+                        k
                     )));
                 }
-                let lij = lij_num / djj;
-                self.l_val[pos] = lij;
+                let mult = self.l_val[pos] / ukk;
+                self.l_val[pos] = mult;
 
-                // AXPY into k>j strictly following ILU0 (only update if k exists in current row pattern)
-                let urs = self.u_row[j];
-                let ure = self.u_row[j + 1];
+                // Update U(i, j)
+                let urs = self.u_row[k];
+                let ure = self.u_row[k + 1];
                 for q in urs..ure {
-                    let kcol = self.u_col[q];
-                    if kcol <= j {
+                    let j = self.u_col[q];
+                    if j <= k {
                         continue;
                     }
-                    let mk = w.mark.get(kcol).copied().unwrap_or(-1);
-                    if mk >= 0 {
-                        let idx = mk as usize;
-                        w.val[idx] -= lij * self.u_val[q];
+                    if let Some(pos_ij) = map.get(j) {
+                        self.u_val[pos_ij] -= mult * self.u_val[q];
                     } else if milu {
-                        self.delta_diag[i] -= lij * self.u_val[q];
+                        let di_pos = self.u_diag_ix[i];
+                        self.u_val[di_pos] -= mult * self.u_val[q];
                     }
                 }
-            }
-
-            // Commit any dropped fill to the diagonal before finalizing
-            let diag_pos2 = w.mark[i] as usize;
-            w.val[diag_pos2] += self.delta_diag[i];
-            self.delta_diag[i] = 0.0;
-
-            // Finalize U row: copy from work for pattern k >= i (zeros if absent)
-            let us = self.u_row[i];
-            let ue = self.u_row[i + 1];
-            let mut diag_val = 0.0;
-            for q in us..ue {
-                let k = self.u_col[q];
-                let v = if w.mark.get(k).copied().unwrap_or(-1) >= 0 {
-                    w.val[w.mark[k] as usize]
-                } else {
-                    0.0
-                };
-                if k == i {
-                    diag_val = v;
-                }
-                self.u_val[q] = v;
             }
 
             // Handle pivot on U(i,i)
+            let di_pos = self.u_diag_ix[i];
             let fixed = pivot::handle_pivot(
-                diag_val,
+                self.u_val[di_pos],
                 self.cfg.pivot,
                 self.cfg.pivot_threshold,
                 self.cfg.diag_perturb_factor,
                 max_diag_abs,
             )
             .map_err(|_| KError::ZeroPivot(i))?;
-
-            let dix = self.u_diag_ix[i];
-            self.u_val[dix] = fixed;
-
-            // Update row pointers already set during symbolic; clear work row
-            symbolic::clear_rowwork(&mut w);
+            self.u_val[di_pos] = fixed;
         }
 
         Ok(())
