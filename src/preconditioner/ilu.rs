@@ -374,8 +374,8 @@ pub struct Ilu<T> {
 /// Consolidated workspace for all ILU operations to minimize allocations
 #[derive(Debug)]
 pub struct IluWorkspace<T> {
-    /// Primary workspace for triangular solves and factorization
-    temp1: RefCell<Vec<T>>,
+    /// Scratch buffer for triangular solves (sized once in setup)
+    solve_buf: RefCell<Vec<T>>,
     /// Secondary workspace for complex operations
     temp2: RefCell<Vec<T>>,
     /// Workspace for level scheduling in parallel triangular solves
@@ -393,7 +393,7 @@ impl<T: Clone> IluWorkspace<T> {
         T: num_traits::Zero,
     {
         Self {
-            temp1: RefCell::new(vec![T::zero(); size]),
+            solve_buf: RefCell::new(vec![T::zero(); size]),
             temp2: RefCell::new(vec![T::zero(); size]),
             levels: RefCell::new(vec![0; size]),
             pattern_work: RefCell::new(vec![false; size]),
@@ -407,7 +407,7 @@ impl<T: Clone> IluWorkspace<T> {
         T: num_traits::Zero + Clone,
     {
         if new_size > self.size {
-            self.temp1.borrow_mut().resize(new_size, T::zero());
+            self.solve_buf.borrow_mut().resize(new_size, T::zero());
             self.temp2.borrow_mut().resize(new_size, T::zero());
             self.levels.borrow_mut().resize(new_size, 0);
             self.pattern_work.borrow_mut().resize(new_size, false);
@@ -420,7 +420,7 @@ impl<T: Clone> IluWorkspace<T> {
     where
         T: num_traits::Zero,
     {
-        for x in self.temp1.borrow_mut().iter_mut() {
+        for x in self.solve_buf.borrow_mut().iter_mut() {
             *x = T::zero();
         }
         for x in self.temp2.borrow_mut().iter_mut() {
@@ -434,9 +434,11 @@ impl<T: Clone> IluWorkspace<T> {
         }
     }
 
-    /// Get temporary workspace for triangular solve operations (zero-allocation)
-    pub fn get_temp_workspace(&self) -> std::cell::RefMut<'_, Vec<T>> {
-        self.temp1.borrow_mut()
+    /// Borrow the solve buffer sized in `setup()`.
+    #[inline]
+    pub fn borrow_solve_buf(&self, n: usize) -> std::cell::RefMut<'_, Vec<T>> {
+        debug_assert!(self.size >= n, "workspace not sized; call ensure_size in setup()");
+        self.solve_buf.borrow_mut()
     }
 }
 
@@ -961,14 +963,14 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         }
     }
 
-    /// Sparse triangular solve with level scheduling potential and workspace reuse
-    fn solve_triangular_exact(&self, lower: bool, b: &[T], x: &mut [T]) {
-        let n = b.len();
+    /// Exact sparse triangular solve operating in-place on the provided buffer.
+    fn solve_triangular_exact(&self, lower: bool, x: &mut [T]) {
+        let n = x.len();
 
         if lower {
-            // Forward substitution: L * x = b (unit diagonal)
+            // Forward substitution: L * x = b (unit diagonal) using x as both rhs and solution
             for i in 0..n {
-                let mut sum = b[i];
+                let mut sum = x[i];
                 let (cols, vals) = self.l.row(i);
                 for (&j, &val) in cols.iter().zip(vals.iter()) {
                     if j < i {
@@ -978,9 +980,9 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                 x[i] = sum;
             }
         } else {
-            // Backward substitution: U * x = b
+            // Backward substitution: U * x = b using x in-place
             for i in (0..n).rev() {
-                let mut sum = b[i];
+                let mut sum = x[i];
                 let (cols, vals) = self.u.row(i);
                 for (&j, &val) in cols.iter().zip(vals.iter()) {
                     if j > i {
@@ -1340,50 +1342,36 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
     /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
     fn apply(&self, _side: PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
-        if x.len() != self.l.nrows() {
+        let n = self.l.nrows();
+        if x.len() != n || y.len() != n {
             return Err(KError::InvalidInput(format!(
-                "Vector length {} doesn't match matrix size {}",
+                "Vector length mismatch: expected {}, got x={} y={}",
+                n,
                 x.len(),
-                self.l.nrows()
+                y.len(),
             )));
         }
 
         let timer = SolveTimer::start(&self.solve_ctrs);
 
-        let n = x.len();
-
-        // Use consolidated workspace to achieve zero allocations during solve
-        {
-            let mut temp_workspace = self.workspace.get_temp_workspace();
-            temp_workspace.resize(n, T::zero());
-
-            // Forward solve: L * temp = x
-            temp_workspace.copy_from_slice(x);
-            match self.config.triangular_solve {
-                TriSolveType::Exact => {
-                    self.solve_triangular_exact(true, x, &mut temp_workspace);
-                }
-                TriSolveType::Jacobi => {
-                    self.solve_triangular_jacobi(true, x, &mut temp_workspace);
-                }
-                TriSolveType::GaussSeidel => {
-                    self.solve_triangular_gauss_seidel(true, x, &mut temp_workspace);
-                }
+        match self.config.triangular_solve {
+            TriSolveType::Exact => {
+                // single copy mandated by API
+                y.copy_from_slice(x);
+                self.solve_triangular_exact(true, y);
+                self.solve_triangular_exact(false, y);
             }
-
-            // Backward solve: U * y = temp
-            match self.config.triangular_solve {
-                TriSolveType::Exact => {
-                    self.solve_triangular_exact(false, &temp_workspace, y);
-                }
-                TriSolveType::Jacobi => {
-                    self.solve_triangular_jacobi(false, &temp_workspace, y);
-                }
-                TriSolveType::GaussSeidel => {
-                    self.solve_triangular_gauss_seidel(false, &temp_workspace, y);
-                }
+            TriSolveType::Jacobi => {
+                let mut buf = self.workspace.borrow_solve_buf(n);
+                self.solve_triangular_jacobi(true, x, &mut buf[..n]);
+                self.solve_triangular_jacobi(false, &buf[..n], y);
             }
-        } // workspace automatically released here
+            TriSolveType::GaussSeidel => {
+                let mut buf = self.workspace.borrow_solve_buf(n);
+                self.solve_triangular_gauss_seidel(true, x, &mut buf[..n]);
+                self.solve_triangular_gauss_seidel(false, &buf[..n], y);
+            }
+        }
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 2 {
