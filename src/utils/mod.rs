@@ -13,3 +13,5 @@ pub mod reordering;
 pub mod buffer_pool;
 #[cfg(feature = "tuning")]
 pub mod tuning;
+
+pub use monitor::{Event, Monitor, NullMonitor, TextMonitor};

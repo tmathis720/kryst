@@ -24,3 +24,36 @@ macro_rules! pc_log {
     };
 }
 
+#[derive(Debug, Clone)]
+pub struct ParIluIterSample {
+    pub iter: u32,
+    pub rel_corr_L: f64,
+    pub rel_corr_U: f64,
+    pub rel_residual: f64,
+    pub max_pivot_rel: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParIluHistory {
+    pub used: u32,
+    pub buf: Vec<ParIluIterSample>,
+}
+
+impl ParIluHistory {
+    pub fn with_capacity(cap: usize) -> Self {
+        let buf = Vec::with_capacity(cap);
+        Self { used: 0, buf }
+    }
+
+    #[inline]
+    pub fn push(&mut self, s: ParIluIterSample) {
+        self.buf.push(s);
+        self.used += 1;
+    }
+
+    pub fn as_slice(&self) -> &[ParIluIterSample] {
+        &self.buf[..self.used as usize]
+    }
+}
+
+

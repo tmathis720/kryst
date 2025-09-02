@@ -29,6 +29,57 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
+use crate::preconditioner::stats::ParIluIterSample;
+
+pub enum Event<'a> {
+    IluSetupBegin { opts_hash: u64 },
+    IluSetupIter { sample: &'a ParIluIterSample },
+    IluSetupEnd { iters: u32, converged: bool, setup_time_s: f64 },
+}
+
+pub trait Monitor: Send + Sync {
+    fn on_event(&self, ev: Event<'_>);
+}
+
+pub struct NullMonitor;
+impl Monitor for NullMonitor {
+    fn on_event(&self, _: Event<'_>) {}
+}
+
+pub struct TextMonitor {
+    pub rank0: bool,
+}
+
+impl Monitor for TextMonitor {
+    fn on_event(&self, ev: Event<'_>) {
+        #[cfg(feature = "logging")]
+        if self.rank0 {
+            match ev {
+                Event::IluSetupBegin { opts_hash } =>
+                    log::info!("ILU: setup begin (opts={:016x})", opts_hash),
+                Event::IluSetupIter { sample } => log::info!(
+                    "ILU: it {:>3}  corr(L)={:.3e}  corr(U)={:.3e}  res≈{:.3e}  maxΔpivot={:.3e}",
+                    sample.iter,
+                    sample.rel_corr_L,
+                    sample.rel_corr_U,
+                    sample.rel_residual,
+                    sample.max_pivot_rel
+                ),
+                Event::IluSetupEnd {
+                    iters,
+                    converged,
+                    setup_time_s,
+                } => log::info!(
+                    "ILU: setup end iters={} converged={} time={:.3}s",
+                    iters,
+                    converged,
+                    setup_time_s
+                ),
+            }
+        }
+    }
+}
+
 /// Convergence statistics computed from iteration history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvergenceStats {
