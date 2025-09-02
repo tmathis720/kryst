@@ -9,8 +9,15 @@ use crate::preconditioner::{PcSide, Preconditioner};
 
 mod pivot;
 mod tri_solve;
+mod ilut_params;
+mod csr_builder;
+mod row_work;
 
 pub use pivot::PivotStrategy;
+pub use ilut_params::{IlutParams, PivotPolicy, Pivoting};
+
+use csr_builder::CsrBuilder;
+use row_work::RowWork;
 
 // Workspace for fast lookups of U(i, j) positions within a row during
 // numeric factorization. Uses the marker/epoch trick to provide O(1)
@@ -65,7 +72,7 @@ pub enum IluKind {
     Ilu0,
     Milu0,
     Iluk { k: usize },
-    Ilut { drop_tol: f64, max_per_row: usize },
+    Ilut { params: IlutParams },
 }
 
 #[derive(Clone, Debug)]
@@ -216,10 +223,7 @@ impl IluCsr {
         match self.cfg.kind {
             IluKind::Ilu0 | IluKind::Milu0 => self.factor_ilu0(a),
             IluKind::Iluk { k } => self.factor_iluk(a, k),
-            IluKind::Ilut {
-                drop_tol,
-                max_per_row,
-            } => self.factor_ilut(a, drop_tol, max_per_row),
+            IluKind::Ilut { params } => self.factor_ilut(a, &params),
         }
     }
 
@@ -705,189 +709,170 @@ impl IluCsr {
         self.iluk_numeric_only(a, k_limit, max_diag_abs)
     }
 
-    // === ILUT(drop_tol, max_per_row) implementation ===
-    fn factor_ilut(
-        &mut self,
-        a: &CsrMatrix<f64>,
-        drop_tol: f64,
-        max_per_row: usize,
-    ) -> Result<(), KError> {
+    // === ILUT(p, tau) implementation with separate L/U caps ===
+    fn factor_ilut(&mut self, a: &CsrMatrix<f64>, params: &IlutParams) -> Result<(), KError> {
         let n = a.nrows();
         if n != a.ncols() {
             return Err(KError::InvalidInput("ILUT requires square matrix".into()));
         }
         self.n = n;
 
-        self.l_row.clear();
-        self.l_col.clear();
-        self.l_val.clear();
-        self.u_row.clear();
-        self.u_col.clear();
-        self.u_val.clear();
-        self.u_diag_ix.clear();
-        self.l_lev.clear();
-        self.u_lev.clear(); // not used by ILUT
-        self.l_row.resize(n + 1, 0);
-        self.u_row.resize(n + 1, 0);
-        self.u_diag_ix.resize(n, 0);
+        // Builders for L and U
+        let mut l_build = CsrBuilder::new(n);
+        let mut u_build = CsrBuilder::new(n);
+        let mut inv_diag_u = vec![0.0f64; n];
 
-        use symbolic::RowWork;
-        let rp = a.row_ptr();
-        let cj = a.col_idx();
-        let vv = a.values();
-        let mut w = RowWork {
-            mark: Vec::new(),
-            idx: Vec::new(),
-            val: Vec::new(),
-        };
-        symbolic::ensure_rowwork(&mut w, n);
+        // Row workspace
+        let mut w = RowWork::<f64>::new();
+        w.ensure_size(n);
+        let mut l_tmp: Vec<(usize, f64)> = Vec::new();
+        let mut u_tmp: Vec<(usize, f64)> = Vec::new();
 
-        // Precompute max |A_ii| for pivot handling
         let mut max_diag_abs = 0.0f64;
+
         for i in 0..n {
-            let mut di = 0.0;
-            for p in rp[i]..rp[i + 1] {
-                if cj[p] == i {
-                    di = vv[p];
-                    break;
+            w.clear_row();
+            l_tmp.clear();
+            u_tmp.clear();
+
+            // Seed w from row i of A
+            let (a_cols, a_vals) = a.row(i);
+            let mut row_inf: f64 = 0.0;
+            for (&j, &v) in a_cols.iter().zip(a_vals.iter()) {
+                if v != 0.0 {
+                    w.set(j, v);
+                    row_inf = row_inf.max(v.abs());
                 }
             }
-            max_diag_abs = max_diag_abs.max(di.abs());
-        }
+            let tau = params.droptol_abs + params.droptol_rel * row_inf;
 
-        for i in 0..n {
-            symbolic::ensure_rowwork(&mut w, n);
-            for p in rp[i]..rp[i + 1] {
-                let j = cj[p];
-                let pos = symbolic::find_or_insert(&mut w, j);
-                w.val[pos] = vv[p];
-            }
-
-            // lower candidates sorted by column
-            let mut lowers: Vec<usize> = w.idx.iter().copied().filter(|&c| c < i).collect();
+            // Eliminate lower entries
+            let mut lowers: Vec<usize> = w.iter().filter(|&(j, _)| j < i).map(|(j, _)| j).collect();
             lowers.sort_unstable();
-            for &j in &lowers {
-                let pos = w.mark[j] as usize;
-                let wij = w.val[pos];
-                if wij.abs() < drop_tol {
+            for &k in &lowers {
+                let wk = w.get(k);
+                if wk == 0.0 {
                     continue;
                 }
-                let djj = self
-                    .u_val
-                    .get(self.u_diag_ix.get(j).copied().unwrap_or(0))
-                    .copied()
-                    .unwrap_or(1.0);
-                let lij = wij / djj;
-                // update work for k>j, but skip tiny values
-                let rs = self.u_row.get(j).copied().unwrap_or(0);
-                let re = self.u_row.get(j + 1).copied().unwrap_or(0);
-                for q in rs..re {
-                    let kcol = self.u_col[q];
-                    if kcol <= j {
+                let lik = wk * inv_diag_u[k];
+                if params.early_drop && lik.abs() < tau {
+                    w.set(k, 0.0);
+                    continue;
+                }
+                l_tmp.push((k, lik));
+                w.set(k, 0.0);
+
+                let (u_cols_k, u_vals_k) = u_build.row(k);
+                for (&j, &ukj) in u_cols_k.iter().zip(u_vals_k.iter()) {
+                    if j <= k {
                         continue;
                     }
-                    let kpos = symbolic::find_or_insert(&mut w, kcol);
-                    let newv = w.val[kpos] - lij * self.u_val[q];
-                    // Drop small ones early to control workspace
-                    if newv.abs() < drop_tol {
-                        w.val[kpos] = 0.0;
+                    let newv: f64 = w.get(j) - lik * ukj;
+                    if params.early_drop && newv.abs() < tau {
+                        w.set(j, 0.0);
                     } else {
-                        w.val[kpos] = newv;
+                        w.set(j, newv);
                     }
                 }
             }
 
-            // Partition and apply per-row cap on off-diagonals
-            // L part (j<i, off-diagonals only) with threshold
-            let mut l_keep: Vec<(usize, f64)> = w
-                .idx
-                .iter()
-                .filter_map(|&c| {
-                    if c < i {
-                        let v = w.val[w.mark[c] as usize];
-                        if v.abs() >= drop_tol {
-                            Some((c, v))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if max_per_row > 0 && l_keep.len() > max_per_row {
-                let m = max_per_row;
-                l_keep.select_nth_unstable_by(m, |a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
-                l_keep.truncate(m);
-            }
-            l_keep.sort_by_key(|x| x.0);
-
-            // U part (k>=i); ensure diagonal always present
-            let mut u_keep: Vec<(usize, f64)> = w
-                .idx
-                .iter()
-                .filter_map(|&c| {
-                    if c >= i {
-                        let v = w.val[w.mark[c] as usize];
-                        if c == i || v.abs() >= drop_tol {
-                            Some((c, v))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !u_keep.iter().any(|(c, _)| *c == i) {
-                u_keep.push((i, 0.0));
-            }
-            // Apply cap to off-diagonals only
-            if max_per_row > 0 {
-                let mut offs: Vec<(usize, f64)> =
-                    u_keep.iter().cloned().filter(|(c, _)| *c > i).collect();
-                if offs.len() > max_per_row {
-                    let m = max_per_row;
-                    offs.select_nth_unstable_by(m, |a, b| {
-                        b.1.abs().partial_cmp(&a.1.abs()).unwrap()
-                    });
-                    offs.truncate(m);
+            // Split remaining w into U-part
+            for (j, v) in w.iter() {
+                if j >= i && (j == i || v.abs() >= tau) {
+                    u_tmp.push((j, v));
                 }
-                offs.sort_by_key(|x| x.0);
-                // rebuild u_keep with diag + offs
-                let mut new_u: Vec<(usize, f64)> = Vec::with_capacity(1 + offs.len());
-                let diagv = u_keep
-                    .iter()
-                    .find(|(c, _)| *c == i)
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.0);
-                new_u.push((i, diagv));
-                new_u.extend(offs.into_iter());
-                u_keep = new_u;
             }
-            u_keep.sort_by_key(|x| x.0);
+            if !u_tmp.iter().any(|(j, _)| *j == i) {
+                u_tmp.push((i, 0.0));
+            }
 
-            // Store L row
-            self.l_row[i + 1] = self.l_row[i] + l_keep.len();
-            for (c, v) in l_keep {
-                self.l_col.push(c);
-                self.l_val.push(v);
+            // Cap L entries
+            if params.p_l > 0 && l_tmp.len() > params.p_l {
+                l_tmp.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+                l_tmp.truncate(params.p_l);
             }
-            // Store U row
-            let u_start = self.u_col.len();
-            self.u_row[i + 1] = self.u_row[i] + u_keep.len();
-            for (c, v) in &u_keep {
-                self.u_col.push(*c);
-                self.u_val.push(*v);
-            }
-            let d_rel = u_keep.iter().position(|(c, _)| *c == i).unwrap();
-            self.u_diag_ix[i] = u_start + d_rel;
 
-            // Clear work row
-            symbolic::clear_rowwork(&mut w);
+            // Cap U entries (excluding diagonal)
+            let mut diag = 0.0;
+            if let Some(pos) = u_tmp.iter().position(|(j, _)| *j == i) {
+                diag = u_tmp[pos].1;
+                u_tmp.remove(pos);
+            }
+            if params.p_u > 0 && u_tmp.len() > params.p_u {
+                u_tmp.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+                u_tmp.truncate(params.p_u);
+            }
+            u_tmp.push((i, diag));
+
+            // Sort by column for determinism
+            if params.reproducible_order {
+                l_tmp.sort_by(|a, b| a.0.cmp(&b.0));
+                u_tmp.sort_by(|a, b| a.0.cmp(&b.0));
+            } else {
+                l_tmp.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                u_tmp.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            }
+
+            // Pivot handling
+            let diag_pos = u_tmp.iter().position(|(j, _)| *j == i).unwrap();
+            let mut uii = u_tmp[diag_pos].1;
+            max_diag_abs = max_diag_abs.max(uii.abs());
+            match params.pivot {
+                PivotPolicy::Strict => {
+                    if uii.abs() < params.pivot_tau {
+                        return Err(KError::ZeroPivot(i));
+                    }
+                }
+                PivotPolicy::Threshold => {
+                    if uii.abs() < params.pivot_tau {
+                        uii = uii.signum() * params.pivot_tau;
+                    }
+                }
+                PivotPolicy::DiagonalPerturbation => {
+                    if uii.abs() < params.pivot_tau {
+                        uii = uii + params.pivot_tau;
+                    }
+                }
+            }
+            u_tmp[diag_pos].1 = uii;
+            inv_diag_u[i] = 1.0 / uii;
+
+            // Store rows into builders
+            for &(k, v) in &l_tmp {
+                l_build.push(i, k, v);
+            }
+            l_build.push(i, i, 1.0);
+            for &(j, v) in &u_tmp {
+                u_build.push(i, j, v);
+            }
         }
 
-        // Numeric refine on fixed pattern
+        // Finalize builders into CSR arrays
+        let (l_row, l_col, l_val) = l_build.finalize_sorted_unique(params.reproducible_order);
+        let (u_row, u_col, u_val) = u_build.finalize_sorted_unique(params.reproducible_order);
+
+        self.l_row = l_row;
+        self.l_col = l_col;
+        self.l_val = l_val;
+        self.u_row = u_row;
+        self.u_col = u_col;
+        self.u_val = u_val;
+
+        self.u_diag_ix.clear();
+        self.u_diag_ix.resize(n, 0);
+        for i in 0..n {
+            let rs = self.u_row[i];
+            let re = self.u_row[i + 1];
+            if let Some(pos) = self.u_col[rs..re].iter().position(|&c| c == i) {
+                self.u_diag_ix[i] = rs + pos;
+            } else {
+                return Err(KError::InvalidInput("missing diagonal".into()));
+            }
+        }
+
+        self.tmp.resize(n, 0.0);
+
+        // Optional numeric refine
         self.ilut_numeric_only(a, max_diag_abs)
     }
 

@@ -116,12 +116,22 @@ pub fn build_ilut(
     max_fill: usize,
     _reordering: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy};
+    use crate::preconditioner::ilu_csr::{
+        IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting,
+    };
+    let params = IlutParams {
+        droptol_abs: drop_tol,
+        droptol_rel: 0.0,
+        p_l: max_fill,
+        p_u: max_fill,
+        early_drop: true,
+        pivot: PivotPolicy::DiagonalPerturbation,
+        pivot_tau: 1e-12,
+        reproducible_order: true,
+        pivoting: Pivoting::None,
+    };
     let cfg = IluCsrConfig {
-        kind: IluKind::Ilut {
-            drop_tol,
-            max_per_row: max_fill,
-        },
+        kind: IluKind::Ilut { params },
         pivot: PivotStrategy::DiagonalPerturbation,
         pivot_threshold: 1e-12,
         diag_perturb_factor: 1e-10,
