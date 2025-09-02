@@ -1047,7 +1047,12 @@ impl Preconditioner for IluCsr {
         }
     }
 
-    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if !matches!(side, PcSide::Left) {
+            return Err(KError::InvalidInput(
+                "IluCsr supports PcSide::Left only; Right/Symmetric not implemented".into(),
+            ));
+        }
         self.apply_op(Op::NoTrans, x, y)
     }
 
@@ -1134,7 +1139,7 @@ impl Preconditioner for IluCsr {
             supports_transpose: true,
             supports_conj_trans: false,
             is_spd: false,
-            side_restriction: None,
+            side_restriction: Some(PcSide::Left),
         }
     }
 }
