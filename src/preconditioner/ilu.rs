@@ -366,8 +366,8 @@ pub struct Ilu<T> {
     l: CsrMatrix<T>,
     /// Upper triangular factor in CSR format
     u: CsrMatrix<T>,
-    /// Diagonal factor for modified ILU (extracted from U for efficiency)
-    d: Vec<T>,
+    /// Cached inverse of U's diagonal entries for fast solves
+    inv_diag_u: Vec<T>,
     /// Permutation arrays (HYPRE: perm, qperm)
     #[allow(dead_code)]
     row_perm: Vec<usize>,
@@ -482,7 +482,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             config,
             l: CsrMatrix::from_csr(0, 0, vec![0], Vec::new(), Vec::new()),
             u: CsrMatrix::from_csr(0, 0, vec![0], Vec::new(), Vec::new()),
-            d: Vec::new(),
+            inv_diag_u: Vec::new(),
             row_perm: Vec::new(),
             col_perm: Vec::new(),
             workspace: IluWorkspace::new(0),
@@ -680,9 +680,6 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
-        // Extract diagonal for efficient storage
-        self.d = u.diagonal();
-
         // Initialize L as lower triangular with unit diagonal, U as upper triangular
         for i in 0..n {
             for j in 0..n {
@@ -702,9 +699,9 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         // HYPRE-style ILU(0) factorization
         for k in 0..n {
             // Enhanced pivot handling
-            let mut pivot = self.d[k];
+            let mut pivot = self.sparse_get(&u, k, k);
             self.handle_pivot(&mut pivot, k, matrix)?;
-            self.d[k] = pivot;
+            self.sparse_set(&mut u, k, k, pivot);
 
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
@@ -727,6 +724,13 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         // Calculate sparsity metrics
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
+
+        // Cache inverse diagonal of U for fast solves
+        self.inv_diag_u = u
+            .diagonal()
+            .into_iter()
+            .map(|v| T::one() / v)
+            .collect();
 
         self.l = l;
         self.u = u;
@@ -764,17 +768,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             }
         }
 
-        // Extract and store diagonal
-        self.d = u.diagonal();
-
         // MILU(0) factorization with row-sum preservation
         for k in 0..n {
-            let mut pivot = self.d[k];
+            let mut pivot = self.sparse_get(&u, k, k);
             self.handle_pivot(&mut pivot, k, matrix)?;
-            self.d[k] = pivot;
-
-            // Track dropped fill-in for diagonal correction
-            let mut dropped_sum = T::zero();
+            self.sparse_set(&mut u, k, k, pivot);
 
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
@@ -782,6 +780,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
 
+                    let mut dropped_sum = T::zero();
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
                         if u_kj != T::zero() {
@@ -790,22 +789,25 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                                 let u_ij = self.sparse_get(&u, i, j);
                                 self.sparse_set(&mut u, i, j, u_ij - update);
                             } else {
-                                // This would be fill-in - add to dropped sum
                                 dropped_sum = dropped_sum + update;
                             }
                         }
                     }
+                    // Apply diagonal correction for this row
+                    let u_ii = self.sparse_get(&u, i, i);
+                    self.sparse_set(&mut u, i, i, u_ii + dropped_sum);
                 }
-            }
-
-            // Apply diagonal correction to preserve row sum
-            if k < n - 1 {
-                self.d[k + 1] = self.d[k + 1] + dropped_sum;
             }
         }
 
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
+
+        self.inv_diag_u = u
+            .diagonal()
+            .into_iter()
+            .map(|v| T::one() / v)
+            .collect();
 
         self.l = l;
         self.u = u;
@@ -865,16 +867,12 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             }
         }
 
-        // Convert to sparse format and extract diagonal
+        // Convert to sparse format and cache inverse diagonal
         let drop_tol = T::from(1e-15).unwrap_or(T::zero());
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
-        // Extract diagonal from dense U matrix before converting
-        self.d = vec![T::zero(); n];
-        for i in 0..n {
-            self.d[i] = u[(i, i)];
-        }
+        self.inv_diag_u = (0..n).map(|i| T::one() / u[(i, i)]).collect();
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
@@ -944,16 +942,12 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             }
         }
 
-        // Convert to sparse format and extract diagonal
+        // Convert to sparse format and cache inverse diagonal
         let drop_tol = T::from(1e-15).unwrap_or(T::zero());
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
-        // Extract diagonal from dense U matrix before converting
-        self.d = vec![T::zero(); n];
-        for i in 0..n {
-            self.d[i] = u[(i, i)];
-        }
+        self.inv_diag_u = (0..n).map(|i| T::one() / u[(i, i)]).collect();
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
@@ -1014,30 +1008,28 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let n = b.len();
 
         if lower {
-            // Forward substitution: L * x = b (L has unit diagonal)
+            // Forward substitution: L * x = b (unit diagonal)
             for i in 0..n {
-                x[i] = b[i];
-                // Use sparse matrix access via dense conversion for now
-                let l_dense = self.l.to_dense();
-                for j in 0..i {
-                    if l_dense[(i, j)] != T::zero() {
-                        x[i] = x[i] - l_dense[(i, j)] * x[j];
+                let mut sum = b[i];
+                let (cols, vals) = self.l.row(i);
+                for (&j, &val) in cols.iter().zip(vals.iter()) {
+                    if j < i {
+                        sum = sum - val * x[j];
                     }
                 }
-                // L has unit diagonal, so no division needed
+                x[i] = sum;
             }
         } else {
             // Backward substitution: U * x = b
             for i in (0..n).rev() {
-                x[i] = b[i];
-                let u_dense = self.u.to_dense();
-                for j in (i + 1)..n {
-                    if u_dense[(i, j)] != T::zero() {
-                        x[i] = x[i] - u_dense[(i, j)] * x[j];
+                let mut sum = b[i];
+                let (cols, vals) = self.u.row(i);
+                for (&j, &val) in cols.iter().zip(vals.iter()) {
+                    if j > i {
+                        sum = sum - val * x[j];
                     }
                 }
-                // Use diagonal stored separately for efficiency
-                x[i] = x[i] / self.d[i];
+                x[i] = sum * self.inv_diag_u[i];
             }
         }
     }
@@ -1083,7 +1075,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                     x[i] = x[i] - u_ij * x[j];
                 }
             }
-            x[i] = x[i] / self.d[i];
+            x[i] = x[i] * self.inv_diag_u[i];
         }
     }
 
@@ -1102,27 +1094,27 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         for _iter in 0..num_iters {
             if lower {
                 // Jacobi iteration for L * x = b
-                let l_dense = self.l.to_dense();
                 for i in 0..n {
                     let mut sum = T::zero();
-                    for j in 0..i {
-                        if l_dense[(i, j)] != T::zero() {
-                            sum = sum + l_dense[(i, j)] * x[j];
+                    let (cols, vals) = self.l.row(i);
+                    for (&j, &val) in cols.iter().zip(vals.iter()) {
+                        if j < i {
+                            sum = sum + val * x[j];
                         }
                     }
                     x[i] = b[i] - sum; // L has unit diagonal
                 }
             } else {
                 // Jacobi iteration for U * x = b
-                let u_dense = self.u.to_dense();
                 for i in (0..n).rev() {
                     let mut sum = T::zero();
-                    for j in (i + 1)..n {
-                        if u_dense[(i, j)] != T::zero() {
-                            sum = sum + u_dense[(i, j)] * x[j];
+                    let (cols, vals) = self.u.row(i);
+                    for (&j, &val) in cols.iter().zip(vals.iter()) {
+                        if j > i {
+                            sum = sum + val * x[j];
                         }
                     }
-                    x[i] = (b[i] - sum) / self.d[i];
+                    x[i] = (b[i] - sum) * self.inv_diag_u[i];
                 }
             }
         }
@@ -1143,27 +1135,27 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         for _iter in 0..num_iters {
             if lower {
                 // Gauss-Seidel for L * x = b (forward sweep using updated values)
-                let l_dense = self.l.to_dense();
                 for i in 0..n {
                     let mut sum = T::zero();
-                    for j in 0..i {
-                        if l_dense[(i, j)] != T::zero() {
-                            sum = sum + l_dense[(i, j)] * x[j]; // Use updated x[j]
+                    let (cols, vals) = self.l.row(i);
+                    for (&j, &val) in cols.iter().zip(vals.iter()) {
+                        if j < i {
+                            sum = sum + val * x[j];
                         }
                     }
                     x[i] = b[i] - sum; // L has unit diagonal
                 }
             } else {
                 // Gauss-Seidel for U * x = b (backward sweep using updated values)
-                let u_dense = self.u.to_dense();
                 for i in (0..n).rev() {
                     let mut sum = T::zero();
-                    for j in (i + 1)..n {
-                        if u_dense[(i, j)] != T::zero() {
-                            sum = sum + u_dense[(i, j)] * x[j]; // Use updated x[j]
+                    let (cols, vals) = self.u.row(i);
+                    for (&j, &val) in cols.iter().zip(vals.iter()) {
+                        if j > i {
+                            sum = sum + val * x[j];
                         }
                     }
-                    x[i] = (b[i] - sum) / self.d[i];
+                    x[i] = (b[i] - sum) * self.inv_diag_u[i];
                 }
             }
         }
