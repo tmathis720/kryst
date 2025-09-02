@@ -236,6 +236,16 @@ impl IluOptions {
             ));
         }
 
+        // Schur complement options are not yet implemented.
+        if self.schur.enable || self.schur.droptol_s != SchurConfig::default().droptol_s {
+            #[cfg(feature = "logging")]
+            if self.logging_level > 0 {
+                log::warn!(
+                    "schur_drop_tolerance is reserved for future use and will be ignored"
+                );
+            }
+        }
+
         // Derived behavior #1: ILUK/ILUT imply ParILU unless explicitly set.
         let mut it = self.iterative_setup.clone();
         if matches!(self.kind, IluKind::ILUK { .. } | IluKind::ILUT { .. })

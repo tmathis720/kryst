@@ -116,3 +116,11 @@ impl Scalar for f64 {
         self
     }
 }
+
+pub trait RealField: private::Sealed + Copy + 'static {}
+impl RealField for f64 {}
+
+mod private {
+    pub trait Sealed {}
+    impl Sealed for f64 {}
+}

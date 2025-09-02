@@ -61,3 +61,21 @@ fn builders_sor_and_chebyshev_object_safe() {
     cheb.apply(PcSide::Left, &x, &mut z).unwrap();
     assert!(z.iter().all(|v| v.is_finite()));
 }
+
+#[test]
+fn ilu_right_side_errors() {
+    use crate::matrix::op::CsrOp;
+    let csr = CsrMatrix::identity(3);
+    let op = CsrOp::new(Arc::new(csr));
+    let mut pc = b::build_ilu0().expect("build_ilu0 should succeed");
+    pc.setup(&op as &dyn LinOp<S = f64>).unwrap();
+    let x = vec![1.0; 3];
+    let mut y = vec![0.0; 3];
+    let err = pc.apply(PcSide::Right, &x, &mut y).unwrap_err();
+    match err {
+        crate::error::KError::InvalidInput(msg) => {
+            assert!(msg.to_lowercase().contains("left only"))
+        }
+        _ => panic!("expected InvalidInput error"),
+    }
+}

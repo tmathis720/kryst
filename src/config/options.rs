@@ -123,6 +123,7 @@ pub struct PcOptions {
     pub ilu_level_of_fill: Option<usize>,
     pub ilu_max_fill_per_row: Option<usize>,
     pub ilu_offdiag_drop_tolerance: Option<f64>,
+    /// Reserved for future Schur complement preconditioners; not yet implemented.
     pub ilu_schur_drop_tolerance: Option<f64>,
     pub ilu_reordering_type: Option<String>,
     pub ilu_triangular_solve: Option<String>,
