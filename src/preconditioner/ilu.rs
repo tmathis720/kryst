@@ -608,23 +608,33 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
     /// Helper: Get element from sparse matrix (returns zero if not present)
     fn sparse_get(&self, matrix: &CsrMatrix<T>, i: usize, j: usize) -> T {
-        let dense = matrix.to_dense();
-        if i < dense.nrows() && j < dense.ncols() {
-            dense[(i, j)]
-        } else {
-            T::zero()
+        let (cols, vals) = matrix.row(i);
+        match cols.binary_search(&j) {
+            Ok(pos) => vals[pos],
+            Err(_) => T::zero(),
         }
     }
 
-    /// Helper: Set element in sparse matrix using dense conversion (inefficient but correct)
+    /// Helper: Set element in sparse matrix without changing structure.
+    ///
+    /// This routine assumes the sparsity pattern already contains the
+    /// entry `(i, j)`.  If the entry is absent, the call is a no-op.
     fn sparse_set(&mut self, matrix: &mut CsrMatrix<T>, i: usize, j: usize, value: T) {
-        // For now, we'll need to convert to dense, modify, and convert back
-        // This is inefficient but ensures correctness
-        let mut dense = matrix.to_dense();
-        if i < dense.nrows() && j < dense.ncols() {
-            dense[(i, j)] = value;
+        let start = matrix.row_ptr()[i];
+        let end = matrix.row_ptr()[i + 1];
+        // Determine position of column j within the row while holding only
+        // an immutable borrow.
+        let mut pos_in_row = None;
+        {
+            let cols = &matrix.col_idx()[start..end];
+            if let Ok(off) = cols.binary_search(&j) {
+                pos_in_row = Some(start + off);
+            }
         }
-        *matrix = CsrMatrix::from_dense(&dense, T::from(1e-15).unwrap_or(T::zero()));
+        if let Some(p) = pos_in_row {
+            let values = matrix.values_mut();
+            values[p] = value;
+        }
     }
 
     /// Compute ILU(0) factorization with enhanced pivot handling and sparse storage

@@ -28,6 +28,14 @@ use faer::traits::ComplexField;
 #[derive(Clone)]
 pub struct CsrMatrix<T> {
     inner: SparseRowMat<usize, T>,
+    /// Cached position of the diagonal entry in each row.
+    ///
+    /// `diag_pos[i]` stores `Some(k)` if column `i` appears in row `i` and
+    /// `k` is the index into `values()`; otherwise `None` if the diagonal is
+    /// structurally zero.  This enables O(1) access to the diagonal for
+    /// factorization and triangular solve kernels without converting to a
+    /// dense representation.
+    diag_pos: Vec<Option<usize>>,
 }
 
 impl<
@@ -54,7 +62,12 @@ impl<
         );
         // Attach the numerical values:
         let inner = SparseRowMat::new(symbolic, values);
-        Self { inner }
+        let mut this = Self {
+            inner,
+            diag_pos: Vec::new(),
+        };
+        this.build_diag_pos();
+        this
     }
 
     /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
@@ -227,6 +240,53 @@ impl<
             &self.inner.col_idx()[start..end],
             &self.inner.val()[start..end],
         )
+    }
+
+    /// Mutable borrow of the values of row `i`.
+    ///
+    /// The column indices remain immutable; the structure of the CSR matrix
+    /// is fixed.  This is intended for in-place numeric operations such as
+    /// ILU factorizations where the sparsity pattern does not change.
+    #[inline]
+    pub fn row_values_mut(&mut self, i: usize) -> &mut [T] {
+        let start = self.inner.row_ptr()[i];
+        let end = self.inner.row_ptr()[i + 1];
+        &mut self.inner.val_mut()[start..end]
+    }
+
+    /// Immutable access to the diagonal entry of row `i` if present.
+    #[inline]
+    pub fn diag_ref(&self, i: usize) -> Option<&T> {
+        self.diag_pos[i].map(|k| &self.values()[k])
+    }
+
+    /// Mutable access to the diagonal entry of row `i` if present.
+    #[inline]
+    pub fn diag_mut(&mut self, i: usize) -> Option<&mut T> {
+        if let Some(k) = self.diag_pos[i] {
+            Some(&mut self.values_mut()[k])
+        } else {
+            None
+        }
+    }
+
+    /// Rebuild the cached diagonal positions.  Call after any operation that
+    /// may have modified the sparsity structure (in this module we construct
+    /// CSR matrices with sorted, unique rows, so this function is typically
+    /// only required once at creation).
+    pub fn build_diag_pos(&mut self) {
+        let n = self.nrows();
+        self.diag_pos.resize(n, None);
+        for i in 0..n {
+            let start = self.inner.row_ptr()[i];
+            let end = self.inner.row_ptr()[i + 1];
+            // Binary search for column i within row i.
+            if let Ok(off) = self.inner.col_idx()[start..end].binary_search(&i) {
+                self.diag_pos[i] = Some(start + off);
+            } else {
+                self.diag_pos[i] = None;
+            }
+        }
     }
 
     /// Mutably borrow the CSR value array (length = nnz).
