@@ -74,6 +74,7 @@ use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
 use crate::preconditioner::{legacy::Preconditioner, pivot::*, PcSide};
+use crate::utils::metrics::{Counters, SolveTimer};
 use faer::traits::ComplexField;
 use faer::Mat;
 use num_traits::Float;
@@ -367,8 +368,7 @@ pub struct Ilu<T> {
     running_max_u: T,
     /// Performance timing
     setup_time: f64,
-    solve_time: f64,
-    solve_count: usize,
+    solve_ctrs: Counters,
 }
 
 /// Consolidated workspace for all ILU operations to minimize allocations
@@ -480,8 +480,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             row_gersh_a: Vec::new(),
             running_max_u: T::zero(),
             setup_time: 0.0,
-            solve_time: 0.0,
-            solve_count: 0,
+            solve_ctrs: Counters::new(),
         })
     }
 
@@ -1112,14 +1111,20 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
     /// Get factorization statistics (HYPRE-style diagnostics)
     pub fn get_stats(&self) -> IluStats {
+        let (total_ns, count, _) = self.solve_ctrs.snapshot();
+        let avg = if count == 0 {
+            0.0
+        } else {
+            (total_ns as f64) / (count as f64) / 1e9
+        };
         IluStats {
             setup_complexity: self.setup_complexity,
             nnz_l: self.nnz_l,
             nnz_u: self.nnz_u,
             num_zero_pivots: self.num_zero_pivots,
             setup_time: self.setup_time,
-            solve_time: self.solve_time,
-            solve_count: self.solve_count,
+            solve_time: avg,
+            solve_count: count as usize,
         }
     }
 
@@ -1325,8 +1330,6 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
     /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
     fn apply(&self, _side: PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
-        let solve_start = std::time::Instant::now();
-
         if x.len() != self.l.nrows() {
             return Err(KError::InvalidInput(format!(
                 "Vector length {} doesn't match matrix size {}",
@@ -1334,6 +1337,8 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
                 self.l.nrows()
             )));
         }
+
+        let timer = SolveTimer::start(&self.solve_ctrs);
 
         let n = x.len();
 
@@ -1370,11 +1375,9 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
             }
         } // workspace automatically released here
 
-        // Update timing statistics (would need interior mutability in practice)
-        let _solve_time = solve_start.elapsed().as_secs_f64();
-
         #[cfg(feature = "logging")]
         if self.config.logging_level > 2 {
+            let _solve_time = timer.elapsed().as_secs_f64();
             trace!(
                 "ILU Apply: solve_time={:.6}s, workspace_size={}",
                 _solve_time,

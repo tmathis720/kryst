@@ -59,6 +59,7 @@ superlu3d = []
 tuning = []
 iai = []
 transpose-cache = ["dep:parking_lot"]
+metrics = []
 
 # Gate top-level re-exports of dense-direct solvers (LU/QR)
 dense-direct = []
