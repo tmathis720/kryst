@@ -6,6 +6,7 @@
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use faer::Mat;
+use oorandom::Rand64;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -171,7 +172,9 @@ pub fn spgemm_with_drop_tol(
             // The accumulator already holds the full sum for j0; skip any duplicates
             let sum = acc[j0];
             // advance read past all instances of j0
-            while read < row_tail && cols[read] == j0 { read += 1; }
+            while read < row_tail && cols[read] == j0 {
+                read += 1;
+            }
             // reset for next row
             acc[j0] = 0.0;
             mark[j0] = usize::MAX;
@@ -420,6 +423,88 @@ pub fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
     // Scale threshold based on anisotropy: higher anisotropy -> lower threshold
     let scaling_factor = (1.0 + avg_anisotropy.log10()).max(0.5).min(2.0);
     base_threshold * scaling_factor
+}
+
+/// Generate a 2D Poisson matrix on an `n_x` by `n_y` grid using the 5-point stencil.
+///
+/// The resulting matrix is SPD with size `(n_x*n_y)`.
+pub fn poisson_2d(n_x: usize, n_y: usize) -> CsrMatrix<f64> {
+    let n = n_x * n_y;
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for j in 0..n_y {
+        for i in 0..n_x {
+            let idx = j * n_x + i;
+            if j > 0 {
+                col_idx.push(idx - n_x);
+                vals.push(-1.0);
+            }
+            if i > 0 {
+                col_idx.push(idx - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(idx);
+            vals.push(4.0);
+            if i + 1 < n_x {
+                col_idx.push(idx + 1);
+                vals.push(-1.0);
+            }
+            if j + 1 < n_y {
+                col_idx.push(idx + n_x);
+                vals.push(-1.0);
+            }
+            row_ptr.push(col_idx.len());
+        }
+    }
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
+/// Generate a random symmetric positive definite banded matrix.
+///
+/// `bandwidth` controls the half-bandwidth; larger values yield denser matrices.
+pub fn random_spd(n: usize, bandwidth: usize) -> CsrMatrix<f64> {
+    let mut rng = Rand64::new(0);
+    let mut entries: Vec<(usize, usize, f64)> = Vec::new();
+    let mut diag = vec![0.0f64; n];
+
+    for i in 0..n {
+        let j_start = i.saturating_sub(bandwidth);
+        let j_end = usize::min(n - 1, i + bandwidth);
+        for j in j_start..=j_end {
+            if i == j {
+                continue;
+            }
+            let v = rng.rand_float() - 0.5;
+            entries.push((i, j, v));
+            entries.push((j, i, v));
+            diag[i] += v.abs();
+            diag[j] += v.abs();
+        }
+    }
+
+    for i in 0..n {
+        entries.push((i, i, diag[i] + 1.0));
+    }
+
+    entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    let mut row_ptr = vec![0usize];
+    let mut col_idx = Vec::with_capacity(entries.len());
+    let mut vals = Vec::with_capacity(entries.len());
+    let mut current_row = 0usize;
+    for (i, j, v) in entries {
+        while i > current_row {
+            row_ptr.push(col_idx.len());
+            current_row += 1;
+        }
+        col_idx.push(j);
+        vals.push(v);
+    }
+    row_ptr.push(col_idx.len());
+
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
 
 #[cfg(test)]
