@@ -80,6 +80,36 @@ impl Default for PcSide {
     }
 }
 
+/// Matrix operation selector for preconditioner application.
+///
+/// `Op::NoTrans` applies the factor as-is, while `Op::Trans` applies the
+/// transpose. `Op::ConjTrans` is reserved for future complex-number support and
+/// maps to `Op::Trans` for real-valued matrices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// Use the factors as stored.
+    NoTrans,
+    /// Apply the transpose of the factors.
+    Trans,
+    /// Apply the conjugate-transpose of the factors. Equivalent to `Trans` for
+    /// real data.
+    ConjTrans,
+}
+
+/// Capability flags advertised by a preconditioner so that solvers can
+/// negotiate required operations.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PcCaps {
+    /// Whether the preconditioner supports applying the transpose inverse.
+    pub supports_transpose: bool,
+    /// Whether the preconditioner supports a conjugate-transpose operation.
+    pub supports_conj_trans: bool,
+    /// Whether the preconditioner is symmetric positive definite when applied on the left.
+    pub is_spd: bool,
+    /// Restrict application to a specific side (left/right) if needed.
+    pub side_restriction: Option<PcSide>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum PcReusePolicy {
     Never,
@@ -111,11 +141,40 @@ pub trait Preconditioner: Send + Sync {
     /// Build any factorization/hierarchy once from the system matrix.
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
 
-    /// Apply M⁻¹ to input vector, writing result to output slice.
+    /// Apply `M^{-op}` to input vector, writing result to output slice.
     ///
     /// When used with CG and [`PcSide::Left`], this operation must represent an
     /// SPD preconditioner `M` so that `rᵀ M⁻¹ r > 0` holds.
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
+
+    /// Apply `M^{-op}` where the operation (`op`) specifies transpose handling.
+    ///
+    /// The default implementation routes `Op::NoTrans` to [`apply`]; transpose
+    /// requests return [`KError::Unsupported`]. Implementations overriding this
+    /// method should ignore the [`PcSide`] argument entirely and instead allow
+    /// callers to decide left/right placement by where they invoke the method.
+    fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        match op {
+            Op::NoTrans => self.apply(PcSide::Left, x, y),
+            Op::Trans | Op::ConjTrans => {
+                Err(KError::Unsupported("transpose application not supported"))
+            }
+        }
+    }
+
+    /// Convenience helper for in-place application (y := M^{-op} y).
+    ///
+    /// The default implementation allocates a temporary buffer; performance-
+    /// sensitive implementations should override this.
+    fn apply_op_inplace(&self, op: Op, y: &mut [f64]) -> Result<(), KError> {
+        let mut tmp = y.to_vec();
+        self.apply_op(op, &tmp, y)
+    }
+
+    /// Capabilities advertised by this preconditioner.
+    fn capabilities(&self) -> PcCaps {
+        PcCaps::default()
+    }
 
     /// Mutable application (flexible/nonlinear preconditioners).
     ///

@@ -151,3 +151,47 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Resul
 
     Ok(())
 }
+
+pub fn tri_solve_transpose_serial(
+    pc: &IluCsr,
+    ut_row: &[usize],
+    ut_col: &[usize],
+    ut_val: &[f64],
+    lt_row: &[usize],
+    lt_col: &[usize],
+    lt_val: &[f64],
+    x: &[f64],
+    y: &mut [f64],
+) -> Result<(), KError> {
+    let n = pc.n();
+    if x.len() != n || y.len() != n {
+        return Err(KError::InvalidInput("tri_solve: dimension mismatch".into()));
+    }
+
+    // Forward solve with U^T (lower with diag)
+    for i in 0..n {
+        let mut s = x[i];
+        for p in ut_row[i]..ut_row[i + 1] {
+            let j = ut_col[p];
+            if j < i {
+                s -= ut_val[p] * y[j];
+            }
+        }
+        let d = pc.u_val()[pc.u_diag_ix()[i]];
+        y[i] = s / d;
+    }
+
+    // Backward solve with L^T (upper unit)
+    for i in (0..n).rev() {
+        let mut s = y[i];
+        for p in lt_row[i]..lt_row[i + 1] {
+            let j = lt_col[p];
+            if j > i {
+                s -= lt_val[p] * y[j];
+            }
+        }
+        y[i] = s;
+    }
+
+    Ok(())
+}
