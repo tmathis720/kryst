@@ -57,6 +57,8 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Trait-based Design**: Extensible for custom matrices and preconditioners
 - **Memory Efficiency**: In-place operations and configurable workspace management
 - **High Performance**: Optimized inner kernels with SIMD and parallelization
+- **Matrix-Free Operators**: Shell matrices for callback-based MatVec operations
+- **Setup Reuse**: Two-phase API with preconditioner and workspace recycling
 - **CSR utilities**: zero-copy `row_ptr`/`col_idx`/`values` access and sparse
   kernels (`spgemm`, CSR Galerkin triple product)
 
@@ -86,47 +88,71 @@ logging = ["dep:log"]          # Iteration monitoring and profiling
 ```rust
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
+use kryst::matrix::op::DenseOp;
 use faer::Mat;
+use std::sync::Arc;
 
-// Create a 100x100 test system
+// Create a 100×100 test system
 let n = 100;
-let matrix = Mat::<f64>::from_fn(n, n, |i, j| {
+let mat = Mat::<f64>::from_fn(n, n, |i, j| {
     if i == j { 4.0 } else if (i as i32 - j as i32).abs() == 1 { -1.0 } else { 0.0 }
 });
+let a = Arc::new(DenseOp::new(Arc::new(mat)));
 let rhs = vec![1.0; n];
 let mut solution = vec![0.0; n];
 
 // Configure solver and preconditioner
 let mut ksp = KspContext::new();
-ksp.set_type(SolverType::Gmres).unwrap()
-   .set_pc_type(PcType::Jacobi).unwrap();
+ksp.set_type(SolverType::Gmres)?
+   .set_pc_type(PcType::Jacobi, None)?
+   .set_operators(a.clone(), None);
 ksp.rtol = 1e-8;
 ksp.maxits = 1000;
 
-// Solve the system
-ksp.setup(&matrix, n).unwrap();
-let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
-println!("Converged in {} iterations with residual {:.2e}", 
-         stats.iterations, stats.residual_norm);
+// Setup once then solve
+ksp.setup()?;
+let stats = ksp.solve(&rhs, &mut solution)?;
+println!(
+    "Converged in {} iterations with residual {:.2e}",
+    stats.iterations,
+    stats.final_residual
+);
+```
+
+### Explicit Setup and Reuse
+
+Reuse factorization and workspace across multiple solves by calling `setup()` once:
+
+```rust
+let mut ksp = KspContext::new();
+ksp.set_type(SolverType::Cg)?
+   .set_pc_type(PcType::Jacobi, None)?
+   .set_operators(a.clone(), None);
+ksp.setup()?; // perform factorization and allocate workspace
+
+for rhs in rhs_set.iter() {
+    let mut x = vec![0.0; n];
+    ksp.solve(rhs, &mut x)?;
+}
 ```
 
 ### Advanced Features: Composite Preconditioning
 
 ```rust
-use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::config::options::PcOptions;
+use kryst::context::ksp_context::KspContext;
+use kryst::config::options::{KspOptions, PcOptions};
+
+let mut ksp_opts = KspOptions::default();
+ksp_opts.ksp_type = Some("cg".into());
+let mut pc_opts = PcOptions::default();
+pc_opts.pc_chain = Some("jacobi,chebyshev".into());
+pc_opts.chebyshev_degree = Some(5);
 
 let mut ksp = KspContext::new();
-ksp.set_type(SolverType::Cg).unwrap();
-
-// Use PC-chaining for composite preconditioning
-let mut pc_opts = PcOptions::default();
-pc_opts.pc_chain = Some("jacobi,chebyshev".to_string());
-pc_opts.chebyshev_degree = Some(5);
-ksp.set_pc_options(pc_opts);
-
-ksp.setup(&matrix, n).unwrap();
-let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
+ksp.set_from_options(&ksp_opts, &pc_opts)?
+   .set_operators(a.clone(), None);
+ksp.setup()?;
+let stats = ksp.solve(&rhs, &mut solution)?;
 ```
 
 ### Enhanced AMG with Smoothing
@@ -136,20 +162,18 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::config::options::PcOptions;
 
-let mut ksp = KspContext::new();
-ksp.set_type(SolverType::Gmres).unwrap()
-   .set_pc_type(PcType::Amg).unwrap();
-
-// Configure AMG smoothing parameters
 let mut pc_opts = PcOptions::default();
 pc_opts.amg_levels = Some(4);
 pc_opts.amg_strength_threshold = Some(0.25);
-pc_opts.amg_nu_pre = Some(2);   // Pre-smoothing steps
-pc_opts.amg_nu_post = Some(1);  // Post-smoothing steps
-ksp.set_pc_options(pc_opts);
+pc_opts.amg_nu_pre = Some(2);  // Pre-smoothing steps
+pc_opts.amg_nu_post = Some(1); // Post-smoothing steps
 
-ksp.setup(&matrix, n).unwrap();
-let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
+let mut ksp = KspContext::new();
+ksp.set_type(SolverType::Gmres)?
+   .set_pc_type(PcType::Amg, Some(&pc_opts))?
+   .set_operators(a.clone(), None);
+ksp.setup()?;
+let stats = ksp.solve(&rhs, &mut solution)?;
 ```
 
 ### Iteration Monitoring and Analysis
@@ -181,13 +205,14 @@ use kryst::context::ksp_context::KspContext;
 
 // Parse command-line options
 let args: Vec<String> = std::env::args().collect();
-let (ksp_opts, pc_opts) = parse_all_options(&args).unwrap();
+let (ksp_opts, pc_opts) = parse_all_options(&args)?;
 
-// Configure from options  
+// Configure from options
 let mut ksp = KspContext::new();
-ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
-ksp.setup(&matrix, n).unwrap();
-let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
+ksp.set_from_all_options(&ksp_opts, &pc_opts)?
+   .set_operators(a.clone(), None);
+ksp.setup()?;
+let stats = ksp.solve(&rhs, &mut solution)?;
 ```
 
 Run your program with PETSc-style options:
@@ -294,8 +319,9 @@ let monitor_ref = Arc::new(Mutex::new(monitor));
 let monitor_clone = Arc::clone(&monitor_ref);
 
 let mut ksp = KspContext::new();
-ksp.set_type(SolverType::Gmres).unwrap()
-   .set_pc_type(PcType::Jacobi).unwrap();
+ksp.set_type(SolverType::Gmres)?
+   .set_pc_type(PcType::Jacobi, None)?
+   .set_operators(a.clone(), None);
 
 // Add monitoring callback
 ksp.add_monitor(move |iter, residual| {
@@ -305,8 +331,8 @@ ksp.add_monitor(move |iter, residual| {
 });
 
 // Solve with monitoring
-ksp.setup(&matrix, n).unwrap();
-let stats = ksp.solve(&matrix, &rhs, &mut solution).unwrap();
+ksp.setup()?;
+let stats = ksp.solve(&rhs, &mut solution)?;
 
 // Analyze convergence
 if let Ok(mon) = monitor_ref.lock() {
@@ -479,12 +505,12 @@ Enhanced polynomial preconditioning implementation based on eigenvalue estimatio
 ```rust
 use kryst::preconditioner::chebyshev::Chebyshev;
 use kryst::config::options::PcOptions;
+use kryst::context::pc_context::PcType;
 
 // Enhanced Chebyshev with automatic eigenvalue estimation
 let mut pc_opts = PcOptions::default();
 pc_opts.chebyshev_degree = Some(6);  // Higher degree for better approximation
-// Lambda bounds are estimated automatically via power iteration
-ksp.set_pc_options(pc_opts);
+ksp.set_pc_type(PcType::Chebyshev, Some(&pc_opts))?;
 ```
 
 Features:
@@ -500,14 +526,15 @@ Advanced Algebraic Multigrid with configurable smoothing:
 ```rust
 use kryst::preconditioner::amg::Amg;
 use kryst::config::options::PcOptions;
+use kryst::context::pc_context::PcType;
 
 // Enhanced AMG with smoothing control
 let mut pc_opts = PcOptions::default();
 pc_opts.amg_levels = Some(5);              // Multigrid levels
-pc_opts.amg_strength_threshold = Some(0.5); // Strong connection threshold  
+pc_opts.amg_strength_threshold = Some(0.5); // Strong connection threshold
 pc_opts.amg_nu_pre = Some(2);              // Pre-smoothing steps
 pc_opts.amg_nu_post = Some(1);             // Post-smoothing steps
-ksp.set_pc_options(pc_opts);
+ksp.set_pc_type(PcType::Amg, Some(&pc_opts))?;
 ```
 
 Features:
@@ -521,24 +548,24 @@ Features:
 PC-chaining allows sequential application of multiple preconditioners:
 
 ```rust
-use kryst::config::options::PcOptions;
+use kryst::config::options::{KspOptions, PcOptions};
 
 // Example 1: Jacobi + Chebyshev combination
 let mut pc_opts = PcOptions::default();
 pc_opts.pc_chain = Some("jacobi,chebyshev".to_string());
 pc_opts.chebyshev_degree = Some(4);
-ksp.set_pc_options(pc_opts);
+ksp.set_from_options(&KspOptions::default(), &pc_opts)?;
 
 // Example 2: Multi-stage preconditioning
-let mut pc_opts = PcOptions::default(); 
+let mut pc_opts = PcOptions::default();
 pc_opts.pc_chain = Some("jacobi,ilu0,chebyshev".to_string());
-ksp.set_pc_options(pc_opts);
+ksp.set_from_options(&KspOptions::default(), &pc_opts)?;
 
 // Example 3: Domain decomposition + multigrid
 let mut pc_opts = PcOptions::default();
 pc_opts.pc_chain = Some("asm,amg".to_string());
 pc_opts.amg_nu_pre = Some(1);
-ksp.set_pc_options(pc_opts);
+ksp.set_from_options(&KspOptions::default(), &pc_opts)?;
 ```
 
 Features:
@@ -735,7 +762,8 @@ impl<M, V> Preconditioner<M, V> for MyCustomPreconditioner {
 
 ### Matrix-Free Operators
 ```rust
-use kryst::{MatVec, KError};
+use kryst::core::traits::MatVec;
+use kryst::error::KError;
 
 struct LaplacianOperator {
     n: usize,  // Grid size
@@ -763,13 +791,18 @@ impl MatVec<Vec<f64>> for LaplacianOperator {
 }
 
 // Usage with KspContext
-let laplacian = LaplacianOperator { n: 1000, h: 0.001 };
+use std::sync::Arc;
+let laplacian = Arc::new(LaplacianOperator { n: 1000, h: 0.001 });
 let mut ksp = KspContext::new();
-ksp.set_type(SolverType::Cg).unwrap()
-   .set_pc_type(PcType::Jacobi).unwrap();
+ksp.set_type(SolverType::Cg)?
+   .set_pc_type(PcType::Jacobi, None)?
+   .set_operators(laplacian.clone(), None);
 
 // Can use matrix-free operator directly
-// ksp.setup(&laplacian, 1000).unwrap();
+let rhs = vec![1.0; laplacian.n];
+let mut sol = vec![0.0; laplacian.n];
+ksp.setup()?;
+let stats = ksp.solve(&rhs, &mut sol)?;
 ```
 
 ## Documentation and Resources
@@ -842,12 +875,12 @@ cargo test --release
 **Recommended Upgrades:**
 ```rust
 // Old approach
-ksp.set_pc_type(PcType::Chebyshev).unwrap();
+ksp.set_pc_type(PcType::Chebyshev, None)?;
 
 // Enhanced approach (optional)
 let mut pc_opts = PcOptions::default();
 pc_opts.chebyshev_degree = Some(6);
-ksp.set_pc_options(pc_opts);
+ksp.set_pc_type(PcType::Chebyshev, Some(&pc_opts))?;
 ```
 
 **New Monitoring Capabilities:**
