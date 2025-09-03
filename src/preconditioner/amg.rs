@@ -147,6 +147,30 @@ pub enum NodalMode {
     Nodal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowScaleMode {
+    /// For scalar or when near-nullspace is provided: enforce per-row reproduction
+    /// target by scaling the subset of columns for each function α.
+    ToNearNullspace,
+    /// Fallback for scalar r=1 without NNS: enforce ∑ P[i,*] = 1.
+    SumToOne,
+    /// Make each row’s α-slice unit L2 norm (robust when T is noisy).
+    L2Unit,
+    /// Diagonal-weighted norm: sqrt(p^T D p) = 1 using D = diag(A).
+    DUnit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PostInterpType {
+    None,
+    /// Pure row-scaling family (stable, cheap, deterministic)
+    RowScaling(RowScaleMode),
+    /// Optional orthonormalization of per-aggregate blocks
+    LocalQR,
+    /// Extra SA-like smoothing passes on P values (fixed pattern).
+    EnergyPolish { sweeps: usize, omega: f64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct NearNullspace {
     pub basis: Vec<Vec<f64>>,
@@ -221,6 +245,7 @@ pub struct AMGConfig {
     pub block_size: usize,
     pub num_functions: usize,
     pub near_nullspace: Option<NearNullspace>,
+    pub post_interp: PostInterpType,
 }
 
 impl Default for AMGConfig {
@@ -288,6 +313,7 @@ impl Default for AMGConfig {
             block_size: 1,
             num_functions: 1,
             near_nullspace: None,
+            post_interp: PostInterpType::None,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -534,6 +560,11 @@ impl AMGBuilder {
         self
     }
 
+    pub fn post_interp(mut self, t: PostInterpType) -> Self {
+        self.cfg.post_interp = t;
+        self
+    }
+
     pub fn build(self, _matrix: &Mat<f64>) -> Result<AMG, KError> {
         Ok(AMG::with_config(self.cfg))
     }
@@ -725,6 +756,267 @@ fn rap_numeric_with_pt(lvl: &mut AMGLevel, out_vals: &mut [f64]) -> Result<(), K
     Ok(())
 }
 
+struct LevelPostContext<'a> {
+    r: usize,
+    agg_of: &'a [usize],
+    nns: Option<Vec<&'a [f64]>>,
+    a: Option<&'a CsrMatrix<f64>>,
+    d_inv: Option<&'a [f64]>,
+}
+
+pub(crate) fn row_scaling(
+    mode: RowScaleMode,
+    r: usize,
+    nns: Option<&[&[f64]]>,
+    agg_of: &[usize],
+    d_inv: Option<&[f64]>,
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    p_vals: &mut [f64],
+) -> Result<(), KError> {
+    let n = p_row_ptr.len() - 1;
+    let eps = 1e-30;
+    for i in 0..n {
+        let rs = p_row_ptr[i];
+        let re = p_row_ptr[i + 1];
+        match mode {
+            RowScaleMode::SumToOne => {
+                let sum: f64 = p_vals[rs..re].iter().copied().sum();
+                if sum.abs() > eps {
+                    let s = 1.0 / sum;
+                    for k in rs..re {
+                        p_vals[k] *= s;
+                    }
+                }
+            }
+            RowScaleMode::L2Unit => {
+                for alpha in 0..r {
+                    let mut n2 = 0.0;
+                    for k in rs..re {
+                        if p_col_idx[k] % r == alpha {
+                            n2 += p_vals[k] * p_vals[k];
+                        }
+                    }
+                    if n2 > eps {
+                        let s = 1.0 / n2.sqrt();
+                        for k in rs..re {
+                            if p_col_idx[k] % r == alpha {
+                                p_vals[k] *= s;
+                            }
+                        }
+                    }
+                }
+            }
+            RowScaleMode::DUnit => {
+                let d = d_inv.expect("DUnit requires diag_inv");
+                for alpha in 0..r {
+                    let mut n2 = 0.0;
+                    for k in rs..re {
+                        if p_col_idx[k] % r == alpha {
+                            n2 += p_vals[k] * p_vals[k];
+                        }
+                    }
+                    let w = d[i].abs().recip().sqrt().max(1e-15);
+                    if n2 > eps {
+                        let s = 1.0 / (w * n2.sqrt());
+                        for k in rs..re {
+                            if p_col_idx[k] % r == alpha {
+                                p_vals[k] *= s;
+                            }
+                        }
+                    }
+                }
+            }
+            RowScaleMode::ToNearNullspace => {
+                let t = nns.expect("ToNearNullspace requires NNS basis");
+                for alpha in 0..r {
+                    let target = t[alpha][i];
+                    let mut sum = 0.0;
+                    for k in rs..re {
+                        if p_col_idx[k] % r == alpha {
+                            sum += p_vals[k];
+                        }
+                    }
+                    if sum.abs() > eps {
+                        let s = target / sum;
+                        for k in rs..re {
+                            if p_col_idx[k] % r == alpha {
+                                p_vals[k] *= s;
+                            }
+                        }
+                    } else {
+                        let own_c = agg_of[i] * r + alpha;
+                        for k in rs..re {
+                            if p_col_idx[k] == own_c {
+                                p_vals[k] = target;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_qr(
+    r: usize,
+    agg_of: &[usize],
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    p_vals: &mut [f64],
+) -> Result<(), KError> {
+    let n = agg_of.len();
+    let n_aggs = 1 + agg_of.iter().copied().max().unwrap_or(0);
+    let mut rows_in_agg: Vec<Vec<usize>> = vec![Vec::new(); n_aggs];
+    for i in 0..n {
+        rows_in_agg[agg_of[i]].push(i);
+    }
+    let mut pos_alpha: Vec<Vec<usize>> = vec![vec![usize::MAX; r]; n];
+    for i in 0..n {
+        let g = agg_of[i];
+        let rs = p_row_ptr[i];
+        let re = p_row_ptr[i + 1];
+        for k in rs..re {
+            let col = p_col_idx[k];
+            if col / r == g {
+                pos_alpha[i][col % r] = k;
+            }
+        }
+    }
+    for g in 0..n_aggs {
+        let rows = &rows_in_agg[g];
+        if rows.is_empty() {
+            continue;
+        }
+        let m = rows.len();
+        let mut q = vec![vec![0.0f64; r]; m];
+        for (ii, &i) in rows.iter().enumerate() {
+            for alpha in 0..r {
+                let k = pos_alpha[i][alpha];
+                if k != usize::MAX {
+                    q[ii][alpha] = p_vals[k];
+                }
+            }
+        }
+        for alpha in 0..r {
+            for beta in 0..alpha {
+                let mut dot = 0.0;
+                for ii in 0..m {
+                    dot += q[ii][alpha] * q[ii][beta];
+                }
+                for ii in 0..m {
+                    q[ii][alpha] -= dot * q[ii][beta];
+                }
+            }
+            let mut n2 = 0.0;
+            for ii in 0..m {
+                n2 += q[ii][alpha] * q[ii][alpha];
+            }
+            if n2 > 1e-30 {
+                let inv = 1.0 / n2.sqrt();
+                for ii in 0..m {
+                    q[ii][alpha] *= inv;
+                }
+            }
+        }
+        for (ii, &i) in rows.iter().enumerate() {
+            for alpha in 0..r {
+                let k = pos_alpha[i][alpha];
+                if k != usize::MAX {
+                    p_vals[k] = q[ii][alpha];
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn energy_polish(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    r: usize,
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    p_vals: &mut [f64],
+    sweeps: usize,
+    omega: f64,
+) -> Result<(), KError> {
+    let n = a.nrows();
+    for _ in 0..sweeps {
+        let old = p_vals.to_vec();
+        for i in 0..n {
+            let di = d_inv[i];
+            let rs = p_row_ptr[i];
+            let re = p_row_ptr[i + 1];
+            for k in rs..re {
+                let c = p_col_idx[k];
+                let mut sum = 0.0;
+                let ars = a.row_ptr()[i];
+                let are = a.row_ptr()[i + 1];
+                for ap in ars..are {
+                    let j = a.col_idx()[ap];
+                    let aij = a.values()[ap];
+                    let prs = p_row_ptr[j];
+                    let pre = p_row_ptr[j + 1];
+                    for pk in prs..pre {
+                        if p_col_idx[pk] == c {
+                            sum += aij * old[pk];
+                            break;
+                        }
+                    }
+                }
+                p_vals[k] = old[k] - omega * di * sum;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_post_interp(
+    cfg: &AMGConfig,
+    ctx: &LevelPostContext,
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    p_vals: &mut [f64],
+) -> Result<(), KError> {
+    match cfg.post_interp {
+        PostInterpType::None => Ok(()),
+        PostInterpType::RowScaling(mode) => {
+            if matches!(mode, RowScaleMode::SumToOne) && ctx.r > 1 && ctx.nns.is_none() {
+                return Ok(());
+            }
+            row_scaling(
+                mode,
+                ctx.r,
+                ctx.nns.as_ref().map(|v| v.as_slice()),
+                ctx.agg_of,
+                ctx.d_inv,
+                p_row_ptr,
+                p_col_idx,
+                p_vals,
+            )
+        }
+        PostInterpType::LocalQR => local_qr(ctx.r, ctx.agg_of, p_row_ptr, p_col_idx, p_vals),
+        PostInterpType::EnergyPolish { sweeps, omega } => {
+            if sweeps == 0 {
+                return Ok(());
+            }
+            energy_polish(
+                ctx.a.expect("EnergyPolish requires A"),
+                ctx.d_inv.expect("EnergyPolish requires diag_inv"),
+                ctx.r,
+                p_row_ptr,
+                p_col_idx,
+                p_vals,
+                sweeps,
+                omega,
+            )
+        }
+    }
+}
+
 // ===== Main AMG object =======================================================
 
 pub struct AMG {
@@ -849,6 +1141,25 @@ impl AMG {
                     &h.levels[l].diag_inv,
                     &tp,
                     self.cfg.jacobi_omega,
+                    &pr,
+                    &pc,
+                    &mut p_new_vals,
+                )?;
+            }
+            {
+                let ctx = LevelPostContext {
+                    r: h.levels[l].num_functions,
+                    agg_of: &h.levels[l].agg_of,
+                    nns: h.levels[l]
+                        .nns
+                        .as_ref()
+                        .map(|v| v.iter().map(|b| b.as_slice()).collect()),
+                    a: Some(&h.levels[l].a),
+                    d_inv: Some(&h.levels[l].diag_inv),
+                };
+                apply_post_interp(
+                    &self.cfg,
+                    &ctx,
                     &pr,
                     &pc,
                     &mut p_new_vals,
@@ -1801,8 +2112,9 @@ fn build_hierarchy(
             nns: nns_opt.clone(),
             comp_of: comp_opt.clone(),
         };
+        let d = diag_inv_from_csr(&a_cur)?;
         let s_sym = s.symmetrize();
-        let (p_csr, cf_opt): (Pcsr, Option<CFInfo>) =
+        let (mut p_csr, cf_opt): (Pcsr, Option<CFInfo>) =
             with_timing(do_stats, &mut lt.prolong, || {
                 if matches!(
                     cfg.interp_type,
@@ -1841,7 +2153,6 @@ fn build_hierarchy(
                     p.vals = vals;
                     Ok((p, Some(cf)))
                 } else {
-                    let d = diag_inv_from_csr(&a_cur)?;
                     Ok((
                         smooth_tentative_sa_multi(
                             &a_cur,
@@ -1856,6 +2167,24 @@ fn build_hierarchy(
                     ))
                 }
             })?;
+        {
+            let ctx = LevelPostContext {
+                r: num_functions,
+                agg_of: &tp.agg_of,
+                nns: nns_opt
+                    .as_ref()
+                    .map(|v| v.iter().map(|b| b.as_slice()).collect()),
+                a: Some(&a_cur),
+                d_inv: Some(&d),
+            };
+            apply_post_interp(
+                cfg,
+                &ctx,
+                &p_csr.row_ptr,
+                &p_csr.col_idx,
+                &mut p_csr.vals,
+            )?;
+        }
         let p = CsrMatrix::from_csr(
             p_csr.m,
             p_csr.n,
