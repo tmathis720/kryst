@@ -1,4 +1,5 @@
 use super::strength::Strength;
+use super::util::DofLayout;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggAlgo {
@@ -185,6 +186,22 @@ pub fn build_aggregates(s_in: &Strength, algo: AggAlgo, opts: &AggOpts) -> (Vec<
 
     let agg = aggregates_from_seeds(&s, &is_seed);
     (agg, is_seed)
+}
+
+pub fn lift_node_aggregates_to_dofs(
+    agg_node: &[usize],
+    is_c_node: &[bool],
+    layout: &DofLayout,
+) -> (Vec<usize>, Vec<bool>) {
+    let n_dofs = layout.node_of.len();
+    let mut agg_of = vec![0usize; n_dofs];
+    let mut is_c = vec![false; n_dofs];
+    for i in 0..n_dofs {
+        let node = layout.node_of[i];
+        agg_of[i] = agg_node[node];
+        is_c[i] = is_c_node[node];
+    }
+    (agg_of, is_c)
 }
 
 // Legacy greedy aggregator kept for compatibility.
