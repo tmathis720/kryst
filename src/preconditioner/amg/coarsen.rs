@@ -115,7 +115,11 @@ fn aggregates_from_seeds(s: &Strength, is_seed: &[bool]) -> Vec<usize> {
 }
 
 /// Build aggregates from a strength graph. Returns fine -> aggregate id.
-pub fn build_aggregates(s_in: &Strength, algo: AggAlgo, opts: &AggOpts) -> Vec<usize> {
+pub fn build_aggregates(
+    s_in: &Strength,
+    algo: AggAlgo,
+    opts: &AggOpts,
+) -> (Vec<usize>, Vec<bool>) {
     let mut s = s_in.symmetrize();
     if let Some(k) = opts.cap_per_row {
         s = s.capped(k);
@@ -183,7 +187,8 @@ pub fn build_aggregates(s_in: &Strength, algo: AggAlgo, opts: &AggOpts) -> Vec<u
         }
     }
 
-    aggregates_from_seeds(&s, &is_seed)
+    let agg = aggregates_from_seeds(&s, &is_seed);
+    (agg, is_seed)
 }
 
 // Legacy greedy aggregator kept for compatibility.

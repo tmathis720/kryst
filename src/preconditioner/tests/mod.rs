@@ -55,3 +55,4 @@ mod direct_apply;
 mod ilu_csr;
 mod ilu_history;
 mod legacy_bridge;
+mod classical;
