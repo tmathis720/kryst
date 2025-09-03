@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-use kryst::matrix::sparse::CsrMatrix;
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use kryst::core::traits::SubmatrixExtract;
+use kryst::matrix::sparse::CsrMatrix;
 
 #[path = "infra/datasets.rs"]
 mod datasets;

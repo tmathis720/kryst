@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::matrix::utils::{rap_btree, rap_opt};
 use rand::{Rng, SeedableRng};
@@ -69,7 +69,11 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
     for _i in 0..n {
         let c0 = rng.gen_range(0..nc);
         let offset = 1 + rng.gen_range(0..3);
-        let c1 = if c0 + offset < nc { c0 + offset } else { c0 - offset };
+        let c1 = if c0 + offset < nc {
+            c0 + offset
+        } else {
+            c0 - offset
+        };
         let (a, b) = if c0 <= c1 { (c0, c1) } else { (c1, c0) };
         p_cj.push(a);
         p_vv.push(0.7);
@@ -81,8 +85,12 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
 
     // R = P^T (simple, not super optimized)
     let mut counts = vec![0usize; nc + 1];
-    for &j in p.col_idx() { counts[j + 1] += 1; }
-    for i in 0..nc { counts[i + 1] += counts[i]; }
+    for &j in p.col_idx() {
+        counts[j + 1] += 1;
+    }
+    for i in 0..nc {
+        counts[i + 1] += counts[i];
+    }
     let mut r_rp = counts.clone();
     let mut r_cj = vec![0usize; p.col_idx().len()];
     let mut r_vv = vec![0.0f64; p.values().len()];
@@ -111,7 +119,11 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
             for _ in 0..1_000 {
                 let c0 = rng.gen_range(0..nc_small);
                 let offset = 1 + rng.gen_range(0..3);
-                let c1 = if c0 + offset < nc_small { c0 + offset } else { c0 - offset };
+                let c1 = if c0 + offset < nc_small {
+                    c0 + offset
+                } else {
+                    c0 - offset
+                };
                 let (a, b) = if c0 <= c1 { (c0, c1) } else { (c1, c0) };
                 pc.push(a);
                 pv.push(0.7);
@@ -122,8 +134,12 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
             let p = CsrMatrix::from_csr(1_000, nc_small, pr, pc, pv);
             // transpose
             let mut counts = vec![0usize; nc_small + 1];
-            for &j in p.col_idx() { counts[j + 1] += 1; }
-            for i in 0..nc_small { counts[i + 1] += counts[i]; }
+            for &j in p.col_idx() {
+                counts[j + 1] += 1;
+            }
+            for i in 0..nc_small {
+                counts[i + 1] += counts[i];
+            }
             let mut r_rp = counts.clone();
             let mut r_cj = vec![0usize; p.col_idx().len()];
             let mut r_vv = vec![0.0f64; p.values().len()];
@@ -146,10 +162,18 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("rap_powerlaw_200k");
     group.bench_function("rap_btree", |b| {
-        b.iter_batched(|| (), |_| black_box(rap_btree(&r, &a, &p).unwrap()), BatchSize::SmallInput)
+        b.iter_batched(
+            || (),
+            |_| black_box(rap_btree(&r, &a, &p).unwrap()),
+            BatchSize::SmallInput,
+        )
     });
     group.bench_function("rap_opt", |b| {
-        b.iter_batched(|| (), |_| black_box(rap_opt(&r, &a, &p).unwrap()), BatchSize::SmallInput)
+        b.iter_batched(
+            || (),
+            |_| black_box(rap_opt(&r, &a, &p).unwrap()),
+            BatchSize::SmallInput,
+        )
     });
     group.finish();
 }

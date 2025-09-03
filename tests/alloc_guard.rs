@@ -19,11 +19,13 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static A: CountingAlloc = CountingAlloc;
 
-fn allocs() -> usize { ALLOCS.load(SeqCst) }
+fn allocs() -> usize {
+    ALLOCS.load(SeqCst)
+}
 
 #[test]
 fn apply_has_no_allocations() {
-    use kryst::preconditioner::{Preconditioner, PcSide};
+    use kryst::preconditioner::{PcSide, Preconditioner};
     let n = 128;
     let a = crate::fixtures::csr_poisson_1d(n);
     let mut pc = kryst::preconditioner::jacobi::Jacobi::new();
@@ -37,4 +39,3 @@ fn apply_has_no_allocations() {
 }
 
 mod fixtures;
-

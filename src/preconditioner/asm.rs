@@ -8,17 +8,19 @@ use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use crate::solver::legacy::LinearSolver;
 use std::sync::Mutex;
 // Extra imports to support LinOp-based setup/apply (f64 case)
-use crate::matrix::convert::csr_from_linop;
-use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::core::traits::SubmatrixExtract;
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::matrix::convert::csr_from_linop;
+use crate::matrix::op::CsrOp;
+use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
-use std::sync::Arc;
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::preconditioner::ilu_csr::{
+    IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+};
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
-use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
-use crate::matrix::op::CsrOp;
+use std::sync::Arc;
 
 /// Additive Schwarz (overlapping block Jacobi) preconditioner.
 /// Each block is solved independently (possibly in parallel), and the results are summed.
@@ -124,7 +126,11 @@ where
             drop_tol: 0.0,
             block_solver_factory,
             asm_mode: AsmMode::ASM,
-            weighting: if overlap == 0 { Weighting::None } else { Weighting::Uniform },
+            weighting: if overlap == 0 {
+                Weighting::None
+            } else {
+                Weighting::Uniform
+            },
             nparts_hint: None,
             dense_threshold: 192,
             owner_of: Vec::new(),
@@ -154,8 +160,8 @@ where
                 })
                 .collect();
         }
-    // Build per-block submatrix and setup solvers. For generic M/V types we
-    // use the SubmatrixExtract impl (CSR or dense) on the provided matrix.
+        // Build per-block submatrix and setup solvers. For generic M/V types we
+        // use the SubmatrixExtract impl (CSR or dense) on the provided matrix.
         self.local_blocks = self
             .subdomains
             .iter()
@@ -276,7 +282,9 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                 .unwrap_or_else(|| crate::parallel::threads::current_rayon_threads().max(1));
             let rp = csr.row_ptr();
             let mut nnz_per_row = vec![0usize; n];
-            for i in 0..n { nnz_per_row[i] = rp[i + 1] - rp[i]; }
+            for i in 0..n {
+                nnz_per_row[i] = rp[i + 1] - rp[i];
+            }
             self.owner_of = greedy_nnz_balanced_partition(n, p, Some(&nnz_per_row));
         } else {
             // Infer owners from provided subdomains (assume non-overlapping; if overlapping,
@@ -285,11 +293,19 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
             self.owner_of.clear();
             self.owner_of.resize(n, p);
             for (s, set) in self.subdomains.iter().enumerate() {
-                for &gi in set { if gi < n && self.owner_of[gi] == p { self.owner_of[gi] = s; } }
+                for &gi in set {
+                    if gi < n && self.owner_of[gi] == p {
+                        self.owner_of[gi] = s;
+                    }
+                }
             }
             if self.owner_of.iter().any(|&o| o == p) {
                 let fallback = contiguous_partition(n, p.max(1));
-                for i in 0..n { if self.owner_of[i] == p { self.owner_of[i] = fallback[i]; } }
+                for i in 0..n {
+                    if self.owner_of[i] == p {
+                        self.owner_of[i] = fallback[i];
+                    }
+                }
             }
         }
 
@@ -311,7 +327,13 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
             .collect();
 
         // 4) Compute weights per strategy
-        self.cover_count = compute_weights(&mut self.blocks_meta, &self.owner_of, &adj, self.weighting, n);
+        self.cover_count = compute_weights(
+            &mut self.blocks_meta,
+            &self.owner_of,
+            &adj,
+            self.weighting,
+            n,
+        );
 
         // 5) Build per-block solvers according to factory
         self.local_blocks.clear();
@@ -337,7 +359,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let mut ilu = IluCsr::new_with_config(cfg.clone());
                         let op = CsrOp::new(a_sub_csr.clone());
                         ilu.setup(&op)?;
-                        self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                        self.local_blocks_csr
+                            .push((a_sub_csr, std::sync::Arc::new(ilu)));
                     }
                 }
                 #[cfg(feature = "dense-direct")]
@@ -357,7 +380,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                             None,
                             None,
                         );
-                        self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                        self.local_blocks
+                            .push((dense, Mutex::new(Box::new(ksp) as _)));
                     }
                 }
             }
@@ -378,7 +402,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     let mut ilu = IluCsr::new_with_config(cfg.clone());
                     let op = CsrOp::new(a_sub_csr.clone());
                     ilu.setup(&op)?;
-                    self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                    self.local_blocks_csr
+                        .push((a_sub_csr, std::sync::Arc::new(ilu)));
                 }
             }
         }
@@ -391,7 +416,6 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     }
 
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        
         if x.len() != y.len() {
             return Err(KError::InvalidInput(format!(
                 "ASM apply: x/y length mismatch: {} vs {}",
@@ -408,9 +432,9 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            let block_results: Vec<(Vec<usize>, Vec<f64>, Vec<bool>, Vec<f64>)> = match self.block_solver_factory {
-                BlockSolverFactory::LuDense => {
-                    self
+            let block_results: Vec<(Vec<usize>, Vec<f64>, Vec<bool>, Vec<f64>)> =
+                match self.block_solver_factory {
+                    BlockSolverFactory::LuDense => self
                         .blocks_meta
                         .par_iter()
                         .zip(self.local_blocks.par_iter())
@@ -436,10 +460,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                                 meta.weights.clone(),
                             )
                         })
-                        .collect()
-                }
-                BlockSolverFactory::CsrSolver => {
-                    self
+                        .collect(),
+                    BlockSolverFactory::CsrSolver => self
                         .blocks_meta
                         .par_iter()
                         .zip(self.local_blocks_csr.par_iter())
@@ -455,16 +477,19 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                                 meta.weights.clone(),
                             )
                         })
-                        .collect()
-                }
-            };
+                        .collect(),
+                };
             match self.asm_mode {
                 AsmMode::ASM => {
                     for (indices, x_blk, _mask, w) in block_results {
                         if matches!(self.weighting, Weighting::None) {
-                            for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                            for (j, &gi) in indices.iter().enumerate() {
+                                y[gi] += x_blk[j];
+                            }
                         } else {
-                            for (j, &gi) in indices.iter().enumerate() { y[gi] += w[j] * x_blk[j]; }
+                            for (j, &gi) in indices.iter().enumerate() {
+                                y[gi] += w[j] * x_blk[j];
+                            }
                         }
                     }
                 }
@@ -472,7 +497,10 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     for (indices, x_blk, mask, w) in block_results {
                         for (j, &gi) in indices.iter().enumerate() {
                             if mask[j] {
-                                let wij = match self.weighting { Weighting::None => 1.0, _ => w[j] };
+                                let wij = match self.weighting {
+                                    Weighting::None => 1.0,
+                                    _ => w[j],
+                                };
                                 y[gi] += wij * x_blk[j];
                             }
                         }
@@ -506,15 +534,22 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                             match self.asm_mode {
                                 AsmMode::ASM => {
                                     if matches!(self.weighting, Weighting::None) {
-                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                                        for (j, &gi) in indices.iter().enumerate() {
+                                            y[gi] += x_blk[j];
+                                        }
                                     } else {
-                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += meta.weights[j] * x_blk[j]; }
+                                        for (j, &gi) in indices.iter().enumerate() {
+                                            y[gi] += meta.weights[j] * x_blk[j];
+                                        }
                                     }
                                 }
                                 AsmMode::RAS => {
                                     for (j, &gi) in indices.iter().enumerate() {
                                         if meta.interior_mask[j] {
-                                            let wij = match self.weighting { Weighting::None => 1.0, _ => meta.weights[j] };
+                                            let wij = match self.weighting {
+                                                Weighting::None => 1.0,
+                                                _ => meta.weights[j],
+                                            };
                                             y[gi] += wij * x_blk[j];
                                         }
                                     }
@@ -534,15 +569,22 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                             match self.asm_mode {
                                 AsmMode::ASM => {
                                     if matches!(self.weighting, Weighting::None) {
-                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += x_blk[j]; }
+                                        for (j, &gi) in indices.iter().enumerate() {
+                                            y[gi] += x_blk[j];
+                                        }
                                     } else {
-                                        for (j, &gi) in indices.iter().enumerate() { y[gi] += meta.weights[j] * x_blk[j]; }
+                                        for (j, &gi) in indices.iter().enumerate() {
+                                            y[gi] += meta.weights[j] * x_blk[j];
+                                        }
                                     }
                                 }
                                 AsmMode::RAS => {
                                     for (j, &gi) in indices.iter().enumerate() {
                                         if meta.interior_mask[j] {
-                                            let wij = match self.weighting { Weighting::None => 1.0, _ => meta.weights[j] };
+                                            let wij = match self.weighting {
+                                                Weighting::None => 1.0,
+                                                _ => meta.weights[j],
+                                            };
                                             y[gi] += wij * x_blk[j];
                                         }
                                     }
@@ -594,7 +636,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                             None,
                             None,
                         );
-                        self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                        self.local_blocks
+                            .push((dense, Mutex::new(Box::new(ksp) as _)));
                     }
                 }
                 #[cfg(not(feature = "dense-direct"))]
@@ -616,7 +659,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let mut ilu = IluCsr::new_with_config(cfg.clone());
                         let op = CsrOp::new(a_sub_csr.clone());
                         ilu.setup(&op)?;
-                        self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                        self.local_blocks_csr
+                            .push((a_sub_csr, std::sync::Arc::new(ilu)));
                     }
                 }
             }
@@ -637,7 +681,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     let mut ilu = IluCsr::new_with_config(cfg.clone());
                     let op = CsrOp::new(a_sub_csr.clone());
                     ilu.setup(&op)?;
-                    self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                    self.local_blocks_csr
+                        .push((a_sub_csr, std::sync::Arc::new(ilu)));
                 }
             }
         }
@@ -659,7 +704,9 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                 .unwrap_or_else(|| crate::parallel::threads::current_rayon_threads().max(1));
             let rp = csr.row_ptr();
             let mut nnz_per_row = vec![0usize; n];
-            for i in 0..n { nnz_per_row[i] = rp[i + 1] - rp[i]; }
+            for i in 0..n {
+                nnz_per_row[i] = rp[i + 1] - rp[i];
+            }
             self.owner_of = greedy_nnz_balanced_partition(n, p, Some(&nnz_per_row));
         }
 
@@ -677,7 +724,13 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                 weights: vec![1.0; idx.len()],
             })
             .collect();
-        self.cover_count = compute_weights(&mut self.blocks_meta, &self.owner_of, &adj, self.weighting, n);
+        self.cover_count = compute_weights(
+            &mut self.blocks_meta,
+            &self.owner_of,
+            &adj,
+            self.weighting,
+            n,
+        );
 
         // Recreate local blocks and solvers according to factory
         self.local_blocks.clear();
@@ -701,7 +754,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                             None,
                             None,
                         );
-                        self.local_blocks.push((dense, Mutex::new(Box::new(ksp) as _)));
+                        self.local_blocks
+                            .push((dense, Mutex::new(Box::new(ksp) as _)));
                     }
                 }
                 #[cfg(not(feature = "dense-direct"))]
@@ -723,7 +777,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let mut ilu = IluCsr::new_with_config(cfg.clone());
                         let op = CsrOp::new(a_sub_csr.clone());
                         ilu.setup(&op)?;
-                        self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                        self.local_blocks_csr
+                            .push((a_sub_csr, std::sync::Arc::new(ilu)));
                     }
                 }
             }
@@ -744,7 +799,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     let mut ilu = IluCsr::new_with_config(cfg.clone());
                     let op = CsrOp::new(a_sub_csr.clone());
                     ilu.setup(&op)?;
-                    self.local_blocks_csr.push((a_sub_csr, std::sync::Arc::new(ilu)));
+                    self.local_blocks_csr
+                        .push((a_sub_csr, std::sync::Arc::new(ilu)));
                 }
             }
         }
@@ -773,9 +829,9 @@ mod tests {
         asm.setup(&a, || LuSolver::<f64>::new());
         let r = vec![1.0, 2.0, 3.0, 4.0];
         let mut z = vec![0.0; 4];
-    Preconditioner::apply(&asm, PcSide::Left, &r, &mut z).unwrap();
-    // For identity, ASM should return the input
-    assert_eq!(z, r);
+        Preconditioner::apply(&asm, PcSide::Left, &r, &mut z).unwrap();
+        // For identity, ASM should return the input
+        assert_eq!(z, r);
     }
 }
 
@@ -797,10 +853,15 @@ fn build_adjacency(csr: &CsrMatrix<f64>) -> Vec<Vec<usize>> {
     // Make symmetric
     for i in 0..n {
         for &j in adj[i].clone().iter() {
-            if !adj[j].contains(&i) { adj[j].push(i); }
+            if !adj[j].contains(&i) {
+                adj[j].push(i);
+            }
         }
     }
-    for i in 0..n { adj[i].sort_unstable(); adj[i].dedup(); }
+    for i in 0..n {
+        adj[i].sort_unstable();
+        adj[i].dedup();
+    }
     adj
 }
 
@@ -809,19 +870,26 @@ fn expand_overlap(adj: &[Vec<usize>], owner_of: &[usize], k: usize) -> Vec<Vec<u
     let p = owner_of.iter().copied().max().unwrap_or(0) + 1;
     use std::collections::BTreeSet;
     let mut blocks: Vec<BTreeSet<usize>> = vec![Default::default(); p];
-    for i in 0..n { blocks[owner_of[i]].insert(i); }
+    for i in 0..n {
+        blocks[owner_of[i]].insert(i);
+    }
     let mut frontier = blocks.clone();
     for _ in 0..k {
         let mut next = blocks.clone();
         for s in 0..p {
             for &u in &frontier[s] {
-                for &v in &adj[u] { next[s].insert(v); }
+                for &v in &adj[u] {
+                    next[s].insert(v);
+                }
             }
         }
         frontier = next.clone();
         blocks = next;
     }
-    blocks.into_iter().map(|b| b.into_iter().collect()).collect()
+    blocks
+        .into_iter()
+        .map(|b| b.into_iter().collect())
+        .collect()
 }
 
 fn compute_weights(
@@ -832,10 +900,16 @@ fn compute_weights(
     n: usize,
 ) -> Vec<usize> {
     let mut cover_count = vec![0usize; n];
-    for b in blocks.iter() { for &gi in &b.indices { cover_count[gi] += 1; } }
+    for b in blocks.iter() {
+        for &gi in &b.indices {
+            cover_count[gi] += 1;
+        }
+    }
 
     if matches!(weighting, Weighting::None) {
-        for b in blocks.iter_mut() { b.weights.resize(b.indices.len(), 1.0); }
+        for b in blocks.iter_mut() {
+            b.weights.resize(b.indices.len(), 1.0);
+        }
         return cover_count;
     }
 
@@ -845,12 +919,17 @@ fn compute_weights(
         if !matches!(weighting, Weighting::Uniform) {
             // membership map
             let mut in_s = vec![false; n];
-            for &gi in &b.indices { in_s[gi] = true; }
+            for &gi in &b.indices {
+                in_s[gi] = true;
+            }
             use std::collections::{HashMap, VecDeque};
             let mut q = VecDeque::new();
             let mut dmap: HashMap<usize, usize> = Default::default();
             for &gi in &b.indices {
-                if adj[gi].iter().any(|&v| !in_s[v]) { q.push_back(gi); dmap.insert(gi, 0); }
+                if adj[gi].iter().any(|&v| !in_s[v]) {
+                    q.push_back(gi);
+                    dmap.insert(gi, 0);
+                }
             }
             while let Some(u) = q.pop_front() {
                 let du = dmap[&u];
@@ -861,12 +940,17 @@ fn compute_weights(
                     }
                 }
             }
-            for (j, &gi) in b.indices.iter().enumerate() { dist[j] = *dmap.get(&gi).unwrap_or(&0); }
+            for (j, &gi) in b.indices.iter().enumerate() {
+                dist[j] = *dmap.get(&gi).unwrap_or(&0);
+            }
         }
         let phi_s: Vec<f64> = match weighting {
             Weighting::Uniform => vec![1.0; b.indices.len()],
             Weighting::SmoothLinear => dist.iter().map(|&d| (d as f64) + 1.0).collect(),
-            Weighting::SmoothPoly(p) => dist.iter().map(|&d| ((d as f64) + 1.0).powi(p as i32)).collect(),
+            Weighting::SmoothPoly(p) => dist
+                .iter()
+                .map(|&d| ((d as f64) + 1.0).powi(p as i32))
+                .collect(),
             Weighting::None => unreachable!(),
         };
         phi[s] = phi_s;
@@ -874,7 +958,9 @@ fn compute_weights(
     // Build coverer index: for each global index, which (block, local_pos) cover it
     let mut coverers: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     for (t, bt) in blocks.iter().enumerate() {
-        for (pos, &gi) in bt.indices.iter().enumerate() { coverers[gi].push((t, pos)); }
+        for (pos, &gi) in bt.indices.iter().enumerate() {
+            coverers[gi].push((t, pos));
+        }
     }
 
     for (s, b) in blocks.iter_mut().enumerate() {
@@ -884,13 +970,18 @@ fn compute_weights(
                 Weighting::Uniform => cover_count[gi] as f64,
                 _ => {
                     let mut sum = 0.0;
-                    for &(t, pos) in &coverers[gi] { sum += phi[t][pos]; }
+                    for &(t, pos) in &coverers[gi] {
+                        sum += phi[t][pos];
+                    }
                     if sum <= 0.0 { 1.0 } else { sum }
                 }
             };
             let num = match weighting {
                 Weighting::Uniform => 1.0,
-                _ => { let pos = b.indices.binary_search(&gi).unwrap(); phi[s][pos] }
+                _ => {
+                    let pos = b.indices.binary_search(&gi).unwrap();
+                    phi[s][pos]
+                }
             };
             b.weights[j] = num / denom;
         }
@@ -900,17 +991,31 @@ fn compute_weights(
 
 impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     /// Select ASM mode (ASM or RAS)
-    pub fn set_mode(&mut self, mode: AsmMode) -> &mut Self { self.asm_mode = mode; self }
+    pub fn set_mode(&mut self, mode: AsmMode) -> &mut Self {
+        self.asm_mode = mode;
+        self
+    }
     /// Select PoU weighting strategy.
-    pub fn set_weighting(&mut self, w: Weighting) -> &mut Self { self.weighting = w; self }
+    pub fn set_weighting(&mut self, w: Weighting) -> &mut Self {
+        self.weighting = w;
+        self
+    }
     /// Set overlap layers; adjusts default weighting if currently None.
     pub fn set_overlap(&mut self, k: usize) -> &mut Self {
         self.overlap = k;
-        if matches!(self.weighting, Weighting::None) && k > 0 { self.weighting = Weighting::Uniform; }
+        if matches!(self.weighting, Weighting::None) && k > 0 {
+            self.weighting = Weighting::Uniform;
+        }
         self
     }
     /// Set number of primary partitions if subdomains are not provided.
-    pub fn set_num_parts(&mut self, p: usize) -> &mut Self { self.nparts_hint = Some(p.max(1)); self }
+    pub fn set_num_parts(&mut self, p: usize) -> &mut Self {
+        self.nparts_hint = Some(p.max(1));
+        self
+    }
     /// Set dense threshold for per-block solver selection (placeholder for future CSR path).
-    pub fn set_dense_threshold(&mut self, n: usize) -> &mut Self { self.dense_threshold = n; self }
+    pub fn set_dense_threshold(&mut self, n: usize) -> &mut Self {
+        self.dense_threshold = n;
+        self
+    }
 }

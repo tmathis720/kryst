@@ -48,7 +48,10 @@ mod tests_gmres_lr {
         let mut x_left = [0.0; 3];
         let stats_left = ksp_left.solve(&b, &mut x_left)?;
         assert!(stats_left.iterations > 0);
-        assert!(stats_left.final_residual < 1e-4, "left solver failed to converge");
+        assert!(
+            stats_left.final_residual < 1e-4,
+            "left solver failed to converge"
+        );
 
         // --- RIGHT preconditioning
         let mut ksp_right = KspContext::new();
@@ -60,7 +63,10 @@ mod tests_gmres_lr {
         let mut x_right = [0.0; 3];
         let stats_right = ksp_right.solve(&b, &mut x_right)?;
         assert!(stats_right.iterations > 0);
-        assert!(stats_right.final_residual < 1e-4, "right solver failed to converge");
+        assert!(
+            stats_right.final_residual < 1e-4,
+            "right solver failed to converge"
+        );
 
         // True residuals are small and comparable
         let res_l = true_residual_norm(amat.as_ref(), &x_left, &b);
@@ -83,7 +89,10 @@ mod tests_gmres_lr {
         // Internal sanity: Left keeps no Z basis; Right populates it (via z_mem)
         if let Some(wl) = ksp_left.debug_workspace() {
             // Left-preconditioned GMRES does not allocate z_mem
-            assert!(wl.z_mem.is_empty(), "Left GMRES should not populate Z basis");
+            assert!(
+                wl.z_mem.is_empty(),
+                "Left GMRES should not populate Z basis"
+            );
         }
         if let Some(wr) = ksp_right.debug_workspace() {
             // Right-preconditioned GMRES uses column-major slabs: v_mem (m+1 cols), z_mem (m cols)

@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::reduction::{CommDeterministic, Packet, ReproMode};
@@ -11,7 +14,10 @@ pub struct CountingComm<C> {
 
 impl<C: Comm + Clone> CountingComm<C> {
     pub fn new(inner: C) -> Self {
-        Self { inner, reduces: Arc::new(AtomicUsize::new(0)) }
+        Self {
+            inner,
+            reduces: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -19,12 +25,23 @@ impl<C: Comm + Clone> Comm for CountingComm<C> {
     type Vec = C::Vec;
     type Request<'a> = C::Request<'a>;
 
-    fn rank(&self) -> usize { self.inner.rank() }
-    fn size(&self) -> usize { self.inner.size() }
-    fn barrier(&self) { self.inner.barrier() }
+    fn rank(&self) -> usize {
+        self.inner.rank()
+    }
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+    fn barrier(&self) {
+        self.inner.barrier()
+    }
 
     #[cfg(feature = "mpi")]
-    fn scatter<T: Clone + mpi::datatype::Equivalence>(&self, global: &[T], out: &mut [T], root: usize) {
+    fn scatter<T: Clone + mpi::datatype::Equivalence>(
+        &self,
+        global: &[T],
+        out: &mut [T],
+        root: usize,
+    ) {
         self.inner.scatter(global, out, root)
     }
     #[cfg(not(feature = "mpi"))]
@@ -33,7 +50,12 @@ impl<C: Comm + Clone> Comm for CountingComm<C> {
     }
 
     #[cfg(feature = "mpi")]
-    fn gather<T: Clone + mpi::datatype::Equivalence>(&self, local: &[T], out: &mut Vec<T>, root: usize) {
+    fn gather<T: Clone + mpi::datatype::Equivalence>(
+        &self,
+        local: &[T],
+        out: &mut Vec<T>,
+        root: usize,
+    ) {
         self.inner.gather(local, out, root)
     }
     #[cfg(not(feature = "mpi"))]

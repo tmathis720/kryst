@@ -35,7 +35,7 @@
 //! selected preconditioner using the preconditioner operator (`P`, or `A` when `P` is `None`).
 //! Use it with direct PCs such as `LU`, `QR`, or `SuperLU_DIST`.
 
-use crate::config::options::{KspOptions, PcOptions, KspType};
+use crate::config::options::{KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
@@ -50,8 +50,7 @@ use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
-pub use workspace::{Workspace, GmresSpec};
-
+pub use workspace::{GmresSpec, Workspace};
 
 /// Supported solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,8 +228,14 @@ impl KspContext {
                 s.pc_mode = crate::solver::PcaPcMode::Left;
                 Some(Box::new(s))
             }
-            SolverType::Qmr => Some(Box::new(crate::solver::QmrSolver::new(self.rtol, self.maxits))),
-            SolverType::Tfqmr => Some(Box::new(crate::solver::TfqmrSolver::new(self.rtol, self.maxits))),
+            SolverType::Qmr => Some(Box::new(crate::solver::QmrSolver::new(
+                self.rtol,
+                self.maxits,
+            ))),
+            SolverType::Tfqmr => Some(Box::new(crate::solver::TfqmrSolver::new(
+                self.rtol,
+                self.maxits,
+            ))),
             SolverType::Preonly => {
                 // PREONLY is intentionally "no iterative solver".
                 // We’ll dispatch to `pc.direct_solve()` in `solve()`.
@@ -690,7 +695,9 @@ impl KspContext {
                         PcReusePolicy::ReuseNumeric => {
                             if pc.supports_numeric_update() {
                                 if !vid_known {
-                                    log::debug!("ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse.");
+                                    log::debug!(
+                                        "ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse."
+                                    );
                                 }
                                 pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
@@ -705,7 +712,9 @@ impl KspContext {
                                 && self.pc_reuse.allow_numeric()
                             {
                                 if !vid_known {
-                                    log::debug!("ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse.");
+                                    log::debug!(
+                                        "ValuesId unknown; conservatively refreshing numeric data. Wrap your matrix in DenseOp/CsrOp and call mark_values_changed() to enable exact reuse."
+                                    );
                                 }
                                 pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
@@ -925,8 +934,8 @@ impl KspContext {
 mod tests {
     use super::*;
     use crate::context::pc_context::PcType;
-    use crate::preconditioner::PcSide;
     use crate::matrix::op::DenseOp;
+    use crate::preconditioner::PcSide;
     use faer::Mat;
     use std::sync::Arc;
 
@@ -1009,7 +1018,9 @@ mod tests {
             Ok(_) => panic!("expected communicator mismatch error"),
         };
         match err {
-            KError::InvalidInput(msg) => assert!(msg.to_lowercase().contains("communicator mismatch")),
+            KError::InvalidInput(msg) => {
+                assert!(msg.to_lowercase().contains("communicator mismatch"))
+            }
             _ => panic!("unexpected error: {:?}", err),
         }
     }
@@ -1036,7 +1047,10 @@ mod tests {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ksp.set_type(SolverType::Cg).unwrap();
         }));
-        assert!(res.is_err(), "expected panic due to incompatible side for CG");
+        assert!(
+            res.is_err(),
+            "expected panic due to incompatible side for CG"
+        );
     }
 
     #[test]

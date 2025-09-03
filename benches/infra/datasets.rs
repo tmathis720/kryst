@@ -1,5 +1,5 @@
 use kryst::matrix::sparse::CsrMatrix;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::BTreeSet;
 
 /// 5-point Poisson on an n x n grid with Dirichlet BCs.
@@ -16,16 +16,35 @@ pub fn poisson2d_csr(n: usize) -> CsrMatrix<f64> {
             let mut entries: [(usize, f64); 5] = [(usize::MAX, 0.0); 5];
             let mut len = 0usize;
             let mut diag = 0.0;
-            if j > 0 { entries[len] = (row - 1, -1.0); len += 1; diag += 1.0; }
-            if j + 1 < n { entries[len] = (row + 1, -1.0); len += 1; diag += 1.0; }
-            if i > 0 { entries[len] = (row - n, -1.0); len += 1; diag += 1.0; }
-            if i + 1 < n { entries[len] = (row + n, -1.0); len += 1; diag += 1.0; }
+            if j > 0 {
+                entries[len] = (row - 1, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            if j + 1 < n {
+                entries[len] = (row + 1, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            if i > 0 {
+                entries[len] = (row - n, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            if i + 1 < n {
+                entries[len] = (row + n, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
             // include diagonal
             entries[len] = (row, diag);
             len += 1;
             // Sort the first `len` elements by column index
             entries[..len].sort_unstable_by_key(|&(c, _)| c);
-            for k in 0..len { col_idx.push(entries[k].0); vals.push(entries[k].1); }
+            for k in 0..len {
+                col_idx.push(entries[k].0);
+                vals.push(entries[k].1);
+            }
             row_ptr.push(col_idx.len());
         }
     }
@@ -58,8 +77,12 @@ pub fn poisson2d_prolong_restrict(n: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>) 
 
     // R = P^T
     let mut counts = vec![0usize; nc + 1];
-    for &cj in p.col_idx() { counts[cj + 1] += 1; }
-    for i in 0..nc { counts[i + 1] += counts[i]; }
+    for &cj in p.col_idx() {
+        counts[cj + 1] += 1;
+    }
+    for i in 0..nc {
+        counts[i + 1] += counts[i];
+    }
     let mut r_row_ptr = counts.clone();
     let mut r_col_idx = vec![0usize; p.col_idx().len()];
     let mut r_vals = vec![0.0f64; p.values().len()];
@@ -95,7 +118,11 @@ pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f6
 
     for i in 0..n {
         let base = rng.gen_range((avg_deg / 2).max(1)..=(avg_deg * 3 / 2).max(2));
-        let burst = if rng.r#gen::<f64>() < 0.05 { rng.gen_range(avg_deg..=4 * avg_deg) } else { 0 };
+        let burst = if rng.r#gen::<f64>() < 0.05 {
+            rng.gen_range(avg_deg..=4 * avg_deg)
+        } else {
+            0
+        };
         let deg = (base + burst).min(n - 1);
 
         let mut set: BTreeSet<usize> = BTreeSet::new();
@@ -109,7 +136,9 @@ pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f6
             col_idx.push(j);
             // Values in [0.5, 1.5], negative off-diagonals with small probability
             let mut v = 0.5 + rng.r#gen::<f64>();
-            if j != i && rng.r#gen::<f64>() < 0.2 { v = -v; }
+            if j != i && rng.r#gen::<f64>() < 0.2 {
+                v = -v;
+            }
             vals.push(v);
         }
         row_ptr.push(col_idx.len());
@@ -119,7 +148,11 @@ pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f6
 
 /// Block-diagonal with light overlap between neighboring blocks.
 /// Returns (A, blocks) where blocks is a list of index sets.
-pub fn blocky_csr(n_blocks: usize, block_size: usize, overlap: usize) -> (CsrMatrix<f64>, Vec<Vec<usize>>) {
+pub fn blocky_csr(
+    n_blocks: usize,
+    block_size: usize,
+    overlap: usize,
+) -> (CsrMatrix<f64>, Vec<Vec<usize>>) {
     let n = n_blocks * block_size;
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::new();
@@ -131,9 +164,16 @@ pub fn blocky_csr(n_blocks: usize, block_size: usize, overlap: usize) -> (CsrMat
         let end = start + block_size;
         for i in start..end {
             // simple tri-diagonal inside block
-            if i > start { col_idx.push(i - 1); vals.push(-1.0); }
-            col_idx.push(i); vals.push(2.0);
-            if i + 1 < end { col_idx.push(i + 1); vals.push(-1.0); }
+            if i > start {
+                col_idx.push(i - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(i);
+            vals.push(2.0);
+            if i + 1 < end {
+                col_idx.push(i + 1);
+                vals.push(-1.0);
+            }
 
             // overlap edges to next block
             if overlap > 0 && b + 1 < n_blocks {

@@ -83,7 +83,9 @@ pub fn rcm_csr(a: &CsrMatrix<f64>) -> Permutation {
     for i in 0..n {
         for k in rp[i]..rp[i + 1] {
             let j = cj[k];
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             adj[i].push(j);
             adj[j].push(i);
         }
@@ -101,7 +103,9 @@ pub fn rcm_csr(a: &CsrMatrix<f64>) -> Permutation {
     let mut visited = vec![false; n];
     let mut order = Vec::with_capacity(n);
     for start in 0..n {
-        if visited[start] { continue; }
+        if visited[start] {
+            continue;
+        }
         // find unvisited node with smallest degree
         let mut s = start;
         let mut min_deg = degrees[start];
@@ -141,28 +145,30 @@ mod tests {
     fn permute_csr_symmetric_matches_dense() {
         // 3x3 matrix
         // [1 2 0; 0 3 4; 5 0 6]
-        let row_ptr = vec![0,2,4,6];
-        let col_idx = vec![0,1,1,2,0,2];
-        let vals = vec![1.0,2.0,3.0,4.0,5.0,6.0];
-        let a = CsrMatrix::from_csr(3,3,row_ptr,col_idx,vals);
-        let perm = Permutation{ p: vec![2,0,1], pinv: vec![1,2,0] };
-        let ap = permute_csr_symmetric(&a,&perm);
+        let row_ptr = vec![0, 2, 4, 6];
+        let col_idx = vec![0, 1, 1, 2, 0, 2];
+        let vals = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let a = CsrMatrix::from_csr(3, 3, row_ptr, col_idx, vals);
+        let perm = Permutation {
+            p: vec![2, 0, 1],
+            pinv: vec![1, 2, 0],
+        };
+        let ap = permute_csr_symmetric(&a, &perm);
         let dense_ap = ap.to_dense();
         // compute dense reference
         let dense_a = a.to_dense();
-        let mut ref_dense = faer::Mat::<f64>::zeros(3,3);
+        let mut ref_dense = faer::Mat::<f64>::zeros(3, 3);
         for i in 0..3 {
             for j in 0..3 {
                 let old_i = perm.p[i];
                 let old_j = perm.p[j];
-                ref_dense[(i,j)] = dense_a[(old_i,old_j)];
+                ref_dense[(i, j)] = dense_a[(old_i, old_j)];
             }
         }
         for i in 0..3 {
             for j in 0..3 {
-                assert!((dense_ap[(i,j)] - ref_dense[(i,j)]).abs() < 1e-12);
+                assert!((dense_ap[(i, j)] - ref_dense[(i, j)]).abs() < 1e-12);
             }
         }
     }
 }
-

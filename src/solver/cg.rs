@@ -46,7 +46,12 @@ pub struct CgSolver {
 impl CgSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
         Self {
-            conv: Convergence { rtol, atol: 1e-50, dtol: 1e5, max_iters: maxits },
+            conv: Convergence {
+                rtol,
+                atol: 1e-50,
+                dtol: 1e5,
+                max_iters: maxits,
+            },
             // Default monitors use preconditioned norm per policy
             norm_type: CgNormType::Preconditioned,
             trust_region: None,
@@ -72,10 +77,7 @@ impl CgSolver {
         self.initial_guess_nonzero = f;
         self
     }
-    pub fn with_true_residual_monitor(
-        mut self,
-        m: Box<dyn Fn(usize, f64) + Send + Sync>,
-    ) -> Self {
+    pub fn with_true_residual_monitor(mut self, m: Box<dyn Fn(usize, f64) + Send + Sync>) -> Self {
         self.true_residual_monitor = Some(m);
         self
     }
@@ -90,10 +92,7 @@ impl CgSolver {
     pub fn set_nonzero_guess(&mut self, f: bool) {
         self.initial_guess_nonzero = f;
     }
-    pub fn set_true_residual_monitor(
-        &mut self,
-        m: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
-    ) {
+    pub fn set_true_residual_monitor(&mut self, m: Option<Box<dyn Fn(usize, f64) + Send + Sync>>) {
         self.true_residual_monitor = m;
     }
 
@@ -126,8 +125,12 @@ impl CgSolver {
         &'a mut [f64],
         &'a mut [f64],
     ) {
-        while work.q.len() < 4 { work.q.push(Vec::new()); }
-        for v in &mut work.q[0..4] { Self::take_or_resize(v, n); }
+        while work.q.len() < 4 {
+            work.q.push(Vec::new());
+        }
+        for v in &mut work.q[0..4] {
+            Self::take_or_resize(v, n);
+        }
         Self::take_or_resize(&mut work.tmp1, n);
         let (r_slice, rest) = work.q.split_at_mut(1);
         let (z_slice, rest) = rest.split_at_mut(1);
@@ -199,8 +202,7 @@ impl CgSolver {
 
         let (r, z, p, ap, tmp) = Self::acquire(n, work);
 
-        let guess_nonzero =
-            self.initial_guess_nonzero || x.iter().any(|&xi| xi != 0.0);
+        let guess_nonzero = self.initial_guess_nonzero || x.iter().any(|&xi| xi != 0.0);
         if guess_nonzero {
             a.matvec(x, tmp);
             for i in 0..n {
@@ -259,15 +261,19 @@ impl CgSolver {
 
         p.copy_from_slice(z);
 
-        let mut stats = SolveStats { iterations: 0, final_residual: res0_reported, reason: ConvergedReason::Continued };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0_reported,
+            reason: ConvergedReason::Continued,
+        };
 
         // Convergence check at iteration 0 (baseline = res0_reported)
-            let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
-            if !matches!(reason0, ConvergedReason::Continued) {
-                let mut s = s0;
-                s.final_residual = Self::nrm2(r, comm);
-                return Ok(s);
-            }
+        let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            let mut s = s0;
+            s.final_residual = Self::nrm2(r, comm);
+            return Ok(s);
+        }
 
         for k in 1..=self.conv.max_iters {
             if k > 1 {
@@ -364,7 +370,11 @@ impl CgSolver {
 
         // Max-its reached: use current residual for final reporting
         let true_res = Self::nrm2(r, comm);
-        Ok(SolveStats { iterations: self.conv.max_iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
+        Ok(SolveStats {
+            iterations: self.conv.max_iters,
+            final_residual: true_res,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }
 

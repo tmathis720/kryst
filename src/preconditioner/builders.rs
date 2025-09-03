@@ -83,7 +83,9 @@ pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {
 // ---- ILU family builders -------------------------------------------------
 
 pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
+    use crate::preconditioner::ilu_csr::{
+        IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+    };
     let cfg = IluCsrConfig {
         kind: IluKind::Ilu0,
         pivot: PivotStrategy::DiagonalPerturbation,
@@ -99,7 +101,9 @@ pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
 }
 
 pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
+    use crate::preconditioner::ilu_csr::{
+        IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+    };
     let cfg = IluCsrConfig {
         kind: IluKind::Iluk { k: level },
         pivot: PivotStrategy::DiagonalPerturbation,
@@ -119,7 +123,8 @@ pub fn build_ilut(
     _reordering: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
-        IluCsr, IluCsrConfig, IluKind, PivotStrategy, IlutParams, PivotPolicy, Pivoting, ReorderingOptions,
+        IluCsr, IluCsrConfig, IluKind, IlutParams, PivotPolicy, PivotStrategy, Pivoting,
+        ReorderingOptions,
     };
     let params = IlutParams {
         droptol_abs: drop_tol,
@@ -147,7 +152,9 @@ pub fn build_ilut(
 }
 
 pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
-    use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
+    use crate::preconditioner::ilu_csr::{
+        IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+    };
     let cfg = IluCsrConfig {
         kind: IluKind::Milu0,
         pivot: PivotStrategy::DiagonalPerturbation,

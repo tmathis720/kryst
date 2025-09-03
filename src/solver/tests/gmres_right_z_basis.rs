@@ -79,4 +79,3 @@ mod tests_gmres_z_basis {
         Ok(())
     }
 }
-

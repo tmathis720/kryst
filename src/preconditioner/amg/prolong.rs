@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use crate::matrix::sparse::CsrMatrix;
 use super::row_filter::{RowFilter, filter_row_by_truncation};
 use super::strength::Strength;
+use crate::matrix::sparse::CsrMatrix;
 
 #[derive(Clone, Debug)]
 pub struct TentativeP {
@@ -12,7 +12,10 @@ pub struct TentativeP {
 
 pub fn tentative_from_aggregates(agg: Vec<usize>) -> TentativeP {
     let n_coarse = 1 + agg.iter().copied().max().unwrap_or(0);
-    TentativeP { agg_of: agg, n_coarse }
+    TentativeP {
+        agg_of: agg,
+        n_coarse,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +64,10 @@ fn build_cf_info(is_c: &[bool]) -> CFInfo {
             k += 1;
         }
     }
-    CFInfo { is_c: is_c.to_vec(), coarse_of }
+    CFInfo {
+        is_c: is_c.to_vec(),
+        coarse_of,
+    }
 }
 
 /// Helper: get entry a[i,j] via binary search in row i.
@@ -71,10 +77,7 @@ fn csr_get(a: &CsrMatrix<f64>, i: usize, j: usize) -> Option<f64> {
     let vv = a.values();
     let rs = rp[i];
     let re = rp[i + 1];
-    cj[rs..re]
-        .binary_search(&j)
-        .ok()
-        .map(|p| vv[rs + p])
+    cj[rs..re].binary_search(&j).ok().map(|p| vv[rs + p])
 }
 
 /// Build classical interpolation pattern.
@@ -86,7 +89,13 @@ pub fn classical_pattern(
 ) -> (Pcsr, CFInfo) {
     let n = a.nrows();
     let cf = build_cf_info(is_c);
-    let ncoarse = cf.coarse_of.iter().filter_map(|&x| x).max().map(|x| x + 1).unwrap_or(0);
+    let ncoarse = cf
+        .coarse_of
+        .iter()
+        .filter_map(|&x| x)
+        .max()
+        .map(|x| x + 1)
+        .unwrap_or(0);
 
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::<usize>::new();
@@ -112,7 +121,9 @@ pub fn classical_pattern(
         }
         if extended {
             for &j in &s_sym.col_idx[rs..re] {
-                if cf.is_c[j] { continue; }
+                if cf.is_c[j] {
+                    continue;
+                }
                 let rj = s_sym.row_ptr[j];
                 let ej = s_sym.row_ptr[j + 1];
                 for &k in &s_sym.col_idx[rj..ej] {
@@ -138,11 +149,17 @@ pub fn classical_pattern(
                 if cf.is_c[j] {
                     let k = cf.coarse_of[j].unwrap();
                     let v = a.values()[p].abs();
-                    if v > bestmag { bestmag = v; best = Some(k); }
+                    if v > bestmag {
+                        bestmag = v;
+                        best = Some(k);
+                    }
                 }
             }
-            if let Some(k) = best { cols.push(k); }
-            else if ncoarse > 0 { cols.push(0); }
+            if let Some(k) = best {
+                cols.push(k);
+            } else if ncoarse > 0 {
+                cols.push(0);
+            }
         }
 
         for c in cols {
@@ -152,7 +169,16 @@ pub fn classical_pattern(
         row_ptr.push(col_idx.len());
     }
 
-    (Pcsr { m: n, n: ncoarse, row_ptr, col_idx, vals }, cf)
+    (
+        Pcsr {
+            m: n,
+            n: ncoarse,
+            row_ptr,
+            col_idx,
+            vals,
+        },
+        cf,
+    )
 }
 
 /// For F-neighbor j, distribute influence over its strong C neighbors.
@@ -176,21 +202,36 @@ fn neighbor_distribution_over_C_of(
             let c = cf.coarse_of[nbr].unwrap();
             if let Some(v) = csr_get(a, j, nbr) {
                 tmp.push((c, v));
-                if v < 0.0 { sum_neg += -v; } else { sum_pos += v; }
+                if v < 0.0 {
+                    sum_neg += -v;
+                } else {
+                    sum_pos += v;
+                }
             }
         }
     }
-    if tmp.is_empty() { return; }
+    if tmp.is_empty() {
+        return;
+    }
     for (c, v) in tmp {
-        let w = if v < 0.0 { if sum_neg > 0.0 { (-v)/sum_neg } else { 0.0 } } else { if sum_pos > 0.0 { v/sum_pos } else { 0.0 } };
+        let w = if v < 0.0 {
+            if sum_neg > 0.0 { (-v) / sum_neg } else { 0.0 }
+        } else {
+            if sum_pos > 0.0 { v / sum_pos } else { 0.0 }
+        };
         cols.push(c);
         wts.push(w);
     }
     let s: f64 = wts.iter().sum();
-    if s > 0.0 { for w in wts.iter_mut() { *w /= s; } }
-    else {
+    if s > 0.0 {
+        for w in wts.iter_mut() {
+            *w /= s;
+        }
+    } else {
         let u = 1.0 / (wts.len() as f64);
-        for w in wts.iter_mut() { *w = u; }
+        for w in wts.iter_mut() {
+            *w = u;
+        }
     }
 }
 
@@ -216,9 +257,16 @@ pub fn classical_values_only(
         let rs_p = p_row_ptr[i];
         let re_p = p_row_ptr[i + 1];
         if cf.is_c[i] {
-            for k in rs_p..re_p { out_vals[k] = 0.0; }
+            for k in rs_p..re_p {
+                out_vals[k] = 0.0;
+            }
             if let Some(kc) = cf.coarse_of[i] {
-                for k in rs_p..re_p { if p_col_idx[k] == kc { out_vals[k] = 1.0; break; } }
+                for k in rs_p..re_p {
+                    if p_col_idx[k] == kc {
+                        out_vals[k] = 1.0;
+                        break;
+                    }
+                }
             }
             continue;
         }
@@ -230,12 +278,17 @@ pub fn classical_values_only(
         let re = s_sym.row_ptr[i + 1];
 
         // Direct part
-        let mut sum_neg = 0.0; let mut sum_pos = 0.0;
+        let mut sum_neg = 0.0;
+        let mut sum_pos = 0.0;
         for &j in &s_sym.col_idx[rs..re] {
             if cf.is_c[j] {
                 if let Some(aij) = csr_get(a, i, j) {
                     if params.variant == ClassicalVariant::Direct {
-                        if aij < 0.0 { sum_neg += -aij; } else { sum_pos += aij; }
+                        if aij < 0.0 {
+                            sum_neg += -aij;
+                        } else {
+                            sum_pos += aij;
+                        }
                     } else {
                         let col = cf.coarse_of[j].unwrap();
                         contrib_cols.push(col);
@@ -250,9 +303,9 @@ pub fn classical_values_only(
                     if let Some(aij) = csr_get(a, i, j) {
                         let col = cf.coarse_of[j].unwrap();
                         let w = if aij < 0.0 {
-                            if sum_neg > 0.0 { (-aij)/sum_neg } else { 0.0 }
+                            if sum_neg > 0.0 { (-aij) / sum_neg } else { 0.0 }
                         } else {
-                            if sum_pos > 0.0 { aij/sum_pos } else { 0.0 }
+                            if sum_pos > 0.0 { aij / sum_pos } else { 0.0 }
                         };
                         contrib_cols.push(col);
                         contrib_vals.push(w);
@@ -261,22 +314,40 @@ pub fn classical_values_only(
             }
         }
 
-        if matches!(params.variant, ClassicalVariant::Standard | ClassicalVariant::HE) {
+        if matches!(
+            params.variant,
+            ClassicalVariant::Standard | ClassicalVariant::HE
+        ) {
             for &j in &s_sym.col_idx[rs..re] {
-                if cf.is_c[j] { continue; }
-                let aij = match csr_get(a, i, j) { Some(v) => v, None => continue };
-                if aij == 0.0 { continue; }
+                if cf.is_c[j] {
+                    continue;
+                }
+                let aij = match csr_get(a, i, j) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if aij == 0.0 {
+                    continue;
+                }
                 neighbor_distribution_over_C_of(j, a, s_sym, cf, &mut buf_cols, &mut buf_wts);
                 let scale = if matches!(params.variant, ClassicalVariant::HE) {
-                    let mut rowsum = 0.0; let mut ajj = 0.0;
-                    let rj = rp[j]; let ej = rp[j + 1];
+                    let mut rowsum = 0.0;
+                    let mut ajj = 0.0;
+                    let rj = rp[j];
+                    let ej = rp[j + 1];
                     for p in rj..ej {
                         let v = vv[p];
-                        if cj[p] == j { ajj = v.abs(); } else { rowsum += v.abs(); }
+                        if cj[p] == j {
+                            ajj = v.abs();
+                        } else {
+                            rowsum += v.abs();
+                        }
                     }
                     let denom = ajj.max(rowsum).max(1e-30);
                     (-aij) / denom
-                } else { -aij };
+                } else {
+                    -aij
+                };
                 for t in 0..buf_cols.len() {
                     contrib_cols.push(buf_cols[t]);
                     contrib_vals.push(scale * buf_wts[t]);
@@ -286,40 +357,80 @@ pub fn classical_values_only(
             // denominator
             let mut sum_neg_strong = 0.0;
             for &j in &s_sym.col_idx[rs..re] {
-                if let Some(aij) = csr_get(a, i, j) { if aij < 0.0 { sum_neg_strong += -aij; } }
+                if let Some(aij) = csr_get(a, i, j) {
+                    if aij < 0.0 {
+                        sum_neg_strong += -aij;
+                    }
+                }
             }
             let mut di = csr_get(a, i, i).unwrap_or(1.0);
             let di_eff = di - sum_neg_strong;
-            let denom = if di_eff.abs() >= 1e-14 * di.abs().max(1.0) { di_eff } else { di };
-            if denom.abs() < 1e-30 {
-                let mut s = 0.0; for v in &contrib_vals { s += v.abs(); }
-                if s > 0.0 { for v in &mut contrib_vals { *v /= s; } }
+            let denom = if di_eff.abs() >= 1e-14 * di.abs().max(1.0) {
+                di_eff
             } else {
-                for v in &mut contrib_vals { *v /= denom; }
+                di
+            };
+            if denom.abs() < 1e-30 {
+                let mut s = 0.0;
+                for v in &contrib_vals {
+                    s += v.abs();
+                }
+                if s > 0.0 {
+                    for v in &mut contrib_vals {
+                        *v /= s;
+                    }
+                }
+            } else {
+                for v in &mut contrib_vals {
+                    *v /= denom;
+                }
             }
         }
 
         if !contrib_cols.is_empty() {
             let mut idx: Vec<usize> = (0..contrib_cols.len()).collect();
-            idx.sort_unstable_by(|&u,&v| contrib_cols[u].cmp(&contrib_cols[v]));
+            idx.sort_unstable_by(|&u, &v| contrib_cols[u].cmp(&contrib_cols[v]));
             let mut last = contrib_cols[idx[0]];
             let mut acc = 0.0;
             let mut cols = Vec::new();
             let mut vals = Vec::new();
             for &id in &idx {
                 let c = contrib_cols[id];
-                if c == last { acc += contrib_vals[id]; }
-                else { if acc != 0.0 { cols.push(last); vals.push(acc); } last = c; acc = contrib_vals[id]; }
+                if c == last {
+                    acc += contrib_vals[id];
+                } else {
+                    if acc != 0.0 {
+                        cols.push(last);
+                        vals.push(acc);
+                    }
+                    last = c;
+                    acc = contrib_vals[id];
+                }
             }
-            if acc != 0.0 { cols.push(last); vals.push(acc); }
+            if acc != 0.0 {
+                cols.push(last);
+                vals.push(acc);
+            }
 
             let kept_cols = cols.clone();
             let kept_vals = vals.clone();
-            let mut rf = RowFilter { tau_abs: params.drop_abs, tau_rel: params.trunc_rel, k_max: params.cap_row, must_keep: None };
+            let mut rf = RowFilter {
+                tau_abs: params.drop_abs,
+                tau_rel: params.trunc_rel,
+                k_max: params.cap_row,
+                must_keep: None,
+            };
             filter_row_by_truncation(&mut cols, &mut vals, rf);
             if params.keep_at_least_one && cols.is_empty() && !kept_cols.is_empty() {
-                let mut best = 0usize; let mut bestmag = kept_vals[0].abs();
-                for t in 1..kept_cols.len() { let m = kept_vals[t].abs(); if m > bestmag { bestmag = m; best = t; } }
+                let mut best = 0usize;
+                let mut bestmag = kept_vals[0].abs();
+                for t in 1..kept_cols.len() {
+                    let m = kept_vals[t].abs();
+                    if m > bestmag {
+                        bestmag = m;
+                        best = t;
+                    }
+                }
                 cols.push(kept_cols[best]);
                 vals.push(kept_vals[best]);
             }
@@ -331,8 +442,12 @@ pub fn classical_values_only(
                 }
             }
         } else {
-            for k in rs_p..re_p { out_vals[k] = 0.0; }
-            if rs_p < re_p { out_vals[rs_p] = 1.0; }
+            for k in rs_p..re_p {
+                out_vals[k] = 0.0;
+            }
+            if rs_p < re_p {
+                out_vals[rs_p] = 1.0;
+            }
         }
     }
     Ok(())
@@ -366,18 +481,27 @@ pub fn smooth_tentative_sa(
     let mut acc_vals: Vec<f64> = Vec::new();
 
     for i in 0..m {
-        if marker.len() < ncoarse { marker.resize(ncoarse, -1); }
-        acc_cols.clear(); acc_vals.clear();
+        if marker.len() < ncoarse {
+            marker.resize(ncoarse, -1);
+        }
+        acc_cols.clear();
+        acc_vals.clear();
 
         // Start with 1.0 at own aggregate
         let myc = tp.agg_of[i];
-        marker[myc] = 0; acc_cols.push(myc); acc_vals.push(1.0);
+        marker[myc] = 0;
+        acc_cols.push(myc);
+        acc_vals.push(1.0);
 
         // Accumulate -ω d_i a_ij into coarse columns of neighbors' aggregates
         let di = d_inv[i];
-        let rs = rp[i]; let re = rp[i + 1];
+        let rs = rp[i];
+        let re = rp[i + 1];
         for p in rs..re {
-            let j = cj[p]; if j == i { continue; }
+            let j = cj[p];
+            if j == i {
+                continue;
+            }
             let cjg = tp.agg_of[j];
             let v = -omega * di * vv[p];
             let k = marker[cjg];
@@ -385,13 +509,19 @@ pub fn smooth_tentative_sa(
                 acc_vals[k as usize] += v;
             } else {
                 marker[cjg] = acc_cols.len() as isize;
-                acc_cols.push(cjg); acc_vals.push(v);
+                acc_cols.push(cjg);
+                acc_vals.push(v);
             }
         }
 
         let mut cols: Vec<usize> = acc_cols.clone();
         let mut vs: Vec<f64> = acc_vals.clone();
-        let rf = RowFilter { tau_abs: drop_tol, tau_rel: trunc_rel, k_max: max_per_row, must_keep: Some(myc) };
+        let rf = RowFilter {
+            tau_abs: drop_tol,
+            tau_rel: trunc_rel,
+            k_max: max_per_row,
+            must_keep: Some(myc),
+        };
         filter_row_by_truncation(&mut cols, &mut vs, rf);
         if cols.is_empty() {
             cols.push(myc);
@@ -404,10 +534,18 @@ pub fn smooth_tentative_sa(
         row_ptr.push(col_idx.len());
 
         // reset markers used
-        for &c in &acc_cols { marker[c] = -1; }
+        for &c in &acc_cols {
+            marker[c] = -1;
+        }
     }
 
-    Pcsr { m, n: ncoarse, row_ptr, col_idx, vals }
+    Pcsr {
+        m,
+        n: ncoarse,
+        row_ptr,
+        col_idx,
+        vals,
+    }
 }
 
 /// Values-only refresh for P using fixed pattern in `p`.
@@ -433,25 +571,37 @@ pub fn smooth_sa_values_only(
     let mut map_vals: Vec<f64> = Vec::new();
 
     for i in 0..m {
-        map_cols.clear(); map_vals.clear();
+        map_cols.clear();
+        map_vals.clear();
         // Start with 1 at own aggregate
         let myc = tp.agg_of[i];
-        map_cols.push(myc); map_vals.push(1.0);
+        map_cols.push(myc);
+        map_vals.push(1.0);
         // Add neighbors contributions
         let di = d_inv[i];
-        let rs = rp[i]; let re = rp[i + 1];
+        let rs = rp[i];
+        let re = rp[i + 1];
         for pidx in rs..re {
-            let j = cj[pidx]; if j == i { continue; }
+            let j = cj[pidx];
+            if j == i {
+                continue;
+            }
             let cjg = tp.agg_of[j];
             let val = -omega * di * vv[pidx];
             // find or insert
             match map_cols.iter().position(|&c| c == cjg) {
-                Some(pos) => { map_vals[pos] += val; }
-                None => { map_cols.push(cjg); map_vals.push(val); }
+                Some(pos) => {
+                    map_vals[pos] += val;
+                }
+                None => {
+                    map_cols.push(cjg);
+                    map_vals.push(val);
+                }
             }
         }
         // Scatter into existing pattern
-        let rs_p = pr[i]; let re_p = pr[i + 1];
+        let rs_p = pr[i];
+        let re_p = pr[i + 1];
         for k in rs_p..re_p {
             let c = pc[k];
             // find in map
@@ -479,7 +629,10 @@ mod tests {
             vec![0, 1, 0, 1],
             vec![1.0, 0.5, 0.5, 1.0],
         );
-        let tp = TentativeP { agg_of: vec![0, 1], n_coarse: 2 };
+        let tp = TentativeP {
+            agg_of: vec![0, 1],
+            n_coarse: 2,
+        };
         let d_inv = vec![1.0, 1.0];
         let p = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 10.0, 0, 0.0);
         assert_eq!(p.col_idx, vec![0, 1]);
@@ -494,7 +647,10 @@ mod tests {
             vec![0, 1, 0, 1],
             vec![1.0, 0.5, 0.5, 1.0],
         );
-        let tp = TentativeP { agg_of: vec![0, 1], n_coarse: 2 };
+        let tp = TentativeP {
+            agg_of: vec![0, 1],
+            n_coarse: 2,
+        };
         let d_inv = vec![1.0, 1.0];
         // drop_tol=0 -> keep all
         let p_full = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 0.0, 0, 0.0);

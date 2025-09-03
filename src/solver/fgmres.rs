@@ -1,13 +1,13 @@
 //! Flexible GMRES (FGMRES) over &dyn LinOp<f64>, right-preconditioned, object-safe.
 
-use crate::context::ksp_context::{Workspace, GmresSpec};
+use crate::context::ksp_context::{GmresSpec, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::solver::common::recompute_true_residual_norm;
+use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::any::Any;
 
 /// Orthogonalization flavor
@@ -366,7 +366,11 @@ impl FgmresSolver {
         self.orthog = o;
     }
     pub fn set_reorthog(&mut self, flag: bool) {
-        self.orthog = if flag { Orthog::Modified } else { Orthog::Classical };
+        self.orthog = if flag {
+            Orthog::Modified
+        } else {
+            Orthog::Classical
+        };
     }
     pub fn set_happy_breakdown(&mut self, flag: bool) {
         self.happy_breakdown = flag;

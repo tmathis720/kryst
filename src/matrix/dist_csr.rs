@@ -118,14 +118,20 @@ impl DistCsrOp {
                 reqs_counts.push(comm.isend_to_u64(std::slice::from_ref(&counts_out[r]), r as i32));
             }
             comm.wait_all(&mut reqs_counts);
-            for (i, &r) in peers.iter().enumerate() { counts_in[r] = counts_in_buf[i]; }
+            for (i, &r) in peers.iter().enumerate() {
+                counts_in[r] = counts_in_buf[i];
+            }
         }
 
         // Union neighbors: ranks we need from OR ranks that need from us
         let mut neighbors: Vec<i32> = Vec::new();
         for r in 0..size {
-            if r == my_rank { continue; }
-            if counts_out[r] > 0 || counts_in[r] > 0 { neighbors.push(r as i32); }
+            if r == my_rank {
+                continue;
+            }
+            if counts_out[r] > 0 || counts_in[r] > 0 {
+                neighbors.push(r as i32);
+            }
         }
         // assign halo indices and build g2l mapping
         let mut g2l: HashMap<usize, usize> = HashMap::new();
@@ -188,9 +194,15 @@ impl DistCsrOp {
             v.sort_unstable();
             v.dedup();
             for g in &v {
-                debug_assert!((*g as usize) >= row_start && (*g as usize) < row_end,
+                debug_assert!(
+                    (*g as usize) >= row_start && (*g as usize) < row_end,
                     "Neighbor {} requested column {} not owned by rank {} [{}, {})",
-                    nb, g, my_rank, row_start, row_end);
+                    nb,
+                    g,
+                    my_rank,
+                    row_start,
+                    row_end
+                );
             }
             send_idx.extend(v.into_iter().map(|z| z as usize));
             send_disp.push(send_idx.len());
@@ -198,10 +210,18 @@ impl DistCsrOp {
 
         // Minimal runtime checks
         for &g in &send_idx {
-            debug_assert!(g >= row_start && g < row_end, "send_idx contains nonlocal col {}", g);
+            debug_assert!(
+                g >= row_start && g < row_end,
+                "send_idx contains nonlocal col {}",
+                g
+            );
         }
         for &g in &recv_idx {
-            debug_assert!(owner_of_row(g, part_prefix) != my_rank, "recv_idx contains local col {}", g);
+            debug_assert!(
+                owner_of_row(g, part_prefix) != my_rank,
+                "recv_idx contains local col {}",
+                g
+            );
         }
 
         // Build CSR blocks

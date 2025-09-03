@@ -1,6 +1,6 @@
-#[cfg(feature = "rayon")]
-use kryst::matrix::{format::AsFormat, spmv, sparse::SparseMatrix, CsrMatrix};
 use kryst::LinOp;
+#[cfg(feature = "rayon")]
+use kryst::matrix::{CsrMatrix, format::AsFormat, sparse::SparseMatrix, spmv};
 
 #[cfg(feature = "rayon")]
 #[test]
@@ -37,13 +37,7 @@ fn t_spmv_csr_parallel_matches_serial_csc_backend() {
     let mut y_serial = vec![0.0; 3];
     csc.t_matvec(&x, &mut y_serial);
     let mut y_parallel = vec![0.0; 3];
-    spmv::t_spmv_csr_parallel(
-        &csr,
-        spmv::TBackend::Csc(&csc),
-        &x,
-        &mut y_parallel,
-    )
-    .unwrap();
+    spmv::t_spmv_csr_parallel(&csr, spmv::TBackend::Csc(&csc), &x, &mut y_parallel).unwrap();
     assert_eq!(y_serial, y_parallel);
 }
 
@@ -93,4 +87,3 @@ fn spmm_csr_block_matches_serial() {
     assert_eq!(y1, y_cols[0]);
     assert_eq!(y2, y_cols[1]);
 }
-

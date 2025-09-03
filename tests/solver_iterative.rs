@@ -8,8 +8,8 @@
 use approx::assert_abs_diff_eq;
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
-use kryst::preconditioner::PcSide;
 use kryst::context::ksp_context::Workspace;
+use kryst::preconditioner::PcSide;
 use kryst::solver::LinearSolver;
 use kryst::solver::{CgSolver, GmresSolver};
 use rand::Rng;
@@ -43,7 +43,16 @@ fn cg_vs_direct_on_spd() {
     let mut ws = Workspace::new(n);
     solver.setup_workspace(&mut ws);
     let stats = solver
-        .solve(&a, None, &b, &mut x_cg, PcSide::Left, &comm, None, Some(&mut ws))
+        .solve(
+            &a,
+            None,
+            &b,
+            &mut x_cg,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
         .unwrap();
     assert!(matches!(
         stats.reason,

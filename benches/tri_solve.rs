@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use kryst::matrix::sparse::CsrMatrix;
 
 #[path = "infra/datasets.rs"]
@@ -13,10 +13,14 @@ fn extract_lower_unit(a: &CsrMatrix<f64>) -> CsrMatrix<f64> {
     for i in 0..n {
         for p in a.row_ptr()[i]..a.row_ptr()[i + 1] {
             let j = a.col_idx()[p];
-            if j < i { cj.push(j); vv.push(a.values()[p]); }
+            if j < i {
+                cj.push(j);
+                vv.push(a.values()[p]);
+            }
         }
         // unit diagonal
-        cj.push(i); vv.push(1.0);
+        cj.push(i);
+        vv.push(1.0);
         rp.push(cj.len());
     }
     CsrMatrix::from_csr(n, n, rp, cj, vv)
@@ -31,7 +35,10 @@ fn extract_upper(a: &CsrMatrix<f64>) -> CsrMatrix<f64> {
     for i in 0..n {
         for p in a.row_ptr()[i]..a.row_ptr()[i + 1] {
             let j = a.col_idx()[p];
-            if j >= i { cj.push(j); vv.push(a.values()[p]); }
+            if j >= i {
+                cj.push(j);
+                vv.push(a.values()[p]);
+            }
         }
         rp.push(cj.len());
     }
@@ -47,7 +54,9 @@ fn csr_forward_unit_diag(l: &CsrMatrix<f64>, b: &[f64], x: &mut [f64]) {
         let mut sum = 0.0;
         for p in l.row_ptr()[i]..l.row_ptr()[i + 1] {
             let j = l.col_idx()[p];
-            if j < i { sum += l.values()[p] * x[j]; }
+            if j < i {
+                sum += l.values()[p] * x[j];
+            }
         }
         x[i] = b[i] - sum; // diag = 1
     }
@@ -64,10 +73,17 @@ fn csr_backward(u: &CsrMatrix<f64>, b: &[f64], x: &mut [f64]) {
         for p in u.row_ptr()[i]..u.row_ptr()[i + 1] {
             let j = u.col_idx()[p];
             let v = u.values()[p];
-            if j == i { diag = v; }
-            else if j > i { sum += v * x[j]; }
+            if j == i {
+                diag = v;
+            } else if j > i {
+                sum += v * x[j];
+            }
         }
-        x[i] = if diag.abs() > 1e-14 { (b[i] - sum) / diag } else { 0.0 };
+        x[i] = if diag.abs() > 1e-14 {
+            (b[i] - sum) / diag
+        } else {
+            0.0
+        };
     }
 }
 

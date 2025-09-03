@@ -1,4 +1,4 @@
-use kryst::{error::KError, KspOptions, PcOptions};
+use kryst::{KspOptions, PcOptions, error::KError};
 
 fn main() -> Result<(), KError> {
     // Test command line parsing for SuperLU_DIST

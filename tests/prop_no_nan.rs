@@ -1,5 +1,5 @@
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::{Preconditioner, PcSide};
+use kryst::preconditioner::{PcSide, Preconditioner};
 use proptest::prelude::*;
 
 // Build a random strictly diagonally dominant symmetric CSR

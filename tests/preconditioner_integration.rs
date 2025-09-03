@@ -6,11 +6,11 @@
 //! preconditioner and solver interfaces are compatible and robust for a variety of matrix types.
 
 use faer::Mat;
+use kryst::context::ksp_context::Workspace;
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::preconditioner::{Jacobi, PcSide};
 use kryst::solver::LinearSolver;
 use kryst::solver::{CgSolver, GmresSolver};
-use kryst::context::ksp_context::Workspace;
 
 /// Construct a symmetric positive definite (SPD) tridiagonal matrix of size `n`.
 /// Returns the matrix, the right-hand side vector `b` for the solution x = [1, ..., 1],
@@ -95,7 +95,16 @@ fn cg_with_jacobi() {
     let mut r_out = vec![0.0; b.len()];
     pc.apply(PcSide::Left, &r_in, &mut r_out).unwrap();
     let stats = solver
-        .solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))
+        .solve(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
         .unwrap();
     assert!(stats.reason != kryst::utils::convergence::ConvergedReason::Continued);
     // Ensure it runs without panic and terminates
@@ -113,7 +122,16 @@ fn gmres_with_ilu0() {
     let mut solver = GmresSolver::new(4, 1e-6, 1000);
     let mut x = vec![0.0; 5];
     let stats = solver
-        .solve(&a, Some(&mut pc), &b, &mut x, PcSide::Left, &comm, None, None)
+        .solve(
+            &a,
+            Some(&mut pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
         .unwrap();
     assert!(matches!(
         stats.reason,
@@ -137,7 +155,16 @@ fn spd_jacobi_pcg_converges() {
     let mut ws = Workspace::new(n);
     solver.setup_workspace(&mut ws);
     let stats = solver
-        .solve(&a, Some(&mut pc), &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))
+        .solve(
+            &a,
+            Some(&mut pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
         .unwrap();
     assert!(stats.reason != kryst::utils::convergence::ConvergedReason::Continued);
     // Solution accuracy not guaranteed in this configuration
@@ -155,7 +182,16 @@ fn spd_no_pc_cg_converges() {
     let mut ws = Workspace::new(n);
     solver.setup_workspace(&mut ws);
     let stats = solver
-        .solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))
+        .solve(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
         .unwrap();
     assert!(stats.reason != kryst::utils::convergence::ConvergedReason::Continued);
     // Solution accuracy not guaranteed in this configuration
@@ -194,7 +230,16 @@ fn nonsym_left_pc_gmresleft_converges() {
     let mut solver = GmresSolver::new(10, 1e-12, 100);
     let mut x = vec![0.0; n];
     let stats = solver
-        .solve(&a, Some(&mut pc), &b, &mut x, PcSide::Left, &comm, None, None)
+        .solve(
+            &a,
+            Some(&mut pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            None,
+        )
         .unwrap();
     assert!(matches!(
         stats.reason,

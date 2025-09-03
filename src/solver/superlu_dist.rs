@@ -69,8 +69,8 @@
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm};
-use crate::solver::legacy::LinearSolver;
 use crate::solver::api::Solver;
+use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use faer::MatMut;
 use faer::prelude::*;
@@ -249,10 +249,7 @@ impl ProcessGrid3D {
     pub fn from_2d_with_depth(g2d: &ProcessGrid, depth: usize) -> Result<Self, KError> {
         let total = g2d.total_procs;
         if depth == 0 || total % depth != 0 {
-            return Err(KError::InvalidInput(format!(
-                "invalid 3D depth {}",
-                depth
-            )));
+            return Err(KError::InvalidInput(format!("invalid 3D depth {}", depth)));
         }
         let layer_size = total / depth;
         let my_layer = g2d.my_rank / layer_size;
@@ -1100,8 +1097,7 @@ impl DistributedTriangularSolver {
         comm: &UniverseComm,
         comm_pattern: CommPattern,
         overlap_comm: bool,
-        #[cfg(feature = "superlu3d")]
-        grid3d: Option<&ProcessGrid3D>,
+        #[cfg(feature = "superlu3d")] grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("DistributedForwardSolve");
@@ -1221,8 +1217,7 @@ impl DistributedTriangularSolver {
         comm: &UniverseComm,
         comm_pattern: CommPattern,
         overlap_comm: bool,
-        #[cfg(feature = "superlu3d")]
-        grid3d: Option<&ProcessGrid3D>,
+        #[cfg(feature = "superlu3d")] grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("DistributedBackwardSolve");
@@ -1388,8 +1383,7 @@ impl DistributedTriangularSolver {
         distribution: &BlockCyclicDistribution,
         comm_pattern: CommPattern,
         comm: &UniverseComm,
-        #[cfg(feature = "superlu3d")]
-        grid3d: Option<&ProcessGrid3D>,
+        #[cfg(feature = "superlu3d")] grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         let root_rank = solve_data.block_owners[block_id];
 
@@ -1436,8 +1430,7 @@ impl DistributedTriangularSolver {
         block_id: usize,
         comm: &UniverseComm,
         comm_pattern: CommPattern,
-        #[cfg(feature = "superlu3d")]
-        grid3d: Option<&ProcessGrid3D>,
+        #[cfg(feature = "superlu3d")] grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
         // In real implementation, would use MPI_Bcast or implement custom patterns
         #[cfg(feature = "logging")]
@@ -4404,10 +4397,9 @@ impl Solver<CsrMatrix<f64>> for SuperLuDistSolver {
 
     fn factor(&mut self, a: &CsrMatrix<f64>) -> Result<(), Self::Error> {
         {
-            let data = self
-                .data
-                .as_ref()
-                .ok_or_else(|| KError::SolveError("call setup(&A, &comm) before factor(&A)".into()))?;
+            let data = self.data.as_ref().ok_or_else(|| {
+                KError::SolveError("call setup(&A, &comm) before factor(&A)".into())
+            })?;
             if a.nrows() != data.distribution.global_rows
                 || a.ncols() != data.distribution.global_cols
             {
@@ -4418,10 +4410,9 @@ impl Solver<CsrMatrix<f64>> for SuperLuDistSolver {
         }
 
         let numeric = {
-            let data_ref = self
-                .data
-                .as_ref()
-                .ok_or_else(|| KError::SolveError("call setup(&A, &comm) before factor(&A)".into()))?;
+            let data_ref = self.data.as_ref().ok_or_else(|| {
+                KError::SolveError("call setup(&A, &comm) before factor(&A)".into())
+            })?;
             self.numerical_factorization(data_ref)?
         };
         if let Some(data_mut) = self.data.as_mut() {
@@ -4487,7 +4478,12 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
         let _ = monitors;
         self.setup(a, comm)?;
         self.factor(a)?;
-        <SuperLuDistSolver as Solver<CsrMatrix<f64>>>::solve(self, b.as_slice(), x.as_mut_slice(), comm)
+        <SuperLuDistSolver as Solver<CsrMatrix<f64>>>::solve(
+            self,
+            b.as_slice(),
+            x.as_mut_slice(),
+            comm,
+        )
     }
 }
 
@@ -4533,8 +4529,8 @@ pub fn solve(
 mod tests {
     use super::*;
     use crate::parallel::NoComm;
-    use faer::linalg::solvers::{FullPivLu, SolveCore};
     use faer::MatMut;
+    use faer::linalg::solvers::{FullPivLu, SolveCore};
 
     #[test]
     fn test_superlu_dist_creation() {
@@ -5143,7 +5139,7 @@ mod tests {
         let bs = 2;
         let nb = 3;
         let mut lbg = vec![Vec::<usize>::new(); nb];
-    let add_edge = |g: &mut [Vec<usize>], s: usize, t: usize| {
+        let add_edge = |g: &mut [Vec<usize>], s: usize, t: usize| {
             if s != t && !g[s].contains(&t) {
                 g[s].push(t);
             }

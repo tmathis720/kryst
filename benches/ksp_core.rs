@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::op::CsrOp;
@@ -11,9 +11,16 @@ fn csr_poisson_1d(n: usize) -> CsrMatrix<f64> {
     let mut vals = Vec::new();
     row_ptr.push(0);
     for i in 0..n {
-        if i > 0 { col_idx.push(i - 1); vals.push(-1.0); }
-        col_idx.push(i); vals.push(2.0);
-        if i + 1 < n { col_idx.push(i + 1); vals.push(-1.0); }
+        if i > 0 {
+            col_idx.push(i - 1);
+            vals.push(-1.0);
+        }
+        col_idx.push(i);
+        vals.push(2.0);
+        if i + 1 < n {
+            col_idx.push(i + 1);
+            vals.push(-1.0);
+        }
         row_ptr.push(col_idx.len());
     }
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
@@ -28,9 +35,11 @@ fn bench_cg_jacobi(c: &mut Criterion) {
             || {
                 let aop = CsrOp::new(Arc::new(a.clone()));
                 let mut ksp = KspContext::new();
-                ksp.set_type(SolverType::Cg).unwrap()
-                   .set_pc_type(PcType::Jacobi, None).unwrap()
-                   .set_tolerances(1e-6, 1e-12, 1e6, 2000);
+                ksp.set_type(SolverType::Cg)
+                    .unwrap()
+                    .set_pc_type(PcType::Jacobi, None)
+                    .unwrap()
+                    .set_tolerances(1e-6, 1e-12, 1e6, 2000);
                 ksp.set_operators(Arc::new(aop), None);
                 ksp.setup().unwrap();
                 (ksp, b.clone(), vec![0.0; n])
@@ -45,4 +54,3 @@ fn bench_cg_jacobi(c: &mut Criterion) {
 
 criterion_group!(benches, bench_cg_jacobi);
 criterion_main!(benches);
-

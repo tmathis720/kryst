@@ -1,7 +1,7 @@
 use faer::Mat;
-use kryst::preconditioner::amg::{AMGBuilder, RelaxType, CoarseSolve, RelaxPhase};
-use kryst::preconditioner::{PcSide, Preconditioner};
 use fixtures::csr_poisson_1d;
+use kryst::preconditioner::amg::{AMGBuilder, CoarseSolve, RelaxPhase, RelaxType};
+use kryst::preconditioner::{PcSide, Preconditioner};
 
 #[test]
 fn ilu_coarse_matches_dense() {

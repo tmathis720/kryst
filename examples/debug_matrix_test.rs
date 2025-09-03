@@ -82,8 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ksp = KspContext::new();
     // Replace your GMRES/Jacobi block with:
     ksp.set_type(SolverType::Gmres)?
-        .set_pc_type(PcType::Ilu, None)?       // Start with no PC
-        .set_tolerances(1e-6, 1e-12, 2000.0, 50);  // (rtol, atol, maxit, restart=unused for CG)
+        .set_pc_type(PcType::Ilu, None)? // Start with no PC
+        .set_tolerances(1e-6, 1e-12, 2000.0, 50); // (rtol, atol, maxit, restart=unused for CG)
 
     // Keep the CSR operator:
     ksp.set_operators(Arc::new(matrix), None);

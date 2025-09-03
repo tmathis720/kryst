@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use faer::Mat;
 
+use fixtures::csr_poisson_1d;
 use kryst::preconditioner::amg::AMGBuilder;
 use kryst::preconditioner::{PcSide, Preconditioner};
-use fixtures::csr_poisson_1d;
 
 #[test]
 fn amg_level_stats() {
@@ -56,4 +56,3 @@ fn amg_cycle_timings_gated() {
 }
 
 mod fixtures;
-

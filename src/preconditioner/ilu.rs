@@ -73,12 +73,12 @@
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
-use crate::preconditioner::{legacy::Preconditioner, pivot::*, PcSide};
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
+use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
-use faer::traits::ComplexField;
 use faer::Mat;
+use faer::traits::ComplexField;
 use num_traits::Float;
 use std::cell::RefCell;
 
@@ -206,17 +206,25 @@ impl Default for IluConfig {
 
 #[cfg(feature = "logging")]
 fn print_ilu_banner(cfg: &IluConfig) {
-    if cfg.logging_level == 0 { return; }
+    if cfg.logging_level == 0 {
+        return;
+    }
     info!("ILU Setup:");
     info!("  kind                 : {:?}", cfg.ilu_type);
     info!("  reordering           : {:?}", cfg.reordering_type);
     let tri = match cfg.triangular_solve {
         TriSolveType::Exact => "Exact".to_string(),
-        TriSolveType::Jacobi => format!("Jacobi (L:{} U:{})", cfg.lower_jacobi_iters, cfg.upper_jacobi_iters),
+        TriSolveType::Jacobi => format!(
+            "Jacobi (L:{} U:{})",
+            cfg.lower_jacobi_iters, cfg.upper_jacobi_iters
+        ),
         TriSolveType::GaussSeidel => "GaussSeidel".to_string(),
     };
     info!("  triangular solve     : {}", tri);
-    info!("  iterative setup      : tol={:.2e}, max_iter={}", cfg.tolerance, cfg.max_iterations);
+    info!(
+        "  iterative setup      : tol={:.2e}, max_iter={}",
+        cfg.tolerance, cfg.max_iterations
+    );
     info!(
         "  exec                 : distributed={}, par_factorization={}, par_trisolve={}",
         cfg.enable_distributed,
@@ -471,7 +479,10 @@ impl<T: Clone> IluWorkspace<T> {
     /// Borrow the solve buffer sized in `setup()`.
     #[inline]
     pub fn borrow_solve_buf(&self, n: usize) -> std::cell::RefMut<'_, Vec<T>> {
-        debug_assert!(self.size >= n, "workspace not sized; call ensure_size in setup()");
+        debug_assert!(
+            self.size >= n,
+            "workspace not sized; call ensure_size in setup()"
+        );
         self.solve_buf.borrow_mut()
     }
 }
@@ -515,7 +526,10 @@ where
     for (i, &l) in lev.iter().enumerate() {
         buckets[l as usize].push(i);
     }
-    Levels { buckets, max_level: maxl }
+    Levels {
+        buckets,
+        max_level: maxl,
+    }
 }
 
 #[cfg(feature = "rayon")]
@@ -547,7 +561,10 @@ where
     for (i, &l) in lev.iter().enumerate() {
         buckets[l as usize].push(i);
     }
-    Levels { buckets, max_level: maxl }
+    Levels {
+        buckets,
+        max_level: maxl,
+    }
 }
 
 impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
@@ -1446,8 +1463,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
             debug!(
                 "Pivot floors: {} (max shift {:.3e})",
-                self.pivot_stats.num_floors,
-                self.pivot_stats.max_abs_shift
+                self.pivot_stats.num_floors, self.pivot_stats.max_abs_shift
             );
 
             if self.num_zero_pivots > 0 {
@@ -1515,8 +1531,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
             let _solve_time = timer.elapsed().as_secs_f64();
             trace!(
                 "ILU Apply: solve_time={:.6}s, workspace_size={}",
-                _solve_time,
-                self.workspace.size
+                _solve_time, self.workspace.size
             );
         }
 

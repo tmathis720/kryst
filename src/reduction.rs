@@ -279,12 +279,7 @@ impl Default for DotEngine {
 }
 
 impl DotEngine {
-    pub fn dot<C: Comm + CommDeterministic>(
-        &self,
-        u: &[f64],
-        v: &[f64],
-        comm: &C,
-    ) -> f64 {
+    pub fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
         let local = if self.opts.mode == ReproMode::Fast {
             u.iter().zip(v).map(|(a, b)| a * b).sum()
         } else if self.opts.single_thread_local {
@@ -297,15 +292,9 @@ impl DotEngine {
         g.v[0]
     }
 
-    pub fn dot2<C: Comm + CommDeterministic>(
-        &self,
-        a: f64,
-        b: f64,
-        comm: &C,
-    ) -> (f64, f64) {
+    pub fn dot2<C: Comm + CommDeterministic>(&self, a: f64, b: f64, comm: &C) -> (f64, f64) {
         let packet = Packet::<2> { v: [a, b] };
         let g = comm.allreduce_det(&packet, self.opts.mode);
         (g.v[0], g.v[1])
     }
 }
-

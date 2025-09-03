@@ -19,7 +19,11 @@ macro_rules! pc_log {
     ($stats:expr) => {
         log::info!(
             "PC {}: n={}, build_ms={:.3}, nnz_pc={}, fill={:.3}",
-            $stats.name, $stats.n, $stats.build_ms, $stats.nnz_pc, $stats.fill_ratio
+            $stats.name,
+            $stats.n,
+            $stats.build_ms,
+            $stats.nnz_pc,
+            $stats.fill_ratio
         );
     };
 }
@@ -55,5 +59,3 @@ impl ParIluHistory {
         &self.buf[..self.used as usize]
     }
 }
-
-

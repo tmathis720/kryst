@@ -251,7 +251,7 @@ impl PcConfig {
                     other => {
                         return Err(KError::InvalidInput(format!(
                             "unknown pc_approxinv_kind: {other}"
-                        )))
+                        )));
                     }
                 };
                 let levels = o.approxinv_levels.unwrap_or(1);

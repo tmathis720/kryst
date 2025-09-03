@@ -16,7 +16,14 @@ pub struct CgnrSolver {
 
 impl CgnrSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits } }
+        Self {
+            conv: Convergence {
+                rtol,
+                atol: 1e-12,
+                dtol: 1e3,
+                max_iters: maxits,
+            },
+        }
     }
 
     #[inline]
@@ -49,8 +56,12 @@ impl CgnrSolver {
         Self::take_or_resize(&mut work.tmp1, n);
         Self::take_or_resize(&mut work.tmp2, n);
         // q: p, Ap, AtAp (optional), zhat
-        while work.q.len() < 4 { work.q.push(Vec::new()); }
-        for k in 0..4 { Self::take_or_resize(&mut work.q[k], n); }
+        while work.q.len() < 4 {
+            work.q.push(Vec::new());
+        }
+        for k in 0..4 {
+            Self::take_or_resize(&mut work.q[k], n);
+        }
         let (p_slice, rest) = work.q.split_at_mut(1);
         let (ap_slice, rest) = rest.split_at_mut(1);
         let (atap_slice, rest) = rest.split_at_mut(1);
@@ -127,7 +138,8 @@ impl LinearSolver for CgnrSolver {
             });
         }
 
-        let (r_store, z_store, p_store, ap_store, _atap_store, zhat_store) = Self::acquire(ncols.max(m), work);
+        let (r_store, z_store, p_store, ap_store, _atap_store, zhat_store) =
+            Self::acquire(ncols.max(m), work);
         let (r, z, p, ap, _atap, zhat) = (
             &mut r_store[..m],
             &mut z_store[..ncols],
@@ -173,7 +185,11 @@ impl LinearSolver for CgnrSolver {
             let mut tmp = vec![0.0; m];
             let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
             s0.final_residual = true_res;
-            return Ok(SolveStats { iterations: 0, final_residual: s0.final_residual, reason: s0.reason });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: s0.final_residual,
+                reason: s0.reason,
+            });
         }
 
         let mut iters = 0usize;
@@ -187,7 +203,11 @@ impl LinearSolver for CgnrSolver {
                 // Gracefully declare divergence on breakdown
                 let mut tmp = vec![0.0; m];
                 let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-                return Ok(SolveStats { iterations: k - 1, final_residual: true_res, reason: ConvergedReason::DivergedDtol });
+                return Ok(SolveStats {
+                    iterations: k - 1,
+                    final_residual: true_res,
+                    reason: ConvergedReason::DivergedDtol,
+                });
             }
             let alpha = rz / denom;
 
@@ -220,7 +240,11 @@ impl LinearSolver for CgnrSolver {
                 let mut tmp = vec![0.0; m];
                 let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
                 s.final_residual = true_res;
-                return Ok(SolveStats { iterations: k, final_residual: s.final_residual, reason: s.reason });
+                return Ok(SolveStats {
+                    iterations: k,
+                    final_residual: s.final_residual,
+                    reason: s.reason,
+                });
             }
 
             let beta = rz_new / rz;
@@ -232,6 +256,10 @@ impl LinearSolver for CgnrSolver {
 
         let mut tmp = vec![0.0; m];
         let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-        Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
+        Ok(SolveStats {
+            iterations: iters,
+            final_residual: true_res,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }

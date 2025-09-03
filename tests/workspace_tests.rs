@@ -1,8 +1,8 @@
-use kryst::context::ksp_context::{Workspace, GmresSpec};
-use kryst::solver::{GmresSolver, LinearSolver};
+use kryst::context::ksp_context::{GmresSpec, Workspace};
 use kryst::matrix::op::LinOp;
-use kryst::preconditioner::PcSide;
 use kryst::parallel::UniverseComm;
+use kryst::preconditioner::PcSide;
+use kryst::solver::{GmresSolver, LinearSolver};
 
 #[test]
 fn gmres_workspace_allocation_stable_and_sized() {
@@ -10,7 +10,12 @@ fn gmres_workspace_allocation_stable_and_sized() {
     let restart = 3;
     // allocate workspace manually
     let mut ws = Workspace::default();
-    ws.acquire_gmres(GmresSpec { n, m: restart, need_z: true, block_s: 0 });
+    ws.acquire_gmres(GmresSpec {
+        n,
+        m: restart,
+        need_z: true,
+        block_s: 0,
+    });
 
     let v_ptr = ws.v_mem.as_ptr();
     let z_ptr = ws.z_mem.as_ptr();
@@ -55,4 +60,3 @@ fn gmres_workspace_allocation_stable_and_sized() {
     assert_eq!(ws.cs.len(), restart);
     assert_eq!(ws.sn.len(), restart);
 }
-

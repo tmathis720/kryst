@@ -265,9 +265,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (matrix_name, _description) in test_matrices {
         let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let matrix_path = base_dir.join("examples").join("mtx").join(format!("{}.mtx", matrix_name));
-        let rhs_path = base_dir.join("examples").join("mtx").join(format!("{}_rhs1.mtx", matrix_name));
-
+        let matrix_path = base_dir
+            .join("examples")
+            .join("mtx")
+            .join(format!("{}.mtx", matrix_name));
+        let rhs_path = base_dir
+            .join("examples")
+            .join("mtx")
+            .join(format!("{}_rhs1.mtx", matrix_name));
 
         // Try to read the matrix and RHS
         let (matrix_data, rhs_data) = match (

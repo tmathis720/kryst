@@ -1,15 +1,17 @@
+use faer::Mat;
+use kryst::context::ksp_context::Workspace;
+use kryst::error::KError;
+use kryst::parallel::{NoComm, UniverseComm};
+use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::solver::cg::CgNormType;
 use kryst::solver::{CgSolver, LinearSolver};
-use kryst::preconditioner::{Preconditioner, PcSide};
-use kryst::parallel::{NoComm, UniverseComm};
-use kryst::context::ksp_context::Workspace;
-use faer::Mat;
 use std::sync::{Arc, Mutex};
-use kryst::error::KError;
 
 struct HalfPc;
 impl Preconditioner for HalfPc {
-    fn setup(&mut self, _a: &dyn kryst::matrix::op::LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
+    fn setup(&mut self, _a: &dyn kryst::matrix::op::LinOp<S = f64>) -> Result<(), KError> {
+        Ok(())
+    }
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         for (yi, xi) in y.iter_mut().zip(x) {
             *yi = 0.5 * xi;

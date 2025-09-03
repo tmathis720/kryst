@@ -27,6 +27,9 @@
 
 use crate::core::traits::MatVec;
 use crate::error::KError;
+use crate::matrix::convert::csr_from_linop;
+use crate::matrix::op::{StructureId, ValuesId};
+use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
 use faer::linalg::solvers::SolveCore;
@@ -35,9 +38,6 @@ use num_traits::Float;
 use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use crate::matrix::convert::csr_from_linop;
-use crate::matrix::sparse::CsrMatrix;
-use crate::matrix::op::{StructureId, ValuesId};
 
 /// Sparse Approximate Inverse (SPAI) preconditioner
 ///
@@ -341,7 +341,9 @@ where
             if n != n_expected {
                 // allow mismatch only if auto
                 if let SparsityPattern::Manual(_) = &self.pattern {
-                    return Err(KError::InvalidInput("ApproxInv: operator size mismatch with manual pattern".into()));
+                    return Err(KError::InvalidInput(
+                        "ApproxInv: operator size mismatch with manual pattern".into(),
+                    ));
                 }
             }
 
@@ -410,12 +412,23 @@ where
         Ok(())
     }
 
-    fn apply(&self, _side: crate::preconditioner::PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        x: &[f64],
+        y: &mut [f64],
+    ) -> Result<(), KError> {
         if x.len() != y.len() {
-            return Err(KError::InvalidInput(format!("ApproxInv.apply: x/y length mismatch: {} vs {}", x.len(), y.len())));
+            return Err(KError::InvalidInput(format!(
+                "ApproxInv.apply: x/y length mismatch: {} vs {}",
+                x.len(),
+                y.len()
+            )));
         }
         // zero y
-        for v in y.iter_mut() { *v = 0.0; }
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;

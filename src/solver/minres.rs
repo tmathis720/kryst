@@ -299,7 +299,7 @@ impl LinearSolver for MinresSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parallel::UniverseComm, MatShell};
+    use crate::{MatShell, parallel::UniverseComm};
 
     // Helper to make a MatShell from a closure
     fn matshell_from<F: Fn(&[f64], &mut [f64]) + Send + Sync + 'static>(
@@ -398,7 +398,10 @@ mod tests {
                 b[i]
             );
         }
-        assert!(stats.iterations <= 2, "expected <= 2 MINRES iterations on I");
+        assert!(
+            stats.iterations <= 2,
+            "expected <= 2 MINRES iterations on I"
+        );
         assert!(
             matches!(
                 stats.reason,
@@ -476,10 +479,9 @@ mod tests {
         let monitor_data = Arc::new(Mutex::new(Vec::<(usize, f64)>::new()));
         let monitor_data_clone = monitor_data.clone();
 
-        let monitor: Box<dyn Fn(usize, f64) + Send + Sync> =
-            Box::new(move |iter, residual| {
-                monitor_data_clone.lock().unwrap().push((iter, residual));
-            });
+        let monitor: Box<dyn Fn(usize, f64) + Send + Sync> = Box::new(move |iter, residual| {
+            monitor_data_clone.lock().unwrap().push((iter, residual));
+        });
         let monitors = vec![monitor];
 
         let mut solver = MinresSolver::new(1e-8, 10);

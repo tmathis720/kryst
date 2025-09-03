@@ -128,7 +128,9 @@ pub fn merged_dot_prefix_kahan<S: Scalar>(
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup_in_row, merged_dot_prefix, merged_dot_prefix_kahan, merged_dot_strict_upper};
+    use super::{
+        lookup_in_row, merged_dot_prefix, merged_dot_prefix_kahan, merged_dot_strict_upper,
+    };
 
     #[test]
     fn basic_prefix() {

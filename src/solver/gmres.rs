@@ -15,7 +15,7 @@
 //! in column-major form. The legacy `Workspace.z` (Vec<Vec<_>>) is not used by
 //! GMRES/FGMRES.
 
-use crate::context::ksp_context::{Workspace, GmresSpec};
+use crate::context::ksp_context::{GmresSpec, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
@@ -70,7 +70,6 @@ impl GmresSolver {
         Self::dot(x, x).sqrt()
     }
 
-
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, side: PcSide) {
         let spec = GmresSpec {
             n,
@@ -95,8 +94,6 @@ impl GmresSolver {
             Ok(())
         }
     }
-
-
 
     fn backsolve(h: &[f64], g: &[f64], k: usize) -> Vec<f64> {
         let ld = g.len();
@@ -194,7 +191,9 @@ impl LinearSolver for GmresSolver {
                 self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                 let beta = Self::nrm2(&ws.tmp2);
                 if beta > 0.0 {
-                    for i in 0..n { ws.tmp2[i] /= beta; }
+                    for i in 0..n {
+                        ws.tmp2[i] /= beta;
+                    }
                     ws.copy_tmp2_into_vcol(0);
                 } else {
                     ws.v_col(0).fill(0.0);
@@ -204,7 +203,9 @@ impl LinearSolver for GmresSolver {
             PcSide::Right => {
                 let beta = Self::nrm2(&ws.tmp1);
                 if beta > 0.0 {
-                    for i in 0..n { ws.tmp2[i] = ws.tmp1[i] / beta; }
+                    for i in 0..n {
+                        ws.tmp2[i] = ws.tmp1[i] / beta;
+                    }
                     ws.copy_tmp2_into_vcol(0);
                 } else {
                     ws.v_col(0).fill(0.0);
@@ -254,14 +255,18 @@ impl LinearSolver for GmresSolver {
                             {
                                 let vi = &ws.v_mem[i * n..(i + 1) * n];
                                 hij = Self::dot(&ws.tmp2, vi);
-                                for (w, &vi_j) in ws.tmp2.iter_mut().zip(vi) { *w -= hij * vi_j; }
+                                for (w, &vi_j) in ws.tmp2.iter_mut().zip(vi) {
+                                    *w -= hij * vi_j;
+                                }
                             }
                             *ws.h_at_mut(i, k) = hij;
                         }
                         let hnext = Self::nrm2(&ws.tmp2);
                         *ws.h_at_mut(k + 1, k) = hnext;
                         if hnext > 0.0 {
-                            for i in 0..n { ws.tmp2[i] /= hnext; }
+                            for i in 0..n {
+                                ws.tmp2[i] /= hnext;
+                            }
                             ws.copy_tmp2_into_vcol(k + 1);
                         } else {
                             ws.v_col(k + 1).fill(0.0);
@@ -280,14 +285,18 @@ impl LinearSolver for GmresSolver {
                             {
                                 let vi = &ws.v_mem[i * n..(i + 1) * n];
                                 hij = Self::dot(&ws.tmp1, vi);
-                                for (w, &vi_j) in ws.tmp1.iter_mut().zip(vi) { *w -= hij * vi_j; }
+                                for (w, &vi_j) in ws.tmp1.iter_mut().zip(vi) {
+                                    *w -= hij * vi_j;
+                                }
                             }
                             *ws.h_at_mut(i, k) = hij;
                         }
                         let hnext = Self::nrm2(&ws.tmp1);
                         *ws.h_at_mut(k + 1, k) = hnext;
                         if hnext > 0.0 {
-                            for i in 0..n { ws.tmp1[i] /= hnext; }
+                            for i in 0..n {
+                                ws.tmp1[i] /= hnext;
+                            }
                             ws.copy_tmp1_into_vcol(k + 1);
                         } else {
                             ws.v_col(k + 1).fill(0.0);
@@ -354,7 +363,9 @@ impl LinearSolver for GmresSolver {
                     self.apply_precond(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2)?;
                     let beta = Self::nrm2(&ws.tmp2);
                     if beta > 0.0 {
-                        for i in 0..n { ws.tmp2[i] /= beta; }
+                        for i in 0..n {
+                            ws.tmp2[i] /= beta;
+                        }
                         ws.copy_tmp2_into_vcol(0);
                     } else {
                         ws.v_col(0).fill(0.0);
@@ -364,7 +375,9 @@ impl LinearSolver for GmresSolver {
                 PcSide::Right => {
                     let beta = Self::nrm2(&ws.tmp1);
                     if beta > 0.0 {
-                        for i in 0..n { ws.tmp2[i] = ws.tmp1[i] / beta; }
+                        for i in 0..n {
+                            ws.tmp2[i] = ws.tmp1[i] / beta;
+                        }
                         ws.copy_tmp2_into_vcol(0);
                     } else {
                         ws.v_col(0).fill(0.0);
@@ -410,6 +423,11 @@ impl GmresSolver {
 
     #[cfg(test)]
     pub fn debug_config(&self) -> (usize, GmresOrthog, bool, bool) {
-        (self.restart, self.orthog, self.reorthog, self.happy_breakdown)
+        (
+            self.restart,
+            self.orthog,
+            self.reorthog,
+            self.happy_breakdown,
+        )
     }
 }

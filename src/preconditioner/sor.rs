@@ -20,17 +20,17 @@
 
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
-use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
-use std::sync::Arc;
-use std::sync::Mutex;
+use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use bitflags::bitflags;
 use num_traits::Float;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 bitflags! {
     /// Bitflags for SOR sweep types and options.
@@ -365,7 +365,9 @@ impl ObjPreconditioner for SorPc {
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("SOR not setup".into()))?;
         if x.len() != self.n || y.len() != self.n {
-            return Err(KError::InvalidInput("dimension mismatch in SorPc::apply".into()));
+            return Err(KError::InvalidInput(
+                "dimension mismatch in SorPc::apply".into(),
+            ));
         }
         for _ in 0..self.sweeps {
             match (side, self.mat_side) {

@@ -1,8 +1,8 @@
 #[derive(Clone, Debug)]
 pub struct RowWork {
-    pub mark: Vec<i32>,   // n, initialized to -1
-    pub idx: Vec<usize>,  // positions used in this row
-    pub val: Vec<f64>,    // values aligned with idx
+    pub mark: Vec<i32>,  // n, initialized to -1
+    pub idx: Vec<usize>, // positions used in this row
+    pub val: Vec<f64>,   // values aligned with idx
 }
 
 pub fn ensure_rowwork(w: &mut RowWork, n: usize) {
@@ -35,4 +35,3 @@ pub fn clear_rowwork(w: &mut RowWork) {
     w.idx.clear();
     w.val.clear();
 }
-

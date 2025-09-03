@@ -1,5 +1,5 @@
-use crate::parallel::{Comm, UniverseComm};
 use super::Global;
+use crate::parallel::{Comm, UniverseComm};
 
 /// Partition `n_global` rows among all ranks in `comm`.
 ///

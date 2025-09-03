@@ -6,14 +6,16 @@
 //! - Help now generated from registry: `print_help()`
 //! - Boolean flags accept presence or explicit on/off/true/false/1/0
 
+use crate::config::kinds;
 use crate::error::KError;
-use crate::config::kinds as kinds;
 use std::str::FromStr;
 
-use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
 use crate::config::options_core::is_help_requested;
+use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
-use crate::preconditioner::ilu_options::{IluOptions, IluKind, ReorderingType, TriSolveType, PivotPolicy, IterativeSetupType, Overlay};
+use crate::preconditioner::ilu_options::{
+    IluKind, IluOptions, IterativeSetupType, Overlay, PivotPolicy, ReorderingType, TriSolveType,
+};
 
 /// KSP (Krylov Solver) options.
 #[derive(Debug, Default, Clone)]
@@ -140,7 +142,7 @@ pub struct PcOptions {
     /// Structured ILU options (new schema).
     pub ilu: IluOptions,
     // ---- Approximate inverse (CSR) ----
-    pub approxinv_kind: Option<String>,        // "fsai" | "spai"
+    pub approxinv_kind: Option<String>, // "fsai" | "spai"
     pub approxinv_levels: Option<usize>,
     pub approxinv_max_per_col: Option<usize>,
     pub approxinv_drop_tol: Option<f64>,
@@ -516,20 +518,19 @@ impl Sink for PcOptions {
             "pc_reuse_policy" => set_opt!(&mut self.reuse_policy, v.to_string()),
             // Approximate inverse (CSR) numeric/structure controls
             "pc_approxinv_kind" => set_opt!(&mut self.approxinv_kind, v.to_lowercase()),
-            "pc_approxinv_levels" => set_opt!(&mut self.approxinv_levels, parse_as::<usize>(v, spec)?),
-            "pc_approxinv_max_per_col" => set_opt!(
-                &mut self.approxinv_max_per_col,
-                parse_as::<usize>(v, spec)?
-            ),
-            "pc_approxinv_drop_tol" => set_opt!(
-                &mut self.approxinv_drop_tol,
-                parse_as::<f64>(v, spec)?
-            ),
+            "pc_approxinv_levels" => {
+                set_opt!(&mut self.approxinv_levels, parse_as::<usize>(v, spec)?)
+            }
+            "pc_approxinv_max_per_col" => {
+                set_opt!(&mut self.approxinv_max_per_col, parse_as::<usize>(v, spec)?)
+            }
+            "pc_approxinv_drop_tol" => {
+                set_opt!(&mut self.approxinv_drop_tol, parse_as::<f64>(v, spec)?)
+            }
             "pc_approxinv_reg" => set_opt!(&mut self.approxinv_reg, parse_as::<f64>(v, spec)?),
-            "pc_approxinv_max_cond" => set_opt!(
-                &mut self.approxinv_max_cond,
-                parse_as::<f64>(v, spec)?
-            ),
+            "pc_approxinv_max_cond" => {
+                set_opt!(&mut self.approxinv_max_cond, parse_as::<f64>(v, spec)?)
+            }
             "options_file" => Ok(()), // consumed earlier
             _ => Err(KError::SolveError(format!("Unknown PC key: {}", spec.key))),
         }
@@ -612,9 +613,9 @@ impl KspOptions {
             me.restart = Some(ensure_ge_1("KRYST_KSP_RESTART", n)?);
         }
         if let Ok(v) = std::env::var("KRYST_KSP_GMRES_RESTART") {
-            let n: usize = v.parse().map_err(|_| {
-                KError::SolveError(format!("Invalid KRYST_KSP_GMRES_RESTART: {v}"))
-            })?;
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_GMRES_RESTART: {v}")))?;
             me.gmres_restart = Some(ensure_ge_1("KRYST_KSP_GMRES_RESTART", n)?);
         }
         if let Ok(v) = std::env::var("KRYST_KSP_FGMRES_RESTART") {
@@ -703,7 +704,10 @@ impl PcOptions {
                 "ilut" => {
                     let droptol = self.ilu_offdiag_drop_tolerance.unwrap_or(0.0);
                     let max_fill = self.ilu_max_fill_per_row.unwrap_or(0) as u32;
-                    self.ilu.kind = IluKind::ILUT { droptol, max_fill_per_row: max_fill };
+                    self.ilu.kind = IluKind::ILUT {
+                        droptol,
+                        max_fill_per_row: max_fill,
+                    };
                 }
                 _ => {}
             }
@@ -726,7 +730,10 @@ impl PcOptions {
             if t == "iterative" {
                 let l = self.ilu_lower_jacobi_iters.unwrap_or(0) as u32;
                 let u = self.ilu_upper_jacobi_iters.unwrap_or(0) as u32;
-                self.ilu.tri_solve.kind = TriSolveType::Iterative { lower_jacobi_iters: l, upper_jacobi_iters: u };
+                self.ilu.tri_solve.kind = TriSolveType::Iterative {
+                    lower_jacobi_iters: l,
+                    upper_jacobi_iters: u,
+                };
             } else {
                 self.ilu.tri_solve.kind = TriSolveType::Exact;
             }
@@ -784,16 +791,36 @@ impl PcOptions {
         let mut me = Self::default();
         registry().parse_into(args, &mut me, Some("-pc_"))?;
         // enum validations (centralized)
-        if let Some(ref t) = me.reorder { kinds::ReorderKind::from_str(t)?; }
-        if let Some(ref s) = me.scaling { kinds::ScalingKind::from_str(s)?; }
-        if let Some(ref t) = me.ilu_type { kinds::IluTypeKind::from_str(t)?; }
-        if let Some(ref t) = me.ilu_reordering_type { kinds::IluReorderKind::from_str(t)?; }
-        if let Some(ref t) = me.ilu_triangular_solve { kinds::IluTriSolveKind::from_str(t)?; }
-        if let Some(ref t) = me.amg_coarsen_type { kinds::AmgCoarsenKind::from_str(t)?; }
-        if let Some(ref t) = me.amg_interp_type { kinds::AmgInterpKind::from_str(t)?; }
-        if let Some(ref t) = me.amg_relax_type { kinds::AmgRelaxKind::from_str(t)?; }
-        if let Some(ref t) = me.asm_block_solver { kinds::AsmBlockSolverKind::from_str(t)?; }
-        if let Some(ref t) = me.asm_mode { kinds::AsmModeKind::from_str(t)?; }
+        if let Some(ref t) = me.reorder {
+            kinds::ReorderKind::from_str(t)?;
+        }
+        if let Some(ref s) = me.scaling {
+            kinds::ScalingKind::from_str(s)?;
+        }
+        if let Some(ref t) = me.ilu_type {
+            kinds::IluTypeKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.ilu_reordering_type {
+            kinds::IluReorderKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.ilu_triangular_solve {
+            kinds::IluTriSolveKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.amg_coarsen_type {
+            kinds::AmgCoarsenKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.amg_interp_type {
+            kinds::AmgInterpKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.amg_relax_type {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.asm_block_solver {
+            kinds::AsmBlockSolverKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.asm_mode {
+            kinds::AsmModeKind::from_str(t)?;
+        }
         me.sync_ilu_all();
         Ok(me)
     }
@@ -1020,7 +1047,7 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 mod tests {
     use super::*;
     use crate::error::KError;
-    use crate::preconditioner::ilu_options::{IluKind, ReorderingType, TriSolveType, PivotPolicy};
+    use crate::preconditioner::ilu_options::{IluKind, PivotPolicy, ReorderingType, TriSolveType};
 
     #[test]
     fn ksp_bool_toggle() {
@@ -1081,10 +1108,7 @@ mod tests {
         let k = parse_with_layers("-ksp_fgmres_restart 20\n", &["-ksp_fgmres_restart", "80"]);
         assert_eq!(k.fgmres_restart, Some(80));
 
-        let k = parse_with_layers(
-            "-ksp_fgmres_orthog mgs\n",
-            &["-ksp_fgmres_orthog", "cgs"],
-        );
+        let k = parse_with_layers("-ksp_fgmres_orthog mgs\n", &["-ksp_fgmres_orthog", "cgs"]);
         assert_eq!(k.fgmres_orthog.as_deref(), Some("cgs"));
 
         let k = parse_with_layers(
@@ -1100,7 +1124,10 @@ mod tests {
         assert_eq!(k.fgmres_happy_breakdown, Some(true));
 
         // CG
-        let k = parse_with_layers("-ksp_cg_norm preconditioned\n", &["-ksp_cg_norm", "natural"]);
+        let k = parse_with_layers(
+            "-ksp_cg_norm preconditioned\n",
+            &["-ksp_cg_norm", "natural"],
+        );
         assert_eq!(k.cg_norm.as_deref(), Some("natural"));
 
         let k = parse_with_layers(
@@ -1136,11 +1163,7 @@ mod tests {
         let a = tempfile::NamedTempFile::new().unwrap();
         let b = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(b.path(), "-pc_type amg\n").unwrap();
-        std::fs::write(
-            a.path(),
-            format!("-options_file {}\n", b.path().display()),
-        )
-        .unwrap();
+        std::fs::write(a.path(), format!("-options_file {}\n", b.path().display())).unwrap();
 
         let args = vec![
             "-options_file".to_string(),
@@ -1158,18 +1181,13 @@ mod tests {
         // A includes B; B includes A
         let a = tempfile::NamedTempFile::new().unwrap();
         let b = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            a.path(),
-            format!("-options_file {}\n", b.path().display()),
-        )
-        .unwrap();
-        std::fs::write(
-            b.path(),
-            format!("-options_file {}\n", a.path().display()),
-        )
-        .unwrap();
+        std::fs::write(a.path(), format!("-options_file {}\n", b.path().display())).unwrap();
+        std::fs::write(b.path(), format!("-options_file {}\n", a.path().display())).unwrap();
 
-        let args = vec!["-options_file".to_string(), a.path().to_string_lossy().into_owned()];
+        let args = vec![
+            "-options_file".to_string(),
+            a.path().to_string_lossy().into_owned(),
+        ];
         let err = parse_all_options(&args).unwrap_err();
         match err {
             KError::SolveError(msg) => assert!(msg.to_lowercase().contains("cyclic")),
@@ -1306,12 +1324,7 @@ mod old_tests {
 
     #[test]
     fn generic_then_specific_precedence() {
-        let args = vec![
-            "-ksp_restart",
-            "30",
-            "-ksp_gmres_restart",
-            "60",
-        ];
+        let args = vec!["-ksp_restart", "30", "-ksp_gmres_restart", "60"];
         let opts = KspOptions::from_args(&args).unwrap();
         assert_eq!(opts.restart, Some(30));
         assert_eq!(opts.gmres_restart, Some(60));
@@ -1501,7 +1514,12 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid amgcoarsenkind") || lo.contains("invalid amg_coarsen_type") || lo.contains("invalid pc_amg_coarsen_type") || lo.contains("invalid amg"));
+            assert!(
+                lo.contains("invalid amgcoarsenkind")
+                    || lo.contains("invalid amg_coarsen_type")
+                    || lo.contains("invalid pc_amg_coarsen_type")
+                    || lo.contains("invalid amg")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid coarsen type");
@@ -1516,7 +1534,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid amginterpkind") || lo.contains("invalid amg_interp_type") || lo.contains("invalid pc_amg_interp_type"));
+            assert!(
+                lo.contains("invalid amginterpkind")
+                    || lo.contains("invalid amg_interp_type")
+                    || lo.contains("invalid pc_amg_interp_type")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid interpolation type");
@@ -1531,7 +1553,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid amgrelaxkind") || lo.contains("invalid amg_relax_type") || lo.contains("invalid pc_amg_relax_type"));
+            assert!(
+                lo.contains("invalid amgrelaxkind")
+                    || lo.contains("invalid amg_relax_type")
+                    || lo.contains("invalid pc_amg_relax_type")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid relaxation type");
@@ -1614,7 +1640,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid reorderkind") || lo.contains("invalid pc_reorder") || lo.contains("invalid reorder"));
+            assert!(
+                lo.contains("invalid reorderkind")
+                    || lo.contains("invalid pc_reorder")
+                    || lo.contains("invalid reorder")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid reorder type");
@@ -1629,7 +1659,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid scalingkind") || lo.contains("invalid pc_scaling") || lo.contains("invalid scaling"));
+            assert!(
+                lo.contains("invalid scalingkind")
+                    || lo.contains("invalid pc_scaling")
+                    || lo.contains("invalid scaling")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid scaling type");
@@ -1704,13 +1738,23 @@ mod old_tests {
         assert_eq!(opts.ilu_pivot_monitoring, Some(false));
         assert_eq!(opts.ilu_optimize_workspace, Some(true));
         assert_eq!(opts.ilu_pivot_threshold, Some(1e-10));
-        assert!(matches!(opts.ilu.kind, IluKind::ILUT { droptol, max_fill_per_row } if (droptol - 1e-5).abs() < 1e-12 && max_fill_per_row == 50));
+        assert!(
+            matches!(opts.ilu.kind, IluKind::ILUT { droptol, max_fill_per_row } if (droptol - 1e-5).abs() < 1e-12 && max_fill_per_row == 50)
+        );
         assert_eq!(opts.ilu.reordering, ReorderingType::RCM);
-        assert!(matches!(opts.ilu.tri_solve.kind, TriSolveType::Iterative { lower_jacobi_iters: 2, upper_jacobi_iters: 3 }));
+        assert!(matches!(
+            opts.ilu.tri_solve.kind,
+            TriSolveType::Iterative {
+                lower_jacobi_iters: 2,
+                upper_jacobi_iters: 3
+            }
+        ));
         assert!((opts.ilu.iterative_setup.tol - 1e-8).abs() < 1e-12);
         assert_eq!(opts.ilu.iterative_setup.max_iter, 10);
         assert_eq!(opts.ilu.logging_level, 2);
-        assert!(matches!(opts.ilu.pivot, PivotPolicy::Threshold { tau } if (tau - 1e-10).abs() < 1e-12));
+        assert!(
+            matches!(opts.ilu.pivot, PivotPolicy::Threshold { tau } if (tau - 1e-10).abs() < 1e-12)
+        );
     }
 
     #[test]
@@ -1721,7 +1765,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid ilutypekind") || lo.contains("invalid pc_ilu_type") || lo.contains("invalid ilu_type"));
+            assert!(
+                lo.contains("invalid ilutypekind")
+                    || lo.contains("invalid pc_ilu_type")
+                    || lo.contains("invalid ilu_type")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid ILU type");
@@ -1736,7 +1784,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid ilureorderkind") || lo.contains("invalid pc_ilu_reordering_type") || lo.contains("invalid ilu_reordering_type"));
+            assert!(
+                lo.contains("invalid ilureorderkind")
+                    || lo.contains("invalid pc_ilu_reordering_type")
+                    || lo.contains("invalid ilu_reordering_type")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid ILU reordering type");
@@ -1751,7 +1803,11 @@ mod old_tests {
 
         if let Err(KError::SolveError(msg)) = result {
             let lo = msg.to_lowercase();
-            assert!(lo.contains("invalid ilutrisolvekind") || lo.contains("invalid pc_ilu_triangular_solve") || lo.contains("invalid ilu_triangular_solve"));
+            assert!(
+                lo.contains("invalid ilutrisolvekind")
+                    || lo.contains("invalid pc_ilu_triangular_solve")
+                    || lo.contains("invalid ilu_triangular_solve")
+            );
             assert!(lo.contains("allowed"));
         } else {
             panic!("Expected SolveError for invalid ILU triangular solve type");

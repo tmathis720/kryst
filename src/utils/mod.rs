@@ -1,5 +1,6 @@
 //! Utility modules for logging, convergence checks, graph coloring, reordering, and profiling.
 
+pub mod buffer_pool;
 pub mod coloring;
 pub mod convergence;
 pub mod matrix_market;
@@ -10,7 +11,6 @@ pub mod partition;
 pub mod permutation;
 pub mod profiling;
 pub mod reordering;
-pub mod buffer_pool;
 #[cfg(feature = "tuning")]
 pub mod tuning;
 

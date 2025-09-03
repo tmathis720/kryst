@@ -1,6 +1,6 @@
 use kryst::LinOp;
-use kryst::matrix::sparse::CsrMatrix;
 use kryst::matrix::dist_csr::DistCsrOp;
+use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{NoComm, UniverseComm};
 
 #[test]
@@ -30,7 +30,9 @@ fn dist_try_matvec_returns_error_on_bad_dims() {
 
     let err = op.try_matvec(&x, &mut y).unwrap_err();
     match err {
-        kryst::error::KError::InvalidInput(msg) => assert!(msg.to_lowercase().contains("dimension")),
+        kryst::error::KError::InvalidInput(msg) => {
+            assert!(msg.to_lowercase().contains("dimension"))
+        }
         other => panic!("unexpected error: {:?}", other),
     }
 }

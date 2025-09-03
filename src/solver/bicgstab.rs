@@ -36,16 +36,27 @@ pub struct BiCgStabSolver {
 
 impl BiCgStabSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { rtol, atol: 1e-12, dtol: 1e3, maxits }
+        Self {
+            rtol,
+            atol: 1e-12,
+            dtol: 1e3,
+            maxits,
+        }
     }
 
     #[inline]
-    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 { comm.dot(x, y) }
+    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 {
+        comm.dot(x, y)
+    }
     #[inline]
-    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 { Self::dot(x, x, comm).sqrt() }
+    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
+        Self::dot(x, x, comm).sqrt()
+    }
 
     fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
-        if buf.len() != n { buf.resize(n, 0.0); }
+        if buf.len() != n {
+            buf.resize(n, 0.0);
+        }
     }
 
     /// Acquire all work vectors from the Workspace (no steady-state allocs).
@@ -70,25 +81,39 @@ impl BiCgStabSolver {
         Self::take_or_resize(&mut work.tmp1, n); // r
         Self::take_or_resize(&mut work.tmp2, n); // r_hat
         let need_q = if need_v_raw { 5 } else { 4 };
-        while work.q.len() < need_q { work.q.push(Vec::new()); }
-        for k in 0..need_q { Self::take_or_resize(&mut work.q[k], n); }
-        let r      = &mut work.tmp1[..];
-        let r_hat  = &mut work.tmp2[..];
+        while work.q.len() < need_q {
+            work.q.push(Vec::new());
+        }
+        for k in 0..need_q {
+            Self::take_or_resize(&mut work.q[k], n);
+        }
+        let r = &mut work.tmp1[..];
+        let r_hat = &mut work.tmp2[..];
         let (q0, rest) = work.q.split_at_mut(1);
         let (q1, rest) = rest.split_at_mut(1);
         let (q2, rest) = rest.split_at_mut(1);
-        let (q3, q_more)   = rest.split_at_mut(1);
-        let v      = &mut q0[0][..];
-        let p      = &mut q1[0][..];
-        let s      = &mut q2[0][..];
-        let t      = &mut q3[0][..];
+        let (q3, q_more) = rest.split_at_mut(1);
+        let v = &mut q0[0][..];
+        let p = &mut q1[0][..];
+        let s = &mut q2[0][..];
+        let t = &mut q3[0][..];
         let z = if need_z {
-            while work.z.len() < 2 { work.z.push(Vec::new()); }
-            for k in 0..2 { Self::take_or_resize(&mut work.z[k], n); }
+            while work.z.len() < 2 {
+                work.z.push(Vec::new());
+            }
+            for k in 0..2 {
+                Self::take_or_resize(&mut work.z[k], n);
+            }
             let (z0, z1) = work.z.split_at_mut(1);
             Some((&mut z0[0][..], &mut z1[0][..]))
-        } else { None };
-        let v_raw = if need_v_raw { Some(&mut q_more[0][..]) } else { None };
+        } else {
+            None
+        };
+        let v_raw = if need_v_raw {
+            Some(&mut q_more[0][..])
+        } else {
+            None
+        };
         (r, r_hat, v, p, s, t, z, v_raw)
     }
 }
@@ -96,10 +121,14 @@ impl BiCgStabSolver {
 impl LinearSolver for BiCgStabSolver {
     type Error = KError;
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
-        if w.q.len() < 4 { w.q.resize(4, Vec::new()); }
+        if w.q.len() < 4 {
+            w.q.resize(4, Vec::new());
+        }
     }
 
     fn solve(
@@ -118,12 +147,17 @@ impl LinearSolver for BiCgStabSolver {
 
         let (m, n) = a.dims();
         if m != n || b.len() != n || x.len() != n {
-            return Err(KError::InvalidInput("BiCGStab: square operator and matching b,x required".into()));
+            return Err(KError::InvalidInput(
+                "BiCGStab: square operator and matching b,x required".into(),
+            ));
         }
         let mons = monitors.unwrap_or(&[]);
 
         // Acquire workspace (required to avoid allocs)
-        let side = match pc_side { PcSide::Symmetric => PcSide::Left, s => s };
+        let side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
         let w = work.ok_or_else(|| KError::InvalidInput("BiCGStab requires a Workspace".into()))?;
         let need_right = matches!(side, PcSide::Right) && pc.is_some();
         let need_left = matches!(side, PcSide::Left) && pc.is_some();
@@ -132,12 +166,17 @@ impl LinearSolver for BiCgStabSolver {
         let (r, r_hat, v, p, s, t, zopt, mut v_raw_opt) = Self::acquire(n, w, need_z, need_v_raw);
         let mut z_p_opt: Option<&mut [f64]> = None;
         let mut z_s_opt: Option<&mut [f64]> = None;
-        if let Some((zp, zs)) = zopt { z_p_opt = Some(zp); z_s_opt = Some(zs); }
+        if let Some((zp, zs)) = zopt {
+            z_p_opt = Some(zp);
+            z_s_opt = Some(zs);
+        }
 
         // r = b - A x
         if x.iter().any(|&xi| xi != 0.0) {
-            a.matvec(x, v);                // reuse v as Ax
-            for i in 0..n { r[i] = b[i] - v[i]; }
+            a.matvec(x, v); // reuse v as Ax
+            for i in 0..n {
+                r[i] = b[i] - v[i];
+            }
         } else {
             r.copy_from_slice(b);
         }
@@ -153,7 +192,7 @@ impl LinearSolver for BiCgStabSolver {
                     zs.copy_from_slice(r);
                 }
                 r_hat.copy_from_slice(zs); // shadow residual = z0
-                s.copy_from_slice(zs);     // current z stored in s
+                s.copy_from_slice(zs); // current z stored in s
                 res0 = Self::nrm2(s, comm);
                 // Initialize p := z
                 p.copy_from_slice(s);
@@ -166,64 +205,97 @@ impl LinearSolver for BiCgStabSolver {
         } else {
             // r_hat = r (fixed shadow residual)
             r_hat.copy_from_slice(r);
-            res0  = Self::nrm2(r, comm);
+            res0 = Self::nrm2(r, comm);
             // Initialize p := r
             p.copy_from_slice(r);
         }
         let bnorm = Self::nrm2(b, comm).max(1e-32);
-        let thr   = self.atol.max(self.rtol * bnorm);
+        let thr = self.atol.max(self.rtol * bnorm);
 
-        if !mons.is_empty() { for m in mons { m(0, res0); } }
+        if !mons.is_empty() {
+            for m in mons {
+                m(0, res0);
+            }
+        }
         if res0 <= thr {
             return Ok(SolveStats {
                 iterations: 0,
                 final_residual: res0,
-                reason: if res0 <= self.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol },
+                reason: if res0 <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                },
             });
         }
 
         // Parameters
-        let mut rho_prev   = 1.0;
-        let mut alpha      = 1.0;
+        let mut rho_prev = 1.0;
+        let mut alpha = 1.0;
         let mut omega_prev = 1.0;
 
         // Breakdown epsilons (relative-safe)
-        let eps_rho   = 1e-30_f64;
+        let eps_rho = 1e-30_f64;
         let eps_alpha = 1e-30_f64;
         let eps_omega = 1e-30_f64;
 
-        let mut stats = SolveStats { iterations: 0, final_residual: res0, reason: ConvergedReason::Continued };
+        let mut stats = SolveStats {
+            iterations: 0,
+            final_residual: res0,
+            reason: ConvergedReason::Continued,
+        };
 
         for k in 1..=self.maxits {
             // ρ_k = <r_hat, r> (Right/unpreconditioned) or <r_hat, z> (Left)
-            let rho = if need_left { Self::dot(r_hat, s, comm) } else { Self::dot(r_hat, r, comm) };
+            let rho = if need_left {
+                Self::dot(r_hat, s, comm)
+            } else {
+                Self::dot(r_hat, r, comm)
+            };
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {}", k);
                 stats.iterations = k - 1;
-                stats.final_residual = if need_left { Self::nrm2(s, comm) } else { Self::nrm2(r, comm) };
+                stats.final_residual = if need_left {
+                    Self::nrm2(s, comm)
+                } else {
+                    Self::nrm2(r, comm)
+                };
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
 
             // β = (ρ/ρ_{k-1}) * (α/ω_{k-1});
-            let beta = if k == 1 { 0.0 } else { (rho / rho_prev) * (alpha / omega_prev) };
+            let beta = if k == 1 {
+                0.0
+            } else {
+                (rho / rho_prev) * (alpha / omega_prev)
+            };
             if need_left {
                 // p = z + β (p − ω ṽ)
-                for i in 0..n { p[i] = s[i] + beta * (p[i] - omega_prev * v[i]); }
+                for i in 0..n {
+                    p[i] = s[i] + beta * (p[i] - omega_prev * v[i]);
+                }
             } else {
                 // p = r + β (p − ω v)
-                for i in 0..n { p[i] = r[i] + beta * (p[i] - omega_prev * v[i]); }
+                for i in 0..n {
+                    p[i] = r[i] + beta * (p[i] - omega_prev * v[i]);
+                }
             }
 
             if need_left {
                 // y = M^{-1} p (use z_p buffer)
                 let yp = match (pc.as_deref(), z_p_opt.as_deref_mut()) {
-                    (Some(pc), Some(zp)) => { pc.apply(PcSide::Left, p, zp)?; zp }
+                    (Some(pc), Some(zp)) => {
+                        pc.apply(PcSide::Left, p, zp)?;
+                        zp
+                    }
                     _ => p,
                 };
                 // v_raw = A y
-                let vr = v_raw_opt.as_deref_mut().expect("workspace: missing v_raw buffer");
+                let vr = v_raw_opt
+                    .as_deref_mut()
+                    .expect("workspace: missing v_raw buffer");
                 a.matvec(yp, vr);
                 // ṽ = M^{-1} v_raw -> store in v
                 if let Some(pc) = pc.as_deref() {
@@ -250,7 +322,11 @@ impl LinearSolver for BiCgStabSolver {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {}", k);
                 stats.iterations = k - 1;
-                stats.final_residual = if need_left { Self::nrm2(s, comm) } else { Self::nrm2(r, comm) };
+                stats.final_residual = if need_left {
+                    Self::nrm2(s, comm)
+                } else {
+                    Self::nrm2(r, comm)
+                };
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
@@ -258,33 +334,60 @@ impl LinearSolver for BiCgStabSolver {
 
             if need_left {
                 // s = z − α ṽ (reuse s buffer which held z)
-                for i in 0..n { s[i] = s[i] - alpha * v[i]; }
+                for i in 0..n {
+                    s[i] = s[i] - alpha * v[i];
+                }
             } else {
                 // s = r − α v
-                for i in 0..n { s[i] = r[i] - alpha * v[i]; }
+                for i in 0..n {
+                    s[i] = r[i] - alpha * v[i];
+                }
             }
 
             // Early exit if ||s|| is tiny
             let s_norm = Self::nrm2(s, comm);
-            if !mons.is_empty() { for m in mons { m(k, s_norm); } }
+            if !mons.is_empty() {
+                for m in mons {
+                    m(k, s_norm);
+                }
+            }
             if s_norm <= thr {
                 if need_left {
-                    if let Some(yp) = z_p_opt.as_deref() { for i in 0..n { x[i] += alpha * yp[i]; } }
-                    else { for i in 0..n { x[i] += alpha * p[i]; } }
+                    if let Some(yp) = z_p_opt.as_deref() {
+                        for i in 0..n {
+                            x[i] += alpha * yp[i];
+                        }
+                    } else {
+                        for i in 0..n {
+                            x[i] += alpha * p[i];
+                        }
+                    }
                 } else {
-                    for i in 0..n { x[i] += alpha * p[i]; }
+                    for i in 0..n {
+                        x[i] += alpha * p[i];
+                    }
                 }
                 stats.iterations = k;
                 stats.final_residual = s_norm;
-                stats.reason = if s_norm <= self.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol };
+                stats.reason = if s_norm <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                };
                 return Ok(stats);
             }
 
             // t path
             if need_left {
                 // tpre = M^{-1} s (use z_s buffer), then At = A tpre -> store in t
-                let zs = z_s_opt.as_deref_mut().expect("workspace: missing z_s buffer");
-                if let Some(pc) = pc.as_deref() { pc.apply(PcSide::Left, s, zs)?; } else { zs.copy_from_slice(s); }
+                let zs = z_s_opt
+                    .as_deref_mut()
+                    .expect("workspace: missing z_s buffer");
+                if let Some(pc) = pc.as_deref() {
+                    pc.apply(PcSide::Left, s, zs)?;
+                } else {
+                    zs.copy_from_slice(s);
+                }
                 a.matvec(zs, t);
             } else {
                 // t = A s (Right PC: t = A (M^{-1} s))
@@ -324,18 +427,38 @@ impl LinearSolver for BiCgStabSolver {
                 let y = z_p_opt.as_deref();
                 let tpre = z_s_opt.as_deref();
                 match (y, tpre) {
-                    (Some(y), Some(tpre)) => { for i in 0..n { x[i] += alpha * y[i] + omega * tpre[i]; } }
-                    (Some(y), None) => { for i in 0..n { x[i] += alpha * y[i] + omega * s[i]; } }
-                    (None, Some(tpre)) => { for i in 0..n { x[i] += alpha * p[i] + omega * tpre[i]; } }
-                    (None, None) => { for i in 0..n { x[i] += alpha * p[i] + omega * s[i]; } }
+                    (Some(y), Some(tpre)) => {
+                        for i in 0..n {
+                            x[i] += alpha * y[i] + omega * tpre[i];
+                        }
+                    }
+                    (Some(y), None) => {
+                        for i in 0..n {
+                            x[i] += alpha * y[i] + omega * s[i];
+                        }
+                    }
+                    (None, Some(tpre)) => {
+                        for i in 0..n {
+                            x[i] += alpha * p[i] + omega * tpre[i];
+                        }
+                    }
+                    (None, None) => {
+                        for i in 0..n {
+                            x[i] += alpha * p[i] + omega * s[i];
+                        }
+                    }
                 }
             } else {
                 match (side, pc.as_deref(), z_p_opt.as_deref(), z_s_opt.as_deref()) {
                     (PcSide::Right, Some(_), Some(zp), Some(zs)) => {
-                        for i in 0..n { x[i] += alpha * zp[i] + omega * zs[i]; }
+                        for i in 0..n {
+                            x[i] += alpha * zp[i] + omega * zs[i];
+                        }
                     }
                     _ => {
-                        for i in 0..n { x[i] += alpha * p[i] + omega * s[i]; }
+                        for i in 0..n {
+                            x[i] += alpha * p[i] + omega * s[i];
+                        }
                     }
                 }
             }
@@ -343,25 +466,49 @@ impl LinearSolver for BiCgStabSolver {
             // r update (true residual)
             if need_left {
                 // r = r − α v_raw − ω (A tpre) = r − α v_raw − ω t
-                let vr = v_raw_opt.as_deref().expect("workspace: missing v_raw buffer");
-                for i in 0..n { r[i] -= alpha * vr[i] + omega * t[i]; }
+                let vr = v_raw_opt
+                    .as_deref()
+                    .expect("workspace: missing v_raw buffer");
+                for i in 0..n {
+                    r[i] -= alpha * vr[i] + omega * t[i];
+                }
                 // z = M^{-1} r for next iteration
-                let zs = z_s_opt.as_deref_mut().expect("workspace: missing z_s buffer");
-                if let Some(pc) = pc.as_deref() { pc.apply(PcSide::Left, r, zs)?; } else { zs.copy_from_slice(r); }
+                let zs = z_s_opt
+                    .as_deref_mut()
+                    .expect("workspace: missing z_s buffer");
+                if let Some(pc) = pc.as_deref() {
+                    pc.apply(PcSide::Left, r, zs)?;
+                } else {
+                    zs.copy_from_slice(r);
+                }
                 s.copy_from_slice(zs);
             } else {
                 // r = s − ω t
-                for i in 0..n { r[i] = s[i] - omega * t[i]; }
+                for i in 0..n {
+                    r[i] = s[i] - omega * t[i];
+                }
             }
 
             // check convergence on true ||r||
-            let r_norm = if need_left { Self::nrm2(s, comm) } else { Self::nrm2(r, comm) };
-            if !mons.is_empty() { for m in mons { m(k, r_norm); } }
+            let r_norm = if need_left {
+                Self::nrm2(s, comm)
+            } else {
+                Self::nrm2(r, comm)
+            };
+            if !mons.is_empty() {
+                for m in mons {
+                    m(k, r_norm);
+                }
+            }
 
             if r_norm <= thr {
                 stats.iterations = k;
                 stats.final_residual = r_norm;
-                stats.reason = if r_norm <= self.atol { ConvergedReason::ConvergedAtol } else { ConvergedReason::ConvergedRtol };
+                stats.reason = if r_norm <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                };
                 return Ok(stats);
             }
             if !r_norm.is_finite() || r_norm >= self.dtol * bnorm {
@@ -377,7 +524,11 @@ impl LinearSolver for BiCgStabSolver {
 
         // Max iters
         let r_norm = Self::nrm2(r, comm);
-        Ok(SolveStats { iterations: self.maxits, final_residual: r_norm, reason: ConvergedReason::DivergedMaxIts })
+        Ok(SolveStats {
+            iterations: self.maxits,
+            final_residual: r_norm,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }
 
@@ -390,11 +541,19 @@ mod tests {
     // Helper: random well-conditioned non-symmetric 3x3 matrix
     fn nonsym_3x3() -> (Mat<f64>, Vec<f64>) {
         let a = Mat::from_fn(3, 3, |i, j| {
-            if i == j { 4.0 } else { (i + 2 * j) as f64 + 1.0 }
+            if i == j {
+                4.0
+            } else {
+                (i + 2 * j) as f64 + 1.0
+            }
         });
         let x_true = vec![1.0, 2.0, 3.0];
         let mut b = vec![0.0; 3];
-        for i in 0..3 { for j in 0..3 { b[i] += a[(i, j)] * x_true[j]; } }
+        for i in 0..3 {
+            for j in 0..3 {
+                b[i] += a[(i, j)] * x_true[j];
+            }
+        }
         (a, b)
     }
 
@@ -446,7 +605,9 @@ mod tests {
     }
     impl crate::matrix::op::LinOp for ScriptedOp {
         type S = f64;
-        fn dims(&self) -> (usize, usize) { (self.n, self.n) }
+        fn dims(&self) -> (usize, usize) {
+            (self.n, self.n)
+        }
         fn matvec(&self, _x: &[f64], y: &mut [f64]) {
             use std::sync::atomic::Ordering;
             let i = self.idx.fetch_add(1, Ordering::Relaxed);
@@ -456,18 +617,35 @@ mod tests {
                 y.fill(0.0);
             }
         }
-        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     fn run_with_scripted(seq: Vec<Vec<f64>>, b: Vec<f64>) -> SolveStats<f64> {
         let n = b.len();
-        let op = ScriptedOp { n, seq: std::sync::Arc::new(seq), idx: std::sync::atomic::AtomicUsize::new(0) };
+        let op = ScriptedOp {
+            n,
+            seq: std::sync::Arc::new(seq),
+            idx: std::sync::atomic::AtomicUsize::new(0),
+        };
         let mut x = vec![0.0; n];
         let mut solver = BiCgStabSolver::new(1e-10, 50);
         let comm = crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm);
         let mut ws = Workspace::new(n);
         solver.setup_workspace(&mut ws);
-        solver.solve(&op, None, &b, &mut x, crate::preconditioner::PcSide::Left, &comm, None, Some(&mut ws)).unwrap()
+        solver
+            .solve(
+                &op,
+                None,
+                &b,
+                &mut x,
+                crate::preconditioner::PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
+            .unwrap()
     }
 
     #[test]
@@ -497,10 +675,7 @@ mod tests {
     fn bicgstab_omega_zero_breakdown() {
         // r0 = e1; v = [1,1,0] -> s = [0,-1,0]; t = [1,0,0] orthogonal => omega = 0
         let b = vec![1.0, 0.0, 0.0];
-        let seq = vec![
-            vec![1.0, 1.0, 0.0],
-            vec![1.0, 0.0, 0.0],
-        ];
+        let seq = vec![vec![1.0, 1.0, 0.0], vec![1.0, 0.0, 0.0]];
         let stats = run_with_scripted(seq, b);
         assert_eq!(stats.reason, ConvergedReason::DivergedDtol);
     }
@@ -511,8 +686,8 @@ mod tests {
         // r1 = s - 0.5 t = 0.5 e2 - 0.5 e3, orthogonal to r0; next rho=0 ⇒ breakdown
         let b = vec![1.0, 0.0, 0.0];
         let seq = vec![
-            vec![1.0, -1.0, 0.0],     // v = A p
-            vec![0.0, 1.0, 1.0],      // t = A s
+            vec![1.0, -1.0, 0.0], // v = A p
+            vec![0.0, 1.0, 1.0],  // t = A s
         ];
         let stats = run_with_scripted(seq, b);
         assert_eq!(stats.reason, ConvergedReason::DivergedDtol);

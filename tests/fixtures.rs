@@ -35,4 +35,3 @@ pub fn csr_identity(n: usize) -> CsrMatrix<f64> {
     }
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
-

@@ -5,13 +5,13 @@
 //!   to ensure CSC/CSR cache keys include the new `ValuesId`, triggering correct refreshes.
 use std::sync::Arc;
 
-use faer::Mat;
 use crate::matrix::{
     csc::CscMatrix,
     format::{AsFormat, CSC_CACHE, CSR_CACHE, csc_key_from_ptr, key_from_ptr},
     op::{DenseOp, LinOp},
     sparse::CsrMatrix,
 };
+use faer::Mat;
 
 impl AsFormat for CsrMatrix<f64> {
     fn as_csr(&self) -> Option<&CsrMatrix<f64>> {

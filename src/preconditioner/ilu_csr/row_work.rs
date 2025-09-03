@@ -11,7 +11,12 @@ pub struct RowWork<T> {
 
 impl<T: Zero + Copy> RowWork<T> {
     pub fn new() -> Self {
-        Self { epoch: 0, mark: Vec::new(), val: Vec::new(), idx: Vec::new() }
+        Self {
+            epoch: 0,
+            mark: Vec::new(),
+            val: Vec::new(),
+            idx: Vec::new(),
+        }
     }
 
     pub fn ensure_size(&mut self, n: usize) {
@@ -30,7 +35,9 @@ impl<T: Zero + Copy> RowWork<T> {
     pub fn get(&self, j: usize) -> T {
         if self.mark.get(j).copied().unwrap_or(0) == self.epoch {
             self.val[j]
-            } else { T::zero() }
+        } else {
+            T::zero()
+        }
     }
 
     #[inline]
@@ -44,7 +51,9 @@ impl<T: Zero + Copy> RowWork<T> {
 
     #[inline]
     pub fn add_to(&mut self, j: usize, delta: T)
-    where T: std::ops::Add<Output=T> {
+    where
+        T: std::ops::Add<Output = T>,
+    {
         if self.mark.get(j).copied().unwrap_or(0) != self.epoch {
             self.mark[j] = self.epoch;
             self.val[j] = delta;
@@ -54,7 +63,7 @@ impl<T: Zero + Copy> RowWork<T> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item=(usize,T)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (usize, T)> + '_ {
         self.idx.iter().copied().map(|j| (j, self.val[j]))
     }
 }

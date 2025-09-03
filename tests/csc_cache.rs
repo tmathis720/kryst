@@ -31,5 +31,8 @@ fn raw_mat_csc_cache_is_stable_without_values_tracking() {
     let c2 = <Mat<f64> as AsFormat>::to_csc_cached(&m, 0.0);
     let p1 = Arc::as_ptr(&c1) as usize;
     let p2 = Arc::as_ptr(&c2) as usize;
-    assert_eq!(p1, p2, "Raw Mat should reuse the same CSC when values_id is unknown (0)");
+    assert_eq!(
+        p1, p2,
+        "Raw Mat should reuse the same CSC when values_id is unknown (0)"
+    );
 }

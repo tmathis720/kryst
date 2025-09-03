@@ -31,4 +31,3 @@ pub fn reset_alloc_counts() {
     ALLOC_OPS.store(0, Relaxed);
     DEALLOC_OPS.store(0, Relaxed);
 }
-

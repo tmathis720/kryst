@@ -1,5 +1,5 @@
 use super::*;
-use crate::preconditioner::amg::coarsen::{build_aggregates, AggAlgo, AggOpts};
+use crate::preconditioner::amg::coarsen::{AggAlgo, AggOpts, build_aggregates};
 use crate::preconditioner::amg::strength::Strength;
 use std::collections::VecDeque;
 

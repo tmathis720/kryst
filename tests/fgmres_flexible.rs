@@ -3,12 +3,12 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
 use kryst::matrix::op::LinOp;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::solver::FgmresSolver;
-use kryst::context::ksp_context::Workspace;
 
 struct MutableCountPc {
     hits: Arc<AtomicUsize>,

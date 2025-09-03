@@ -1,10 +1,10 @@
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::poisson_2d;
+use crate::preconditioner::Preconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, IlutParams, PivotPolicy, PivotStrategy, Pivoting,
     ReorderingKind, ReorderingOptions,
 };
-use crate::preconditioner::Preconditioner;
 
 fn tridiag_csr(n: usize, a: f64, b: f64, c: f64) -> CsrMatrix<f64> {
     // main diag b, subdiag a, superdiag c

@@ -6,7 +6,7 @@ use crate::matrix::format::FormatHint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
-use crate::utils::permutation::{permute_csr_symmetric, rcm_csr, Permutation};
+use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 use once_cell::sync::OnceCell;
 
 mod csr_builder;

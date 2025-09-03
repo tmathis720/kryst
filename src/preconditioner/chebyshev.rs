@@ -28,14 +28,14 @@
 
 use crate::core::traits::MatVec;
 use crate::error::KError;
-use crate::preconditioner::legacy::Preconditioner;
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
-use crate::matrix::op::LinOp;
 use crate::matrix::convert::csr_from_linop;
+use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::preconditioner::legacy::Preconditioner;
+use faer::Mat;
 use std::sync::Arc;
 use std::sync::Mutex;
-use faer::Mat;
 
 /// Chebyshev polynomial preconditioner struct
 ///
@@ -302,7 +302,11 @@ struct ChebScratch {
 
 impl Default for ChebScratch {
     fn default() -> Self {
-        Self { v0: Vec::new(), v1: Vec::new(), v2: Vec::new() }
+        Self {
+            v0: Vec::new(),
+            v1: Vec::new(),
+            v2: Vec::new(),
+        }
     }
 }
 
@@ -337,13 +341,21 @@ impl ObjPreconditioner for ChebyshevPc {
         self.n = n;
         // ensure scratch
         let mut s = self.scratch.lock().unwrap();
-        if s.v0.len() != n { s.v0.resize(n, 0.0); }
-        if s.v1.len() != n { s.v1.resize(n, 0.0); }
-        if s.v2.len() != n { s.v2.resize(n, 0.0); }
+        if s.v0.len() != n {
+            s.v0.resize(n, 0.0);
+        }
+        if s.v1.len() != n {
+            s.v1.resize(n, 0.0);
+        }
+        if s.v2.len() != n {
+            s.v2.resize(n, 0.0);
+        }
         Ok(())
     }
 
-    fn supports_numeric_update(&self) -> bool { true }
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), crate::error::KError> {
         // For now, refresh CSR view and keep degree/spectrum
@@ -352,11 +364,21 @@ impl ObjPreconditioner for ChebyshevPc {
         Ok(())
     }
 
-    fn apply(&self, _side: crate::preconditioner::PcSide, r: &[f64], z: &mut [f64]) -> Result<(), crate::error::KError> {
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        r: &[f64],
+        z: &mut [f64],
+    ) -> Result<(), crate::error::KError> {
         use crate::error::KError;
-        let a = self.a_csr.as_ref().ok_or_else(|| KError::InvalidInput("ChebyshevPc not setup".into()))?;
+        let a = self
+            .a_csr
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("ChebyshevPc not setup".into()))?;
         if r.len() != self.n || z.len() != self.n {
-            return Err(KError::InvalidInput("dimension mismatch in ChebyshevPc::apply".into()));
+            return Err(KError::InvalidInput(
+                "dimension mismatch in ChebyshevPc::apply".into(),
+            ));
         }
 
         let n = self.n;
@@ -378,9 +400,13 @@ impl ObjPreconditioner for ChebyshevPc {
 
         // v1 = (A r - c r) / d
         a.spmv_scaled(1.0, r, 0.0, &mut s.v1)?;
-        for i in 0..n { s.v1[i] = (s.v1[i] - c * r[i]) / d; }
+        for i in 0..n {
+            s.v1[i] = (s.v1[i] - c * r[i]) / d;
+        }
         if self.degree == 1 {
-            for i in 0..n { z[i] = tau * s.v1[i]; }
+            for i in 0..n {
+                z[i] = tau * s.v1[i];
+            }
             return Ok(());
         }
 
@@ -405,7 +431,9 @@ impl ObjPreconditioner for ChebyshevPc {
             s.v2 = t0;
         }
 
-        for i in 0..n { z[i] = tau * s.v1[i]; }
+        for i in 0..n {
+            z[i] = tau * s.v1[i];
+        }
         Ok(())
     }
 

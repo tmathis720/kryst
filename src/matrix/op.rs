@@ -2,8 +2,8 @@ use crate::error::KError;
 use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StructureId(pub u64);

@@ -31,7 +31,14 @@ const BRK_ABS: f64 = 1e-300;
 
 impl CgsSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
-        Self { conv: Convergence { rtol, atol: 1e-12, dtol: 1e3, max_iters: maxits } }
+        Self {
+            conv: Convergence {
+                rtol,
+                atol: 1e-12,
+                dtol: 1e3,
+                max_iters: maxits,
+            },
+        }
     }
 
     #[inline]
@@ -68,8 +75,12 @@ impl CgsSolver {
     ) {
         Self::take_or_resize(&mut work.tmp1, n); // r
         Self::take_or_resize(&mut work.tmp2, n); // v
-        while work.q.len() < 5 { work.q.push(Vec::new()); }
-        for k in 0..5 { Self::take_or_resize(&mut work.q[k], n); }
+        while work.q.len() < 5 {
+            work.q.push(Vec::new());
+        }
+        for k in 0..5 {
+            Self::take_or_resize(&mut work.q[k], n);
+        }
         let r = &mut work.tmp1[..];
         let v = &mut work.tmp2[..];
         let (u, p, q, upq, w) = {
@@ -77,7 +88,13 @@ impl CgsSolver {
             let (q1, rest) = rest.split_at_mut(1);
             let (q2, rest) = rest.split_at_mut(1);
             let (q3, q4) = rest.split_at_mut(1);
-            (&mut q0[0][..], &mut q1[0][..], &mut q2[0][..], &mut q3[0][..], &mut q4[0][..])
+            (
+                &mut q0[0][..],
+                &mut q1[0][..],
+                &mut q2[0][..],
+                &mut q3[0][..],
+                &mut q4[0][..],
+            )
         };
         (r, v, u, p, q, upq, w)
     }
@@ -167,7 +184,11 @@ impl LinearSolver for CgsSolver {
         let (reason0, s0) = self.conv.check(rnorm, res0_reported, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             // ensure final_residual is true residual (already computed as rnorm)
-            return Ok(SolveStats { iterations: 0, final_residual: rnorm, reason: s0.reason });
+            return Ok(SolveStats {
+                iterations: 0,
+                final_residual: rnorm,
+                reason: s0.reason,
+            });
         }
 
         // CGS parameters
@@ -231,7 +252,11 @@ impl LinearSolver for CgsSolver {
             // convergence / divergence tests against res0_reported
             let (reason, s) = self.conv.check(rnorm, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                return Ok(SolveStats { iterations: k, final_residual: rnorm, reason: s.reason });
+                return Ok(SolveStats {
+                    iterations: k,
+                    final_residual: rnorm,
+                    reason: s.reason,
+                });
             }
 
             // rho, beta updates
@@ -259,6 +284,10 @@ impl LinearSolver for CgsSolver {
         // Max-its: recompute true residual and report divergence
         let mut tmp = vec![0.0; n];
         let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-        Ok(SolveStats { iterations: iters, final_residual: true_res, reason: ConvergedReason::DivergedMaxIts })
+        Ok(SolveStats {
+            iterations: iters,
+            final_residual: true_res,
+            reason: ConvergedReason::DivergedMaxIts,
+        })
     }
 }

@@ -1,5 +1,5 @@
-use num_traits::Zero;
 use crate::algebra::scalar::Scalar;
+use num_traits::Zero;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -11,7 +11,10 @@ pub struct CsrRowBuilder<T> {
 
 impl<T> Default for CsrRowBuilder<T> {
     fn default() -> Self {
-        Self { cols: Vec::new(), vals: Vec::new() }
+        Self {
+            cols: Vec::new(),
+            vals: Vec::new(),
+        }
     }
 }
 
@@ -23,7 +26,10 @@ pub struct CsrBuilder<T> {
 
 impl<T> CsrBuilder<T> {
     pub fn new(n: usize) -> Self {
-        Self { nrows: n, rows: (0..n).map(|_| CsrRowBuilder::<T>::default()).collect() }
+        Self {
+            nrows: n,
+            rows: (0..n).map(|_| CsrRowBuilder::<T>::default()).collect(),
+        }
     }
 
     #[inline]
@@ -182,8 +188,7 @@ impl<S: Scalar, const CAP: usize> IlukRow<S, CAP> {
             }
         }
         let better = lev < self.cand_lev[worst]
-            || (lev == self.cand_lev[worst]
-                && val.abs() > self.cand_val[worst].abs());
+            || (lev == self.cand_lev[worst] && val.abs() > self.cand_val[worst].abs());
         if better {
             self.cand_col[worst] = col;
             self.cand_lev[worst] = lev;
@@ -262,7 +267,11 @@ pub struct IlutRow<S: Scalar> {
 
 impl<S: Scalar> IlutRow<S> {
     pub fn new(p: usize, drop_tol: S::Real) -> Self {
-        Self { p, drop_tol, heap: BinaryHeap::new() }
+        Self {
+            p,
+            drop_tol,
+            heap: BinaryHeap::new(),
+        }
     }
 }
 
@@ -300,4 +309,3 @@ impl<S: Scalar> RowBuilder<S> for IlutRow<S> {
         }
     }
 }
-

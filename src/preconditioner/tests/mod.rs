@@ -50,9 +50,9 @@ fn default_apply_mut_forwards_to_apply() {
     assert_eq!(pc.calls.load(Ordering::Relaxed), 1);
 }
 
+mod classical;
 mod coarsen;
 mod direct_apply;
 mod ilu_csr;
 mod ilu_history;
 mod legacy_bridge;
-mod classical;

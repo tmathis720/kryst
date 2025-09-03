@@ -1,4 +1,4 @@
-use super::scalar::{Scalar, RealScalar};
+use super::scalar::{RealScalar, Scalar};
 
 /// Compute the dot product \(x^\mathrm{H} y\).
 #[inline]

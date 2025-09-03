@@ -141,8 +141,12 @@ impl<'p, 'm> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 
 
 impl<S> LinearSolver for OpSolverAdapter<S>
 where
-    S: for<'a> legacy::LinearSolver<dyn LinOp<S = f64> + 'a, Vec<f64>, Scalar = f64, Error = KError>
-        + Send
+    S: for<'a> legacy::LinearSolver<
+            dyn LinOp<S = f64> + 'a,
+            Vec<f64>,
+            Scalar = f64,
+            Error = KError,
+        > + Send
         + 'static,
 {
     type Error = KError;
@@ -170,9 +174,13 @@ where
         let b_vec = b.to_vec();
         // Coerce &mut dyn Preconditioner -> &dyn Preconditioner for the legacy adapter.
         let pc_adapter = pc.as_deref().map(|p| OpPcAdapter { inner: p });
-        let pc_ref = pc_adapter.as_ref().map(
-            |p| p as &dyn crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + '_, Vec<f64>>,
-        );
+        let pc_ref = pc_adapter.as_ref().map(|p| {
+            p
+                as &dyn crate::preconditioner::legacy::Preconditioner<
+                    dyn LinOp<S = f64> + '_,
+                    Vec<f64>,
+                >
+        });
         let stats = self
             .inner
             .solve(a, pc_ref, &b_vec, &mut x_vec, pc_side, comm, monitors, work)?;
@@ -201,11 +209,11 @@ pub mod minres;
 pub use minres::MinresSolver;
 // Dense direct modules are gated; opt-in via `dense-direct`.
 #[cfg(feature = "dense-direct")]
-pub mod direct_lu;
-#[cfg(feature = "dense-direct")]
 pub mod dense_lu;
 #[cfg(feature = "dense-direct")]
 pub mod dense_qr;
+#[cfg(feature = "dense-direct")]
+pub mod direct_lu;
 
 #[cfg(feature = "dense-direct")]
 pub use direct_lu::{LuSolver, QrSolver};

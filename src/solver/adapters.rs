@@ -10,7 +10,9 @@ pub struct LegacyDirectAdapter<'a, S: CanonicalSolver<CsrMatrix<f64>, f64, Error
 }
 
 impl<'a, S: CanonicalSolver<CsrMatrix<f64>, f64, Error = KError>> LegacyDirectAdapter<'a, S> {
-    pub fn new(inner: &'a mut S, comm: &'a UniverseComm) -> Self { Self { inner, comm } }
+    pub fn new(inner: &'a mut S, comm: &'a UniverseComm) -> Self {
+        Self { inner, comm }
+    }
 }
 
 impl<'a, S: CanonicalSolver<CsrMatrix<f64>, f64, Error = KError>>
@@ -22,7 +24,9 @@ impl<'a, S: CanonicalSolver<CsrMatrix<f64>, f64, Error = KError>>
     fn solve(
         &mut self,
         a: &CsrMatrix<f64>,
-        _pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<CsrMatrix<f64>, Vec<f64>> + '_)>,
+        _pc: Option<
+            &(dyn crate::preconditioner::legacy::Preconditioner<CsrMatrix<f64>, Vec<f64>> + '_),
+        >,
         b: &Vec<f64>,
         x: &mut Vec<f64>,
         _pc_side: crate::preconditioner::PcSide,

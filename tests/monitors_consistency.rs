@@ -1,8 +1,8 @@
 use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
-use kryst::preconditioner::PcSide;
 use kryst::matrix::op::LinOp;
+use kryst::preconditioner::PcSide;
 use std::sync::Arc;
 
 fn diag_mat(vals: &[f64]) -> Mat<f64> {
@@ -25,7 +25,9 @@ fn monitors_reported_norms_and_final_true_residual() {
     // Expected norms
     let bnorm = nrm2(&b);
     let mut minv_b = vec![0.0; n];
-    for i in 0..n { minv_b[i] = b[i] / d[i]; }
+    for i in 0..n {
+        minv_b[i] = b[i] / d[i];
+    }
     let minv_b_norm = nrm2(&minv_b);
 
     // Helper to run a solver and capture first monitor value and final residual
@@ -35,7 +37,9 @@ fn monitors_reported_norms_and_final_true_residual() {
         let mut ax = vec![0.0; n];
         a.matvec(x, &mut ax);
         let mut r = vec![0.0; n];
-        for i in 0..n { r[i] = b[i] - ax[i]; }
+        for i in 0..n {
+            r[i] = b[i] - ax[i];
+        }
         nrm2(&r)
     };
 
@@ -59,7 +63,11 @@ fn monitors_reported_norms_and_final_true_residual() {
 
         let mut x = vec![0.0; n];
         let stats = ksp.solve(&b, &mut x).unwrap();
-        (first.lock().unwrap().unwrap_or(0.0), stats.final_residual, x)
+        (
+            first.lock().unwrap().unwrap_or(0.0),
+            stats.final_residual,
+            x,
+        )
     };
 
     // CG (Left) with no PC: monitors fall back to true residual, final is true
@@ -74,14 +82,16 @@ fn monitors_reported_norms_and_final_true_residual() {
     let first_cg: SArc<SMutex<Option<f64>>> = SArc::new(SMutex::new(None));
     let first_cg_cl = SArc::clone(&first_cg);
     ksp.add_monitor(move |iter, res| {
-        if iter == 0 { *first_cg_cl.lock().unwrap() = Some(res); }
+        if iter == 0 {
+            *first_cg_cl.lock().unwrap() = Some(res);
+        }
     });
     let mut x = vec![0.0; n];
     let stats = ksp.solve(&b, &mut x).unwrap();
     let first = first_cg.lock().unwrap().unwrap_or(0.0);
     assert!((first - bnorm).abs() < 1e-12);
     let final_r = stats.final_residual;
-    
+
     // CG should converge to exact on diagonal with Jacobi
     assert!(final_r <= 1e-5);
 
@@ -107,7 +117,11 @@ fn monitors_reported_norms_and_final_true_residual() {
         ksp.set_operators(amat, None);
         let first: SArc<SMutex<Option<f64>>> = SArc::new(SMutex::new(None));
         let first_cl = SArc::clone(&first);
-        ksp.add_monitor(move |iter, res| { if iter == 0 { *first_cl.lock().unwrap() = Some(res); } });
+        ksp.add_monitor(move |iter, res| {
+            if iter == 0 {
+                *first_cl.lock().unwrap() = Some(res);
+            }
+        });
         let mut x = vec![0.0; n];
         let stats = ksp.solve(&b, &mut x).unwrap();
         let res_true = true_res_norm(&a, &b, &x);
@@ -126,7 +140,11 @@ fn monitors_reported_norms_and_final_true_residual() {
         ksp.set_operators(amat, None);
         let first: SArc<SMutex<Option<f64>>> = SArc::new(SMutex::new(None));
         let first_cl = SArc::clone(&first);
-        ksp.add_monitor(move |iter, res| { if iter == 0 { *first_cl.lock().unwrap() = Some(res); } });
+        ksp.add_monitor(move |iter, res| {
+            if iter == 0 {
+                *first_cl.lock().unwrap() = Some(res);
+            }
+        });
         let mut x = vec![0.0; n];
         let stats = ksp.solve(&b, &mut x).unwrap();
         let res_true = true_res_norm(&a, &b, &x);

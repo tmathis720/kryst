@@ -261,10 +261,7 @@ fn demo_safety_features() -> Result<(), KError> {
     }
 
     // Invalid strong threshold
-    match AMGBuilder::new()
-        .strong_threshold(1.5)
-        .build(&valid_matrix)
-    {
+    match AMGBuilder::new().strong_threshold(1.5).build(&valid_matrix) {
         Ok(_) => println!("   Invalid threshold should have failed"),
         Err(_) => println!("  Invalid threshold correctly rejected"),
     }

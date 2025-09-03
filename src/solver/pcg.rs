@@ -2,8 +2,8 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
-use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
@@ -44,8 +44,8 @@ impl PcgSolver {
                 dtol: 1e5,
                 max_iters: maxits,
             },
-              norm_type: CgNormType::Preconditioned,
-              reduction: ReductionOptions::default(),
+            norm_type: CgNormType::Preconditioned,
+            reduction: ReductionOptions::default(),
             true_residual_monitor: None,
             initial_guess_nonzero: false,
         }
@@ -67,10 +67,14 @@ impl PcgSolver {
     /// Enable a more reproducible (but slightly slower) local dot product using
     /// Kahan summation. When combined with a deterministic MPI reduction this
     /// yields bitwise-identical results across runs.
-      pub fn with_reproducible_dot(mut self, f: bool) -> Self {
-          self.reduction.mode = if f { ReproMode::Deterministic } else { ReproMode::Fast };
-          self
-      }
+    pub fn with_reproducible_dot(mut self, f: bool) -> Self {
+        self.reduction.mode = if f {
+            ReproMode::Deterministic
+        } else {
+            ReproMode::Fast
+        };
+        self
+    }
 
     /// Install a monitor that receives the true residual norm `||b - A x||₂`
     /// at each iteration. This uses the already available residual and is
@@ -96,9 +100,13 @@ impl PcgSolver {
     }
 
     /// Toggle reproducible local dot products after construction.
-      pub fn set_reproducible_dot(&mut self, f: bool) {
-          self.reduction.mode = if f { ReproMode::Deterministic } else { ReproMode::Fast };
-      }
+    pub fn set_reproducible_dot(&mut self, f: bool) {
+        self.reduction.mode = if f {
+            ReproMode::Deterministic
+        } else {
+            ReproMode::Fast
+        };
+    }
 
     /// Set or clear the true residual monitor after construction.
     pub fn set_true_residual_monitor(&mut self, m: Option<Box<dyn Fn(usize, f64) + Send + Sync>>) {
@@ -106,18 +114,17 @@ impl PcgSolver {
     }
 
     #[inline]
-      fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
-          let engine = DotEngine {
-              opts: self.reduction,
-          };
-          engine.dot(u, v, comm)
-      }
-
+    fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
+        let engine = DotEngine {
+            opts: self.reduction,
+        };
+        engine.dot(u, v, comm)
+    }
 
     #[inline]
-      fn nrm2<C: Comm + CommDeterministic>(&self, u: &[f64], comm: &C) -> f64 {
-          self.dot(u, u, comm).sqrt()
-      }
+    fn nrm2<C: Comm + CommDeterministic>(&self, u: &[f64], comm: &C) -> f64 {
+        self.dot(u, u, comm).sqrt()
+    }
 
     fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
         if buf.len() != n {
@@ -126,7 +133,7 @@ impl PcgSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-      pub fn solve_with_comm<C: Comm + CommDeterministic>(
+    pub fn solve_with_comm<C: Comm + CommDeterministic>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
@@ -141,7 +148,7 @@ impl PcgSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-      fn solve_impl<C: Comm + CommDeterministic>(
+    fn solve_impl<C: Comm + CommDeterministic>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,

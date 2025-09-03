@@ -173,7 +173,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Analyze matrix properties (CSR-only)
         let (density, has_zeros) = analyze_matrix(&matrix);
         if has_zeros {
-            println!("⚠ Matrix has zeros or missing entries on the diagonal (common in driven cavity)");
+            println!(
+                "⚠ Matrix has zeros or missing entries on the diagonal (common in driven cavity)"
+            );
             println!("  → Diagonal-based preconditioners (Jacobi/SOR) may fail.");
         }
         println!();

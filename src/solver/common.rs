@@ -37,8 +37,8 @@ pub fn recompute_true_residual_norm<C: Comm>(
 pub fn reported_residual_norm(
     side: crate::preconditioner::PcSide,
     pc: Option<&dyn crate::preconditioner::Preconditioner>,
-    r_true: &mut [f64],      // input: r = b - Ax, length = n
-    scratch: &mut [f64],     // length = n (used for M^{-1} r)
+    r_true: &mut [f64],  // input: r = b - Ax, length = n
+    scratch: &mut [f64], // length = n (used for M^{-1} r)
     comm: &UniverseComm,
 ) -> f64 {
     match side {

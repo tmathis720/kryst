@@ -13,17 +13,19 @@
 // 3. Use `apply` to apply the preconditioner to a vector.
 
 use crate::core::traits::{MatrixGet, RowPattern};
-use crate::preconditioner::PcSide;
-#[cfg(feature = "dense-direct")]
-use crate::solver::direct_lu::LuSolver;
-#[cfg(not(feature = "dense-direct"))]
-use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
-#[cfg(not(feature = "dense-direct"))]
-use crate::matrix::sparse::CsrMatrix;
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::op::CsrOp;
 #[cfg(not(feature = "dense-direct"))]
+use crate::matrix::sparse::CsrMatrix;
+use crate::preconditioner::PcSide;
+#[cfg(not(feature = "dense-direct"))]
 use crate::preconditioner::Preconditioner; // bring trait into scope for IluCsr::setup/apply
+#[cfg(not(feature = "dense-direct"))]
+use crate::preconditioner::ilu_csr::{
+    IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+};
+#[cfg(feature = "dense-direct")]
+use crate::solver::direct_lu::LuSolver;
 #[cfg(feature = "dense-direct")]
 use crate::solver::legacy::LinearSolver;
 #[cfg(not(feature = "dense-direct"))]
@@ -120,11 +122,13 @@ impl BlockJacobi<f64> {
                 }
                 row_ptr.push(col_idx.len());
             }
-            let csr = std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
+            let csr =
+                std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
             let mut ilu = IluCsr::new_with_config(cfg.clone());
             let op = CsrOp::new(csr.clone());
             let _ = ilu.setup(&op);
-            self.block_factors_ilu.push((block.clone(), std::sync::Arc::new(ilu)));
+            self.block_factors_ilu
+                .push((block.clone(), std::sync::Arc::new(ilu)));
         }
     }
     /// Apply the Block-Jacobi preconditioner: z = M⁻¹ r
@@ -187,23 +191,33 @@ impl BlockJacobi<f64> {
                 use rayon::prelude::*;
                 use std::sync::{Arc, Mutex};
                 let z_arc = Arc::new(Mutex::new(z));
-                self.block_factors_ilu.par_iter().for_each(|(indices, ilu)| {
-                    let mut r_blk = Vec::with_capacity(indices.len());
-                    for &i in indices { r_blk.push(r[i]); }
-                    let mut x_blk = vec![0.0; indices.len()];
-                    let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
-                    let mut z_guard = z_arc.lock().unwrap();
-                    for (&i, &xi) in indices.iter().zip(x_blk.iter()) { z_guard[i] = xi; }
-                });
+                self.block_factors_ilu
+                    .par_iter()
+                    .for_each(|(indices, ilu)| {
+                        let mut r_blk = Vec::with_capacity(indices.len());
+                        for &i in indices {
+                            r_blk.push(r[i]);
+                        }
+                        let mut x_blk = vec![0.0; indices.len()];
+                        let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
+                        let mut z_guard = z_arc.lock().unwrap();
+                        for (&i, &xi) in indices.iter().zip(x_blk.iter()) {
+                            z_guard[i] = xi;
+                        }
+                    });
             }
             #[cfg(not(feature = "rayon"))]
             {
                 for (indices, ilu) in &self.block_factors_ilu {
                     let mut r_blk = Vec::with_capacity(indices.len());
-                    for &i in indices { r_blk.push(r[i]); }
+                    for &i in indices {
+                        r_blk.push(r[i]);
+                    }
                     let mut x_blk = vec![0.0; indices.len()];
                     let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
-                    for (&i, &xi) in indices.iter().zip(x_blk.iter()) { z[i] = xi; }
+                    for (&i, &xi) in indices.iter().zip(x_blk.iter()) {
+                        z[i] = xi;
+                    }
                 }
             }
         }

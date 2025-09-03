@@ -4,7 +4,7 @@ mod alloc;
 mod datasets;
 
 use alloc::{alloc_counts, reset_alloc_counts};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use kryst::matrix::op::LinOp; // for trait bounds
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
@@ -27,7 +27,8 @@ fn no_alloc_apply_jacobi(c: &mut Criterion) {
     c.bench_function("apply_no_alloc_jacobi", |b| {
         b.iter(|| {
             reset_alloc_counts();
-            pc.apply(PcSide::Left, black_box(&x), black_box(&mut y)).unwrap();
+            pc.apply(PcSide::Left, black_box(&x), black_box(&mut y))
+                .unwrap();
             let (a, d) = alloc_counts();
             assert_eq!(a - d, 0, "heap activity detected in apply()");
         })

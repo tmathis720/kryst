@@ -1,7 +1,7 @@
 use crate::matrix::{
     csc::CscMatrix,
     sparse::{CsrMatrix, SparseMatrix},
-    spmv::{spmm_csr_block, spmv_csr_parallel, t_spmv_csr_parallel, TBackend},
+    spmv::{TBackend, spmm_csr_block, spmv_csr_parallel, t_spmv_csr_parallel},
 };
 
 #[test]

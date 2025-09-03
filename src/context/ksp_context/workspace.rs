@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub tmp1: Vec<f64>,
@@ -74,14 +73,22 @@ impl Workspace {
     }
 
     #[inline]
-    pub fn n(&self) -> usize { self.n }
+    pub fn n(&self) -> usize {
+        self.n
+    }
     #[inline]
-    pub fn m(&self) -> usize { self.m }
+    pub fn m(&self) -> usize {
+        self.m
+    }
     #[inline]
-    pub fn has_z(&self) -> bool { self.need_z }
+    pub fn has_z(&self) -> bool {
+        self.need_z
+    }
 
     #[inline]
-    pub fn ld_h(&self) -> usize { self.m + 1 }
+    pub fn ld_h(&self) -> usize {
+        self.m + 1
+    }
 
     /// Ensure capacity for a (F)GMRES run. Idempotent and allocation-friendly.
     pub fn acquire_gmres(&mut self, spec: GmresSpec) {
@@ -128,7 +135,7 @@ impl Workspace {
         debug_assert!(j <= self.m);
         let n = self.n;
         let off = j.checked_mul(n).expect("v offset overflow");
-        &mut self.v_mem[off .. off + n]
+        &mut self.v_mem[off..off + n]
     }
 
     #[inline]
@@ -136,7 +143,7 @@ impl Workspace {
         debug_assert!(self.need_z && j < self.m);
         let n = self.n;
         let off = j.checked_mul(n).expect("z offset overflow");
-        &mut self.z_mem[off .. off + n]
+        &mut self.z_mem[off..off + n]
     }
 
     #[inline]
@@ -160,7 +167,11 @@ impl Workspace {
         let (lo_part, rest) = self.v_mem.split_at_mut(hi_off);
         let (_, lo_slice) = lo_part.split_at_mut(lo_off);
         let (hi_slice, _) = rest.split_at_mut(n);
-        if a < b { (&mut lo_slice[..n], hi_slice) } else { (hi_slice, &mut lo_slice[..n]) }
+        if a < b {
+            (&mut lo_slice[..n], hi_slice)
+        } else {
+            (hi_slice, &mut lo_slice[..n])
+        }
     }
 
     pub fn z_cols2(&mut self, a: usize, b: usize) -> (&mut [f64], &mut [f64]) {
@@ -172,7 +183,11 @@ impl Workspace {
         let (lo_part, rest) = self.z_mem.split_at_mut(hi_off);
         let (_, lo_slice) = lo_part.split_at_mut(lo_off);
         let (hi_slice, _) = rest.split_at_mut(n);
-        if a < b { (&mut lo_slice[..n], hi_slice) } else { (hi_slice, &mut lo_slice[..n]) }
+        if a < b {
+            (&mut lo_slice[..n], hi_slice)
+        } else {
+            (hi_slice, &mut lo_slice[..n])
+        }
     }
 
     // --- Composite view helpers -------------------------------------------------
@@ -300,7 +315,8 @@ fn ensure_len(v: &mut Vec<f64>, need: usize) {
         if v.capacity() < need {
             v.reserve_exact(need - v.capacity());
         }
-        unsafe { v.set_len(need); }
+        unsafe {
+            v.set_len(need);
+        }
     }
 }
-

@@ -61,4 +61,3 @@ fn pcg_norm_variants() {
     run(CgNormType::Unpreconditioned, 2.0);
     run(CgNormType::Natural, 1.0);
 }
-

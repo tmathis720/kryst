@@ -32,9 +32,17 @@ use std::time::{Duration, Instant};
 use crate::preconditioner::stats::ParIluIterSample;
 
 pub enum Event<'a> {
-    IluSetupBegin { opts_hash: u64 },
-    IluSetupIter { sample: &'a ParIluIterSample },
-    IluSetupEnd { iters: u32, converged: bool, setup_time_s: f64 },
+    IluSetupBegin {
+        opts_hash: u64,
+    },
+    IluSetupIter {
+        sample: &'a ParIluIterSample,
+    },
+    IluSetupEnd {
+        iters: u32,
+        converged: bool,
+        setup_time_s: f64,
+    },
 }
 
 pub trait Monitor: Send + Sync {
@@ -55,8 +63,9 @@ impl Monitor for TextMonitor {
         #[cfg(feature = "logging")]
         if self.rank0 {
             match ev {
-                Event::IluSetupBegin { opts_hash } =>
-                    log::info!("ILU: setup begin (opts={:016x})", opts_hash),
+                Event::IluSetupBegin { opts_hash } => {
+                    log::info!("ILU: setup begin (opts={:016x})", opts_hash)
+                }
                 Event::IluSetupIter { sample } => log::info!(
                     "ILU: it {:>3}  corr(L)={:.3e}  corr(U)={:.3e}  res≈{:.3e}  maxΔpivot={:.3e}",
                     sample.iter,

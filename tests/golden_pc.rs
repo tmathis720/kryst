@@ -3,7 +3,7 @@ use std::sync::Arc;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::op::CsrOp;
-use kryst::preconditioner::{Preconditioner, PcSide};
+use kryst::preconditioner::{PcSide, Preconditioner};
 
 mod fixtures;
 use fixtures::*;
@@ -38,7 +38,8 @@ fn cg_on_spd_converges_with_tight_tol() {
         .unwrap()
         .set_pc_type(PcType::Jacobi, None)
         .unwrap();
-    ksp.try_set_pc_side(kryst::preconditioner::PcSide::Left).unwrap();
+    ksp.try_set_pc_side(kryst::preconditioner::PcSide::Left)
+        .unwrap();
 
     ksp.set_operators(Arc::new(aop), None);
     ksp.setup().unwrap();

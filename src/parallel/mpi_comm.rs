@@ -12,9 +12,9 @@
 //! comm.barrier();
 //! ```
 
+use mpi::raw::AsRaw;
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
-use mpi::raw::AsRaw;
 use std::sync::{Arc, OnceLock};
 
 /// MPI communicator wrapper for distributed parallelism.
@@ -216,7 +216,10 @@ impl super::Comm for MpiComm {
             )
         };
         debug_assert_eq!(rc, 0);
-        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
+        super::MpiRequest {
+            handle: req,
+            _marker: std::marker::PhantomData,
+        }
     }
     fn isend_to<'a>(&'a self, buf: &'a [f64], dest: i32) -> Self::Request<'a> {
         // Nonblocking send via raw MPI
@@ -235,7 +238,10 @@ impl super::Comm for MpiComm {
             )
         };
         debug_assert_eq!(rc, 0);
-        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
+        super::MpiRequest {
+            handle: req,
+            _marker: std::marker::PhantomData,
+        }
     }
     fn irecv_from_u64<'a>(&'a self, buf: &'a mut [u64], src: i32) -> Self::Request<'a> {
         // Nonblocking receive of u64 via raw MPI
@@ -254,7 +260,10 @@ impl super::Comm for MpiComm {
             )
         };
         debug_assert_eq!(rc, 0);
-        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
+        super::MpiRequest {
+            handle: req,
+            _marker: std::marker::PhantomData,
+        }
     }
     fn isend_to_u64<'a>(&'a self, buf: &'a [u64], dest: i32) -> Self::Request<'a> {
         // Nonblocking send of u64 via raw MPI
@@ -273,7 +282,10 @@ impl super::Comm for MpiComm {
             )
         };
         debug_assert_eq!(rc, 0);
-        super::MpiRequest { handle: req, _marker: std::marker::PhantomData }
+        super::MpiRequest {
+            handle: req,
+            _marker: std::marker::PhantomData,
+        }
     }
     fn wait_all<'a>(&self, reqs: &mut [Self::Request<'a>]) {
         for rq in reqs {

@@ -53,5 +53,8 @@ pub enum PivotPolicy {
 pub enum Pivoting {
     None,
     #[allow(dead_code)]
-    ILUTP { band: usize, tau: f64 },
+    ILUTP {
+        band: usize,
+        tau: f64,
+    },
 }

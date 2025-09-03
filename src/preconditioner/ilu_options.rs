@@ -240,9 +240,7 @@ impl IluOptions {
         if self.schur.enable || self.schur.droptol_s != SchurConfig::default().droptol_s {
             #[cfg(feature = "logging")]
             if self.logging_level > 0 {
-                log::warn!(
-                    "schur_drop_tolerance is reserved for future use and will be ignored"
-                );
+                log::warn!("schur_drop_tolerance is reserved for future use and will be ignored");
             }
         }
 
@@ -269,15 +267,13 @@ impl IluOptions {
         let pivot = match self.pivot {
             PivotPolicy::Strict => PivotPolicy::Strict,
             PivotPolicy::Threshold { tau } => PivotPolicy::Threshold { tau: tau.max(0.0) },
-            PivotPolicy::DiagPerturb { eta } => {
-                PivotPolicy::DiagPerturb { eta: eta.max(0.0) }
-            }
+            PivotPolicy::DiagPerturb { eta } => PivotPolicy::DiagPerturb { eta: eta.max(0.0) },
         };
 
         let reductions = prefer_repro_in_ci(self.reductions.clone());
 
-        let keep_history = it.keep_history
-            || it.option_bits.contains(IterativeSetupBits::TRACE_HISTORY);
+        let keep_history =
+            it.keep_history || it.option_bits.contains(IterativeSetupBits::TRACE_HISTORY);
 
         let o2 = IluOptions {
             iterative_setup: IterativeSetupConfig {
@@ -394,11 +390,13 @@ mod tests {
             resolved.o.iterative_setup.ty,
             IterativeSetupType::ParILUFixedPoint
         ));
-        assert!(resolved
-            .o
-            .iterative_setup
-            .option_bits
-            .contains(IterativeSetupBits::PIVOT_STAB));
+        assert!(
+            resolved
+                .o
+                .iterative_setup
+                .option_bits
+                .contains(IterativeSetupBits::PIVOT_STAB)
+        );
     }
 
     #[test]
@@ -428,4 +426,3 @@ mod tests {
         assert_eq!(opts, parsed);
     }
 }
-

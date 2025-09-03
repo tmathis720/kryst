@@ -10,7 +10,10 @@ pub struct BufferPool<T> {
 impl<T> BufferPool<T> {
     /// Create a new pool with given capacity.
     pub fn with_capacity(n: usize) -> Self {
-        Self { buf: RefCell::new(Vec::with_capacity(n)), len: 0 }
+        Self {
+            buf: RefCell::new(Vec::with_capacity(n)),
+            len: 0,
+        }
     }
 
     /// Ensure the internal buffer can hold at least `n` elements.
@@ -25,9 +28,7 @@ impl<T> BufferPool<T> {
     /// Mutable slice view assuming caller initializes elements before reading.
     pub fn as_mut_slice_init(&self) -> &mut [T] {
         // SAFETY: Caller guarantees initialization of all elements before use.
-        unsafe {
-            &mut *(self.buf.borrow_mut().as_mut_slice() as *mut [MaybeUninit<T>] as *mut [T])
-        }
+        unsafe { &mut *(self.buf.borrow_mut().as_mut_slice() as *mut [MaybeUninit<T>] as *mut [T]) }
     }
 
     /// Immutable slice view for already initialized data.
@@ -47,6 +48,9 @@ impl<T> Clone for BufferPool<T> {
         let len = self.buf.borrow().len();
         let mut vec = Vec::with_capacity(len);
         vec.resize_with(len, || MaybeUninit::uninit());
-        Self { buf: RefCell::new(vec), len: self.len }
+        Self {
+            buf: RefCell::new(vec),
+            len: self.len,
+        }
     }
 }

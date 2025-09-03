@@ -382,15 +382,15 @@ pub mod builders;
 pub mod chain;
 pub mod chebyshev;
 pub mod direct;
-pub mod ilu_options;
 pub mod ilu;
+pub mod ilu_csr;
+pub mod ilu_options;
 pub mod ilup;
 pub mod ilut;
 pub mod ilutp;
 pub mod jacobi;
-pub mod sor;
-pub mod ilu_csr;
 pub mod pivot;
+pub mod sor;
 
 // Re-exports for convenience
 pub use self::sor::MatSorType;
@@ -400,9 +400,9 @@ pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCs
 pub use asm::AdditiveSchwarz;
 pub use chain::PcChain;
 pub use chebyshev::{Chebyshev, ChebyshevPre};
+pub use direct::SuperLuDistPc;
 #[cfg(feature = "dense-direct")]
 pub use direct::{LuPc, QrPc};
-pub use direct::SuperLuDistPc;
 pub use ilu::Ilu0;
 pub use ilup::Ilup;
 pub use ilut::Ilut;

@@ -89,7 +89,13 @@ pub trait MatVecOp<T> {
     fn mat_vec(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::error::KError>;
 
     /// Compute y = alpha * A^T * x + beta * y (transpose operation)
-    fn mat_vec_trans(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::error::KError>;
+    fn mat_vec_trans(
+        &self,
+        alpha: T,
+        x: &[T],
+        beta: T,
+        y: &mut [T],
+    ) -> Result<(), crate::error::KError>;
 
     /// Get the number of rows
     fn nrows(&self) -> usize;
@@ -203,7 +209,10 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
         {
             // Basic CSR integrity checks
             assert_eq!(rp.len(), self.nrows() + 1, "row_ptr length must be nrows+1");
-            assert!(rp.windows(2).all(|w| w[0] <= w[1]), "row_ptr must be non-decreasing");
+            assert!(
+                rp.windows(2).all(|w| w[0] <= w[1]),
+                "row_ptr must be non-decreasing"
+            );
             let nnz = *rp.last().unwrap();
             assert_eq!(cj.len(), nnz, "col_idx length must equal nnz");
             assert_eq!(vv.len(), nnz, "values length must equal nnz");
@@ -764,7 +773,10 @@ mod tests {
             }
         }
 
-        fn _use_traits<T: TestMatVec<Vec<f64>> + TestMatTransVec<Vec<f64>> + TestInnerProduct<Vec<f64>>>() {}
+        fn _use_traits<
+            T: TestMatVec<Vec<f64>> + TestMatTransVec<Vec<f64>> + TestInnerProduct<Vec<f64>>,
+        >() {
+        }
         _use_traits::<Dummy>();
 
         let dummy = Dummy;
@@ -784,13 +796,7 @@ mod tests {
     fn csr_matvec_happy_path() {
         // 2x3 CSR: row_ptr=[0,2,3], col_idx=[0,2,1], val=[1,4,5]
         // A = [1 0 4; 0 5 0]
-        let a = CsrMatrix::from_csr(
-            2,
-            3,
-            vec![0, 2, 3],
-            vec![0, 2, 1],
-            vec![1.0, 4.0, 5.0],
-        );
+        let a = CsrMatrix::from_csr(2, 3, vec![0, 2, 3], vec![0, 2, 1], vec![1.0, 4.0, 5.0]);
         let x = [10.0, 20.0, 30.0];
         let mut y = [0.0; 2];
         MatVecOp::mat_vec(&a, 1.0, &x, 0.0, &mut y).unwrap();

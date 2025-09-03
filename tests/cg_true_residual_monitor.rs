@@ -1,8 +1,8 @@
-use kryst::solver::{CgSolver, LinearSolver};
-use kryst::preconditioner::PcSide;
-use kryst::parallel::{UniverseComm, NoComm};
-use kryst::context::ksp_context::Workspace;
 use faer::Mat;
+use kryst::context::ksp_context::Workspace;
+use kryst::parallel::{NoComm, UniverseComm};
+use kryst::preconditioner::PcSide;
+use kryst::solver::{CgSolver, LinearSolver};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -22,7 +22,16 @@ fn cg_reports_true_residual() {
     })));
 
     solver
-        .solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut wk))
+        .solve(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut wk),
+        )
         .unwrap();
 
     let l = log.lock().unwrap();

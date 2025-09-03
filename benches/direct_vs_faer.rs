@@ -1,9 +1,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
-use kryst::solver::legacy::LinearSolver;
-use kryst::solver::LuSolver;
 use kryst::preconditioner::PcSide;
+use kryst::solver::LuSolver;
+use kryst::solver::legacy::LinearSolver;
 
 fn bench_lu_vs_faer(c: &mut Criterion) {
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);

@@ -22,26 +22,26 @@
 
 pub mod parallel;
 
+pub mod algebra;
 pub mod config;
 pub mod context;
 pub mod core;
 pub mod error;
 pub mod matrix;
 pub mod preconditioner;
+pub mod reduction;
 pub mod solver;
 pub mod utils;
-pub mod algebra;
-pub mod reduction;
 
 // Re-exports for convenience
+pub use algebra::*;
 pub use config::*;
 pub use context::*;
 pub use core::*;
 pub use error::*;
 pub use matrix::*;
-pub use utils::*;
-pub use algebra::*;
 pub use reduction::*;
+pub use utils::*;
 
 // Re-export SolveStats at the crate root for convenience
 pub use utils::convergence::SolveStats;

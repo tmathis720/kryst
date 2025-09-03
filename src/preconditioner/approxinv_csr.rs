@@ -95,7 +95,7 @@ impl ApproxInvBuilder {
 
 /// FSAI: lower-triangular factor G in CSR and per-column patterns.
 pub struct FsaiCsr {
-    pub(crate) g: CsrMatrix<f64>, // lower triangular
+    pub(crate) g: CsrMatrix<f64>,    // lower triangular
     pub(crate) pat: Vec<Vec<usize>>, // per-column patterns (global indices), restricted to rows >= col
     pub(crate) params: ApproxInvParams,
     // book-keeping for update reuse
@@ -193,17 +193,25 @@ fn grow_pattern_row_graph(a: &CsrMatrix<f64>, i: usize, levels: usize, cap: usiz
         acc.extend(next);
         acc.sort_unstable();
         acc.dedup();
-        if acc.len() > cap { acc.truncate(cap); }
+        if acc.len() > cap {
+            acc.truncate(cap);
+        }
         // frontier becomes the just-added nodes (approximate) — simple heuristic
         cur = acc.clone();
-        if cur.len() >= cap { break; }
+        if cur.len() >= cap {
+            break;
+        }
     }
 
     // Ensure i present and sorted unique
-    if !acc.contains(&i) { acc.push(i); }
+    if !acc.contains(&i) {
+        acc.push(i);
+    }
     acc.sort_unstable();
     acc.dedup();
-    if acc.len() > cap { acc.truncate(cap); }
+    if acc.len() > cap {
+        acc.truncate(cap);
+    }
     acc
 }
 
@@ -219,10 +227,14 @@ impl FsaiCsr {
             let mut s = grow_pattern_row_graph(&a, i, cfg.levels, cfg.max_per_col);
             // restrict to lower triangle for column i
             s.retain(|&r| r >= i);
-            if !s.contains(&i) { s.insert(0, i); }
+            if !s.contains(&i) {
+                s.insert(0, i);
+            }
             s.sort_unstable();
             s.dedup();
-            if s.len() > cfg.max_per_col { s.truncate(cfg.max_per_col); }
+            if s.len() > cfg.max_per_col {
+                s.truncate(cfg.max_per_col);
+            }
             pat.push(s);
         }
 
@@ -234,7 +246,9 @@ impl FsaiCsr {
         for i in 0..n {
             let s = &pat[i];
             let m = s.len();
-            if m == 0 { continue; }
+            if m == 0 {
+                continue;
+            }
             if a_ss.nrows() != m || a_ss.ncols() != m {
                 a_ss = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
                 b.resize(m, 0.0);
@@ -252,7 +266,9 @@ impl FsaiCsr {
                 a_ss[(d, d)] += cfg.reg;
             }
             // b = e_i restricted to S
-            for k in 0..m { b[k] = 0.0; }
+            for k in 0..m {
+                b[k] = 0.0;
+            }
             if let Ok(pos) = s.binary_search(&i) {
                 b[pos] = 1.0;
             } else {
@@ -265,7 +281,9 @@ impl FsaiCsr {
             let rhs = Mat::<f64>::from_fn(m, 1, |r, _| b[r]);
             let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
             let mut norm2 = 0.0f64;
-            for r in 0..m { norm2 += sol[(r, 0)] * sol[(r, 0)]; }
+            for r in 0..m {
+                norm2 += sol[(r, 0)] * sol[(r, 0)];
+            }
             norm2 = norm2.sqrt();
             let thr = cfg.drop_tol * norm2.max(1e-32);
 
@@ -288,7 +306,13 @@ impl FsaiCsr {
 
         // 3) Assemble CSR from triplets
         let g = assemble_csr(n, n, &mut trips);
-        Ok(Self { g, pat, params: cfg, last_sid: None, last_vid: None })
+        Ok(Self {
+            g,
+            pat,
+            params: cfg,
+            last_sid: None,
+            last_vid: None,
+        })
     }
 }
 
@@ -322,7 +346,9 @@ impl Preconditioner for FsaiCsr {
         if x.len() != self.g.nrows() || y.len() != self.g.nrows() {
             return Err(KError::InvalidInput(format!(
                 "FsaiCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
-                self.g.nrows(), x.len(), y.len()
+                self.g.nrows(),
+                x.len(),
+                y.len()
             )));
         }
         let n = x.len();
@@ -332,7 +358,9 @@ impl Preconditioner for FsaiCsr {
         Ok(())
     }
 
-    fn supports_numeric_update(&self) -> bool { true }
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         // Re-solve per-column with fixed pattern and write values back into existing G
@@ -346,7 +374,9 @@ impl Preconditioner for FsaiCsr {
         for i in 0..n {
             let s = &self.pat[i];
             let m = s.len();
-            if m == 0 { continue; }
+            if m == 0 {
+                continue;
+            }
             if a_ss.nrows() != m || a_ss.ncols() != m {
                 a_ss = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
                 b.resize(m, 0.0);
@@ -358,9 +388,17 @@ impl Preconditioner for FsaiCsr {
                     a_ss[(q, p)] = v;
                 }
             }
-            for d in 0..m { a_ss[(d, d)] += self.params.reg; }
-            for k in 0..m { b[k] = 0.0; }
-            if let Ok(pos) = s.binary_search(&i) { b[pos] = 1.0; } else { continue; }
+            for d in 0..m {
+                a_ss[(d, d)] += self.params.reg;
+            }
+            for k in 0..m {
+                b[k] = 0.0;
+            }
+            if let Ok(pos) = s.binary_search(&i) {
+                b[pos] = 1.0;
+            } else {
+                continue;
+            }
             let rhs = Mat::<f64>::from_fn(m, 1, |r, _| b[r]);
             let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
             // No pruning during update to preserve structure
@@ -373,7 +411,9 @@ impl Preconditioner for FsaiCsr {
         Ok(())
     }
 
-    fn required_format(&self) -> crate::matrix::format::FormatHint { crate::matrix::format::FormatHint::Csr }
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Csr
+    }
 }
 
 // -------------------------- SPAI: build/apply ----------------------------
@@ -386,10 +426,14 @@ impl SpaiCsr {
         let mut pat: Vec<Vec<usize>> = Vec::with_capacity(n);
         for j in 0..n {
             let mut s = grow_pattern_row_graph(&a, j, cfg.levels, cfg.max_per_col);
-            if !s.contains(&j) { s.push(j); }
+            if !s.contains(&j) {
+                s.push(j);
+            }
             s.sort_unstable();
             s.dedup();
-            if s.len() > cfg.max_per_col { s.truncate(cfg.max_per_col); }
+            if s.len() > cfg.max_per_col {
+                s.truncate(cfg.max_per_col);
+            }
             pat.push(s);
         }
 
@@ -404,9 +448,13 @@ impl SpaiCsr {
         for j in 0..n {
             let s = &pat[j];
             let m = s.len();
-            if m == 0 { continue; }
+            if m == 0 {
+                continue;
+            }
             // map
-            for (pos, &g) in s.iter().enumerate() { idx_in_s[g] = pos as i32; }
+            for (pos, &g) in s.iter().enumerate() {
+                idx_in_s[g] = pos as i32;
+            }
             let mut nmat = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
             let mut cvec = Mat::<f64>::from_fn(m, 1, |_, _| 0.0);
 
@@ -416,7 +464,9 @@ impl SpaiCsr {
                 let col = ci[pidx];
                 let val = vv[pidx];
                 let pos = idx_in_s[col];
-                if pos >= 0 { cvec[(pos as usize, 0)] = val; }
+                if pos >= 0 {
+                    cvec[(pos as usize, 0)] = val;
+                }
             }
 
             // N = A_S^T A_S: iterate rows, intersect with S by membership check via idx_in_s
@@ -439,18 +489,24 @@ impl SpaiCsr {
                         let (py, vy) = pos_tmp[iy];
                         let v = vx * vy;
                         nmat[(px, py)] += v;
-                        if px != py { nmat[(py, px)] += v; }
+                        if px != py {
+                            nmat[(py, px)] += v;
+                        }
                     }
                 }
             }
 
             // regularize
-            for d in 0..m { nmat[(d, d)] += cfg.reg; }
+            for d in 0..m {
+                nmat[(d, d)] += cfg.reg;
+            }
             // Solve SPD system via QR (robust for small m)
             let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
             // prune
             let mut norm2 = 0.0f64;
-            for r in 0..m { norm2 += sol[(r, 0)] * sol[(r, 0)]; }
+            for r in 0..m {
+                norm2 += sol[(r, 0)] * sol[(r, 0)];
+            }
             norm2 = norm2.sqrt();
             let thr = cfg.drop_tol * norm2.max(1e-32);
             let mut kept: Vec<usize> = Vec::with_capacity(m);
@@ -462,14 +518,22 @@ impl SpaiCsr {
                 }
             }
             // clear map for all original entries in s
-            for &g in s.iter() { idx_in_s[g] = -1; }
+            for &g in s.iter() {
+                idx_in_s[g] = -1;
+            }
             // Pin pattern to kept rows to preserve update structure
             kept.sort_unstable();
             pat[j] = kept;
         }
 
         let m = assemble_csr(n, n, &mut trips);
-        Ok(Self { m, pat, params: cfg, last_sid: None, last_vid: None })
+        Ok(Self {
+            m,
+            pat,
+            params: cfg,
+            last_sid: None,
+            last_vid: None,
+        })
     }
 }
 
@@ -498,14 +562,19 @@ impl Preconditioner for SpaiCsr {
         if x.len() != self.m.ncols() || y.len() != self.m.nrows() {
             return Err(KError::InvalidInput(format!(
                 "SpaiCsr::apply dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
-                self.m.nrows(), self.m.ncols(), x.len(), y.len()
+                self.m.nrows(),
+                self.m.ncols(),
+                x.len(),
+                y.len()
             )));
         }
         spmv_csr(&self.m, x, y);
         Ok(())
     }
 
-    fn supports_numeric_update(&self) -> bool { true }
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         let csr = csr_from_linop(a, 0.0)?;
@@ -519,8 +588,12 @@ impl Preconditioner for SpaiCsr {
         for j in 0..n {
             let s = &self.pat[j];
             let m = s.len();
-            if m == 0 { continue; }
-            for (pos, &g) in s.iter().enumerate() { idx_in_s[g] = pos as i32; }
+            if m == 0 {
+                continue;
+            }
+            for (pos, &g) in s.iter().enumerate() {
+                idx_in_s[g] = pos as i32;
+            }
             let mut nmat = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
             let mut cvec = Mat::<f64>::from_fn(m, 1, |_, _| 0.0);
             // cvec
@@ -529,7 +602,9 @@ impl Preconditioner for SpaiCsr {
                 let col = ci[pidx];
                 let val = vv[pidx];
                 let pos = idx_in_s[col];
-                if pos >= 0 { cvec[(pos as usize, 0)] = val; }
+                if pos >= 0 {
+                    cvec[(pos as usize, 0)] = val;
+                }
             }
             // N
             for i in 0..n {
@@ -538,7 +613,9 @@ impl Preconditioner for SpaiCsr {
                 for p in rs..re {
                     let col = ci[p];
                     let pos = idx_in_s[col];
-                    if pos >= 0 { pos_tmp.push((pos as usize, vv[p])); }
+                    if pos >= 0 {
+                        pos_tmp.push((pos as usize, vv[p]));
+                    }
                 }
                 for ix in 0..pos_tmp.len() {
                     let (px, vx) = pos_tmp[ix];
@@ -546,30 +623,45 @@ impl Preconditioner for SpaiCsr {
                         let (py, vy) = pos_tmp[iy];
                         let v = vx * vy;
                         nmat[(px, py)] += v;
-                        if px != py { nmat[(py, px)] += v; }
+                        if px != py {
+                            nmat[(py, px)] += v;
+                        }
                     }
                 }
             }
-            for d in 0..m { nmat[(d, d)] += self.params.reg; }
+            for d in 0..m {
+                nmat[(d, d)] += self.params.reg;
+            }
             let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
             // no pruning during update to preserve structure
             for (k, &row) in s.iter().enumerate() {
                 trips.push((row, j, sol[(k, 0)]));
             }
-            for &g in s.iter() { idx_in_s[g] = -1; }
+            for &g in s.iter() {
+                idx_in_s[g] = -1;
+            }
         }
         self.m = assemble_csr(n, n, &mut trips);
         Ok(())
     }
 
-    fn required_format(&self) -> crate::matrix::format::FormatHint { crate::matrix::format::FormatHint::Csr }
+    fn required_format(&self) -> crate::matrix::format::FormatHint {
+        crate::matrix::format::FormatHint::Csr
+    }
 }
 
 // ---------------------------- Assembly helper ----------------------------
 
-fn assemble_csr(nrows: usize, ncols: usize, trips: &mut Vec<(usize, usize, f64)>) -> CsrMatrix<f64> {
+fn assemble_csr(
+    nrows: usize,
+    ncols: usize,
+    trips: &mut Vec<(usize, usize, f64)>,
+) -> CsrMatrix<f64> {
     // Sort by (row, col)
-    trips.sort_unstable_by(|a, b| match a.0.cmp(&b.0) { std::cmp::Ordering::Equal => a.1.cmp(&b.1), o => o });
+    trips.sort_unstable_by(|a, b| match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+        o => o,
+    });
     // Build CSR arrays
     let mut row_ptr = vec![0usize; nrows + 1];
     let mut col_idx: Vec<usize> = Vec::with_capacity(trips.len());
@@ -581,7 +673,10 @@ fn assemble_csr(nrows: usize, ncols: usize, trips: &mut Vec<(usize, usize, f64)>
     while k < trips.len() {
         let (r, c, mut v) = trips[k];
         // advance rows
-        while cur_row < r { row_ptr[cur_row + 1] = acc; cur_row += 1; }
+        while cur_row < r {
+            row_ptr[cur_row + 1] = acc;
+            cur_row += 1;
+        }
         // combine duplicates
         k += 1;
         while k < trips.len() && trips[k].0 == r && trips[k].1 == c {
@@ -592,7 +687,10 @@ fn assemble_csr(nrows: usize, ncols: usize, trips: &mut Vec<(usize, usize, f64)>
         vals.push(v);
         acc += 1;
     }
-    while cur_row < nrows { row_ptr[cur_row + 1] = acc; cur_row += 1; }
+    while cur_row < nrows {
+        row_ptr[cur_row + 1] = acc;
+        cur_row += 1;
+    }
 
     // Ensure row_ptr nondecreasing and col_idx sorted within rows (implied by sort)
     CsrMatrix::from_csr(nrows, ncols, row_ptr, col_idx, vals)

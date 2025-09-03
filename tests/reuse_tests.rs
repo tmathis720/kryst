@@ -1,13 +1,16 @@
+use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
-use kryst::matrix::op::{DenseOp, LinOp};
-use kryst::matrix::format::AsFormat;
-use kryst::matrix::{CsrOp, convert::csr_from_linop};
-use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-use faer::Mat;
 use kryst::error::KError;
+use kryst::matrix::format::AsFormat;
+use kryst::matrix::op::{DenseOp, LinOp};
+use kryst::matrix::sparse::CsrMatrix;
+use kryst::matrix::{CsrOp, convert::csr_from_linop};
+use kryst::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 struct CountPc {
     numeric: Arc<AtomicUsize>,
@@ -17,15 +20,35 @@ impl CountPc {
     fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let n = Arc::new(AtomicUsize::new(0));
         let s = Arc::new(AtomicUsize::new(0));
-        (Self { numeric: n.clone(), symbolic: s.clone() }, n, s)
+        (
+            Self {
+                numeric: n.clone(),
+                symbolic: s.clone(),
+            },
+            n,
+            s,
+        )
     }
 }
 impl Preconditioner for CountPc {
-    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { Ok(()) }
-    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> { y.copy_from_slice(x); Ok(()) }
-    fn supports_numeric_update(&self) -> bool { true }
-    fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { self.numeric.fetch_add(1, Ordering::SeqCst); Ok(()) }
-    fn update_symbolic(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> { self.symbolic.fetch_add(1, Ordering::SeqCst); Ok(()) }
+    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        Ok(())
+    }
+    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        y.copy_from_slice(x);
+        Ok(())
+    }
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+    fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        self.numeric.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn update_symbolic(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        self.symbolic.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -40,8 +63,13 @@ impl Preconditioner for PatternCheckPc {
         self.col_idx = csr.col_idx().to_vec();
         Ok(())
     }
-    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> { y.copy_from_slice(x); Ok(()) }
-    fn supports_numeric_update(&self) -> bool { true }
+    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        y.copy_from_slice(x);
+        Ok(())
+    }
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         let csr = csr_from_linop(a, 0.0)?;
         if self.row_ptr != csr.row_ptr() || self.col_idx != csr.col_idx() {
@@ -145,7 +173,15 @@ fn pattern_mismatch_in_numeric_update() {
     let mut pc = PatternCheckPc::default();
     let a1 = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
     pc.setup(&a1).unwrap();
-    let a2 = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else if i == 0 && j == 1 { 0.5 } else { 0.0 });
+    let a2 = Mat::from_fn(2, 2, |i, j| {
+        if i == j {
+            1.0
+        } else if i == 0 && j == 1 {
+            0.5
+        } else {
+            0.0
+        }
+    });
     let err = pc.update_numeric(&a2).unwrap_err();
     match err {
         KError::Unsupported(msg) => assert!(msg.contains("pattern changed")),

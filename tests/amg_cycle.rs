@@ -1,7 +1,7 @@
 use faer::Mat;
+use fixtures::csr_poisson_1d;
 use kryst::preconditioner::amg::{AMGBuilder, RelaxType};
 use kryst::preconditioner::{PcSide, Preconditioner};
-use fixtures::csr_poisson_1d;
 
 #[test]
 fn w_cycle_reduces_residual_more_than_v() {

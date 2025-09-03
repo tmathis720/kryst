@@ -25,7 +25,11 @@ pub fn handle_pivot(
         }
         PivotStrategy::Threshold => {
             if raw_pivot.abs() < thr {
-                Ok(if raw_pivot.is_sign_negative() { -thr } else { thr })
+                Ok(if raw_pivot.is_sign_negative() {
+                    -thr
+                } else {
+                    thr
+                })
             } else {
                 Ok(raw_pivot)
             }
@@ -38,11 +42,14 @@ pub fn handle_pivot(
                     1.0
                 };
                 let delta = (diag_perturb_factor.abs().max(thr.min(1.0) * 1e-12)) * base;
-                Ok(if raw_pivot.is_sign_negative() { -delta } else { delta })
+                Ok(if raw_pivot.is_sign_negative() {
+                    -delta
+                } else {
+                    delta
+                })
             } else {
                 Ok(raw_pivot)
             }
         }
     }
 }
-

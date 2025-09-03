@@ -1,10 +1,10 @@
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
-use crate::preconditioner::{PcSide, Preconditioner};
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Jacobi {
     pub(crate) diag_inv: Vec<f64>,
@@ -67,7 +67,9 @@ impl Preconditioner for Jacobi {
         if r.len() != self.n || z.len() != self.n {
             return Err(KError::InvalidInput(format!(
                 "Jacobi::apply dimension mismatch: n={}, r.len()={}, z.len()={}",
-                self.n, r.len(), z.len()
+                self.n,
+                r.len(),
+                z.len()
             )));
         }
         for i in 0..self.n {

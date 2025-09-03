@@ -7,7 +7,7 @@ use crate::{
     matrix::{
         csc::CscMatrix,
         format::{AsFormat, FormatHint},
-        op::{wrap_with_comm, DenseOp, LinOp},
+        op::{DenseOp, LinOp, wrap_with_comm},
         sparse::CsrMatrix,
     },
 };
@@ -28,11 +28,17 @@ fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) ->
     help.push_str("- Recovery options:\n");
     help.push_str("  • If you have a dense matrix (`faer::Mat<f64>`), wrap it with `DenseOp` so structure/values IDs are tracked and conversions can be cached:\n");
     help.push_str("      let op = DenseOp::new(Arc::new(mat));\n");
-    help.push_str("      // after in-place updates: op.mark_values_changed() / op.mark_structure_changed()\n");
-    help.push_str("  • If you have a CSR matrix (`CsrMatrix<f64>`), wrap it with `CsrOp` likewise:\n");
+    help.push_str(
+        "      // after in-place updates: op.mark_values_changed() / op.mark_structure_changed()\n",
+    );
+    help.push_str(
+        "  • If you have a CSR matrix (`CsrMatrix<f64>`), wrap it with `CsrOp` likewise:\n",
+    );
     help.push_str("      let op = CsrOp::new(Arc::new(csr));\n");
     help.push_str("  • If this is your own LinOp type, implement `matrix::format::AsFormat` for it to enable cached conversions.\n");
-    help.push_str("  • If running distributed, attach the communicator with `wrap_with_comm(op, comm)`.\n");
+    help.push_str(
+        "  • If running distributed, attach the communicator with `wrap_with_comm(op, comm)`.\n",
+    );
 
     if !has_ids {
         help.push_str("\nNote: this operator reports unknown StructureId/ValuesId (both 0). \
@@ -210,8 +216,16 @@ pub fn materialize_linop_with_hint(
     }
 
     // Unsupported operator for conversion (e.g., distributed CSR or custom LinOp)
-    let target = match hint { FormatHint::Csr => "CSR", FormatHint::Csc => "CSC", FormatHint::Dense => "dense" };
-    Err(unsupported_linop_err(op, "materialize_linop_with_hint", target))
+    let target = match hint {
+        FormatHint::Csr => "CSR",
+        FormatHint::Csc => "CSC",
+        FormatHint::Dense => "dense",
+    };
+    Err(unsupported_linop_err(
+        op,
+        "materialize_linop_with_hint",
+        target,
+    ))
 }
 
 #[cfg(test)]
@@ -232,7 +246,10 @@ mod tests {
         assert!(msg.contains("DenseOp"), "error should suggest DenseOp");
         assert!(msg.contains("CsrOp"), "error should suggest CsrOp");
         assert!(msg.contains("AsFormat"), "error should suggest AsFormat");
-        assert!(msg.contains("wrap_with_comm"), "error should suggest wrapping communicator");
+        assert!(
+            msg.contains("wrap_with_comm"),
+            "error should suggest wrapping communicator"
+        );
     }
 
     #[test]
@@ -240,7 +257,10 @@ mod tests {
         let shell = MatShell::new(2, 2, |x, y| y.copy_from_slice(x));
         let err = dense_from_linop(&shell).err().unwrap();
         let msg = format!("{err:?}");
-        assert!(msg.to_lowercase().contains("dense"), "should reference dense target");
+        assert!(
+            msg.to_lowercase().contains("dense"),
+            "should reference dense target"
+        );
         assert!(msg.contains("DenseOp"), "should suggest DenseOp");
     }
 }
