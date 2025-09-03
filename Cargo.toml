@@ -63,6 +63,7 @@ iai = []
 transpose-cache = ["dep:parking_lot"]
 metrics = []
 amd = []
+proptest = []
 
 # Gate top-level re-exports of dense-direct solvers (LU/QR)
 dense-direct = []
