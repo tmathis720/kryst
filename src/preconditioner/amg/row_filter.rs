@@ -2,9 +2,9 @@ use std::cmp::Ordering;
 
 #[derive(Clone, Copy)]
 pub struct RowFilter {
-    pub tau_abs: f64,      // absolute drop (>= 0)
-    pub tau_rel: f64,      // relative truncation in [0,1)
-    pub k_max: usize,      // cap (0 => unlimited)
+    pub tau_abs: f64,             // absolute drop (>= 0)
+    pub tau_rel: f64,             // relative truncation in [0,1)
+    pub k_max: usize,             // cap (0 => unlimited)
     pub must_keep: Option<usize>, // column index to force-keep
 }
 
@@ -32,13 +32,9 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
     if rf.tau_rel > 0.0 && !vals.is_empty() {
         // sort indices by ascending |v| with column tiebreaker for determinism
         let mut idx: Vec<usize> = (0..vals.len()).collect();
-        idx.sort_unstable_by(|&i, &j| {
-            let ai = vals[i].abs().partial_cmp(&vals[j].abs()).unwrap_or(Ordering::Equal);
-            if ai == Ordering::Equal {
-                cols[i].cmp(&cols[j])
-            } else {
-                ai
-            }
+        idx.sort_unstable_by(|&i, &j| match vals[i].abs().total_cmp(&vals[j].abs()) {
+            Ordering::Equal => cols[i].cmp(&cols[j]),
+            o => o,
         });
         let total: f64 = vals.iter().map(|v| v.abs()).sum();
         let mut dropped_sum = 0.0;
@@ -70,24 +66,31 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
 
     // 3) Cap
     if rf.k_max > 0 && vals.len() > rf.k_max {
-        let mut idx: Vec<usize> = (0..vals.len()).collect();
-        idx.select_nth_unstable_by(rf.k_max, |&i, &j| {
-            vals[j].abs().partial_cmp(&vals[i].abs()).unwrap_or(Ordering::Equal)
+        let mut order: Vec<usize> = (0..vals.len()).collect();
+        order.sort_unstable_by(|&i, &j| match vals[j].abs().total_cmp(&vals[i].abs()) {
+            Ordering::Equal => cols[i].cmp(&cols[j]),
+            o => o,
         });
-        idx.truncate(rf.k_max);
         let mut keep = vec![false; vals.len()];
-        for &i in &idx { keep[i] = true; }
+        for &idx in order.iter().take(rf.k_max) {
+            keep[idx] = true;
+        }
         if let Some(mk) = rf.must_keep {
             if let Some(pos) = cols.iter().position(|&c| c == mk) {
                 if !keep[pos] {
-                    // find smallest among kept
-                    let mut smallest: Option<usize> = None;
-                    for &i in &idx {
-                        if smallest.map_or(true, |s: usize| vals[i].abs() < vals[s].abs()) {
-                            smallest = Some(i);
+                    let mut replace: Option<usize> = None;
+                    for &idx in order.iter().take(rf.k_max) {
+                        if replace.map_or(true, |r| {
+                            let cmp_mag = vals[idx].abs().total_cmp(&vals[r].abs());
+                            cmp_mag == Ordering::Less
+                                || (cmp_mag == Ordering::Equal && cols[idx] > cols[r])
+                        }) {
+                            replace = Some(idx);
                         }
                     }
-                    if let Some(s) = smallest { keep[s] = false; }
+                    if let Some(ridx) = replace {
+                        keep[ridx] = false;
+                    }
                     keep[pos] = true;
                 }
             }
@@ -124,7 +127,9 @@ pub fn apply_filter_to_csr_values_in_place(
     for i in 0..nrows {
         let rs = row_ptr[i];
         let re = row_ptr[i + 1];
-        if rs == re { continue; }
+        if rs == re {
+            continue;
+        }
         let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
         let mut vs: Vec<f64> = vals[rs..re].to_vec();
         let rf = rf_for_row(i);
@@ -132,7 +137,9 @@ pub fn apply_filter_to_csr_values_in_place(
         let mut keep_pos = 0usize;
         for p in rs..re {
             let c = col_idx[p];
-            while keep_pos < cols.len() && cols[keep_pos] < c { keep_pos += 1; }
+            while keep_pos < cols.len() && cols[keep_pos] < c {
+                keep_pos += 1;
+            }
             if keep_pos < cols.len() && cols[keep_pos] == c {
                 vals[p] = vs[keep_pos];
             } else {
@@ -150,7 +157,12 @@ mod tests {
     fn abs_drop_and_must_keep() {
         let mut cols = vec![0, 1];
         let mut vals = vec![1e-3, 2.0];
-        let rf = RowFilter { tau_abs: 0.1, tau_rel: 0.0, k_max: 0, must_keep: Some(0) };
+        let rf = RowFilter {
+            tau_abs: 0.1,
+            tau_rel: 0.0,
+            k_max: 0,
+            must_keep: Some(0),
+        };
         filter_row_by_truncation(&mut cols, &mut vals, rf);
         assert_eq!(cols, vec![0, 1]);
     }
@@ -159,7 +171,12 @@ mod tests {
     fn relative_truncation() {
         let mut cols = vec![0, 1, 2];
         let mut vals = vec![0.2, 0.3, 0.5];
-        let rf = RowFilter { tau_abs: 0.0, tau_rel: 0.25, k_max: 0, must_keep: None };
+        let rf = RowFilter {
+            tau_abs: 0.0,
+            tau_rel: 0.25,
+            k_max: 0,
+            must_keep: None,
+        };
         filter_row_by_truncation(&mut cols, &mut vals, rf);
         assert_eq!(cols, vec![1, 2]);
     }
@@ -168,7 +185,12 @@ mod tests {
     fn cap_with_must_keep() {
         let mut cols = vec![0, 1, 2];
         let mut vals = vec![1.0, 0.9, 0.8];
-        let rf = RowFilter { tau_abs: 0.0, tau_rel: 0.0, k_max: 2, must_keep: Some(2) };
+        let rf = RowFilter {
+            tau_abs: 0.0,
+            tau_rel: 0.0,
+            k_max: 2,
+            must_keep: Some(2),
+        };
         filter_row_by_truncation(&mut cols, &mut vals, rf);
         assert_eq!(cols, vec![0, 2]);
     }
@@ -179,14 +201,14 @@ mod tests {
         let row_ptr = vec![0, 3, 5];
         let col_idx = vec![0, 1, 2, 0, 1];
         let mut vals = vec![10.0, 1e-3, 0.2, 3.0, 4.0];
-        apply_filter_to_csr_values_in_place(
-            nrows,
-            &row_ptr,
-            &col_idx,
-            &mut vals,
-            |row| RowFilter { tau_abs: 0.5, tau_rel: 0.0, k_max: 0, must_keep: Some(row) },
-        );
+        apply_filter_to_csr_values_in_place(nrows, &row_ptr, &col_idx, &mut vals, |row| {
+            RowFilter {
+                tau_abs: 0.5,
+                tau_rel: 0.0,
+                k_max: 0,
+                must_keep: Some(row),
+            }
+        });
         assert_eq!(vals, vec![10.0, 0.0, 0.0, 3.0, 4.0]);
     }
 }
-
