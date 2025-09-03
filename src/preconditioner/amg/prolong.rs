@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::matrix::sparse::CsrMatrix;
+use super::row_filter::{RowFilter, filter_row_by_truncation};
 
 #[derive(Clone, Debug)]
 pub struct TentativeP {
@@ -32,6 +33,7 @@ pub fn smooth_tentative_sa(
     omega: f64,
     drop_tol: f64,
     max_per_row: usize,
+    trunc_rel: f64,
 ) -> Pcsr {
     let m = a.nrows();
     let ncoarse = tp.n_coarse;
@@ -72,17 +74,15 @@ pub fn smooth_tentative_sa(
             }
         }
 
-        // Drop small and cap per row
-        let mut keep: Vec<(usize, f64)> = acc_cols.iter().zip(acc_vals.iter())
-            .filter_map(|(&c, &v)| if v.abs() >= drop_tol { Some((c, v)) } else { None })
-            .collect();
-        if max_per_row > 0 && keep.len() > max_per_row {
-            keep.select_nth_unstable_by(max_per_row, |a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
-            keep.truncate(max_per_row);
+        let mut cols: Vec<usize> = acc_cols.clone();
+        let mut vs: Vec<f64> = acc_vals.clone();
+        let rf = RowFilter { tau_abs: drop_tol, tau_rel: trunc_rel, k_max: max_per_row, must_keep: Some(myc) };
+        filter_row_by_truncation(&mut cols, &mut vs, rf);
+        if cols.is_empty() {
+            cols.push(myc);
+            vs.push(1.0);
         }
-        keep.sort_by_key(|(c, _)| *c);
-
-        for (c, v) in keep {
+        for (c, v) in cols.into_iter().zip(vs.into_iter()) {
             col_idx.push(c);
             vals.push(v);
         }
@@ -148,4 +148,44 @@ pub fn smooth_sa_values_only(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matrix::sparse::CsrMatrix;
+
+    #[test]
+    fn own_aggregate_kept() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![1.0, 0.5, 0.5, 1.0],
+        );
+        let tp = TentativeP { agg_of: vec![0, 1], n_coarse: 2 };
+        let d_inv = vec![1.0, 1.0];
+        let p = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 10.0, 0, 0.0);
+        assert_eq!(p.col_idx, vec![0, 1]);
+    }
+
+    #[test]
+    fn drop_tol_prunes_but_keeps_self() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![1.0, 0.5, 0.5, 1.0],
+        );
+        let tp = TentativeP { agg_of: vec![0, 1], n_coarse: 2 };
+        let d_inv = vec![1.0, 1.0];
+        // drop_tol=0 -> keep all
+        let p_full = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 0.0, 0, 0.0);
+        assert_eq!(p_full.col_idx, vec![0, 1, 0, 1]);
+        // drop_tol large -> only own aggregates
+        let p_drop = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 1.0, 0, 0.0);
+        assert_eq!(p_drop.col_idx, vec![0, 1]);
+    }
 }

@@ -18,12 +18,14 @@ mod coarsen;
 mod prolong;
 mod rap_ops;
 mod coarse_solver;
+mod row_filter;
 
 use strength::Strength;
 use coarsen::{AggAlgo, build_aggregates};
 use prolong::{TentativeP, Pcsr, smooth_tentative_sa, smooth_sa_values_only};
 use rap_ops::{CsrPattern, rap_symbolic, rap_numeric};
 use coarse_solver::{CoarseSolve, CoarseSolver, CoarseDenseLu};
+use row_filter::{RowFilter, apply_filter_to_csr_values_in_place};
 
 // ===== Public enums (kept compatible with your old file) =====================
 
@@ -121,6 +123,9 @@ pub struct AMGConfig {
     pub truncation_factor: f64,       // 0 => no truncation
     pub max_elements_per_row: usize,  // 0 => unlimited
     pub interpolation_truncation: f64,
+    pub rap_truncation_abs: f64,
+    pub rap_max_elements_per_row: usize,
+    pub keep_pivot_in_rap: bool,
     pub grid_relax_type: [RelaxType; 4],   // [Fine, Down, Up, Coarsest]
     pub num_grid_sweeps: [usize; 4],      // [Fine, Down, Up, Coarsest]
     // legacy shims
@@ -158,6 +163,9 @@ impl Default for AMGConfig {
             truncation_factor: 0.0,
             max_elements_per_row: 0,
             interpolation_truncation: 0.0,
+            rap_truncation_abs: 0.0,
+            rap_max_elements_per_row: 0,
+            keep_pivot_in_rap: true,
             grid_relax_type: [RelaxType::GaussSeidel; 4],
             num_grid_sweeps: [1; 4],
             pre_sweeps: 1,
@@ -207,7 +215,12 @@ impl AMGBuilder {
     pub fn max_coarse_size(mut self, v: usize) -> Self { self.cfg.max_coarse_size = v; self }
     pub fn min_coarse_size(mut self, v: usize) -> Self { self.cfg.min_coarse_size = v; self }
     pub fn truncation_factor(mut self, v: f64) -> Self { self.cfg.truncation_factor = v; self }
-    pub fn interpolation_truncation(mut self, v: f64) -> Self { self.cfg.interpolation_truncation = v; self }
+    pub fn interpolation_drop_abs(mut self, v: f64) -> Self { self.cfg.interpolation_truncation = v; self }
+    pub fn interpolation_cap(mut self, k: usize) -> Self { self.cfg.max_elements_per_row = k; self }
+    pub fn rap_drop_abs(mut self, v: f64) -> Self { self.cfg.rap_truncation_abs = v; self }
+    pub fn rap_cap(mut self, k: usize) -> Self { self.cfg.rap_max_elements_per_row = k; self }
+    pub fn keep_pivot_in_rap(mut self, yes: bool) -> Self { self.cfg.keep_pivot_in_rap = yes; self }
+    pub fn interpolation_truncation(self, v: f64) -> Self { self.interpolation_drop_abs(v) }
     pub fn smoothing_sweeps(mut self, pre: usize, post: usize) -> Self {
         self.cfg.pre_sweeps = pre;
         self.cfg.post_sweeps = post;
@@ -292,6 +305,16 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
                 i
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_truncation_and_caps(cfg: &AMGConfig) -> Result<(), KError> {
+    if !(0.0..1.0).contains(&cfg.truncation_factor) {
+        return Err(KError::InvalidInput("truncation_factor must satisfy 0 ≤ τ_rel < 1".into()));
+    }
+    if cfg.interpolation_truncation < 0.0 || cfg.rap_truncation_abs < 0.0 {
+        return Err(KError::InvalidInput("absolute drop tolerances must be ≥ 0".into()));
     }
     Ok(())
 }
@@ -457,6 +480,15 @@ impl AMG {
                     &h.levels[l].p,
                     &mut vals,
                 );
+                {
+                    let mut rf = |row: usize| RowFilter {
+                        tau_abs: self.cfg.rap_truncation_abs,
+                        tau_rel: self.cfg.truncation_factor,
+                        k_max: self.cfg.rap_max_elements_per_row,
+                        must_keep: if self.cfg.keep_pivot_in_rap { Some(row) } else { None },
+                    };
+                    apply_filter_to_csr_values_in_place(pat.nrows, &pat.row_ptr, &pat.col_idx, &mut vals, &mut rf);
+                }
                 h.levels[l + 1].a = CsrMatrix::from_csr(
                     h.levels[l + 1].a.nrows(),
                     h.levels[l + 1].a.ncols(),
@@ -636,6 +668,7 @@ impl AMG {
 impl Preconditioner for AMG {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
+        validate_truncation_and_caps(&self.cfg)?;
         // Convert to CSR via the new matrix layer entry point.
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let sid = op.structure_id();
@@ -681,6 +714,7 @@ impl Preconditioner for AMG {
     fn supports_numeric_update(&self) -> bool { true }
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        validate_truncation_and_caps(&self.cfg)?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         self.refresh_numeric(&csr)?;
         self.csr = Some(csr);
@@ -691,6 +725,7 @@ impl Preconditioner for AMG {
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
+        validate_truncation_and_caps(&self.cfg)?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         self.build_symbolic(&csr)?;
         self.csr = Some(csr);
@@ -748,6 +783,7 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
             cfg.jacobi_omega,
             cfg.interpolation_truncation,
             cfg.max_elements_per_row,
+            cfg.truncation_factor,
         );
         // Build owned CSR for P and R
         let p = CsrMatrix::from_csr(p_csr.m, p_csr.n, p_csr.row_ptr.clone(), p_csr.col_idx.clone(), p_csr.vals.clone());
@@ -759,6 +795,15 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
         let pat = rap_symbolic(&r, &a_cur, &p);
         let mut a_coarse_vals = vec![0.0; pat.col_idx.len()];
         rap_numeric(&pat, &r, &a_cur, &p, &mut a_coarse_vals);
+        {
+            let mut rf = |row: usize| RowFilter {
+                tau_abs: cfg.rap_truncation_abs,
+                tau_rel: cfg.truncation_factor,
+                k_max: cfg.rap_max_elements_per_row,
+                must_keep: if cfg.keep_pivot_in_rap { Some(row) } else { None },
+            };
+            apply_filter_to_csr_values_in_place(pat.nrows, &pat.row_ptr, &pat.col_idx, &mut a_coarse_vals, &mut rf);
+        }
         let a_coarse = CsrMatrix::from_csr(pat.nrows, pat.ncols, pat.row_ptr.clone(), pat.col_idx.clone(), a_coarse_vals);
         let diag_inv_coarse = diag_inv_from_csr(&a_coarse)?;
 
@@ -1189,6 +1234,18 @@ mod tests {
         cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] = 1;
         let err = validate_relax_policy(&cfg, cfg.coarse_solve).unwrap_err();
         assert!(matches!(err, KError::InvalidInput(_)));
+
+        let mut cfg = AMGConfig::default();
+        cfg.truncation_factor = 1.2;
+        assert!(validate_truncation_and_caps(&cfg).is_err());
+        cfg.truncation_factor = -0.1;
+        assert!(validate_truncation_and_caps(&cfg).is_err());
+        cfg.truncation_factor = 0.0;
+        cfg.interpolation_truncation = -1.0;
+        assert!(validate_truncation_and_caps(&cfg).is_err());
+        cfg.interpolation_truncation = 0.0;
+        cfg.rap_truncation_abs = -1.0;
+        assert!(validate_truncation_and_caps(&cfg).is_err());
     }
 
     #[test]
