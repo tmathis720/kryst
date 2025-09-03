@@ -4,9 +4,12 @@ use crate::matrix::op::CsrOp;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::PcSide;
+
 use crate::preconditioner::builders as b;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
+#[cfg(feature = "dense-direct")]
+use crate::preconditioner::Preconditioner;
 use std::sync::Arc;
 
 #[cfg(feature = "dense-direct")]
