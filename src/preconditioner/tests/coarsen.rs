@@ -54,8 +54,8 @@ fn mis_independence_and_determinism() {
                 mis_k: k,
                 cap_per_row: None,
             };
-            let agg1 = build_aggregates(&s, algo, &opts);
-            let agg2 = build_aggregates(&s, algo, &opts);
+            let (agg1, _) = build_aggregates(&s, algo, &opts);
+            let (agg2, _) = build_aggregates(&s, algo, &opts);
             assert_eq!(agg1, agg2);
             let n_coarse = 1 + agg1.iter().copied().max().unwrap_or(0);
             let mut seeds = Vec::new();

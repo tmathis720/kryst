@@ -22,7 +22,17 @@ pub mod strength;
 
 use coarse_solver::{CoarseDenseLu, CoarseSolve, CoarseSolver};
 use coarsen::{build_aggregates, AggAlgo, AggOpts};
-use prolong::{smooth_sa_values_only, smooth_tentative_sa, Pcsr, TentativeP};
+use prolong::{
+    smooth_sa_values_only,
+    smooth_tentative_sa,
+    Pcsr,
+    TentativeP,
+    CFInfo,
+    classical_pattern,
+    classical_values_only,
+    ClassicalParams,
+    ClassicalVariant,
+};
 use rap_ops::{rap_numeric, rap_symbolic, CsrPattern};
 use row_filter::{apply_filter_to_csr_values_in_place, RowFilter};
 use strength::Strength;
@@ -462,6 +472,10 @@ struct AMGLevel {
     diag_inv: Vec<f64>,
     /// fine->coarse aggregate id used to rebuild P values (SA numeric refresh)
     agg_of: Vec<usize>,
+    /// coarse/fine flags for classical interpolation
+    is_c: Vec<bool>,
+    /// CF metadata for classical interpolation
+    cf: Option<CFInfo>,
     /// Mapping from P entry index -> index in R (transpose) values array
     p2r_pos: Vec<usize>,
     /// Symbolic pattern for A_{l+1}
@@ -558,24 +572,52 @@ impl AMG {
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
             // Recompute P_l values in-place using SA smoother with fixed pattern
-            let tp = TentativeP {
-                agg_of: h.levels[l].agg_of.clone(),
-                n_coarse: h.levels[l + 1].a.nrows(),
-            };
-            let d_inv = &h.levels[l].diag_inv;
-            // Recompute P values under fixed pattern without borrowing P mutably during computation
             let pr = h.levels[l].p.row_ptr().to_vec();
             let pc = h.levels[l].p.col_idx().to_vec();
             let mut p_new_vals = vec![0.0f64; pc.len()];
-            smooth_sa_values_only(
-                &h.levels[l].a,
-                d_inv,
-                &tp,
-                self.cfg.jacobi_omega,
-                &pr,
-                &pc,
-                &mut p_new_vals,
-            )?;
+            if let Some(ref cf) = h.levels[l].cf {
+                let s = Strength::from_csr(
+                    &h.levels[l].a,
+                    self.cfg.strong_threshold,
+                    self.cfg.normalize_strength,
+                );
+                let s_sym = s.symmetrize();
+                let params = ClassicalParams {
+                    variant: match self.cfg.interp_type {
+                        InterpType::Direct => ClassicalVariant::Direct,
+                        InterpType::Standard | InterpType::Classical | InterpType::Extended => ClassicalVariant::Standard,
+                        _ => ClassicalVariant::Standard,
+                    },
+                    extended: matches!(self.cfg.interp_type, InterpType::Extended),
+                    drop_abs: self.cfg.interpolation_truncation,
+                    trunc_rel: self.cfg.truncation_factor,
+                    cap_row: self.cfg.max_elements_per_row,
+                    keep_at_least_one: true,
+                };
+                classical_values_only(
+                    &h.levels[l].a,
+                    &s_sym,
+                    cf,
+                    &params,
+                    &pr,
+                    &pc,
+                    &mut p_new_vals,
+                )?;
+            } else {
+                let tp = TentativeP {
+                    agg_of: h.levels[l].agg_of.clone(),
+                    n_coarse: h.levels[l + 1].a.nrows(),
+                };
+                smooth_sa_values_only(
+                    &h.levels[l].a,
+                    &h.levels[l].diag_inv,
+                    &tp,
+                    self.cfg.jacobi_omega,
+                    &pr,
+                    &pc,
+                    &mut p_new_vals,
+                )?;
+            }
             h.levels[l].p.values_mut().copy_from_slice(&p_new_vals);
             // Update R values from P via precomputed transpose mapping
             {
@@ -1012,6 +1054,8 @@ fn build_hierarchy(
         p: CsrMatrix::identity(a_cur.nrows()),
         r: CsrMatrix::identity(a_cur.nrows()),
         agg_of: (0..a_cur.nrows()).collect(),
+        is_c: Vec::new(),
+        cf: None,
         p2r_pos: Vec::new(),
         a_next_pat: None,
     };
@@ -1048,7 +1092,7 @@ fn build_hierarchy(
         } else {
             1
         };
-        let agg = with_timing(do_stats, &mut lt.aggregate, || {
+        let (agg, is_c) = with_timing(do_stats, &mut lt.aggregate, || {
             build_aggregates(
                 &s,
                 match cfg.coarsen_type {
@@ -1064,20 +1108,52 @@ fn build_hierarchy(
             n_coarse: 1 + agg.iter().copied().max().unwrap_or(0),
             agg_of: agg.clone(),
         };
-        // 3) Smoothed aggregation P (sparse-only)
-        let p_csr: Pcsr = with_timing(do_stats, &mut lt.prolong, || {
-            let d = diag_inv_from_csr(&a_cur)?;
-            Ok(smooth_tentative_sa(
-                &a_cur,
-                &d,
-                &tp,
-                cfg.jacobi_omega,
-                cfg.interpolation_truncation,
-                cfg.max_elements_per_row,
-                cfg.truncation_factor,
-            ))
+        let s_sym = s.symmetrize();
+        let (p_csr, cf_opt): (Pcsr, Option<CFInfo>) = with_timing(do_stats, &mut lt.prolong, || {
+            if matches!(cfg.interp_type, InterpType::Direct | InterpType::Standard | InterpType::Extended | InterpType::Classical) {
+                let extended = matches!(cfg.interp_type, InterpType::Extended);
+                let (pat, cf) = classical_pattern(&a_cur, &s_sym, &is_c, extended);
+                let mut vals = vec![0.0; pat.col_idx.len()];
+                let params = ClassicalParams {
+                    variant: match cfg.interp_type {
+                        InterpType::Direct => ClassicalVariant::Direct,
+                        InterpType::Standard | InterpType::Classical | InterpType::Extended => ClassicalVariant::Standard,
+                        _ => ClassicalVariant::Standard,
+                    },
+                    extended,
+                    drop_abs: cfg.interpolation_truncation,
+                    trunc_rel: cfg.truncation_factor,
+                    cap_row: cfg.max_elements_per_row,
+                    keep_at_least_one: true,
+                };
+                classical_values_only(
+                    &a_cur,
+                    &s_sym,
+                    &cf,
+                    &params,
+                    &pat.row_ptr,
+                    &pat.col_idx,
+                    &mut vals,
+                )?;
+                let mut p = pat.clone();
+                p.vals = vals;
+                Ok((p, Some(cf)))
+            } else {
+                let d = diag_inv_from_csr(&a_cur)?;
+                Ok((
+                    smooth_tentative_sa(
+                        &a_cur,
+                        &d,
+                        &tp,
+                        cfg.jacobi_omega,
+                        cfg.interpolation_truncation,
+                        cfg.max_elements_per_row,
+                        cfg.truncation_factor,
+                    ),
+                    None,
+                ))
+            }
         })?;
-        // Build owned CSR for P and R
         let p = CsrMatrix::from_csr(
             p_csr.m,
             p_csr.n,
@@ -1149,6 +1225,8 @@ fn build_hierarchy(
             prev.p = p.clone();
             prev.r = r.clone();
             prev.agg_of = tp.agg_of.clone();
+            prev.is_c = is_c.clone();
+            prev.cf = cf_opt.clone();
             prev.p2r_pos = p2r_pos;
             prev.a_next_pat = Some(pat.clone());
         }
@@ -1161,6 +1239,8 @@ fn build_hierarchy(
             r: CsrMatrix::identity(a_cur.nrows()),
             diag_inv: diag_inv_coarse,
             agg_of: (0..a_cur.nrows()).collect(),
+            is_c: Vec::new(),
+            cf: None,
             p2r_pos: Vec::new(),
             a_next_pat: None,
         });
