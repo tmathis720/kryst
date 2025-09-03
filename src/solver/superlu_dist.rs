@@ -247,7 +247,7 @@ impl ProcessGrid3D {
     pub fn from_2d_with_depth(g2d: &ProcessGrid, depth: usize) -> Result<Self, KError> {
         let total = g2d.total_procs;
         if depth == 0 || total % depth != 0 {
-            return Err(KError::InvalidInput(format!("invalid 3D depth {}", depth)));
+            return Err(KError::InvalidInput(format!("invalid 3D depth {depth}")));
         }
         let layer_size = total / depth;
         let my_layer = g2d.my_rank / layer_size;
