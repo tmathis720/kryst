@@ -436,7 +436,7 @@ impl ParameterTuner {
                         avg_convergence_rate: f64::INFINITY,
                         setup_time,
                         memory_usage_estimate: None,
-                        convergence_reason: format!("Solve error: {}", e),
+                        convergence_reason: format!("Solve error: {e}"),
                     }),
                 }
             }
@@ -478,8 +478,7 @@ impl ParameterTuner {
         };
 
         println!(
-            "Starting parameter tuning: {} configurations to test",
-            configs_to_test
+            "Starting parameter tuning: {configs_to_test} configurations to test"
         );
 
         self.results.clear();
@@ -505,7 +504,7 @@ impl ParameterTuner {
                     self.results.push(metrics);
                 }
                 Err(e) => {
-                    println!("  Error: {}", e);
+                    println!("  Error: {e}");
                     // Continue with next configuration
                 }
             }
@@ -541,7 +540,7 @@ impl ParameterTuner {
                     best.config.solver_type, best.config.pc_type
                 );
                 if let Some(ref chain) = best.config.pc_chain {
-                    println!("  PC Chain: {}", chain);
+                    println!("  PC Chain: {chain}");
                 }
                 println!(
                     "  Converged: {}, Iterations: {}, Time: {:.3}s",
