@@ -19,6 +19,7 @@ pub mod coarsen;
 pub(crate) mod prolong;
 mod rap_ops;
 mod row_filter;
+mod non_galerkin;
 pub mod strength;
 
 use coarse_solver::{CoarseDenseLu, CoarseIlu, CoarseSolver};
@@ -29,6 +30,7 @@ use prolong::{
 };
 use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
 use row_filter::{RowFilter, apply_filter_to_csr_values_in_place};
+use non_galerkin::{NgRowFilter, non_galerkin_filter_coarse};
 use strength::Strength;
 
 // ===== Public enums (kept compatible with your old file) =====================
@@ -129,6 +131,25 @@ impl Default for CycleType {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NgSymmetry {
+    None,
+    Symmetric,
+}
+
+#[derive(Clone, Debug)]
+pub struct NonGalerkin {
+    pub enabled: bool,
+    pub start_level: usize,
+    pub drop_abs: f64,
+    pub drop_rel: f64,
+    pub cap_row: usize,
+    pub symmetry: NgSymmetry,
+    pub lump_diagonal: bool,
+    pub oc_target: Option<f64>,
+    pub oc_max_iter: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct AMGConfig {
     pub max_levels: usize,           // HYPRE default: 25
@@ -180,6 +201,7 @@ pub struct AMGConfig {
     pub fmg_nu_post: usize,
     pub fmg_gamma: usize,
     pub fmg_levels_use: Option<usize>,
+    pub non_galerkin: NonGalerkin,
 }
 
 impl Default for AMGConfig {
@@ -232,6 +254,17 @@ impl Default for AMGConfig {
             fmg_nu_post: 1,
             fmg_gamma: 1,
             fmg_levels_use: None,
+            non_galerkin: NonGalerkin {
+                enabled: false,
+                start_level: 1,
+                drop_abs: 0.0,
+                drop_rel: 0.0,
+                cap_row: 0,
+                symmetry: NgSymmetry::Symmetric,
+                lump_diagonal: true,
+                oc_target: None,
+                oc_max_iter: 4,
+            },
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -434,6 +467,34 @@ impl AMGBuilder {
         self
     }
 
+    pub fn non_galerkin(
+        mut self,
+        enabled: bool,
+        start_level: usize,
+        drop_abs: f64,
+        drop_rel: f64,
+        cap_row: usize,
+    ) -> Self {
+        self.cfg.non_galerkin.enabled = enabled;
+        self.cfg.non_galerkin.start_level = start_level;
+        self.cfg.non_galerkin.drop_abs = drop_abs;
+        self.cfg.non_galerkin.drop_rel = drop_rel;
+        self.cfg.non_galerkin.cap_row = cap_row;
+        self
+    }
+
+    pub fn non_galerkin_symmetry(mut self, sym: NgSymmetry, lump_diag: bool) -> Self {
+        self.cfg.non_galerkin.symmetry = sym;
+        self.cfg.non_galerkin.lump_diagonal = lump_diag;
+        self
+    }
+
+    pub fn non_galerkin_oc_target(mut self, target: Option<f64>, iters: usize) -> Self {
+        self.cfg.non_galerkin.oc_target = target;
+        self.cfg.non_galerkin.oc_max_iter = iters;
+        self
+    }
+
     pub fn build(self, _matrix: &Mat<f64>) -> Result<AMG, KError> {
         Ok(AMG::with_config(self.cfg))
     }
@@ -554,6 +615,10 @@ struct AMGLevel {
     p2r_pos: Vec<usize>,
     /// Symbolic pattern for A_{l+1}
     a_next_pat: Option<CsrPattern>,
+    /// Filtered NG pattern for A_{l+1}
+    a_next_pat_ng: Option<CsrPattern>,
+    /// Mapping from full RAP nnz index -> NG nnz index
+    rap_full2ng_pos: Option<Vec<Option<usize>>>,
     /// Optional transpose storage when keep_transpose is disabled
     r_row_ptr: Option<Vec<usize>>,
     r_col_idx: Option<Vec<usize>>,
@@ -659,7 +724,7 @@ impl AMG {
 
     fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<(), KError> {
         // Build the full hierarchy from scratch (symbolic + numeric)
-        let (hier, stats) = build_hierarchy(fine, &self.cfg)?;
+        let (hier, stats) = build_hierarchy(fine, &mut self.cfg)?;
         self.state = Some(hier);
         self.stats = stats;
         Ok(())
@@ -786,13 +851,31 @@ impl AMG {
                         &mut rf,
                     );
                 }
-                h.levels[l + 1].a = CsrMatrix::from_csr(
-                    h.levels[l + 1].a.nrows(),
-                    h.levels[l + 1].a.ncols(),
-                    pat.row_ptr.clone(),
-                    pat.col_idx.clone(),
-                    vals,
-                );
+                if let (Some(ng_pat), Some(map)) =
+                    (&h.levels[l].a_next_pat_ng, &h.levels[l].rap_full2ng_pos)
+                {
+                    let mut vals_ng = vec![0.0; ng_pat.col_idx.len()];
+                    for (k_full, &maybe) in map.iter().enumerate() {
+                        if let Some(k_ng) = maybe {
+                            vals_ng[k_ng] += vals[k_full];
+                        }
+                    }
+                    h.levels[l + 1].a = CsrMatrix::from_csr(
+                        ng_pat.nrows,
+                        ng_pat.ncols,
+                        ng_pat.row_ptr.clone(),
+                        ng_pat.col_idx.clone(),
+                        vals_ng,
+                    );
+                } else {
+                    h.levels[l + 1].a = CsrMatrix::from_csr(
+                        h.levels[l + 1].a.nrows(),
+                        h.levels[l + 1].a.ncols(),
+                        pat.row_ptr.clone(),
+                        pat.col_idx.clone(),
+                        vals,
+                    );
+                }
                 h.levels[l + 1].diag_inv = diag_inv_from_csr(&h.levels[l + 1].a)?;
             } else {
                 // Safety fallback: full RAP (structure + values)
@@ -1501,7 +1584,7 @@ impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for AMG {
 
 fn build_hierarchy(
     fine: &CsrMatrix<f64>,
-    cfg: &AMGConfig,
+    cfg: &mut AMGConfig,
 ) -> Result<(AmgHierarchy, Option<AmgStats>), KError> {
     let mut levels: Vec<AMGLevel> = Vec::with_capacity(cfg.max_levels);
     let mut a_cur = fine.clone();
@@ -1554,6 +1637,8 @@ fn build_hierarchy(
         cf: None,
         p2r_pos: Vec::new(),
         a_next_pat: None,
+        a_next_pat_ng: None,
+        rap_full2ng_pos: None,
         r_row_ptr: None,
         r_col_idx: None,
         r_vals_scratch: None,
@@ -1713,13 +1798,38 @@ fn build_hierarchy(
                 &mut rf,
             );
         }
-        let a_coarse = CsrMatrix::from_csr(
-            pat.nrows,
-            pat.ncols,
-            pat.row_ptr.clone(),
-            pat.col_idx.clone(),
-            a_coarse_vals,
-        );
+
+        let use_ng = cfg.non_galerkin.enabled && (level + 1) >= cfg.non_galerkin.start_level;
+        let (a_coarse, ng_pat_opt, map_opt) = if use_ng {
+            let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
+                &pat,
+                &a_coarse_vals,
+                cfg.non_galerkin.symmetry,
+                NgRowFilter {
+                    tau_abs: cfg.non_galerkin.drop_abs,
+                    tau_rel: cfg.non_galerkin.drop_rel,
+                    k_max: cfg.non_galerkin.cap_row,
+                    lump_diag: cfg.non_galerkin.lump_diagonal,
+                },
+            );
+            let a_ng = CsrMatrix::from_csr(
+                ng_pat.nrows,
+                ng_pat.ncols,
+                ng_pat.row_ptr.clone(),
+                ng_pat.col_idx.clone(),
+                ng_vals,
+            );
+            (a_ng, Some(ng_pat), Some(full2ng))
+        } else {
+            let a_full = CsrMatrix::from_csr(
+                pat.nrows,
+                pat.ncols,
+                pat.row_ptr.clone(),
+                pat.col_idx.clone(),
+                a_coarse_vals,
+            );
+            (a_full, None, None)
+        };
         let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || diag_inv_from_csr(&a_coarse))?;
         lt.total = lt.strength
             + lt.aggregate
@@ -1740,6 +1850,8 @@ fn build_hierarchy(
             prev.cf = cf_opt.clone();
             prev.p2r_pos = p2r_pos;
             prev.a_next_pat = Some(pat.clone());
+            prev.a_next_pat_ng = ng_pat_opt.clone();
+            prev.rap_full2ng_pos = map_opt;
             if cfg.keep_transpose {
                 prev.r = r.clone();
                 prev.r_row_ptr = None;
@@ -1782,6 +1894,8 @@ fn build_hierarchy(
             cf: None,
             p2r_pos: Vec::new(),
             a_next_pat: None,
+            a_next_pat_ng: None,
+            rap_full2ng_pos: None,
             r_row_ptr: None,
             r_col_idx: None,
             r_vals_scratch: None,
@@ -1819,6 +1933,10 @@ fn build_hierarchy(
                 break;
             }
         }
+    }
+
+    if cfg.non_galerkin.enabled && cfg.non_galerkin.oc_target.is_some() {
+        enforce_oc_target(&mut levels, cfg)?;
     }
 
     let L = levels.len() - 1;
@@ -1864,6 +1982,75 @@ fn build_hierarchy(
     };
 
     Ok((hier, stats_opt))
+}
+
+fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<(), KError> {
+    if let Some(target) = cfg.non_galerkin.oc_target {
+        for _ in 0..cfg.non_galerkin.oc_max_iter {
+            let oc = operator_complexity_estimate(levels);
+            if oc <= target {
+                break;
+            }
+            cfg.non_galerkin.drop_abs *= 1.25;
+            cfg.non_galerkin.drop_rel = (cfg.non_galerkin.drop_rel * 1.1).min(0.95);
+            for l in 0..levels.len() - 1 {
+                if l + 1 < cfg.non_galerkin.start_level {
+                    continue;
+                }
+                if let Some(pat_full) = levels[l].a_next_pat.clone() {
+                    let mut vals_full = vec![0.0; pat_full.col_idx.len()];
+                    if cfg.keep_transpose {
+                        rap_numeric(
+                            &pat_full,
+                            &levels[l].r,
+                            &levels[l].a,
+                            &levels[l].p,
+                            &mut vals_full,
+                        );
+                    } else {
+                        rap_numeric_with_pt(&mut levels[l], &mut vals_full)?;
+                    }
+                    {
+                        let mut rf = |row: usize| RowFilter {
+                            tau_abs: cfg.rap_truncation_abs,
+                            tau_rel: cfg.truncation_factor,
+                            k_max: cfg.rap_max_elements_per_row,
+                            must_keep: if cfg.keep_pivot_in_rap { Some(row) } else { None },
+                        };
+                        apply_filter_to_csr_values_in_place(
+                            pat_full.nrows,
+                            &pat_full.row_ptr,
+                            &pat_full.col_idx,
+                            &mut vals_full,
+                            &mut rf,
+                        );
+                    }
+                    let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
+                        &pat_full,
+                        &vals_full,
+                        cfg.non_galerkin.symmetry,
+                        NgRowFilter {
+                            tau_abs: cfg.non_galerkin.drop_abs,
+                            tau_rel: cfg.non_galerkin.drop_rel,
+                            k_max: cfg.non_galerkin.cap_row,
+                            lump_diag: cfg.non_galerkin.lump_diagonal,
+                        },
+                    );
+                    levels[l].a_next_pat_ng = Some(ng_pat.clone());
+                    levels[l].rap_full2ng_pos = Some(full2ng);
+                    levels[l + 1].a = CsrMatrix::from_csr(
+                        ng_pat.nrows,
+                        ng_pat.ncols,
+                        ng_pat.row_ptr.clone(),
+                        ng_pat.col_idx.clone(),
+                        ng_vals,
+                    );
+                    levels[l + 1].diag_inv = diag_inv_from_csr(&levels[l + 1].a)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ===== Sparse utilities (local; avoid dense on hot path) ====================
@@ -2774,6 +2961,8 @@ mod tests {
             cf: None,
             p2r_pos: vec![],
             a_next_pat: None,
+            a_next_pat_ng: None,
+            rap_full2ng_pos: None,
             r_row_ptr: None,
             r_col_idx: None,
             r_vals_scratch: None,
