@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
@@ -144,6 +145,7 @@ pub struct AMGConfig {
     pub jacobi_omega: f64,
     pub chebyshev_degree: usize,
     pub drop_tol: f64,                // NEW: used for dense->CSR conversion
+    pub stats_eps: f64,                // threshold for effective nnz reporting
     // New SA/RS controls
     pub normalize_strength: bool,
     pub coarse_solve: CoarseSolve,
@@ -183,6 +185,7 @@ impl Default for AMGConfig {
             jacobi_omega: 2.0 / 3.0,
             chebyshev_degree: 0,
             drop_tol: 1e-12,
+            stats_eps: 1e-12,
             normalize_strength: true,
             coarse_solve: CoarseSolve::CG,
             ilu_drop_tol: 1e-2,
@@ -196,6 +199,7 @@ impl Default for AMGConfig {
             RelaxType::GaussSeidel,
         ];
         cfg.num_grid_sweeps = [cfg.pre_sweeps, cfg.pre_sweeps, cfg.post_sweeps, 1];
+        cfg.stats_eps = cfg.drop_tol;
         cfg
     }
 }
@@ -266,7 +270,12 @@ impl AMGBuilder {
     pub fn print_level(mut self, lvl: usize) -> Self { self.cfg.print_level = lvl; self }
     pub fn jacobi_omega(mut self, w: f64) -> Self { self.cfg.jacobi_omega = w; self }
     pub fn chebyshev_degree(mut self, k: usize) -> Self { self.cfg.chebyshev_degree = k; self }
-    pub fn drop_tolerance(mut self, t: f64) -> Self { self.cfg.drop_tol = t; self }
+    pub fn drop_tolerance(mut self, t: f64) -> Self {
+        self.cfg.drop_tol = t;
+        self.cfg.stats_eps = t;
+        self
+    }
+    pub fn stats_eps(mut self, t: f64) -> Self { self.cfg.stats_eps = t; self }
 
     pub fn build(self, _matrix: &Mat<f64>) -> Result<AMG, KError> {
         Ok(AMG::with_config(self.cfg))
@@ -394,6 +403,7 @@ pub struct AMG {
     last_vid: Option<ValuesId>,
     cfg: AMGConfig,
     stats: Option<AmgStats>,
+    runtime: Mutex<AmgRuntime>,
 }
 
 impl Default for AMG {
@@ -405,6 +415,7 @@ impl Default for AMG {
             last_vid: None,
             cfg: AMGConfig::default(),
             stats: None,
+            runtime: Mutex::new(AmgRuntime::default()),
         }
     }
 }
@@ -414,16 +425,15 @@ impl AMG {
         AMG::default()
     }
     pub fn builder() -> AMGBuilder { AMGBuilder::new() }
-    pub fn with_config(cfg: AMGConfig) -> Self {
-        Self { cfg, ..Default::default() }
-    }
+    pub fn with_config(cfg: AMGConfig) -> Self { Self { cfg, ..Default::default() } }
 
     // ---- Setup paths --------------------------------------------------------
 
     fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<(), KError> {
         // Build the full hierarchy from scratch (symbolic + numeric)
-        let hier = build_hierarchy(fine, &self.cfg)?;
+        let (hier, stats) = build_hierarchy(fine, &self.cfg)?;
         self.state = Some(hier);
+        self.stats = stats;
         Ok(())
     }
 
@@ -505,6 +515,11 @@ impl AMG {
             }
         }
 
+        if self.cfg.logging_level > 0 {
+            let mut st = AmgStats::from_hierarchy(&h);
+            st.levels = collect_level_stats(&h, &self.cfg);
+            self.stats = Some(st);
+        }
         self.state = Some(h);
         Ok(())
     }
@@ -572,12 +587,13 @@ impl AMG {
 
     // ---- V-cycle ------------------------------------------------------------
 
-    fn v_cycle(
+    fn v_cycle_profiled(
         &self,
         level: usize,
         rhs: &[f64],
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
+        mut cyc: Option<&mut CycleTimings>,
     ) -> Result<(), KError> {
         let h = self.state.as_ref().ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
         let lc = h.coarsest_ix();
@@ -585,23 +601,29 @@ impl AMG {
         let a = &h.levels[level].a;
         let d = &h.levels[level].diag_inv;
         let pol = &h.policy;
+        let mut lv = CycleLevelTiming { level, ..Default::default() };
+        let prof = cyc.is_some();
 
         if level == lc {
-            // Coarsest: choose solver, with heuristic to use dense when tiny
-            let use_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
-                || a.nrows() <= self.cfg.max_coarse_size;
-            if use_dense {
-                let mut solver = CoarseDenseLu::new();
-                solver.setup(a)?;
-                solver.solve(rhs, sol)?;
-            } else {
-                match h.coarse_solve {
-                    CoarseSolve::CG | CoarseSolve::ILU => {
-                        // Fallback to CG; ILU path can be added later
-                        cg_sparse(a, rhs, sol, self.cfg.tolerance, a.nrows().min(50))?;
+            with_timing(prof, &mut lv.coarse_solve, || {
+                // Coarsest: choose solver
+                let use_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
+                    || a.nrows() <= self.cfg.max_coarse_size;
+                if use_dense {
+                    let mut solver = CoarseDenseLu::new();
+                    solver.setup(a)?;
+                    solver.solve(rhs, sol)
+                } else {
+                    match h.coarse_solve {
+                        CoarseSolve::CG | CoarseSolve::ILU => {
+                            cg_sparse(a, rhs, sol, self.cfg.tolerance, a.nrows().min(50))
+                        }
+                        CoarseSolve::DirectDense => unreachable!(),
                     }
-                    CoarseSolve::DirectDense => unreachable!(),
                 }
+            })?;
+            if let Some(c) = cyc {
+                c.per_level.push(lv);
             }
             return Ok(());
         }
@@ -611,56 +633,90 @@ impl AMG {
 
         // Pre-smooth
         let phase_pre = if level == 0 { RelaxPhase::Fine } else { RelaxPhase::Down };
-        Self::apply_relax(pol, phase_pre, RelaxWhere::Pre, a, d, rhs, sol, ws)?;
+        with_timing(prof, &mut lv.pre_smooth, || {
+            Self::apply_relax(pol, phase_pre, RelaxWhere::Pre, a, d, rhs, sol, ws)
+        })?;
 
         // residual = rhs - A * sol
-        a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])?;
-        #[cfg(feature = "rayon")]
-        ws.residual[..n].par_iter_mut().enumerate().for_each(|(i, ri)| {
-            *ri = rhs[i] - ws.work[i];
+        with_timing(prof, &mut lv.matvec, || {
+            a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])
+        })?;
+        with_timing(prof, &mut lv.residual_axpy, || {
+            #[cfg(feature = "rayon")]
+            ws.residual[..n].par_iter_mut().enumerate().for_each(|(i, ri)| {
+                *ri = rhs[i] - ws.work[i];
+            });
+            #[cfg(not(feature = "rayon"))]
+            for i in 0..n {
+                ws.residual[i] = rhs[i] - ws.work[i];
+            }
         });
-        #[cfg(not(feature = "rayon"))]
-        for i in 0..n { ws.residual[i] = rhs[i] - ws.work[i]; }
 
         // r_c = R * residual
         let r = &h.levels[level].r;
         let p = &h.levels[level].p;
         let nc = h.levels[level + 1].a.nrows();
 
-        // Take ownership of the workspace coarse buffer to avoid cloning and
-        // to prevent simultaneous immutable and mutable borrows of `ws`.
         let mut local_coarse = std::mem::take(&mut ws.coarse_rhs);
         local_coarse.resize(nc, 0.0);
-        // Fill local buffer with R * residual
-        r.spmv_scaled(1.0, &ws.residual[..n], 0.0, &mut local_coarse[..nc])?;
+        with_timing(prof, &mut lv.restrict, || {
+            r.spmv_scaled(1.0, &ws.residual[..n], 0.0, &mut local_coarse[..nc])
+        })?;
 
-        // recurse
-        let mut zc = vec![0.0; nc];
-        self.v_cycle(level + 1, &local_coarse[..nc], &mut zc, ws)?;
-        // Restore workspace buffer for reuse
+        // recurse / coarse solve
+        if level + 1 == lc {
+            with_timing(prof, &mut lv.coarse_solve, || {
+                let mut solver = CoarseDenseLu::new();
+                solver.setup(&h.levels[level + 1].a)?;
+                solver.solve(&local_coarse[..nc], &mut ws.fine_corr[..nc])
+            })?;
+            ws.fine_corr[..n].fill(0.0);
+        } else {
+            let mut zc = vec![0.0; nc];
+            self.v_cycle_profiled(level + 1, &local_coarse[..nc], &mut zc, ws, cyc.as_deref_mut())?;
+            with_timing(prof, &mut lv.prolong, || {
+                ws.fine_corr[..n].fill(0.0);
+                p.spmv_scaled(1.0, &zc, 0.0, &mut ws.fine_corr[..n])
+            })?;
+            for i in 0..n {
+                sol[i] += ws.fine_corr[i];
+            }
+        }
         ws.coarse_rhs = local_coarse;
-
-        // fine_corr = P * zc
-        ws.fine_corr[..n].fill(0.0);
-        p.spmv_scaled(1.0, &zc, 0.0, &mut ws.fine_corr[..n])?;
-
-        // sol += fine_corr
-        #[cfg(feature = "rayon")]
-        sol.par_iter_mut().enumerate().for_each(|(i, zi)| { *zi += ws.fine_corr[i]; });
-        #[cfg(not(feature = "rayon"))]
-        for i in 0..n { sol[i] += ws.fine_corr[i]; }
 
         // Post-smooth
         let phase_post = if level == 0 { RelaxPhase::Fine } else { RelaxPhase::Up };
-        Self::apply_relax(pol, phase_post, RelaxWhere::Post, a, d, rhs, sol, ws)?;
+        with_timing(prof, &mut lv.post_smooth, || {
+            Self::apply_relax(pol, phase_post, RelaxWhere::Post, a, d, rhs, sol, ws)
+        })?;
+
+        if let Some(c) = cyc {
+            c.per_level.push(lv);
+        }
         Ok(())
+    }
+
+    fn v_cycle(
+        &self,
+        level: usize,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        self.v_cycle_profiled(level, rhs, sol, ws, None)
     }
 
     // Convenience to avoid trait ambiguity in examples
     pub fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         Preconditioner::apply(self, side, x, y)
     }
-    pub fn stats(&self) -> Option<AmgStats> { self.stats.clone() }
+    pub fn stats(&self) -> Option<AmgStats> {
+        let mut out = self.stats.clone();
+        if let (Some(s), Ok(rt)) = (out.as_mut(), self.runtime.lock()) {
+            s.last_cycle = rt.last_cycle.clone();
+        }
+        out
+    }
 }
 
 // ===== Preconditioner trait (new API) =======================================
@@ -684,9 +740,10 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(sid);
         self.last_vid = Some(vid);
-        // compute stats if available
-        if let Some(h) = &self.state {
-            self.stats = Some(AmgStats::from_hierarchy(h));
+        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1 {
+            if let Some(s) = self.stats.as_ref() {
+                print_setup_tables(s);
+            }
         }
         Ok(())
     }
@@ -700,14 +757,33 @@ impl Preconditioner for AMG {
         let h = self.state.as_ref().ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
         if h.levels.is_empty() {
             // Fallback Jacobi with diagonal of input matrix if hierarchy missing
-            let a = self.csr.as_ref().ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+            let a = self
+                .csr
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
             let d = diag_inv_from_csr(a)?;
             let mut ws = AMGWorkspace::new(r.len());
             Self::jacobi_smooth_sparse(self.cfg.jacobi_omega, a, &d, r, z, 10, &mut ws)
         } else {
             let mut ws = AMGWorkspace::new(h.finest().a.nrows());
-            z.fill(0.0);
-            self.v_cycle(0, r, z, &mut ws)
+            let do_prof = self.cfg.logging_level >= 2;
+            if do_prof {
+                let mut cyc = CycleTimings::default();
+                let t_all = tic();
+                z.fill(0.0);
+                self.v_cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
+                cyc.total_cycle = toc(t_all);
+                if let Ok(mut rt) = self.runtime.lock() {
+                    rt.last_cycle = Some(cyc.clone());
+                }
+                if self.cfg.print_level >= 2 {
+                    print_cycle_table(&cyc);
+                }
+            } else {
+                z.fill(0.0);
+                self.v_cycle(0, r, z, &mut ws)?;
+            }
+            Ok(())
         }
     }
 
@@ -719,7 +795,11 @@ impl Preconditioner for AMG {
         self.refresh_numeric(&csr)?;
         self.csr = Some(csr);
         self.last_vid = Some(op.values_id());
-        if let Some(h) = &self.state { self.stats = Some(AmgStats::from_hierarchy(h)); }
+        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1 {
+            if let Some(s) = self.stats.as_ref() {
+                print_setup_tables(s);
+            }
+        }
         Ok(())
     }
 
@@ -731,7 +811,11 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(op.structure_id());
         self.last_vid = Some(op.values_id());
-        if let Some(h) = &self.state { self.stats = Some(AmgStats::from_hierarchy(h)); }
+        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1 {
+            if let Some(s) = self.stats.as_ref() {
+                print_setup_tables(s);
+            }
+        }
         Ok(())
     }
 }
@@ -749,52 +833,109 @@ impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for AMG {
 
 // ===== Hierarchy construction (symbolic + numeric) ==========================
 
-fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarchy, KError> {
+fn build_hierarchy(
+    fine: &CsrMatrix<f64>,
+    cfg: &AMGConfig,
+) -> Result<(AmgHierarchy, Option<AmgStats>), KError> {
     let mut levels: Vec<AMGLevel> = Vec::with_capacity(cfg.max_levels);
     let mut a_cur = fine.clone();
+    let do_stats = cfg.logging_level > 0;
+    let mut level_stats: Vec<LevelStats> = Vec::new();
+    let mut timings: Vec<LevelSetupTiming> = Vec::new();
+    let t_setup_all = if do_stats { Some(tic()) } else { None };
 
     // Level 0 (finest)
+    let mut lt0 = LevelSetupTiming::default();
+    let t = tic();
+    let diag0 = diag_inv_from_csr(&a_cur)?;
+    if do_stats {
+        lt0.diag = toc(t);
+        lt0.total = lt0.diag;
+    }
     let l0 = AMGLevel {
-        diag_inv: diag_inv_from_csr(&a_cur)?,
+        diag_inv: diag0,
         a: a_cur.clone(),
-        p: CsrMatrix::identity(a_cur.nrows()), // placeholder; updated after coarsening step
+        p: CsrMatrix::identity(a_cur.nrows()),
         r: CsrMatrix::identity(a_cur.nrows()),
-        agg_of: (0..a_cur.nrows()).collect(), // identity initially
+        agg_of: (0..a_cur.nrows()).collect(),
         p2r_pos: Vec::new(),
         a_next_pat: None,
     };
     levels.push(l0);
+    if do_stats {
+        level_stats.push(LevelStats {
+            level: 0,
+            n: a_cur.nrows(),
+            nnz_a: a_cur.nnz(),
+            nnz_p: 0,
+            nnz_r: 0,
+            max_row_sum_a: max_row_sum_abs(&a_cur),
+            eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
+        });
+        timings.push(lt0);
+    }
 
     // Drive coarsening: build levels 0..L (inclusive L is coarsest)
     for _level in 0..cfg.max_levels {
         let n = a_cur.nrows();
-        if n <= cfg.coarse_threshold || n <= cfg.min_coarse_size { break; }
+        if n <= cfg.coarse_threshold || n <= cfg.min_coarse_size {
+            break;
+        }
+
+        let mut lt = LevelSetupTiming::default();
 
         // 1) Strength of connection (sparse)
-        let s = Strength::from_csr(&a_cur, cfg.strong_threshold, cfg.normalize_strength);
+        let s = with_timing(do_stats, &mut lt.strength, || {
+            Strength::from_csr(&a_cur, cfg.strong_threshold, cfg.normalize_strength)
+        });
         // 2) Aggregates
-        let agg = build_aggregates(&s, match cfg.coarsen_type { CoarsenType::RS => AggAlgo::RSGreedy, CoarsenType::HMIS => AggAlgo::HMIS, CoarsenType::PMIS => AggAlgo::PMIS, CoarsenType::Falgout => AggAlgo::HMIS });
-        let tp = TentativeP { n_coarse: 1 + agg.iter().copied().max().unwrap_or(0), agg_of: agg.clone() };
+        let agg = with_timing(do_stats, &mut lt.aggregate, || {
+            build_aggregates(
+                &s,
+                match cfg.coarsen_type {
+                    CoarsenType::RS => AggAlgo::RSGreedy,
+                    CoarsenType::HMIS => AggAlgo::HMIS,
+                    CoarsenType::PMIS => AggAlgo::PMIS,
+                    CoarsenType::Falgout => AggAlgo::HMIS,
+                },
+            )
+        });
+        let tp = TentativeP {
+            n_coarse: 1 + agg.iter().copied().max().unwrap_or(0),
+            agg_of: agg.clone(),
+        };
         // 3) Smoothed aggregation P (sparse-only)
-        let p_csr: Pcsr = smooth_tentative_sa(
-            &a_cur,
-            &diag_inv_from_csr(&a_cur)?,
-            &tp,
-            cfg.jacobi_omega,
-            cfg.interpolation_truncation,
-            cfg.max_elements_per_row,
-            cfg.truncation_factor,
-        );
+        let p_csr: Pcsr = with_timing(do_stats, &mut lt.prolong, || {
+            let d = diag_inv_from_csr(&a_cur)?;
+            Ok(smooth_tentative_sa(
+                &a_cur,
+                &d,
+                &tp,
+                cfg.jacobi_omega,
+                cfg.interpolation_truncation,
+                cfg.max_elements_per_row,
+                cfg.truncation_factor,
+            ))
+        })?;
         // Build owned CSR for P and R
-        let p = CsrMatrix::from_csr(p_csr.m, p_csr.n, p_csr.row_ptr.clone(), p_csr.col_idx.clone(), p_csr.vals.clone());
+        let p = CsrMatrix::from_csr(
+            p_csr.m,
+            p_csr.n,
+            p_csr.row_ptr.clone(),
+            p_csr.col_idx.clone(),
+            p_csr.vals.clone(),
+        );
         // R = P^T pattern and values
-        let (r_row_ptr, r_col_idx, r_vals, p2r_pos) = transpose_csr_with_pos(&p_csr);
+        let (r_row_ptr, r_col_idx, r_vals, p2r_pos) =
+            with_timing(do_stats, &mut lt.restrict, || transpose_csr_with_pos(&p_csr));
         let r = CsrMatrix::from_csr(p_csr.n, p_csr.m, r_row_ptr.clone(), r_col_idx.clone(), r_vals.clone());
 
         // 4) Coarse operator A_c symbolic and numeric
-        let pat = rap_symbolic(&r, &a_cur, &p);
+        let pat = with_timing(do_stats, &mut lt.rap_symbolic, || rap_symbolic(&r, &a_cur, &p));
         let mut a_coarse_vals = vec![0.0; pat.col_idx.len()];
-        rap_numeric(&pat, &r, &a_cur, &p, &mut a_coarse_vals);
+        with_timing(do_stats, &mut lt.rap_numeric, || {
+            rap_numeric(&pat, &r, &a_cur, &p, &mut a_coarse_vals);
+        });
         {
             let mut rf = |row: usize| RowFilter {
                 tau_abs: cfg.rap_truncation_abs,
@@ -802,10 +943,34 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
                 k_max: cfg.rap_max_elements_per_row,
                 must_keep: if cfg.keep_pivot_in_rap { Some(row) } else { None },
             };
-            apply_filter_to_csr_values_in_place(pat.nrows, &pat.row_ptr, &pat.col_idx, &mut a_coarse_vals, &mut rf);
+            apply_filter_to_csr_values_in_place(
+                pat.nrows,
+                &pat.row_ptr,
+                &pat.col_idx,
+                &mut a_coarse_vals,
+                &mut rf,
+            );
         }
-        let a_coarse = CsrMatrix::from_csr(pat.nrows, pat.ncols, pat.row_ptr.clone(), pat.col_idx.clone(), a_coarse_vals);
-        let diag_inv_coarse = diag_inv_from_csr(&a_coarse)?;
+        let a_coarse = CsrMatrix::from_csr(
+            pat.nrows,
+            pat.ncols,
+            pat.row_ptr.clone(),
+            pat.col_idx.clone(),
+            a_coarse_vals,
+        );
+        let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || {
+            diag_inv_from_csr(&a_coarse)
+        })?;
+        lt.total = lt.strength
+            + lt.aggregate
+            + lt.prolong
+            + lt.restrict
+            + lt.rap_symbolic
+            + lt.rap_numeric
+            + lt.diag;
+        if do_stats {
+            timings.push(lt);
+        }
 
         // Replace previous temporary P/R by actual inter-level transfers and agg mapping
         if let Some(prev) = levels.last_mut() {
@@ -828,15 +993,40 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
             a_next_pat: None,
         });
 
-        if a_cur.nrows() >= n { break; } // stalled
-        if a_cur.nrows() <= cfg.max_coarse_size { break; }
+        if do_stats {
+            level_stats.push(LevelStats {
+                level: levels.len() - 1,
+                n: a_cur.nrows(),
+                nnz_a: a_cur.nnz(),
+                nnz_p: 0,
+                nnz_r: 0,
+                max_row_sum_a: max_row_sum_abs(&a_cur),
+                eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
+            });
+            let ls_len = level_stats.len();
+            if ls_len >= 2 {
+                if let Some(prev) = level_stats.get_mut(ls_len - 2) {
+                    prev.nnz_p = p.nnz();
+                    prev.nnz_r = r.nnz();
+                }
+            }
+        }
+
+        if a_cur.nrows() >= n {
+            break;
+        } // stalled
+        if a_cur.nrows() <= cfg.max_coarse_size {
+            break;
+        }
         if let Some(limit) = cfg.max_operator_complexity {
             let oc = operator_complexity_estimate(&levels);
-            if oc > limit { break; }
+            if oc > limit {
+                break;
+            }
         }
     }
 
-    Ok(AmgHierarchy {
+    let hier = AmgHierarchy {
         policy: RelaxPolicy {
             kind: cfg.grid_relax_type,
             sweeps: cfg.num_grid_sweeps,
@@ -844,7 +1034,28 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
         },
         coarse_solve: cfg.coarse_solve,
         levels,
-    })
+    };
+
+    let stats_opt = if do_stats {
+        let mut stats = AmgStats::from_hierarchy(&hier);
+        stats.levels = level_stats;
+        let mut setup = SetupTimings::default();
+        setup.per_level = timings;
+        if let Some(t0) = t_setup_all {
+            setup.total_setup = toc(t0);
+        }
+        for lt in &setup.per_level {
+            setup.total_symbolic +=
+                lt.strength + lt.aggregate + lt.prolong + lt.restrict + lt.rap_symbolic;
+            setup.total_numeric += lt.rap_numeric + lt.diag;
+        }
+        stats.setup = setup;
+        Some(stats)
+    } else {
+        None
+    };
+
+    Ok((hier, stats_opt))
 }
 
 // ===== Sparse utilities (local; avoid dense on hot path) ====================
@@ -1132,10 +1343,62 @@ fn dot(x: &[f64], y: &[f64]) -> f64 {
 // ===== Helpers for transpose mapping and stats ==============================
 
 #[derive(Clone, Debug)]
+pub struct LevelStats {
+    pub level: usize,
+    pub n: usize,
+    pub nnz_a: usize,
+    pub nnz_p: usize,
+    pub nnz_r: usize,
+    pub max_row_sum_a: f64,
+    pub eff_nnz_a: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LevelSetupTiming {
+    pub strength: Duration,
+    pub aggregate: Duration,
+    pub prolong: Duration,
+    pub restrict: Duration,
+    pub rap_symbolic: Duration,
+    pub rap_numeric: Duration,
+    pub diag: Duration,
+    pub total: Duration,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SetupTimings {
+    pub per_level: Vec<LevelSetupTiming>,
+    pub total_setup: Duration,
+    pub total_symbolic: Duration,
+    pub total_numeric: Duration,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CycleLevelTiming {
+    pub level: usize,
+    pub pre_smooth: Duration,
+    pub matvec: Duration,
+    pub residual_axpy: Duration,
+    pub restrict: Duration,
+    pub coarse_solve: Duration,
+    pub prolong: Duration,
+    pub post_smooth: Duration,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CycleTimings {
+    pub per_level: Vec<CycleLevelTiming>,
+    pub total_cycle: Duration,
+}
+
+#[derive(Clone, Debug)]
 pub struct AmgStats {
     pub grid_complexity: f64,
     pub operator_complexity: f64,
     pub num_levels: usize,
+    pub levels: Vec<LevelStats>,
+    pub setup: SetupTimings,
+    pub last_cycle: Option<CycleTimings>,
 }
 
 impl AmgStats {
@@ -1152,8 +1415,16 @@ impl AmgStats {
             grid_complexity: ng_sum / n0,
             operator_complexity: nnz_sum / nnz0,
             num_levels: h.levels.len(),
+            levels: Vec::new(),
+            setup: SetupTimings::default(),
+            last_cycle: None,
         }
     }
+}
+
+#[derive(Default)]
+struct AmgRuntime {
+    last_cycle: Option<CycleTimings>,
 }
 
 fn operator_complexity_estimate(levels: &[AMGLevel]) -> f64 {
@@ -1161,6 +1432,147 @@ fn operator_complexity_estimate(levels: &[AMGLevel]) -> f64 {
     let nnz0 = levels[0].a.nnz() as f64;
     let nnz_sum: f64 = levels.iter().map(|l| l.a.nnz() as f64).sum();
     nnz_sum / nnz0
+}
+
+fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
+    let mut out = Vec::with_capacity(h.levels.len());
+    for (i, lvl) in h.levels.iter().enumerate() {
+        out.push(LevelStats {
+            level: i,
+            n: lvl.a.nrows(),
+            nnz_a: lvl.a.nnz(),
+            nnz_p: if i < h.coarsest_ix() { lvl.p.nnz() } else { 0 },
+            nnz_r: if i < h.coarsest_ix() { lvl.r.nnz() } else { 0 },
+            max_row_sum_a: max_row_sum_abs(&lvl.a),
+            eff_nnz_a: Some(eff_nnz(&lvl.a, cfg.stats_eps)),
+        });
+    }
+    out
+}
+
+fn print_setup_tables(stats: &AmgStats) {
+    if stats.levels.is_empty() {
+        return;
+    }
+    println!(
+        "AMG hierarchy: {} levels\nGrid complexity: {:.3}, Operator complexity: {:.3}",
+        stats.num_levels, stats.grid_complexity, stats.operator_complexity
+    );
+    println!(
+        "{:>5} {:>10} {:>10} {:>10} {:>10} {:>12}",
+        "lev", "n", "nnz(A)", "nnz(P)", "nnz(R)", "max_row_sum"
+    );
+    for ls in &stats.levels {
+        println!(
+            "{:>5} {:>10} {:>10} {:>10} {:>10} {:>12.4e}",
+            ls.level, ls.n, ls.nnz_a, ls.nnz_p, ls.nnz_r, ls.max_row_sum_a
+        );
+    }
+    if !stats.setup.per_level.is_empty() {
+        println!(
+            "Setup timings (ms): level | strength agg prolon restr symRAP numRAP diag total"
+        );
+        let ms = |d: Duration| (d.as_secs_f64() * 1e3).round() as u64;
+        for (i, lt) in stats.setup.per_level.iter().enumerate() {
+            println!(
+                "{:>5} {:>9} {:>3} {:>6} {:>5} {:>7} {:>8} {:>4} {:>6}",
+                i,
+                ms(lt.strength),
+                ms(lt.aggregate),
+                ms(lt.prolong),
+                ms(lt.restrict),
+                ms(lt.rap_symbolic),
+                ms(lt.rap_numeric),
+                ms(lt.diag),
+                ms(lt.total)
+            );
+        }
+        println!(
+            "Total setup: {} ms (symbolic {} ms, numeric {} ms)",
+            ms(stats.setup.total_setup),
+            ms(stats.setup.total_symbolic),
+            ms(stats.setup.total_numeric)
+        );
+    }
+}
+
+fn print_cycle_table(c: &CycleTimings) {
+    println!("V-cycle timings (ms): level | pre mv axpy R coarse P post");
+    let ms = |d: Duration| (d.as_secs_f64() * 1e3).round() as u64;
+    for lv in &c.per_level {
+        println!(
+            "{:>5} {:>4} {:>2} {:>4} {:>1} {:>6} {:>1} {:>4}",
+            lv.level,
+            ms(lv.pre_smooth),
+            ms(lv.matvec),
+            ms(lv.residual_axpy),
+            ms(lv.restrict),
+            ms(lv.coarse_solve),
+            ms(lv.prolong),
+            ms(lv.post_smooth)
+        );
+    }
+    println!("Total cycle: {} ms", ms(c.total_cycle));
+}
+
+#[inline]
+fn tic() -> Instant { Instant::now() }
+#[inline]
+fn toc(t0: Instant) -> Duration { t0.elapsed() }
+
+fn max_row_sum_abs(a: &CsrMatrix<f64>) -> f64 {
+    let n = a.nrows();
+    let rp = a.row_ptr();
+    let vv = a.values();
+    #[cfg(feature = "rayon")]
+    {
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let mut s = 0.0;
+                for p in rp[i]..rp[i + 1] {
+                    s += vv[p].abs();
+                }
+                s
+            })
+            .reduce(|| 0.0, |x, y| x.max(y))
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut m = 0.0;
+        for i in 0..n {
+            let mut s = 0.0;
+            for p in rp[i]..rp[i + 1] {
+                s += vv[p].abs();
+            }
+            if s > m {
+                m = s;
+            }
+        }
+        m
+    }
+}
+
+fn eff_nnz(a: &CsrMatrix<f64>, eps: f64) -> usize {
+    if eps <= 0.0 {
+        return a.nnz();
+    }
+    a.values().iter().filter(|&&v| v.abs() >= eps).count()
+}
+
+#[inline]
+fn with_timing<F, R>(enabled: bool, acc: &mut Duration, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    if enabled {
+        let t = tic();
+        let out = f();
+        *acc += toc(t);
+        out
+    } else {
+        f()
+    }
 }
 
 fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>) {
