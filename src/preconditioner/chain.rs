@@ -18,7 +18,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use std::cell::RefCell;
 
 thread_local! {
-    static TLS_BUF: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+    static TLS_BUF: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A simple compositional preconditioner:
@@ -71,7 +71,7 @@ impl Preconditioner for PcChain {
             }
             tmp.copy_from_slice(x);
             for st in &self.stages {
-                st.apply(side, &*tmp, y)?;
+                st.apply(side, &tmp, y)?;
                 tmp.copy_from_slice(y);
             }
             Ok(())
@@ -93,7 +93,7 @@ impl Preconditioner for PcChain {
             }
             tmp.copy_from_slice(x);
             for st in self.stages.iter_mut() {
-                st.apply_mut(side, &*tmp, y)?;
+                st.apply_mut(side, &tmp, y)?;
                 tmp.copy_from_slice(y);
             }
             Ok(())

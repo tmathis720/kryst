@@ -196,12 +196,7 @@ impl DistCsrOp {
             for g in &v {
                 debug_assert!(
                     (*g as usize) >= row_start && (*g as usize) < row_end,
-                    "Neighbor {} requested column {} not owned by rank {} [{}, {})",
-                    nb,
-                    g,
-                    my_rank,
-                    row_start,
-                    row_end
+                    "Neighbor {nb} requested column {g} not owned by rank {my_rank} [{row_start}, {row_end})"
                 );
             }
             send_idx.extend(v.into_iter().map(|z| z as usize));
@@ -212,15 +207,13 @@ impl DistCsrOp {
         for &g in &send_idx {
             debug_assert!(
                 g >= row_start && g < row_end,
-                "send_idx contains nonlocal col {}",
-                g
+                "send_idx contains nonlocal col {g}"
             );
         }
         for &g in &recv_idx {
             debug_assert!(
                 owner_of_row(g, part_prefix) != my_rank,
-                "recv_idx contains local col {}",
-                g
+                "recv_idx contains local col {g}"
             );
         }
 
@@ -338,7 +331,7 @@ impl LinOp for DistCsrOp {
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         if let Err(e) = self.spmv_dist_impl(x, y) {
-            panic!("DistCsrOp::matvec: {}", e);
+            panic!("DistCsrOp::matvec: {e}");
         }
     }
 

@@ -41,16 +41,16 @@ impl CgnrSolver {
         }
     }
 
-    fn acquire<'a>(
+    fn acquire(
         n: usize,
-        work: &'a mut Workspace,
+        work: &mut Workspace,
     ) -> (
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
     ) {
         // tmp1=r (len>=m), tmp2=z (len>=n)
         Self::take_or_resize(&mut work.tmp1, n);

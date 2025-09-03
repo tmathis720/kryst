@@ -292,12 +292,11 @@ impl<S: Scalar> RowBuilder<S> for IlutRow<S> {
         let elem = Reverse(HeapElem { mag, col, val });
         if self.heap.len() < self.p {
             self.heap.push(elem);
-        } else if let Some(peek) = self.heap.peek() {
-            if mag > peek.0.mag {
+        } else if let Some(peek) = self.heap.peek()
+            && mag > peek.0.mag {
                 let _ = self.heap.pop();
                 self.heap.push(elem);
             }
-        }
     }
 
     fn finalize_into(&mut self, row_cols: &mut Vec<usize>, row_vals: &mut Vec<S>) {

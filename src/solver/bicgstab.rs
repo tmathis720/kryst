@@ -63,20 +63,20 @@ impl BiCgStabSolver {
     /// Layout:
     ///   tmp1 = r, tmp2 = r_hat
     ///   q[0] = v, q[1] = p, q[2] = s, q[3] = t
-    fn acquire<'a>(
+    fn acquire(
         n: usize,
-        work: &'a mut Workspace,
+        work: &mut Workspace,
         need_z: bool,
         need_v_raw: bool,
     ) -> (
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        Option<(&'a mut [f64], &'a mut [f64])>,
-        Option<&'a mut [f64]>,
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        Option<(&mut [f64], &mut [f64])>,
+        Option<&mut [f64]>,
     ) {
         Self::take_or_resize(&mut work.tmp1, n); // r
         Self::take_or_resize(&mut work.tmp2, n); // r_hat
@@ -254,7 +254,7 @@ impl LinearSolver for BiCgStabSolver {
             };
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: rho ~ 0 at iter {}", k);
+                trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
                 stats.iterations = k - 1;
                 stats.final_residual = if need_left {
                     Self::nrm2(s, comm)
@@ -320,7 +320,7 @@ impl LinearSolver for BiCgStabSolver {
             let alpha_den = Self::dot(r_hat, v, comm);
             if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {}", k);
+                trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {k}");
                 stats.iterations = k - 1;
                 stats.final_residual = if need_left {
                     Self::nrm2(s, comm)
@@ -335,7 +335,7 @@ impl LinearSolver for BiCgStabSolver {
             if need_left {
                 // s = z − α ṽ (reuse s buffer which held z)
                 for i in 0..n {
-                    s[i] = s[i] - alpha * v[i];
+                    s[i] -= alpha * v[i];
                 }
             } else {
                 // s = r − α v
@@ -406,7 +406,7 @@ impl LinearSolver for BiCgStabSolver {
             let omega_den = Self::dot(t, t, comm);
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: omega_den ~ 0 at iter {}", k);
+                trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = Self::nrm2(s, comm);
                 stats.reason = ConvergedReason::DivergedDtol;
@@ -415,7 +415,7 @@ impl LinearSolver for BiCgStabSolver {
             let omega = Self::dot(t, s, comm) / omega_den;
             if omega.abs() <= eps_omega || !omega.is_finite() {
                 #[cfg(feature = "logging")]
-                trace!("BiCGStab breakdown: omega ~ 0 at iter {}", k);
+                trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = Self::nrm2(s, comm);
                 stats.reason = ConvergedReason::DivergedDtol;

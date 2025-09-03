@@ -134,6 +134,12 @@ struct PendingFgmres {
     happy_breakdown: Option<bool>,
 }
 
+impl Default for KspContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KspContext {
     #[inline]
     fn normalize_side(side: PcSide) -> PcSide {
@@ -245,9 +251,7 @@ impl KspContext {
         self.solver = solver;
         // Fail fast if an explicit side was set and is incompatible with the selected solver
         if self.pc_side_explicit {
-            if let Err(e) = self.check_pc_side_now(self.pc_side) {
-                return Err(e);
-            }
+            self.check_pc_side_now(self.pc_side)?
         }
         self.invalidate_setup();
         Ok(self)
@@ -736,11 +740,10 @@ impl KspContext {
             .unwrap_or(true)
         {
             self.work = Some(Workspace::new(m));
-            if let Some(ref mut solver) = self.solver {
-                if let Some(ref mut w) = self.work {
+            if let Some(ref mut solver) = self.solver
+                && let Some(ref mut w) = self.work {
                     solver.setup_workspace(w);
                 }
-            }
         }
         self.setup_called = true;
         Ok(())
@@ -788,7 +791,7 @@ impl KspContext {
             Some(self.monitors.as_slice())
         };
         let comm = amat.comm();
-        let mut pc = self
+        let pc = self
             .pc
             .as_mut()
             .map(|b| b.as_mut() as &mut dyn Preconditioner);
@@ -798,7 +801,7 @@ impl KspContext {
             .ok_or_else(|| KError::SolveError("No solver".into()))?;
         let mut stats = solver.solve(
             amat.as_ref(),
-            pc.as_deref_mut(),
+            pc,
             b,
             x,
             self.pc_side,

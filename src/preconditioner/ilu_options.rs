@@ -318,6 +318,12 @@ pub struct IluBuilder {
     opts: IluOptions,
 }
 
+impl Default for IluBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IluBuilder {
     pub fn new() -> Self {
         Self {

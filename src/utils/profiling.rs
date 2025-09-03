@@ -75,7 +75,7 @@ impl StageGuard {
     pub fn new(name: &'static str) -> Self {
         let start_time = if is_profiling_enabled() {
             #[cfg(feature = "logging")]
-            log::trace!("---- enter stage: {}", name);
+            log::trace!("---- enter stage: {name}");
             #[cfg(not(feature = "logging"))]
             eprintln!("---- enter stage: {}", name);
             Some(Instant::now())

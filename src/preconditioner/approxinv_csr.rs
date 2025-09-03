@@ -324,14 +324,13 @@ impl Preconditioner for FsaiCsr {
         let vid = a.values_id();
 
         // Recompute numeric with fixed pattern if possible, else rebuild.
-        if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid) {
-            if ls == sid && lv != vid {
+        if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
+            && ls == sid && lv != vid {
                 // values changed only: refresh numeric with fixed pattern
                 self.update_numeric(a)?;
                 self.last_vid = Some(vid);
                 return Ok(());
             }
-        }
 
         // Full rebuild using current params against CSR
         let rebuilt = FsaiCsr::build_from_csr((*csr).clone(), self.params)?;
@@ -543,13 +542,12 @@ impl Preconditioner for SpaiCsr {
         let sid = a.structure_id();
         let vid = a.values_id();
 
-        if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid) {
-            if ls == sid && lv != vid {
+        if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
+            && ls == sid && lv != vid {
                 self.update_numeric(a)?;
                 self.last_vid = Some(vid);
                 return Ok(());
             }
-        }
 
         let rebuilt = SpaiCsr::build_from_csr((*csr).clone(), self.params)?;
         *self = rebuilt;

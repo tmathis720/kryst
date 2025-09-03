@@ -17,7 +17,7 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
     if rf.tau_abs > 0.0 {
         let mut w = 0usize;
         for i in 0..cols.len() {
-            let keep = vals[i].abs() >= rf.tau_abs || rf.must_keep.map_or(false, |c| c == cols[i]);
+            let keep = vals[i].abs() >= rf.tau_abs || rf.must_keep.is_some_and(|c| c == cols[i]);
             if keep {
                 cols[w] = cols[i];
                 vals[w] = vals[i];
@@ -41,7 +41,7 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
         let mut drop_mask = vec![false; vals.len()];
 
         for &i in &idx {
-            if rf.must_keep.map_or(false, |c| cols[i] == c) {
+            if rf.must_keep.is_some_and(|c| cols[i] == c) {
                 continue;
             }
             let allow = rf.tau_rel * total;
@@ -75,12 +75,12 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
         for &idx in order.iter().take(rf.k_max) {
             keep[idx] = true;
         }
-        if let Some(mk) = rf.must_keep {
-            if let Some(pos) = cols.iter().position(|&c| c == mk) {
-                if !keep[pos] {
+        if let Some(mk) = rf.must_keep
+            && let Some(pos) = cols.iter().position(|&c| c == mk)
+                && !keep[pos] {
                     let mut replace: Option<usize> = None;
                     for &idx in order.iter().take(rf.k_max) {
-                        if replace.map_or(true, |r| {
+                        if replace.is_none_or(|r| {
                             let cmp_mag = vals[idx].abs().total_cmp(&vals[r].abs());
                             cmp_mag == Ordering::Less
                                 || (cmp_mag == Ordering::Equal && cols[idx] > cols[r])
@@ -93,8 +93,6 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
                     }
                     keep[pos] = true;
                 }
-            }
-        }
         let mut w = 0usize;
         for i in 0..cols.len() {
             if keep[i] {

@@ -54,7 +54,7 @@ pub fn build_lu() -> Result<Box<dyn Preconditioner>, KError> {
     }
     #[cfg(not(feature = "dense-direct"))]
     {
-        return Err(KError::Unsupported("dense-direct feature not enabled"));
+        Err(KError::Unsupported("dense-direct feature not enabled"))
     }
 }
 
@@ -65,7 +65,7 @@ pub fn build_qr() -> Result<Box<dyn Preconditioner>, KError> {
     }
     #[cfg(not(feature = "dense-direct"))]
     {
-        return Err(KError::Unsupported("dense-direct feature not enabled"));
+        Err(KError::Unsupported("dense-direct feature not enabled"))
     }
 }
 

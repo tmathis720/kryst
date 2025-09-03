@@ -52,8 +52,10 @@ use std::str::FromStr;
 /// - Right: Solve AM⁻¹y = b, then x = M⁻¹y  
 /// - Symmetric: Apply both left and right preconditioning (M₁⁻¹AM₂⁻¹)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PcSide {
     /// Left preconditioning: M⁻¹Ax = M⁻¹b
+    #[default]
     Left,
     /// Right preconditioning: AM⁻¹y = b, x = M⁻¹y
     Right,
@@ -74,11 +76,6 @@ impl FromStr for PcSide {
     }
 }
 
-impl Default for PcSide {
-    fn default() -> Self {
-        PcSide::Left
-    }
-}
 
 /// Matrix operation selector for preconditioner application.
 ///
@@ -167,7 +164,7 @@ pub trait Preconditioner: Send + Sync {
     /// The default implementation allocates a temporary buffer; performance-
     /// sensitive implementations should override this.
     fn apply_op_inplace(&self, op: Op, y: &mut [f64]) -> Result<(), KError> {
-        let mut tmp = y.to_vec();
+        let tmp = y.to_vec();
         self.apply_op(op, &tmp, y)
     }
 

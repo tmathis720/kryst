@@ -38,7 +38,7 @@ fn parse_error<E>(err: E) -> KError
 where
     E: std::fmt::Debug,
 {
-    KError::SolveError(format!("Parse error: {:?}", err))
+    KError::SolveError(format!("Parse error: {err:?}"))
 }
 
 /// Matrix Market data representation.
@@ -140,7 +140,7 @@ impl MatrixMarketData {
         // Count entries per row
         for &(r, _, _) in &triplets {
             if r >= self.rows {
-                return Err(KError::SolveError(format!("Row index {} out of bounds", r)));
+                return Err(KError::SolveError(format!("Row index {r} out of bounds")));
             }
             row_ptr[r + 1] += 1;
         }
@@ -178,7 +178,7 @@ impl MatrixMarketData {
             .zip(self.values.iter())
         {
             if r >= self.rows {
-                return Err(KError::SolveError(format!("Row index {} out of bounds", r)));
+                return Err(KError::SolveError(format!("Row index {r} out of bounds")));
             }
             vector[r] = v;
         }
@@ -202,7 +202,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
     let header = lines
         .next()
         .ok_or_else(|| KError::SolveError("Empty file".to_string()))?
-        .map_err(|e| KError::SolveError(format!("Failed to read header: {}", e)))?;
+        .map_err(|e| KError::SolveError(format!("Failed to read header: {e}")))?;
 
     // Check the Matrix Market banner
     if !header.starts_with("%%MatrixMarket") {
@@ -244,7 +244,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
             }
         })
         .ok_or_else(|| KError::SolveError("Missing size information".to_string()))?
-        .map_err(|e| KError::SolveError(format!("Failed to read size line: {}", e)))?;
+        .map_err(|e| KError::SolveError(format!("Failed to read size line: {e}")))?;
 
     // Parse size line
     let size_parts: Vec<&str> = size_line.split_whitespace().collect();
@@ -280,7 +280,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
         let mut entry_count = 0;
         for line in lines {
             let line =
-                line.map_err(|e| KError::SolveError(format!("Failed to read line: {}", e)))?;
+                line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
             let trimmed_line = line.trim();
             if trimmed_line.is_empty() {
                 continue;
@@ -294,8 +294,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
 
             if col >= cols || row >= rows {
                 return Err(KError::SolveError(format!(
-                    "Entry index ({}, {}) out of bounds for {}x{} matrix",
-                    row, col, rows, cols
+                    "Entry index ({row}, {col}) out of bounds for {rows}x{cols} matrix"
                 )));
             }
 
@@ -313,7 +312,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
         // Parse sparse coordinate data
         for line in lines {
             let line =
-                line.map_err(|e| KError::SolveError(format!("Failed to read line: {}", e)))?;
+                line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
             let trimmed_line = line.trim();
             if trimmed_line.is_empty() {
                 continue;
@@ -334,8 +333,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
 
             if row >= rows || col >= cols {
                 return Err(KError::SolveError(format!(
-                    "Entry index ({}, {}) out of bounds",
-                    row, col
+                    "Entry index ({row}, {col}) out of bounds"
                 )));
             }
 
@@ -385,10 +383,9 @@ pub fn write_matrix_market<P: AsRef<Path>>(
     };
     writeln!(
         file,
-        "%%MatrixMarket matrix {} real {}",
-        format_type, symmetry
+        "%%MatrixMarket matrix {format_type} real {symmetry}"
     )
-    .map_err(|e| KError::SolveError(format!("Failed to write header: {}", e)))?;
+    .map_err(|e| KError::SolveError(format!("Failed to write header: {e}")))?;
 
     // Write size information
     if data.is_coordinate {
@@ -396,7 +393,7 @@ pub fn write_matrix_market<P: AsRef<Path>>(
     } else {
         writeln!(file, "{} {}", data.rows, data.cols)
     }
-    .map_err(|e| KError::SolveError(format!("Failed to write size: {}", e)))?;
+    .map_err(|e| KError::SolveError(format!("Failed to write size: {e}")))?;
 
     // Write data
     if data.is_coordinate {
@@ -408,7 +405,7 @@ pub fn write_matrix_market<P: AsRef<Path>>(
             .zip(data.values.iter())
         {
             writeln!(file, "{} {} {}", row + 1, col + 1, value)
-                .map_err(|e| KError::SolveError(format!("Failed to write entry: {}", e)))?;
+                .map_err(|e| KError::SolveError(format!("Failed to write entry: {e}")))?;
         }
     } else {
         // Write array format (column-major order)
@@ -425,8 +422,8 @@ pub fn write_matrix_market<P: AsRef<Path>>(
         }
 
         for &value in &dense_data {
-            writeln!(file, "{}", value)
-                .map_err(|e| KError::SolveError(format!("Failed to write value: {}", e)))?;
+            writeln!(file, "{value}")
+                .map_err(|e| KError::SolveError(format!("Failed to write value: {e}")))?;
         }
     }
 

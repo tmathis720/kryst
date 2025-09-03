@@ -221,8 +221,7 @@ impl Ilutp {
             let diag = self.u_factor[(i, i)];
             if diag.abs() < 1e-14 {
                 return Err(KError::SolveError(format!(
-                    "Singular U factor at diagonal {}",
-                    i
+                    "Singular U factor at diagonal {i}"
                 )));
             }
             x[i] /= diag;

@@ -67,6 +67,12 @@ mod disabled {
     use std::time::Duration;
 
     pub struct Counters;
+    impl Default for Counters {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl Counters {
         pub const fn new() -> Self {
             Self

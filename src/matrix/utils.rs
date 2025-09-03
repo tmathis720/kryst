@@ -62,14 +62,12 @@ pub fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
             let val = matrix[(i, j)];
             if val.is_nan() {
                 return Err(KError::InvalidInput(format!(
-                    "NaN detected at position ({}, {})",
-                    i, j
+                    "NaN detected at position ({i}, {j})"
                 )));
             }
             if val.is_infinite() {
                 return Err(KError::InvalidInput(format!(
-                    "Infinite value detected at position ({}, {})",
-                    i, j
+                    "Infinite value detected at position ({i}, {j})"
                 )));
             }
         }

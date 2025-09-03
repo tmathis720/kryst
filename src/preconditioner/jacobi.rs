@@ -11,6 +11,12 @@ pub struct Jacobi {
     n: usize,
     applies: AtomicU64,
 }
+impl Default for Jacobi {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Jacobi {
     pub fn new() -> Self {
         Self {

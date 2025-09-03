@@ -1,5 +1,5 @@
 use crate::error::KError;
-use crate::matrix::{csc::CscMatrix, op::LinOp, sparse::CsrMatrix};
+use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
 
 /// y = A * x using CSR; parallel when `rayon` is enabled.
 #[cfg(feature = "rayon")]

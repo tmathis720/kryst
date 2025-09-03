@@ -1,4 +1,5 @@
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct Workspace {
     pub tmp1: Vec<f64>,
     pub tmp2: Vec<f64>,
@@ -32,30 +33,6 @@ pub struct GmresSpec {
     pub block_s: usize,
 }
 
-impl Default for Workspace {
-    fn default() -> Self {
-        Self {
-            tmp1: Vec::new(),
-            tmp2: Vec::new(),
-            q: Vec::new(),
-            z: Vec::new(),
-            h: Vec::new(),
-            v_mem: Vec::new(),
-            z_mem: Vec::new(),
-            h_mem: Vec::new(),
-            cs: Vec::new(),
-            sn: Vec::new(),
-            g: Vec::new(),
-            blk_scratch: Vec::new(),
-            send_arena: crate::utils::buffer_pool::BufferPool::default(),
-            recv_arena: crate::utils::buffer_pool::BufferPool::default(),
-            packet_arena: crate::utils::buffer_pool::BufferPool::default(),
-            n: 0,
-            m: 0,
-            need_z: false,
-        }
-    }
-}
 
 impl Workspace {
     pub fn new(n: usize) -> Self {

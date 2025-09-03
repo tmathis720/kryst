@@ -61,17 +61,17 @@ impl CgsSolver {
     /// We use:
     ///   tmp1 = r, tmp2 = v
     ///   q[0] = u, q[1] = p, q[2] = q, q[3] = upq, q[4] = w (A*(u+q))
-    fn acquire<'a>(
+    fn acquire(
         n: usize,
-        work: &'a mut Workspace,
+        work: &mut Workspace,
     ) -> (
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
     ) {
         Self::take_or_resize(&mut work.tmp1, n); // r
         Self::take_or_resize(&mut work.tmp2, n); // v

@@ -69,7 +69,7 @@ impl Registry {
         while i < args.len() {
             let tok = args[i];
             let looks_like_flag = tok.starts_with('-');
-            if !looks_like_flag || prefix_filter.map_or(false, |p| !tok.starts_with(p)) {
+            if !looks_like_flag || prefix_filter.is_some_and(|p| !tok.starts_with(p)) {
                 i += 1;
                 continue;
             }
@@ -154,7 +154,7 @@ fn kind_str(k: ValueKind) -> Cow<'static, str> {
         ValueKind::UInt => Cow::Borrowed("uint"),
         ValueKind::Float => Cow::Borrowed("float"),
         ValueKind::Str => Cow::Borrowed("str"),
-        ValueKind::Pair(a, b) => Cow::Owned(format!("{},{}", a, b)),
+        ValueKind::Pair(a, b) => Cow::Owned(format!("{a},{b}")),
     }
 }
 
@@ -246,7 +246,7 @@ fn expand_tokens_recursive(
 
 fn read_options_file(path: &Path) -> Result<Vec<String>, KError> {
     let text = fs::read_to_string(path)
-        .map_err(|e| KError::SolveError(format!("Failed to read options file {:?}: {e}", path)))?;
+        .map_err(|e| KError::SolveError(format!("Failed to read options file {path:?}: {e}")))?;
     let mut toks = Vec::new();
     for line in text.lines() {
         let line = line.trim();

@@ -413,8 +413,7 @@ impl IluCsr {
                 let ukk = self.u_val[self.u_diag_ix[k]];
                 if ukk == 0.0 {
                     return Err(KError::FactorError(format!(
-                        "zero U(j,j) encountered at row {}",
-                        k
+                        "zero U(j,j) encountered at row {k}"
                     )));
                 }
                 let mult = self.l_val[pos] / ukk;
@@ -563,10 +562,8 @@ impl IluCsr {
                     let kpos = symbolic::find_or_insert(&mut w, kcol);
                     if kpos == wlev.len() {
                         wlev.push(new_level);
-                    } else {
-                        if new_level < wlev[kpos] {
-                            wlev[kpos] = new_level;
-                        }
+                    } else if new_level < wlev[kpos] {
+                        wlev[kpos] = new_level;
                     }
                     w.val[kpos] -= lij * self.u_val[q];
                 }
@@ -866,7 +863,7 @@ impl IluCsr {
                 }
                 PivotPolicy::DiagonalPerturbation => {
                     if uii.abs() < params.pivot_tau {
-                        uii = uii + params.pivot_tau;
+                        uii += params.pivot_tau;
                     }
                 }
             }

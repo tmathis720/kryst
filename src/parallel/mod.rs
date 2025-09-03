@@ -353,7 +353,7 @@ impl Comm for UniverseComm {
                 // Post a true nonblocking receive via raw MPI and keep the handle
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
                 let count = _buf.len() as i32;
-                let src_rank = _src as i32;
+                let src_rank = _src;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Irecv(
@@ -386,7 +386,7 @@ impl Comm for UniverseComm {
                 // Post a true nonblocking send via raw MPI and keep the handle
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
                 let count = _buf.len() as i32;
-                let dest_rank = _dest as i32;
+                let dest_rank = _dest;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Isend(
@@ -420,7 +420,7 @@ impl Comm for UniverseComm {
                 // Nonblocking receive of u64 via raw MPI
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
                 let count = _buf.len() as i32;
-                let src_rank = _src as i32;
+                let src_rank = _src;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Irecv(
@@ -453,7 +453,7 @@ impl Comm for UniverseComm {
                 // Nonblocking send of u64 via raw MPI
                 let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
                 let count = _buf.len() as i32;
-                let dest_rank = _dest as i32;
+                let dest_rank = _dest;
                 let comm_raw = mpi::raw::AsRaw::as_raw(&comm.world);
                 let rc = unsafe {
                     mpi::ffi::MPI_Isend(

@@ -64,7 +64,7 @@ impl Monitor for TextMonitor {
         if self.rank0 {
             match ev {
                 Event::IluSetupBegin { opts_hash } => {
-                    log::info!("ILU: setup begin (opts={:016x})", opts_hash)
+                    log::info!("ILU: setup begin (opts={opts_hash:016x})")
                 }
                 Event::IluSetupIter { sample } => log::info!(
                     "ILU: it {:>3}  corr(L)={:.3e}  corr(U)={:.3e}  res≈{:.3e}  maxΔpivot={:.3e}",
@@ -79,10 +79,7 @@ impl Monitor for TextMonitor {
                     converged,
                     setup_time_s,
                 } => log::info!(
-                    "ILU: setup end iters={} converged={} time={:.3}s",
-                    iters,
-                    converged,
-                    setup_time_s
+                    "ILU: setup end iters={iters} converged={converged} time={setup_time_s:.3}s"
                 ),
             }
         }
@@ -254,7 +251,7 @@ impl IterationMonitor {
         if let Some(ref mut writer) = self.csv_writer {
             let rate_str = iter_data
                 .convergence_rate
-                .map(|r| format!("{:.6e}", r))
+                .map(|r| format!("{r:.6e}"))
                 .unwrap_or_default();
             let pc_time_str = iter_data
                 .pc_time

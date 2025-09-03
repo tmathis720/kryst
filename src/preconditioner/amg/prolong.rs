@@ -222,9 +222,7 @@ fn neighbor_distribution_over_C_of(
     for (c, v) in tmp {
         let w = if v < 0.0 {
             if sum_neg > 0.0 { (-v) / sum_neg } else { 0.0 }
-        } else {
-            if sum_pos > 0.0 { v / sum_pos } else { 0.0 }
-        };
+        } else if sum_pos > 0.0 { v / sum_pos } else { 0.0 };
         cols.push(c);
         wts.push(w);
     }
@@ -287,8 +285,8 @@ pub fn classical_values_only(
         let mut sum_neg = 0.0;
         let mut sum_pos = 0.0;
         for &j in &s_sym.col_idx[rs..re] {
-            if cf.is_c[j] {
-                if let Some(aij) = csr_get(a, i, j) {
+            if cf.is_c[j]
+                && let Some(aij) = csr_get(a, i, j) {
                     if params.variant == ClassicalVariant::Direct {
                         if aij < 0.0 {
                             sum_neg += -aij;
@@ -301,22 +299,18 @@ pub fn classical_values_only(
                         contrib_vals.push(-aij);
                     }
                 }
-            }
         }
         if params.variant == ClassicalVariant::Direct {
             for &j in &s_sym.col_idx[rs..re] {
-                if cf.is_c[j] {
-                    if let Some(aij) = csr_get(a, i, j) {
+                if cf.is_c[j]
+                    && let Some(aij) = csr_get(a, i, j) {
                         let col = cf.coarse_of[j].unwrap();
                         let w = if aij < 0.0 {
                             if sum_neg > 0.0 { (-aij) / sum_neg } else { 0.0 }
-                        } else {
-                            if sum_pos > 0.0 { aij / sum_pos } else { 0.0 }
-                        };
+                        } else if sum_pos > 0.0 { aij / sum_pos } else { 0.0 };
                         contrib_cols.push(col);
                         contrib_vals.push(w);
                     }
-                }
             }
         }
 
@@ -363,13 +357,12 @@ pub fn classical_values_only(
             // denominator
             let mut sum_neg_strong = 0.0;
             for &j in &s_sym.col_idx[rs..re] {
-                if let Some(aij) = csr_get(a, i, j) {
-                    if aij < 0.0 {
+                if let Some(aij) = csr_get(a, i, j)
+                    && aij < 0.0 {
                         sum_neg_strong += -aij;
                     }
-                }
             }
-            let mut di = csr_get(a, i, i).unwrap_or(1.0);
+            let di = csr_get(a, i, i).unwrap_or(1.0);
             let di_eff = di - sum_neg_strong;
             let denom = if di_eff.abs() >= 1e-14 * di.abs().max(1.0) {
                 di_eff
@@ -420,7 +413,7 @@ pub fn classical_values_only(
 
             let kept_cols = cols.clone();
             let kept_vals = vals.clone();
-            let mut rf = RowFilter {
+            let rf = RowFilter {
                 tau_abs: params.drop_abs,
                 tau_rel: params.trunc_rel,
                 k_max: params.cap_row,
@@ -658,9 +651,7 @@ pub fn smooth_tentative_sa_multi(
                 nns[alpha][i]
             } else if let Some(ref comp) = tp.comp_of {
                 if comp[i] == alpha { 1.0 } else { 0.0 }
-            } else {
-                if alpha == 0 { 1.0 } else { 0.0 }
-            };
+            } else if alpha == 0 { 1.0 } else { 0.0 };
             acc_vals.push(v0);
         }
         let di = d_inv[i];
@@ -679,9 +670,7 @@ pub fn smooth_tentative_sa_multi(
                     nns[alpha][j]
                 } else if let Some(ref comp) = tp.comp_of {
                     if comp[j] == alpha { 1.0 } else { 0.0 }
-                } else {
-                    if alpha == 0 { 1.0 } else { 0.0 }
-                };
+                } else if alpha == 0 { 1.0 } else { 0.0 };
                 let val = s * t;
                 let k = marker[col];
                 if k >= 0 {
@@ -709,9 +698,7 @@ pub fn smooth_tentative_sa_multi(
                     nns[alpha][i]
                 } else if let Some(ref comp) = tp.comp_of {
                     if comp[i] == alpha { 1.0 } else { 0.0 }
-                } else {
-                    if alpha == 0 { 1.0 } else { 0.0 }
-                };
+                } else if alpha == 0 { 1.0 } else { 0.0 };
                 cols.push(c);
                 vs.push(v0);
             }
@@ -763,9 +750,7 @@ pub fn smooth_sa_values_only_multi(
                 nns[alpha][i]
             } else if let Some(ref comp) = tp.comp_of {
                 if comp[i] == alpha { 1.0 } else { 0.0 }
-            } else {
-                if alpha == 0 { 1.0 } else { 0.0 }
-            };
+            } else if alpha == 0 { 1.0 } else { 0.0 };
             map_vals.push(v0);
         }
         let di = d_inv[i];
@@ -783,9 +768,7 @@ pub fn smooth_sa_values_only_multi(
                     nns[alpha][j]
                 } else if let Some(ref comp) = tp.comp_of {
                     if comp[j] == alpha { 1.0 } else { 0.0 }
-                } else {
-                    if alpha == 0 { 1.0 } else { 0.0 }
-                };
+                } else if alpha == 0 { 1.0 } else { 0.0 };
                 let col = gj + alpha;
                 match map_cols.iter().position(|&c| c == col) {
                     Some(pos) => {

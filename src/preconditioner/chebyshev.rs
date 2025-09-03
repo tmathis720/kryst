@@ -294,21 +294,13 @@ fn chebyshev_t<T: num_traits::Float>(m: usize, x: T) -> T {
 // Object-safe Chebyshev preconditioner using CSR and LinOp.
 // -----------------------------------------------------------------------------
 
+#[derive(Default)]
 struct ChebScratch {
     v0: Vec<f64>,
     v1: Vec<f64>,
     v2: Vec<f64>,
 }
 
-impl Default for ChebScratch {
-    fn default() -> Self {
-        Self {
-            v0: Vec::new(),
-            v1: Vec::new(),
-            v2: Vec::new(),
-        }
-    }
-}
 
 /// Object-safe Chebyshev preconditioner
 pub struct ChebyshevPc {

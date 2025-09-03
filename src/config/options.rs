@@ -221,7 +221,7 @@ impl FromStr for PcSide {
             "left" => Ok(PcSide::Left),
             "right" => Ok(PcSide::Right),
             "symmetric" => Ok(PcSide::Symmetric),
-            _ => Err(KError::SolveError(format!("Unrecognized pc_side: {}", s))),
+            _ => Err(KError::SolveError(format!("Unrecognized pc_side: {s}"))),
         }
     }
 }

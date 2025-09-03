@@ -327,14 +327,13 @@ impl PcFactory {
             .collect();
         if direct_positions.len() > 1 {
             let msg = format!(
-                "PC chain contains multiple direct PCs at positions {:?}. \
-                 Stacking direct factorizations is usually unintended.",
-                direct_positions
+                "PC chain contains multiple direct PCs at positions {direct_positions:?}. \
+                 Stacking direct factorizations is usually unintended."
             );
             if strict {
                 return Err(KError::InvalidInput(msg));
             } else {
-                log::warn!("{}", msg);
+                log::warn!("{msg}");
             }
         }
 
@@ -354,7 +353,7 @@ impl PcFactory {
             if strict {
                 return Err(KError::InvalidInput(msg));
             } else {
-                log::warn!("{}", msg);
+                log::warn!("{msg}");
             }
         }
 
@@ -368,23 +367,20 @@ impl PcFactory {
                      This is typically redundant unless options differ.",
                     w[0].pc_type, w[1].pc_type
                 );
-                log::warn!("{}", msg);
+                log::warn!("{msg}");
             }
         }
 
         // Rule 4: BlockJacobi block_size <= 1 behaves like Jacobi
         for (i, spec) in specs.iter().enumerate() {
-            if matches!(spec.pc_type, PcType::BlockJacobi) {
-                if let Some(ref o) = spec.options {
-                    if o.jacobi_block_size.unwrap_or(1) <= 1 {
+            if matches!(spec.pc_type, PcType::BlockJacobi)
+                && let Some(ref o) = spec.options
+                    && o.jacobi_block_size.unwrap_or(1) <= 1 {
                         log::warn!(
-                            "PC chain stage {}: BlockJacobi with block_size <= 1 behaves like Jacobi; \
-                             consider using 'jacobi' instead.",
-                            i
+                            "PC chain stage {i}: BlockJacobi with block_size <= 1 behaves like Jacobi; \
+                             consider using 'jacobi' instead."
                         );
                     }
-                }
-            }
         }
 
         Ok(())

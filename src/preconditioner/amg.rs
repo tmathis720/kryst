@@ -124,16 +124,13 @@ pub fn get_relax_counts() -> [usize; 4] {
 // ===== Config + Builder ======================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CycleType {
+    #[default]
     V,
     W { gamma: usize },
 }
 
-impl Default for CycleType {
-    fn default() -> Self {
-        CycleType::V
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NgSymmetry {
@@ -582,13 +579,12 @@ impl Default for AMGBuilder {
 // ===== Workspace, levels & hierarchy ========================================
 
 fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<(), KError> {
-    if !matches!(coarse_solver, CoarseSolve::CG | CoarseSolve::ILU) {
-        if cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0 {
+    if !matches!(coarse_solver, CoarseSolve::CG | CoarseSolve::ILU)
+        && cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0 {
             return Err(KError::InvalidInput(
                 "num_grid_sweeps[Coarsest] must be 0 when coarse_solve is DirectDense".into(),
             ));
         }
-    }
 
     for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
         match rt {
@@ -600,8 +596,7 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             | RelaxType::Chebyshev => {}
             _ => {
                 return Err(KError::InvalidInput(format!(
-                    "RelaxType {:?} not yet supported (phase index {})",
-                    rt, i
+                    "RelaxType {rt:?} not yet supported (phase index {i})"
                 )));
             }
         }
@@ -610,8 +605,7 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
     for (i, &k) in cfg.num_grid_sweeps.iter().enumerate() {
         if i != RelaxPhase::Coarsest.ix() && k == 0 {
             return Err(KError::InvalidInput(format!(
-                "num_grid_sweeps for phase {} must be >= 1",
-                i
+                "num_grid_sweeps for phase {i} must be >= 1"
             )));
         }
     }
@@ -993,7 +987,7 @@ fn apply_post_interp(
             row_scaling(
                 mode,
                 ctx.r,
-                ctx.nns.as_ref().map(|v| v.as_slice()),
+                ctx.nns.as_deref(),
                 ctx.agg_of,
                 ctx.d_inv,
                 p_row_ptr,
@@ -1086,14 +1080,10 @@ impl AMG {
 
         let need_l1 = self
             .cfg
-            .grid_relax_type
-            .iter()
-            .any(|&t| t == RelaxType::L1Jacobi);
+            .grid_relax_type.contains(&RelaxType::L1Jacobi);
         let need_cheb = self
             .cfg
-            .grid_relax_type
-            .iter()
-            .any(|&t| t == RelaxType::Chebyshev);
+            .grid_relax_type.contains(&RelaxType::Chebyshev);
 
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
@@ -1287,7 +1277,7 @@ impl AMG {
 
         if self.cfg.logging_level > 0 {
             let mut st = AmgStats::from_hierarchy(h);
-            st.levels = collect_level_stats(&h, &self.cfg);
+            st.levels = collect_level_stats(h, &self.cfg);
             self.stats = Some(st);
         }
         Ok(())
@@ -1523,8 +1513,8 @@ impl AMG {
             }
             RelaxType::Chebyshev => {
                 if let Some(ref cheb) = lvl.cheb {
-                    let mut lmax = cheb.lambda_max.max(1e-12);
-                    let mut lmin = cheb.lambda_min.min(0.99 * lmax).max(1e-16);
+                    let lmax = cheb.lambda_max.max(1e-12);
+                    let lmin = cheb.lambda_min.min(0.99 * lmax).max(1e-16);
                     if lmin >= lmax {
                         Self::jacobi_smooth_sparse(
                             pol.omega,
@@ -1548,8 +1538,7 @@ impl AMG {
                 }
             }
             other => Err(KError::InvalidInput(format!(
-                "RelaxType {:?} not yet supported",
-                other
+                "RelaxType {other:?} not yet supported"
             ))),
         }
     }
@@ -1833,11 +1822,10 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(sid);
         self.last_vid = Some(vid);
-        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1 {
-            if let Some(s) = self.stats.as_ref() {
+        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref() {
                 print_setup_tables(s);
             }
-        }
         Ok(())
     }
 
@@ -1900,11 +1888,10 @@ impl Preconditioner for AMG {
         self.refresh_numeric(&csr)?;
         self.csr = Some(csr);
         self.last_vid = Some(op.values_id());
-        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1 {
-            if let Some(s) = self.stats.as_ref() {
+        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref() {
                 print_setup_tables(s);
             }
-        }
         Ok(())
     }
 
@@ -1916,11 +1903,10 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(op.structure_id());
         self.last_vid = Some(op.values_id());
-        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1 {
-            if let Some(s) = self.stats.as_ref() {
+        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref() {
                 print_setup_tables(s);
             }
-        }
         Ok(())
     }
 }
@@ -1950,13 +1936,9 @@ fn build_hierarchy(
     let t_setup_all = if do_stats { Some(tic()) } else { None };
 
     let need_l1 = cfg
-        .grid_relax_type
-        .iter()
-        .any(|&t| t == RelaxType::L1Jacobi);
+        .grid_relax_type.contains(&RelaxType::L1Jacobi);
     let need_cheb = cfg
-        .grid_relax_type
-        .iter()
-        .any(|&t| t == RelaxType::Chebyshev);
+        .grid_relax_type.contains(&RelaxType::Chebyshev);
 
     // Level 0 (finest)
     let mut lt0 = LevelSetupTiming::default();
@@ -2090,13 +2072,11 @@ fn build_hierarchy(
         } else {
             None
         };
-        if nns_opt.is_none() {
-            if let Some(ref lay) = layout {
-                if num_functions < lay.block_size {
+        if nns_opt.is_none()
+            && let Some(ref lay) = layout
+                && num_functions < lay.block_size {
                     num_functions = lay.block_size;
                 }
-            }
-        }
         let comp_opt = if nns_opt.is_none() {
             layout.as_ref().map(|lay| lay.comp_of.clone())
         } else {
@@ -2349,12 +2329,11 @@ fn build_hierarchy(
                 eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
             });
             let ls_len = level_stats.len();
-            if ls_len >= 2 {
-                if let Some(prev) = level_stats.get_mut(ls_len - 2) {
+            if ls_len >= 2
+                && let Some(prev) = level_stats.get_mut(ls_len - 2) {
                     prev.nnz_p = p.nnz();
                     prev.nnz_r = r.nnz();
                 }
-            }
         }
 
         if a_cur.nrows() >= n {
@@ -2523,8 +2502,7 @@ fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
         }
         if aii.abs() < 1e-14 {
             return Err(KError::SolveError(format!(
-                "near-zero diagonal at row {}",
-                i
+                "near-zero diagonal at row {i}"
             )));
         }
         d[i] = 1.0 / aii;
@@ -3187,9 +3165,9 @@ fn print_setup_tables(stats: &AmgStats) {
 fn print_cycle_table(c: &CycleTimings) {
     let desc = match c.cycle_type {
         CycleType::V => "V-cycle".to_string(),
-        CycleType::W { gamma } => format!("W-cycle(gamma={})", gamma),
+        CycleType::W { gamma } => format!("W-cycle(gamma={gamma})"),
     };
-    println!("{} timings (ms): level | pre mv axpy R coarse P post", desc);
+    println!("{desc} timings (ms): level | pre mv axpy R coarse P post");
     let ms = |d: Duration| (d.as_secs_f64() * 1e3).round() as u64;
     for lv in &c.per_level {
         println!(

@@ -151,7 +151,7 @@ where
         if self.subdomains.is_empty() {
             let n = a.nrows();
             let p = self.subdomains.capacity().max(1);
-            let chunk = (n + p - 1) / p;
+            let chunk = n.div_ceil(p);
             self.subdomains = (0..p)
                 .map(|i| {
                     let start = i * chunk;
@@ -299,7 +299,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     }
                 }
             }
-            if self.owner_of.iter().any(|&o| o == p) {
+            if self.owner_of.contains(&p) {
                 let fallback = contiguous_partition(n, p.max(1));
                 for i in 0..n {
                     if self.owner_of[i] == p {

@@ -37,6 +37,12 @@ pub struct Kahan {
     pub c: f64,
 }
 
+impl Default for Kahan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Kahan {
     #[inline]
     pub fn new() -> Self {
@@ -62,6 +68,12 @@ impl Accum for Kahan {
 pub struct DD {
     pub hi: f64,
     pub lo: f64,
+}
+
+impl Default for DD {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DD {
@@ -142,6 +154,12 @@ pub struct KahanP<const N: usize> {
     c: [f64; N],
 }
 
+impl<const N: usize> Default for KahanP<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> KahanP<N> {
     pub fn new() -> Self {
         Self {
@@ -170,6 +188,12 @@ impl<const N: usize> PacketAccum<N> for KahanP<N> {
 pub struct DDP<const N: usize> {
     hi: [f64; N],
     lo: [f64; N],
+}
+
+impl<const N: usize> Default for DDP<N> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const N: usize> DDP<N> {
@@ -266,17 +290,11 @@ impl CommDeterministic for UniverseComm {
     }
 }
 
+#[derive(Default)]
 pub struct DotEngine {
     pub opts: ReductionOptions,
 }
 
-impl Default for DotEngine {
-    fn default() -> Self {
-        Self {
-            opts: ReductionOptions::default(),
-        }
-    }
-}
 
 impl DotEngine {
     pub fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {

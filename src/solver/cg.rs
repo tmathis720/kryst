@@ -115,15 +115,15 @@ impl CgSolver {
         }
     }
 
-    fn acquire<'a>(
+    fn acquire(
         n: usize,
-        work: &'a mut Workspace,
+        work: &mut Workspace,
     ) -> (
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
-        &'a mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
+        &mut [f64],
     ) {
         while work.q.len() < 4 {
             work.q.push(Vec::new());
@@ -257,7 +257,7 @@ impl CgSolver {
             m(0, true_res);
         }
         #[cfg(feature = "logging")]
-        trace!("CG initial residual: {:.3e}", res0_reported);
+        trace!("CG initial residual: {res0_reported:.3e}");
 
         p.copy_from_slice(z);
 

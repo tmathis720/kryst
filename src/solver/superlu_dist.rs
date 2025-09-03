@@ -98,8 +98,7 @@ fn validate_local_csr(m: &CsrMatrix<f64>) -> Result<(), KError> {
     for k in 0..m.nrows() {
         if rp[k] > rp[k + 1] {
             return Err(KError::InvalidInput(format!(
-                "CSR row_ptr not nondecreasing at row {}",
-                k
+                "CSR row_ptr not nondecreasing at row {k}"
             )));
         }
     }
@@ -175,8 +174,7 @@ impl ProcessGrid {
 
         if prows * pcols != total_procs {
             return Err(KError::InvalidInput(format!(
-                "Process grid {}x{} doesn't match MPI size {}",
-                prows, pcols, total_procs
+                "Process grid {prows}x{pcols} doesn't match MPI size {total_procs}"
             )));
         }
 
@@ -320,12 +318,12 @@ impl BlockCyclicDistribution {
 
     /// Number of row blocks for an external block size
     pub fn n_row_blocks(&self, block_size: usize) -> usize {
-        (self.global_rows + block_size - 1) / block_size
+        self.global_rows.div_ceil(block_size)
     }
 
     /// Number of column blocks for an external block size
     pub fn n_col_blocks(&self, block_size: usize) -> usize {
-        (self.global_cols + block_size - 1) / block_size
+        self.global_cols.div_ceil(block_size)
     }
 
     /// Owner rank of a given (row-block, col-block)
@@ -352,7 +350,7 @@ impl BlockCyclicDistribution {
             return 0;
         }
 
-        let num_blocks = (global_dim + block_size - 1) / block_size;
+        let num_blocks = global_dim.div_ceil(block_size);
         let blocks_per_proc = num_blocks / proc_dim;
         let extra_blocks = num_blocks % proc_dim;
 
@@ -711,7 +709,7 @@ impl Panel {
                 let diag = a[(gcol, gcol)];
                 if diag != 0.0 {
                     for r in (gcol + 1)..m {
-                        a[(r, gcol)] = a[(r, gcol)] / diag;
+                        a[(r, gcol)] /= diag;
                     }
                 }
             }
@@ -1014,9 +1012,7 @@ impl TriangularSolveData {
 
         #[cfg(feature = "logging")]
         log::debug!(
-            "Started nonblocking send to rank {} with tag {}",
-            dest_rank,
-            tag
+            "Started nonblocking send to rank {dest_rank} with tag {tag}"
         );
 
         Ok(())
@@ -1044,9 +1040,7 @@ impl TriangularSolveData {
 
         #[cfg(feature = "logging")]
         log::debug!(
-            "Started nonblocking recv from rank {} with tag {}",
-            source_rank,
-            tag
+            "Started nonblocking recv from rank {source_rank} with tag {tag}"
         );
 
         Ok(())
@@ -1059,7 +1053,7 @@ impl TriangularSolveData {
             .retain(|req| req.request_id != request_id);
 
         #[cfg(feature = "logging")]
-        log::debug!("Completed communication request {}", request_id);
+        log::debug!("Completed communication request {request_id}");
 
         Ok(())
     }
@@ -1107,14 +1101,11 @@ impl DistributedTriangularSolver {
             return Ok(());
         }
         let block_size = 64; // Could be made configurable
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
 
         #[cfg(feature = "logging")]
         log::debug!(
-            "Starting forward solve: n={}, blocks={}, pattern={:?}",
-            n,
-            num_blocks,
-            comm_pattern
+            "Starting forward solve: n={n}, blocks={num_blocks}, pattern={comm_pattern:?}"
         );
 
         // Initialize solve data structure
@@ -1227,14 +1218,11 @@ impl DistributedTriangularSolver {
             return Ok(());
         }
         let block_size = 64; // Could be made configurable
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
 
         #[cfg(feature = "logging")]
         log::debug!(
-            "Starting backward solve: n={}, blocks={}, pattern={:?}",
-            n,
-            num_blocks,
-            comm_pattern
+            "Starting backward solve: n={n}, blocks={num_blocks}, pattern={comm_pattern:?}"
         );
 
         // Initialize solve data structure
@@ -1389,10 +1377,7 @@ impl DistributedTriangularSolver {
 
         #[cfg(feature = "logging")]
         log::debug!(
-            "Starting nonblocking broadcast from rank {} for block {} using {:?}",
-            root_rank,
-            block_id,
-            comm_pattern
+            "Starting nonblocking broadcast from rank {root_rank} for block {block_id} using {comm_pattern:?}"
         );
 
         // Simplified broadcast: root sends to all other ranks
@@ -1435,10 +1420,7 @@ impl DistributedTriangularSolver {
         // In real implementation, would use MPI_Bcast or implement custom patterns
         #[cfg(feature = "logging")]
         log::debug!(
-            "Synchronous broadcast from rank {} for block {} using {:?}",
-            root_rank,
-            block_id,
-            comm_pattern
+            "Synchronous broadcast from rank {root_rank} for block {block_id} using {comm_pattern:?}"
         );
 
         // Simulate broadcast operation
@@ -1631,11 +1613,10 @@ impl SuperLuDistOptions {
                 self.diagonal_pivot_threshold
             )));
         }
-        if let Some(sz) = self.panel_size {
-            if sz == 0 {
+        if let Some(sz) = self.panel_size
+            && sz == 0 {
                 return Err(KError::InvalidInput("panel_size must be > 0".into()));
             }
-        }
         if self.enable_3d_factorization && self.process_grid_3d_depth == Some(0) {
             return Err(KError::InvalidInput("3D depth must be > 0".into()));
         }
@@ -1647,8 +1628,7 @@ impl SuperLuDistOptions {
                 let sz = comm.size();
                 if r * c != sz {
                     return Err(KError::InvalidInput(format!(
-                        "process_grid {}x{} does not match comm size {}",
-                        r, c, sz
+                        "process_grid {r}x{c} does not match comm size {sz}"
                     )));
                 }
             }
@@ -1980,7 +1960,7 @@ impl OrderingAlgorithms {
 
         #[cfg(feature = "logging")]
         if comm.rank() == 0 {
-            log::debug!("Starting distributed MMD ordering for matrix {}x{}", n, n);
+            log::debug!("Starting distributed MMD ordering for matrix {n}x{n}");
         }
 
         // Main MMD elimination loop (same algorithm, but only log on rank 0)
@@ -2222,8 +2202,8 @@ impl SymbolicFactorizer {
             Self::compute_reach_set(
                 k,
                 &etree,
-                &row_ptrs,
-                &col_indices,
+                row_ptrs,
+                col_indices,
                 row_perm,
                 col_perm,
                 &mut visited,
@@ -2277,8 +2257,8 @@ impl SymbolicFactorizer {
             for idx in start..end {
                 let orig_col = col_indices[idx];
                 // Find permuted column position
-                if let Some(j) = col_perm.iter().position(|&c| c == orig_col) {
-                    if j < k {
+                if let Some(j) = col_perm.iter().position(|&c| c == orig_col)
+                    && j < k {
                         // Follow path compression for efficiency
                         let mut root = j;
                         while ancestor[root] != root && ancestor[root] < k {
@@ -2291,7 +2271,6 @@ impl SymbolicFactorizer {
                         }
                         ancestor[j] = k;
                     }
-                }
             }
         }
 
@@ -2325,11 +2304,10 @@ impl SymbolicFactorizer {
 
                 for idx in start..end {
                     let orig_col = col_indices[idx];
-                    if let Some(j) = col_perm.iter().position(|&c| c == orig_col) {
-                        if j < col && !visited[j] {
+                    if let Some(j) = col_perm.iter().position(|&c| c == orig_col)
+                        && j < col && !visited[j] {
                             Self::dfs_reach(j, etree, visited, reach_set);
                         }
-                    }
                 }
             }
         }
@@ -2887,13 +2865,12 @@ impl MemoryPool {
 
     /// Get a vector from the pool or allocate new one
     pub fn get_f64_vector(&mut self, size: usize) -> Vec<f64> {
-        if let Some(pool) = self.f64_pools.get_mut(&size) {
-            if let Some(mut vec) = pool.pop() {
+        if let Some(pool) = self.f64_pools.get_mut(&size)
+            && let Some(mut vec) = pool.pop() {
                 vec.clear();
                 vec.resize(size, 0.0);
                 return vec;
             }
-        }
 
         // Allocate new vector if none available
         vec![0.0; size]
@@ -2909,7 +2886,7 @@ impl MemoryPool {
             return; // Drop the vector instead of storing it
         }
 
-        let pool = self.f64_pools.entry(size).or_insert_with(Vec::new);
+        let pool = self.f64_pools.entry(size).or_default();
         if pool.len() < self.max_vectors_per_size {
             vec.clear();
             pool.push(vec);
@@ -2919,13 +2896,12 @@ impl MemoryPool {
 
     /// Get a usize vector from the pool
     pub fn get_usize_vector(&mut self, size: usize) -> Vec<usize> {
-        if let Some(pool) = self.usize_pools.get_mut(&size) {
-            if let Some(mut vec) = pool.pop() {
+        if let Some(pool) = self.usize_pools.get_mut(&size)
+            && let Some(mut vec) = pool.pop() {
                 vec.clear();
                 vec.resize(size, 0);
                 return vec;
             }
-        }
 
         vec![0; size]
     }
@@ -2939,7 +2915,7 @@ impl MemoryPool {
             return;
         }
 
-        let pool = self.usize_pools.entry(size).or_insert_with(Vec::new);
+        let pool = self.usize_pools.entry(size).or_default();
         if pool.len() < self.max_vectors_per_size {
             vec.clear();
             pool.push(vec);
@@ -3275,11 +3251,10 @@ impl SuperLuDistWorkspace {
 
     /// Return a temporary vector (for aggressive reuse)
     pub fn return_temp_vector(&mut self, name: &str) {
-        if self.config.aggressive_reuse {
-            if let Some(vector) = self.temp_vectors.remove(name) {
+        if self.config.aggressive_reuse
+            && let Some(vector) = self.temp_vectors.remove(name) {
                 self.memory_pool.return_f64_vector(vector);
             }
-        }
         // Otherwise keep the vector allocated for next use
     }
 
@@ -3479,8 +3454,7 @@ impl SuperLuDistBuilder {
             if d < 2 {
                 #[cfg(feature = "logging")]
                 log::warn!(
-                    "process_grid_3d_depth={} is too small, falling back to 2D factorization",
-                    d
+                    "process_grid_3d_depth={d} is too small, falling back to 2D factorization"
                 );
                 self.options.enable_3d_factorization = false;
                 self.options.process_grid_3d_depth = None;
@@ -3628,8 +3602,7 @@ impl SuperLuDistSolver {
             if d < 2 {
                 #[cfg(feature = "logging")]
                 log::warn!(
-                    "process_grid_3d_depth={} is too small, falling back to 2D factorization",
-                    d
+                    "process_grid_3d_depth={d} is too small, falling back to 2D factorization"
                 );
                 self.options.enable_3d_factorization = false;
                 self.options.process_grid_3d_depth = None;
@@ -3776,21 +3749,19 @@ impl SuperLuDistSolver {
 
     /// Optimize workspace memory usage
     pub fn optimize_workspace(&mut self) -> Result<(), KError> {
-        if let Some(ref mut data) = self.data {
-            if let Some(ref mut solve_workspace) = data.solve_workspace {
+        if let Some(ref mut data) = self.data
+            && let Some(ref mut solve_workspace) = data.solve_workspace {
                 solve_workspace.workspace.optimize();
             }
-        }
         Ok(())
     }
 
     /// Clear workspace temporary data to free memory
     pub fn clear_workspace_temp_data(&mut self) -> Result<(), KError> {
-        if let Some(ref mut data) = self.data {
-            if let Some(ref mut solve_workspace) = data.solve_workspace {
+        if let Some(ref mut data) = self.data
+            && let Some(ref mut solve_workspace) = data.solve_workspace {
                 solve_workspace.workspace.clear_temp_data();
             }
-        }
         Ok(())
     }
 
@@ -3977,7 +3948,7 @@ impl SuperLuDistSolver {
         };
 
         #[cfg(feature = "logging")]
-        log::debug!("Computing symbolic pattern with {} x {} matrix", n, n);
+        log::debug!("Computing symbolic pattern with {n} x {n} matrix");
 
         // Compute symbolic factorization pattern
         let l_pattern = SymbolicFactorizer::compute_symbolic_pattern(matrix, &col_perm, &row_perm)?;
@@ -4043,9 +4014,7 @@ impl SuperLuDistSolver {
 
         #[cfg(feature = "logging")]
         log::debug!(
-            "Starting numerical factorization with panel size {}, pivot strategy {:?}",
-            panel_size,
-            pivot_strategy
+            "Starting numerical factorization with panel size {panel_size}, pivot strategy {pivot_strategy:?}"
         );
 
         let mut panels = Vec::new();
@@ -4104,7 +4073,7 @@ impl SuperLuDistSolver {
                 }
                 Err(e) => {
                     #[cfg(feature = "logging")]
-                    log::error!("Panel factorization failed: {}", e);
+                    log::error!("Panel factorization failed: {e}");
                     return Err(e);
                 }
             }
@@ -4149,7 +4118,7 @@ impl SuperLuDistSolver {
         }
 
         let bs = std::cmp::min(64, n / 4).max(1);
-        let nb = (n + bs - 1) / bs;
+        let nb = n.div_ceil(bs);
         let mut lbg = vec![Vec::<usize>::new(); nb];
         let mut ubg = vec![Vec::<usize>::new(); nb];
         let add_edge = |graph: &mut [Vec<usize>], s: usize, t: usize| {
@@ -4157,14 +4126,14 @@ impl SuperLuDistSolver {
                 graph[s].push(t);
             }
         };
-        for (&(i, j), _) in &symbolic.l_pattern {
+        for &(i, j) in symbolic.l_pattern.keys() {
             let bi = i / bs;
             let bj = j / bs;
             if bj < bi {
                 add_edge(&mut lbg, bi, bj);
             }
         }
-        for (&(i, j), _) in &symbolic.u_pattern {
+        for &(i, j) in symbolic.u_pattern.keys() {
             let bi = i / bs;
             let bj = j / bs;
             if bj > bi {
@@ -4263,9 +4232,7 @@ impl SuperLuDistSolver {
         #[cfg(feature = "logging")]
         if self.options.enabled(1, 1) {
             log::info!(
-                "Starting distributed triangular solve with pattern {:?}, overlap_comm={}",
-                comm_pattern,
-                overlap_comm
+                "Starting distributed triangular solve with pattern {comm_pattern:?}, overlap_comm={overlap_comm}"
             );
         }
 
@@ -4328,8 +4295,8 @@ impl SuperLuDistSolver {
         if !matches!(
             self.options.iterative_refinement,
             IterativeRefinement::NoRefine
-        ) {
-            if let Some(ref mut engine) = self.refinement_engine {
+        )
+            && let Some(ref mut engine) = self.refinement_engine {
                 // Get the original matrix for residual computation
                 let data = self.data.as_ref().unwrap();
                 let local_matrix = data.local_matrix.as_ref().ok_or_else(|| {
@@ -4340,17 +4307,15 @@ impl SuperLuDistSolver {
                 let _refinement_stats = engine.refine_solution(local_matrix, b, x, data, comm)?;
 
                 #[cfg(feature = "logging")]
-                if self.options.enabled(1, 1) {
-                    if let Some(stats) = engine.last_stats() {
+                if self.options.enabled(1, 1)
+                    && let Some(stats) = engine.last_stats() {
                         log::info!(
                             "Iterative refinement completed: {} iterations, final residual: {:.2e}",
                             stats.iterations,
                             stats.final_residual_norm
                         );
                     }
-                }
             }
-        }
 
         #[cfg(feature = "logging")]
         if self.options.enabled(1, 1) {

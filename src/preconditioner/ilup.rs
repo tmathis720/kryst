@@ -113,8 +113,7 @@ where
                     let u_jj = a_work[j][j];
                     if u_jj.is_zero() {
                         return Err(KError::SolveError(format!(
-                            "ILUP: zero diagonal in U at row {}",
-                            j
+                            "ILUP: zero diagonal in U at row {j}"
                         )));
                     }
                     let lij = a_work[i][j] / u_jj;

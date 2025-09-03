@@ -12,6 +12,12 @@ pub struct SuperLuDistPc {
     comm: Option<UniverseComm>,
 }
 
+impl Default for SuperLuDistPc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SuperLuDistPc {
     pub fn new() -> Self {
         Self { comm: None }

@@ -177,8 +177,7 @@ pub fn preprocess_matrix(
         ReorderingMethod::CuthillMckee => cuthill_mckee(a)?,
         ReorderingMethod::Colamd | ReorderingMethod::Amd => {
             return Err(KError::NotImplemented(format!(
-                "{:?} reordering not yet implemented",
-                reorder_method
+                "{reorder_method:?} reordering not yet implemented"
             )));
         }
     };

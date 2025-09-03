@@ -220,7 +220,7 @@ fn print_ilu_banner(cfg: &IluConfig) {
         ),
         TriSolveType::GaussSeidel => "GaussSeidel".to_string(),
     };
-    info!("  triangular solve     : {}", tri);
+    info!("  triangular solve     : {tri}");
     info!(
         "  iterative setup      : tol={:.2e}, max_iter={}",
         cfg.tolerance, cfg.max_iterations
@@ -639,14 +639,12 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
                 let val = matrix[(i, j)];
                 if val.is_nan() {
                     return Err(KError::InvalidInput(format!(
-                        "NaN detected in matrix at position ({}, {})",
-                        i, j
+                        "NaN detected in matrix at position ({i}, {j})"
                     )));
                 }
                 if val.is_infinite() {
                     return Err(KError::InvalidInput(format!(
-                        "Infinity detected in matrix at position ({}, {})",
-                        i, j
+                        "Infinity detected in matrix at position ({i}, {j})"
                     )));
                 }
             }
@@ -1086,7 +1084,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
             #[cfg(feature = "logging")]
             if self.config.logging_level > 1 {
-                debug!("ILU: Workspace configured for {} x {} matrix", n, n);
+                debug!("ILU: Workspace configured for {n} x {n} matrix");
             }
         } else {
             // Still allocate minimal workspace for correctness
@@ -1413,8 +1411,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
             info!(
-                "ILU Setup: {} x {} matrix with {} nonzeros",
-                n, n, original_nnz
+                "ILU Setup: {n} x {n} matrix with {original_nnz} nonzeros"
             );
             debug!("ILU: Using {:?} factorization type", self.config.ilu_type);
         }
