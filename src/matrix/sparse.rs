@@ -213,6 +213,46 @@ impl<
         Ok(())
     }
 
+    /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y
+    pub fn spmv_transpose_scaled(
+        &self,
+        alpha: T,
+        x: &[T],
+        beta: T,
+        y: &mut [T],
+    ) -> Result<(), crate::error::KError> {
+        if x.len() != self.nrows() || y.len() != self.ncols() {
+            return Err(crate::error::KError::InvalidInput(format!(
+                "Dimension mismatch in spmv^T: A={}x{}, x.len()={}, y.len()={}",
+                self.nrows(),
+                self.ncols(),
+                x.len(),
+                y.len()
+            )));
+        }
+
+        // y = beta * y
+        for yi in y.iter_mut() {
+            *yi = *yi * beta;
+        }
+
+        let rp = self.inner.row_ptr();
+        let cj = self.inner.col_idx();
+        let vv = self.inner.val();
+
+        for i in 0..self.nrows() {
+            let xi = x[i];
+            let row_start = rp[i];
+            let row_end = rp[i + 1];
+            for idx in row_start..row_end {
+                let j = cj[idx];
+                y[j] = y[j] + alpha * vv[idx] * xi;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Borrow the CSR row pointer array (length = nrows + 1).
     #[inline]
     pub fn row_ptr(&self) -> &[usize] {
@@ -438,5 +478,21 @@ mod tests {
         let mut y = vec![0.0; 2];
         m.spmv_scaled(1.0, &x, 0.0, &mut y).unwrap();
         assert_eq!(y, vec![3.0, 7.0]);
+    }
+
+    #[test]
+    fn transpose_spmv() {
+        // 2×3 matrix [[1,2,0],[0,3,4]]; transpose is 3×2
+        let m = CsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 2, 4],
+            vec![0, 1, 1, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+        );
+        let x = vec![1.0, 2.0];
+        let mut y = vec![0.0; 3];
+        m.spmv_transpose_scaled(1.0, &x, 0.0, &mut y).unwrap();
+        assert_eq!(y, vec![1.0, 8.0, 8.0]);
     }
 }

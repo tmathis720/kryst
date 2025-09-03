@@ -22,20 +22,13 @@ mod row_filter;
 pub mod strength;
 
 use coarse_solver::{CoarseDenseLu, CoarseIlu, CoarseSolver};
-use coarsen::{build_aggregates, AggAlgo, AggOpts};
+use coarsen::{AggAlgo, AggOpts, build_aggregates};
 use prolong::{
-    smooth_sa_values_only,
-    smooth_tentative_sa,
-    Pcsr,
-    TentativeP,
-    CFInfo,
-    classical_pattern,
-    classical_values_only,
-    ClassicalParams,
-    ClassicalVariant,
+    CFInfo, ClassicalParams, ClassicalVariant, Pcsr, TentativeP, classical_pattern,
+    classical_values_only, smooth_sa_values_only, smooth_tentative_sa,
 };
-use rap_ops::{rap_numeric, rap_symbolic, CsrPattern};
-use row_filter::{apply_filter_to_csr_values_in_place, RowFilter};
+use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
+use row_filter::{RowFilter, apply_filter_to_csr_values_in_place};
 use strength::Strength;
 
 // ===== Public enums (kept compatible with your old file) =====================
@@ -148,6 +141,7 @@ pub struct AMGConfig {
     pub interpolation_truncation: f64,
     pub rap_truncation_abs: f64,
     pub rap_max_elements_per_row: usize,
+    pub keep_transpose: bool,
     pub keep_pivot_in_rap: bool,
     pub grid_relax_type: [RelaxType; 4], // [Fine, Down, Up, Coarsest]
     pub num_grid_sweeps: [usize; 4],     // [Fine, Down, Up, Coarsest]
@@ -201,6 +195,7 @@ impl Default for AMGConfig {
             interpolation_truncation: 0.0,
             rap_truncation_abs: 0.0,
             rap_max_elements_per_row: 0,
+            keep_transpose: true,
             keep_pivot_in_rap: true,
             grid_relax_type: [RelaxType::GaussSeidel; 4],
             num_grid_sweeps: [1; 4],
@@ -308,6 +303,10 @@ impl AMGBuilder {
     }
     pub fn rap_cap(mut self, k: usize) -> Self {
         self.cfg.rap_max_elements_per_row = k;
+        self
+    }
+    pub fn keep_transpose(mut self, on: bool) -> Self {
+        self.cfg.keep_transpose = on;
         self
     }
     pub fn keep_pivot_in_rap(mut self, yes: bool) -> Self {
@@ -555,6 +554,10 @@ struct AMGLevel {
     p2r_pos: Vec<usize>,
     /// Symbolic pattern for A_{l+1}
     a_next_pat: Option<CsrPattern>,
+    /// Optional transpose storage when keep_transpose is disabled
+    r_row_ptr: Option<Vec<usize>>,
+    r_col_idx: Option<Vec<usize>>,
+    r_vals_scratch: Option<Vec<f64>>,
     #[allow(clippy::redundant_allocation)]
     coarse_solver: Option<Mutex<Box<dyn CoarseSolver + Send>>>,
 }
@@ -585,6 +588,31 @@ impl AmgHierarchy {
     fn coarsest_ix(&self) -> usize {
         self.levels.len() - 1
     }
+}
+
+fn build_r_from_p(lvl: &mut AMGLevel) -> CsrMatrix<f64> {
+    let rr = lvl.r_row_ptr.as_ref().expect("missing R pattern");
+    let rc = lvl.r_col_idx.as_ref().expect("missing R pattern");
+    let p2r = &lvl.p2r_pos;
+    let pvals = lvl.p.values();
+    let rvals = lvl.r_vals_scratch.as_mut().expect("missing R scratch");
+    for (pi, &ri) in p2r.iter().enumerate() {
+        rvals[ri] = pvals[pi];
+    }
+    CsrMatrix::from_csr(
+        lvl.p.ncols(),
+        lvl.p.nrows(),
+        rr.clone(),
+        rc.clone(),
+        rvals.clone(),
+    )
+}
+
+fn rap_numeric_with_pt(lvl: &mut AMGLevel, out_vals: &mut [f64]) -> Result<(), KError> {
+    let r_tmp = build_r_from_p(lvl);
+    let pat = lvl.a_next_pat.as_ref().expect("missing pattern").clone();
+    rap_numeric(&pat, &r_tmp, &lvl.a, &lvl.p, out_vals);
+    Ok(())
 }
 
 // ===== Main AMG object =======================================================
@@ -678,7 +706,9 @@ impl AMG {
                 let params = ClassicalParams {
                     variant: match self.cfg.interp_type {
                         InterpType::Direct => ClassicalVariant::Direct,
-                        InterpType::Standard | InterpType::Classical | InterpType::Extended => ClassicalVariant::Standard,
+                        InterpType::Standard | InterpType::Classical | InterpType::Extended => {
+                            ClassicalVariant::Standard
+                        }
                         _ => ClassicalVariant::Standard,
                     },
                     extended: matches!(self.cfg.interp_type, InterpType::Extended),
@@ -713,7 +743,7 @@ impl AMG {
             }
             h.levels[l].p.values_mut().copy_from_slice(&p_new_vals);
             // Update R values from P via precomputed transpose mapping
-            {
+            if self.cfg.keep_transpose {
                 let pvals = h.levels[l].p.values().to_vec();
                 let p2r = h.levels[l].p2r_pos.clone();
                 let rvalsm = h.levels[l].r.values_mut();
@@ -722,16 +752,21 @@ impl AMG {
                 }
             }
             // Recompute A_{l+1} values by RAP numeric using fixed pattern
-            if let Some(ref pat) = h.levels[l].a_next_pat {
+            if h.levels[l].a_next_pat.is_some() {
+                let pat = h.levels[l].a_next_pat.as_ref().unwrap().clone();
                 let nnz = pat.col_idx.len();
                 let mut vals = vec![0.0; nnz];
-                rap_numeric(
-                    pat,
-                    &h.levels[l].r,
-                    &h.levels[l].a,
-                    &h.levels[l].p,
-                    &mut vals,
-                );
+                if self.cfg.keep_transpose {
+                    rap_numeric(
+                        &pat,
+                        &h.levels[l].r,
+                        &h.levels[l].a,
+                        &h.levels[l].p,
+                        &mut vals,
+                    );
+                } else {
+                    rap_numeric_with_pt(&mut h.levels[l], &mut vals)?;
+                }
                 {
                     let mut rf = |row: usize| RowFilter {
                         tau_abs: self.cfg.rap_truncation_abs,
@@ -761,7 +796,12 @@ impl AMG {
                 h.levels[l + 1].diag_inv = diag_inv_from_csr(&h.levels[l + 1].a)?;
             } else {
                 // Safety fallback: full RAP (structure + values)
-                let a_coarse = rap(&h.levels[l].r, &h.levels[l].a, &h.levels[l].p)?;
+                let a_coarse = if self.cfg.keep_transpose {
+                    rap(&h.levels[l].r, &h.levels[l].a, &h.levels[l].p)?
+                } else {
+                    let r_tmp = build_r_from_p(&mut h.levels[l]);
+                    rap(&r_tmp, &h.levels[l].a, &h.levels[l].p)?
+                };
                 h.levels[l + 1].diag_inv = diag_inv_from_csr(&a_coarse)?;
                 h.levels[l + 1].a = a_coarse;
             }
@@ -796,7 +836,10 @@ impl AMG {
                         self.cfg.chebyshev_power_iters,
                     );
                     let lmin = (self.cfg.chebyshev_min_ratio * lmax).max(1e-12);
-                    h.levels[lvl].cheb = Some(ChebCache { lambda_max: lmax, lambda_min: lmin });
+                    h.levels[lvl].cheb = Some(ChebCache {
+                        lambda_max: lmax,
+                        lambda_min: lmin,
+                    });
                 }
             } else {
                 h.levels[lvl].cheb = None;
@@ -1030,12 +1073,8 @@ impl AMG {
                     Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k)
                 }
             }
-            RelaxType::GaussSeidelBackward => {
-                Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k)
-            }
-            RelaxType::SymmetricGaussSeidel => {
-                Self::sym_gs(1.0, a, &lvl.diag_inv, rhs, sol, k)
-            }
+            RelaxType::GaussSeidelBackward => Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k),
+            RelaxType::SymmetricGaussSeidel => Self::sym_gs(1.0, a, &lvl.diag_inv, rhs, sol, k),
             RelaxType::L1Jacobi => {
                 if let Some(ref l1) = lvl.l1_inv {
                     Self::l1_jacobi(pol.omega, a, l1, rhs, sol, k, ws)
@@ -1048,7 +1087,15 @@ impl AMG {
                     let mut lmax = cheb.lambda_max.max(1e-12);
                     let mut lmin = cheb.lambda_min.min(0.99 * lmax).max(1e-16);
                     if lmin >= lmax {
-                        Self::jacobi_smooth_sparse(pol.omega, a, &lvl.diag_inv, rhs, sol, k.min(2).max(1), ws)
+                        Self::jacobi_smooth_sparse(
+                            pol.omega,
+                            a,
+                            &lvl.diag_inv,
+                            rhs,
+                            sol,
+                            k.min(2).max(1),
+                            ws,
+                        )
                     } else {
                         let deg = if cfg.chebyshev_degree > 0 {
                             cfg.chebyshev_degree
@@ -1069,6 +1116,18 @@ impl AMG {
     }
 
     // ---- Multigrid cycle ----------------------------------------------------
+
+    fn restrict_apply(
+        lvl: &AMGLevel,
+        fine_res: &[f64],
+        coarse_rhs: &mut [f64],
+    ) -> Result<(), KError> {
+        if lvl.r_row_ptr.is_some() {
+            lvl.p.spmv_transpose_scaled(1.0, fine_res, 0.0, coarse_rhs)
+        } else {
+            lvl.r.spmv_scaled(1.0, fine_res, 0.0, coarse_rhs)
+        }
+    }
 
     fn cycle_profiled(
         &self,
@@ -1104,20 +1163,17 @@ impl AMG {
                     solver.solve(rhs, sol)
                 } else {
                     match h.coarse_solve {
-                        CoarseSolve::CG => {
-                            cg_sparse(
-                                a,
-                                rhs,
-                                sol,
-                                self.cfg.tolerance,
-                                n.min(self.cfg.max_iterations.max(50)),
-                            )
-                        }
+                        CoarseSolve::CG => cg_sparse(
+                            a,
+                            rhs,
+                            sol,
+                            self.cfg.tolerance,
+                            n.min(self.cfg.max_iterations.max(50)),
+                        ),
                         CoarseSolve::ILU => {
                             let levelc = &h.levels[level];
                             if let Some(m) = &levelc.coarse_solver {
-                                let mut guard =
-                                    m.lock().expect("coarse solver mutex poisoned");
+                                let mut guard = m.lock().expect("coarse solver mutex poisoned");
                                 guard.solve(rhs, sol)
                             } else {
                                 let mut solver = CoarseIlu::new(
@@ -1181,14 +1237,13 @@ impl AMG {
         });
 
         // r_c = R * residual
-        let r = &h.levels[level].r;
         let p = &h.levels[level].p;
         let nc = h.levels[level + 1].a.nrows();
 
         let mut local_coarse = std::mem::take(&mut ws.coarse_rhs);
         local_coarse.resize(nc, 0.0);
         with_timing(prof, &mut lv.restrict, || {
-            r.spmv_scaled(1.0, &ws.residual[..n], 0.0, &mut local_coarse[..nc])
+            Self::restrict_apply(&h.levels[level], &ws.residual[..n], &mut local_coarse[..nc])
         })?;
 
         let gamma = gamma.max(1);
@@ -1236,7 +1291,11 @@ impl AMG {
                     }
                 });
                 with_timing(prof, &mut lv.restrict, || {
-                    r.spmv_scaled(1.0, &ws.residual[..n], 0.0, &mut local_coarse[..nc])
+                    Self::restrict_apply(
+                        &h.levels[level],
+                        &ws.residual[..n],
+                        &mut local_coarse[..nc],
+                    )
                 })?;
             }
         }
@@ -1290,11 +1349,15 @@ impl AMG {
     }
 
     pub fn fmg_solve(&self, _b: &[f64], _x: &mut [f64]) -> Result<(), KError> {
-        Err(KError::NotImplemented("FMG solve not yet implemented".into()))
+        Err(KError::NotImplemented(
+            "FMG solve not yet implemented".into(),
+        ))
     }
 
     pub fn cascade_solve(&self, _b: &[f64], _x: &mut [f64]) -> Result<(), KError> {
-        Err(KError::NotImplemented("Cascade solve not yet implemented".into()))
+        Err(KError::NotImplemented(
+            "Cascade solve not yet implemented".into(),
+        ))
     }
 
     // Convenience to avoid trait ambiguity in examples
@@ -1472,7 +1535,10 @@ fn build_hierarchy(
     let cheb0 = if need_cheb {
         let lmax = estimate_lambda_max(&a_cur, &diag0, cfg.chebyshev_power_iters);
         let lmin = (cfg.chebyshev_min_ratio * lmax).max(1e-12);
-        Some(ChebCache { lambda_max: lmax, lambda_min: lmin })
+        Some(ChebCache {
+            lambda_max: lmax,
+            lambda_min: lmin,
+        })
     } else {
         None
     };
@@ -1488,6 +1554,9 @@ fn build_hierarchy(
         cf: None,
         p2r_pos: Vec::new(),
         a_next_pat: None,
+        r_row_ptr: None,
+        r_col_idx: None,
+        r_vals_scratch: None,
         coarse_solver: None,
     };
     levels.push(l0);
@@ -1532,7 +1601,10 @@ fn build_hierarchy(
                     CoarsenType::PMIS => AggAlgo::PMIS,
                     CoarsenType::Falgout => AggAlgo::Falgout,
                 },
-                &AggOpts { mis_k, cap_per_row: cfg.max_strong_per_row },
+                &AggOpts {
+                    mis_k,
+                    cap_per_row: cfg.max_strong_per_row,
+                },
             )
         });
         let tp = TentativeP {
@@ -1540,51 +1612,60 @@ fn build_hierarchy(
             agg_of: agg.clone(),
         };
         let s_sym = s.symmetrize();
-        let (p_csr, cf_opt): (Pcsr, Option<CFInfo>) = with_timing(do_stats, &mut lt.prolong, || {
-            if matches!(cfg.interp_type, InterpType::Direct | InterpType::Standard | InterpType::Extended | InterpType::Classical) {
-                let extended = matches!(cfg.interp_type, InterpType::Extended);
-                let (pat, cf) = classical_pattern(&a_cur, &s_sym, &is_c, extended);
-                let mut vals = vec![0.0; pat.col_idx.len()];
-                let params = ClassicalParams {
-                    variant: match cfg.interp_type {
-                        InterpType::Direct => ClassicalVariant::Direct,
-                        InterpType::Standard | InterpType::Classical | InterpType::Extended => ClassicalVariant::Standard,
-                        _ => ClassicalVariant::Standard,
-                    },
-                    extended,
-                    drop_abs: cfg.interpolation_truncation,
-                    trunc_rel: cfg.truncation_factor,
-                    cap_row: cfg.max_elements_per_row,
-                    keep_at_least_one: true,
-                };
-                classical_values_only(
-                    &a_cur,
-                    &s_sym,
-                    &cf,
-                    &params,
-                    &pat.row_ptr,
-                    &pat.col_idx,
-                    &mut vals,
-                )?;
-                let mut p = pat.clone();
-                p.vals = vals;
-                Ok((p, Some(cf)))
-            } else {
-                let d = diag_inv_from_csr(&a_cur)?;
-                Ok((
-                    smooth_tentative_sa(
+        let (p_csr, cf_opt): (Pcsr, Option<CFInfo>) =
+            with_timing(do_stats, &mut lt.prolong, || {
+                if matches!(
+                    cfg.interp_type,
+                    InterpType::Direct
+                        | InterpType::Standard
+                        | InterpType::Extended
+                        | InterpType::Classical
+                ) {
+                    let extended = matches!(cfg.interp_type, InterpType::Extended);
+                    let (pat, cf) = classical_pattern(&a_cur, &s_sym, &is_c, extended);
+                    let mut vals = vec![0.0; pat.col_idx.len()];
+                    let params = ClassicalParams {
+                        variant: match cfg.interp_type {
+                            InterpType::Direct => ClassicalVariant::Direct,
+                            InterpType::Standard | InterpType::Classical | InterpType::Extended => {
+                                ClassicalVariant::Standard
+                            }
+                            _ => ClassicalVariant::Standard,
+                        },
+                        extended,
+                        drop_abs: cfg.interpolation_truncation,
+                        trunc_rel: cfg.truncation_factor,
+                        cap_row: cfg.max_elements_per_row,
+                        keep_at_least_one: true,
+                    };
+                    classical_values_only(
                         &a_cur,
-                        &d,
-                        &tp,
-                        cfg.jacobi_omega,
-                        cfg.interpolation_truncation,
-                        cfg.max_elements_per_row,
-                        cfg.truncation_factor,
-                    ),
-                    None,
-                ))
-            }
-        })?;
+                        &s_sym,
+                        &cf,
+                        &params,
+                        &pat.row_ptr,
+                        &pat.col_idx,
+                        &mut vals,
+                    )?;
+                    let mut p = pat.clone();
+                    p.vals = vals;
+                    Ok((p, Some(cf)))
+                } else {
+                    let d = diag_inv_from_csr(&a_cur)?;
+                    Ok((
+                        smooth_tentative_sa(
+                            &a_cur,
+                            &d,
+                            &tp,
+                            cfg.jacobi_omega,
+                            cfg.interpolation_truncation,
+                            cfg.max_elements_per_row,
+                            cfg.truncation_factor,
+                        ),
+                        None,
+                    ))
+                }
+            })?;
         let p = CsrMatrix::from_csr(
             p_csr.m,
             p_csr.n,
@@ -1654,12 +1735,22 @@ fn build_hierarchy(
         // Replace previous temporary P/R by actual inter-level transfers and agg mapping
         if let Some(prev) = levels.last_mut() {
             prev.p = p.clone();
-            prev.r = r.clone();
             prev.agg_of = tp.agg_of.clone();
             prev.is_c = is_c.clone();
             prev.cf = cf_opt.clone();
             prev.p2r_pos = p2r_pos;
             prev.a_next_pat = Some(pat.clone());
+            if cfg.keep_transpose {
+                prev.r = r.clone();
+                prev.r_row_ptr = None;
+                prev.r_col_idx = None;
+                prev.r_vals_scratch = None;
+            } else {
+                prev.r = CsrMatrix::identity(0);
+                prev.r_row_ptr = Some(r_row_ptr);
+                prev.r_col_idx = Some(r_col_idx);
+                prev.r_vals_scratch = Some(vec![0.0; prev.r_col_idx.as_ref().unwrap().len()]);
+            }
         }
 
         // Next level (coarser)
@@ -1672,7 +1763,10 @@ fn build_hierarchy(
         let cheb_coarse = if need_cheb {
             let lmax = estimate_lambda_max(&a_cur, &diag_inv_coarse, cfg.chebyshev_power_iters);
             let lmin = (cfg.chebyshev_min_ratio * lmax).max(1e-12);
-            Some(ChebCache { lambda_max: lmax, lambda_min: lmin })
+            Some(ChebCache {
+                lambda_max: lmax,
+                lambda_min: lmin,
+            })
         } else {
             None
         };
@@ -1688,6 +1782,9 @@ fn build_hierarchy(
             cf: None,
             p2r_pos: Vec::new(),
             a_next_pat: None,
+            r_row_ptr: None,
+            r_col_idx: None,
+            r_vals_scratch: None,
             coarse_solver: None,
         });
 
@@ -2397,7 +2494,18 @@ fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
             n: lvl.a.nrows(),
             nnz_a: lvl.a.nnz(),
             nnz_p: if i < h.coarsest_ix() { lvl.p.nnz() } else { 0 },
-            nnz_r: if i < h.coarsest_ix() { lvl.r.nnz() } else { 0 },
+            nnz_r: if i < h.coarsest_ix() {
+                if cfg.keep_transpose {
+                    lvl.r.nnz()
+                } else {
+                    lvl.r_row_ptr
+                        .as_ref()
+                        .and_then(|rp| rp.last().copied())
+                        .unwrap_or(0)
+                }
+            } else {
+                0
+            },
             max_row_sum_a: max_row_sum_abs(&lvl.a),
             eff_nnz_a: Some(eff_nnz(&lvl.a, cfg.stats_eps)),
         });
@@ -2666,6 +2774,9 @@ mod tests {
             cf: None,
             p2r_pos: vec![],
             a_next_pat: None,
+            r_row_ptr: None,
+            r_col_idx: None,
+            r_vals_scratch: None,
             coarse_solver: None,
         }
     }
@@ -2880,7 +2991,8 @@ mod tests {
             let ri = rhs[i] - ws_j.work[i];
             rj += ri * ri;
         }
-        a.spmv_scaled(1.0, &z_l1, 0.0, &mut ws_l1.work[..3]).unwrap();
+        a.spmv_scaled(1.0, &z_l1, 0.0, &mut ws_l1.work[..3])
+            .unwrap();
         let mut rl1 = 0.0;
         for i in 0..3 {
             let ri = rhs[i] - ws_l1.work[i];
