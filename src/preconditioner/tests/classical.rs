@@ -1,5 +1,5 @@
 use super::*;
-use crate::preconditioner::amg::prolong::classical_pattern;
+use super::super::amg::prolong::classical_pattern;
 use crate::preconditioner::amg::strength::Strength;
 use crate::matrix::sparse::CsrMatrix;
 
