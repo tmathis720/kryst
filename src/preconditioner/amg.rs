@@ -58,6 +58,57 @@ pub enum RelaxType {
     Chebyshev,
 }
 
+/// Per-phase relaxation controls mirroring Boomer semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelaxPhase {
+    Fine = 0,
+    Down = 1,
+    Up = 2,
+    Coarsest = 3,
+}
+
+enum RelaxWhere {
+    Pre,
+    Post,
+}
+
+impl RelaxPhase {
+    #[inline]
+    pub fn ix(self) -> usize {
+        self as usize
+    }
+    pub const ALL: [RelaxPhase; 4] = [
+        RelaxPhase::Fine,
+        RelaxPhase::Down,
+        RelaxPhase::Up,
+        RelaxPhase::Coarsest,
+    ];
+}
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+pub static RELAX_CALL_COUNTS: [AtomicUsize; 4] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+#[cfg(test)]
+pub fn reset_relax_counts() {
+    for c in &RELAX_CALL_COUNTS {
+        c.store(0, Ordering::SeqCst);
+    }
+}
+#[cfg(test)]
+pub fn get_relax_counts() -> [usize; 4] {
+    let mut out = [0; 4];
+    for (i, c) in RELAX_CALL_COUNTS.iter().enumerate() {
+        out[i] = c.load(Ordering::SeqCst);
+    }
+    out
+}
+
 // ===== Config + Builder ======================================================
 
 #[derive(Clone, Debug)]
@@ -70,6 +121,9 @@ pub struct AMGConfig {
     pub truncation_factor: f64,       // 0 => no truncation
     pub max_elements_per_row: usize,  // 0 => unlimited
     pub interpolation_truncation: f64,
+    pub grid_relax_type: [RelaxType; 4],   // [Fine, Down, Up, Coarsest]
+    pub num_grid_sweeps: [usize; 4],      // [Fine, Down, Up, Coarsest]
+    // legacy shims
     pub pre_sweeps: usize,            // HYPRE default: 1
     pub post_sweeps: usize,           // HYPRE default: 1
     pub coarsen_type: CoarsenType,    // HYPRE default: HMIS
@@ -95,7 +149,7 @@ pub struct AMGConfig {
 
 impl Default for AMGConfig {
     fn default() -> Self {
-        Self {
+        let mut cfg = Self {
             max_levels: 25,
             strong_threshold: 0.25,
             coarse_threshold: 9,
@@ -104,6 +158,8 @@ impl Default for AMGConfig {
             truncation_factor: 0.0,
             max_elements_per_row: 0,
             interpolation_truncation: 0.0,
+            grid_relax_type: [RelaxType::GaussSeidel; 4],
+            num_grid_sweeps: [1; 4],
             pre_sweeps: 1,
             post_sweeps: 1,
             coarsen_type: CoarsenType::HMIS,
@@ -124,7 +180,15 @@ impl Default for AMGConfig {
             ilu_drop_tol: 1e-2,
             ilu_fill_per_row: 0,
             max_operator_complexity: None,
-        }
+        };
+        cfg.grid_relax_type = [
+            cfg.relax_type,
+            cfg.relax_type,
+            cfg.relax_type,
+            RelaxType::GaussSeidel,
+        ];
+        cfg.num_grid_sweeps = [cfg.pre_sweeps, cfg.pre_sweeps, cfg.post_sweeps, 1];
+        cfg
     }
 }
 
@@ -145,11 +209,44 @@ impl AMGBuilder {
     pub fn truncation_factor(mut self, v: f64) -> Self { self.cfg.truncation_factor = v; self }
     pub fn interpolation_truncation(mut self, v: f64) -> Self { self.cfg.interpolation_truncation = v; self }
     pub fn smoothing_sweeps(mut self, pre: usize, post: usize) -> Self {
-        self.cfg.pre_sweeps = pre; self.cfg.post_sweeps = post; self
+        self.cfg.pre_sweeps = pre;
+        self.cfg.post_sweeps = post;
+        self.cfg.num_grid_sweeps[RelaxPhase::Fine.ix()] = pre;
+        self.cfg.num_grid_sweeps[RelaxPhase::Down.ix()] = pre;
+        self.cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = post;
+        // leave Coarsest as-is
+        self
     }
     pub fn coarsening_type(mut self, v: CoarsenType) -> Self { self.cfg.coarsen_type = v; self }
     pub fn interpolation_type(mut self, v: InterpType) -> Self { self.cfg.interp_type = v; self }
-    pub fn relaxation_type(mut self, v: RelaxType) -> Self { self.cfg.relax_type = v; self }
+    pub fn relaxation_type(mut self, v: RelaxType) -> Self {
+        self.cfg.relax_type = v;
+        for ph in RelaxPhase::ALL {
+            self.cfg.grid_relax_type[ph.ix()] = v;
+        }
+        self.cfg.grid_relax_type[RelaxPhase::Coarsest.ix()] = RelaxType::GaussSeidel;
+        self
+    }
+    pub fn grid_relax_type(mut self, phase: RelaxPhase, t: RelaxType) -> Self {
+        self.cfg.grid_relax_type[phase.ix()] = t;
+        self
+    }
+    pub fn num_grid_sweeps(mut self, phase: RelaxPhase, k: usize) -> Self {
+        self.cfg.num_grid_sweeps[phase.ix()] = k;
+        self
+    }
+    pub fn grid_relax_type_all(mut self, t: RelaxType) -> Self {
+        for ph in RelaxPhase::ALL {
+            self.cfg.grid_relax_type[ph.ix()] = t;
+        }
+        self
+    }
+    pub fn num_grid_sweeps_all(mut self, k: usize) -> Self {
+        for ph in RelaxPhase::ALL {
+            self.cfg.num_grid_sweeps[ph.ix()] = k;
+        }
+        self
+    }
     pub fn enable_logging(mut self) -> Self { self.cfg.logging_level = 1; self }
     pub fn logging_level(mut self, lvl: usize) -> Self { self.cfg.logging_level = lvl; self }
     pub fn enable_printing(mut self) -> Self { self.cfg.print_level = 1; self }
@@ -166,6 +263,38 @@ impl AMGBuilder {
 impl Default for AMGBuilder { fn default() -> Self { Self::new() } }
 
 // ===== Workspace, levels & hierarchy ========================================
+
+fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<(), KError> {
+    if !matches!(coarse_solver, CoarseSolve::CG | CoarseSolve::ILU) {
+        if cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0 {
+            return Err(KError::InvalidInput(
+                "num_grid_sweeps[Coarsest] must be 0 when coarse_solve is DirectDense".into(),
+            ));
+        }
+    }
+
+    for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
+        match rt {
+            RelaxType::Jacobi => {}
+            _ => {
+                return Err(KError::InvalidInput(format!(
+                    "RelaxType {:?} not yet supported (phase index {}); choose Jacobi for now",
+                    rt, i
+                )));
+            }
+        }
+    }
+
+    for (i, &k) in cfg.num_grid_sweeps.iter().enumerate() {
+        if i != RelaxPhase::Coarsest.ix() && k == 0 {
+            return Err(KError::InvalidInput(format!(
+                "num_grid_sweeps for phase {} must be >= 1",
+                i
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 struct AMGWorkspace {
@@ -215,11 +344,16 @@ struct AMGLevel {
 }
 
 #[derive(Clone)]
+struct RelaxPolicy {
+    kind: [RelaxType; 4],
+    sweeps: [usize; 4],
+    omega: f64,
+}
+
+#[derive(Clone)]
 struct AmgHierarchy {
     levels: Vec<AMGLevel>, // 0..L ; L is coarsest
-    pre_sweeps: usize,
-    post_sweeps: usize,
-    omega: f64,
+    policy: RelaxPolicy,
     coarse_solve: CoarseSolve,
 }
 
@@ -379,6 +513,31 @@ impl AMG {
         Ok(())
     }
 
+    // single dispatch point for all relaxation strategies
+    fn apply_relax(
+        pol: &RelaxPolicy,
+        phase: RelaxPhase,
+        _where: RelaxWhere,
+        a: &CsrMatrix<f64>,
+        diag_inv: &[f64],
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        let k = pol.sweeps[phase.ix()];
+        if k == 0 {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            RELAX_CALL_COUNTS[phase.ix()].fetch_add(1, Ordering::SeqCst);
+        }
+        match pol.kind[phase.ix()] {
+            RelaxType::Jacobi => Self::jacobi_smooth_sparse(pol.omega, a, diag_inv, rhs, sol, k, ws),
+            other => Err(KError::InvalidInput(format!("RelaxType {:?} not yet supported", other))),
+        }
+    }
+
     // ---- V-cycle ------------------------------------------------------------
 
     fn v_cycle(
@@ -393,8 +552,7 @@ impl AMG {
 
         let a = &h.levels[level].a;
         let d = &h.levels[level].diag_inv;
-        let (pre, post) = (h.pre_sweeps, h.post_sweeps);
-        let omega = h.omega;
+        let pol = &h.policy;
 
         if level == lc {
             // Coarsest: choose solver, with heuristic to use dense when tiny
@@ -420,7 +578,8 @@ impl AMG {
         ws.ensure(n);
 
         // Pre-smooth
-        Self::jacobi_smooth_sparse(omega, a, d, rhs, sol, pre, ws)?;
+        let phase_pre = if level == 0 { RelaxPhase::Fine } else { RelaxPhase::Down };
+        Self::apply_relax(pol, phase_pre, RelaxWhere::Pre, a, d, rhs, sol, ws)?;
 
         // residual = rhs - A * sol
         a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])?;
@@ -460,7 +619,8 @@ impl AMG {
         for i in 0..n { sol[i] += ws.fine_corr[i]; }
 
         // Post-smooth
-        Self::jacobi_smooth_sparse(omega, a, d, rhs, sol, post, ws)?;
+        let phase_post = if level == 0 { RelaxPhase::Fine } else { RelaxPhase::Up };
+        Self::apply_relax(pol, phase_post, RelaxWhere::Post, a, d, rhs, sol, ws)?;
         Ok(())
     }
 
@@ -475,6 +635,7 @@ impl AMG {
 
 impl Preconditioner for AMG {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
         // Convert to CSR via the new matrix layer entry point.
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let sid = op.structure_id();
@@ -529,6 +690,7 @@ impl Preconditioner for AMG {
     }
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         self.build_symbolic(&csr)?;
         self.csr = Some(csr);
@@ -630,9 +792,11 @@ fn build_hierarchy(fine: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<AmgHierarch
     }
 
     Ok(AmgHierarchy {
-        pre_sweeps: cfg.pre_sweeps,
-        post_sweeps: cfg.post_sweeps,
-        omega: cfg.jacobi_omega,
+        policy: RelaxPolicy {
+            kind: cfg.grid_relax_type,
+            sweeps: cfg.num_grid_sweeps,
+            omega: cfg.jacobi_omega,
+        },
         coarse_solve: cfg.coarse_solve,
         levels,
     })
@@ -977,4 +1141,59 @@ fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<us
         }
     }
     (r_row_counts, r_col_idx, r_vals, p2r_pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    fn identity_level() -> AMGLevel {
+        AMGLevel {
+            a: CsrMatrix::identity(1),
+            p: CsrMatrix::identity(1),
+            r: CsrMatrix::identity(1),
+            diag_inv: vec![1.0],
+            agg_of: vec![0],
+            p2r_pos: vec![],
+            a_next_pat: None,
+        }
+    }
+
+    #[test]
+    fn phase_selection_logic() {
+        reset_relax_counts();
+        let levels = vec![identity_level(), identity_level(), identity_level()];
+        let policy = RelaxPolicy { kind: [RelaxType::Jacobi; 4], sweeps: [1, 1, 1, 0], omega: 1.0 };
+        let hier = AmgHierarchy { levels, policy, coarse_solve: CoarseSolve::DirectDense };
+        let amg = AMG { state: Some(hier), ..Default::default() };
+        let rhs = [1.0];
+        let mut sol = [0.0];
+        amg.apply(PcSide::Left, &rhs, &mut sol).unwrap();
+        let counts = get_relax_counts();
+        assert_eq!(counts[RelaxPhase::Fine.ix()], 2);
+        assert_eq!(counts[RelaxPhase::Down.ix()], 1);
+        assert_eq!(counts[RelaxPhase::Up.ix()], 1);
+        assert_eq!(counts[RelaxPhase::Coarsest.ix()], 0);
+    }
+
+    #[test]
+    fn validation_failures() {
+        let mut cfg = AMGConfig::default();
+        cfg.grid_relax_type = [RelaxType::GaussSeidel; 4];
+        let err = validate_relax_policy(&cfg, cfg.coarse_solve).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
+
+        let mut cfg = AMGConfig::default();
+        cfg.coarse_solve = CoarseSolve::DirectDense;
+        cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] = 1;
+        let err = validate_relax_policy(&cfg, cfg.coarse_solve).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn legacy_shim_populates_arrays() {
+        let amg = AMG::builder().smoothing_sweeps(2, 3).build(&Mat::<f64>::zeros(0, 0)).unwrap();
+        assert_eq!(amg.cfg.num_grid_sweeps, [2, 2, 3, 1]);
+    }
 }
