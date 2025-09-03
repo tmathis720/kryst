@@ -14,14 +14,14 @@ use rayon::prelude::*;
 
 // New sparse SA/RS submodules
 mod coarse_solver;
-mod coarsen;
+pub mod coarsen;
 mod prolong;
 mod rap_ops;
 mod row_filter;
-mod strength;
+pub mod strength;
 
 use coarse_solver::{CoarseDenseLu, CoarseSolve, CoarseSolver};
-use coarsen::{build_aggregates, AggAlgo};
+use coarsen::{build_aggregates, AggAlgo, AggOpts};
 use prolong::{smooth_sa_values_only, smooth_tentative_sa, Pcsr, TentativeP};
 use rap_ops::{rap_numeric, rap_symbolic, CsrPattern};
 use row_filter::{apply_filter_to_csr_values_in_place, RowFilter};
@@ -151,6 +151,9 @@ pub struct AMGConfig {
     pub ilu_drop_tol: f64,
     pub ilu_fill_per_row: usize,
     pub max_operator_complexity: Option<f64>,
+    pub agg_num_levels: usize,
+    pub aggressive_mis_k: usize,
+    pub max_strong_per_row: Option<usize>,
 }
 
 impl Default for AMGConfig {
@@ -190,6 +193,9 @@ impl Default for AMGConfig {
             ilu_drop_tol: 1e-2,
             ilu_fill_per_row: 0,
             max_operator_complexity: None,
+            agg_num_levels: 1,
+            aggressive_mis_k: 2,
+            max_strong_per_row: None,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -272,6 +278,18 @@ impl AMGBuilder {
     }
     pub fn coarsening_type(mut self, v: CoarsenType) -> Self {
         self.cfg.coarsen_type = v;
+        self
+    }
+    pub fn agg_num_levels(mut self, v: usize) -> Self {
+        self.cfg.agg_num_levels = v;
+        self
+    }
+    pub fn aggressive_mis_k(mut self, v: usize) -> Self {
+        self.cfg.aggressive_mis_k = v;
+        self
+    }
+    pub fn max_strong_per_row(mut self, k: usize) -> Self {
+        self.cfg.max_strong_per_row = Some(k);
         self
     }
     pub fn interpolation_type(mut self, v: InterpType) -> Self {
@@ -1012,7 +1030,7 @@ fn build_hierarchy(
     }
 
     // Drive coarsening: build levels 0..L (inclusive L is coarsest)
-    for _level in 0..cfg.max_levels {
+    for level in 0..cfg.max_levels {
         let n = a_cur.nrows();
         if n <= cfg.coarse_threshold || n <= cfg.min_coarse_size {
             break;
@@ -1025,6 +1043,11 @@ fn build_hierarchy(
             Strength::from_csr(&a_cur, cfg.strong_threshold, cfg.normalize_strength)
         });
         // 2) Aggregates
+        let mis_k = if level < cfg.agg_num_levels {
+            cfg.aggressive_mis_k.max(2)
+        } else {
+            1
+        };
         let agg = with_timing(do_stats, &mut lt.aggregate, || {
             build_aggregates(
                 &s,
@@ -1032,8 +1055,9 @@ fn build_hierarchy(
                     CoarsenType::RS => AggAlgo::RSGreedy,
                     CoarsenType::HMIS => AggAlgo::HMIS,
                     CoarsenType::PMIS => AggAlgo::PMIS,
-                    CoarsenType::Falgout => AggAlgo::HMIS,
+                    CoarsenType::Falgout => AggAlgo::Falgout,
                 },
+                &AggOpts { mis_k, cap_per_row: cfg.max_strong_per_row },
             )
         });
         let tp = TentativeP {
