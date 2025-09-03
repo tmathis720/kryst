@@ -16,23 +16,23 @@ use rayon::prelude::*;
 mod coarse_solver;
 pub use coarse_solver::CoarseSolve;
 pub mod coarsen;
+mod non_galerkin;
 pub(crate) mod prolong;
 mod rap_ops;
 mod row_filter;
-mod non_galerkin;
 pub mod strength;
 pub(crate) mod strength_nodal;
 pub(crate) mod util;
 
 use coarse_solver::{CoarseDenseLu, CoarseIlu, CoarseSolver};
 use coarsen::{AggAlgo, AggOpts, build_aggregates, lift_node_aggregates_to_dofs};
+use non_galerkin::{NgRowFilter, non_galerkin_filter_coarse};
 use prolong::{
     CFInfo, ClassicalParams, ClassicalVariant, Pcsr, TentativeP, classical_pattern,
     classical_values_only, smooth_sa_values_only_multi, smooth_tentative_sa_multi,
 };
 use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
 use row_filter::{RowFilter, apply_filter_to_csr_values_in_place};
-use non_galerkin::{NgRowFilter, non_galerkin_filter_coarse};
 use strength::Strength;
 use strength_nodal::strength_nodal;
 use util::DofLayout;
@@ -1767,7 +1767,11 @@ fn build_hierarchy(
         } else {
             (agg_node, is_c_node)
         };
-        let mut num_functions = cfg.num_functions;
+        let mut num_functions = if level == 0 {
+            cfg.num_functions
+        } else {
+            block_size_cur
+        };
         let nns_opt = if level == 0 {
             cfg.near_nullspace.as_ref().map(|nns| {
                 if nns.basis.len() > num_functions {
@@ -2127,7 +2131,11 @@ fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<
                             tau_abs: cfg.rap_truncation_abs,
                             tau_rel: cfg.truncation_factor,
                             k_max: cfg.rap_max_elements_per_row,
-                            must_keep: if cfg.keep_pivot_in_rap { Some(row) } else { None },
+                            must_keep: if cfg.keep_pivot_in_rap {
+                                Some(row)
+                            } else {
+                                None
+                            },
                         };
                         apply_filter_to_csr_values_in_place(
                             pat_full.nrows,
@@ -3455,5 +3463,46 @@ mod tests {
 
         assert_eq!(setups_before, 1);
         assert_eq!(setups_after, 1);
+    }
+
+    #[test]
+    fn preserves_num_functions_across_levels() {
+        // Build 1D Poisson matrix of size 16
+        let n = 16;
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+        for i in 0..n {
+            if i > 0 {
+                col_idx.push(i - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                col_idx.push(i + 1);
+                vals.push(-1.0);
+            }
+            row_ptr.push(col_idx.len());
+        }
+        let a = CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals);
+
+        // Two-function near nullspace: constant and linear
+        let t0 = vec![1.0; n];
+        let t1: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        let mut amg = AMGBuilder::new()
+            .coarse_threshold(1)
+            .max_coarse_size(1)
+            .near_nullspace(vec![t0, t1])
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        amg.setup(&a).unwrap();
+
+        let h = amg.state.as_ref().unwrap();
+        for l in 0..h.coarsest_ix() {
+            assert_eq!(h.levels[l].num_functions, 2);
+        }
     }
 }
