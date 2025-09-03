@@ -123,6 +123,18 @@ pub fn get_relax_counts() -> [usize; 4] {
 
 // ===== Config + Builder ======================================================
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CycleType {
+    V,
+    W { gamma: usize },
+}
+
+impl Default for CycleType {
+    fn default() -> Self {
+        CycleType::V
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AMGConfig {
     pub max_levels: usize,           // HYPRE default: 25
@@ -168,6 +180,11 @@ pub struct AMGConfig {
     pub agg_num_levels: usize,
     pub aggressive_mis_k: usize,
     pub max_strong_per_row: Option<usize>,
+    pub cycle_type: CycleType,
+    pub fmg_nu_pre: usize,
+    pub fmg_nu_post: usize,
+    pub fmg_gamma: usize,
+    pub fmg_levels_use: Option<usize>,
 }
 
 impl Default for AMGConfig {
@@ -214,6 +231,11 @@ impl Default for AMGConfig {
             agg_num_levels: 1,
             aggressive_mis_k: 2,
             max_strong_per_row: None,
+            cycle_type: CycleType::V,
+            fmg_nu_pre: 1,
+            fmg_nu_post: 1,
+            fmg_gamma: 1,
+            fmg_levels_use: None,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -237,6 +259,15 @@ impl AMGBuilder {
         Self {
             cfg: AMGConfig::default(),
         }
+    }
+    pub fn cycle_v(mut self) -> Self {
+        self.cfg.cycle_type = CycleType::V;
+        self
+    }
+    pub fn cycle_w(mut self, gamma: usize) -> Self {
+        let g = gamma.max(2);
+        self.cfg.cycle_type = CycleType::W { gamma: g };
+        self
     }
     pub fn max_levels(mut self, v: usize) -> Self {
         self.cfg.max_levels = v;
@@ -1011,11 +1042,12 @@ impl AMG {
         }
     }
 
-    // ---- V-cycle ------------------------------------------------------------
+    // ---- Multigrid cycle ----------------------------------------------------
 
-    fn v_cycle_profiled(
+    fn cycle_profiled(
         &self,
         level: usize,
+        gamma: usize,
         rhs: &[f64],
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
@@ -1037,7 +1069,6 @@ impl AMG {
 
         if level == lc {
             with_timing(prof, &mut lv.coarse_solve, || {
-                // Coarsest: choose solver
                 let use_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
                     || a.nrows() <= self.cfg.max_coarse_size;
                 if use_dense {
@@ -1110,29 +1141,53 @@ impl AMG {
             r.spmv_scaled(1.0, &ws.residual[..n], 0.0, &mut local_coarse[..nc])
         })?;
 
-        // recurse / coarse solve
-        if level + 1 == lc {
-            with_timing(prof, &mut lv.coarse_solve, || {
-                let mut solver = CoarseDenseLu::new();
-                solver.setup(&h.levels[level + 1].a)?;
-                solver.solve(&local_coarse[..nc], &mut ws.fine_corr[..nc])
-            })?;
-            ws.fine_corr[..n].fill(0.0);
-        } else {
+        let gamma = gamma.max(1);
+        for t in 0..gamma {
             let mut zc = vec![0.0; nc];
-            self.v_cycle_profiled(
-                level + 1,
-                &local_coarse[..nc],
-                &mut zc,
-                ws,
-                cyc.as_deref_mut(),
-            )?;
+            if level + 1 == lc {
+                with_timing(prof, &mut lv.coarse_solve, || {
+                    let mut solver = CoarseDenseLu::new();
+                    solver.setup(&h.levels[level + 1].a)?;
+                    solver.solve(&local_coarse[..nc], &mut zc)
+                })?;
+            } else {
+                self.cycle_profiled(
+                    level + 1,
+                    gamma,
+                    &local_coarse[..nc],
+                    &mut zc,
+                    ws,
+                    cyc.as_deref_mut(),
+                )?;
+            }
             with_timing(prof, &mut lv.prolong, || {
                 ws.fine_corr[..n].fill(0.0);
                 p.spmv_scaled(1.0, &zc, 0.0, &mut ws.fine_corr[..n])
             })?;
             for i in 0..n {
                 sol[i] += ws.fine_corr[i];
+            }
+
+            if t + 1 < gamma {
+                with_timing(prof, &mut lv.matvec, || {
+                    a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])
+                })?;
+                with_timing(prof, &mut lv.residual_axpy, || {
+                    #[cfg(feature = "rayon")]
+                    ws.residual[..n]
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, ri)| {
+                            *ri = rhs[i] - ws.work[i];
+                        });
+                    #[cfg(not(feature = "rayon"))]
+                    for i in 0..n {
+                        ws.residual[i] = rhs[i] - ws.work[i];
+                    }
+                });
+                with_timing(prof, &mut lv.restrict, || {
+                    r.spmv_scaled(1.0, &ws.residual[..n], 0.0, &mut local_coarse[..nc])
+                })?;
             }
         }
         ws.coarse_rhs = local_coarse;
@@ -1162,6 +1217,18 @@ impl AMG {
         Ok(())
     }
 
+    fn cycle(
+        &self,
+        level: usize,
+        gamma: usize,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        self.cycle_profiled(level, gamma, rhs, sol, ws, None)
+    }
+
+    #[inline]
     fn v_cycle(
         &self,
         level: usize,
@@ -1169,7 +1236,15 @@ impl AMG {
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
     ) -> Result<(), KError> {
-        self.v_cycle_profiled(level, rhs, sol, ws, None)
+        self.cycle(level, 1, rhs, sol, ws)
+    }
+
+    pub fn fmg_solve(&self, _b: &[f64], _x: &mut [f64]) -> Result<(), KError> {
+        Err(KError::NotImplemented("FMG solve not yet implemented".into()))
+    }
+
+    pub fn cascade_solve(&self, _b: &[f64], _x: &mut [f64]) -> Result<(), KError> {
+        Err(KError::NotImplemented("Cascade solve not yet implemented".into()))
     }
 
     // Convenience to avoid trait ambiguity in examples
@@ -1238,12 +1313,17 @@ impl Preconditioner for AMG {
         } else {
             let mut ws = AMGWorkspace::new(h.finest().a.nrows());
             let do_prof = self.cfg.logging_level >= 2;
+            let gamma = match self.cfg.cycle_type {
+                CycleType::V => 1,
+                CycleType::W { gamma } => gamma.max(2),
+            };
             if do_prof {
                 let mut cyc = CycleTimings::default();
                 let t_all = tic();
                 z.fill(0.0);
-                self.v_cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
+                self.cycle_profiled(0, gamma, r, z, &mut ws, Some(&mut cyc))?;
                 cyc.total_cycle = toc(t_all);
+                cyc.cycle_type = self.cfg.cycle_type;
                 if let Ok(mut rt) = self.runtime.lock() {
                     rt.last_cycle = Some(cyc.clone());
                 }
@@ -1252,7 +1332,7 @@ impl Preconditioner for AMG {
                 }
             } else {
                 z.fill(0.0);
-                self.v_cycle(0, r, z, &mut ws)?;
+                self.cycle(0, gamma, r, z, &mut ws)?;
             }
             Ok(())
         }
@@ -2127,10 +2207,21 @@ pub struct CycleLevelTiming {
     pub post_smooth: Duration,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CycleTimings {
     pub per_level: Vec<CycleLevelTiming>,
     pub total_cycle: Duration,
+    pub cycle_type: CycleType,
+}
+
+impl Default for CycleTimings {
+    fn default() -> Self {
+        Self {
+            per_level: Vec::new(),
+            total_cycle: Duration::default(),
+            cycle_type: CycleType::V,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2239,7 +2330,11 @@ fn print_setup_tables(stats: &AmgStats) {
 }
 
 fn print_cycle_table(c: &CycleTimings) {
-    println!("V-cycle timings (ms): level | pre mv axpy R coarse P post");
+    let desc = match c.cycle_type {
+        CycleType::V => "V-cycle".to_string(),
+        CycleType::W { gamma } => format!("W-cycle(gamma={})", gamma),
+    };
+    println!("{} timings (ms): level | pre mv axpy R coarse P post", desc);
     let ms = |d: Duration| (d.as_secs_f64() * 1e3).round() as u64;
     for lv in &c.per_level {
         println!(
