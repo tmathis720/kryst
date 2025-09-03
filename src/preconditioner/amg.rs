@@ -1898,6 +1898,88 @@ fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<us
 mod tests {
     use super::*;
     use faer::Mat;
+    use std::cmp::Ordering;
+
+    #[inline]
+    fn feq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
+        let diff = (a - b).abs();
+        diff <= atol.max(rtol * a.abs()).max(rtol * b.abs())
+    }
+
+    fn assert_dense_eq(a: &Mat<f64>, b: &Mat<f64>, atol: f64, rtol: f64) {
+        assert_eq!(a.nrows(), b.nrows());
+        assert_eq!(a.ncols(), b.ncols());
+        for i in 0..a.nrows() {
+            for j in 0..a.ncols() {
+                assert!(
+                    feq(a[(i, j)], b[(i, j)], atol, rtol),
+                    "dense mismatch at ({},{}): {} vs {}",
+                    i,
+                    j,
+                    a[(i, j)],
+                    b[(i, j)]
+                );
+            }
+        }
+    }
+
+    fn csr_from_triples(m: usize, n: usize, mut trip: Vec<(usize, usize, f64)>) -> CsrMatrix<f64> {
+        trip.sort_by(|a, b| match a.0.cmp(&b.0) {
+            Ordering::Equal => a.1.cmp(&b.1),
+            o => o,
+        });
+        let mut row_ptr = vec![0usize; m + 1];
+        let mut col_idx = Vec::<usize>::new();
+        let mut vals = Vec::<f64>::new();
+        let mut i_cur = 0usize;
+        let mut j_prev = usize::MAX;
+        let mut acc = 0.0;
+
+        let mut push_acc = |row: usize,
+                            col: usize,
+                            v: f64,
+                            row_ptr: &mut [usize],
+                            col_idx: &mut Vec<usize>,
+                            vals: &mut Vec<f64>| {
+            if v != 0.0 {
+                col_idx.push(col);
+                vals.push(v);
+            }
+            row_ptr[row + 1] = col_idx.len();
+        };
+
+        for (r, c, v) in trip {
+            while i_cur < r {
+                if j_prev != usize::MAX {
+                    push_acc(i_cur, j_prev, acc, &mut row_ptr, &mut col_idx, &mut vals);
+                    j_prev = usize::MAX;
+                    acc = 0.0;
+                }
+                i_cur += 1;
+                row_ptr[i_cur] = col_idx.len();
+            }
+            if j_prev == c {
+                acc += v;
+            } else {
+                if j_prev != usize::MAX {
+                    push_acc(i_cur, j_prev, acc, &mut row_ptr, &mut col_idx, &mut vals);
+                }
+                j_prev = c;
+                acc = v;
+            }
+        }
+        while i_cur < m {
+            if j_prev != usize::MAX {
+                push_acc(i_cur, j_prev, acc, &mut row_ptr, &mut col_idx, &mut vals);
+                j_prev = usize::MAX;
+                acc = 0.0;
+            }
+            i_cur += 1;
+            row_ptr[i_cur] = col_idx.len();
+        }
+
+        CsrMatrix::from_csr(m, n, row_ptr, col_idx, vals)
+    }
 
     fn identity_level() -> AMGLevel {
         AMGLevel {
@@ -1972,5 +2054,87 @@ mod tests {
             .build(&Mat::<f64>::zeros(0, 0))
             .unwrap();
         assert_eq!(amg.cfg.num_grid_sweeps, [2, 2, 3, 1]);
+    }
+
+    #[test]
+    fn rap_numeric_matches_dense_small() {
+        let a = csr_from_triples(
+            3,
+            3,
+            vec![
+                (0, 0, 4.0),
+                (0, 1, -1.0),
+                (1, 0, -1.0),
+                (1, 1, 4.0),
+                (1, 2, -1.0),
+                (2, 1, -1.0),
+                (2, 2, 4.0),
+            ],
+        );
+        let p = csr_from_triples(3, 2, vec![(0, 0, 1.0), (1, 0, 1.0), (2, 1, 1.0)]);
+        let r = csr_from_triples(2, 3, vec![(0, 0, 1.0), (0, 1, 1.0), (1, 2, 1.0)]);
+
+        let pat = rap_ops::rap_symbolic(&r, &a, &p);
+        let mut vals = vec![0.0; pat.col_idx.len()];
+        rap_ops::rap_numeric(&pat, &r, &a, &p, &mut vals);
+
+        let ad = a.to_dense();
+        let pd = p.to_dense();
+        let rd = r.to_dense();
+        let cd = &rd * &ad * &pd;
+
+        let mut cpat = Mat::<f64>::zeros(pat.nrows, pat.ncols);
+        for i in 0..pat.nrows {
+            for k in pat.row_ptr[i]..pat.row_ptr[i + 1] {
+                let j = pat.col_idx[k];
+                cpat[(i, j)] = vals[k];
+            }
+        }
+        assert_dense_eq(&cpat, &cd, 1e-12, 1e-12);
+    }
+
+    #[test]
+    fn transpose_bijection_and_values_small() {
+        let m = 3;
+        let n = 4;
+        let p = prolong::Pcsr {
+            m,
+            n,
+            row_ptr: vec![0, 2, 3, 5],
+            col_idx: vec![0, 2, 1, 1, 3],
+            vals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        };
+        let (rr, rc, rv, p2r) = super::transpose_csr_with_pos(&p);
+        assert_eq!(rr.len(), n + 1);
+        assert_eq!(rc.len(), p.col_idx.len());
+        assert_eq!(rv.len(), p.vals.len());
+
+        let nnz = p.vals.len();
+        let mut seen = vec![false; nnz];
+        for &q in &p2r {
+            assert!(q < nnz);
+            assert!(!seen[q]);
+            seen[q] = true;
+        }
+        assert!(seen.into_iter().all(|b| b));
+
+        for (pi, &ri) in p2r.iter().enumerate() {
+            assert!(feq(p.vals[pi], rv[ri], 0.0, 0.0));
+        }
+
+        let mut p_dense = Mat::<f64>::zeros(m, n);
+        for i in 0..m {
+            for k in p.row_ptr[i]..p.row_ptr[i + 1] {
+                p_dense[(i, p.col_idx[k])] = p.vals[k];
+            }
+        }
+        let r_dense = p_dense.transpose().to_owned();
+        let mut r_pat = Mat::<f64>::zeros(n, m);
+        for i in 0..n {
+            for k in rr[i]..rr[i + 1] {
+                r_pat[(i, rc[k])] = rv[k];
+            }
+        }
+        assert_dense_eq(&r_pat, &r_dense, 0.0, 0.0);
     }
 }
