@@ -192,9 +192,10 @@ pub fn build_aggregates(
 }
 
 // Legacy greedy aggregator kept for compatibility.
-fn rs_greedy(s: &Strength) -> Vec<usize> {
+fn rs_greedy(s: &Strength) -> (Vec<usize>, Vec<bool>) {
     let n = s.row_ptr.len() - 1;
     let mut agg = vec![usize::MAX; n];
+    let mut is_seed = vec![false; n];
     let mut next = 0usize;
     let max_sz = 4usize;
     let mut order: Vec<(usize, usize)> = (0..n)
@@ -206,6 +207,7 @@ fn rs_greedy(s: &Strength) -> Vec<usize> {
             continue;
         }
         agg[seed] = next;
+        is_seed[seed] = true;
         let rs = s.row_ptr[seed];
         let re = s.row_ptr[seed + 1];
         let mut neigh: Vec<(usize, usize)> = s.col_idx[rs..re]
@@ -232,7 +234,8 @@ fn rs_greedy(s: &Strength) -> Vec<usize> {
                 next += 1;
                 id
             };
+            is_seed[i] = true;
         }
     }
-    agg
+    (agg, is_seed)
 }

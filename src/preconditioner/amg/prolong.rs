@@ -27,7 +27,7 @@ pub struct Pcsr {
 // ===== Classical interpolation family =======================================
 
 /// Variants of classical interpolation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassicalVariant {
     Direct,
     Standard,

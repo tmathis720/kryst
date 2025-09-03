@@ -15,7 +15,7 @@ use rayon::prelude::*;
 // New sparse SA/RS submodules
 mod coarse_solver;
 pub mod coarsen;
-mod prolong;
+pub(crate) mod prolong;
 mod rap_ops;
 mod row_filter;
 pub mod strength;
@@ -153,6 +153,10 @@ pub struct AMGConfig {
     pub optimize_workspace: bool,
     pub jacobi_omega: f64,
     pub chebyshev_degree: usize,
+    pub chebyshev_min_ratio: f64,
+    pub chebyshev_recompute: bool,
+    pub chebyshev_power_iters: usize,
+    pub use_level_scheduling: bool,
     pub drop_tol: f64,  // NEW: used for dense->CSR conversion
     pub stats_eps: f64, // threshold for effective nnz reporting
     // New SA/RS controls
@@ -196,6 +200,10 @@ impl Default for AMGConfig {
             optimize_workspace: true,
             jacobi_omega: 2.0 / 3.0,
             chebyshev_degree: 0,
+            chebyshev_min_ratio: 0.3,
+            chebyshev_recompute: true,
+            chebyshev_power_iters: 10,
+            use_level_scheduling: false,
             drop_tol: 1e-12,
             stats_eps: 1e-12,
             normalize_strength: true,
@@ -358,6 +366,22 @@ impl AMGBuilder {
         self.cfg.chebyshev_degree = k;
         self
     }
+    pub fn chebyshev_min_ratio(mut self, v: f64) -> Self {
+        self.cfg.chebyshev_min_ratio = v;
+        self
+    }
+    pub fn chebyshev_recompute(mut self, v: bool) -> Self {
+        self.cfg.chebyshev_recompute = v;
+        self
+    }
+    pub fn chebyshev_power_iters(mut self, iters: usize) -> Self {
+        self.cfg.chebyshev_power_iters = iters;
+        self
+    }
+    pub fn use_level_scheduling(mut self, v: bool) -> Self {
+        self.cfg.use_level_scheduling = v;
+        self
+    }
     pub fn drop_tolerance(mut self, t: f64) -> Self {
         self.cfg.drop_tol = t;
         self.cfg.stats_eps = t;
@@ -392,10 +416,15 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
 
     for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
         match rt {
-            RelaxType::Jacobi => {}
+            RelaxType::Jacobi
+            | RelaxType::GaussSeidel
+            | RelaxType::GaussSeidelBackward
+            | RelaxType::SymmetricGaussSeidel
+            | RelaxType::L1Jacobi
+            | RelaxType::Chebyshev => {}
             _ => {
                 return Err(KError::InvalidInput(format!(
-                    "RelaxType {:?} not yet supported (phase index {}); choose Jacobi for now",
+                    "RelaxType {:?} not yet supported (phase index {})",
                     rt, i
                 )));
             }
@@ -470,6 +499,10 @@ struct AMGLevel {
     r: CsrMatrix<f64>,
     /// diag(A_l)^{-1}
     diag_inv: Vec<f64>,
+    /// 1 / (\sum_j |a_ij|) for L1-Jacobi
+    l1_inv: Option<Vec<f64>>,
+    /// Cached spectral bounds for Chebyshev smoother
+    cheb: Option<ChebCache>,
     /// fine->coarse aggregate id used to rebuild P values (SA numeric refresh)
     agg_of: Vec<usize>,
     /// coarse/fine flags for classical interpolation
@@ -480,6 +513,12 @@ struct AMGLevel {
     p2r_pos: Vec<usize>,
     /// Symbolic pattern for A_{l+1}
     a_next_pat: Option<CsrPattern>,
+}
+
+#[derive(Clone)]
+struct ChebCache {
+    lambda_max: f64,
+    lambda_min: f64,
 }
 
 #[derive(Clone)]
@@ -568,6 +607,17 @@ impl AMG {
         // Update finest A_0 and diag(A_0)^{-1}
         h.levels[0].a = fine.clone();
         h.levels[0].diag_inv = diag_inv_from_csr(&h.levels[0].a)?;
+
+        let need_l1 = self
+            .cfg
+            .grid_relax_type
+            .iter()
+            .any(|&t| t == RelaxType::L1Jacobi);
+        let need_cheb = self
+            .cfg
+            .grid_relax_type
+            .iter()
+            .any(|&t| t == RelaxType::Chebyshev);
 
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
@@ -674,6 +724,27 @@ impl AMG {
             }
         }
 
+        for lvl in 0..=h.coarsest_ix() {
+            if need_l1 {
+                h.levels[lvl].l1_inv = Some(l1_diag_inv(&h.levels[lvl].a));
+            } else {
+                h.levels[lvl].l1_inv = None;
+            }
+            if need_cheb {
+                if self.cfg.chebyshev_recompute || h.levels[lvl].cheb.is_none() {
+                    let lmax = estimate_lambda_max(
+                        &h.levels[lvl].a,
+                        &h.levels[lvl].diag_inv,
+                        self.cfg.chebyshev_power_iters,
+                    );
+                    let lmin = (self.cfg.chebyshev_min_ratio * lmax).max(1e-12);
+                    h.levels[lvl].cheb = Some(ChebCache { lambda_max: lmax, lambda_min: lmin });
+                }
+            } else {
+                h.levels[lvl].cheb = None;
+            }
+        }
+
         if self.cfg.logging_level > 0 {
             let mut st = AmgStats::from_hierarchy(&h);
             st.levels = collect_level_stats(&h, &self.cfg);
@@ -721,16 +792,166 @@ impl AMG {
         Ok(())
     }
 
+    fn l1_jacobi(
+        omega: f64,
+        a: &CsrMatrix<f64>,
+        l1_inv: &[f64],
+        r: &[f64],
+        z: &mut [f64],
+        iters: usize,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if iters == 0 {
+            return Ok(());
+        }
+        let n = a.nrows();
+        if l1_inv.len() != n || r.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("L1-Jacobi: dimension mismatch".into()));
+        }
+        ws.ensure(n);
+        ws.temp[..n].copy_from_slice(z);
+        for _ in 0..iters {
+            a.spmv_scaled(1.0, &ws.temp[..n], 0.0, &mut ws.work[..n])?;
+            for i in 0..n {
+                ws.temp[i] += omega * l1_inv[i] * (r[i] - ws.work[i]);
+            }
+        }
+        z.copy_from_slice(&ws.temp[..n]);
+        Ok(())
+    }
+
+    fn gs_forward(
+        omega: f64,
+        a: &CsrMatrix<f64>,
+        diag_inv: &[f64],
+        r: &[f64],
+        z: &mut [f64],
+        sweeps: usize,
+    ) -> Result<(), KError> {
+        let n = a.nrows();
+        if diag_inv.len() != n || r.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("GS: dimension mismatch".into()));
+        }
+        for _ in 0..sweeps {
+            for i in 0..n {
+                let mut s = 0.0;
+                let rs = a.row_ptr()[i];
+                let re = a.row_ptr()[i + 1];
+                for p in rs..re {
+                    s += a.values()[p] * z[a.col_idx()[p]];
+                }
+                z[i] += omega * diag_inv[i] * (r[i] - s);
+            }
+        }
+        Ok(())
+    }
+
+    fn gs_backward(
+        omega: f64,
+        a: &CsrMatrix<f64>,
+        diag_inv: &[f64],
+        r: &[f64],
+        z: &mut [f64],
+        sweeps: usize,
+    ) -> Result<(), KError> {
+        let n = a.nrows();
+        if diag_inv.len() != n || r.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("GS: dimension mismatch".into()));
+        }
+        for _ in 0..sweeps {
+            for i in (0..n).rev() {
+                let mut s = 0.0;
+                let rs = a.row_ptr()[i];
+                let re = a.row_ptr()[i + 1];
+                for p in rs..re {
+                    s += a.values()[p] * z[a.col_idx()[p]];
+                }
+                z[i] += omega * diag_inv[i] * (r[i] - s);
+            }
+        }
+        Ok(())
+    }
+
+    fn sym_gs(
+        omega: f64,
+        a: &CsrMatrix<f64>,
+        diag_inv: &[f64],
+        r: &[f64],
+        z: &mut [f64],
+        sweeps: usize,
+    ) -> Result<(), KError> {
+        for _ in 0..sweeps {
+            Self::gs_forward(omega, a, diag_inv, r, z, 1)?;
+            Self::gs_backward(omega, a, diag_inv, r, z, 1)?;
+        }
+        Ok(())
+    }
+
+    fn chebyshev_smooth(
+        a: &CsrMatrix<f64>,
+        d_inv: &[f64],
+        rhs: &[f64],
+        z: &mut [f64],
+        k: usize,
+        lambda_min: f64,
+        lambda_max: f64,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if k == 0 {
+            return Ok(());
+        }
+        let n = a.nrows();
+        ws.ensure(n);
+
+        a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
+        for i in 0..n {
+            ws.residual[i] = rhs[i] - ws.work[i];
+        }
+
+        let c = 0.5 * (lambda_max - lambda_min);
+        let d = 0.5 * (lambda_max + lambda_min);
+        let mut alpha = 0.0;
+        let mut beta = 0.0;
+        let p = &mut ws.coarse_rhs[..n];
+        p[..n].fill(0.0);
+
+        for t in 0..k {
+            if t == 0 {
+                alpha = 1.0 / d;
+                p[..n].copy_from_slice(&ws.residual[..n]);
+            } else {
+                let tmp = 0.5 * c * alpha;
+                beta = tmp * tmp;
+                alpha = 1.0 / (d - beta);
+                for i in 0..n {
+                    p[i] = ws.residual[i] + beta * p[i];
+                }
+            }
+
+            for i in 0..n {
+                ws.temp[i] = d_inv[i] * p[i];
+            }
+            for i in 0..n {
+                z[i] += alpha * ws.temp[i];
+            }
+            a.spmv_scaled(alpha, &ws.temp[..n], 0.0, &mut ws.work[..n])?;
+            for i in 0..n {
+                ws.residual[i] -= ws.work[i];
+            }
+        }
+        Ok(())
+    }
+
     // single dispatch point for all relaxation strategies
     fn apply_relax(
         pol: &RelaxPolicy,
         phase: RelaxPhase,
-        _where: RelaxWhere,
-        a: &CsrMatrix<f64>,
-        diag_inv: &[f64],
+        where_: RelaxWhere,
+        lvl: &AMGLevel,
         rhs: &[f64],
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
+        cfg: &AMGConfig,
     ) -> Result<(), KError> {
         let k = pol.sweeps[phase.ix()];
         if k == 0 {
@@ -740,9 +961,48 @@ impl AMG {
         {
             RELAX_CALL_COUNTS[phase.ix()].fetch_add(1, Ordering::SeqCst);
         }
+        let a = &lvl.a;
         match pol.kind[phase.ix()] {
             RelaxType::Jacobi => {
-                Self::jacobi_smooth_sparse(pol.omega, a, diag_inv, rhs, sol, k, ws)
+                Self::jacobi_smooth_sparse(pol.omega, a, &lvl.diag_inv, rhs, sol, k, ws)
+            }
+            RelaxType::GaussSeidel => {
+                if matches!(where_, RelaxWhere::Pre) {
+                    Self::gs_forward(1.0, a, &lvl.diag_inv, rhs, sol, k)
+                } else {
+                    Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k)
+                }
+            }
+            RelaxType::GaussSeidelBackward => {
+                Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k)
+            }
+            RelaxType::SymmetricGaussSeidel => {
+                Self::sym_gs(1.0, a, &lvl.diag_inv, rhs, sol, k)
+            }
+            RelaxType::L1Jacobi => {
+                if let Some(ref l1) = lvl.l1_inv {
+                    Self::l1_jacobi(pol.omega, a, l1, rhs, sol, k, ws)
+                } else {
+                    Err(KError::InvalidInput("L1Jacobi cache missing".into()))
+                }
+            }
+            RelaxType::Chebyshev => {
+                if let Some(ref cheb) = lvl.cheb {
+                    let mut lmax = cheb.lambda_max.max(1e-12);
+                    let mut lmin = cheb.lambda_min.min(0.99 * lmax).max(1e-16);
+                    if lmin >= lmax {
+                        Self::jacobi_smooth_sparse(pol.omega, a, &lvl.diag_inv, rhs, sol, k.min(2).max(1), ws)
+                    } else {
+                        let deg = if cfg.chebyshev_degree > 0 {
+                            cfg.chebyshev_degree
+                        } else {
+                            k
+                        };
+                        Self::chebyshev_smooth(a, &lvl.diag_inv, rhs, sol, deg, lmin, lmax, ws)
+                    }
+                } else {
+                    Err(KError::InvalidInput("Chebyshev cache missing".into()))
+                }
             }
             other => Err(KError::InvalidInput(format!(
                 "RelaxType {:?} not yet supported",
@@ -768,7 +1028,6 @@ impl AMG {
         let lc = h.coarsest_ix();
 
         let a = &h.levels[level].a;
-        let d = &h.levels[level].diag_inv;
         let pol = &h.policy;
         let mut lv = CycleLevelTiming {
             level,
@@ -810,7 +1069,16 @@ impl AMG {
             RelaxPhase::Down
         };
         with_timing(prof, &mut lv.pre_smooth, || {
-            Self::apply_relax(pol, phase_pre, RelaxWhere::Pre, a, d, rhs, sol, ws)
+            Self::apply_relax(
+                pol,
+                phase_pre,
+                RelaxWhere::Pre,
+                &h.levels[level],
+                rhs,
+                sol,
+                ws,
+                &self.cfg,
+            )
         })?;
 
         // residual = rhs - A * sol
@@ -876,7 +1144,16 @@ impl AMG {
             RelaxPhase::Up
         };
         with_timing(prof, &mut lv.post_smooth, || {
-            Self::apply_relax(pol, phase_post, RelaxWhere::Post, a, d, rhs, sol, ws)
+            Self::apply_relax(
+                pol,
+                phase_post,
+                RelaxWhere::Post,
+                &h.levels[level],
+                rhs,
+                sol,
+                ws,
+                &self.cfg,
+            )
         })?;
 
         if let Some(c) = cyc {
@@ -1040,6 +1317,15 @@ fn build_hierarchy(
     let mut timings: Vec<LevelSetupTiming> = Vec::new();
     let t_setup_all = if do_stats { Some(tic()) } else { None };
 
+    let need_l1 = cfg
+        .grid_relax_type
+        .iter()
+        .any(|&t| t == RelaxType::L1Jacobi);
+    let need_cheb = cfg
+        .grid_relax_type
+        .iter()
+        .any(|&t| t == RelaxType::Chebyshev);
+
     // Level 0 (finest)
     let mut lt0 = LevelSetupTiming::default();
     let t = tic();
@@ -1048,11 +1334,25 @@ fn build_hierarchy(
         lt0.diag = toc(t);
         lt0.total = lt0.diag;
     }
+    let l1_inv0 = if need_l1 {
+        Some(l1_diag_inv(&a_cur))
+    } else {
+        None
+    };
+    let cheb0 = if need_cheb {
+        let lmax = estimate_lambda_max(&a_cur, &diag0, cfg.chebyshev_power_iters);
+        let lmin = (cfg.chebyshev_min_ratio * lmax).max(1e-12);
+        Some(ChebCache { lambda_max: lmax, lambda_min: lmin })
+    } else {
+        None
+    };
     let l0 = AMGLevel {
-        diag_inv: diag0,
         a: a_cur.clone(),
         p: CsrMatrix::identity(a_cur.nrows()),
         r: CsrMatrix::identity(a_cur.nrows()),
+        diag_inv: diag0,
+        l1_inv: l1_inv0,
+        cheb: cheb0,
         agg_of: (0..a_cur.nrows()).collect(),
         is_c: Vec::new(),
         cf: None,
@@ -1233,11 +1533,25 @@ fn build_hierarchy(
 
         // Next level (coarser)
         a_cur = a_coarse.clone();
+        let l1_inv_coarse = if need_l1 {
+            Some(l1_diag_inv(&a_cur))
+        } else {
+            None
+        };
+        let cheb_coarse = if need_cheb {
+            let lmax = estimate_lambda_max(&a_cur, &diag_inv_coarse, cfg.chebyshev_power_iters);
+            let lmin = (cfg.chebyshev_min_ratio * lmax).max(1e-12);
+            Some(ChebCache { lambda_max: lmax, lambda_min: lmin })
+        } else {
+            None
+        };
         levels.push(AMGLevel {
             a: a_coarse,
             p: CsrMatrix::identity(a_cur.nrows()),
             r: CsrMatrix::identity(a_cur.nrows()),
             diag_inv: diag_inv_coarse,
+            l1_inv: l1_inv_coarse,
+            cheb: cheb_coarse,
             agg_of: (0..a_cur.nrows()).collect(),
             is_c: Vec::new(),
             cf: None,
@@ -1312,6 +1626,19 @@ fn build_hierarchy(
 
 // ===== Sparse utilities (local; avoid dense on hot path) ====================
 
+fn l1_diag_inv(a: &CsrMatrix<f64>) -> Vec<f64> {
+    let n = a.nrows();
+    let mut inv = vec![0.0; n];
+    for i in 0..n {
+        let mut s = 0.0;
+        for p in a.row_ptr()[i]..a.row_ptr()[i + 1] {
+            s += a.values()[p].abs();
+        }
+        inv[i] = 1.0 / s.max(1e-30);
+    }
+    inv
+}
+
 fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
     let n = a.nrows();
     let mut d = vec![0.0; n];
@@ -1334,6 +1661,32 @@ fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
         d[i] = 1.0 / aii;
     }
     Ok(d)
+}
+
+fn estimate_lambda_max(a: &CsrMatrix<f64>, d_inv: &[f64], iters: usize) -> f64 {
+    let n = a.nrows();
+    let mut v = vec![0.0; n];
+    for i in 0..n {
+        v[i] = 1.0 + (i % 7) as f64 * 0.01;
+    }
+    let mut w = vec![0.0; n];
+    let mut t = vec![0.0; n];
+    let mut lam = 0.0;
+    let nit = iters.max(3);
+    for _ in 0..nit {
+        a.spmv_scaled(1.0, &v, 0.0, &mut t).ok();
+        for i in 0..n {
+            w[i] = d_inv[i] * t[i];
+        }
+        let num = dot(&v, &w);
+        let den = dot(&v, &v).max(1e-30);
+        lam = num / den;
+        let nw = dot(&w, &w).sqrt().max(1e-30);
+        for i in 0..n {
+            v[i] = w[i] / nw;
+        }
+    }
+    lam.max(1e-12)
 }
 
 /// CSR * CSR using per-row growing maps (Gustavson-style, simple).
@@ -2091,7 +2444,11 @@ mod tests {
             p: CsrMatrix::identity(1),
             r: CsrMatrix::identity(1),
             diag_inv: vec![1.0],
+            l1_inv: None,
+            cheb: None,
             agg_of: vec![0],
+            is_c: Vec::new(),
+            cf: None,
             p2r_pos: vec![],
             a_next_pat: None,
         }
@@ -2128,7 +2485,7 @@ mod tests {
     #[test]
     fn validation_failures() {
         let mut cfg = AMGConfig::default();
-        cfg.grid_relax_type = [RelaxType::GaussSeidel; 4];
+        cfg.grid_relax_type = [RelaxType::HybridGaussSeidel; 4];
         let err = validate_relax_policy(&cfg, cfg.coarse_solve).unwrap_err();
         assert!(matches!(err, KError::InvalidInput(_)));
 
@@ -2240,5 +2597,170 @@ mod tests {
             }
         }
         assert_dense_eq(&r_pat, &r_dense, 0.0, 0.0);
+    }
+
+    fn poisson1d(n: usize) -> CsrMatrix<f64> {
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+        for i in 0..n {
+            if i > 0 {
+                col_idx.push(i - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                col_idx.push(i + 1);
+                vals.push(-1.0);
+            }
+            row_ptr.push(col_idx.len());
+        }
+        CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+    }
+
+    #[test]
+    fn gs_symgs_residual() {
+        let a = poisson1d(3);
+        let d = diag_inv_from_csr(&a).unwrap();
+        let rhs = vec![1.0; 3];
+        let mut zf = vec![0.0; 3];
+        AMG::gs_forward(1.0, &a, &d, &rhs, &mut zf, 1).unwrap();
+        let mut work = vec![0.0; 3];
+        a.spmv_scaled(1.0, &zf, 0.0, &mut work).unwrap();
+        let mut res_f = vec![0.0; 3];
+        for i in 0..3 {
+            res_f[i] = rhs[i] - work[i];
+        }
+        let norm_f = dot(&res_f, &res_f);
+
+        let mut zs = vec![0.0; 3];
+        AMG::sym_gs(1.0, &a, &d, &rhs, &mut zs, 1).unwrap();
+        a.spmv_scaled(1.0, &zs, 0.0, &mut work).unwrap();
+        let mut res_s = vec![0.0; 3];
+        for i in 0..3 {
+            res_s[i] = rhs[i] - work[i];
+        }
+        let norm_s = dot(&res_s, &res_s);
+        assert!(norm_s < norm_f);
+    }
+
+    #[test]
+    fn l1_jacobi_no_worse_than_jacobi() {
+        let a = poisson1d(3);
+        let d = diag_inv_from_csr(&a).unwrap();
+        let l1 = l1_diag_inv(&a);
+        let rhs = vec![1.0; 3];
+        let mut z_j = vec![0.0; 3];
+        let mut z_l1 = vec![0.0; 3];
+        let mut ws_j = AMGWorkspace::new(3);
+        let mut ws_l1 = AMGWorkspace::new(3);
+        AMG::jacobi_smooth_sparse(1.0, &a, &d, &rhs, &mut z_j, 1, &mut ws_j).unwrap();
+        AMG::l1_jacobi(1.0, &a, &l1, &rhs, &mut z_l1, 1, &mut ws_l1).unwrap();
+        a.spmv_scaled(1.0, &z_j, 0.0, &mut ws_j.work[..3]).unwrap();
+        let mut rj = 0.0;
+        for i in 0..3 {
+            let ri = rhs[i] - ws_j.work[i];
+            rj += ri * ri;
+        }
+        a.spmv_scaled(1.0, &z_l1, 0.0, &mut ws_l1.work[..3]).unwrap();
+        let mut rl1 = 0.0;
+        for i in 0..3 {
+            let ri = rhs[i] - ws_l1.work[i];
+            rl1 += ri * ri;
+        }
+        let r0 = 3.0; // initial residual norm squared for rhs=[1,1,1]
+        assert!(rj < r0);
+        assert!(rl1 < r0);
+    }
+
+    #[test]
+    fn chebyshev_degree_improves() {
+        let n = 10;
+        let a = poisson1d(n);
+        let d = diag_inv_from_csr(&a).unwrap();
+        let lmax = estimate_lambda_max(&a, &d, 10);
+        assert!(lmax > 1.8 && lmax < 2.1);
+        let lmin = 0.3 * lmax;
+        let rhs = vec![1.0; n];
+        let mut ws = AMGWorkspace::new(n);
+        let mut z2 = vec![0.0; n];
+        AMG::chebyshev_smooth(&a, &d, &rhs, &mut z2, 2, lmin, lmax, &mut ws).unwrap();
+        a.spmv_scaled(1.0, &z2, 0.0, &mut ws.work[..n]).unwrap();
+        let mut r2 = 0.0;
+        for i in 0..n {
+            let ri = rhs[i] - ws.work[i];
+            r2 += ri * ri;
+        }
+        let mut z4 = vec![0.0; n];
+        AMG::chebyshev_smooth(&a, &d, &rhs, &mut z4, 4, lmin, lmax, &mut ws).unwrap();
+        a.spmv_scaled(1.0, &z4, 0.0, &mut ws.work[..n]).unwrap();
+        let mut r4 = 0.0;
+        for i in 0..n {
+            let ri = rhs[i] - ws.work[i];
+            r4 += ri * ri;
+        }
+        let mut z8 = vec![0.0; n];
+        AMG::chebyshev_smooth(&a, &d, &rhs, &mut z8, 8, lmin, lmax, &mut ws).unwrap();
+        a.spmv_scaled(1.0, &z8, 0.0, &mut ws.work[..n]).unwrap();
+        let mut r8 = 0.0;
+        for i in 0..n {
+            let ri = rhs[i] - ws.work[i];
+            r8 += ri * ri;
+        }
+        assert!(r4 < r2);
+        assert!(r8 < r4);
+    }
+
+    #[test]
+    fn refresh_updates_caches() {
+        let a = poisson1d(4);
+        let mut amg_l1 = AMGBuilder::new()
+            .grid_relax_type_all(RelaxType::L1Jacobi)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        amg_l1.setup(&a).unwrap();
+        let old = amg_l1.state.as_ref().unwrap().levels[0]
+            .l1_inv
+            .as_ref()
+            .unwrap()[0];
+        let mut a2 = a.clone();
+        let rp = a2.row_ptr();
+        for p in rp[0]..rp[1] {
+            a2.values_mut()[p] *= 2.0;
+        }
+        amg_l1.update_numeric(&a2).unwrap();
+        let new = amg_l1.state.as_ref().unwrap().levels[0]
+            .l1_inv
+            .as_ref()
+            .unwrap()[0];
+        assert!((new - old).abs() > 1e-12);
+
+        let mut amg_ch = AMGBuilder::new()
+            .grid_relax_type_all(RelaxType::Chebyshev)
+            .chebyshev_recompute(true)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        amg_ch.setup(&a).unwrap();
+        let old_l = amg_ch.state.as_ref().unwrap().levels[0]
+            .cheb
+            .as_ref()
+            .unwrap()
+            .lambda_max;
+        let mut a3 = a.clone();
+        let rp3 = a3.row_ptr();
+        for p in rp3[0]..rp3[1] {
+            if a3.col_idx()[p] == 0 {
+                a3.values_mut()[p] *= 1.5;
+            }
+        }
+        amg_ch.update_numeric(&a3).unwrap();
+        let new_l = amg_ch.state.as_ref().unwrap().levels[0]
+            .cheb
+            .as_ref()
+            .unwrap()
+            .lambda_max;
+        assert!((new_l - old_l).abs() > 1e-6);
     }
 }
