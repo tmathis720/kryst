@@ -644,8 +644,11 @@ pub fn smooth_tentative_sa_multi(
     let mut acc_cols: Vec<usize> = Vec::new();
     let mut acc_vals: Vec<f64> = Vec::new();
     for i in 0..m {
-        if marker.len() < ncoarse { marker.resize(ncoarse, -1); }
-        acc_cols.clear(); acc_vals.clear();
+        if marker.len() < ncoarse {
+            marker.resize(ncoarse, -1);
+        }
+        acc_cols.clear();
+        acc_vals.clear();
         let base = tp.agg_of[i] * r;
         for alpha in 0..r {
             let c = base + alpha;
@@ -661,9 +664,13 @@ pub fn smooth_tentative_sa_multi(
             acc_vals.push(v0);
         }
         let di = d_inv[i];
-        let rs = rp[i]; let re = rp[i+1];
+        let rs = rp[i];
+        let re = rp[i + 1];
         for p in rs..re {
-            let j = cj[p]; if j==i { continue; }
+            let j = cj[p];
+            if j == i {
+                continue;
+            }
             let gj = tp.agg_of[j] * r;
             let s = -omega * di * vv[p];
             for alpha in 0..r {
@@ -677,7 +684,9 @@ pub fn smooth_tentative_sa_multi(
                 };
                 let val = s * t;
                 let k = marker[col];
-                if k >= 0 { acc_vals[k as usize] += val; } else {
+                if k >= 0 {
+                    acc_vals[k as usize] += val;
+                } else {
                     marker[col] = acc_cols.len() as isize;
                     acc_cols.push(col);
                     acc_vals.push(val);
@@ -686,7 +695,12 @@ pub fn smooth_tentative_sa_multi(
         }
         let mut cols = acc_cols.clone();
         let mut vs = acc_vals.clone();
-        let rf = RowFilter { tau_abs: drop_tol, tau_rel: trunc_rel, k_max: max_per_row, must_keep: None };
+        let rf = RowFilter {
+            tau_abs: drop_tol,
+            tau_rel: trunc_rel,
+            k_max: max_per_row,
+            must_keep: None,
+        };
         filter_row_by_truncation(&mut cols, &mut vs, rf);
         for alpha in 0..r {
             let c = base + alpha;
@@ -702,14 +716,22 @@ pub fn smooth_tentative_sa_multi(
                 vs.push(v0);
             }
         }
-        for (c,v) in cols.into_iter().zip(vs.into_iter()) {
+        for (c, v) in cols.into_iter().zip(vs.into_iter()) {
             col_idx.push(c);
             vals.push(v);
         }
         row_ptr.push(col_idx.len());
-        for &c in &acc_cols { marker[c] = -1; }
+        for &c in &acc_cols {
+            marker[c] = -1;
+        }
     }
-    Pcsr { m, n: ncoarse, row_ptr, col_idx, vals }
+    Pcsr {
+        m,
+        n: ncoarse,
+        row_ptr,
+        col_idx,
+        vals,
+    }
 }
 
 pub fn smooth_sa_values_only_multi(
@@ -732,7 +754,8 @@ pub fn smooth_sa_values_only_multi(
     let mut map_cols: Vec<usize> = Vec::new();
     let mut map_vals: Vec<f64> = Vec::new();
     for i in 0..m {
-        map_cols.clear(); map_vals.clear();
+        map_cols.clear();
+        map_vals.clear();
         let base = tp.agg_of[i] * r;
         for alpha in 0..r {
             map_cols.push(base + alpha);
@@ -746,9 +769,13 @@ pub fn smooth_sa_values_only_multi(
             map_vals.push(v0);
         }
         let di = d_inv[i];
-        let rs = rp[i]; let re = rp[i+1];
+        let rs = rp[i];
+        let re = rp[i + 1];
         for pidx in rs..re {
-            let j = cj[pidx]; if j==i { continue; }
+            let j = cj[pidx];
+            if j == i {
+                continue;
+            }
             let gj = tp.agg_of[j] * r;
             let s = -omega * di * vv[pidx];
             for alpha in 0..r {
@@ -760,16 +787,22 @@ pub fn smooth_sa_values_only_multi(
                     if alpha == 0 { 1.0 } else { 0.0 }
                 };
                 let col = gj + alpha;
-                match map_cols.iter().position(|&c| c==col) {
-                    Some(pos) => { map_vals[pos] += s * t; }
-                    None => { map_cols.push(col); map_vals.push(s*t); }
+                match map_cols.iter().position(|&c| c == col) {
+                    Some(pos) => {
+                        map_vals[pos] += s * t;
+                    }
+                    None => {
+                        map_cols.push(col);
+                        map_vals.push(s * t);
+                    }
                 }
             }
         }
-        let rs_p = pr[i]; let re_p = pr[i+1];
+        let rs_p = pr[i];
+        let re_p = pr[i + 1];
         for k in rs_p..re_p {
             let c = pc[k];
-            if let Some(pos) = map_cols.iter().position(|&cc| cc==c) {
+            if let Some(pos) = map_cols.iter().position(|&cc| cc == c) {
                 out_vals[k] = map_vals[pos];
             } else {
                 out_vals[k] = 0.0;

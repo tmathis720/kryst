@@ -68,4 +68,3 @@ pub fn strength_nodal(
     }
     Strength { row_ptr, col_idx }
 }
-

@@ -168,7 +168,10 @@ pub enum PostInterpType {
     /// Optional orthonormalization of per-aggregate blocks
     LocalQR,
     /// Extra SA-like smoothing passes on P values (fixed pattern).
-    EnergyPolish { sweeps: usize, omega: f64 },
+    EnergyPolish {
+        sweeps: usize,
+        omega: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1157,13 +1160,7 @@ impl AMG {
                     a: Some(&h.levels[l].a),
                     d_inv: Some(&h.levels[l].diag_inv),
                 };
-                apply_post_interp(
-                    &self.cfg,
-                    &ctx,
-                    &pr,
-                    &pc,
-                    &mut p_new_vals,
-                )?;
+                apply_post_interp(&self.cfg, &ctx, &pr, &pc, &mut p_new_vals)?;
             }
             h.levels[l].p.values_mut().copy_from_slice(&p_new_vals);
             // Update R values from P via precomputed transpose mapping
@@ -2177,13 +2174,7 @@ fn build_hierarchy(
                 a: Some(&a_cur),
                 d_inv: Some(&d),
             };
-            apply_post_interp(
-                cfg,
-                &ctx,
-                &p_csr.row_ptr,
-                &p_csr.col_idx,
-                &mut p_csr.vals,
-            )?;
+            apply_post_interp(cfg, &ctx, &p_csr.row_ptr, &p_csr.col_idx, &mut p_csr.vals)?;
         }
         let p = CsrMatrix::from_csr(
             p_csr.m,

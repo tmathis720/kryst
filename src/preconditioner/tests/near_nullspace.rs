@@ -1,6 +1,6 @@
 use super::*;
-use crate::preconditioner::amg::prolong::{smooth_tentative_sa_multi, TentativeP};
 use crate::matrix::sparse::CsrMatrix;
+use crate::preconditioner::amg::prolong::{TentativeP, smooth_tentative_sa_multi};
 
 #[test]
 fn nns_tentative_reproduces_basis() {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::preconditioner::amg::{row_scaling, RowScaleMode};
+use crate::preconditioner::amg::{RowScaleMode, row_scaling};
 
 #[test]
 fn row_scaling_sum_to_one() {
@@ -8,7 +8,17 @@ fn row_scaling_sum_to_one() {
     let pr = vec![0, 2, 4];
     let pc = vec![0, 1, 0, 1];
     let mut pv = vec![0.2, 0.3, 0.4, 0.1];
-    row_scaling(RowScaleMode::SumToOne, r, None, &agg, None, &pr, &pc, &mut pv).unwrap();
+    row_scaling(
+        RowScaleMode::SumToOne,
+        r,
+        None,
+        &agg,
+        None,
+        &pr,
+        &pc,
+        &mut pv,
+    )
+    .unwrap();
     for i in 0..2 {
         let rs = pr[i];
         let re = pr[i + 1];

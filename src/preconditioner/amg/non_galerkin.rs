@@ -1,4 +1,4 @@
-use super::{rap_ops::CsrPattern, NgSymmetry};
+use super::{NgSymmetry, rap_ops::CsrPattern};
 
 #[derive(Clone, Copy)]
 pub(crate) struct NgRowFilter {
@@ -213,12 +213,13 @@ mod tests {
             row_ptr: vec![0, 3, 6, 9],
             col_idx: vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
         };
-        let vals = vec![
-            4.0, -0.1, 0.05,
-            -0.1, 5.0, 0.02,
-            0.05, 0.02, 6.0,
-        ];
-        let rf = NgRowFilter { tau_abs: 0.1, tau_rel: 0.0, k_max: 0, lump_diag: true };
+        let vals = vec![4.0, -0.1, 0.05, -0.1, 5.0, 0.02, 0.05, 0.02, 6.0];
+        let rf = NgRowFilter {
+            tau_abs: 0.1,
+            tau_rel: 0.0,
+            k_max: 0,
+            lump_diag: true,
+        };
         let (ng_pat, ng_vals, _) =
             non_galerkin_filter_coarse(&pat, &vals, NgSymmetry::Symmetric, rf);
         assert_eq!(ng_pat.row_ptr, vec![0, 3, 5, 7]);
@@ -227,4 +228,3 @@ mod tests {
         assert_eq!(ng_vals, expected_vals);
     }
 }
-
