@@ -21,17 +21,21 @@ mod rap_ops;
 mod row_filter;
 mod non_galerkin;
 pub mod strength;
+pub(crate) mod strength_nodal;
+pub(crate) mod util;
 
 use coarse_solver::{CoarseDenseLu, CoarseIlu, CoarseSolver};
-use coarsen::{AggAlgo, AggOpts, build_aggregates};
+use coarsen::{AggAlgo, AggOpts, build_aggregates, lift_node_aggregates_to_dofs};
 use prolong::{
     CFInfo, ClassicalParams, ClassicalVariant, Pcsr, TentativeP, classical_pattern,
-    classical_values_only, smooth_sa_values_only, smooth_tentative_sa,
+    classical_values_only, smooth_sa_values_only_multi, smooth_tentative_sa_multi,
 };
 use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
 use row_filter::{RowFilter, apply_filter_to_csr_values_in_place};
 use non_galerkin::{NgRowFilter, non_galerkin_filter_coarse};
 use strength::Strength;
+use strength_nodal::strength_nodal;
+use util::DofLayout;
 
 // ===== Public enums (kept compatible with your old file) =====================
 
@@ -137,6 +141,17 @@ pub enum NgSymmetry {
     Symmetric,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodalMode {
+    Off,
+    Nodal,
+}
+
+#[derive(Clone, Debug)]
+pub struct NearNullspace {
+    pub basis: Vec<Vec<f64>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct NonGalerkin {
     pub enabled: bool,
@@ -202,6 +217,10 @@ pub struct AMGConfig {
     pub fmg_gamma: usize,
     pub fmg_levels_use: Option<usize>,
     pub non_galerkin: NonGalerkin,
+    pub nodal: NodalMode,
+    pub block_size: usize,
+    pub num_functions: usize,
+    pub near_nullspace: Option<NearNullspace>,
 }
 
 impl Default for AMGConfig {
@@ -265,6 +284,10 @@ impl Default for AMGConfig {
                 oc_target: None,
                 oc_max_iter: 4,
             },
+            nodal: NodalMode::Off,
+            block_size: 1,
+            num_functions: 1,
+            near_nullspace: None,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -495,6 +518,22 @@ impl AMGBuilder {
         self
     }
 
+    pub fn nodal(mut self, on: bool, block_size: usize) -> Self {
+        self.cfg.nodal = if on { NodalMode::Nodal } else { NodalMode::Off };
+        self.cfg.block_size = block_size.max(1);
+        self
+    }
+
+    pub fn num_functions(mut self, r: usize) -> Self {
+        self.cfg.num_functions = r.max(1);
+        self
+    }
+
+    pub fn near_nullspace(mut self, basis: Vec<Vec<f64>>) -> Self {
+        self.cfg.near_nullspace = Some(NearNullspace { basis });
+        self
+    }
+
     pub fn build(self, _matrix: &Mat<f64>) -> Result<AMG, KError> {
         Ok(AMG::with_config(self.cfg))
     }
@@ -613,6 +652,12 @@ struct AMGLevel {
     cf: Option<CFInfo>,
     /// Mapping from P entry index -> index in R (transpose) values array
     p2r_pos: Vec<usize>,
+    /// number of coarse basis functions per aggregate
+    num_functions: usize,
+    /// DOF layout for nodal aggregation
+    layout: Option<DofLayout>,
+    /// stored near-nullspace basis (optional)
+    nns: Option<Vec<Vec<f64>>>,
     /// Symbolic pattern for A_{l+1}
     a_next_pat: Option<CsrPattern>,
     /// Filtered NG pattern for A_{l+1}
@@ -795,8 +840,11 @@ impl AMG {
                 let tp = TentativeP {
                     agg_of: h.levels[l].agg_of.clone(),
                     n_coarse: h.levels[l + 1].a.nrows(),
+                    num_functions: h.levels[l].num_functions,
+                    nns: h.levels[l].nns.clone(),
+                    comp_of: h.levels[l].layout.as_ref().map(|lay| lay.comp_of.clone()),
                 };
-                smooth_sa_values_only(
+                smooth_sa_values_only_multi(
                     &h.levels[l].a,
                     &h.levels[l].diag_inv,
                     &tp,
@@ -1625,6 +1673,11 @@ fn build_hierarchy(
     } else {
         None
     };
+    let layout0 = if cfg.nodal == NodalMode::Nodal {
+        Some(DofLayout::new(a_cur.nrows(), cfg.block_size))
+    } else {
+        None
+    };
     let l0 = AMGLevel {
         a: a_cur.clone(),
         p: CsrMatrix::identity(a_cur.nrows()),
@@ -1636,6 +1689,9 @@ fn build_hierarchy(
         is_c: Vec::new(),
         cf: None,
         p2r_pos: Vec::new(),
+        num_functions: 1,
+        layout: layout0.clone(),
+        nns: cfg.near_nullspace.as_ref().map(|nns| nns.basis.clone()),
         a_next_pat: None,
         a_next_pat_ng: None,
         rap_full2ng_pos: None,
@@ -1658,6 +1714,11 @@ fn build_hierarchy(
         timings.push(lt0);
     }
 
+    let mut block_size_cur = if cfg.nodal == NodalMode::Nodal {
+        cfg.block_size
+    } else {
+        1
+    };
     // Drive coarsening: build levels 0..L (inclusive L is coarsest)
     for level in 0..cfg.max_levels {
         let n = a_cur.nrows();
@@ -1667,9 +1728,18 @@ fn build_hierarchy(
 
         let mut lt = LevelSetupTiming::default();
 
+        let layout = if cfg.nodal == NodalMode::Nodal {
+            Some(DofLayout::new(n, block_size_cur))
+        } else {
+            None
+        };
         // 1) Strength of connection (sparse)
         let s = with_timing(do_stats, &mut lt.strength, || {
-            Strength::from_csr(&a_cur, cfg.strong_threshold, cfg.normalize_strength)
+            if let Some(ref lay) = layout {
+                strength_nodal(&a_cur, lay, cfg.strong_threshold, cfg.normalize_strength)
+            } else {
+                Strength::from_csr(&a_cur, cfg.strong_threshold, cfg.normalize_strength)
+            }
         });
         // 2) Aggregates
         let mis_k = if level < cfg.agg_num_levels {
@@ -1677,7 +1747,7 @@ fn build_hierarchy(
         } else {
             1
         };
-        let (agg, is_c) = with_timing(do_stats, &mut lt.aggregate, || {
+        let (agg_node, is_c_node) = with_timing(do_stats, &mut lt.aggregate, || {
             build_aggregates(
                 &s,
                 match cfg.coarsen_type {
@@ -1692,9 +1762,40 @@ fn build_hierarchy(
                 },
             )
         });
+        let (agg, is_c) = if let Some(ref lay) = layout {
+            lift_node_aggregates_to_dofs(&agg_node, &is_c_node, lay)
+        } else {
+            (agg_node, is_c_node)
+        };
+        let mut num_functions = cfg.num_functions;
+        let nns_opt = if level == 0 {
+            cfg.near_nullspace.as_ref().map(|nns| {
+                if nns.basis.len() > num_functions {
+                    num_functions = nns.basis.len();
+                }
+                nns.basis.clone()
+            })
+        } else {
+            None
+        };
+        if nns_opt.is_none() {
+            if let Some(ref lay) = layout {
+                if num_functions < lay.block_size {
+                    num_functions = lay.block_size;
+                }
+            }
+        }
+        let comp_opt = if nns_opt.is_none() {
+            layout.as_ref().map(|lay| lay.comp_of.clone())
+        } else {
+            None
+        };
         let tp = TentativeP {
             n_coarse: 1 + agg.iter().copied().max().unwrap_or(0),
             agg_of: agg.clone(),
+            num_functions,
+            nns: nns_opt.clone(),
+            comp_of: comp_opt.clone(),
         };
         let s_sym = s.symmetrize();
         let (p_csr, cf_opt): (Pcsr, Option<CFInfo>) =
@@ -1738,7 +1839,7 @@ fn build_hierarchy(
                 } else {
                     let d = diag_inv_from_csr(&a_cur)?;
                     Ok((
-                        smooth_tentative_sa(
+                        smooth_tentative_sa_multi(
                             &a_cur,
                             &d,
                             &tp,
@@ -1849,6 +1950,9 @@ fn build_hierarchy(
             prev.is_c = is_c.clone();
             prev.cf = cf_opt.clone();
             prev.p2r_pos = p2r_pos;
+            prev.num_functions = tp.num_functions;
+            prev.nns = tp.nns.clone();
+            prev.layout = layout.clone();
             prev.a_next_pat = Some(pat.clone());
             prev.a_next_pat_ng = ng_pat_opt.clone();
             prev.rap_full2ng_pos = map_opt;
@@ -1867,6 +1971,7 @@ fn build_hierarchy(
 
         // Next level (coarser)
         a_cur = a_coarse.clone();
+        block_size_cur = tp.num_functions;
         let l1_inv_coarse = if need_l1 {
             Some(l1_diag_inv(&a_cur))
         } else {
@@ -1893,6 +1998,13 @@ fn build_hierarchy(
             is_c: Vec::new(),
             cf: None,
             p2r_pos: Vec::new(),
+            num_functions: 1,
+            layout: if cfg.nodal == NodalMode::Nodal {
+                Some(DofLayout::new(a_cur.nrows(), block_size_cur))
+            } else {
+                None
+            },
+            nns: None,
             a_next_pat: None,
             a_next_pat_ng: None,
             rap_full2ng_pos: None,
@@ -2960,6 +3072,9 @@ mod tests {
             is_c: Vec::new(),
             cf: None,
             p2r_pos: vec![],
+            num_functions: 1,
+            layout: None,
+            nns: None,
             a_next_pat: None,
             a_next_pat_ng: None,
             rap_full2ng_pos: None,

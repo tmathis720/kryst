@@ -8,6 +8,9 @@ use crate::matrix::sparse::CsrMatrix;
 pub struct TentativeP {
     pub agg_of: Vec<usize>,
     pub n_coarse: usize,
+    pub num_functions: usize,
+    pub nns: Option<Vec<Vec<f64>>>,
+    pub comp_of: Option<Vec<usize>>,
 }
 
 pub fn tentative_from_aggregates(agg: Vec<usize>) -> TentativeP {
@@ -15,6 +18,9 @@ pub fn tentative_from_aggregates(agg: Vec<usize>) -> TentativeP {
     TentativeP {
         agg_of: agg,
         n_coarse,
+        num_functions: 1,
+        nns: None,
+        comp_of: None,
     }
 }
 
@@ -615,6 +621,164 @@ pub fn smooth_sa_values_only(
     Ok(())
 }
 
+pub fn smooth_tentative_sa_multi(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    tp: &TentativeP,
+    omega: f64,
+    drop_tol: f64,
+    max_per_row: usize,
+    trunc_rel: f64,
+) -> Pcsr {
+    let m = a.nrows();
+    let r = tp.num_functions;
+    let ncoarse = tp.n_coarse * r;
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    row_ptr.push(0);
+    let mut marker: Vec<isize> = vec![-1; ncoarse.min(1024).max(512)];
+    let mut acc_cols: Vec<usize> = Vec::new();
+    let mut acc_vals: Vec<f64> = Vec::new();
+    for i in 0..m {
+        if marker.len() < ncoarse { marker.resize(ncoarse, -1); }
+        acc_cols.clear(); acc_vals.clear();
+        let base = tp.agg_of[i] * r;
+        for alpha in 0..r {
+            let c = base + alpha;
+            marker[c] = acc_cols.len() as isize;
+            acc_cols.push(c);
+            let v0 = if let Some(ref nns) = tp.nns {
+                nns[alpha][i]
+            } else if let Some(ref comp) = tp.comp_of {
+                if comp[i] == alpha { 1.0 } else { 0.0 }
+            } else {
+                if alpha == 0 { 1.0 } else { 0.0 }
+            };
+            acc_vals.push(v0);
+        }
+        let di = d_inv[i];
+        let rs = rp[i]; let re = rp[i+1];
+        for p in rs..re {
+            let j = cj[p]; if j==i { continue; }
+            let gj = tp.agg_of[j] * r;
+            let s = -omega * di * vv[p];
+            for alpha in 0..r {
+                let col = gj + alpha;
+                let t = if let Some(ref nns) = tp.nns {
+                    nns[alpha][j]
+                } else if let Some(ref comp) = tp.comp_of {
+                    if comp[j] == alpha { 1.0 } else { 0.0 }
+                } else {
+                    if alpha == 0 { 1.0 } else { 0.0 }
+                };
+                let val = s * t;
+                let k = marker[col];
+                if k >= 0 { acc_vals[k as usize] += val; } else {
+                    marker[col] = acc_cols.len() as isize;
+                    acc_cols.push(col);
+                    acc_vals.push(val);
+                }
+            }
+        }
+        let mut cols = acc_cols.clone();
+        let mut vs = acc_vals.clone();
+        let rf = RowFilter { tau_abs: drop_tol, tau_rel: trunc_rel, k_max: max_per_row, must_keep: None };
+        filter_row_by_truncation(&mut cols, &mut vs, rf);
+        for alpha in 0..r {
+            let c = base + alpha;
+            if !cols.contains(&c) {
+                let v0 = if let Some(ref nns) = tp.nns {
+                    nns[alpha][i]
+                } else if let Some(ref comp) = tp.comp_of {
+                    if comp[i] == alpha { 1.0 } else { 0.0 }
+                } else {
+                    if alpha == 0 { 1.0 } else { 0.0 }
+                };
+                cols.push(c);
+                vs.push(v0);
+            }
+        }
+        for (c,v) in cols.into_iter().zip(vs.into_iter()) {
+            col_idx.push(c);
+            vals.push(v);
+        }
+        row_ptr.push(col_idx.len());
+        for &c in &acc_cols { marker[c] = -1; }
+    }
+    Pcsr { m, n: ncoarse, row_ptr, col_idx, vals }
+}
+
+pub fn smooth_sa_values_only_multi(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    tp: &TentativeP,
+    omega: f64,
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    out_vals: &mut [f64],
+) -> Result<(), crate::error::KError> {
+    let m = a.nrows();
+    let r = tp.num_functions;
+    assert_eq!(p_row_ptr.len(), m + 1);
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    let pr = p_row_ptr;
+    let pc = p_col_idx;
+    let mut map_cols: Vec<usize> = Vec::new();
+    let mut map_vals: Vec<f64> = Vec::new();
+    for i in 0..m {
+        map_cols.clear(); map_vals.clear();
+        let base = tp.agg_of[i] * r;
+        for alpha in 0..r {
+            map_cols.push(base + alpha);
+            let v0 = if let Some(ref nns) = tp.nns {
+                nns[alpha][i]
+            } else if let Some(ref comp) = tp.comp_of {
+                if comp[i] == alpha { 1.0 } else { 0.0 }
+            } else {
+                if alpha == 0 { 1.0 } else { 0.0 }
+            };
+            map_vals.push(v0);
+        }
+        let di = d_inv[i];
+        let rs = rp[i]; let re = rp[i+1];
+        for pidx in rs..re {
+            let j = cj[pidx]; if j==i { continue; }
+            let gj = tp.agg_of[j] * r;
+            let s = -omega * di * vv[pidx];
+            for alpha in 0..r {
+                let t = if let Some(ref nns) = tp.nns {
+                    nns[alpha][j]
+                } else if let Some(ref comp) = tp.comp_of {
+                    if comp[j] == alpha { 1.0 } else { 0.0 }
+                } else {
+                    if alpha == 0 { 1.0 } else { 0.0 }
+                };
+                let col = gj + alpha;
+                match map_cols.iter().position(|&c| c==col) {
+                    Some(pos) => { map_vals[pos] += s * t; }
+                    None => { map_cols.push(col); map_vals.push(s*t); }
+                }
+            }
+        }
+        let rs_p = pr[i]; let re_p = pr[i+1];
+        for k in rs_p..re_p {
+            let c = pc[k];
+            if let Some(pos) = map_cols.iter().position(|&cc| cc==c) {
+                out_vals[k] = map_vals[pos];
+            } else {
+                out_vals[k] = 0.0;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,9 +796,12 @@ mod tests {
         let tp = TentativeP {
             agg_of: vec![0, 1],
             n_coarse: 2,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
         };
         let d_inv = vec![1.0, 1.0];
-        let p = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 10.0, 0, 0.0);
+        let p = smooth_tentative_sa_multi(&a, &d_inv, &tp, 1.0, 10.0, 0, 0.0);
         assert_eq!(p.col_idx, vec![0, 1]);
     }
 
@@ -650,13 +817,16 @@ mod tests {
         let tp = TentativeP {
             agg_of: vec![0, 1],
             n_coarse: 2,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
         };
         let d_inv = vec![1.0, 1.0];
         // drop_tol=0 -> keep all
-        let p_full = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 0.0, 0, 0.0);
+        let p_full = smooth_tentative_sa_multi(&a, &d_inv, &tp, 1.0, 0.0, 0, 0.0);
         assert_eq!(p_full.col_idx, vec![0, 1, 0, 1]);
         // drop_tol large -> only own aggregates
-        let p_drop = smooth_tentative_sa(&a, &d_inv, &tp, 1.0, 1.0, 0, 0.0);
+        let p_drop = smooth_tentative_sa_multi(&a, &d_inv, &tp, 1.0, 1.0, 0, 0.0);
         assert_eq!(p_drop.col_idx, vec![0, 1]);
     }
 }
