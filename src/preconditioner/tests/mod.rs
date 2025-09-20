@@ -52,6 +52,7 @@ fn default_apply_mut_forwards_to_apply() {
 
 mod classical;
 mod coarsen;
+mod deflation;
 mod direct_apply;
 mod ilu_csr;
 mod ilu_history;

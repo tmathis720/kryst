@@ -1,5 +1,6 @@
 use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
+use faer::{MatMut, MatRef};
 
 /// y = A * x using CSR; parallel when `rayon` is enabled.
 #[cfg(feature = "rayon")]
@@ -209,6 +210,55 @@ pub fn spmm_csr_block(
             y_cols[r][i] = acc[r];
         }
     }
+    Ok(())
+}
+
+/// Dense sparse matrix-matrix product specialized for small dense blocks.
+///
+/// Computes `Y = A * X` where `A` is CSR and `X`, `Y` are column-major dense
+/// matrices provided as [`MatRef`] and [`MatMut`] respectively. The caller must
+/// zero `Y` prior to invocation if accumulation is not desired.
+pub fn csr_spmm_dense(
+    a: &CsrMatrix<f64>,
+    x: MatRef<'_, f64>,
+    mut y: MatMut<'_, f64>,
+) -> Result<(), KError> {
+    let (m, n) = (a.nrows(), a.ncols());
+    if x.nrows() != n {
+        return Err(KError::InvalidInput(
+            "csr_spmm_dense: column count mismatch".into(),
+        ));
+    }
+    if y.nrows() != m {
+        return Err(KError::InvalidInput(
+            "csr_spmm_dense: row count mismatch".into(),
+        ));
+    }
+    if x.ncols() != y.ncols() {
+        return Err(KError::InvalidInput(
+            "csr_spmm_dense: rhs count mismatch".into(),
+        ));
+    }
+
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    let k = x.ncols();
+
+    for i in 0..m {
+        // zero the output row explicitly to avoid accumulating stale data.
+        for col in 0..k {
+            y[(i, col)] = 0.0;
+        }
+        for p in rp[i]..rp[i + 1] {
+            let col = cj[p];
+            let val = vv[p];
+            for rhs in 0..k {
+                y[(i, rhs)] += val * x[(col, rhs)];
+            }
+        }
+    }
+
     Ok(())
 }
 
