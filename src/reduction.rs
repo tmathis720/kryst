@@ -295,7 +295,6 @@ pub struct DotEngine {
     pub opts: ReductionOptions,
 }
 
-
 impl DotEngine {
     pub fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
         let local = if self.opts.mode == ReproMode::Fast {

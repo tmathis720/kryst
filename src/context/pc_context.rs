@@ -375,12 +375,13 @@ impl PcFactory {
         for (i, spec) in specs.iter().enumerate() {
             if matches!(spec.pc_type, PcType::BlockJacobi)
                 && let Some(ref o) = spec.options
-                    && o.jacobi_block_size.unwrap_or(1) <= 1 {
-                        log::warn!(
-                            "PC chain stage {i}: BlockJacobi with block_size <= 1 behaves like Jacobi; \
+                && o.jacobi_block_size.unwrap_or(1) <= 1
+            {
+                log::warn!(
+                    "PC chain stage {i}: BlockJacobi with block_size <= 1 behaves like Jacobi; \
                              consider using 'jacobi' instead."
-                        );
-                    }
+                );
+            }
         }
 
         Ok(())

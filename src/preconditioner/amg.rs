@@ -33,7 +33,10 @@ use prolong::{
     classical_values_only, smooth_sa_values_only_multi, smooth_tentative_sa_multi,
 };
 use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
-use row_filter::{RowFilter, apply_filter_to_csr_values_in_place};
+use row_filter::{
+    RowFilter, apply_filter_to_csr_values_in_place, compensate_nodal_diag, compensate_scalar_rows,
+    restrict_trials,
+};
 use strength::Strength;
 use strength_nodal::strength_nodal;
 use util::DofLayout;
@@ -249,6 +252,9 @@ pub struct AMGConfig {
     pub block_size: usize,
     pub num_functions: usize,
     pub near_nullspace: Option<NearNullspace>,
+    pub filter_trial_vectors: Option<Vec<Vec<f64>>>,
+    pub filter_omega: f64,
+    pub filter_after_non_galerkin: bool,
     pub post_interp: PostInterpType,
     pub flexible_level: Option<usize>,
     pub flexible_iters: usize,
@@ -324,6 +330,9 @@ impl Default for AMGConfig {
             block_size: 1,
             num_functions: 1,
             near_nullspace: None,
+            filter_trial_vectors: None,
+            filter_omega: 1.0,
+            filter_after_non_galerkin: true,
             post_interp: PostInterpType::None,
             flexible_level: None,
             flexible_iters: 0,
@@ -516,6 +525,18 @@ impl AMGBuilder {
     }
     pub fn chebyshev_power_iters(mut self, iters: usize) -> Self {
         self.cfg.chebyshev_power_iters = iters;
+        self
+    }
+    pub fn filter_trials(mut self, trials: Vec<Vec<f64>>) -> Self {
+        self.cfg.filter_trial_vectors = Some(trials);
+        self
+    }
+    pub fn filter_omega(mut self, omega: f64) -> Self {
+        self.cfg.filter_omega = omega;
+        self
+    }
+    pub fn filter_after_non_galerkin(mut self, on: bool) -> Self {
+        self.cfg.filter_after_non_galerkin = on;
         self
     }
     pub fn use_level_scheduling(mut self, v: bool) -> Self {
@@ -888,6 +909,70 @@ fn rap_numeric_with_pt(lvl: &mut AMGLevel, out_vals: &mut [f64]) -> Result<(), K
     let pat = lvl.a_next_pat.as_ref().expect("missing pattern").clone();
     rap_numeric(&pat, &r_tmp, &lvl.a, &lvl.p, out_vals);
     Ok(())
+}
+
+fn make_trial_matrix(cfg: &AMGConfig, n: usize) -> Result<Option<Mat<f64>>, KError> {
+    if cfg.filter_omega <= 0.0 {
+        return Ok(None);
+    }
+    if cfg.require_spd && cfg.filter_trial_vectors.is_none() {
+        return Ok(None);
+    }
+    let mat = if let Some(basis) = cfg.filter_trial_vectors.as_ref() {
+        if basis.is_empty() {
+            return Ok(None);
+        }
+        let r = basis.len();
+        let mut m = Mat::<f64>::zeros(n, r);
+        for (col, vec) in basis.iter().enumerate() {
+            if vec.len() != n {
+                return Err(KError::InvalidInput(
+                    "filter_trial_vectors entry has mismatched length".into(),
+                ));
+            }
+            for i in 0..n {
+                m[(i, col)] = vec[i];
+            }
+        }
+        m
+    } else {
+        let mut m = Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            m[(i, 0)] = 1.0;
+        }
+        m
+    };
+    Ok(Some(mat))
+}
+
+fn apply_trial_compensation(
+    cfg: &AMGConfig,
+    a: &mut CsrMatrix<f64>,
+    trials: Option<&Mat<f64>>,
+    block_size: usize,
+) -> Result<(), KError> {
+    if cfg.filter_omega <= 0.0 {
+        return Ok(());
+    }
+    let Some(trials_mat) = trials else {
+        return Ok(());
+    };
+    let min_diag = if cfg.require_spd {
+        Some(cfg.spd_diag_floor.max(1e-12))
+    } else {
+        None
+    };
+    if block_size > 1 && matches!(cfg.nodal, NodalMode::Nodal) && a.nrows() % block_size == 0 {
+        compensate_nodal_diag(
+            a,
+            trials_mat.as_ref(),
+            block_size,
+            cfg.filter_omega,
+            min_diag,
+        )
+    } else {
+        compensate_scalar_rows(a, trials_mat.as_ref(), cfg.filter_omega, min_diag)
+    }
 }
 
 struct LevelPostContext<'a> {
@@ -1283,6 +1368,7 @@ impl AMG {
 
         let need_l1 = self.cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
         let need_cheb = self.cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
+        let mut trials_current = make_trial_matrix(&self.cfg, h.levels[0].a.nrows())?;
 
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
@@ -1373,18 +1459,21 @@ impl AMG {
             if h.levels[l].a_next_pat.is_some() {
                 let pat = h.levels[l].a_next_pat.as_ref().unwrap().clone();
                 let nnz = pat.col_idx.len();
-                let mut vals = vec![0.0; nnz];
-                if self.cfg.keep_transpose {
-                    rap_numeric(
-                        &pat,
-                        &h.levels[l].r,
-                        &h.levels[l].a,
-                        &h.levels[l].p,
-                        &mut vals,
-                    );
+                let r_tmp_storage = if self.cfg.keep_transpose {
+                    None
                 } else {
-                    rap_numeric_with_pt(&mut h.levels[l], &mut vals)?;
-                }
+                    Some(build_r_from_p(&mut h.levels[l]))
+                };
+                let r_for_ops = r_tmp_storage.as_ref().unwrap_or(&h.levels[l].r);
+                let trials_next = if let Some(ref trials) = trials_current {
+                    let mut next = Mat::<f64>::zeros(r_for_ops.nrows(), trials.ncols());
+                    restrict_trials(r_for_ops, trials.as_ref(), next.as_mut())?;
+                    Some(next)
+                } else {
+                    None
+                };
+                let mut vals = vec![0.0; nnz];
+                rap_numeric(&pat, r_for_ops, &h.levels[l].a, &h.levels[l].p, &mut vals);
                 {
                     let mut rf = |row: usize| RowFilter {
                         tau_abs: self.cfg.rap_truncation_abs,
@@ -1404,31 +1493,53 @@ impl AMG {
                         &mut rf,
                     );
                 }
+                let block_size_next = h.levels[l].num_functions.max(1);
+                let mut a_full = CsrMatrix::from_csr(
+                    pat.nrows,
+                    pat.ncols,
+                    pat.row_ptr.clone(),
+                    pat.col_idx.clone(),
+                    vals,
+                );
+                let use_ng = h.levels[l].a_next_pat_ng.is_some();
+                if !use_ng || !self.cfg.filter_after_non_galerkin {
+                    apply_trial_compensation(
+                        &self.cfg,
+                        &mut a_full,
+                        trials_next.as_ref(),
+                        block_size_next,
+                    )?;
+                }
                 if let (Some(ng_pat), Some(map)) =
                     (&h.levels[l].a_next_pat_ng, &h.levels[l].rap_full2ng_pos)
                 {
                     let mut vals_ng = vec![0.0; ng_pat.col_idx.len()];
+                    let full_vals = a_full.values();
                     for (k_full, &maybe) in map.iter().enumerate() {
                         if let Some(k_ng) = maybe {
-                            vals_ng[k_ng] += vals[k_full];
+                            vals_ng[k_ng] += full_vals[k_full];
                         }
                     }
-                    h.levels[l + 1].a = CsrMatrix::from_csr(
+                    let mut a_ng = CsrMatrix::from_csr(
                         ng_pat.nrows,
                         ng_pat.ncols,
                         ng_pat.row_ptr.clone(),
                         ng_pat.col_idx.clone(),
                         vals_ng,
                     );
+                    if self.cfg.filter_after_non_galerkin {
+                        apply_trial_compensation(
+                            &self.cfg,
+                            &mut a_ng,
+                            trials_next.as_ref(),
+                            block_size_next,
+                        )?;
+                    }
+                    h.levels[l + 1].a = a_ng;
                 } else {
-                    h.levels[l + 1].a = CsrMatrix::from_csr(
-                        h.levels[l + 1].a.nrows(),
-                        h.levels[l + 1].a.ncols(),
-                        pat.row_ptr.clone(),
-                        pat.col_idx.clone(),
-                        vals,
-                    );
+                    h.levels[l + 1].a = a_full;
                 }
+                trials_current = trials_next;
                 h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&h.levels[l + 1].a, &self.cfg)?;
             } else {
                 // Safety fallback: full RAP (structure + values)
@@ -1440,6 +1551,7 @@ impl AMG {
                 };
                 h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&a_coarse, &self.cfg)?;
                 h.levels[l + 1].a = a_coarse;
+                trials_current = None;
             }
             if l + 1 == h.coarsest_ix() && matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
                 let levelc = &mut h.levels[l + 1];
@@ -2471,6 +2583,7 @@ fn build_hierarchy(
     } else {
         1
     };
+    let mut trials_current = make_trial_matrix(cfg, a_cur.nrows())?;
     // Drive coarsening: build levels 0..L (inclusive L is coarsest)
     for level in 0..cfg.max_levels {
         let n = a_cur.nrows();
@@ -2552,6 +2665,7 @@ fn build_hierarchy(
             nns: nns_opt.clone(),
             comp_of: comp_opt.clone(),
         };
+        let block_size_next = tp.num_functions.max(1);
         let d = diag_inv_from_csr_cfg(&a_cur, cfg)?;
         let s_sym = s.symmetrize();
         let (mut p_csr, cf_opt): (Pcsr, Option<CFInfo>) =
@@ -2648,6 +2762,14 @@ fn build_hierarchy(
             );
         }
 
+        let trials_next = if let Some(ref trials) = trials_current {
+            let mut next = Mat::<f64>::zeros(r.nrows(), trials.ncols());
+            restrict_trials(&r, trials.as_ref(), next.as_mut())?;
+            Some(next)
+        } else {
+            None
+        };
+
         // 4) Coarse operator A_c symbolic and numeric
         let pat = with_timing(do_stats, &mut lt.rap_symbolic, || {
             rap_symbolic(&r, &a_cur, &p)
@@ -2680,10 +2802,20 @@ fn build_hierarchy(
         if cfg.require_spd && cfg.forbid_non_galerkin_in_spd {
             use_ng = false;
         }
-        let (a_coarse, ng_pat_opt, map_opt) = if use_ng {
+        let mut a_full = CsrMatrix::from_csr(
+            pat.nrows,
+            pat.ncols,
+            pat.row_ptr.clone(),
+            pat.col_idx.clone(),
+            a_coarse_vals,
+        );
+        if !use_ng || !cfg.filter_after_non_galerkin {
+            apply_trial_compensation(cfg, &mut a_full, trials_next.as_ref(), block_size_next)?;
+        }
+        let (mut a_coarse, ng_pat_opt, map_opt) = if use_ng {
             let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
                 &pat,
-                &a_coarse_vals,
+                a_full.values(),
                 cfg.non_galerkin.symmetry,
                 NgRowFilter {
                     tau_abs: cfg.non_galerkin.drop_abs,
@@ -2692,22 +2824,18 @@ fn build_hierarchy(
                     lump_diag: cfg.non_galerkin.lump_diagonal,
                 },
             );
-            let a_ng = CsrMatrix::from_csr(
+            let mut a_ng = CsrMatrix::from_csr(
                 ng_pat.nrows,
                 ng_pat.ncols,
                 ng_pat.row_ptr.clone(),
                 ng_pat.col_idx.clone(),
                 ng_vals,
             );
+            if cfg.filter_after_non_galerkin {
+                apply_trial_compensation(cfg, &mut a_ng, trials_next.as_ref(), block_size_next)?;
+            }
             (a_ng, Some(ng_pat), Some(full2ng))
         } else {
-            let a_full = CsrMatrix::from_csr(
-                pat.nrows,
-                pat.ncols,
-                pat.row_ptr.clone(),
-                pat.col_idx.clone(),
-                a_coarse_vals,
-            );
             (a_full, None, None)
         };
         let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || {
@@ -2752,6 +2880,7 @@ fn build_hierarchy(
 
         // Next level (coarser)
         a_cur = a_coarse.clone();
+        trials_current = trials_next;
         block_size_cur = tp.num_functions;
         let l1_inv_coarse = if need_l1 {
             Some(l1_diag_inv(&a_cur))
@@ -2879,6 +3008,7 @@ fn build_hierarchy(
 
 fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<(), KError> {
     if let Some(target) = cfg.non_galerkin.oc_target {
+        let mut trials_current = make_trial_matrix(cfg, levels[0].a.nrows())?;
         for _ in 0..cfg.non_galerkin.oc_max_iter {
             let oc = operator_complexity_estimate(levels);
             if oc <= target {
@@ -2887,22 +3017,32 @@ fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<
             cfg.non_galerkin.drop_abs *= 1.25;
             cfg.non_galerkin.drop_rel = (cfg.non_galerkin.drop_rel * 1.1).min(0.95);
             for l in 0..levels.len() - 1 {
-                if l + 1 < cfg.non_galerkin.start_level {
-                    continue;
-                }
                 if let Some(pat_full) = levels[l].a_next_pat.clone() {
-                    let mut vals_full = vec![0.0; pat_full.col_idx.len()];
-                    if cfg.keep_transpose {
-                        rap_numeric(
-                            &pat_full,
-                            &levels[l].r,
-                            &levels[l].a,
-                            &levels[l].p,
-                            &mut vals_full,
-                        );
+                    let r_tmp_storage = if cfg.keep_transpose {
+                        None
                     } else {
-                        rap_numeric_with_pt(&mut levels[l], &mut vals_full)?;
+                        Some(build_r_from_p(&mut levels[l]))
+                    };
+                    let r_for_ops = r_tmp_storage.as_ref().unwrap_or(&levels[l].r);
+                    let trials_next = if let Some(ref trials) = trials_current {
+                        let mut next = Mat::<f64>::zeros(r_for_ops.nrows(), trials.ncols());
+                        restrict_trials(r_for_ops, trials.as_ref(), next.as_mut())?;
+                        Some(next)
+                    } else {
+                        None
+                    };
+                    if l + 1 < cfg.non_galerkin.start_level {
+                        trials_current = trials_next;
+                        continue;
                     }
+                    let mut vals_full = vec![0.0; pat_full.col_idx.len()];
+                    rap_numeric(
+                        &pat_full,
+                        r_for_ops,
+                        &levels[l].a,
+                        &levels[l].p,
+                        &mut vals_full,
+                    );
                     {
                         let mut rf = |row: usize| RowFilter {
                             tau_abs: cfg.rap_truncation_abs,
@@ -2922,9 +3062,25 @@ fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<
                             &mut rf,
                         );
                     }
+                    let block_size_next = levels[l].num_functions.max(1);
+                    let mut a_full = CsrMatrix::from_csr(
+                        pat_full.nrows,
+                        pat_full.ncols,
+                        pat_full.row_ptr.clone(),
+                        pat_full.col_idx.clone(),
+                        vals_full,
+                    );
+                    if !cfg.filter_after_non_galerkin {
+                        apply_trial_compensation(
+                            cfg,
+                            &mut a_full,
+                            trials_next.as_ref(),
+                            block_size_next,
+                        )?;
+                    }
                     let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
                         &pat_full,
-                        &vals_full,
+                        a_full.values(),
                         cfg.non_galerkin.symmetry,
                         NgRowFilter {
                             tau_abs: cfg.non_galerkin.drop_abs,
@@ -2933,16 +3089,28 @@ fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<
                             lump_diag: cfg.non_galerkin.lump_diagonal,
                         },
                     );
-                    levels[l].a_next_pat_ng = Some(ng_pat.clone());
-                    levels[l].rap_full2ng_pos = Some(full2ng);
-                    levels[l + 1].a = CsrMatrix::from_csr(
+                    let mut a_ng = CsrMatrix::from_csr(
                         ng_pat.nrows,
                         ng_pat.ncols,
                         ng_pat.row_ptr.clone(),
                         ng_pat.col_idx.clone(),
                         ng_vals,
                     );
+                    if cfg.filter_after_non_galerkin {
+                        apply_trial_compensation(
+                            cfg,
+                            &mut a_ng,
+                            trials_next.as_ref(),
+                            block_size_next,
+                        )?;
+                    }
+                    levels[l].a_next_pat_ng = Some(ng_pat.clone());
+                    levels[l].rap_full2ng_pos = Some(full2ng);
+                    levels[l + 1].a = a_ng;
                     levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&levels[l + 1].a, cfg)?;
+                    trials_current = trials_next;
+                } else {
+                    trials_current = None;
                 }
             }
         }
@@ -3867,6 +4035,10 @@ mod tests {
         CsrMatrix::from_csr(m, n, row_ptr, col_idx, vals)
     }
 
+    fn l2_norm(v: &[f64]) -> f64 {
+        v.iter().map(|x| x * x).sum::<f64>().sqrt()
+    }
+
     fn identity_level() -> AMGLevel {
         AMGLevel {
             a: CsrMatrix::identity(1),
@@ -4150,6 +4322,183 @@ mod tests {
             }
         }
         assert_dense_eq(&r_pat, &r_dense, 0.0, 0.0);
+    }
+
+    #[test]
+    fn filter_enforces_row_sums() {
+        let a = poisson1d(64);
+        let mut filtered = AMGBuilder::new()
+            .rap_drop_abs(0.05)
+            .require_spd(false)
+            .filter_omega(1.0)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        let mut baseline = AMGBuilder::new()
+            .rap_drop_abs(0.05)
+            .require_spd(false)
+            .filter_omega(0.0)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        filtered.setup(&a).unwrap();
+        baseline.setup(&a).unwrap();
+        let h_filtered = filtered.state.as_ref().unwrap();
+        let h_baseline = baseline.state.as_ref().unwrap();
+        assert_eq!(h_filtered.levels.len(), h_baseline.levels.len());
+        let mut best_ratio = f64::INFINITY;
+        let mut any_significant = false;
+        for (lvl_ix, (lvl_filtered, lvl_baseline)) in
+            h_filtered.levels.iter().zip(&h_baseline.levels).enumerate()
+        {
+            if lvl_ix == 0 {
+                continue;
+            }
+            let n = lvl_filtered.a.nrows();
+            assert_eq!(n, lvl_baseline.a.nrows());
+            let ones = vec![1.0; n];
+            let mut sums_filtered = vec![0.0; n];
+            let mut sums_baseline = vec![0.0; n];
+            lvl_filtered
+                .a
+                .spmv_scaled(1.0, &ones, 0.0, &mut sums_filtered)
+                .unwrap();
+            lvl_baseline
+                .a
+                .spmv_scaled(1.0, &ones, 0.0, &mut sums_baseline)
+                .unwrap();
+            let max_filtered = sums_filtered.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            let max_baseline = sums_baseline.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            if max_baseline > 1e-14 {
+                let ratio = max_filtered / max_baseline;
+                best_ratio = best_ratio.min(ratio);
+                any_significant = true;
+            } else {
+                assert!(
+                    max_filtered <= 1e-14,
+                    "level {lvl_ix} filtered row sum {} exceeds tight tolerance",
+                    max_filtered
+                );
+            }
+        }
+        assert!(
+            any_significant,
+            "no levels with meaningful baseline row sums"
+        );
+        assert!(
+            best_ratio <= 0.1 + 1e-12,
+            "expected at least one level to reduce max row sum by an order of magnitude: best_ratio={}",
+            best_ratio
+        );
+    }
+    #[test]
+    fn filter_non_galerkin_preserves_row_sums() {
+        let a = poisson1d(64);
+        let mut cfg_filtered = AMGConfig::default();
+        cfg_filtered.require_spd = false;
+        cfg_filtered.rap_truncation_abs = 0.02;
+        cfg_filtered.filter_omega = 1.0;
+        cfg_filtered.filter_after_non_galerkin = true;
+        cfg_filtered.non_galerkin.enabled = true;
+        cfg_filtered.non_galerkin.drop_abs = 0.05;
+        cfg_filtered.non_galerkin.drop_rel = 0.0;
+        cfg_filtered.non_galerkin.cap_row = 0;
+        let mut cfg_baseline = cfg_filtered.clone();
+        cfg_baseline.filter_omega = 0.0;
+        let mut amg_filtered = AMG::with_config(cfg_filtered);
+        let mut amg_baseline = AMG::with_config(cfg_baseline);
+        amg_filtered.setup(&a).unwrap();
+        amg_baseline.setup(&a).unwrap();
+        let h_filtered = amg_filtered.state.as_ref().unwrap();
+        let h_baseline = amg_baseline.state.as_ref().unwrap();
+        assert_eq!(h_filtered.levels.len(), h_baseline.levels.len());
+        let mut best_ratio = f64::INFINITY;
+        let mut any_significant = false;
+        for (lvl_ix, (lvl_filtered, lvl_baseline)) in
+            h_filtered.levels.iter().zip(&h_baseline.levels).enumerate()
+        {
+            if lvl_ix == 0 {
+                continue;
+            }
+            let n = lvl_filtered.a.nrows();
+            assert_eq!(n, lvl_baseline.a.nrows());
+            let ones = vec![1.0; n];
+            let mut sums_filtered = vec![0.0; n];
+            let mut sums_baseline = vec![0.0; n];
+            lvl_filtered
+                .a
+                .spmv_scaled(1.0, &ones, 0.0, &mut sums_filtered)
+                .unwrap();
+            lvl_baseline
+                .a
+                .spmv_scaled(1.0, &ones, 0.0, &mut sums_baseline)
+                .unwrap();
+            let max_filtered = sums_filtered.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            let max_baseline = sums_baseline.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            if max_baseline > 1e-14 {
+                let ratio = max_filtered / max_baseline;
+                best_ratio = best_ratio.min(ratio);
+                any_significant = true;
+            } else {
+                assert!(
+                    max_filtered <= 1e-14,
+                    "level {lvl_ix} filtered row sum {} exceeds tight tolerance",
+                    max_filtered
+                );
+            }
+        }
+        assert!(
+            any_significant,
+            "no levels with meaningful baseline row sums"
+        );
+        assert!(
+            best_ratio <= 0.1 + 1e-12,
+            "expected at least one level to reduce max row sum by an order of magnitude: best_ratio={}",
+            best_ratio
+        );
+    }
+    #[test]
+    fn filter_reduces_constant_mode_residual() {
+        let a = poisson1d(64);
+        let mut cfg_off = AMGConfig::default();
+        cfg_off.rap_truncation_abs = 0.02;
+        cfg_off.require_spd = false;
+        cfg_off.filter_omega = 0.0;
+        let mut cfg_on = cfg_off.clone();
+        cfg_on.filter_omega = 1.0;
+        let mut amg_off = AMG::with_config(cfg_off);
+        let mut amg_on = AMG::with_config(cfg_on);
+        amg_off.setup(&a).unwrap();
+        amg_on.setup(&a).unwrap();
+        let h_on = amg_on.state.as_ref().unwrap();
+        let h_off = amg_off.state.as_ref().unwrap();
+        assert!(h_on.coarsest_ix() >= 1);
+        let coarse_ix = 1;
+        let n_fine = h_on.levels[0].a.nrows();
+        let ones_fine = vec![1.0; n_fine];
+        let mut rhs_on = vec![0.0; h_on.levels[coarse_ix].a.nrows()];
+        h_on.levels[0]
+            .r
+            .spmv_scaled(1.0, &ones_fine, 0.0, &mut rhs_on)
+            .unwrap();
+        let mut prod_on = vec![0.0; rhs_on.len()];
+        h_on.levels[coarse_ix]
+            .a
+            .spmv_scaled(1.0, &rhs_on, 0.0, &mut prod_on)
+            .unwrap();
+        let norm_on = l2_norm(&prod_on);
+
+        let mut rhs_off = vec![0.0; h_off.levels[coarse_ix].a.nrows()];
+        h_off.levels[0]
+            .r
+            .spmv_scaled(1.0, &ones_fine, 0.0, &mut rhs_off)
+            .unwrap();
+        let mut prod_off = vec![0.0; rhs_off.len()];
+        h_off.levels[coarse_ix]
+            .a
+            .spmv_scaled(1.0, &rhs_off, 0.0, &mut prod_off)
+            .unwrap();
+        let norm_off = l2_norm(&prod_off);
+        assert!(norm_off > 1e-12);
+        assert!(norm_on <= norm_off * 0.1 + 1e-10);
     }
 
     fn poisson1d(n: usize) -> CsrMatrix<f64> {

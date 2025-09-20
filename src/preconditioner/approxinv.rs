@@ -462,7 +462,10 @@ fn get_nrows<M: 'static>(a: &M) -> Option<usize> {
     let any = a as &dyn std::any::Any;
     if let Some(indexed) = any.downcast_ref::<&dyn Indexing>() {
         Some(indexed.nrows())
-    } else { any.downcast_ref::<&dyn crate::core::traits::MatShape>().map(|indexed| indexed.nrows()) }
+    } else {
+        any.downcast_ref::<&dyn crate::core::traits::MatShape>()
+            .map(|indexed| indexed.nrows())
+    }
 }
 
 // Helper: get RowPattern trait object if implemented

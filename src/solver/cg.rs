@@ -118,13 +118,7 @@ impl CgSolver {
     fn acquire(
         n: usize,
         work: &mut Workspace,
-    ) -> (
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-    ) {
+    ) -> (&mut [f64], &mut [f64], &mut [f64], &mut [f64], &mut [f64]) {
         while work.q.len() < 4 {
             work.q.push(Vec::new());
         }
