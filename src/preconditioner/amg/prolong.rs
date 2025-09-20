@@ -2,7 +2,10 @@
 
 use super::row_filter::{RowFilter, filter_row_by_truncation};
 use super::strength::Strength;
+use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
+use faer::linalg::solvers::{FullPivLu, SolveCore};
+use faer::{Conj, Mat, MatMut};
 
 #[derive(Clone, Debug)]
 pub struct TentativeP {
@@ -31,6 +34,274 @@ pub struct Pcsr {
     pub row_ptr: Vec<usize>,
     pub col_idx: Vec<usize>,
     pub vals: Vec<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveWeight {
+    None,
+    Diag,
+    RowNorm,
+}
+
+pub fn sample_low_modes(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    r: usize,
+    nu: usize,
+    omega: f64,
+    seed: u64,
+) -> Result<Mat<f64>, KError> {
+    let n = a.nrows();
+    let mut u_f = Mat::<f64>::zeros(n, r);
+    if r == 0 {
+        return Ok(u_f);
+    }
+    let mut v = vec![0.0f64; n];
+    let mut u = vec![0.0f64; n];
+    let mut tmp = vec![0.0f64; n];
+    for k in 0..r {
+        for i in 0..n {
+            let t = (i as u64)
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(seed.wrapping_add(k as u64));
+            let bits = ((t >> 17) & 0xFFFF_FFFF) as u32;
+            let rand = (bits as f64) * (1.0 / (u32::MAX as f64)) - 0.5;
+            v[i] = rand;
+        }
+        u.copy_from_slice(&v);
+        for _ in 0..nu {
+            a.spmv_scaled(1.0, &u, 0.0, &mut tmp)?;
+            for i in 0..n {
+                u[i] -= omega * d_inv[i] * tmp[i];
+            }
+        }
+        for prev in 0..k {
+            let mut dot = 0.0;
+            for i in 0..n {
+                dot += u[i] * u_f[(i, prev)];
+            }
+            for i in 0..n {
+                u[i] -= dot * u_f[(i, prev)];
+            }
+        }
+        let mut norm_sq = 0.0f64;
+        for &val in &u {
+            norm_sq += val * val;
+        }
+        let norm = norm_sq.sqrt().max(1e-30);
+        for i in 0..n {
+            u_f[(i, k)] = u[i] / norm;
+        }
+    }
+    Ok(u_f)
+}
+
+pub fn restrict_samples_to_coarse(
+    a: &CsrMatrix<f64>,
+    tp: &TentativeP,
+    u_f: &Mat<f64>,
+    mode: AdaptiveWeight,
+) -> Mat<f64> {
+    let n = a.nrows();
+    let r = u_f.ncols();
+    let n_coarse = tp.n_coarse;
+    let mut u_c = Mat::<f64>::zeros(n_coarse, r);
+    if n_coarse == 0 || r == 0 {
+        return u_c;
+    }
+    let mut weights = vec![1.0f64; n];
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    match mode {
+        AdaptiveWeight::None => {}
+        AdaptiveWeight::Diag => {
+            for i in 0..n {
+                let mut diag = 0.0;
+                for p in rp[i]..rp[i + 1] {
+                    if cj[p] == i {
+                        diag = vv[p].abs();
+                        break;
+                    }
+                }
+                weights[i] = diag.max(1e-30);
+            }
+        }
+        AdaptiveWeight::RowNorm => {
+            for i in 0..n {
+                let mut sum = 0.0;
+                for p in rp[i]..rp[i + 1] {
+                    if cj[p] != i {
+                        sum += vv[p].abs();
+                    }
+                }
+                weights[i] = sum.max(1e-30);
+            }
+        }
+    }
+    let mut wsum = vec![0.0f64; n_coarse];
+    for i in 0..n {
+        let agg = tp.agg_of[i];
+        let wi = weights[i];
+        wsum[agg] += wi;
+        for alpha in 0..r {
+            u_c[(agg, alpha)] += wi * u_f[(i, alpha)];
+        }
+    }
+    for c in 0..n_coarse {
+        let denom = wsum[c].max(1e-30);
+        for alpha in 0..r {
+            u_c[(c, alpha)] /= denom;
+        }
+    }
+    u_c
+}
+
+pub fn adaptive_fit_values_only(
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    out_vals: &mut [f64],
+    tp: &TentativeP,
+    u_f: &Mat<f64>,
+    u_c: &Mat<f64>,
+    lambda: f64,
+    enforce_sum1: bool,
+    trunc: f64,
+) -> Result<(), KError> {
+    if tp.num_functions != 1 {
+        return Ok(());
+    }
+    let n = tp.agg_of.len();
+    if p_row_ptr.len() != n + 1 {
+        return Err(KError::InvalidInput("adaptive fit: row_ptr length".into()));
+    }
+    if u_f.nrows() != n {
+        return Err(KError::InvalidInput(
+            "adaptive fit: fine samples mismatch".into(),
+        ));
+    }
+    if u_c.nrows() < tp.n_coarse {
+        return Err(KError::InvalidInput(
+            "adaptive fit: coarse samples mismatch".into(),
+        ));
+    }
+    if p_col_idx.len() != out_vals.len() {
+        return Err(KError::InvalidInput("adaptive fit: values length".into()));
+    }
+    let r = u_f.ncols();
+    if r == 0 {
+        return Ok(());
+    }
+    for i in 0..n {
+        let rs = p_row_ptr[i];
+        let re = p_row_ptr[i + 1];
+        let m = re - rs;
+        if m == 0 {
+            continue;
+        }
+        if m == 1 {
+            out_vals[rs] = 1.0;
+            continue;
+        }
+        let mut gram = Mat::<f64>::zeros(m, m);
+        let mut rhs_base = vec![0.0f64; m];
+        for row in 0..m {
+            let c_row = p_col_idx[rs + row];
+            let mut rhs_val = 0.0;
+            for alpha in 0..r {
+                rhs_val += u_c[(c_row, alpha)] * u_f[(i, alpha)];
+            }
+            rhs_base[row] = rhs_val;
+            for col in row..m {
+                let c_col = p_col_idx[rs + col];
+                let mut val = 0.0;
+                for alpha in 0..r {
+                    val += u_c[(c_row, alpha)] * u_c[(c_col, alpha)];
+                }
+                gram[(row, col)] = val;
+                if row != col {
+                    gram[(col, row)] = val;
+                }
+            }
+        }
+        let gram_base = gram.clone();
+        let mut lambda_cur = lambda.max(0.0);
+        let mut solved = false;
+        let mut best = vec![0.0f64; m];
+        for _ in 0..3 {
+            let mut gram = gram_base.clone();
+            for d in 0..m {
+                gram[(d, d)] += lambda_cur;
+            }
+            if enforce_sum1 {
+                let mut kkt = Mat::<f64>::zeros(m + 1, m + 1);
+                for row in 0..m {
+                    for col in 0..m {
+                        kkt[(row, col)] = gram[(row, col)];
+                    }
+                    kkt[(row, m)] = 1.0;
+                    kkt[(m, row)] = 1.0;
+                }
+                let mut rhs = vec![0.0f64; m + 1];
+                for row in 0..m {
+                    rhs[row] = rhs_base[row];
+                }
+                rhs[m] = 1.0;
+                let lu = FullPivLu::new(kkt.as_ref());
+                let rhs_mat = MatMut::from_column_major_slice_mut(&mut rhs, m + 1, 1);
+                lu.solve_in_place_with_conj(Conj::No, rhs_mat);
+                if rhs.iter().any(|x| !x.is_finite()) {
+                    lambda_cur = if lambda_cur == 0.0 {
+                        1e-10
+                    } else {
+                        lambda_cur * 10.0
+                    };
+                    continue;
+                }
+                best.copy_from_slice(&rhs[..m]);
+                solved = true;
+            } else {
+                let lu = FullPivLu::new(gram.as_ref());
+                let mut rhs = rhs_base.clone();
+                let rhs_mat = MatMut::from_column_major_slice_mut(&mut rhs, m, 1);
+                lu.solve_in_place_with_conj(Conj::No, rhs_mat);
+                if rhs.iter().any(|x| !x.is_finite()) {
+                    lambda_cur = if lambda_cur == 0.0 {
+                        1e-10
+                    } else {
+                        lambda_cur * 10.0
+                    };
+                    continue;
+                }
+                best.copy_from_slice(&rhs);
+                solved = true;
+            }
+            break;
+        }
+        if !solved {
+            continue;
+        }
+        if trunc > 0.0 {
+            for val in &mut best {
+                if val.abs() < trunc {
+                    *val = 0.0;
+                }
+            }
+        }
+        if enforce_sum1 {
+            let sum = best.iter().copied().sum::<f64>();
+            if sum.abs() < 1e-30 {
+                continue;
+            }
+            for val in &mut best {
+                *val /= sum;
+            }
+        }
+        for (local, idx) in (rs..re).enumerate() {
+            out_vals[idx] = best[local];
+        }
+    }
+    Ok(())
 }
 
 // ===== Classical interpolation family =======================================
@@ -831,6 +1102,81 @@ mod tests {
     use super::*;
     use crate::matrix::sparse::CsrMatrix;
 
+    fn diag_inv(a: &CsrMatrix<f64>) -> Vec<f64> {
+        let n = a.nrows();
+        let mut out = vec![0.0; n];
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        for i in 0..n {
+            let mut diag = 0.0;
+            for p in rp[i]..rp[i + 1] {
+                if cj[p] == i {
+                    diag = vv[p];
+                    break;
+                }
+            }
+            out[i] = if diag.abs() > 0.0 { 1.0 / diag } else { 0.0 };
+        }
+        out
+    }
+
+    fn hetero_poisson_1d(n: usize) -> CsrMatrix<f64> {
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+        for i in 0..n {
+            if i > 0 {
+                col_idx.push(i - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(i);
+            let diag = if i % 2 == 0 { 4.0 } else { 8.0 };
+            vals.push(diag);
+            if i + 1 < n {
+                col_idx.push(i + 1);
+                vals.push(-1.5);
+            }
+            row_ptr.push(col_idx.len());
+        }
+        CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+    }
+
+    fn row_fit_residuals(
+        row_ptr: &[usize],
+        col_idx: &[usize],
+        vals: &[f64],
+        u_f: &Mat<f64>,
+        u_c: &Mat<f64>,
+    ) -> Vec<f64> {
+        let n = u_f.nrows();
+        let r = u_f.ncols();
+        let mut out = vec![0.0; n];
+        for i in 0..n {
+            let rs = row_ptr[i];
+            let re = row_ptr[i + 1];
+            if rs == re || r == 0 {
+                continue;
+            }
+            let mut approx = vec![0.0f64; r];
+            for k in rs..re {
+                let w = vals[k];
+                let c = col_idx[k];
+                for alpha in 0..r {
+                    approx[alpha] += w * u_c[(c, alpha)];
+                }
+            }
+            let mut res = 0.0;
+            for alpha in 0..r {
+                let diff = approx[alpha] - u_f[(i, alpha)];
+                res += diff * diff;
+            }
+            out[i] = res.sqrt();
+        }
+        out
+    }
+
     #[test]
     fn own_aggregate_kept() {
         let a = CsrMatrix::from_csr(
@@ -875,5 +1221,95 @@ mod tests {
         // drop_tol large -> only own aggregates
         let p_drop = smooth_tentative_sa_multi(&a, &d_inv, &tp, 1.0, 1.0, 0, 0.0);
         assert_eq!(p_drop.col_idx, vec![0, 1]);
+    }
+
+    #[test]
+    fn adaptive_fit_reduces_residual() {
+        let a = hetero_poisson_1d(8);
+        let tp = TentativeP {
+            agg_of: (0..8).map(|i| i / 2).collect(),
+            n_coarse: 4,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
+        };
+        let d_inv = diag_inv(&a);
+        let p_csr = smooth_tentative_sa_multi(&a, &d_inv, &tp, 2.0 / 3.0, 0.0, 0, 0.0);
+        let u_f = sample_low_modes(&a, &d_inv, 4, 3, 2.0 / 3.0, 0xCAFE).unwrap();
+        let u_c = restrict_samples_to_coarse(&a, &tp, &u_f, AdaptiveWeight::Diag);
+        let baseline = p_csr.vals.clone();
+        let mut adapted = baseline.clone();
+        adaptive_fit_values_only(
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut adapted,
+            &tp,
+            &u_f,
+            &u_c,
+            1e-10,
+            true,
+            0.0,
+        )
+        .unwrap();
+        let baseline_res = row_fit_residuals(&p_csr.row_ptr, &p_csr.col_idx, &baseline, &u_f, &u_c);
+        let adapted_res = row_fit_residuals(&p_csr.row_ptr, &p_csr.col_idx, &adapted, &u_f, &u_c);
+        let avg_baseline: f64 = baseline_res.iter().sum::<f64>() / (baseline_res.len() as f64);
+        let avg_adapted: f64 = adapted_res.iter().sum::<f64>() / (adapted_res.len() as f64);
+        assert!(avg_adapted < avg_baseline * 0.9);
+    }
+
+    #[test]
+    fn adaptive_fit_preserves_sum_and_is_deterministic() {
+        let a = hetero_poisson_1d(6);
+        let tp = TentativeP {
+            agg_of: (0..6).map(|i| i / 2).collect(),
+            n_coarse: 3,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
+        };
+        let d_inv = diag_inv(&a);
+        let p_csr = smooth_tentative_sa_multi(&a, &d_inv, &tp, 2.0 / 3.0, 0.0, 0, 0.0);
+        let u_f = sample_low_modes(&a, &d_inv, 3, 2, 2.0 / 3.0, 0x1234).unwrap();
+        let u_c = restrict_samples_to_coarse(&a, &tp, &u_f, AdaptiveWeight::Diag);
+        let mut first = p_csr.vals.clone();
+        adaptive_fit_values_only(
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut first,
+            &tp,
+            &u_f,
+            &u_c,
+            1e-10,
+            true,
+            0.0,
+        )
+        .unwrap();
+        let mut second = p_csr.vals.clone();
+        adaptive_fit_values_only(
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut second,
+            &tp,
+            &u_f,
+            &u_c,
+            1e-10,
+            true,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(first.len(), second.len());
+        for i in 0..first.len() {
+            assert!((first[i] - second[i]).abs() < 1e-12);
+        }
+        for row in 0..tp.agg_of.len() {
+            let rs = p_csr.row_ptr[row];
+            let re = p_csr.row_ptr[row + 1];
+            if rs == re {
+                continue;
+            }
+            let sum: f64 = first[rs..re].iter().sum();
+            assert!((sum - 1.0).abs() < 1e-8);
+        }
     }
 }

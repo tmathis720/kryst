@@ -19,6 +19,7 @@ pub use coarse_solver::CoarseSolve;
 pub mod coarsen;
 mod non_galerkin;
 pub(crate) mod prolong;
+pub use prolong::AdaptiveWeight;
 mod rap_ops;
 mod row_filter;
 pub mod strength;
@@ -29,8 +30,9 @@ use coarse_solver::{CoarseDenseLu, CoarseIlu, CoarseSolver};
 use coarsen::{AggAlgo, AggOpts, build_aggregates, lift_node_aggregates_to_dofs};
 use non_galerkin::{NgRowFilter, non_galerkin_filter_coarse};
 use prolong::{
-    CFInfo, ClassicalParams, ClassicalVariant, Pcsr, TentativeP, classical_pattern,
-    classical_values_only, smooth_sa_values_only_multi, smooth_tentative_sa_multi,
+    CFInfo, ClassicalParams, ClassicalVariant, Pcsr, TentativeP, adaptive_fit_values_only,
+    classical_pattern, classical_values_only, restrict_samples_to_coarse, sample_low_modes,
+    smooth_sa_values_only_multi, smooth_tentative_sa_multi,
 };
 use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
 use row_filter::{
@@ -226,6 +228,13 @@ pub struct AMGConfig {
     pub ieee_checks: bool,
     pub optimize_workspace: bool,
     pub jacobi_omega: f64,
+    pub adaptive_interp: bool,
+    pub adaptive_samples: usize,
+    pub adaptive_smooth_steps: usize,
+    pub adaptive_smooth_omega: f64,
+    pub adaptive_lambda: f64,
+    pub adaptive_enforce_sum1: bool,
+    pub adaptive_weight_mode: AdaptiveWeight,
     pub chebyshev_degree: usize,
     pub chebyshev_min_ratio: f64,
     pub chebyshev_recompute: bool,
@@ -295,6 +304,13 @@ impl Default for AMGConfig {
             ieee_checks: true,
             optimize_workspace: true,
             jacobi_omega: 2.0 / 3.0,
+            adaptive_interp: false,
+            adaptive_samples: 4,
+            adaptive_smooth_steps: 3,
+            adaptive_smooth_omega: 2.0 / 3.0,
+            adaptive_lambda: 1e-10,
+            adaptive_enforce_sum1: true,
+            adaptive_weight_mode: AdaptiveWeight::Diag,
             chebyshev_degree: 0,
             chebyshev_min_ratio: 0.3,
             chebyshev_recompute: true,
@@ -509,6 +525,35 @@ impl AMGBuilder {
     }
     pub fn jacobi_omega(mut self, w: f64) -> Self {
         self.cfg.jacobi_omega = w;
+        self.cfg.adaptive_smooth_omega = w;
+        self
+    }
+    pub fn adaptive_interp(mut self, on: bool) -> Self {
+        self.cfg.adaptive_interp = on;
+        self
+    }
+    pub fn adaptive_samples(mut self, r: usize) -> Self {
+        self.cfg.adaptive_samples = r;
+        self
+    }
+    pub fn adaptive_smooth_steps(mut self, nu: usize) -> Self {
+        self.cfg.adaptive_smooth_steps = nu;
+        self
+    }
+    pub fn adaptive_smooth_omega(mut self, w: f64) -> Self {
+        self.cfg.adaptive_smooth_omega = w;
+        self
+    }
+    pub fn adaptive_lambda(mut self, lam: f64) -> Self {
+        self.cfg.adaptive_lambda = lam;
+        self
+    }
+    pub fn adaptive_enforce_sum1(mut self, on: bool) -> Self {
+        self.cfg.adaptive_enforce_sum1 = on;
+        self
+    }
+    pub fn adaptive_weight_mode(mut self, mode: AdaptiveWeight) -> Self {
+        self.cfg.adaptive_weight_mode = mode;
         self
     }
     pub fn chebyshev_degree(mut self, k: usize) -> Self {
@@ -1376,6 +1421,7 @@ impl AMG {
             let pr = h.levels[l].p.row_ptr().to_vec();
             let pc = h.levels[l].p.col_idx().to_vec();
             let mut p_new_vals = vec![0.0f64; pc.len()];
+            let mut tp_opt: Option<TentativeP> = None;
             if let Some(ref cf) = h.levels[l].cf {
                 let s = Strength::from_csr(
                     &h.levels[l].a,
@@ -1423,6 +1469,7 @@ impl AMG {
                     &pc,
                     &mut p_new_vals,
                 )?;
+                tp_opt = Some(tp);
             }
             {
                 let ctx = LevelPostContext {
@@ -1436,6 +1483,45 @@ impl AMG {
                     d_inv: Some(&h.levels[l].diag_inv),
                 };
                 apply_post_interp(&self.cfg, &ctx, &pr, &pc, &mut p_new_vals)?;
+            }
+            if self.cfg.adaptive_interp
+                && self.cfg.adaptive_samples > 0
+                && h.levels[l].cf.is_none()
+                && h.levels[l + 1].a.nrows() > self.cfg.max_coarse_size
+                && tp_opt.as_ref().map_or(false, |tp| tp.num_functions == 1)
+            {
+                let omega = if self.cfg.adaptive_smooth_omega == 0.0 {
+                    self.cfg.jacobi_omega
+                } else {
+                    self.cfg.adaptive_smooth_omega
+                };
+                let samples = sample_low_modes(
+                    &h.levels[l].a,
+                    &h.levels[l].diag_inv,
+                    self.cfg.adaptive_samples,
+                    self.cfg.adaptive_smooth_steps,
+                    omega,
+                    0xC0FFEE,
+                )?;
+                if let Some(ref tp) = tp_opt {
+                    let coarse_samples = restrict_samples_to_coarse(
+                        &h.levels[l].a,
+                        tp,
+                        &samples,
+                        self.cfg.adaptive_weight_mode,
+                    );
+                    adaptive_fit_values_only(
+                        &pr,
+                        &pc,
+                        &mut p_new_vals,
+                        tp,
+                        &samples,
+                        &coarse_samples,
+                        self.cfg.adaptive_lambda,
+                        self.cfg.adaptive_enforce_sum1,
+                        self.cfg.interpolation_truncation,
+                    )?;
+                }
             }
             h.levels[l].p.values_mut().copy_from_slice(&p_new_vals);
             // Update R values from P via precomputed transpose mapping
@@ -2732,6 +2818,39 @@ fn build_hierarchy(
                 d_inv: Some(&d),
             };
             apply_post_interp(cfg, &ctx, &p_csr.row_ptr, &p_csr.col_idx, &mut p_csr.vals)?;
+        }
+        if cfg.adaptive_interp
+            && cfg.adaptive_samples > 0
+            && cf_opt.is_none()
+            && tp.num_functions == 1
+            && p_csr.n > cfg.max_coarse_size
+        {
+            let omega = if cfg.adaptive_smooth_omega == 0.0 {
+                cfg.jacobi_omega
+            } else {
+                cfg.adaptive_smooth_omega
+            };
+            let samples = sample_low_modes(
+                &a_cur,
+                &d,
+                cfg.adaptive_samples,
+                cfg.adaptive_smooth_steps,
+                omega,
+                0xC0FFEE,
+            )?;
+            let coarse_samples =
+                restrict_samples_to_coarse(&a_cur, &tp, &samples, cfg.adaptive_weight_mode);
+            adaptive_fit_values_only(
+                &p_csr.row_ptr,
+                &p_csr.col_idx,
+                &mut p_csr.vals,
+                &tp,
+                &samples,
+                &coarse_samples,
+                cfg.adaptive_lambda,
+                cfg.adaptive_enforce_sum1,
+                cfg.interpolation_truncation,
+            )?;
         }
         let p = CsrMatrix::from_csr(
             p_csr.m,
