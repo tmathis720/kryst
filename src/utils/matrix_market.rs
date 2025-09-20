@@ -279,8 +279,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
         // Parse dense array data (column-major order in Matrix Market)
         let mut entry_count = 0;
         for line in lines {
-            let line =
-                line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
+            let line = line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
             let trimmed_line = line.trim();
             if trimmed_line.is_empty() {
                 continue;
@@ -311,8 +310,7 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
     } else {
         // Parse sparse coordinate data
         for line in lines {
-            let line =
-                line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
+            let line = line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
             let trimmed_line = line.trim();
             if trimmed_line.is_empty() {
                 continue;
@@ -381,11 +379,8 @@ pub fn write_matrix_market<P: AsRef<Path>>(
     } else {
         "general"
     };
-    writeln!(
-        file,
-        "%%MatrixMarket matrix {format_type} real {symmetry}"
-    )
-    .map_err(|e| KError::SolveError(format!("Failed to write header: {e}")))?;
+    writeln!(file, "%%MatrixMarket matrix {format_type} real {symmetry}")
+        .map_err(|e| KError::SolveError(format!("Failed to write header: {e}")))?;
 
     // Write size information
     if data.is_coordinate {

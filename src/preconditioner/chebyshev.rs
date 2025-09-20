@@ -301,7 +301,6 @@ struct ChebScratch {
     v2: Vec<f64>,
 }
 
-
 /// Object-safe Chebyshev preconditioner
 pub struct ChebyshevPc {
     degree: usize,

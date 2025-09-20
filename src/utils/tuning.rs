@@ -477,9 +477,7 @@ impl ParameterTuner {
             total_configs
         };
 
-        println!(
-            "Starting parameter tuning: {configs_to_test} configurations to test"
-        );
+        println!("Starting parameter tuning: {configs_to_test} configurations to test");
 
         self.results.clear();
 

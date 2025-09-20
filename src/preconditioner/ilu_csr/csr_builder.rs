@@ -293,10 +293,11 @@ impl<S: Scalar> RowBuilder<S> for IlutRow<S> {
         if self.heap.len() < self.p {
             self.heap.push(elem);
         } else if let Some(peek) = self.heap.peek()
-            && mag > peek.0.mag {
-                let _ = self.heap.pop();
-                self.heap.push(elem);
-            }
+            && mag > peek.0.mag
+        {
+            let _ = self.heap.pop();
+            self.heap.push(elem);
+        }
     }
 
     fn finalize_into(&mut self, row_cols: &mut Vec<usize>, row_vals: &mut Vec<S>) {

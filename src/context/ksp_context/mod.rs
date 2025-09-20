@@ -741,9 +741,10 @@ impl KspContext {
         {
             self.work = Some(Workspace::new(m));
             if let Some(ref mut solver) = self.solver
-                && let Some(ref mut w) = self.work {
-                    solver.setup_workspace(w);
-                }
+                && let Some(ref mut w) = self.work
+            {
+                solver.setup_workspace(w);
+            }
         }
         self.setup_called = true;
         Ok(())

@@ -1,5 +1,4 @@
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Workspace {
     pub tmp1: Vec<f64>,
     pub tmp2: Vec<f64>,
@@ -32,7 +31,6 @@ pub struct GmresSpec {
     pub need_z: bool,
     pub block_s: usize,
 }
-
 
 impl Workspace {
     pub fn new(n: usize) -> Self {

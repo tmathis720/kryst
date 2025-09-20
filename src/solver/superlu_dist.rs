@@ -1011,9 +1011,7 @@ impl TriangularSolveData {
         self.pending_requests.push(request);
 
         #[cfg(feature = "logging")]
-        log::debug!(
-            "Started nonblocking send to rank {dest_rank} with tag {tag}"
-        );
+        log::debug!("Started nonblocking send to rank {dest_rank} with tag {tag}");
 
         Ok(())
     }
@@ -1039,9 +1037,7 @@ impl TriangularSolveData {
         self.pending_requests.push(request);
 
         #[cfg(feature = "logging")]
-        log::debug!(
-            "Started nonblocking recv from rank {source_rank} with tag {tag}"
-        );
+        log::debug!("Started nonblocking recv from rank {source_rank} with tag {tag}");
 
         Ok(())
     }
@@ -1104,9 +1100,7 @@ impl DistributedTriangularSolver {
         let num_blocks = n.div_ceil(block_size);
 
         #[cfg(feature = "logging")]
-        log::debug!(
-            "Starting forward solve: n={n}, blocks={num_blocks}, pattern={comm_pattern:?}"
-        );
+        log::debug!("Starting forward solve: n={n}, blocks={num_blocks}, pattern={comm_pattern:?}");
 
         // Initialize solve data structure
         let mut solve_data = TriangularSolveData::new(
@@ -1614,9 +1608,10 @@ impl SuperLuDistOptions {
             )));
         }
         if let Some(sz) = self.panel_size
-            && sz == 0 {
-                return Err(KError::InvalidInput("panel_size must be > 0".into()));
-            }
+            && sz == 0
+        {
+            return Err(KError::InvalidInput("panel_size must be > 0".into()));
+        }
         if self.enable_3d_factorization && self.process_grid_3d_depth == Some(0) {
             return Err(KError::InvalidInput("3D depth must be > 0".into()));
         }
@@ -2258,19 +2253,20 @@ impl SymbolicFactorizer {
                 let orig_col = col_indices[idx];
                 // Find permuted column position
                 if let Some(j) = col_perm.iter().position(|&c| c == orig_col)
-                    && j < k {
-                        // Follow path compression for efficiency
-                        let mut root = j;
-                        while ancestor[root] != root && ancestor[root] < k {
-                            root = ancestor[root];
-                        }
-
-                        // Set parent relationship
-                        if parent[root] == n {
-                            parent[root] = k;
-                        }
-                        ancestor[j] = k;
+                    && j < k
+                {
+                    // Follow path compression for efficiency
+                    let mut root = j;
+                    while ancestor[root] != root && ancestor[root] < k {
+                        root = ancestor[root];
                     }
+
+                    // Set parent relationship
+                    if parent[root] == n {
+                        parent[root] = k;
+                    }
+                    ancestor[j] = k;
+                }
             }
         }
 
@@ -2305,9 +2301,11 @@ impl SymbolicFactorizer {
                 for idx in start..end {
                     let orig_col = col_indices[idx];
                     if let Some(j) = col_perm.iter().position(|&c| c == orig_col)
-                        && j < col && !visited[j] {
-                            Self::dfs_reach(j, etree, visited, reach_set);
-                        }
+                        && j < col
+                        && !visited[j]
+                    {
+                        Self::dfs_reach(j, etree, visited, reach_set);
+                    }
                 }
             }
         }
@@ -2866,11 +2864,12 @@ impl MemoryPool {
     /// Get a vector from the pool or allocate new one
     pub fn get_f64_vector(&mut self, size: usize) -> Vec<f64> {
         if let Some(pool) = self.f64_pools.get_mut(&size)
-            && let Some(mut vec) = pool.pop() {
-                vec.clear();
-                vec.resize(size, 0.0);
-                return vec;
-            }
+            && let Some(mut vec) = pool.pop()
+        {
+            vec.clear();
+            vec.resize(size, 0.0);
+            return vec;
+        }
 
         // Allocate new vector if none available
         vec![0.0; size]
@@ -2897,11 +2896,12 @@ impl MemoryPool {
     /// Get a usize vector from the pool
     pub fn get_usize_vector(&mut self, size: usize) -> Vec<usize> {
         if let Some(pool) = self.usize_pools.get_mut(&size)
-            && let Some(mut vec) = pool.pop() {
-                vec.clear();
-                vec.resize(size, 0);
-                return vec;
-            }
+            && let Some(mut vec) = pool.pop()
+        {
+            vec.clear();
+            vec.resize(size, 0);
+            return vec;
+        }
 
         vec![0; size]
     }
@@ -3252,9 +3252,10 @@ impl SuperLuDistWorkspace {
     /// Return a temporary vector (for aggressive reuse)
     pub fn return_temp_vector(&mut self, name: &str) {
         if self.config.aggressive_reuse
-            && let Some(vector) = self.temp_vectors.remove(name) {
-                self.memory_pool.return_f64_vector(vector);
-            }
+            && let Some(vector) = self.temp_vectors.remove(name)
+        {
+            self.memory_pool.return_f64_vector(vector);
+        }
         // Otherwise keep the vector allocated for next use
     }
 
@@ -3750,18 +3751,20 @@ impl SuperLuDistSolver {
     /// Optimize workspace memory usage
     pub fn optimize_workspace(&mut self) -> Result<(), KError> {
         if let Some(ref mut data) = self.data
-            && let Some(ref mut solve_workspace) = data.solve_workspace {
-                solve_workspace.workspace.optimize();
-            }
+            && let Some(ref mut solve_workspace) = data.solve_workspace
+        {
+            solve_workspace.workspace.optimize();
+        }
         Ok(())
     }
 
     /// Clear workspace temporary data to free memory
     pub fn clear_workspace_temp_data(&mut self) -> Result<(), KError> {
         if let Some(ref mut data) = self.data
-            && let Some(ref mut solve_workspace) = data.solve_workspace {
-                solve_workspace.workspace.clear_temp_data();
-            }
+            && let Some(ref mut solve_workspace) = data.solve_workspace
+        {
+            solve_workspace.workspace.clear_temp_data();
+        }
         Ok(())
     }
 
@@ -4295,27 +4298,28 @@ impl SuperLuDistSolver {
         if !matches!(
             self.options.iterative_refinement,
             IterativeRefinement::NoRefine
-        )
-            && let Some(ref mut engine) = self.refinement_engine {
-                // Get the original matrix for residual computation
-                let data = self.data.as_ref().unwrap();
-                let local_matrix = data.local_matrix.as_ref().ok_or_else(|| {
-                    KError::SolveError("Local matrix not available for refinement".to_string())
-                })?;
+        ) && let Some(ref mut engine) = self.refinement_engine
+        {
+            // Get the original matrix for residual computation
+            let data = self.data.as_ref().unwrap();
+            let local_matrix = data.local_matrix.as_ref().ok_or_else(|| {
+                KError::SolveError("Local matrix not available for refinement".to_string())
+            })?;
 
-                // Perform iterative refinement
-                let _refinement_stats = engine.refine_solution(local_matrix, b, x, data, comm)?;
+            // Perform iterative refinement
+            let _refinement_stats = engine.refine_solution(local_matrix, b, x, data, comm)?;
 
-                #[cfg(feature = "logging")]
-                if self.options.enabled(1, 1)
-                    && let Some(stats) = engine.last_stats() {
-                        log::info!(
-                            "Iterative refinement completed: {} iterations, final residual: {:.2e}",
-                            stats.iterations,
-                            stats.final_residual_norm
-                        );
-                    }
+            #[cfg(feature = "logging")]
+            if self.options.enabled(1, 1)
+                && let Some(stats) = engine.last_stats()
+            {
+                log::info!(
+                    "Iterative refinement completed: {} iterations, final residual: {:.2e}",
+                    stats.iterations,
+                    stats.final_residual_norm
+                );
             }
+        }
 
         #[cfg(feature = "logging")]
         if self.options.enabled(1, 1) {

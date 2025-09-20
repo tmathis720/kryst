@@ -1410,9 +1410,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
-            info!(
-                "ILU Setup: {n} x {n} matrix with {original_nnz} nonzeros"
-            );
+            info!("ILU Setup: {n} x {n} matrix with {original_nnz} nonzeros");
             debug!("ILU: Using {:?} factorization type", self.config.ilu_type);
         }
 
