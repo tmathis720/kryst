@@ -59,3 +59,4 @@ mod legacy_bridge;
 mod near_nullspace;
 mod nodal;
 mod post_interp;
+mod spd;

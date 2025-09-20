@@ -13,6 +13,7 @@ fn ilu_coarse_matches_dense() {
         .grid_relax_type_all(RelaxType::Jacobi)
         .num_grid_sweeps(RelaxPhase::Coarsest, 0)
         .coarse_solve(CoarseSolve::DirectDense)
+        .require_spd(false)
         .build(&Mat::<f64>::zeros(0, 0))
         .unwrap();
     amg_dense.setup(&a).unwrap();
@@ -24,6 +25,7 @@ fn ilu_coarse_matches_dense() {
         .grid_relax_type_all(RelaxType::Jacobi)
         .num_grid_sweeps(RelaxPhase::Coarsest, 0)
         .coarse_solve(CoarseSolve::ILU)
+        .require_spd(false)
         .build(&Mat::<f64>::zeros(0, 0))
         .unwrap();
     amg_ilu.setup(&a).unwrap();
