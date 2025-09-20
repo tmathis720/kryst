@@ -249,6 +249,10 @@ pub struct AMGConfig {
     pub num_functions: usize,
     pub near_nullspace: Option<NearNullspace>,
     pub post_interp: PostInterpType,
+    pub flexible_level: Option<usize>,
+    pub flexible_iters: usize,
+    pub flexible_rtol: f64,
+    pub flexible_pc_sweeps: usize,
 }
 
 impl Default for AMGConfig {
@@ -320,6 +324,10 @@ impl Default for AMGConfig {
             num_functions: 1,
             near_nullspace: None,
             post_interp: PostInterpType::None,
+            flexible_level: None,
+            flexible_iters: 0,
+            flexible_rtol: 0.0,
+            flexible_pc_sweeps: 1,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -583,6 +591,26 @@ impl AMGBuilder {
         self
     }
 
+    pub fn flexible_level(mut self, level: usize) -> Self {
+        self.cfg.flexible_level = Some(level);
+        self
+    }
+
+    pub fn flexible_iters(mut self, iters: usize) -> Self {
+        self.cfg.flexible_iters = iters;
+        self
+    }
+
+    pub fn flexible_rtol(mut self, tol: f64) -> Self {
+        self.cfg.flexible_rtol = tol;
+        self
+    }
+
+    pub fn flexible_pc_sweeps(mut self, sweeps: usize) -> Self {
+        self.cfg.flexible_pc_sweeps = sweeps;
+        self
+    }
+
     pub fn build(self, _matrix: &Mat<f64>) -> Result<AMG, KError> {
         Ok(AMG::with_config(self.cfg))
     }
@@ -626,6 +654,22 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             return Err(KError::InvalidInput(format!(
                 "num_grid_sweeps for phase {i} must be >= 1"
             )));
+        }
+    }
+
+    if cfg.flexible_iters > 0 {
+        let level = cfg.flexible_level.ok_or_else(|| {
+            KError::InvalidInput("flexible_iters > 0 requires flexible_level to be set".into())
+        })?;
+        if level >= cfg.max_levels {
+            return Err(KError::InvalidInput(
+                "flexible_level must be less than max_levels".into(),
+            ));
+        }
+        if cfg.flexible_rtol < 0.0 {
+            return Err(KError::InvalidInput(
+                "flexible_rtol must be non-negative".into(),
+            ));
         }
     }
 
@@ -680,6 +724,24 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
                 | RelaxType::SymmetricGaussSeidel
                 | RelaxType::L1Jacobi
                 | RelaxType::Chebyshev => {}
+            }
+        }
+
+        if cfg.flexible_iters > 0 {
+            let level = cfg.flexible_level.expect("validated above");
+            let phase = if level == 0 {
+                RelaxPhase::Fine
+            } else {
+                RelaxPhase::Down
+            };
+            match cfg.grid_relax_type[phase.ix()] {
+                RelaxType::Jacobi | RelaxType::L1Jacobi | RelaxType::SymmetricGaussSeidel => {}
+                other => {
+                    return Err(KError::InvalidInput(format!(
+                        "SPD mode requires a symmetric positive definite smoother for flexible presmoothing; got {:?}",
+                        other
+                    )));
+                }
             }
         }
     }
@@ -1552,6 +1614,158 @@ impl AMG {
         Ok(())
     }
 
+    fn flexible_relax_supported(relax: RelaxType) -> bool {
+        matches!(
+            relax,
+            RelaxType::Jacobi | RelaxType::L1Jacobi | RelaxType::SymmetricGaussSeidel
+        )
+    }
+
+    fn apply_smoother_as_pc(
+        &self,
+        relax: RelaxType,
+        lvl: &AMGLevel,
+        sweeps: usize,
+        omega: f64,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        let n = lvl.a.nrows();
+        ws.ensure(n);
+        let r = &ws.residual[..n];
+        let z = &mut ws.fine_corr[..n];
+        let work = &mut ws.work[..n];
+        if sweeps == 0 {
+            z.copy_from_slice(r);
+            return Ok(());
+        }
+        match relax {
+            RelaxType::Jacobi => {
+                z.fill(0.0);
+                for _ in 0..sweeps {
+                    lvl.a.spmv_scaled(1.0, &z[..n], 0.0, work)?;
+                    for i in 0..n {
+                        z[i] += omega * lvl.diag_inv[i] * (r[i] - work[i]);
+                    }
+                }
+                Ok(())
+            }
+            RelaxType::L1Jacobi => {
+                let l1 = lvl
+                    .l1_inv
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("L1Jacobi cache missing".into()))?;
+                if l1.len() != n {
+                    return Err(KError::InvalidInput(
+                        "L1Jacobi cache has incorrect length".into(),
+                    ));
+                }
+                z.fill(0.0);
+                for _ in 0..sweeps {
+                    lvl.a.spmv_scaled(1.0, &z[..n], 0.0, work)?;
+                    for i in 0..n {
+                        z[i] += omega * l1[i] * (r[i] - work[i]);
+                    }
+                }
+                Ok(())
+            }
+            RelaxType::SymmetricGaussSeidel => {
+                z.fill(0.0);
+                Self::sym_gs(omega, &lvl.a, &lvl.diag_inv, r, z, sweeps)?;
+                Ok(())
+            }
+            other => Err(KError::InvalidInput(format!(
+                "RelaxType {other:?} cannot be used as a flexible preconditioner"
+            ))),
+        }
+    }
+
+    fn fcg_presmooth(
+        &self,
+        lvl: &AMGLevel,
+        rhs: &[f64],
+        sol: &mut [f64],
+        iters: usize,
+        rtol: f64,
+        pc_sweeps: usize,
+        relax: RelaxType,
+        omega: f64,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if iters == 0 {
+            return Ok(());
+        }
+        let n = lvl.a.nrows();
+        if rhs.len() != n || sol.len() != n {
+            return Err(KError::InvalidInput(
+                "fcg_presmooth: dimension mismatch".into(),
+            ));
+        }
+        ws.ensure(n);
+
+        lvl.a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])?;
+        for i in 0..n {
+            ws.residual[i] = rhs[i] - ws.work[i];
+        }
+
+        self.apply_smoother_as_pc(relax, lvl, pc_sweeps, omega, ws)?;
+        ws.temp[..n].copy_from_slice(&ws.fine_corr[..n]);
+        let mut rho = dot(&ws.residual[..n], &ws.fine_corr[..n]);
+        if !rho.is_finite() {
+            return Err(KError::InvalidInput(
+                "fcg_presmooth: non-finite rho encountered".into(),
+            ));
+        }
+        let mut rnorm_sq = dot(&ws.residual[..n], &ws.residual[..n]);
+        let mut tol = -1.0f64;
+        if rtol > 0.0 {
+            let base = rnorm_sq.sqrt().max(1e-30);
+            tol = base * rtol.max(1e-15);
+            if base <= tol {
+                return Ok(());
+            }
+        }
+
+        for _ in 0..iters {
+            lvl.a
+                .spmv_scaled(1.0, &ws.temp[..n], 0.0, &mut ws.work[..n])?;
+            let p_ap = dot(&ws.temp[..n], &ws.work[..n]);
+            if !p_ap.is_finite() || p_ap.abs() < 1e-300 {
+                break;
+            }
+
+            let alpha = rho / p_ap;
+            for i in 0..n {
+                sol[i] += alpha * ws.temp[i];
+                ws.residual[i] -= alpha * ws.work[i];
+            }
+
+            if tol > 0.0 {
+                rnorm_sq = dot(&ws.residual[..n], &ws.residual[..n]);
+                if rnorm_sq.sqrt() <= tol {
+                    break;
+                }
+            }
+
+            ws.coarse_rhs[..n].copy_from_slice(&ws.fine_corr[..n]);
+            self.apply_smoother_as_pc(relax, lvl, pc_sweeps, omega, ws)?;
+            let z = &ws.fine_corr[..n];
+            let mut rz_diff = 0.0f64;
+            for i in 0..n {
+                rz_diff += ws.residual[i] * (z[i] - ws.coarse_rhs[i]);
+            }
+            let beta = if rho.abs() > 0.0 { rz_diff / rho } else { 0.0 };
+            for i in 0..n {
+                ws.temp[i] = z[i] + beta * ws.temp[i];
+            }
+            let rho_new = dot(&ws.residual[..n], z);
+            if !rho_new.is_finite() {
+                break;
+            }
+            rho = rho_new;
+        }
+        Ok(())
+    }
+
     // single dispatch point for all relaxation strategies
     fn apply_relax(
         pol: &RelaxPolicy,
@@ -1715,16 +1929,38 @@ impl AMG {
             RelaxPhase::Down
         };
         with_timing(prof, &mut lv.pre_smooth, || {
-            Self::apply_relax(
-                pol,
-                phase_pre,
-                RelaxWhere::Pre,
-                &h.levels[level],
-                rhs,
-                sol,
-                ws,
-                &self.cfg,
-            )
+            let use_flexible =
+                self.cfg.flexible_level == Some(level) && self.cfg.flexible_iters > 0;
+            if use_flexible {
+                let relax = pol.kind[phase_pre.ix()];
+                if !Self::flexible_relax_supported(relax) {
+                    return Err(KError::InvalidInput(format!(
+                        "RelaxType {relax:?} cannot be used for flexible presmoothing",
+                    )));
+                }
+                self.fcg_presmooth(
+                    &h.levels[level],
+                    rhs,
+                    sol,
+                    self.cfg.flexible_iters,
+                    self.cfg.flexible_rtol,
+                    self.cfg.flexible_pc_sweeps,
+                    relax,
+                    pol.omega,
+                    ws,
+                )
+            } else {
+                Self::apply_relax(
+                    pol,
+                    phase_pre,
+                    RelaxWhere::Pre,
+                    &h.levels[level],
+                    rhs,
+                    sol,
+                    ws,
+                    &self.cfg,
+                )
+            }
         })?;
 
         // residual = rhs - A * sol
@@ -3592,6 +3828,32 @@ mod tests {
         }
     }
 
+    fn level_from_matrix(a: &CsrMatrix<f64>) -> AMGLevel {
+        let n = a.nrows();
+        AMGLevel {
+            a: a.clone(),
+            p: CsrMatrix::identity(n),
+            r: CsrMatrix::identity(n),
+            diag_inv: diag_inv_from_csr(a).unwrap(),
+            l1_inv: None,
+            cheb: None,
+            agg_of: vec![0; n.max(1)],
+            is_c: Vec::new(),
+            cf: None,
+            p2r_pos: vec![],
+            num_functions: 1,
+            layout: None,
+            nns: None,
+            a_next_pat: None,
+            a_next_pat_ng: None,
+            rap_full2ng_pos: None,
+            r_row_ptr: None,
+            r_col_idx: None,
+            r_vals_scratch: None,
+            coarse_solver: None,
+        }
+    }
+
     #[test]
     fn phase_selection_logic() {
         reset_relax_counts();
@@ -3619,6 +3881,94 @@ mod tests {
         assert_eq!(counts[RelaxPhase::Down.ix()], 1);
         assert_eq!(counts[RelaxPhase::Up.ix()], 1);
         assert_eq!(counts[RelaxPhase::Coarsest.ix()], 0);
+    }
+
+    #[test]
+    fn fcg_presmooth_reduces_residual() {
+        let n = 10;
+        let a = poisson1d(n);
+        let lvl = level_from_matrix(&a);
+        let rhs = vec![1.0; n];
+        let mut sol = vec![0.0; n];
+        let mut ws = AMGWorkspace::new(n);
+        let mut amg = AMG::default();
+        amg.cfg.require_spd = false;
+
+        amg.fcg_presmooth(
+            &lvl,
+            &rhs,
+            &mut sol,
+            5,
+            0.0,
+            1,
+            RelaxType::Jacobi,
+            amg.cfg.jacobi_omega,
+            &mut ws,
+        )
+        .unwrap();
+
+        let mut work = vec![0.0; n];
+        a.spmv_scaled(1.0, &sol, 0.0, &mut work).unwrap();
+        let mut r_out = 0.0;
+        for i in 0..n {
+            let ri = rhs[i] - work[i];
+            r_out += ri * ri;
+        }
+        let r0 = (rhs.iter().map(|v| v * v).sum::<f64>()).sqrt();
+        assert!(r_out.sqrt() < r0);
+    }
+
+    #[test]
+    fn flexible_presmooth_reduces_relax_calls() {
+        let make_amg = || AMG {
+            state: Some(AmgHierarchy {
+                levels: vec![identity_level(), identity_level()],
+                policy: RelaxPolicy {
+                    kind: [RelaxType::Jacobi; 4],
+                    sweeps: [1, 1, 1, 0],
+                    omega: 1.0,
+                },
+                coarse_solve: CoarseSolve::DirectDense,
+            }),
+            ..Default::default()
+        };
+
+        let mut amg_std = make_amg();
+        amg_std.cfg.require_spd = false;
+        reset_relax_counts();
+        let rhs = [1.0];
+        let mut sol = [0.0];
+        amg_std.apply(PcSide::Left, &rhs, &mut sol).unwrap();
+        let baseline = get_relax_counts()[RelaxPhase::Fine.ix()];
+
+        let mut amg_flex = make_amg();
+        amg_flex.cfg.require_spd = false;
+        amg_flex.cfg.flexible_level = Some(0);
+        amg_flex.cfg.flexible_iters = 3;
+        amg_flex.cfg.flexible_pc_sweeps = 1;
+        reset_relax_counts();
+        sol[0] = 0.0;
+        amg_flex.apply(PcSide::Left, &rhs, &mut sol).unwrap();
+        let flex_counts = get_relax_counts()[RelaxPhase::Fine.ix()];
+        assert!(flex_counts < baseline);
+    }
+
+    #[test]
+    fn flexible_presmooth_spd_guard() {
+        let a = poisson1d(4);
+        let mut amg = AMGBuilder::new()
+            .grid_relax_type_all(RelaxType::GaussSeidel)
+            .flexible_level(0)
+            .flexible_iters(2)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        let err = amg.setup(&a).unwrap_err();
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.contains("flexible presmoothing"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
