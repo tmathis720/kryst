@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{convert::csr_from_linop, sparse::CsrMatrix};
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 use faer::Mat;
 
 #[cfg(feature = "rayon")]
@@ -123,14 +123,14 @@ pub fn get_relax_counts() -> [usize; 4] {
 
 // ===== Config + Builder ======================================================
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CycleType {
     #[default]
     V,
-    W { gamma: usize },
+    W {
+        gamma: usize,
+    },
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NgSymmetry {
@@ -203,6 +203,9 @@ pub struct AMGConfig {
     pub rap_max_elements_per_row: usize,
     pub keep_transpose: bool,
     pub keep_pivot_in_rap: bool,
+    pub require_spd: bool,
+    pub spd_diag_floor: f64,
+    pub forbid_non_galerkin_in_spd: bool,
     pub grid_relax_type: [RelaxType; 4], // [Fine, Down, Up, Coarsest]
     pub num_grid_sweeps: [usize; 4],     // [Fine, Down, Up, Coarsest]
     // legacy shims
@@ -263,6 +266,9 @@ impl Default for AMGConfig {
             rap_max_elements_per_row: 0,
             keep_transpose: true,
             keep_pivot_in_rap: true,
+            require_spd: true,
+            spd_diag_floor: 0.0,
+            forbid_non_galerkin_in_spd: true,
             grid_relax_type: [RelaxType::GaussSeidel; 4],
             num_grid_sweeps: [1; 4],
             pre_sweeps: 1,
@@ -393,6 +399,18 @@ impl AMGBuilder {
     }
     pub fn keep_pivot_in_rap(mut self, yes: bool) -> Self {
         self.cfg.keep_pivot_in_rap = yes;
+        self
+    }
+    pub fn require_spd(mut self, on: bool) -> Self {
+        self.cfg.require_spd = on;
+        self
+    }
+    pub fn spd_diag_floor(mut self, eps: f64) -> Self {
+        self.cfg.spd_diag_floor = eps.max(0.0);
+        self
+    }
+    pub fn forbid_non_galerkin_in_spd(mut self, on: bool) -> Self {
+        self.cfg.forbid_non_galerkin_in_spd = on;
         self
     }
     pub fn interpolation_truncation(self, v: f64) -> Self {
@@ -580,11 +598,12 @@ impl Default for AMGBuilder {
 
 fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<(), KError> {
     if !matches!(coarse_solver, CoarseSolve::CG | CoarseSolve::ILU)
-        && cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0 {
-            return Err(KError::InvalidInput(
-                "num_grid_sweeps[Coarsest] must be 0 when coarse_solve is DirectDense".into(),
-            ));
-        }
+        && cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0
+    {
+        return Err(KError::InvalidInput(
+            "num_grid_sweeps[Coarsest] must be 0 when coarse_solve is DirectDense".into(),
+        ));
+    }
 
     for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
         match rt {
@@ -607,6 +626,61 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             return Err(KError::InvalidInput(format!(
                 "num_grid_sweeps for phase {i} must be >= 1"
             )));
+        }
+    }
+
+    if cfg.require_spd {
+        if matches!(coarse_solver, CoarseSolve::ILU) {
+            return Err(KError::InvalidInput(
+                "SPD mode requires DirectDense or CG as the coarse solver; ILU is not SPD-safe"
+                    .into(),
+            ));
+        }
+
+        if cfg.non_galerkin.enabled && cfg.forbid_non_galerkin_in_spd {
+            return Err(KError::InvalidInput(
+                concat!(
+                    "Non-Galerkin filtering is disabled when require_spd is true ",
+                    "(set forbid_non_galerkin_in_spd = false to override)."
+                )
+                .into(),
+            ));
+        }
+
+        let down_sweeps = cfg.num_grid_sweeps[RelaxPhase::Down.ix()];
+        let up_sweeps = cfg.num_grid_sweeps[RelaxPhase::Up.ix()];
+        if down_sweeps != up_sweeps {
+            return Err(KError::InvalidInput(
+                "SPD mode requires symmetric pre/post smoothing counts".into(),
+            ));
+        }
+        if cfg.pre_sweeps != cfg.post_sweeps {
+            return Err(KError::InvalidInput(
+                "SPD mode requires pre_sweeps == post_sweeps".into(),
+            ));
+        }
+
+        let down_type = cfg.grid_relax_type[RelaxPhase::Down.ix()];
+        let up_type = cfg.grid_relax_type[RelaxPhase::Up.ix()];
+        if down_type != up_type {
+            return Err(KError::InvalidInput(
+                "SPD mode requires matching relax types for Down and Up phases".into(),
+            ));
+        }
+
+        for phase in [RelaxPhase::Fine, RelaxPhase::Down, RelaxPhase::Up] {
+            match cfg.grid_relax_type[phase.ix()] {
+                RelaxType::GaussSeidelBackward | RelaxType::HybridGaussSeidel => {
+                    return Err(KError::InvalidInput(
+                        "SPD mode does not support asymmetric Gauss-Seidel variants".into(),
+                    ));
+                }
+                RelaxType::Jacobi
+                | RelaxType::GaussSeidel
+                | RelaxType::SymmetricGaussSeidel
+                | RelaxType::L1Jacobi
+                | RelaxType::Chebyshev => {}
+            }
         }
     }
     Ok(())
@@ -1047,7 +1121,10 @@ impl AMG {
     pub fn builder() -> AMGBuilder {
         AMGBuilder::new()
     }
-    pub fn with_config(cfg: AMGConfig) -> Self {
+    pub fn with_config(mut cfg: AMGConfig) -> Self {
+        if cfg.spd_diag_floor < 0.0 {
+            cfg.spd_diag_floor = 0.0;
+        }
         Self {
             cfg,
             ..Default::default()
@@ -1076,14 +1153,10 @@ impl AMG {
 
         // Update finest A_0 and diag(A_0)^{-1}
         h.levels[0].a = fine.clone();
-        h.levels[0].diag_inv = diag_inv_from_csr(&h.levels[0].a)?;
+        h.levels[0].diag_inv = diag_inv_from_csr_cfg(&h.levels[0].a, &self.cfg)?;
 
-        let need_l1 = self
-            .cfg
-            .grid_relax_type.contains(&RelaxType::L1Jacobi);
-        let need_cheb = self
-            .cfg
-            .grid_relax_type.contains(&RelaxType::Chebyshev);
+        let need_l1 = self.cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
+        let need_cheb = self.cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
 
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
@@ -1161,6 +1234,14 @@ impl AMG {
                 for (pi, &ri) in p2r.iter().enumerate() {
                     rvalsm[ri] = pvals[pi];
                 }
+                if cfg!(debug_assertions) {
+                    let step = (pvals.len() / 7).max(1);
+                    for s in (0..pvals.len()).step_by(step) {
+                        let ri = p2r[s];
+                        let dv = (pvals[s] - rvalsm[ri]).abs();
+                        debug_assert!(dv <= 1e-12, "R != P^T at sample {s}");
+                    }
+                }
             }
             // Recompute A_{l+1} values by RAP numeric using fixed pattern
             if h.levels[l].a_next_pat.is_some() {
@@ -1222,7 +1303,7 @@ impl AMG {
                         vals,
                     );
                 }
-                h.levels[l + 1].diag_inv = diag_inv_from_csr(&h.levels[l + 1].a)?;
+                h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&h.levels[l + 1].a, &self.cfg)?;
             } else {
                 // Safety fallback: full RAP (structure + values)
                 let a_coarse = if self.cfg.keep_transpose {
@@ -1231,7 +1312,7 @@ impl AMG {
                     let r_tmp = build_r_from_p(&mut h.levels[l]);
                     rap(&r_tmp, &h.levels[l].a, &h.levels[l].p)?
                 };
-                h.levels[l + 1].diag_inv = diag_inv_from_csr(&a_coarse)?;
+                h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&a_coarse, &self.cfg)?;
                 h.levels[l + 1].a = a_coarse;
             }
             if l + 1 == h.coarsest_ix() && matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
@@ -1799,6 +1880,65 @@ impl AMG {
         }
         out
     }
+
+    #[cfg(test)]
+    pub(crate) fn debug_levels_r_equals_pt(&self) -> bool {
+        let Some(h) = self.state.as_ref() else {
+            return true;
+        };
+        if !self.cfg.keep_transpose {
+            return true;
+        }
+        for lvl in 0..h.coarsest_ix() {
+            let pvals = h.levels[lvl].p.values();
+            let rvals = h.levels[lvl].r.values();
+            let map = &h.levels[lvl].p2r_pos;
+            if pvals.len() != map.len() || rvals.len() < map.len() {
+                return false;
+            }
+            for (pi, &ri) in map.iter().enumerate() {
+                if ri >= rvals.len() {
+                    return false;
+                }
+                if (pvals[pi] - rvals[ri]).abs() > 1e-12 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(debug_assertions)]
+    fn spd_probe(&self) -> Result<(), KError> {
+        if !self.cfg.require_spd {
+            return Ok(());
+        }
+        let h = self
+            .state
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let n = h.finest().a.nrows();
+        if n == 0 {
+            return Ok(());
+        }
+        let mut x = vec![0.0; n];
+        let mut y = vec![0.0; n];
+        let mut ax = vec![0.0; n];
+        for t in 0..3 {
+            for i in 0..n {
+                x[i] = ((i + 7919 * t) % 127) as f64 - 63.0;
+            }
+            h.finest().a.spmv_scaled(1.0, &x, 0.0, &mut ax)?;
+            y.fill(0.0);
+            self.apply(PcSide::Left, &ax, &mut y)?;
+            let qf = x.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
+            debug_assert!(
+                qf.is_finite() && qf > 0.0,
+                "Preconditioned operator is not SPD"
+            );
+        }
+        Ok(())
+    }
 }
 
 // ===== Preconditioner trait (new API) =======================================
@@ -1822,20 +1962,31 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(sid);
         self.last_vid = Some(vid);
-        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1
-            && let Some(s) = self.stats.as_ref() {
-                print_setup_tables(s);
-            }
+        if self.cfg.logging_level >= 2
+            && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref()
+        {
+            print_setup_tables(s);
+        }
+        #[cfg(debug_assertions)]
+        if self.cfg.require_spd {
+            self.spd_probe()?;
+        }
         Ok(())
     }
 
-    fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
         if r.len() != z.len() {
             return Err(KError::InvalidInput(format!(
                 "AMG.apply: r/z size mismatch: {} vs {}",
                 r.len(),
                 z.len()
             )));
+        }
+        if self.cfg.require_spd && side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "AMG in SPD mode supports only Left preconditioning for CG-safe use".into(),
+            ));
         }
         let h = self
             .state
@@ -1847,7 +1998,7 @@ impl Preconditioner for AMG {
                 .csr
                 .as_ref()
                 .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
-            let d = diag_inv_from_csr(a)?;
+            let d = diag_inv_from_csr_cfg(a, &self.cfg)?;
             let mut ws = AMGWorkspace::new(r.len());
             Self::jacobi_smooth_sparse(self.cfg.jacobi_omega, a, &d, r, z, 10, &mut ws)
         } else {
@@ -1878,6 +2029,15 @@ impl Preconditioner for AMG {
         }
     }
 
+    fn capabilities(&self) -> PcCaps {
+        let mut caps = PcCaps::default();
+        if self.cfg.require_spd {
+            caps.is_spd = true;
+            caps.side_restriction = Some(PcSide::Left);
+        }
+        caps
+    }
+
     fn supports_numeric_update(&self) -> bool {
         true
     }
@@ -1888,10 +2048,12 @@ impl Preconditioner for AMG {
         self.refresh_numeric(&csr)?;
         self.csr = Some(csr);
         self.last_vid = Some(op.values_id());
-        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1
-            && let Some(s) = self.stats.as_ref() {
-                print_setup_tables(s);
-            }
+        if self.cfg.logging_level >= 2
+            && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref()
+        {
+            print_setup_tables(s);
+        }
         Ok(())
     }
 
@@ -1903,10 +2065,12 @@ impl Preconditioner for AMG {
         self.csr = Some(csr);
         self.last_sid = Some(op.structure_id());
         self.last_vid = Some(op.values_id());
-        if self.cfg.logging_level >= 2 && self.cfg.print_level >= 1
-            && let Some(s) = self.stats.as_ref() {
-                print_setup_tables(s);
-            }
+        if self.cfg.logging_level >= 2
+            && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref()
+        {
+            print_setup_tables(s);
+        }
         Ok(())
     }
 }
@@ -1935,15 +2099,13 @@ fn build_hierarchy(
     let mut timings: Vec<LevelSetupTiming> = Vec::new();
     let t_setup_all = if do_stats { Some(tic()) } else { None };
 
-    let need_l1 = cfg
-        .grid_relax_type.contains(&RelaxType::L1Jacobi);
-    let need_cheb = cfg
-        .grid_relax_type.contains(&RelaxType::Chebyshev);
+    let need_l1 = cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
+    let need_cheb = cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
 
     // Level 0 (finest)
     let mut lt0 = LevelSetupTiming::default();
     let t = tic();
-    let diag0 = diag_inv_from_csr(&a_cur)?;
+    let diag0 = diag_inv_from_csr_cfg(&a_cur, cfg)?;
     if do_stats {
         lt0.diag = toc(t);
         lt0.total = lt0.diag;
@@ -2074,9 +2236,10 @@ fn build_hierarchy(
         };
         if nns_opt.is_none()
             && let Some(ref lay) = layout
-                && num_functions < lay.block_size {
-                    num_functions = lay.block_size;
-                }
+            && num_functions < lay.block_size
+        {
+            num_functions = lay.block_size;
+        }
         let comp_opt = if nns_opt.is_none() {
             layout.as_ref().map(|lay| lay.comp_of.clone())
         } else {
@@ -2089,7 +2252,7 @@ fn build_hierarchy(
             nns: nns_opt.clone(),
             comp_of: comp_opt.clone(),
         };
-        let d = diag_inv_from_csr(&a_cur)?;
+        let d = diag_inv_from_csr_cfg(&a_cur, cfg)?;
         let s_sym = s.symmetrize();
         let (mut p_csr, cf_opt): (Pcsr, Option<CFInfo>) =
             with_timing(do_stats, &mut lt.prolong, || {
@@ -2175,6 +2338,15 @@ fn build_hierarchy(
             r_col_idx.clone(),
             r_vals.clone(),
         );
+        debug_assert_eq!(p_csr.col_idx.len(), p2r_pos.len());
+        debug_assert_eq!(r_vals.len(), p2r_pos.len());
+        for (pi, &ri) in p2r_pos.iter().enumerate() {
+            debug_assert!(ri < r_vals.len(), "p2r_pos out of range");
+            debug_assert!(
+                (p_csr.vals[pi] - r_vals[ri]).abs() <= 1e-12,
+                "R != P^T at index {pi}"
+            );
+        }
 
         // 4) Coarse operator A_c symbolic and numeric
         let pat = with_timing(do_stats, &mut lt.rap_symbolic, || {
@@ -2204,7 +2376,10 @@ fn build_hierarchy(
             );
         }
 
-        let use_ng = cfg.non_galerkin.enabled && (level + 1) >= cfg.non_galerkin.start_level;
+        let mut use_ng = cfg.non_galerkin.enabled && (level + 1) >= cfg.non_galerkin.start_level;
+        if cfg.require_spd && cfg.forbid_non_galerkin_in_spd {
+            use_ng = false;
+        }
         let (a_coarse, ng_pat_opt, map_opt) = if use_ng {
             let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
                 &pat,
@@ -2235,7 +2410,9 @@ fn build_hierarchy(
             );
             (a_full, None, None)
         };
-        let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || diag_inv_from_csr(&a_coarse))?;
+        let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || {
+            diag_inv_from_csr_cfg(&a_coarse, cfg)
+        })?;
         lt.total = lt.strength
             + lt.aggregate
             + lt.prolong
@@ -2330,10 +2507,11 @@ fn build_hierarchy(
             });
             let ls_len = level_stats.len();
             if ls_len >= 2
-                && let Some(prev) = level_stats.get_mut(ls_len - 2) {
-                    prev.nnz_p = p.nnz();
-                    prev.nnz_r = r.nnz();
-                }
+                && let Some(prev) = level_stats.get_mut(ls_len - 2)
+            {
+                prev.nnz_p = p.nnz();
+                prev.nnz_r = r.nnz();
+            }
         }
 
         if a_cur.nrows() >= n {
@@ -2464,7 +2642,7 @@ fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<
                         ng_pat.col_idx.clone(),
                         ng_vals,
                     );
-                    levels[l + 1].diag_inv = diag_inv_from_csr(&levels[l + 1].a)?;
+                    levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&levels[l + 1].a, cfg)?;
                 }
             }
         }
@@ -2487,7 +2665,11 @@ fn l1_diag_inv(a: &CsrMatrix<f64>) -> Vec<f64> {
     inv
 }
 
-fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
+fn diag_inv_from_csr_with_floor(
+    a: &CsrMatrix<f64>,
+    floor: f64,
+    require_positive: bool,
+) -> Result<Vec<f64>, KError> {
     let n = a.nrows();
     let mut d = vec![0.0; n];
     for i in 0..n {
@@ -2500,14 +2682,33 @@ fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
                 break;
             }
         }
-        if aii.abs() < 1e-14 {
+        if floor > 0.0 && aii <= 0.0 {
+            aii += floor;
+        }
+        if require_positive && aii <= 0.0 {
             return Err(KError::SolveError(format!(
-                "near-zero diagonal at row {i}"
+                "non-positive diagonal at row {i} (value {aii})"
             )));
+        }
+        if aii.abs() < 1e-14 {
+            return Err(KError::SolveError(format!("near-zero diagonal at row {i}")));
         }
         d[i] = 1.0 / aii;
     }
     Ok(d)
+}
+
+fn diag_inv_from_csr_cfg(a: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<Vec<f64>, KError> {
+    let floor = if cfg.require_spd {
+        cfg.spd_diag_floor.max(0.0)
+    } else {
+        0.0
+    };
+    diag_inv_from_csr_with_floor(a, floor, cfg.require_spd)
+}
+
+fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
+    diag_inv_from_csr_with_floor(a, 0.0, false)
 }
 
 fn estimate_lambda_max(a: &CsrMatrix<f64>, d_inv: &[f64], iters: usize) -> f64 {
@@ -3405,10 +3606,11 @@ mod tests {
             policy,
             coarse_solve: CoarseSolve::DirectDense,
         };
-        let amg = AMG {
+        let mut amg = AMG {
             state: Some(hier),
             ..Default::default()
         };
+        amg.cfg.require_spd = false;
         let rhs = [1.0];
         let mut sol = [0.0];
         amg.apply(PcSide::Left, &rhs, &mut sol).unwrap();
@@ -3728,6 +3930,7 @@ mod tests {
             .relaxation_type(RelaxType::Jacobi)
             .grid_relax_type_all(RelaxType::Jacobi)
             .coarse_solve(CoarseSolve::ILU)
+            .require_spd(false)
             .build(&Mat::<f64>::zeros(0, 0))
             .unwrap();
         amg.setup(&a).unwrap();
