@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
-use crate::matrix::{convert::csr_from_linop, sparse::CsrMatrix};
+use crate::matrix::{convert::csr_from_linop, sparse::CsrMatrix, spmv::csr_spmm_dense};
+use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 use faer::Mat;
 
@@ -1190,6 +1191,69 @@ impl AMG {
         Self {
             cfg,
             ..Default::default()
+        }
+    }
+
+    pub fn extract_coarse_space(&self, opts: &DeflationOptions) -> Result<AmgCoarseSpace, KError> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        if state.levels.is_empty() {
+            return Err(KError::InvalidInput("AMG hierarchy empty".into()));
+        }
+        match opts.z_source {
+            ZSource::CoarsestIdentity { cap_k } => {
+                let coarse_ix = state.coarsest_ix();
+                let n_coarse = state.levels[coarse_ix].a.nrows();
+                let k_full = n_coarse;
+                let cap = cap_k.unwrap_or(k_full).min(k_full);
+                let mut z = Mat::<f64>::zeros(n_coarse, cap);
+                for i in 0..cap {
+                    z[(i, i)] = 1.0;
+                }
+                let mut current = z;
+                for lvl in (0..coarse_ix).rev() {
+                    let p = &state.levels[lvl].p;
+                    let mut next = Mat::<f64>::zeros(p.nrows(), cap);
+                    csr_spmm_dense(p, current.as_ref(), next.as_mut())?;
+                    current = next;
+                }
+                Ok(AmgCoarseSpace {
+                    z: current,
+                    local_range: None,
+                })
+            }
+            ZSource::NearNullspace => {
+                let finest = &state.levels[0];
+                let basis = finest
+                    .nns
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("near-nullspace unavailable".into()))?;
+                let k = basis.len();
+                if k == 0 {
+                    return Err(KError::InvalidInput("near-nullspace empty".into()));
+                }
+                let n = finest.a.nrows();
+                let mut z = Mat::<f64>::zeros(n, k);
+                for (j, vec) in basis.iter().enumerate() {
+                    if vec.len() != n {
+                        return Err(KError::InvalidInput(
+                            "near-nullspace vector has wrong length".into(),
+                        ));
+                    }
+                    for i in 0..n {
+                        z[(i, j)] = vec[i];
+                    }
+                }
+                Ok(AmgCoarseSpace {
+                    z,
+                    local_range: None,
+                })
+            }
+            ZSource::External => Err(KError::InvalidInput(
+                "ZSource::External requires user-provided coarse space".into(),
+            )),
         }
     }
 

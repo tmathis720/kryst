@@ -51,8 +51,7 @@ use std::str::FromStr;
 /// - Left: Solve M⁻¹Ax = M⁻¹b
 /// - Right: Solve AM⁻¹y = b, then x = M⁻¹y  
 /// - Symmetric: Apply both left and right preconditioning (M₁⁻¹AM₂⁻¹)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PcSide {
     /// Left preconditioning: M⁻¹Ax = M⁻¹b
     #[default]
@@ -75,7 +74,6 @@ impl FromStr for PcSide {
         }
     }
 }
-
 
 /// Matrix operation selector for preconditioner application.
 ///
@@ -378,6 +376,7 @@ pub mod block_jacobi;
 pub mod builders;
 pub mod chain;
 pub mod chebyshev;
+pub mod deflation;
 pub mod direct;
 pub mod ilu;
 pub mod ilu_csr;
@@ -397,6 +396,7 @@ pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCs
 pub use asm::AdditiveSchwarz;
 pub use chain::PcChain;
 pub use chebyshev::{Chebyshev, ChebyshevPre};
+pub use deflation::{AmgCoarseSpace, DeflationOptions, DeflationPC, ZSource, with_amg_deflation};
 pub use direct::SuperLuDistPc;
 #[cfg(feature = "dense-direct")]
 pub use direct::{LuPc, QrPc};
