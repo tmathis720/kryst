@@ -2968,8 +2968,8 @@ impl AMG {
         for i in 0..n {
             residual[i] = rhs[i] - work[i];
         }
-        g.spmv_scaled(1.0, residual, 0.0, tmp)?;
-        gt.spmv_scaled(1.0, tmp, 0.0, work)?;
+        gt.spmv_scaled(1.0, residual, 0.0, tmp)?;
+        g.spmv_scaled(1.0, tmp, 0.0, work)?;
         for i in 0..n {
             z[i] += tau * work[i];
         }
