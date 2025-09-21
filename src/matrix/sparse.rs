@@ -18,6 +18,9 @@ use faer::sparse::{
 use faer::traits::ComplexField;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
+#[cfg(feature = "simd")]
+use crate::matrix::spmv::{SpmvPlan, SpmvTuning, build_plan as build_spmv_plan};
+
 /// CSR matrix wrapper for Faer sparse matrices.
 ///
 /// Use [`row_ptr`], [`col_idx`], and [`values`] to access the raw CSR
@@ -36,6 +39,8 @@ pub struct CsrMatrix<T> {
     /// factorization and triangular solve kernels without converting to a
     /// dense representation.
     diag_pos: Vec<Option<usize>>,
+    #[cfg(feature = "simd")]
+    spmv_plan: Option<SpmvPlan>,
 }
 
 impl<
@@ -65,6 +70,8 @@ impl<
         let mut this = Self {
             inner,
             diag_pos: Vec::new(),
+            #[cfg(feature = "simd")]
+            spmv_plan: None,
         };
         this.build_diag_pos();
         this
@@ -197,6 +204,18 @@ impl<
             )));
         }
 
+        #[cfg(feature = "simd")]
+        if let Some(plan) = self.spmv_plan.as_ref() {
+            unsafe {
+                let alpha = *(&alpha as *const T as *const f64);
+                let beta = *(&beta as *const T as *const f64);
+                let x = std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len());
+                let y_slice = std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len());
+                plan.apply(alpha, x, beta, y_slice);
+            }
+            return Ok(());
+        }
+
         for i in 0..self.nrows() {
             let row_start = self.inner.row_ptr()[i];
             let row_end = self.inner.row_ptr()[i + 1];
@@ -289,6 +308,8 @@ impl<
     /// ILU factorizations where the sparsity pattern does not change.
     #[inline]
     pub fn row_values_mut(&mut self, i: usize) -> &mut [T] {
+        #[cfg(feature = "simd")]
+        self.invalidate_spmv_plan();
         let start = self.inner.row_ptr()[i];
         let end = self.inner.row_ptr()[i + 1];
         &mut self.inner.val_mut()[start..end]
@@ -332,7 +353,31 @@ impl<
     /// Mutably borrow the CSR value array (length = nnz).
     #[inline]
     pub fn values_mut(&mut self) -> &mut [T] {
+        #[cfg(feature = "simd")]
+        self.invalidate_spmv_plan();
         self.inner.val_mut()
+    }
+}
+
+#[cfg(feature = "simd")]
+impl<T> CsrMatrix<T> {
+    #[inline]
+    fn invalidate_spmv_plan(&mut self) {
+        self.spmv_plan = None;
+    }
+}
+
+#[cfg(feature = "simd")]
+impl CsrMatrix<f64> {
+    /// Builds (or rebuilds) the SIMD-aware SpMV plan using the provided tuning.
+    pub fn build_spmv_plan(&mut self, tuning: &SpmvTuning) {
+        self.spmv_plan = Some(build_spmv_plan(self, tuning));
+    }
+
+    /// Clears any cached SpMV plan, forcing the scalar fallback on the next
+    /// application until [`build_spmv_plan`] is invoked again.
+    pub fn clear_spmv_plan(&mut self) {
+        self.spmv_plan = None;
     }
 }
 

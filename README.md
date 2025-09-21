@@ -76,10 +76,17 @@ kryst = "1.0"
 ```toml
 [features]
 default = ["rayon", "logging"]  # Shared-memory parallelism + monitoring
-rayon = ["dep:rayon"]           # Rayon-based parallel execution  
+rayon = ["dep:rayon"]           # Rayon-based parallel execution
 mpi = ["dep:mpi"]              # Distributed-memory parallelism via MPI
 logging = ["dep:log"]          # Iteration monitoring and profiling
+simd = []                      # Auto-tuned std::simd sparse mat-vec kernels
+x86_intrinsics = []            # Optional x86_64 gather/prefetch micro-tuning
 ```
+
+Enabling the `simd` feature activates the runtime SpMV planner, which selects
+between the scalar CSR baseline, a gather-based SIMD kernel, and a SELL-C-σ
+kernel. Plans are built once per matrix (e.g., during AMG setup) and cached for
+deterministic, allocation-free application time.
 
 ## Quick Start
 

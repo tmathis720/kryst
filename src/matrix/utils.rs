@@ -5,6 +5,8 @@
 
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "simd")]
+use crate::matrix::spmv::SpmvTuning;
 use faer::Mat;
 use oorandom::Rand64;
 
@@ -196,6 +198,19 @@ pub fn spgemm_with_drop_tol(
 #[inline]
 pub fn spgemm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, KError> {
     spgemm_with_drop_tol(a, b, 1e-12)
+}
+
+#[cfg(feature = "simd")]
+/// Returns the crate-wide default tuning for the SIMD SpMV plan builder.
+pub fn default_spmv_tuning() -> SpmvTuning {
+    SpmvTuning {
+        allow_simd: cfg!(feature = "simd"),
+        prefer_sellc: true,
+        sell_c: 16,
+        sell_sigma: 64,
+        bench_nsamples: 3,
+        min_nnz_for_simd: 2_000,
+    }
 }
 
 /// Baseline Sparse C = A * B using per-row BTreeMap accumulation.
