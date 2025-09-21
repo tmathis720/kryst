@@ -467,11 +467,24 @@ impl KernelOp<f64> for DistributedKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-        _comm: &Self::Comm,
+        comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
-        // TODO: Add proper distributed matrix-vector operations
-        // For now, delegate to local operation
-        matrix.mat_vec(alpha, x, beta, y)
+        let mut local = vec![0.0f64; y.len()];
+        matrix.mat_vec(alpha, x, 0.0, &mut local)?;
+        use crate::parallel::Comm as _;
+        comm.allreduce_sum_slice(&mut local);
+        if beta == 0.0 {
+            y.copy_from_slice(&local);
+        } else {
+            let original: Vec<f64> = y.iter().copied().collect();
+            for (out, (accum, orig)) in y
+                .iter_mut()
+                .zip(local.into_iter().zip(original.into_iter()))
+            {
+                *out = accum + beta * orig;
+            }
+        }
+        Ok(())
     }
 
     fn kernel_mat_vec_trans(
@@ -481,10 +494,24 @@ impl KernelOp<f64> for DistributedKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
-        _comm: &Self::Comm,
+        comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
-        // TODO: Add proper distributed transpose operations
-        matrix.mat_vec_trans(alpha, x, beta, y)
+        let mut local = vec![0.0f64; y.len()];
+        matrix.mat_vec_trans(alpha, x, 0.0, &mut local)?;
+        use crate::parallel::Comm as _;
+        comm.allreduce_sum_slice(&mut local);
+        if beta == 0.0 {
+            y.copy_from_slice(&local);
+        } else {
+            let original: Vec<f64> = y.iter().copied().collect();
+            for (out, (accum, orig)) in y
+                .iter_mut()
+                .zip(local.into_iter().zip(original.into_iter()))
+            {
+                *out = accum + beta * orig;
+            }
+        }
+        Ok(())
     }
 
     fn kernel_dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64 {
@@ -530,6 +557,7 @@ pub trait AmgKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
+        comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>
     where
         M: MatVecOp<f64>;
@@ -577,6 +605,7 @@ impl AmgKernel for LocalAmgKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
+        _comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>
     where
         M: MatVecOp<f64>,
@@ -630,12 +659,27 @@ impl AmgKernel for DistributedAmgKernel {
         x: &[f64],
         beta: f64,
         y: &mut [f64],
+        comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>
     where
         M: MatVecOp<f64>,
     {
-        // For now, delegate to trait method (TODO: implement proper distributed matvec)
-        a.mat_vec(alpha, x, beta, y)
+        let mut local = vec![0.0f64; y.len()];
+        a.mat_vec(alpha, x, 0.0, &mut local)?;
+        use crate::parallel::Comm as _;
+        comm.allreduce_sum_slice(&mut local);
+        if beta == 0.0 {
+            y.copy_from_slice(&local);
+        } else {
+            let original: Vec<f64> = y.iter().copied().collect();
+            for (out, (accum, orig)) in y
+                .iter_mut()
+                .zip(local.into_iter().zip(original.into_iter()))
+            {
+                *out = accum + beta * orig;
+            }
+        }
+        Ok(())
     }
 
     fn dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64 {
