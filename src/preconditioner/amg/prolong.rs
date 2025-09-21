@@ -28,6 +28,14 @@ pub fn tentative_from_aggregates(agg: Vec<usize>) -> TentativeP {
 }
 
 #[derive(Clone, Debug)]
+pub struct TentativeNodal {
+    pub agg_of: Vec<usize>,
+    pub n_agg: usize,
+    pub mfun: usize,
+    pub row_basis: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Pcsr {
     pub m: usize,
     pub n: usize,
@@ -1015,6 +1023,111 @@ pub fn smooth_tentative_sa_multi(
     }
 }
 
+pub fn smooth_tentative_sa_mf(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    tn: &TentativeNodal,
+    omega: f64,
+    drop_tol: f64,
+    max_per_row: usize,
+) -> Pcsr {
+    let n = a.nrows();
+    let mfun = tn.mfun;
+    let ncoarse = tn.n_agg * mfun;
+    debug_assert_eq!(tn.agg_of.len(), n);
+    debug_assert_eq!(tn.row_basis.len(), n * mfun);
+
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    row_ptr.push(0);
+
+    let mut marker: Vec<isize> = vec![-1; ncoarse.min(4096).max(512)];
+    let mut acc_cols: Vec<usize> = Vec::new();
+    let mut acc_vals: Vec<f64> = Vec::new();
+
+    for i in 0..n {
+        if marker.len() < ncoarse {
+            marker.resize(ncoarse, -1);
+        }
+        acc_cols.clear();
+        acc_vals.clear();
+
+        let gi = tn.agg_of[i];
+        let di = d_inv[i];
+
+        for f in 0..mfun {
+            let c = gi * mfun + f;
+            marker[c] = acc_cols.len() as isize;
+            acc_cols.push(c);
+            acc_vals.push(tn.row_basis[i * mfun + f]);
+        }
+
+        let rs = rp[i];
+        let re = rp[i + 1];
+        for p in rs..re {
+            let j = cj[p];
+            if j == i {
+                continue;
+            }
+            let gj = tn.agg_of[j];
+            let scale = -omega * di * vv[p];
+            for f in 0..mfun {
+                let c = gj * mfun + f;
+                let contrib = scale * tn.row_basis[j * mfun + f];
+                let k = marker[c];
+                if k >= 0 {
+                    acc_vals[k as usize] += contrib;
+                } else {
+                    marker[c] = acc_cols.len() as isize;
+                    acc_cols.push(c);
+                    acc_vals.push(contrib);
+                }
+            }
+        }
+
+        let mut keep: Vec<(usize, f64)> = Vec::with_capacity(acc_cols.len());
+        for (&c, &v) in acc_cols.iter().zip(acc_vals.iter()) {
+            if v.abs() >= drop_tol {
+                keep.push((c, v));
+            }
+        }
+
+        if max_per_row > 0 && keep.len() > max_per_row {
+            keep.select_nth_unstable_by(max_per_row, |a, b| {
+                b.1.abs()
+                    .partial_cmp(&a.1.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            keep.truncate(max_per_row);
+        }
+
+        keep.sort_by(|a, b| a.0.cmp(&b.0));
+        for (c, v) in keep {
+            col_idx.push(c);
+            vals.push(v);
+        }
+        row_ptr.push(col_idx.len());
+
+        for &c in &acc_cols {
+            marker[c] = -1;
+        }
+    }
+
+    Pcsr {
+        m: n,
+        n: ncoarse,
+        row_ptr,
+        col_idx,
+        vals,
+    }
+}
+
 pub fn smooth_sa_values_only_multi(
     a: &CsrMatrix<f64>,
     d_inv: &[f64],
@@ -1094,6 +1207,78 @@ pub fn smooth_sa_values_only_multi(
             }
         }
     }
+    Ok(())
+}
+
+pub fn smooth_sa_values_only_mf(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    tn: &TentativeNodal,
+    omega: f64,
+    p_row_ptr: &[usize],
+    p_col_idx: &[usize],
+    out_vals: &mut [f64],
+) -> Result<(), KError> {
+    let n = a.nrows();
+    let mfun = tn.mfun;
+    if tn.agg_of.len() != n {
+        return Err(KError::InvalidInput(
+            "smooth_sa_values_only_mf: agg_of length mismatch".into(),
+        ));
+    }
+    if tn.row_basis.len() != n * mfun {
+        return Err(KError::InvalidInput(
+            "smooth_sa_values_only_mf: row_basis length mismatch".into(),
+        ));
+    }
+    if d_inv.len() != n {
+        return Err(KError::InvalidInput(
+            "smooth_sa_values_only_mf: d_inv length mismatch".into(),
+        ));
+    }
+    if p_row_ptr.len() != n + 1 {
+        return Err(KError::InvalidInput(
+            "smooth_sa_values_only_mf: row_ptr length mismatch".into(),
+        ));
+    }
+    if p_col_idx.len() != out_vals.len() {
+        return Err(KError::InvalidInput(
+            "smooth_sa_values_only_mf: values length mismatch".into(),
+        ));
+    }
+
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+
+    for i in 0..n {
+        let gi = tn.agg_of[i];
+        let di = d_inv[i];
+        let rs = rp[i];
+        let re = rp[i + 1];
+        let prs = p_row_ptr[i];
+        let pre = p_row_ptr[i + 1];
+        for k in prs..pre {
+            let c = p_col_idx[k];
+            let g_col = c / mfun;
+            let f_col = c % mfun;
+            let mut value = if g_col == gi {
+                tn.row_basis[i * mfun + f_col]
+            } else {
+                0.0
+            };
+            let mut sum = 0.0;
+            for p in rs..re {
+                let j = cj[p];
+                if j != i && tn.agg_of[j] == g_col {
+                    sum += vv[p] * tn.row_basis[j * mfun + f_col];
+                }
+            }
+            value += -omega * di * sum;
+            out_vals[k] = value;
+        }
+    }
+
     Ok(())
 }
 
@@ -1310,6 +1495,63 @@ mod tests {
             }
             let sum: f64 = first[rs..re].iter().sum();
             assert!((sum - 1.0).abs() < 1e-8);
+        }
+    }
+
+    #[test]
+    fn smooth_tentative_sa_mf_preserves_row_basis_when_omega_zero() {
+        let a = CsrMatrix::from_csr(
+            4,
+            4,
+            vec![0, 1, 2, 3, 4],
+            vec![0, 1, 2, 3],
+            vec![2.0, 3.0, 4.0, 5.0],
+        );
+        let tn = TentativeNodal {
+            agg_of: vec![0, 0, 1, 1],
+            n_agg: 2,
+            mfun: 2,
+            row_basis: vec![
+                1.0, 0.0, // row 0
+                0.0, 1.0, // row 1
+                1.0, 0.0, // row 2
+                0.0, 1.0, // row 3
+            ],
+        };
+        let d_inv = vec![1.0; 4];
+        let p = smooth_tentative_sa_mf(&a, &d_inv, &tn, 0.0, 0.0, 0);
+        assert_eq!(p.m, 4);
+        assert_eq!(p.n, 4);
+        assert_eq!(p.row_ptr, vec![0, 2, 4, 6, 8]);
+        assert_eq!(p.col_idx, vec![0, 1, 0, 1, 2, 3, 2, 3]);
+        assert_eq!(p.vals, vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn smooth_sa_values_only_mf_matches_builder() {
+        let a = CsrMatrix::from_csr(
+            4,
+            4,
+            vec![0, 3, 6, 9, 12],
+            vec![0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3],
+            vec![
+                4.0, -1.0, 0.5, -1.0, 4.0, -0.5, 0.5, -1.0, 4.0, 0.5, -0.5, 4.0,
+            ],
+        );
+        let tn = TentativeNodal {
+            agg_of: vec![0, 0, 1, 1],
+            n_agg: 2,
+            mfun: 2,
+            row_basis: vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+        };
+        let d_inv = vec![1.0 / 4.0; 4];
+        let p = smooth_tentative_sa_mf(&a, &d_inv, &tn, 0.8, 0.0, 0);
+        let mut refreshed = vec![0.0; p.vals.len()];
+        smooth_sa_values_only_mf(&a, &d_inv, &tn, 0.8, &p.row_ptr, &p.col_idx, &mut refreshed)
+            .unwrap();
+        assert_eq!(refreshed.len(), p.vals.len());
+        for (a, b) in refreshed.iter().zip(p.vals.iter()) {
+            assert!((a - b).abs() < 1e-12);
         }
     }
 }
