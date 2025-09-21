@@ -1271,7 +1271,7 @@ impl Asm {
         let overlapped = expand_overlap(&adj, &owner_of, self.cfg.overlap);
         let weighting = match (self.cfg.combine, self.cfg.weight_partition_of_unity) {
             (AsmCombine::Additive, true) => Weighting::Uniform,
-            (AsmCombine::Restricted, true) => Weighting::Uniform,
+            (AsmCombine::Restricted, true) => Weighting::None,
             (AsmCombine::Optimized, true) => Weighting::SmoothLinear,
             _ => Weighting::None,
         };
