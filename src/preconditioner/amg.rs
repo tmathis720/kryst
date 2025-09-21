@@ -4381,6 +4381,12 @@ fn build_hierarchy(
     } else {
         None
     };
+    let l0_num_functions = cfg
+        .near_nullspace
+        .as_ref()
+        .map(|nns| nns.basis.len().max(1))
+        .or_else(|| layout0.as_ref().map(|layout| layout.block_size.max(1)))
+        .unwrap_or_else(|| cfg.num_functions.max(1));
     let l0 = AMGLevel {
         a: a_cur.clone(),
         p: CsrMatrix::identity(a_cur.nrows()),
@@ -4393,7 +4399,7 @@ fn build_hierarchy(
         is_c: Vec::new(),
         cf: None,
         p2r_pos: Vec::new(),
-        num_functions: 1,
+        num_functions: l0_num_functions,
         row_basis: None,
         layout: layout0.clone(),
         nns: cfg.near_nullspace.as_ref().map(|nns| nns.basis.clone()),
@@ -4563,7 +4569,7 @@ fn build_hierarchy(
         } else if let Some(ref lay) = layout {
             lay.block_size.max(1)
         } else {
-            1
+            block_size_cur.max(1)
         };
         if !user_supplied_nns {
             if let Some(ref lay) = layout {
