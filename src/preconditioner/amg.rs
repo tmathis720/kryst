@@ -1903,15 +1903,27 @@ fn try_fix_rank(
     }
 
     let mut new_vals = vec![0.0; p_csr.col_idx.len()];
-    smooth_sa_values_only(
-        a_l,
-        diag_inv_l,
-        tp,
-        cfg.jacobi_omega,
-        &p_csr.row_ptr,
-        &p_csr.col_idx,
-        &mut new_vals,
-    )?;
+    if tp.num_functions > 1 {
+        smooth_sa_values_only_multi(
+            a_l,
+            diag_inv_l,
+            tp,
+            cfg.jacobi_omega,
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut new_vals,
+        )?;
+    } else {
+        smooth_sa_values_only(
+            a_l,
+            diag_inv_l,
+            tp,
+            cfg.jacobi_omega,
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut new_vals,
+        )?;
+    }
     p_csr.vals.copy_from_slice(&new_vals);
     apply_post_interp(cfg, ctx, &p_csr.row_ptr, &p_csr.col_idx, &mut p_csr.vals)?;
     let p_tmp = CsrMatrix::from_csr(
