@@ -161,6 +161,144 @@ pub struct Chebyshev<T> {
     pub lambda_max: Option<T>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ChebBounds {
+    pub lam_max: f64,
+    pub lam_min: f64,
+}
+
+fn apply_sym_scaled(
+    a: &CsrMatrix<f64>,
+    d_sqrt_inv: &[f64],
+    x: &[f64],
+    y: &mut [f64],
+) -> Result<(), KError> {
+    let n = a.nrows();
+    if d_sqrt_inv.len() != n || x.len() != n || y.len() != n {
+        return Err(KError::InvalidInput(
+            "apply_sym_scaled: dimension mismatch".into(),
+        ));
+    }
+    for i in 0..n {
+        y[i] = d_sqrt_inv[i] * x[i];
+    }
+    let mut tmp = vec![0.0; n];
+    a.spmv_scaled(1.0, y, 0.0, &mut tmp[..])?;
+    for i in 0..n {
+        y[i] = d_sqrt_inv[i] * tmp[i];
+    }
+    Ok(())
+}
+
+pub fn estimate_lmax_sym(
+    a: &CsrMatrix<f64>,
+    d_sqrt_inv: &[f64],
+    power_steps: usize,
+) -> Result<f64, KError> {
+    let n = a.nrows();
+    if n == 0 {
+        return Ok(0.0);
+    }
+    if d_sqrt_inv.len() != n {
+        return Err(KError::InvalidInput(
+            "estimate_lmax_sym: dimension mismatch".into(),
+        ));
+    }
+    let mut x = vec![0.0; n];
+    for i in 0..n {
+        let pattern = (i.wrapping_mul(2_654_435_761)) & 1;
+        x[i] = if pattern == 0 { 1.0 } else { -1.0 };
+    }
+    let mut nrm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if nrm == 0.0 {
+        x[0] = 1.0;
+        nrm = 1.0;
+    }
+    for xi in &mut x {
+        *xi /= nrm;
+    }
+    let mut y = vec![0.0; n];
+    let steps = power_steps.max(1);
+    for _ in 0..steps {
+        apply_sym_scaled(a, d_sqrt_inv, &x, &mut y)?;
+        let nrm = y.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
+        for i in 0..n {
+            x[i] = y[i] / nrm;
+        }
+    }
+    apply_sym_scaled(a, d_sqrt_inv, &x, &mut y)?;
+    let lam = x.iter().zip(y.iter()).map(|(xi, yi)| xi * yi).sum::<f64>();
+    Ok(lam.max(0.0))
+}
+
+pub fn chebyshev_smooth_csr(
+    a: &CsrMatrix<f64>,
+    d_inv: &[f64],
+    rhs: &[f64],
+    z: &mut [f64],
+    deg: usize,
+    bounds: &ChebBounds,
+    work_r: &mut [f64],
+    work_q: &mut [f64],
+    work_aq: &mut [f64],
+) -> Result<(), KError> {
+    if deg == 0 {
+        return Ok(());
+    }
+    let n = a.nrows();
+    if d_inv.len() != n || rhs.len() != n || z.len() != n {
+        return Err(KError::InvalidInput(
+            "chebyshev_smooth_csr: dimension mismatch".into(),
+        ));
+    }
+    if work_r.len() != n || work_q.len() != n || work_aq.len() != n {
+        return Err(KError::InvalidInput(
+            "chebyshev_smooth_csr: workspace mismatch".into(),
+        ));
+    }
+    if !bounds.lam_max.is_finite() || !bounds.lam_min.is_finite() || bounds.lam_max <= 0.0 {
+        return Err(KError::InvalidInput(
+            "chebyshev_smooth_csr: invalid eigenvalue bounds".into(),
+        ));
+    }
+
+    a.spmv_scaled(1.0, z, 0.0, work_aq)?;
+    for i in 0..n {
+        work_r[i] = rhs[i] - work_aq[i];
+    }
+
+    let theta = (0.5 * (bounds.lam_max + bounds.lam_min)).max(1e-12);
+    let delta = 0.5 * (bounds.lam_max - bounds.lam_min);
+    let mut alpha = 1.0 / theta;
+
+    for i in 0..n {
+        work_q[i] = d_inv[i] * work_r[i];
+    }
+    for i in 0..n {
+        z[i] += alpha * work_q[i];
+    }
+    a.spmv_scaled(1.0, work_q, 0.0, work_aq)?;
+    for i in 0..n {
+        work_r[i] -= alpha * work_aq[i];
+    }
+
+    for _ in 1..deg {
+        for i in 0..n {
+            work_q[i] = d_inv[i] * work_r[i];
+        }
+        let beta = 0.25 * delta * delta * alpha;
+        alpha = 1.0 / (theta - beta);
+        for i in 0..n {
+            z[i] += alpha * work_q[i];
+        }
+        a.spmv_scaled(1.0, work_q, 0.0, work_aq)?;
+        for i in 0..n {
+            work_r[i] -= alpha * work_aq[i];
+        }
+    }
+    Ok(())
+}
+
 impl<T> Chebyshev<T> {
     /// Create a new Chebyshev preconditioner
     ///
