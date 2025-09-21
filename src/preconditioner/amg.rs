@@ -6,7 +6,11 @@ use std::time::{Duration, Instant};
 
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
-use crate::matrix::{convert::csr_from_linop, sparse::CsrMatrix, spmv::csr_spmm_dense};
+use crate::matrix::{
+    convert::csr_from_linop,
+    sparse::CsrMatrix,
+    spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
+};
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
@@ -148,6 +152,30 @@ pub enum CycleType {
     W {
         gamma: usize,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MixedPrecision {
+    pub smooth: bool,
+    pub residual: bool,
+}
+
+impl MixedPrecision {
+    #[inline]
+    fn smoothers_enabled(self) -> bool {
+        self.smooth
+    }
+
+    #[inline]
+    fn residual_enabled(self) -> bool {
+        self.residual
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixedStorage {
+    Cached,
+    Transient,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,6 +329,8 @@ pub struct AMGConfig {
     pub flexible_iters: usize,
     pub flexible_rtol: f64,
     pub flexible_pc_sweeps: usize,
+    pub mixed_precision: Option<MixedPrecision>,
+    pub mixed_storage: MixedStorage,
 }
 
 impl Default for AMGConfig {
@@ -402,6 +432,8 @@ impl Default for AMGConfig {
             flexible_iters: 0,
             flexible_rtol: 0.0,
             flexible_pc_sweeps: 1,
+            mixed_precision: None,
+            mixed_storage: MixedStorage::Cached,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -758,6 +790,16 @@ impl AMGBuilder {
         self
     }
 
+    pub fn mixed_precision(mut self, mp: Option<MixedPrecision>) -> Self {
+        self.cfg.mixed_precision = mp;
+        self
+    }
+
+    pub fn mixed_storage(mut self, storage: MixedStorage) -> Self {
+        self.cfg.mixed_storage = storage;
+        self
+    }
+
     pub fn build(self, _matrix: &Mat<f64>) -> Result<AMG, KError> {
         Ok(AMG::with_config(self.cfg))
     }
@@ -793,6 +835,27 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
                 return Err(KError::InvalidInput(format!(
                     "RelaxType {rt:?} not yet supported (phase index {i})"
                 )));
+            }
+        }
+    }
+
+    if let Some(mp) = cfg.mixed_precision {
+        if mp.smoothers_enabled() {
+            for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
+                if i == RelaxPhase::Coarsest.ix() {
+                    continue;
+                }
+                match rt {
+                    RelaxType::Jacobi
+                    | RelaxType::L1Jacobi
+                    | RelaxType::Chebyshev
+                    | RelaxType::Fsai => {}
+                    other => {
+                        return Err(KError::InvalidInput(format!(
+                            "Mixed-precision smoothing only supports Jacobi, L1Jacobi, Chebyshev, or Fsai; got {other:?}"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -931,6 +994,7 @@ struct AMGWorkspace {
     residual: Vec<f64>,
     coarse_rhs: Vec<f64>,
     fine_corr: Vec<f64>,
+    mp: Option<MixedWs>,
 }
 
 impl AMGWorkspace {
@@ -941,6 +1005,7 @@ impl AMGWorkspace {
             residual: vec![0.0; cap],
             coarse_rhs: vec![0.0; cap],
             fine_corr: vec![0.0; cap],
+            mp: None,
         }
     }
     fn ensure(&mut self, n: usize) {
@@ -954,6 +1019,103 @@ impl AMGWorkspace {
         grow(&mut self.residual, n);
         grow(&mut self.coarse_rhs, n);
         grow(&mut self.fine_corr, n);
+    }
+
+    fn ensure_mixed(&mut self, n: usize) {
+        if self.mp.is_none() {
+            self.mp = Some(MixedWs::with_capacity(n));
+        }
+        if let Some(ref mut mp) = self.mp {
+            mp.ensure_vectors(n);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MixedWs {
+    temp32: Vec<f32>,
+    work32: Vec<f32>,
+    residual32: Vec<f32>,
+    coarse_rhs32: Vec<f32>,
+    fine_corr32: Vec<f32>,
+    a_vals32: Vec<f32>,
+    diag_inv32: Vec<f32>,
+    l1_inv32: Vec<f32>,
+    d_sqrt_inv32: Vec<f32>,
+    fsai_g_vals32: Vec<f32>,
+    fsai_gt_vals32: Vec<f32>,
+}
+
+impl MixedWs {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            temp32: vec![0.0; n],
+            work32: vec![0.0; n],
+            residual32: vec![0.0; n],
+            coarse_rhs32: vec![0.0; n],
+            fine_corr32: vec![0.0; n],
+            a_vals32: Vec::new(),
+            diag_inv32: Vec::new(),
+            l1_inv32: Vec::new(),
+            d_sqrt_inv32: Vec::new(),
+            fsai_g_vals32: Vec::new(),
+            fsai_gt_vals32: Vec::new(),
+        }
+    }
+
+    fn ensure_vectors(&mut self, n: usize) {
+        let grow = |v: &mut Vec<f32>, n: usize| {
+            if v.len() < n {
+                v.resize(n, 0.0);
+            }
+        };
+        grow(&mut self.temp32, n);
+        grow(&mut self.work32, n);
+        grow(&mut self.residual32, n);
+        grow(&mut self.coarse_rhs32, n);
+        grow(&mut self.fine_corr32, n);
+    }
+
+    fn ensure_vals(&mut self, nnz: usize) -> &mut Vec<f32> {
+        if self.a_vals32.len() < nnz {
+            self.a_vals32.resize(nnz, 0.0);
+        }
+        &mut self.a_vals32
+    }
+
+    fn ensure_diag(&mut self, n: usize) -> &mut Vec<f32> {
+        if self.diag_inv32.len() < n {
+            self.diag_inv32.resize(n, 0.0);
+        }
+        &mut self.diag_inv32
+    }
+
+    fn ensure_l1(&mut self, n: usize) -> &mut Vec<f32> {
+        if self.l1_inv32.len() < n {
+            self.l1_inv32.resize(n, 0.0);
+        }
+        &mut self.l1_inv32
+    }
+
+    fn ensure_d_sqrt(&mut self, n: usize) -> &mut Vec<f32> {
+        if self.d_sqrt_inv32.len() < n {
+            self.d_sqrt_inv32.resize(n, 0.0);
+        }
+        &mut self.d_sqrt_inv32
+    }
+
+    fn ensure_fsai_g(&mut self, nnz: usize) -> &mut Vec<f32> {
+        if self.fsai_g_vals32.len() < nnz {
+            self.fsai_g_vals32.resize(nnz, 0.0);
+        }
+        &mut self.fsai_g_vals32
+    }
+
+    fn ensure_fsai_gt(&mut self, nnz: usize) -> &mut Vec<f32> {
+        if self.fsai_gt_vals32.len() < nnz {
+            self.fsai_gt_vals32.resize(nnz, 0.0);
+        }
+        &mut self.fsai_gt_vals32
     }
 }
 
@@ -1006,6 +1168,12 @@ struct AMGLevel {
     #[allow(clippy::redundant_allocation)]
     coarse_solver: Option<Mutex<Box<dyn CoarseSolver + Send>>>,
     fsai: Option<FsaiData>,
+    a_vals_f32: Option<Vec<f32>>,
+    diag_inv_f32: Option<Vec<f32>>,
+    d_sqrt_inv_f32: Option<Vec<f32>>,
+    l1_inv_f32: Option<Vec<f32>>,
+    fsai_g_vals_f32: Option<Vec<f32>>,
+    fsai_gt_vals_f32: Option<Vec<f32>>,
 }
 
 #[derive(Clone)]
@@ -2243,8 +2411,10 @@ impl AMG {
                     fsai_refresh_numeric(&level.a, &mut data, self.cfg.fsai_lambda)?;
                     level.fsai = Some(data);
                 }
+                refresh_mixed_precision_shadows(&self.cfg, level);
             } else {
                 h.levels[lvl].fsai = None;
+                refresh_mixed_precision_shadows(&self.cfg, &mut h.levels[lvl]);
             }
         }
 
@@ -2292,6 +2462,89 @@ impl AMG {
             }
         }
         z.copy_from_slice(&ws.temp[..n]);
+        Ok(())
+    }
+
+    fn jacobi_smooth_sparse_mp(
+        omega: f32,
+        level: &AMGLevel,
+        rhs: &[f64],
+        z: &mut [f64],
+        iters: usize,
+        ws: &mut AMGWorkspace,
+        cfg: &AMGConfig,
+    ) -> Result<(), KError> {
+        if iters == 0 {
+            return Ok(());
+        }
+        let n = level.a.nrows();
+        if rhs.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("Jacobi: dimension mismatch".into()));
+        }
+        ws.ensure(n);
+        ws.ensure_mixed(n);
+        let mp_ws = ws
+            .mp
+            .as_mut()
+            .expect("mixed workspace missing after ensure_mixed");
+        mp_ws.temp32[..n]
+            .iter_mut()
+            .zip(z.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        mp_ws.residual32[..n]
+            .iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        let mut diag_owned = Vec::new();
+        let diag_slice: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .diag_inv_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("Jacobi mixed cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_diag(n);
+                buf.iter_mut()
+                    .zip(level.diag_inv.iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                diag_owned.extend_from_slice(&buf[..n]);
+                &diag_owned
+            }
+        };
+        let mut vals_owned = Vec::new();
+        let vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .a_vals_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("Jacobi mixed matrix cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_vals(level.a.nnz());
+                buf.iter_mut()
+                    .zip(level.a.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                vals_owned.extend_from_slice(buf.as_slice());
+                &vals_owned
+            }
+        };
+        let row_ptr = level.a.row_ptr();
+        let col_idx = level.a.col_idx();
+        for _ in 0..iters {
+            spmv_scaled_f32_on_pattern(
+                n,
+                row_ptr,
+                col_idx,
+                vals32,
+                1.0,
+                &mp_ws.temp32[..n],
+                0.0,
+                &mut mp_ws.work32[..n],
+            );
+            for i in 0..n {
+                mp_ws.temp32[i] += omega * diag_slice[i] * (mp_ws.residual32[i] - mp_ws.work32[i]);
+            }
+        }
+        z.iter_mut()
+            .zip(mp_ws.temp32[..n].iter())
+            .for_each(|(dst, &src)| *dst = src as f64);
         Ok(())
     }
 
@@ -2346,6 +2599,91 @@ impl AMG {
                 z[i] += omega * diag_inv[i] * (r[i] - s);
             }
         }
+        Ok(())
+    }
+
+    fn l1_jacobi_mp(
+        omega: f32,
+        level: &AMGLevel,
+        rhs: &[f64],
+        z: &mut [f64],
+        iters: usize,
+        ws: &mut AMGWorkspace,
+        cfg: &AMGConfig,
+    ) -> Result<(), KError> {
+        if iters == 0 {
+            return Ok(());
+        }
+        let n = level.a.nrows();
+        if rhs.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("L1Jacobi: dimension mismatch".into()));
+        }
+        ws.ensure(n);
+        ws.ensure_mixed(n);
+        let mp_ws = ws.mp.as_mut().expect("mixed workspace missing");
+        mp_ws.temp32[..n]
+            .iter_mut()
+            .zip(z.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        mp_ws.residual32[..n]
+            .iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        let mut l1_owned = Vec::new();
+        let l1_slice: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .l1_inv_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("L1Jacobi mixed cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_l1(n);
+                buf.iter_mut()
+                    .zip(
+                        level
+                            .l1_inv
+                            .as_ref()
+                            .ok_or_else(|| KError::InvalidInput("L1Jacobi cache missing".into()))?
+                            .iter(),
+                    )
+                    .for_each(|(d, &s)| *d = s as f32);
+                l1_owned.extend_from_slice(&buf[..n]);
+                &l1_owned
+            }
+        };
+        let mut vals_owned = Vec::new();
+        let vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level.a_vals_f32.as_ref().ok_or_else(|| {
+                KError::InvalidInput("L1Jacobi mixed matrix cache missing".into())
+            })?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_vals(level.a.nnz());
+                buf.iter_mut()
+                    .zip(level.a.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                vals_owned.extend_from_slice(buf.as_slice());
+                &vals_owned
+            }
+        };
+        let row_ptr = level.a.row_ptr();
+        let col_idx = level.a.col_idx();
+        for _ in 0..iters {
+            spmv_scaled_f32_on_pattern(
+                n,
+                row_ptr,
+                col_idx,
+                vals32,
+                1.0,
+                &mp_ws.temp32[..n],
+                0.0,
+                &mut mp_ws.work32[..n],
+            );
+            for i in 0..n {
+                mp_ws.temp32[i] += omega * l1_slice[i] * (mp_ws.residual32[i] - mp_ws.work32[i]);
+            }
+        }
+        z.iter_mut()
+            .zip(mp_ws.temp32[..n].iter())
+            .for_each(|(dst, &src)| *dst = src as f64);
         Ok(())
     }
 
@@ -2445,6 +2783,134 @@ impl AMG {
         Ok(())
     }
 
+    fn chebyshev_smooth_csr_mp(
+        level: &AMGLevel,
+        rhs: &[f64],
+        z: &mut [f64],
+        degree: usize,
+        data: &ChebData,
+        ws: &mut AMGWorkspace,
+        cfg: &AMGConfig,
+    ) -> Result<(), KError> {
+        if degree == 0 {
+            return Ok(());
+        }
+        let n = level.a.nrows();
+        if rhs.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("Chebyshev: dimension mismatch".into()));
+        }
+        ws.ensure(n);
+        ws.ensure_mixed(n);
+        let mp_ws = ws.mp.as_mut().expect("mixed workspace missing");
+        mp_ws.temp32[..n]
+            .iter_mut()
+            .zip(z.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        mp_ws.residual32[..n]
+            .iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+
+        let mut vals_owned = Vec::new();
+        let vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level.a_vals_f32.as_ref().ok_or_else(|| {
+                KError::InvalidInput("Chebyshev mixed matrix cache missing".into())
+            })?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_vals(level.a.nnz());
+                buf.iter_mut()
+                    .zip(level.a.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                vals_owned.extend_from_slice(buf.as_slice());
+                &vals_owned
+            }
+        };
+        let mut diag_owned = Vec::new();
+        let diag32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .diag_inv_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("Chebyshev mixed diag cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_diag(n);
+                buf.iter_mut()
+                    .zip(level.diag_inv.iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                diag_owned.extend_from_slice(&buf[..n]);
+                &diag_owned
+            }
+        };
+
+        let row_ptr = level.a.row_ptr();
+        let col_idx = level.a.col_idx();
+        spmv_scaled_f32_on_pattern(
+            n,
+            row_ptr,
+            col_idx,
+            vals32,
+            1.0,
+            &mp_ws.temp32[..n],
+            0.0,
+            &mut mp_ws.work32[..n],
+        );
+        for i in 0..n {
+            mp_ws.residual32[i] -= mp_ws.work32[i];
+        }
+
+        let theta = (0.5 * (data.lambda_max + data.lambda_min)).max(1e-12) as f32;
+        let delta = (0.5 * (data.lambda_max - data.lambda_min)) as f32;
+        let mut alpha = 1.0f32 / theta;
+
+        for i in 0..n {
+            mp_ws.fine_corr32[i] = diag32[i] * mp_ws.residual32[i];
+        }
+        for i in 0..n {
+            mp_ws.temp32[i] += alpha * mp_ws.fine_corr32[i];
+        }
+        spmv_scaled_f32_on_pattern(
+            n,
+            row_ptr,
+            col_idx,
+            vals32,
+            1.0,
+            &mp_ws.fine_corr32[..n],
+            0.0,
+            &mut mp_ws.work32[..n],
+        );
+        for i in 0..n {
+            mp_ws.residual32[i] -= alpha * mp_ws.work32[i];
+        }
+
+        for _ in 1..degree {
+            for i in 0..n {
+                mp_ws.fine_corr32[i] = diag32[i] * mp_ws.residual32[i];
+            }
+            let beta = 0.25f32 * delta * delta * alpha;
+            alpha = 1.0f32 / (theta - beta);
+            for i in 0..n {
+                mp_ws.temp32[i] += alpha * mp_ws.fine_corr32[i];
+            }
+            spmv_scaled_f32_on_pattern(
+                n,
+                row_ptr,
+                col_idx,
+                vals32,
+                1.0,
+                &mp_ws.fine_corr32[..n],
+                0.0,
+                &mut mp_ws.work32[..n],
+            );
+            for i in 0..n {
+                mp_ws.residual32[i] -= alpha * mp_ws.work32[i];
+            }
+        }
+
+        z.iter_mut()
+            .zip(mp_ws.temp32[..n].iter())
+            .for_each(|(dst, &src)| *dst = src as f64);
+        Ok(())
+    }
+
     fn fsai_smooth(
         g: &CsrMatrix<f64>,
         gt: &CsrMatrix<f64>,
@@ -2460,6 +2926,168 @@ impl AMG {
         let work = &mut ws.work[..n];
         let tmp = &mut ws.fine_corr[..n];
         Self::fsai_smooth_core(g, gt, a, rhs, z, tau, residual, work, tmp)
+    }
+
+    fn fsai_smooth_mp(
+        level: &AMGLevel,
+        data: &FsaiData,
+        rhs: &[f64],
+        z: &mut [f64],
+        tau: f32,
+        ws: &mut AMGWorkspace,
+        cfg: &AMGConfig,
+    ) -> Result<(), KError> {
+        let n = level.a.nrows();
+        if rhs.len() != n || z.len() != n {
+            return Err(KError::InvalidInput("FSAI: dimension mismatch".into()));
+        }
+        ws.ensure(n);
+        ws.ensure_mixed(n);
+        let mp_ws = ws.mp.as_mut().expect("mixed workspace missing");
+        mp_ws.temp32[..n]
+            .iter_mut()
+            .zip(z.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        mp_ws.residual32[..n]
+            .iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+
+        let mut a_vals_owned = Vec::new();
+        let a_vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .a_vals_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("FSAI mixed matrix cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_vals(level.a.nnz());
+                buf.iter_mut()
+                    .zip(level.a.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                a_vals_owned.extend_from_slice(buf.as_slice());
+                &a_vals_owned
+            }
+        };
+        let row_ptr = level.a.row_ptr();
+        let col_idx = level.a.col_idx();
+        spmv_scaled_f32_on_pattern(
+            n,
+            row_ptr,
+            col_idx,
+            a_vals32,
+            1.0,
+            &mp_ws.temp32[..n],
+            0.0,
+            &mut mp_ws.work32[..n],
+        );
+        for i in 0..n {
+            mp_ws.residual32[i] -= mp_ws.work32[i];
+        }
+
+        let mut g_vals_owned = Vec::new();
+        let g_vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .fsai_g_vals_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("FSAI mixed G cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_fsai_g(data.g.nnz());
+                buf.iter_mut()
+                    .zip(data.g.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                g_vals_owned.extend_from_slice(buf.as_slice());
+                &g_vals_owned
+            }
+        };
+        spmv_scaled_f32_on_pattern(
+            data.g.nrows(),
+            data.g.row_ptr(),
+            data.g.col_idx(),
+            g_vals32,
+            1.0,
+            &mp_ws.residual32[..data.g.ncols()],
+            0.0,
+            &mut mp_ws.work32[..data.g.nrows()],
+        );
+
+        let mut gt_vals_owned = Vec::new();
+        let gt_vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .fsai_gt_vals_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("FSAI mixed Gt cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_fsai_gt(data.gt.nnz());
+                buf.iter_mut()
+                    .zip(data.gt.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                gt_vals_owned.extend_from_slice(buf.as_slice());
+                &gt_vals_owned
+            }
+        };
+        spmv_scaled_f32_on_pattern(
+            data.gt.nrows(),
+            data.gt.row_ptr(),
+            data.gt.col_idx(),
+            gt_vals32,
+            1.0,
+            &mp_ws.work32[..data.gt.ncols()],
+            0.0,
+            &mut mp_ws.coarse_rhs32[..data.gt.nrows()],
+        );
+        for i in 0..n {
+            mp_ws.temp32[i] += tau * mp_ws.coarse_rhs32[i];
+        }
+        z.iter_mut()
+            .zip(mp_ws.temp32[..n].iter())
+            .for_each(|(dst, &src)| *dst = src as f64);
+        Ok(())
+    }
+
+    fn mixed_spmv(
+        level: &AMGLevel,
+        cfg: &AMGConfig,
+        x: &[f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        let n = level.a.nrows();
+        if x.len() != n {
+            return Err(KError::InvalidInput(
+                "mixed SpMV: dimension mismatch".into(),
+            ));
+        }
+        ws.ensure_mixed(n);
+        let mp_ws = ws.mp.as_mut().expect("mixed workspace missing");
+        mp_ws.temp32[..n]
+            .iter_mut()
+            .zip(x.iter())
+            .for_each(|(dst, &src)| *dst = src as f32);
+        let mut vals_owned = Vec::new();
+        let vals32: &[f32] = match cfg.mixed_storage {
+            MixedStorage::Cached => level
+                .a_vals_f32
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("mixed matrix cache missing".into()))?,
+            MixedStorage::Transient => {
+                let buf = mp_ws.ensure_vals(level.a.nnz());
+                buf.iter_mut()
+                    .zip(level.a.values().iter())
+                    .for_each(|(d, &s)| *d = s as f32);
+                vals_owned.extend_from_slice(buf.as_slice());
+                &vals_owned
+            }
+        };
+        spmv_scaled_f32_on_pattern(
+            n,
+            level.a.row_ptr(),
+            level.a.col_idx(),
+            vals32,
+            1.0,
+            &mp_ws.temp32[..n],
+            0.0,
+            &mut mp_ws.work32[..n],
+        );
+        Ok(())
     }
 
     fn flexible_relax_supported(relax: RelaxType) -> bool {
@@ -2653,6 +3281,10 @@ impl AMG {
         if k == 0 {
             return Ok(());
         }
+        let use_mp_smooth = cfg
+            .mixed_precision
+            .map(|mp| mp.smoothers_enabled())
+            .unwrap_or(false);
         #[cfg(test)]
         {
             RELAX_CALL_COUNTS[phase.ix()].fetch_add(1, Ordering::SeqCst);
@@ -2660,7 +3292,11 @@ impl AMG {
         let a = &lvl.a;
         match pol.kind[phase.ix()] {
             RelaxType::Jacobi => {
-                Self::jacobi_smooth_sparse(pol.omega, a, &lvl.diag_inv, rhs, sol, k, ws)
+                if use_mp_smooth {
+                    Self::jacobi_smooth_sparse_mp(pol.omega as f32, lvl, rhs, sol, k, ws, cfg)
+                } else {
+                    Self::jacobi_smooth_sparse(pol.omega, a, &lvl.diag_inv, rhs, sol, k, ws)
+                }
             }
             RelaxType::GaussSeidel => {
                 if matches!(where_, RelaxWhere::Pre) {
@@ -2673,7 +3309,11 @@ impl AMG {
             RelaxType::SymmetricGaussSeidel => Self::sym_gs(1.0, a, &lvl.diag_inv, rhs, sol, k),
             RelaxType::L1Jacobi => {
                 if let Some(ref l1) = lvl.l1_inv {
-                    Self::l1_jacobi(pol.omega, a, l1, rhs, sol, k, ws)
+                    if use_mp_smooth {
+                        Self::l1_jacobi_mp(pol.omega as f32, lvl, rhs, sol, k, ws, cfg)
+                    } else {
+                        Self::l1_jacobi(pol.omega, a, l1, rhs, sol, k, ws)
+                    }
                 } else {
                     Err(KError::InvalidInput("L1Jacobi cache missing".into()))
                 }
@@ -2685,7 +3325,11 @@ impl AMG {
                     .ok_or_else(|| KError::InvalidInput("Chebyshev cache missing".into()))?;
                 let degree = cfg.chebyshev_degree.max(1);
                 for _ in 0..k {
-                    Self::apply_chebyshev(a, &lvl.diag_inv, rhs, sol, degree, cheb, ws)?;
+                    if use_mp_smooth {
+                        Self::chebyshev_smooth_csr_mp(lvl, rhs, sol, degree, cheb, ws, cfg)?;
+                    } else {
+                        Self::apply_chebyshev(a, &lvl.diag_inv, rhs, sol, degree, cheb, ws)?;
+                    }
                 }
                 Ok(())
             }
@@ -2695,7 +3339,19 @@ impl AMG {
                     .as_ref()
                     .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
                 for _ in 0..k {
-                    Self::fsai_smooth(&data.g, &data.gt, a, rhs, sol, cfg.fsai_damping, ws)?;
+                    if use_mp_smooth {
+                        Self::fsai_smooth_mp(
+                            lvl,
+                            data,
+                            rhs,
+                            sol,
+                            cfg.fsai_damping as f32,
+                            ws,
+                            cfg,
+                        )?;
+                    } else {
+                        Self::fsai_smooth(&data.g, &data.gt, a, rhs, sol, cfg.fsai_damping, ws)?;
+                    }
                 }
                 Ok(())
             }
@@ -2788,6 +3444,11 @@ impl AMG {
 
         let n = a.nrows();
         ws.ensure(n);
+        let use_mp_residual = self
+            .cfg
+            .mixed_precision
+            .map(|mp| mp.residual_enabled())
+            .unwrap_or(false);
 
         // Pre-smooth
         let phase_pre = if level == 0 {
@@ -2831,22 +3492,52 @@ impl AMG {
         })?;
 
         // residual = rhs - A * sol
-        with_timing(prof, &mut lv.matvec, || {
-            a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])
-        })?;
-        with_timing(prof, &mut lv.residual_axpy, || {
-            #[cfg(feature = "rayon")]
-            ws.residual[..n]
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, ri)| {
-                    *ri = rhs[i] - ws.work[i];
-                });
-            #[cfg(not(feature = "rayon"))]
-            for i in 0..n {
-                ws.residual[i] = rhs[i] - ws.work[i];
-            }
-        });
+        if use_mp_residual {
+            with_timing(prof, &mut lv.matvec, || {
+                Self::mixed_spmv(&h.levels[level], &self.cfg, sol, ws)
+            })?;
+            with_timing(prof, &mut lv.residual_axpy, || {
+                let mp_ws = ws
+                    .mp
+                    .as_ref()
+                    .expect("mixed workspace missing after mixed_spmv");
+                #[cfg(feature = "rayon")]
+                {
+                    for i in 0..n {
+                        ws.work[i] = mp_ws.work32[i] as f64;
+                    }
+                    ws.residual[..n]
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, ri)| {
+                            *ri = rhs[i] - ws.work[i];
+                        });
+                }
+                #[cfg(not(feature = "rayon"))]
+                for i in 0..n {
+                    let az = mp_ws.work32[i] as f64;
+                    ws.work[i] = az;
+                    ws.residual[i] = rhs[i] - az;
+                }
+            });
+        } else {
+            with_timing(prof, &mut lv.matvec, || {
+                a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])
+            })?;
+            with_timing(prof, &mut lv.residual_axpy, || {
+                #[cfg(feature = "rayon")]
+                ws.residual[..n]
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, ri)| {
+                        *ri = rhs[i] - ws.work[i];
+                    });
+                #[cfg(not(feature = "rayon"))]
+                for i in 0..n {
+                    ws.residual[i] = rhs[i] - ws.work[i];
+                }
+            });
+        }
 
         // r_c = R * residual
         let p = &h.levels[level].p;
@@ -3243,6 +3934,12 @@ fn build_hierarchy(
         r_vals_scratch: None,
         coarse_solver: None,
         fsai: None,
+        a_vals_f32: None,
+        diag_inv_f32: None,
+        d_sqrt_inv_f32: None,
+        l1_inv_f32: None,
+        fsai_g_vals_f32: None,
+        fsai_gt_vals_f32: None,
     };
     let mut l0 = l0;
     update_level_caches(cfg, &mut l0, need_l1, need_cheb, true)?;
@@ -3257,6 +3954,7 @@ fn build_hierarchy(
             None
         };
         l0.fsai = Some(fsai_build_for_level(cfg, &l0.a, strength0.as_ref())?);
+        refresh_mixed_precision_shadows(cfg, &mut l0);
     }
     levels.push(l0);
     if do_stats {
@@ -3726,6 +4424,12 @@ fn build_hierarchy(
             r_vals_scratch: None,
             coarse_solver: None,
             fsai: None,
+            a_vals_f32: None,
+            diag_inv_f32: None,
+            d_sqrt_inv_f32: None,
+            l1_inv_f32: None,
+            fsai_g_vals_f32: None,
+            fsai_gt_vals_f32: None,
         };
         update_level_caches(cfg, &mut next_level, need_l1, need_cheb, true)?;
         if need_fsai {
@@ -3743,6 +4447,7 @@ fn build_hierarchy(
                 &next_level.a,
                 strength_coarse.as_ref(),
             )?);
+            refresh_mixed_precision_shadows(cfg, &mut next_level);
         }
         levels.push(next_level);
 
@@ -4086,7 +4791,64 @@ fn update_level_caches(
         level.d_sqrt_inv = None;
         level.cheb = None;
     }
+    refresh_mixed_precision_shadows(cfg, level);
     Ok(())
+}
+
+fn cast_slice_to_f32(src: &[f64]) -> Vec<f32> {
+    src.iter().map(|&v| v as f32).collect()
+}
+
+fn refresh_mixed_precision_shadows(cfg: &AMGConfig, level: &mut AMGLevel) {
+    let Some(mp) = cfg.mixed_precision else {
+        level.a_vals_f32 = None;
+        level.diag_inv_f32 = None;
+        level.d_sqrt_inv_f32 = None;
+        level.l1_inv_f32 = None;
+        level.fsai_g_vals_f32 = None;
+        level.fsai_gt_vals_f32 = None;
+        return;
+    };
+    if cfg.mixed_storage != MixedStorage::Cached {
+        level.a_vals_f32 = None;
+        level.diag_inv_f32 = None;
+        level.d_sqrt_inv_f32 = None;
+        level.l1_inv_f32 = None;
+        level.fsai_g_vals_f32 = None;
+        level.fsai_gt_vals_f32 = None;
+        return;
+    }
+    if mp.residual_enabled() || mp.smoothers_enabled() {
+        level.a_vals_f32 = Some(cast_slice_to_f32(level.a.values()));
+    } else {
+        level.a_vals_f32 = None;
+    }
+    if mp.smoothers_enabled() {
+        level.diag_inv_f32 = Some(cast_slice_to_f32(&level.diag_inv));
+        if let Some(ref d) = level.d_sqrt_inv {
+            level.d_sqrt_inv_f32 = Some(cast_slice_to_f32(d));
+        } else {
+            level.d_sqrt_inv_f32 = None;
+        }
+        if let Some(ref l1) = level.l1_inv {
+            level.l1_inv_f32 = Some(cast_slice_to_f32(l1));
+        } else {
+            level.l1_inv_f32 = None;
+        }
+        if let Some(ref fsai) = level.fsai {
+            level.fsai_g_vals_f32 = Some(cast_slice_to_f32(fsai.g.values()));
+            level.fsai_gt_vals_f32 = Some(cast_slice_to_f32(fsai.gt.values()));
+        } else {
+            level.fsai_g_vals_f32 = None;
+            level.fsai_gt_vals_f32 = None;
+        }
+    } else {
+        level.diag_inv_f32 = None;
+        level.d_sqrt_inv_f32 = None;
+        level.l1_inv_f32 = None;
+        level.fsai_g_vals_f32 = None;
+        level.fsai_gt_vals_f32 = None;
+    }
 }
 
 fn csr_lookup(a: &CsrMatrix<f64>, row: usize, col: usize) -> f64 {
@@ -5398,6 +6160,7 @@ mod tests {
 
     mod chebyshev;
     mod fsai_smoother;
+    mod mixed_precision;
     mod rank_galerkin;
 
     #[inline]
@@ -5509,6 +6272,12 @@ mod tests {
             r_vals_scratch: None,
             coarse_solver: None,
             fsai: None,
+            a_vals_f32: None,
+            diag_inv_f32: None,
+            d_sqrt_inv_f32: None,
+            l1_inv_f32: None,
+            fsai_g_vals_f32: None,
+            fsai_gt_vals_f32: None,
         }
     }
 
@@ -5537,6 +6306,12 @@ mod tests {
             r_vals_scratch: None,
             coarse_solver: None,
             fsai: None,
+            a_vals_f32: None,
+            diag_inv_f32: None,
+            d_sqrt_inv_f32: None,
+            l1_inv_f32: None,
+            fsai_g_vals_f32: None,
+            fsai_gt_vals_f32: None,
         }
     }
 

@@ -2,6 +2,69 @@ use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
 use faer::{MatMut, MatRef};
 
+#[inline]
+pub fn spmv_scaled_f32_on_pattern(
+    n: usize,
+    row_ptr: &[usize],
+    col_idx: &[usize],
+    vals32: &[f32],
+    alpha: f32,
+    x: &[f32],
+    beta: f32,
+    y: &mut [f32],
+) {
+    assert_eq!(row_ptr.len(), n + 1);
+    assert_eq!(y.len(), n);
+    if beta == 0.0 {
+        y.fill(0.0);
+    } else if beta != 1.0 {
+        for v in y.iter_mut() {
+            *v *= beta;
+        }
+    }
+    for i in 0..n {
+        let mut acc = 0.0f32;
+        let rs = row_ptr[i];
+        let re = row_ptr[i + 1];
+        for p in rs..re {
+            acc += vals32[p] * x[col_idx[p]];
+        }
+        y[i] += alpha * acc;
+    }
+}
+
+#[inline]
+pub fn spmv_t_scaled_f32_on_pattern(
+    n: usize,
+    row_ptr: &[usize],
+    col_idx: &[usize],
+    vals32: &[f32],
+    alpha: f32,
+    x: &[f32],
+    beta: f32,
+    y: &mut [f32],
+) {
+    assert_eq!(row_ptr.len(), n + 1);
+    if beta == 0.0 {
+        y.fill(0.0);
+    } else if beta != 1.0 {
+        for v in y.iter_mut() {
+            *v *= beta;
+        }
+    }
+    for i in 0..n {
+        let xi = x[i];
+        if xi == 0.0 {
+            continue;
+        }
+        let rs = row_ptr[i];
+        let re = row_ptr[i + 1];
+        for p in rs..re {
+            y[col_idx[p]] += alpha * vals32[p] * xi;
+        }
+    }
+}
+
 /// y = A * x using CSR; parallel when `rayon` is enabled.
 #[cfg(feature = "rayon")]
 pub fn spmv_csr_parallel(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
