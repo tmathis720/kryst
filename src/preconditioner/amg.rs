@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::cmp::Ordering as CmpOrdering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -75,6 +76,7 @@ pub enum RelaxType {
     HybridGaussSeidel,
     L1Jacobi,
     Chebyshev,
+    Fsai,
 }
 
 /// Per-phase relaxation controls mirroring Boomer semantics.
@@ -244,6 +246,14 @@ pub struct AMGConfig {
     pub use_level_scheduling: bool,
     pub drop_tol: f64,  // NEW: used for dense->CSR conversion
     pub stats_eps: f64, // threshold for effective nnz reporting
+    // FSAI smoother controls
+    pub fsai_dist: usize,
+    pub fsai_use_strength: bool,
+    pub fsai_max_per_row: usize,
+    pub fsai_lambda: f64,
+    pub fsai_adaptive_passes: usize,
+    pub fsai_drop_tol: f64,
+    pub fsai_damping: f64,
     // New SA/RS controls
     pub normalize_strength: bool,
     pub coarse_solve: CoarseSolve,
@@ -321,6 +331,13 @@ impl Default for AMGConfig {
             use_level_scheduling: false,
             drop_tol: 1e-12,
             stats_eps: 1e-12,
+            fsai_dist: 1,
+            fsai_use_strength: true,
+            fsai_max_per_row: 12,
+            fsai_lambda: 1e-12,
+            fsai_adaptive_passes: 0,
+            fsai_drop_tol: 1e-12,
+            fsai_damping: 0.3,
             normalize_strength: true,
             coarse_solve: CoarseSolve::CG,
             ilu_drop_tol: 1e-2,
@@ -604,6 +621,34 @@ impl AMGBuilder {
         self.cfg.stats_eps = t;
         self
     }
+    pub fn fsai_dist(mut self, dist: usize) -> Self {
+        self.cfg.fsai_dist = dist.max(1);
+        self
+    }
+    pub fn fsai_use_strength(mut self, use_strength: bool) -> Self {
+        self.cfg.fsai_use_strength = use_strength;
+        self
+    }
+    pub fn fsai_max_per_row(mut self, cap: usize) -> Self {
+        self.cfg.fsai_max_per_row = cap.max(1);
+        self
+    }
+    pub fn fsai_lambda(mut self, lambda: f64) -> Self {
+        self.cfg.fsai_lambda = if lambda >= 0.0 { lambda } else { 0.0 };
+        self
+    }
+    pub fn fsai_adaptive_passes(mut self, passes: usize) -> Self {
+        self.cfg.fsai_adaptive_passes = passes;
+        self
+    }
+    pub fn fsai_drop_tol(mut self, drop: f64) -> Self {
+        self.cfg.fsai_drop_tol = if drop >= 0.0 { drop } else { 0.0 };
+        self
+    }
+    pub fn fsai_damping(mut self, tau: f64) -> Self {
+        self.cfg.fsai_damping = tau;
+        self
+    }
 
     pub fn coarse_solve(mut self, v: CoarseSolve) -> Self {
         self.cfg.coarse_solve = v;
@@ -714,7 +759,8 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             | RelaxType::GaussSeidelBackward
             | RelaxType::SymmetricGaussSeidel
             | RelaxType::L1Jacobi
-            | RelaxType::Chebyshev => {}
+            | RelaxType::Chebyshev
+            | RelaxType::Fsai => {}
             _ => {
                 return Err(KError::InvalidInput(format!(
                     "RelaxType {rt:?} not yet supported (phase index {i})"
@@ -771,6 +817,7 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
                 | RelaxType::Jacobi
                 | RelaxType::L1Jacobi
                 | RelaxType::SymmetricGaussSeidel
+                | RelaxType::Fsai
         ) {
             return Err(KError::InvalidInput(
                 "SPD mode requires symmetric or Jacobi-type smoothers".into(),
@@ -809,7 +856,8 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
                 | RelaxType::GaussSeidel
                 | RelaxType::SymmetricGaussSeidel
                 | RelaxType::L1Jacobi
-                | RelaxType::Chebyshev => {}
+                | RelaxType::Chebyshev
+                | RelaxType::Fsai => {}
             }
         }
 
@@ -881,6 +929,13 @@ impl AMGWorkspace {
     }
 }
 
+#[derive(Clone)]
+struct FsaiData {
+    g: CsrMatrix<f64>,
+    gt: CsrMatrix<f64>,
+    g2gt_pos: Vec<usize>,
+}
+
 struct AMGLevel {
     /// A_l (coarse operator at this level, l = 0 is finest)
     a: CsrMatrix<f64>,
@@ -922,6 +977,7 @@ struct AMGLevel {
     r_vals_scratch: Option<Vec<f64>>,
     #[allow(clippy::redundant_allocation)]
     coarse_solver: Option<Mutex<Box<dyn CoarseSolver + Send>>>,
+    fsai: Option<FsaiData>,
 }
 
 #[derive(Clone)]
@@ -1434,6 +1490,7 @@ impl AMG {
 
         let need_l1 = self.cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
         let need_cheb = self.cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
+        let need_fsai = self.cfg.grid_relax_type.contains(&RelaxType::Fsai);
         let mut trials_current = make_trial_matrix(&self.cfg, h.levels[0].a.nrows())?;
 
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
@@ -1680,6 +1737,31 @@ impl AMG {
         for lvl in 0..=h.coarsest_ix() {
             let recompute = self.cfg.chebyshev_recompute_esteig || h.levels[lvl].cheb.is_none();
             update_level_caches(&self.cfg, &mut h.levels[lvl], need_l1, need_cheb, recompute)?;
+            if need_fsai {
+                let level = &mut h.levels[lvl];
+                if level.fsai.is_none() {
+                    let strength_opt = if self.cfg.fsai_use_strength {
+                        Some(Strength::from_csr(
+                            &level.a,
+                            self.cfg.strong_threshold,
+                            self.cfg.normalize_strength,
+                        ))
+                    } else {
+                        None
+                    };
+                    level.fsai = Some(fsai_build_for_level(
+                        &self.cfg,
+                        &level.a,
+                        strength_opt.as_ref(),
+                    )?);
+                }
+                if let Some(mut data) = level.fsai.take() {
+                    fsai_refresh_numeric(&level.a, &mut data, self.cfg.fsai_lambda)?;
+                    level.fsai = Some(data);
+                }
+            } else {
+                h.levels[lvl].fsai = None;
+            }
         }
 
         if self.cfg.logging_level > 0 {
@@ -1854,10 +1936,54 @@ impl AMG {
         )
     }
 
+    fn fsai_smooth_core(
+        g: &CsrMatrix<f64>,
+        gt: &CsrMatrix<f64>,
+        a: &CsrMatrix<f64>,
+        rhs: &[f64],
+        z: &mut [f64],
+        tau: f64,
+        residual: &mut [f64],
+        work: &mut [f64],
+        tmp: &mut [f64],
+    ) -> Result<(), KError> {
+        let n = a.nrows();
+        a.spmv_scaled(1.0, z, 0.0, work)?;
+        for i in 0..n {
+            residual[i] = rhs[i] - work[i];
+        }
+        g.spmv_scaled(1.0, residual, 0.0, tmp)?;
+        gt.spmv_scaled(1.0, tmp, 0.0, work)?;
+        for i in 0..n {
+            z[i] += tau * work[i];
+        }
+        Ok(())
+    }
+
+    fn fsai_smooth(
+        g: &CsrMatrix<f64>,
+        gt: &CsrMatrix<f64>,
+        a: &CsrMatrix<f64>,
+        rhs: &[f64],
+        z: &mut [f64],
+        tau: f64,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        let n = a.nrows();
+        ws.ensure(n);
+        let residual = &mut ws.residual[..n];
+        let work = &mut ws.work[..n];
+        let tmp = &mut ws.fine_corr[..n];
+        Self::fsai_smooth_core(g, gt, a, rhs, z, tau, residual, work, tmp)
+    }
+
     fn flexible_relax_supported(relax: RelaxType) -> bool {
         matches!(
             relax,
-            RelaxType::Jacobi | RelaxType::L1Jacobi | RelaxType::SymmetricGaussSeidel
+            RelaxType::Jacobi
+                | RelaxType::L1Jacobi
+                | RelaxType::SymmetricGaussSeidel
+                | RelaxType::Fsai
         )
     }
 
@@ -1911,6 +2037,27 @@ impl AMG {
             RelaxType::SymmetricGaussSeidel => {
                 z.fill(0.0);
                 Self::sym_gs(omega, &lvl.a, &lvl.diag_inv, r, z, sweeps)?;
+                Ok(())
+            }
+            RelaxType::Fsai => {
+                let data = lvl
+                    .fsai
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
+                ws.fine_corr[..n].fill(0.0);
+                for _ in 0..sweeps {
+                    Self::fsai_smooth_core(
+                        &data.g,
+                        &data.gt,
+                        &lvl.a,
+                        r,
+                        &mut ws.fine_corr[..n],
+                        self.cfg.fsai_damping,
+                        &mut ws.work[..n],
+                        &mut ws.coarse_rhs[..n],
+                        &mut ws.temp[..n],
+                    )?;
+                }
                 Ok(())
             }
             other => Err(KError::InvalidInput(format!(
@@ -2054,6 +2201,16 @@ impl AMG {
                 let degree = cfg.chebyshev_degree.max(1);
                 for _ in 0..k {
                     Self::apply_chebyshev(a, &lvl.diag_inv, rhs, sol, degree, cheb, ws)?;
+                }
+                Ok(())
+            }
+            RelaxType::Fsai => {
+                let data = lvl
+                    .fsai
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
+                for _ in 0..k {
+                    Self::fsai_smooth(&data.g, &data.gt, a, rhs, sol, cfg.fsai_damping, ws)?;
                 }
                 Ok(())
             }
@@ -2562,6 +2719,7 @@ fn build_hierarchy(
 
     let need_l1 = cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
     let need_cheb = cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
+    let need_fsai = cfg.grid_relax_type.contains(&RelaxType::Fsai);
 
     // Level 0 (finest)
     let mut lt0 = LevelSetupTiming::default();
@@ -2598,9 +2756,22 @@ fn build_hierarchy(
         r_col_idx: None,
         r_vals_scratch: None,
         coarse_solver: None,
+        fsai: None,
     };
     let mut l0 = l0;
     update_level_caches(cfg, &mut l0, need_l1, need_cheb, true)?;
+    if need_fsai {
+        let strength0 = if cfg.fsai_use_strength {
+            Some(Strength::from_csr(
+                &l0.a,
+                cfg.strong_threshold,
+                cfg.normalize_strength,
+            ))
+        } else {
+            None
+        };
+        l0.fsai = Some(fsai_build_for_level(cfg, &l0.a, strength0.as_ref())?);
+    }
     levels.push(l0);
     if do_stats {
         level_stats.push(LevelStats {
@@ -2978,8 +3149,25 @@ fn build_hierarchy(
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
+            fsai: None,
         };
         update_level_caches(cfg, &mut next_level, need_l1, need_cheb, true)?;
+        if need_fsai {
+            let strength_coarse = if cfg.fsai_use_strength {
+                Some(Strength::from_csr(
+                    &next_level.a,
+                    cfg.strong_threshold,
+                    cfg.normalize_strength,
+                ))
+            } else {
+                None
+            };
+            next_level.fsai = Some(fsai_build_for_level(
+                cfg,
+                &next_level.a,
+                strength_coarse.as_ref(),
+            )?);
+        }
         levels.push(next_level);
 
         if do_stats {
@@ -3315,6 +3503,549 @@ fn update_level_caches(
     } else {
         level.d_sqrt_inv = None;
         level.cheb = None;
+    }
+    Ok(())
+}
+
+fn csr_lookup(a: &CsrMatrix<f64>, row: usize, col: usize) -> f64 {
+    let rp = a.row_ptr();
+    let ci = a.col_idx();
+    let vv = a.values();
+    let (rs, re) = (rp[row], rp[row + 1]);
+    match ci[rs..re].binary_search(&col) {
+        Ok(pos) => vv[rs + pos],
+        Err(_) => 0.0,
+    }
+}
+
+fn gather_dense_submatrix(a: &CsrMatrix<f64>, pattern: &[usize], buf: &mut Vec<f64>) {
+    let m = pattern.len();
+    buf.resize(m * m, 0.0);
+    for (i_local, &i) in pattern.iter().enumerate() {
+        for (j_local, &j) in pattern.iter().take(i_local + 1).enumerate() {
+            let val = csr_lookup(a, i, j);
+            buf[i_local * m + j_local] = val;
+            buf[j_local * m + i_local] = val;
+        }
+    }
+}
+
+fn cholesky_factor(mat: &mut [f64], n: usize) -> bool {
+    for i in 0..n {
+        for j in 0..i {
+            let mut sum = mat[i * n + j];
+            for k in 0..j {
+                sum -= mat[i * n + k] * mat[j * n + k];
+            }
+            let diag = mat[j * n + j];
+            if diag <= 0.0 {
+                return false;
+            }
+            sum /= diag;
+            mat[i * n + j] = sum;
+        }
+        let mut sum = mat[i * n + i];
+        for k in 0..i {
+            let v = mat[i * n + k];
+            sum -= v * v;
+        }
+        if sum <= 0.0 {
+            return false;
+        }
+        let diag = sum.sqrt();
+        mat[i * n + i] = diag;
+        for j in (i + 1)..n {
+            mat[i * n + j] = 0.0;
+        }
+    }
+    true
+}
+
+fn cholesky_solve(mat: &[f64], rhs: &[f64], n: usize) -> Vec<f64> {
+    let mut y = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = rhs[i];
+        for k in 0..i {
+            sum -= mat[i * n + k] * y[k];
+        }
+        let diag = mat[i * n + i];
+        y[i] = sum / diag;
+    }
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut sum = y[i];
+        for k in (i + 1)..n {
+            sum -= mat[k * n + i] * x[k];
+        }
+        let diag = mat[i * n + i];
+        x[i] = sum / diag;
+    }
+    x
+}
+
+fn solve_fsai_system(base: &[f64], rhs: &[f64], n: usize, lambda: f64) -> Option<Vec<f64>> {
+    let mut attempt = if lambda >= 0.0 { lambda } else { 0.0 };
+    let mut mat = vec![0.0; n * n];
+    let mut tries = 0;
+    while tries < 5 {
+        mat.copy_from_slice(base);
+        for d in 0..n {
+            mat[d * n + d] += attempt;
+        }
+        if cholesky_factor(&mut mat, n) {
+            return Some(cholesky_solve(&mat, rhs, n));
+        }
+        attempt = if attempt == 0.0 {
+            1e-12
+        } else {
+            attempt * 10.0
+        };
+        tries += 1;
+    }
+    None
+}
+
+fn prune_pattern_row(a: &CsrMatrix<f64>, row: usize, pattern: &mut Vec<usize>, cap: usize) {
+    if pattern.is_empty() {
+        pattern.push(row);
+    }
+    if !pattern.contains(&row) {
+        pattern.push(row);
+    }
+    if cap == 0 {
+        pattern.clear();
+        pattern.push(row);
+        return;
+    }
+    if pattern.len() <= cap {
+        pattern.sort_unstable();
+        return;
+    }
+    let mut entries: Vec<(usize, f64)> = pattern
+        .iter()
+        .copied()
+        .filter(|&col| col != row)
+        .map(|col| (col, csr_lookup(a, row, col).abs()))
+        .collect();
+    entries.sort_unstable_by(
+        |a, b| match b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal) {
+            CmpOrdering::Equal => a.0.cmp(&b.0),
+            other => other,
+        },
+    );
+    let mut kept = Vec::with_capacity(cap.max(1));
+    kept.push(row);
+    for (col, _) in entries.into_iter().take(cap.saturating_sub(1)) {
+        kept.push(col);
+    }
+    kept.sort_unstable();
+    pattern.clear();
+    pattern.extend(kept);
+}
+
+fn fsai_build_pattern(
+    a: &CsrMatrix<f64>,
+    strength: Option<&Strength>,
+    dist: usize,
+    cap: usize,
+) -> Vec<Vec<usize>> {
+    let n = a.nrows();
+    let mut patterns: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut mark = vec![0usize; n];
+    let mut stamp = 1usize;
+    let mut frontier: Vec<usize> = Vec::new();
+    let mut next: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let mut acc: Vec<usize> = vec![i];
+        frontier.clear();
+        frontier.push(i);
+        mark[i] = stamp;
+        for _ in 0..dist {
+            next.clear();
+            for &u in &frontier {
+                let neighbors: &[usize] = if let Some(g) = strength {
+                    let rs = g.row_ptr[u];
+                    let re = g.row_ptr[u + 1];
+                    &g.col_idx[rs..re]
+                } else {
+                    let rp = a.row_ptr();
+                    let ci = a.col_idx();
+                    let (rs, re) = (rp[u], rp[u + 1]);
+                    &ci[rs..re]
+                };
+                for &v in neighbors {
+                    if v >= n {
+                        continue;
+                    }
+                    if mark[v] != stamp {
+                        mark[v] = stamp;
+                        acc.push(v);
+                        next.push(v);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            std::mem::swap(&mut frontier, &mut next);
+        }
+        stamp = stamp.wrapping_add(1);
+        acc.sort_unstable();
+        acc.dedup();
+        prune_pattern_row(a, i, &mut acc, cap);
+        patterns.push(acc);
+    }
+    if cap > 0 {
+        let mut additions: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            let current = patterns[i].clone();
+            for &j in &current {
+                if j >= n || j == i {
+                    continue;
+                }
+                if patterns[j].binary_search(&i).is_err() {
+                    additions.push((j, i));
+                }
+            }
+        }
+        additions.sort_unstable();
+        additions.dedup();
+        for (row, col) in additions {
+            let pat = &mut patterns[row];
+            match pat.binary_search(&col) {
+                Ok(_) => {}
+                Err(pos) => pat.insert(pos, col),
+            }
+            prune_pattern_row(a, row, pat, cap);
+        }
+    }
+    patterns
+}
+
+fn fsai_enrich_pattern(
+    a: &CsrMatrix<f64>,
+    pattern: &mut Vec<usize>,
+    sol: &[f64],
+    cap: usize,
+) -> usize {
+    if pattern.len() >= cap {
+        return 0;
+    }
+    let rp = a.row_ptr();
+    let ci = a.col_idx();
+    let vv = a.values();
+    let mut accum: Vec<(usize, f64)> = Vec::new();
+    for (local, &row) in pattern.iter().enumerate() {
+        let coeff = sol[local];
+        if coeff == 0.0 {
+            continue;
+        }
+        let (rs, re) = (rp[row], rp[row + 1]);
+        for idx in rs..re {
+            let col = ci[idx];
+            if pattern.binary_search(&col).is_ok() {
+                continue;
+            }
+            accum.push((col, -coeff * vv[idx]));
+        }
+    }
+    if accum.is_empty() {
+        return 0;
+    }
+    accum.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut merged: Vec<(usize, f64)> = Vec::new();
+    for (col, val) in accum {
+        if let Some(last) = merged.last_mut() {
+            if last.0 == col {
+                last.1 += val;
+                continue;
+            }
+        }
+        merged.push((col, val));
+    }
+    merged.sort_unstable_by(|a, b| {
+        match b
+            .1
+            .abs()
+            .partial_cmp(&a.1.abs())
+            .unwrap_or(CmpOrdering::Equal)
+        {
+            CmpOrdering::Equal => a.0.cmp(&b.0),
+            other => other,
+        }
+    });
+    let mut added = 0usize;
+    let space = cap.saturating_sub(pattern.len());
+    for (col, _) in merged.into_iter() {
+        if added >= space {
+            break;
+        }
+        if col >= a.ncols() {
+            continue;
+        }
+        if let Err(pos) = pattern.binary_search(&col) {
+            pattern.insert(pos, col);
+            added += 1;
+        }
+    }
+    added
+}
+
+fn fsai_drop_entries(
+    a: &CsrMatrix<f64>,
+    row: usize,
+    pattern: &[usize],
+    sol: &[f64],
+    drop_tol: f64,
+    cap: usize,
+) -> (Vec<usize>, Vec<f64>) {
+    let mut norm = 0.0;
+    for &v in sol {
+        norm += v * v;
+    }
+    let norm = norm.sqrt();
+    let thr = drop_tol.max(0.0) * norm.max(1e-32);
+    let mut cols: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    for (col, &val) in pattern.iter().zip(sol.iter()) {
+        if *col == row {
+            let mut keep = val;
+            if keep.abs() < thr {
+                let diag = csr_lookup(a, row, row);
+                keep = if diag.abs() > 0.0 { 1.0 / diag } else { 1.0 };
+            }
+            cols.push(*col);
+            vals.push(keep);
+        } else if val.abs() >= thr {
+            cols.push(*col);
+            vals.push(val);
+        }
+    }
+    if cols.is_empty() {
+        let diag = csr_lookup(a, row, row);
+        cols.push(row);
+        vals.push(if diag.abs() > 0.0 { 1.0 / diag } else { 1.0 });
+    }
+    let limit = cap.max(1);
+    if cols.len() > limit {
+        let diag_pos = cols.iter().position(|&c| c == row).unwrap_or(0);
+        let mut others: Vec<(usize, f64, usize)> = cols
+            .iter()
+            .enumerate()
+            .filter(|&(idx, &c)| idx != diag_pos && c != row)
+            .map(|(idx, &c)| (c, vals[idx].abs(), idx))
+            .collect();
+        others.sort_unstable_by(
+            |a, b| match b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal) {
+                CmpOrdering::Equal => a.0.cmp(&b.0),
+                other => other,
+            },
+        );
+        let mut keep = vec![diag_pos];
+        for (_, _, idx) in others.into_iter().take(limit.saturating_sub(1)) {
+            keep.push(idx);
+        }
+        keep.sort_unstable();
+        let mut new_cols = Vec::with_capacity(keep.len());
+        let mut new_vals = Vec::with_capacity(keep.len());
+        for idx in keep {
+            new_cols.push(cols[idx]);
+            new_vals.push(vals[idx]);
+        }
+        cols = new_cols;
+        vals = new_vals;
+    }
+    let mut pairs: Vec<(usize, f64)> = cols.into_iter().zip(vals.into_iter()).collect();
+    pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut out_cols = Vec::with_capacity(pairs.len());
+    let mut out_vals = Vec::with_capacity(pairs.len());
+    for (c, v) in pairs {
+        out_cols.push(c);
+        out_vals.push(v);
+    }
+    (out_cols, out_vals)
+}
+
+fn fsai_factor_values(
+    a: &CsrMatrix<f64>,
+    patterns: &mut [Vec<usize>],
+    lambda: f64,
+    drop_tol: f64,
+    adaptive_passes: usize,
+    cap: usize,
+) -> Result<CsrMatrix<f64>, KError> {
+    let n = a.nrows();
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx: Vec<usize> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    let mut base = Vec::new();
+    let mut rhs = Vec::new();
+    row_ptr.push(0);
+    for row in 0..n {
+        let pat = &mut patterns[row];
+        if pat.is_empty() {
+            pat.push(row);
+        }
+        if !pat.contains(&row) {
+            pat.push(row);
+            pat.sort_unstable();
+        }
+        let mut pass = 0usize;
+        let mut solved = None;
+        loop {
+            let m = pat.len();
+            if m == 0 {
+                break;
+            }
+            gather_dense_submatrix(a, pat, &mut base);
+            rhs.resize(m, 0.0);
+            if let Ok(pos) = pat.binary_search(&row) {
+                rhs[pos] = 1.0;
+            } else {
+                rhs[0] = 1.0;
+            }
+            solved = solve_fsai_system(&base, &rhs, m, lambda);
+            if solved.is_none() {
+                pat.clear();
+                pat.push(row);
+                let diag = csr_lookup(a, row, row);
+                let val = if diag.abs() > 0.0 { 1.0 / diag } else { 1.0 };
+                col_idx.push(row);
+                values.push(val);
+                row_ptr.push(col_idx.len());
+                break;
+            }
+            if adaptive_passes > 0 && pass < adaptive_passes {
+                let added = fsai_enrich_pattern(a, pat, solved.as_ref().unwrap(), cap);
+                if added > 0 {
+                    pass += 1;
+                    continue;
+                }
+            }
+            let (cols, vals) =
+                fsai_drop_entries(a, row, pat, solved.as_ref().unwrap(), drop_tol, cap);
+            pat.clear();
+            pat.extend(cols.iter().copied());
+            col_idx.extend_from_slice(&cols);
+            values.extend_from_slice(&vals);
+            row_ptr.push(col_idx.len());
+            break;
+        }
+    }
+    Ok(CsrMatrix::from_csr(n, n, row_ptr, col_idx, values))
+}
+
+fn fsai_transpose_with_pos(g: &CsrMatrix<f64>) -> (CsrMatrix<f64>, Vec<usize>) {
+    let m = g.nrows();
+    let n = g.ncols();
+    let nnz = g.nnz();
+    let mut row_counts = vec![0usize; n + 1];
+    for &col in g.col_idx() {
+        row_counts[col + 1] += 1;
+    }
+    for i in 0..n {
+        row_counts[i + 1] += row_counts[i];
+    }
+    let mut col_idx = vec![0usize; nnz];
+    let mut vals = vec![0.0f64; nnz];
+    let mut next = row_counts.clone();
+    let mut map = vec![0usize; nnz];
+    for row in 0..m {
+        let (rs, re) = (g.row_ptr()[row], g.row_ptr()[row + 1]);
+        for idx in rs..re {
+            let col = g.col_idx()[idx];
+            let dest = next[col];
+            col_idx[dest] = row;
+            vals[dest] = g.values()[idx];
+            map[idx] = dest;
+            next[col] += 1;
+        }
+    }
+    (CsrMatrix::from_csr(n, m, row_counts, col_idx, vals), map)
+}
+
+fn fsai_build_for_level(
+    cfg: &AMGConfig,
+    a: &CsrMatrix<f64>,
+    strength: Option<&Strength>,
+) -> Result<FsaiData, KError> {
+    let strength_owned = if cfg.fsai_use_strength {
+        if let Some(s) = strength {
+            Some(s.symmetrize())
+        } else {
+            Some(Strength::from_csr(a, cfg.strong_threshold, cfg.normalize_strength).symmetrize())
+        }
+    } else {
+        None
+    };
+    let mut patterns = fsai_build_pattern(
+        a,
+        strength_owned.as_ref(),
+        cfg.fsai_dist.max(1),
+        cfg.fsai_max_per_row.max(1),
+    );
+    let g = fsai_factor_values(
+        a,
+        &mut patterns,
+        cfg.fsai_lambda,
+        cfg.fsai_drop_tol,
+        cfg.fsai_adaptive_passes,
+        cfg.fsai_max_per_row.max(1),
+    )?;
+    let (gt, map) = fsai_transpose_with_pos(&g);
+    Ok(FsaiData {
+        g,
+        gt,
+        g2gt_pos: map,
+    })
+}
+
+fn fsai_refresh_numeric(
+    a: &CsrMatrix<f64>,
+    data: &mut FsaiData,
+    lambda: f64,
+) -> Result<(), KError> {
+    let n = a.nrows();
+    let rp = data.g.row_ptr().to_vec();
+    let ci = data.g.col_idx().to_vec();
+    let mut base = Vec::new();
+    let mut rhs = Vec::new();
+    {
+        let vals = data.g.values_mut();
+        for row in 0..n {
+            let start = rp[row];
+            let end = rp[row + 1];
+            if start == end {
+                continue;
+            }
+            let pattern = &ci[start..end];
+            gather_dense_submatrix(a, pattern, &mut base);
+            rhs.resize(pattern.len(), 0.0);
+            if let Ok(pos) = pattern.binary_search(&row) {
+                rhs[pos] = 1.0;
+            } else if !pattern.is_empty() {
+                rhs[0] = 1.0;
+            }
+            if let Some(sol) = solve_fsai_system(&base, &rhs, pattern.len(), lambda) {
+                for (dst, val) in vals[start..end].iter_mut().zip(sol.iter()) {
+                    *dst = *val;
+                }
+            } else {
+                for (dst, &col) in vals[start..end].iter_mut().zip(pattern.iter()) {
+                    if col == row {
+                        let diag = csr_lookup(a, row, row);
+                        *dst = if diag.abs() > 0.0 { 1.0 / diag } else { 1.0 };
+                    } else {
+                        *dst = 0.0;
+                    }
+                }
+            }
+        }
+    }
+    let g_vals = data.g.values();
+    let gt_vals = data.gt.values_mut();
+    for (src, &dst) in data.g2gt_pos.iter().enumerate() {
+        gt_vals[dst] = g_vals[src];
     }
     Ok(())
 }
@@ -4075,6 +4806,7 @@ mod tests {
     }
 
     mod chebyshev;
+    mod fsai_smoother;
 
     #[inline]
     fn feq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
@@ -4184,6 +4916,7 @@ mod tests {
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
+            fsai: None,
         }
     }
 
@@ -4211,6 +4944,7 @@ mod tests {
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
+            fsai: None,
         }
     }
 
