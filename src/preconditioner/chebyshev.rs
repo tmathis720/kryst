@@ -283,10 +283,10 @@ pub fn chebyshev_smooth_csr(
     }
 
     for _ in 1..deg {
-        for i in 0..n {
-            work_q[i] = d_inv[i] * work_r[i];
-        }
         let beta = 0.25 * delta * delta * alpha;
+        for i in 0..n {
+            work_q[i] = d_inv[i] * work_r[i] + beta * work_q[i];
+        }
         alpha = 1.0 / (theta - beta);
         for i in 0..n {
             z[i] += alpha * work_q[i];
