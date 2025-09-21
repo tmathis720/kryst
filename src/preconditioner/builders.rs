@@ -1,7 +1,13 @@
 use crate::error::KError;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
-use crate::preconditioner::{Preconditioner, jacobi::Jacobi, sor::MatSorType};
+use crate::preconditioner::{
+    Preconditioner,
+    asm::{AsmCombine, AsmConfig, AsmLocalSolver},
+    asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
+    jacobi::Jacobi,
+    sor::MatSorType,
+};
 
 use crate::preconditioner::chebyshev::ChebyshevPc;
 use crate::preconditioner::sor::SorPc;
@@ -239,4 +245,17 @@ pub fn build_amg(
     use crate::preconditioner::amg::AMG;
     let amg = AMG::with_config(Default::default());
     Ok(Box::new(amg))
+}
+
+pub fn build_asm_amg(overlap: usize) -> Result<Box<dyn Preconditioner>, KError> {
+    let mut asm_cfg = AsmConfig::default();
+    asm_cfg.overlap = overlap;
+    asm_cfg.combine = AsmCombine::Restricted;
+    asm_cfg.local_solver = AsmLocalSolver::ILU;
+    asm_cfg.deterministic = true;
+    let mut two_cfg = TwoLevelConfig::default();
+    two_cfg.mode = TwoLevelMode::AdditiveCoarse;
+    two_cfg.coarse_every = 1;
+    let pc = AsmAmg::with_configs(asm_cfg, two_cfg);
+    Ok(Box::new(pc))
 }
