@@ -1,3 +1,13 @@
+pub mod plan;
+pub mod scalar;
+#[cfg(feature = "simd")]
+pub mod sellc;
+#[cfg(feature = "simd")]
+pub mod simd_csr;
+
+pub use self::plan::{KernelKind, SpmvPlan, SpmvTuning, build as build_plan};
+pub use self::scalar::{spmv_scaled_csr, spmv_t_scaled_csr};
+
 use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
 use faer::{MatMut, MatRef};

@@ -11,6 +11,8 @@ use crate::matrix::{
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
+#[cfg(feature = "simd")]
+use crate::matrix::{spmv::SpmvTuning, utils};
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
@@ -796,7 +798,9 @@ impl AMGBuilder {
     }
 
     pub fn near_nullspace(mut self, basis: Vec<Vec<f64>>) -> Self {
+        let count = basis.len().max(1);
         self.cfg.near_nullspace = Some(NearNullspace { basis });
+        self.cfg.num_functions = count;
         self
     }
 
@@ -1229,6 +1233,13 @@ struct AMGLevel {
     l1_inv_f32: Option<Vec<f32>>,
     fsai_g_vals_f32: Option<Vec<f32>>,
     fsai_gt_vals_f32: Option<Vec<f32>>,
+}
+
+#[cfg(feature = "simd")]
+fn build_level_spmv_plans(level: &mut AMGLevel, tuning: &SpmvTuning) {
+    level.a.build_spmv_plan(tuning);
+    level.p.build_spmv_plan(tuning);
+    level.r.build_spmv_plan(tuning);
 }
 
 #[derive(Clone)]
@@ -2130,6 +2141,9 @@ impl AMG {
             return self.build_symbolic(fine);
         }
 
+        #[cfg(feature = "simd")]
+        let spmv_tuning = utils::default_spmv_tuning();
+
         // Update finest A_0 and diag(A_0)^{-1}
         h.levels[0].a = fine.clone();
         h.levels[0].diag_inv = diag_inv_from_csr_cfg(&h.levels[0].a, &self.cfg)?;
@@ -2587,6 +2601,13 @@ impl AMG {
             } else {
                 h.levels[lvl].fsai = None;
                 refresh_mixed_precision_shadows(&self.cfg, &mut h.levels[lvl]);
+            }
+        }
+
+        #[cfg(feature = "simd")]
+        {
+            for level in &mut h.levels {
+                build_level_spmv_plans(level, &spmv_tuning);
             }
         }
 
@@ -4340,6 +4361,8 @@ fn build_hierarchy(
     let mut timings: Vec<LevelSetupTiming> = Vec::new();
     let mut diag_stats: Vec<AmgLevelStats> = Vec::new();
     let t_setup_all = if do_stats { Some(tic()) } else { None };
+    #[cfg(feature = "simd")]
+    let spmv_tuning: SpmvTuning = utils::default_spmv_tuning();
 
     let need_l1 = cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
     let need_cheb = cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
@@ -4404,6 +4427,8 @@ fn build_hierarchy(
         l0.fsai = Some(fsai_build_for_level(cfg, &l0.a, strength0.as_ref())?);
         refresh_mixed_precision_shadows(cfg, &mut l0);
     }
+    #[cfg(feature = "simd")]
+    build_level_spmv_plans(&mut l0, &spmv_tuning);
     levels.push(l0);
     if do_stats {
         level_stats.push(LevelStats {
@@ -4942,6 +4967,8 @@ fn build_hierarchy(
                 prev.r_col_idx = Some(r_col_idx);
                 prev.r_vals_scratch = Some(vec![0.0; prev.r_col_idx.as_ref().unwrap().len()]);
             }
+            #[cfg(feature = "simd")]
+            build_level_spmv_plans(prev, &spmv_tuning);
         }
 
         // Next level (coarser)
@@ -5001,6 +5028,8 @@ fn build_hierarchy(
             )?);
             refresh_mixed_precision_shadows(cfg, &mut next_level);
         }
+        #[cfg(feature = "simd")]
+        build_level_spmv_plans(&mut next_level, &spmv_tuning);
         levels.push(next_level);
 
         if do_stats {
@@ -6856,7 +6885,7 @@ mod tests {
     }
 
     fn identity_level() -> AMGLevel {
-        AMGLevel {
+        let mut level = AMGLevel {
             a: CsrMatrix::identity(1),
             p: CsrMatrix::identity(1),
             r: CsrMatrix::identity(1),
@@ -6886,12 +6915,18 @@ mod tests {
             l1_inv_f32: None,
             fsai_g_vals_f32: None,
             fsai_gt_vals_f32: None,
+        };
+        #[cfg(feature = "simd")]
+        {
+            let tuning = utils::default_spmv_tuning();
+            build_level_spmv_plans(&mut level, &tuning);
         }
+        level
     }
 
     fn level_from_matrix(a: &CsrMatrix<f64>) -> AMGLevel {
         let n = a.nrows();
-        AMGLevel {
+        let mut level = AMGLevel {
             a: a.clone(),
             p: CsrMatrix::identity(n),
             r: CsrMatrix::identity(n),
@@ -6921,7 +6956,13 @@ mod tests {
             l1_inv_f32: None,
             fsai_g_vals_f32: None,
             fsai_gt_vals_f32: None,
+        };
+        #[cfg(feature = "simd")]
+        {
+            let tuning = utils::default_spmv_tuning();
+            build_level_spmv_plans(&mut level, &tuning);
         }
+        level
     }
 
     #[test]
