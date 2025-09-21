@@ -34,7 +34,7 @@ use non_galerkin::{NgRowFilter, non_galerkin_filter_coarse};
 use prolong::{
     CFInfo, ClassicalParams, ClassicalVariant, Pcsr, TentativeP, adaptive_fit_values_only,
     classical_pattern, classical_values_only, restrict_samples_to_coarse, sample_low_modes,
-    smooth_sa_values_only_multi, smooth_tentative_sa_multi,
+    smooth_sa_values_only, smooth_sa_values_only_multi, smooth_tentative_sa_multi,
 };
 use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
 use row_filter::{
@@ -64,6 +64,15 @@ pub enum InterpType {
     Multipass,
     Extended,
     Standard,
+}
+
+/// Response when rank diagnostics flag interpolation issues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankFallback {
+    RetryLooserInterp,
+    SwitchInterpKind,
+    Reaggregate,
+    Abort,
 }
 
 /// Relaxation/smoothing choices.
@@ -246,6 +255,17 @@ pub struct AMGConfig {
     pub use_level_scheduling: bool,
     pub drop_tol: f64,  // NEW: used for dense->CSR conversion
     pub stats_eps: f64, // threshold for effective nnz reporting
+    // P rank diagnostics
+    pub verify_p_rank: bool,
+    pub rank_sketch_cols: usize,
+    pub rank_cond_threshold: f64,
+    pub rank_min_col_norm: f64,
+    // Galerkin sampling controls
+    pub verify_galerkin: bool,
+    pub galerkin_samples: usize,
+    pub galerkin_rel_tol: f64,
+    // Rank fallback policy
+    pub on_rank_failure: RankFallback,
     // FSAI smoother controls
     pub fsai_dist: usize,
     pub fsai_use_strength: bool,
@@ -331,6 +351,14 @@ impl Default for AMGConfig {
             use_level_scheduling: false,
             drop_tol: 1e-12,
             stats_eps: 1e-12,
+            verify_p_rank: true,
+            rank_sketch_cols: 8,
+            rank_cond_threshold: 1e8,
+            rank_min_col_norm: 1e-12,
+            verify_galerkin: true,
+            galerkin_samples: 2,
+            galerkin_rel_tol: 1e-10,
+            on_rank_failure: RankFallback::RetryLooserInterp,
             fsai_dist: 1,
             fsai_use_strength: true,
             fsai_max_per_row: 12,
@@ -1358,6 +1386,303 @@ fn apply_post_interp(
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct RankDiagnostics {
+    min_col_norm: f64,
+    cond_estimate: f64,
+    suspect: bool,
+    degenerate_cols: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RankFixOutcome {
+    Fixed,
+    Unfixed,
+}
+
+fn p_column_norms2(p: &CsrMatrix<f64>) -> Vec<f64> {
+    let mut n2 = vec![0.0; p.ncols()];
+    let rp = p.row_ptr();
+    let cj = p.col_idx();
+    let vv = p.values();
+    for i in 0..p.nrows() {
+        let (rs, re) = (rp[i], rp[i + 1]);
+        for k in rs..re {
+            let j = cj[k];
+            n2[j] += vv[k] * vv[k];
+        }
+    }
+    n2
+}
+
+fn symmetric_eigenvalues(mut m: Mat<f64>) -> Vec<f64> {
+    let n = m.nrows();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut iter = 0usize;
+    loop {
+        let mut max_val = 0.0f64;
+        let mut p = 0usize;
+        let mut q = 1usize;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let val = m[(i, j)].abs();
+                if val > max_val {
+                    max_val = val;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+        if max_val < 1e-12 || iter > 64 * n * n {
+            break;
+        }
+        iter += 1;
+        let app = m[(p, p)];
+        let aqq = m[(q, q)];
+        let apq = m[(p, q)];
+        if apq.abs() < 1e-30 {
+            continue;
+        }
+        let tau = (aqq - app) / (2.0 * apq);
+        let t = if tau >= 0.0 {
+            1.0 / (tau + (1.0 + tau * tau).sqrt())
+        } else {
+            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+        };
+        let c = 1.0 / (1.0 + t * t).sqrt();
+        let s = t * c;
+        for k in 0..n {
+            if k != p && k != q {
+                let mkp = m[(k, p)];
+                let mkq = m[(k, q)];
+                let new_kp = mkp * c - mkq * s;
+                let new_kq = mkp * s + mkq * c;
+                m[(k, p)] = new_kp;
+                m[(p, k)] = new_kp;
+                m[(k, q)] = new_kq;
+                m[(q, k)] = new_kq;
+            }
+        }
+        let app_new = app * c * c - 2.0 * apq * s * c + aqq * s * s;
+        let aqq_new = app * s * s + 2.0 * apq * s * c + aqq * c * c;
+        m[(p, p)] = app_new;
+        m[(q, q)] = aqq_new;
+        m[(p, q)] = 0.0;
+        m[(q, p)] = 0.0;
+    }
+    (0..n).map(|i| m[(i, i)]).collect()
+}
+
+fn rank_condition_estimate(p: &CsrMatrix<f64>, s: usize, seed: u64) -> Result<(bool, f64), KError> {
+    let nc = p.ncols();
+    if nc == 0 {
+        return Ok((true, 1.0));
+    }
+    let n = p.nrows();
+    let s = s.max(1).min(nc);
+    let mut w = Mat::<f64>::zeros(n, s);
+    let mut x = vec![0.0f64; nc];
+    let mut y = vec![0.0f64; n];
+    let mut omega_cols: Vec<Vec<i8>> = Vec::with_capacity(s);
+    for col in 0..s {
+        let mut col_vals = vec![0i8; nc];
+        for i in 0..nc {
+            let mut h = seed
+                ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (col as u64).wrapping_mul(0xD00D_F00D_F00D_F00D);
+            h ^= h >> 30;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            h ^= h >> 27;
+            h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+            h ^= h >> 31;
+            col_vals[i] = if h & 1 == 0 { 1 } else { -1 };
+        }
+        if nc > 0 {
+            'adjust: loop {
+                let mut tweaked = false;
+                for prev in 0..omega_cols.len() {
+                    let mut same = true;
+                    let mut neg = true;
+                    for i in 0..nc {
+                        let v = col_vals[i];
+                        let pv = omega_cols[prev][i];
+                        if v != pv {
+                            same = false;
+                        }
+                        if v != -pv {
+                            neg = false;
+                        }
+                        if !same && !neg {
+                            break;
+                        }
+                    }
+                    if same || neg {
+                        let idx = (col + prev) % nc;
+                        col_vals[idx] = -col_vals[idx];
+                        tweaked = true;
+                        break;
+                    }
+                }
+                if !tweaked {
+                    break 'adjust;
+                }
+            }
+        }
+        for i in 0..nc {
+            x[i] = col_vals[i] as f64;
+        }
+        p.spmv_scaled(1.0, &x, 0.0, &mut y)?;
+        for i in 0..n {
+            w[(i, col)] = y[i];
+        }
+        omega_cols.push(col_vals);
+    }
+    let mut s_mat = Mat::<f64>::zeros(s, s);
+    for i in 0..s {
+        for j in i..s {
+            let mut dot = 0.0f64;
+            for k in 0..n {
+                dot += w[(k, i)] * w[(k, j)];
+            }
+            s_mat[(i, j)] = dot;
+            s_mat[(j, i)] = dot;
+        }
+    }
+    let mut lam = symmetric_eigenvalues(s_mat);
+    lam.sort_by(|a, b| a.partial_cmp(b).unwrap_or(CmpOrdering::Equal));
+    let lam_min = lam.first().copied().unwrap_or(0.0).max(0.0);
+    let lam_max = lam.last().copied().unwrap_or(0.0).max(0.0);
+    let cond = if lam_min > 0.0 {
+        lam_max / lam_min
+    } else if lam_max == 0.0 {
+        1.0
+    } else {
+        f64::INFINITY
+    };
+    let ok = lam_min.is_finite() && lam_max.is_finite() && cond.is_finite();
+    Ok((ok, cond))
+}
+
+fn check_p_rank_fast(p: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<RankDiagnostics, KError> {
+    if p.ncols() == 0 {
+        return Ok(RankDiagnostics::default());
+    }
+    let norms2 = p_column_norms2(p);
+    let mut diag = RankDiagnostics::default();
+    let mut min_norm = f64::MAX;
+    for (j, &n2) in norms2.iter().enumerate() {
+        let norm = n2.sqrt();
+        if norm < cfg.rank_min_col_norm {
+            diag.degenerate_cols.push(j);
+        }
+        if norm < min_norm {
+            min_norm = norm;
+        }
+    }
+    diag.min_col_norm = if min_norm.is_finite() { min_norm } else { 0.0 };
+    let (ok, cond) = rank_condition_estimate(p, cfg.rank_sketch_cols, 0xC0FF_EE_u64)?;
+    diag.cond_estimate = cond;
+    let cond_bad = !ok || !cond.is_finite() || cond > cfg.rank_cond_threshold;
+    diag.suspect = !diag.degenerate_cols.is_empty() || cond_bad;
+    Ok(diag)
+}
+
+fn try_fix_rank(
+    _level_idx: usize,
+    a_l: &CsrMatrix<f64>,
+    diag_inv_l: &[f64],
+    tp: &TentativeP,
+    ctx: &LevelPostContext,
+    p_csr: &mut Pcsr,
+    cfg: &mut AMGConfig,
+) -> Result<RankFixOutcome, KError> {
+    let old_drop = cfg.interpolation_truncation;
+    let old_cap = cfg.max_elements_per_row;
+    cfg.interpolation_truncation = (old_drop * 0.1).min(old_drop);
+    if old_cap == 0 {
+        cfg.max_elements_per_row = 16;
+    } else {
+        cfg.max_elements_per_row = old_cap.max(16);
+    }
+
+    let mut new_vals = vec![0.0; p_csr.col_idx.len()];
+    smooth_sa_values_only(
+        a_l,
+        diag_inv_l,
+        tp,
+        cfg.jacobi_omega,
+        &p_csr.row_ptr,
+        &p_csr.col_idx,
+        &mut new_vals,
+    )?;
+    p_csr.vals.copy_from_slice(&new_vals);
+    apply_post_interp(cfg, ctx, &p_csr.row_ptr, &p_csr.col_idx, &mut p_csr.vals)?;
+    let p_tmp = CsrMatrix::from_csr(
+        p_csr.m,
+        p_csr.n,
+        p_csr.row_ptr.clone(),
+        p_csr.col_idx.clone(),
+        p_csr.vals.clone(),
+    );
+    let diag = check_p_rank_fast(&p_tmp, cfg)?;
+
+    cfg.interpolation_truncation = old_drop;
+    cfg.max_elements_per_row = old_cap;
+
+    if diag.suspect {
+        Ok(RankFixOutcome::Unfixed)
+    } else {
+        Ok(RankFixOutcome::Fixed)
+    }
+}
+
+fn galerkin_sample_check(
+    a_l: &CsrMatrix<f64>,
+    p_l: &CsrMatrix<f64>,
+    r_l: &CsrMatrix<f64>,
+    a_c: &CsrMatrix<f64>,
+    samples: usize,
+    tol: f64,
+    seed: u64,
+) -> Result<(bool, f64), KError> {
+    let n = a_l.nrows();
+    let nc = a_c.nrows();
+    if nc == 0 {
+        return Ok((true, 0.0));
+    }
+    let s = samples.max(1);
+    let mut worst = 0.0f64;
+    let mut y = vec![0.0f64; nc];
+    let mut x = vec![0.0f64; n];
+    let mut ax = vec![0.0f64; n];
+    let mut u = vec![0.0f64; nc];
+    let mut v = vec![0.0f64; nc];
+    for t in 0..s {
+        for i in 0..nc {
+            let h = seed ^ ((t as u64).wrapping_mul(0x9E37) ^ (i as u64).wrapping_mul(0xD00D));
+            y[i] = if (h >> 1) & 1 == 0 { 1.0 } else { -1.0 };
+        }
+        p_l.spmv_scaled(1.0, &y, 0.0, &mut x)?;
+        a_l.spmv_scaled(1.0, &x, 0.0, &mut ax)?;
+        r_l.spmv_scaled(1.0, &ax, 0.0, &mut u)?;
+        a_c.spmv_scaled(1.0, &y, 0.0, &mut v)?;
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for i in 0..nc {
+            let d = u[i] - v[i];
+            num += d * d;
+            den += v[i] * v[i];
+        }
+        let rel = num.sqrt() / den.sqrt().max(1e-300);
+        if rel > worst {
+            worst = rel;
+        }
+    }
+    Ok((worst <= tol, worst))
+}
+
 // ===== Main AMG object =======================================================
 
 pub struct AMG {
@@ -1492,6 +1817,12 @@ impl AMG {
         let need_cheb = self.cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
         let need_fsai = self.cfg.grid_relax_type.contains(&RelaxType::Fsai);
         let mut trials_current = make_trial_matrix(&self.cfg, h.levels[0].a.nrows())?;
+        let mut diag_stats: Vec<AmgLevelStats> = Vec::new();
+        diag_stats.push(AmgLevelStats {
+            p_min_col_norm: 0.0,
+            p_cond_sketched: 0.0,
+            galerkin_worst_rel: 0.0,
+        });
 
         // Recompute P_l values, R_l values, and A_{l+1} values using fixed patterns
         for l in 0..h.coarsest_ix() {
@@ -1549,19 +1880,17 @@ impl AMG {
                 )?;
                 tp_opt = Some(tp);
             }
-            {
-                let ctx = LevelPostContext {
-                    r: h.levels[l].num_functions,
-                    agg_of: &h.levels[l].agg_of,
-                    nns: h.levels[l]
-                        .nns
-                        .as_ref()
-                        .map(|v| v.iter().map(|b| b.as_slice()).collect()),
-                    a: Some(&h.levels[l].a),
-                    d_inv: Some(&h.levels[l].diag_inv),
-                };
-                apply_post_interp(&self.cfg, &ctx, &pr, &pc, &mut p_new_vals)?;
-            }
+            let ctx = LevelPostContext {
+                r: h.levels[l].num_functions,
+                agg_of: &h.levels[l].agg_of,
+                nns: h.levels[l]
+                    .nns
+                    .as_ref()
+                    .map(|v| v.iter().map(|b| b.as_slice()).collect()),
+                a: Some(&h.levels[l].a),
+                d_inv: Some(&h.levels[l].diag_inv),
+            };
+            apply_post_interp(&self.cfg, &ctx, &pr, &pc, &mut p_new_vals)?;
             if self.cfg.adaptive_interp
                 && self.cfg.adaptive_samples > 0
                 && h.levels[l].cf.is_none()
@@ -1601,7 +1930,79 @@ impl AMG {
                     )?;
                 }
             }
-            h.levels[l].p.values_mut().copy_from_slice(&p_new_vals);
+            let mut p_tmp = Pcsr {
+                m: h.levels[l].p.nrows(),
+                n: h.levels[l].p.ncols(),
+                row_ptr: pr,
+                col_idx: pc,
+                vals: p_new_vals,
+            };
+            let mut rank_diag = RankDiagnostics::default();
+            let check_rank = self.cfg.verify_p_rank && tp_opt.is_some();
+            if check_rank {
+                let p_view = CsrMatrix::from_csr(
+                    p_tmp.m,
+                    p_tmp.n,
+                    p_tmp.row_ptr.clone(),
+                    p_tmp.col_idx.clone(),
+                    p_tmp.vals.clone(),
+                );
+                rank_diag = check_p_rank_fast(&p_view, &self.cfg)?;
+                if rank_diag.suspect {
+                    let mut cond_report = rank_diag.cond_estimate;
+                    match self.cfg.on_rank_failure {
+                        RankFallback::RetryLooserInterp => {
+                            let tp = tp_opt.as_ref().ok_or_else(|| {
+                                KError::InvalidInput(
+                                    "AMG: RetryLooserInterp requires SA interpolation".into(),
+                                )
+                            })?;
+                            match try_fix_rank(
+                                l,
+                                &h.levels[l].a,
+                                &h.levels[l].diag_inv,
+                                tp,
+                                &ctx,
+                                &mut p_tmp,
+                                &mut self.cfg,
+                            )? {
+                                RankFixOutcome::Fixed => {
+                                    let p_view = CsrMatrix::from_csr(
+                                        p_tmp.m,
+                                        p_tmp.n,
+                                        p_tmp.row_ptr.clone(),
+                                        p_tmp.col_idx.clone(),
+                                        p_tmp.vals.clone(),
+                                    );
+                                    rank_diag = check_p_rank_fast(&p_view, &self.cfg)?;
+                                    cond_report = rank_diag.cond_estimate;
+                                    if rank_diag.suspect {
+                                        return Err(KError::InvalidInput(format!(
+                                            "AMG: P rank suspect at level {l}, cond≈{cond_report:.3e}"
+                                        )));
+                                    }
+                                }
+                                RankFixOutcome::Unfixed => {
+                                    return Err(KError::InvalidInput(format!(
+                                        "AMG: P rank suspect at level {l}, cond≈{cond_report:.3e}"
+                                    )));
+                                }
+                            }
+                        }
+                        RankFallback::Abort => {
+                            return Err(KError::InvalidInput(format!(
+                                "AMG: P rank suspect at level {l}, cond≈{cond_report:.3e}"
+                            )));
+                        }
+                        other => {
+                            return Err(KError::InvalidInput(format!(
+                                "AMG: rank fallback {other:?} not implemented at level {l}"
+                            )));
+                        }
+                    }
+                }
+            }
+            h.levels[l].p.values_mut().copy_from_slice(&p_tmp.vals);
             // Update R values from P via precomputed transpose mapping
             if self.cfg.keep_transpose {
                 let pvals = h.levels[l].p.values().to_vec();
@@ -1619,9 +2020,13 @@ impl AMG {
                     }
                 }
             }
+            let mut galerkin_worst = 0.0;
+            let has_ng = h.levels[l].a_next_pat_ng.is_some();
+            let allow_galerkin =
+                self.cfg.verify_galerkin && self.cfg.filter_omega <= 0.0 && !has_ng;
             // Recompute A_{l+1} values by RAP numeric using fixed pattern
-            if h.levels[l].a_next_pat.is_some() {
-                let pat = h.levels[l].a_next_pat.as_ref().unwrap().clone();
+            if let Some(pat_ref) = h.levels[l].a_next_pat.as_ref() {
+                let pat = pat_ref.clone();
                 let nnz = pat.col_idx.len();
                 let r_tmp_storage = if self.cfg.keep_transpose {
                     None
@@ -1665,7 +2070,7 @@ impl AMG {
                     pat.col_idx.clone(),
                     vals,
                 );
-                let use_ng = h.levels[l].a_next_pat_ng.is_some();
+                let use_ng = has_ng;
                 if !use_ng || !self.cfg.filter_after_non_galerkin {
                     apply_trial_compensation(
                         &self.cfg,
@@ -1674,7 +2079,7 @@ impl AMG {
                         block_size_next,
                     )?;
                 }
-                if let (Some(ng_pat), Some(map)) =
+                let mut a_coarse = if let (Some(ng_pat), Some(map)) =
                     (&h.levels[l].a_next_pat_ng, &h.levels[l].rap_full2ng_pos)
                 {
                     let mut vals_ng = vec![0.0; ng_pat.col_idx.len()];
@@ -1699,24 +2104,98 @@ impl AMG {
                             block_size_next,
                         )?;
                     }
-                    h.levels[l + 1].a = a_ng;
+                    a_ng
                 } else {
-                    h.levels[l + 1].a = a_full;
+                    a_full
+                };
+                if allow_galerkin {
+                    let (ok, worst) = galerkin_sample_check(
+                        &h.levels[l].a,
+                        &h.levels[l].p,
+                        r_for_ops,
+                        &a_coarse,
+                        self.cfg.galerkin_samples,
+                        self.cfg.galerkin_rel_tol,
+                        0xBEEF,
+                    )?;
+                    galerkin_worst = worst;
+                    if !ok {
+                        let a_fix = rap(r_for_ops, &h.levels[l].a, &h.levels[l].p)?;
+                        let (ok2, worst2) = galerkin_sample_check(
+                            &h.levels[l].a,
+                            &h.levels[l].p,
+                            r_for_ops,
+                            &a_fix,
+                            self.cfg.galerkin_samples,
+                            self.cfg.galerkin_rel_tol,
+                            0xBEEF,
+                        )?;
+                        if ok2 {
+                            galerkin_worst = worst2;
+                            a_coarse = a_fix;
+                        } else {
+                            return Err(KError::InvalidInput(format!(
+                                "AMG: Galerkin identity failed at level {l}: worst rel={:.3e} (retry={:.3e})",
+                                worst, worst2
+                            )));
+                        }
+                    }
                 }
-                trials_current = trials_next;
+                h.levels[l + 1].a = a_coarse;
                 h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&h.levels[l + 1].a, &self.cfg)?;
+                trials_current = trials_next;
             } else {
                 // Safety fallback: full RAP (structure + values)
-                let a_coarse = if self.cfg.keep_transpose {
-                    rap(&h.levels[l].r, &h.levels[l].a, &h.levels[l].p)?
+                let mut _r_tmp_owned: Option<CsrMatrix<f64>> = None;
+                let r_used = if self.cfg.keep_transpose {
+                    &h.levels[l].r
                 } else {
-                    let r_tmp = build_r_from_p(&mut h.levels[l]);
-                    rap(&r_tmp, &h.levels[l].a, &h.levels[l].p)?
+                    _r_tmp_owned = Some(build_r_from_p(&mut h.levels[l]));
+                    _r_tmp_owned.as_ref().unwrap()
                 };
+                let mut a_coarse = rap(r_used, &h.levels[l].a, &h.levels[l].p)?;
+                if allow_galerkin {
+                    let (ok, worst) = galerkin_sample_check(
+                        &h.levels[l].a,
+                        &h.levels[l].p,
+                        r_used,
+                        &a_coarse,
+                        self.cfg.galerkin_samples,
+                        self.cfg.galerkin_rel_tol,
+                        0xBEEF,
+                    )?;
+                    galerkin_worst = worst;
+                    if !ok {
+                        let a_fix = rap(r_used, &h.levels[l].a, &h.levels[l].p)?;
+                        let (ok2, worst2) = galerkin_sample_check(
+                            &h.levels[l].a,
+                            &h.levels[l].p,
+                            r_used,
+                            &a_fix,
+                            self.cfg.galerkin_samples,
+                            self.cfg.galerkin_rel_tol,
+                            0xBEEF,
+                        )?;
+                        if ok2 {
+                            galerkin_worst = worst2;
+                            a_coarse = a_fix;
+                        } else {
+                            return Err(KError::InvalidInput(format!(
+                                "AMG: Galerkin identity failed at level {l}: worst rel={:.3e} (retry={:.3e})",
+                                worst, worst2
+                            )));
+                        }
+                    }
+                }
                 h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&a_coarse, &self.cfg)?;
                 h.levels[l + 1].a = a_coarse;
                 trials_current = None;
             }
+            diag_stats.push(AmgLevelStats {
+                p_min_col_norm: rank_diag.min_col_norm,
+                p_cond_sketched: rank_diag.cond_estimate,
+                galerkin_worst_rel: galerkin_worst,
+            });
             if l + 1 == h.coarsest_ix() && matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
                 let levelc = &mut h.levels[l + 1];
                 if let Some(m) = &levelc.coarse_solver {
@@ -1734,6 +2213,11 @@ impl AMG {
             }
         }
 
+        diag_stats.push(AmgLevelStats {
+            p_min_col_norm: 0.0,
+            p_cond_sketched: 0.0,
+            galerkin_worst_rel: 0.0,
+        });
         for lvl in 0..=h.coarsest_ix() {
             let recompute = self.cfg.chebyshev_recompute_esteig || h.levels[lvl].cheb.is_none();
             update_level_caches(&self.cfg, &mut h.levels[lvl], need_l1, need_cheb, recompute)?;
@@ -1767,6 +2251,7 @@ impl AMG {
         if self.cfg.logging_level > 0 {
             let mut st = AmgStats::from_hierarchy(h);
             st.levels = collect_level_stats(h, &self.cfg);
+            st.diagnostics = diag_stats;
             self.stats = Some(st);
         }
         Ok(())
@@ -2715,6 +3200,7 @@ fn build_hierarchy(
     let do_stats = cfg.logging_level > 0;
     let mut level_stats: Vec<LevelStats> = Vec::new();
     let mut timings: Vec<LevelSetupTiming> = Vec::new();
+    let mut diag_stats: Vec<AmgLevelStats> = Vec::new();
     let t_setup_all = if do_stats { Some(tic()) } else { None };
 
     let need_l1 = cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
@@ -2785,6 +3271,11 @@ fn build_hierarchy(
         });
         timings.push(lt0);
     }
+    diag_stats.push(AmgLevelStats {
+        p_min_col_norm: 0.0,
+        p_cond_sketched: 0.0,
+        galerkin_worst_rel: 0.0,
+    });
 
     let mut block_size_cur = if cfg.nodal == NodalMode::Nodal {
         cfg.block_size
@@ -2929,18 +3420,16 @@ fn build_hierarchy(
                     ))
                 }
             })?;
-        {
-            let ctx = LevelPostContext {
-                r: num_functions,
-                agg_of: &tp.agg_of,
-                nns: nns_opt
-                    .as_ref()
-                    .map(|v| v.iter().map(|b| b.as_slice()).collect()),
-                a: Some(&a_cur),
-                d_inv: Some(&d),
-            };
-            apply_post_interp(cfg, &ctx, &p_csr.row_ptr, &p_csr.col_idx, &mut p_csr.vals)?;
-        }
+        let ctx = LevelPostContext {
+            r: num_functions,
+            agg_of: &tp.agg_of,
+            nns: nns_opt
+                .as_ref()
+                .map(|v| v.iter().map(|b| b.as_slice()).collect()),
+            a: Some(&a_cur),
+            d_inv: Some(&d),
+        };
+        apply_post_interp(cfg, &ctx, &p_csr.row_ptr, &p_csr.col_idx, &mut p_csr.vals)?;
         if cfg.adaptive_interp
             && cfg.adaptive_samples > 0
             && cf_opt.is_none()
@@ -2974,13 +3463,58 @@ fn build_hierarchy(
                 cfg.interpolation_truncation,
             )?;
         }
-        let p = CsrMatrix::from_csr(
+        let mut p = CsrMatrix::from_csr(
             p_csr.m,
             p_csr.n,
             p_csr.row_ptr.clone(),
             p_csr.col_idx.clone(),
             p_csr.vals.clone(),
         );
+        let mut rank_diag = RankDiagnostics::default();
+        let check_rank = cfg.verify_p_rank && cf_opt.is_none();
+        if check_rank {
+            rank_diag = check_p_rank_fast(&p, cfg)?;
+            if rank_diag.suspect {
+                let mut cond_report = rank_diag.cond_estimate;
+                match cfg.on_rank_failure {
+                    RankFallback::RetryLooserInterp if cf_opt.is_none() => {
+                        match try_fix_rank(level, &a_cur, &d, &tp, &ctx, &mut p_csr, cfg)? {
+                            RankFixOutcome::Fixed => {
+                                p = CsrMatrix::from_csr(
+                                    p_csr.m,
+                                    p_csr.n,
+                                    p_csr.row_ptr.clone(),
+                                    p_csr.col_idx.clone(),
+                                    p_csr.vals.clone(),
+                                );
+                                rank_diag = check_p_rank_fast(&p, cfg)?;
+                                cond_report = rank_diag.cond_estimate;
+                                if rank_diag.suspect {
+                                    return Err(KError::InvalidInput(format!(
+                                        "AMG: P rank suspect at level {level}, cond≈{cond_report:.3e}"
+                                    )));
+                                }
+                            }
+                            RankFixOutcome::Unfixed => {
+                                return Err(KError::InvalidInput(format!(
+                                    "AMG: P rank suspect at level {level}, cond≈{cond_report:.3e}"
+                                )));
+                            }
+                        }
+                    }
+                    RankFallback::Abort => {
+                        return Err(KError::InvalidInput(format!(
+                            "AMG: P rank suspect at level {level}, cond≈{cond_report:.3e}"
+                        )));
+                    }
+                    other => {
+                        return Err(KError::InvalidInput(format!(
+                            "AMG: rank fallback {other:?} not implemented at level {level}"
+                        )));
+                    }
+                }
+            }
+        }
         // R = P^T pattern and values
         let (r_row_ptr, r_col_idx, r_vals, p2r_pos) =
             with_timing(do_stats, &mut lt.restrict, || {
@@ -3053,7 +3587,7 @@ fn build_hierarchy(
         if !use_ng || !cfg.filter_after_non_galerkin {
             apply_trial_compensation(cfg, &mut a_full, trials_next.as_ref(), block_size_next)?;
         }
-        let (mut a_coarse, ng_pat_opt, map_opt) = if use_ng {
+        let (mut a_coarse, mut ng_pat_opt, mut map_opt) = if use_ng {
             let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
                 &pat,
                 a_full.values(),
@@ -3079,6 +3613,43 @@ fn build_hierarchy(
         } else {
             (a_full, None, None)
         };
+        let mut galerkin_worst = 0.0;
+        let allow_galerkin = cfg.verify_galerkin && cfg.filter_omega <= 0.0 && !use_ng;
+        if allow_galerkin {
+            let (ok, worst) = galerkin_sample_check(
+                &a_cur,
+                &p,
+                &r,
+                &a_coarse,
+                cfg.galerkin_samples,
+                cfg.galerkin_rel_tol,
+                0xBEEF,
+            )?;
+            galerkin_worst = worst;
+            if !ok {
+                let a_fix = rap(&r, &a_cur, &p)?;
+                let (ok2, worst2) = galerkin_sample_check(
+                    &a_cur,
+                    &p,
+                    &r,
+                    &a_fix,
+                    cfg.galerkin_samples,
+                    cfg.galerkin_rel_tol,
+                    0xBEEF,
+                )?;
+                if ok2 {
+                    galerkin_worst = worst2;
+                    a_coarse = a_fix;
+                    ng_pat_opt = None;
+                    map_opt = None;
+                } else {
+                    return Err(KError::InvalidInput(format!(
+                        "AMG: Galerkin identity failed at level {level}: worst rel={:.3e} (retry={:.3e})",
+                        worst, worst2
+                    )));
+                }
+            }
+        }
         let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || {
             diag_inv_from_csr_cfg(&a_coarse, cfg)
         })?;
@@ -3092,6 +3663,11 @@ fn build_hierarchy(
         if do_stats {
             timings.push(lt);
         }
+        diag_stats.push(AmgLevelStats {
+            p_min_col_norm: rank_diag.min_col_norm,
+            p_cond_sketched: rank_diag.cond_estimate,
+            galerkin_worst_rel: galerkin_worst,
+        });
 
         // Replace previous temporary P/R by actual inter-level transfers and agg mapping
         if let Some(prev) = levels.last_mut() {
@@ -3203,6 +3779,11 @@ fn build_hierarchy(
         }
     }
 
+    diag_stats.push(AmgLevelStats {
+        p_min_col_norm: 0.0,
+        p_cond_sketched: 0.0,
+        galerkin_worst_rel: 0.0,
+    });
     if cfg.non_galerkin.enabled && cfg.non_galerkin.oc_target.is_some() {
         enforce_oc_target(&mut levels, cfg)?;
     }
@@ -3233,6 +3814,7 @@ fn build_hierarchy(
     let stats_opt = if do_stats {
         let mut stats = AmgStats::from_hierarchy(&hier);
         stats.levels = level_stats;
+        stats.diagnostics = diag_stats;
         let mut setup = SetupTimings::default();
         setup.per_level = timings;
         if let Some(t0) = t_setup_all {
@@ -4512,6 +5094,13 @@ pub struct LevelStats {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct AmgLevelStats {
+    pub p_min_col_norm: f64,
+    pub p_cond_sketched: f64,
+    pub galerkin_worst_rel: f64,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct LevelSetupTiming {
     pub strength: Duration,
     pub aggregate: Duration,
@@ -4566,6 +5155,7 @@ pub struct AmgStats {
     pub operator_complexity: f64,
     pub num_levels: usize,
     pub levels: Vec<LevelStats>,
+    pub diagnostics: Vec<AmgLevelStats>,
     pub setup: SetupTimings,
     pub last_cycle: Option<CycleTimings>,
 }
@@ -4585,6 +5175,7 @@ impl AmgStats {
             operator_complexity: nnz_sum / nnz0,
             num_levels: h.levels.len(),
             levels: Vec::new(),
+            diagnostics: Vec::new(),
             setup: SetupTimings::default(),
             last_cycle: None,
         }
@@ -4807,6 +5398,7 @@ mod tests {
 
     mod chebyshev;
     mod fsai_smoother;
+    mod rank_galerkin;
 
     #[inline]
     fn feq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
