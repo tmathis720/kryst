@@ -4540,12 +4540,14 @@ fn build_hierarchy(
         } else {
             1
         };
-        if let Some(ref lay) = layout {
-            target_functions = target_functions.max(lay.block_size.max(1));
-        }
-        target_functions = target_functions.max(nns_basis.len().max(1));
-        while nns_basis.len() < target_functions {
-            nns_basis.push(vec![0.0; n]);
+        if !user_supplied_nns {
+            if let Some(ref lay) = layout {
+                target_functions = target_functions.max(lay.block_size.max(1));
+            }
+            target_functions = target_functions.max(nns_basis.len().max(1));
+            while nns_basis.len() < target_functions {
+                nns_basis.push(vec![0.0; n]);
+            }
         }
         let num_functions = target_functions;
         let nns_opt = Some(nns_basis.clone());
