@@ -97,6 +97,25 @@ pub struct ParameterTuner {
 }
 
 impl ParameterTuner {
+    fn estimate_memory_usage(
+        matrix: &Mat<f64>,
+        rhs: &[f64],
+        solution: &[f64],
+        monitor: Option<&IterationMonitor>,
+    ) -> usize {
+        let elem = std::mem::size_of::<f64>();
+        let matrix_bytes = matrix.nrows() * matrix.ncols() * elem;
+        let vector_bytes = (rhs.len() + solution.len()) * elem;
+        let monitor_bytes = monitor
+            .map(|m| {
+                let stats = m.get_statistics();
+                // Each stored iteration roughly keeps an IterationData structure.
+                stats.total_iterations * std::mem::size_of::<crate::utils::monitor::IterationData>()
+            })
+            .unwrap_or(0);
+        matrix_bytes + vector_bytes + monitor_bytes
+    }
+
     /// Create a new parameter tuner with default ranges.
     pub fn new() -> Self {
         Self {
@@ -357,6 +376,7 @@ impl ParameterTuner {
         }));
 
         let solve_time = solve_start.elapsed();
+        let memory_usage_estimate = Self::estimate_memory_usage(matrix, rhs, &x, monitor.as_ref());
 
         // Check for timeout
         if solve_time > self.max_config_time {
@@ -368,7 +388,7 @@ impl ParameterTuner {
                 solve_time,
                 avg_convergence_rate: f64::INFINITY,
                 setup_time,
-                memory_usage_estimate: None,
+                memory_usage_estimate: Some(memory_usage_estimate),
                 convergence_reason: "Timeout".to_string(),
             });
         }
@@ -423,7 +443,7 @@ impl ParameterTuner {
                             solve_time,
                             avg_convergence_rate: avg_rate,
                             setup_time,
-                            memory_usage_estimate: None, // TODO: Implement memory tracking
+                            memory_usage_estimate: Some(memory_usage_estimate),
                             convergence_reason: reason,
                         })
                     }
@@ -435,7 +455,7 @@ impl ParameterTuner {
                         solve_time,
                         avg_convergence_rate: f64::INFINITY,
                         setup_time,
-                        memory_usage_estimate: None,
+                        memory_usage_estimate: Some(memory_usage_estimate),
                         convergence_reason: format!("Solve error: {e}"),
                     }),
                 }
@@ -448,7 +468,7 @@ impl ParameterTuner {
                 solve_time,
                 avg_convergence_rate: f64::INFINITY,
                 setup_time,
-                memory_usage_estimate: None,
+                memory_usage_estimate: Some(memory_usage_estimate),
                 convergence_reason: "Panic/crash".to_string(),
             }),
         }

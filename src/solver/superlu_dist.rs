@@ -76,6 +76,9 @@ use faer::MatMut;
 use faer::prelude::*;
 use std::collections::HashMap;
 
+#[cfg(feature = "mpi")]
+use mpi::collective::CommunicatorCollectives;
+
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 
@@ -1933,13 +1936,92 @@ impl OrderingAlgorithms {
     pub fn mmd_ata_ordering_distributed(
         matrix: &CsrMatrix<f64>,
         comm: &UniverseComm,
-        _distribution: &BlockCyclicDistribution,
+        distribution: &BlockCyclicDistribution,
     ) -> Result<Vec<usize>, KError> {
         let n = matrix.nrows();
 
-        // Step 1: For now, replicate the local matrix pattern on all processes
-        // TODO: Implement proper global pattern assembly with MPI communication
-        let global_pattern = matrix.clone();
+        // Step 1: Assemble the global sparsity pattern across all ranks.
+        let global_pattern = if comm.size() <= 1 {
+            matrix.clone()
+        } else {
+            #[cfg(feature = "mpi")]
+            {
+                match comm {
+                    UniverseComm::Mpi(comm_impl) => {
+                        let global_rows = distribution.global_rows;
+                        let global_cols = distribution.global_cols;
+                        let mut adjacency = vec![Vec::<usize>::new(); global_rows];
+
+                        let rp = matrix.row_ptr();
+                        let ci = matrix.col_idx();
+                        let local_rows = matrix.nrows();
+                        let mut encoded: Vec<usize> = Vec::new();
+                        for local_row in 0..local_rows {
+                            let global_row = distribution.local_to_global_row(local_row);
+                            let start = rp[local_row];
+                            let end = rp[local_row + 1];
+                            encoded.push(global_row);
+                            encoded.push(end - start);
+                            encoded.extend_from_slice(&ci[start..end]);
+                        }
+
+                        let local_len = encoded.len() as i32;
+                        let mut lengths = vec![0i32; comm_impl.size];
+                        comm_impl
+                            .world
+                            .all_gather_into(&local_len, &mut lengths[..]);
+                        let lengths: Vec<usize> = lengths.iter().map(|&l| l as usize).collect();
+                        let max_len = lengths.iter().copied().max().unwrap_or(0);
+
+                        if max_len > 0 {
+                            let mut padded = encoded.clone();
+                            padded.resize(max_len, usize::MAX);
+                            let mut gathered = vec![0usize; max_len * comm_impl.size];
+                            comm_impl
+                                .world
+                                .all_gather_into(&padded[..], &mut gathered[..]);
+
+                            for (rank_idx, &len) in lengths.iter().enumerate() {
+                                let chunk = &gathered[rank_idx * max_len..rank_idx * max_len + len];
+                                let mut idx = 0;
+                                while idx < chunk.len() {
+                                    if idx + 1 >= chunk.len() {
+                                        break;
+                                    }
+                                    let global_row = chunk[idx];
+                                    idx += 1;
+                                    let nnz = chunk[idx];
+                                    idx += 1;
+                                    if idx + nnz > chunk.len() {
+                                        break;
+                                    }
+                                    adjacency[global_row].extend_from_slice(&chunk[idx..idx + nnz]);
+                                    idx += nnz;
+                                }
+                            }
+                        }
+
+                        let mut row_ptr = Vec::with_capacity(global_rows + 1);
+                        let mut col_idx = Vec::new();
+                        row_ptr.push(0);
+                        for cols in adjacency.iter_mut() {
+                            cols.sort_unstable();
+                            cols.dedup();
+                            col_idx.extend_from_slice(cols);
+                            row_ptr.push(col_idx.len());
+                        }
+                        let values = vec![0.0; col_idx.len()];
+                        CsrMatrix::from_csr(global_rows, global_cols, row_ptr, col_idx, values)
+                    }
+                    _ => matrix.clone(),
+                }
+            }
+            #[cfg(not(feature = "mpi"))]
+            {
+                let _ = distribution;
+                matrix.clone()
+            }
+        };
 
         // Step 2: Build A + A^T graph
         let graph = Self::build_ata_graph(&global_pattern);
