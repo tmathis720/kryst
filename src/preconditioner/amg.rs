@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{convert::csr_from_linop, sparse::CsrMatrix, spmv::csr_spmm_dense};
+use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 use faer::Mat;
@@ -235,10 +236,11 @@ pub struct AMGConfig {
     pub adaptive_lambda: f64,
     pub adaptive_enforce_sum1: bool,
     pub adaptive_weight_mode: AdaptiveWeight,
+    pub chebyshev_recompute_esteig: bool,
+    pub chebyshev_safety: f64,
+    pub chebyshev_lower_ratio: f64,
+    pub chebyshev_power_steps: usize,
     pub chebyshev_degree: usize,
-    pub chebyshev_min_ratio: f64,
-    pub chebyshev_recompute: bool,
-    pub chebyshev_power_iters: usize,
     pub use_level_scheduling: bool,
     pub drop_tol: f64,  // NEW: used for dense->CSR conversion
     pub stats_eps: f64, // threshold for effective nnz reporting
@@ -295,7 +297,7 @@ impl Default for AMGConfig {
             post_sweeps: 1,
             coarsen_type: CoarsenType::HMIS,
             interp_type: InterpType::Extended,
-            relax_type: RelaxType::GaussSeidel,
+            relax_type: RelaxType::SymmetricGaussSeidel,
             logging_level: 0,
             print_level: 0,
             tolerance: 1e-6,
@@ -311,10 +313,11 @@ impl Default for AMGConfig {
             adaptive_lambda: 1e-10,
             adaptive_enforce_sum1: true,
             adaptive_weight_mode: AdaptiveWeight::Diag,
-            chebyshev_degree: 0,
-            chebyshev_min_ratio: 0.3,
-            chebyshev_recompute: true,
-            chebyshev_power_iters: 10,
+            chebyshev_recompute_esteig: true,
+            chebyshev_safety: 1.10,
+            chebyshev_lower_ratio: 0.10,
+            chebyshev_power_steps: 4,
+            chebyshev_degree: 2,
             use_level_scheduling: false,
             drop_tol: 1e-12,
             stats_eps: 1e-12,
@@ -556,20 +559,24 @@ impl AMGBuilder {
         self.cfg.adaptive_weight_mode = mode;
         self
     }
-    pub fn chebyshev_degree(mut self, k: usize) -> Self {
-        self.cfg.chebyshev_degree = k;
+    pub fn chebyshev_recompute_esteig(mut self, on: bool) -> Self {
+        self.cfg.chebyshev_recompute_esteig = on;
         self
     }
-    pub fn chebyshev_min_ratio(mut self, v: f64) -> Self {
-        self.cfg.chebyshev_min_ratio = v;
+    pub fn chebyshev_safety(mut self, s: f64) -> Self {
+        self.cfg.chebyshev_safety = s;
         self
     }
-    pub fn chebyshev_recompute(mut self, v: bool) -> Self {
-        self.cfg.chebyshev_recompute = v;
+    pub fn chebyshev_lower_ratio(mut self, r: f64) -> Self {
+        self.cfg.chebyshev_lower_ratio = r;
         self
     }
-    pub fn chebyshev_power_iters(mut self, iters: usize) -> Self {
-        self.cfg.chebyshev_power_iters = iters;
+    pub fn chebyshev_power_steps(mut self, steps: usize) -> Self {
+        self.cfg.chebyshev_power_steps = steps;
+        self
+    }
+    pub fn chebyshev_degree(mut self, d: usize) -> Self {
+        self.cfg.chebyshev_degree = d;
         self
     }
     pub fn filter_trials(mut self, trials: Vec<Vec<f64>>) -> Self {
@@ -758,6 +765,18 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             ));
         }
 
+        if !matches!(
+            cfg.relax_type,
+            RelaxType::Chebyshev
+                | RelaxType::Jacobi
+                | RelaxType::L1Jacobi
+                | RelaxType::SymmetricGaussSeidel
+        ) {
+            return Err(KError::InvalidInput(
+                "SPD mode requires symmetric or Jacobi-type smoothers".into(),
+            ));
+        }
+
         let down_sweeps = cfg.num_grid_sweeps[RelaxPhase::Down.ix()];
         let up_sweeps = cfg.num_grid_sweeps[RelaxPhase::Up.ix()];
         if down_sweeps != up_sweeps {
@@ -871,10 +890,12 @@ struct AMGLevel {
     r: CsrMatrix<f64>,
     /// diag(A_l)^{-1}
     diag_inv: Vec<f64>,
+    /// diag(A_l)^{-1/2} (optional)
+    d_sqrt_inv: Option<Vec<f64>>,
     /// 1 / (\sum_j |a_ij|) for L1-Jacobi
     l1_inv: Option<Vec<f64>>,
     /// Cached spectral bounds for Chebyshev smoother
-    cheb: Option<ChebCache>,
+    cheb: Option<ChebData>,
     /// fine->coarse aggregate id used to rebuild P values (SA numeric refresh)
     agg_of: Vec<usize>,
     /// coarse/fine flags for classical interpolation
@@ -904,7 +925,7 @@ struct AMGLevel {
 }
 
 #[derive(Clone)]
-struct ChebCache {
+struct ChebData {
     lambda_max: f64,
     lambda_min: f64,
 }
@@ -1657,27 +1678,8 @@ impl AMG {
         }
 
         for lvl in 0..=h.coarsest_ix() {
-            if need_l1 {
-                h.levels[lvl].l1_inv = Some(l1_diag_inv(&h.levels[lvl].a));
-            } else {
-                h.levels[lvl].l1_inv = None;
-            }
-            if need_cheb {
-                if self.cfg.chebyshev_recompute || h.levels[lvl].cheb.is_none() {
-                    let lmax = estimate_lambda_max(
-                        &h.levels[lvl].a,
-                        &h.levels[lvl].diag_inv,
-                        self.cfg.chebyshev_power_iters,
-                    );
-                    let lmin = (self.cfg.chebyshev_min_ratio * lmax).max(1e-12);
-                    h.levels[lvl].cheb = Some(ChebCache {
-                        lambda_max: lmax,
-                        lambda_min: lmin,
-                    });
-                }
-            } else {
-                h.levels[lvl].cheb = None;
-            }
+            let recompute = self.cfg.chebyshev_recompute_esteig || h.levels[lvl].cheb.is_none();
+            update_level_caches(&self.cfg, &mut h.levels[lvl], need_l1, need_cheb, recompute)?;
         }
 
         if self.cfg.logging_level > 0 {
@@ -1821,59 +1823,35 @@ impl AMG {
         Ok(())
     }
 
-    fn chebyshev_smooth(
+    fn apply_chebyshev(
         a: &CsrMatrix<f64>,
         d_inv: &[f64],
         rhs: &[f64],
         z: &mut [f64],
-        k: usize,
-        lambda_min: f64,
-        lambda_max: f64,
+        degree: usize,
+        data: &ChebData,
         ws: &mut AMGWorkspace,
     ) -> Result<(), KError> {
-        if k == 0 {
+        if degree == 0 {
             return Ok(());
         }
         let n = a.nrows();
         ws.ensure(n);
-
-        a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
-        for i in 0..n {
-            ws.residual[i] = rhs[i] - ws.work[i];
-        }
-
-        let c = 0.5 * (lambda_max - lambda_min);
-        let d = 0.5 * (lambda_max + lambda_min);
-        let mut alpha = 0.0;
-        let mut beta = 0.0;
-        let p = &mut ws.coarse_rhs[..n];
-        p[..n].fill(0.0);
-
-        for t in 0..k {
-            if t == 0 {
-                alpha = 1.0 / d;
-                p[..n].copy_from_slice(&ws.residual[..n]);
-            } else {
-                let tmp = 0.5 * c * alpha;
-                beta = tmp * tmp;
-                alpha = 1.0 / (d - beta);
-                for i in 0..n {
-                    p[i] = ws.residual[i] + beta * p[i];
-                }
-            }
-
-            for i in 0..n {
-                ws.temp[i] = d_inv[i] * p[i];
-            }
-            for i in 0..n {
-                z[i] += alpha * ws.temp[i];
-            }
-            a.spmv_scaled(alpha, &ws.temp[..n], 0.0, &mut ws.work[..n])?;
-            for i in 0..n {
-                ws.residual[i] -= ws.work[i];
-            }
-        }
-        Ok(())
+        let bounds = ChebBounds {
+            lam_max: data.lambda_max,
+            lam_min: data.lambda_min,
+        };
+        chebyshev::chebyshev_smooth_csr(
+            a,
+            d_inv,
+            rhs,
+            z,
+            degree,
+            &bounds,
+            &mut ws.residual[..n],
+            &mut ws.temp[..n],
+            &mut ws.work[..n],
+        )
     }
 
     fn flexible_relax_supported(relax: RelaxType) -> bool {
@@ -2069,30 +2047,15 @@ impl AMG {
                 }
             }
             RelaxType::Chebyshev => {
-                if let Some(ref cheb) = lvl.cheb {
-                    let lmax = cheb.lambda_max.max(1e-12);
-                    let lmin = cheb.lambda_min.min(0.99 * lmax).max(1e-16);
-                    if lmin >= lmax {
-                        Self::jacobi_smooth_sparse(
-                            pol.omega,
-                            a,
-                            &lvl.diag_inv,
-                            rhs,
-                            sol,
-                            k.min(2).max(1),
-                            ws,
-                        )
-                    } else {
-                        let deg = if cfg.chebyshev_degree > 0 {
-                            cfg.chebyshev_degree
-                        } else {
-                            k
-                        };
-                        Self::chebyshev_smooth(a, &lvl.diag_inv, rhs, sol, deg, lmin, lmax, ws)
-                    }
-                } else {
-                    Err(KError::InvalidInput("Chebyshev cache missing".into()))
+                let cheb = lvl
+                    .cheb
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("Chebyshev cache missing".into()))?;
+                let degree = cfg.chebyshev_degree.max(1);
+                for _ in 0..k {
+                    Self::apply_chebyshev(a, &lvl.diag_inv, rhs, sol, degree, cheb, ws)?;
                 }
+                Ok(())
             }
             other => Err(KError::InvalidInput(format!(
                 "RelaxType {other:?} not yet supported"
@@ -2608,21 +2571,6 @@ fn build_hierarchy(
         lt0.diag = toc(t);
         lt0.total = lt0.diag;
     }
-    let l1_inv0 = if need_l1 {
-        Some(l1_diag_inv(&a_cur))
-    } else {
-        None
-    };
-    let cheb0 = if need_cheb {
-        let lmax = estimate_lambda_max(&a_cur, &diag0, cfg.chebyshev_power_iters);
-        let lmin = (cfg.chebyshev_min_ratio * lmax).max(1e-12);
-        Some(ChebCache {
-            lambda_max: lmax,
-            lambda_min: lmin,
-        })
-    } else {
-        None
-    };
     let layout0 = if cfg.nodal == NodalMode::Nodal {
         Some(DofLayout::new(a_cur.nrows(), cfg.block_size))
     } else {
@@ -2633,8 +2581,9 @@ fn build_hierarchy(
         p: CsrMatrix::identity(a_cur.nrows()),
         r: CsrMatrix::identity(a_cur.nrows()),
         diag_inv: diag0,
-        l1_inv: l1_inv0,
-        cheb: cheb0,
+        d_sqrt_inv: None,
+        l1_inv: None,
+        cheb: None,
         agg_of: (0..a_cur.nrows()).collect(),
         is_c: Vec::new(),
         cf: None,
@@ -2650,6 +2599,8 @@ fn build_hierarchy(
         r_vals_scratch: None,
         coarse_solver: None,
     };
+    let mut l0 = l0;
+    update_level_caches(cfg, &mut l0, need_l1, need_cheb, true)?;
     levels.push(l0);
     if do_stats {
         level_stats.push(LevelStats {
@@ -3001,28 +2952,14 @@ fn build_hierarchy(
         a_cur = a_coarse.clone();
         trials_current = trials_next;
         block_size_cur = tp.num_functions;
-        let l1_inv_coarse = if need_l1 {
-            Some(l1_diag_inv(&a_cur))
-        } else {
-            None
-        };
-        let cheb_coarse = if need_cheb {
-            let lmax = estimate_lambda_max(&a_cur, &diag_inv_coarse, cfg.chebyshev_power_iters);
-            let lmin = (cfg.chebyshev_min_ratio * lmax).max(1e-12);
-            Some(ChebCache {
-                lambda_max: lmax,
-                lambda_min: lmin,
-            })
-        } else {
-            None
-        };
-        levels.push(AMGLevel {
+        let mut next_level = AMGLevel {
             a: a_coarse,
             p: CsrMatrix::identity(a_cur.nrows()),
             r: CsrMatrix::identity(a_cur.nrows()),
             diag_inv: diag_inv_coarse,
-            l1_inv: l1_inv_coarse,
-            cheb: cheb_coarse,
+            d_sqrt_inv: None,
+            l1_inv: None,
+            cheb: None,
             agg_of: (0..a_cur.nrows()).collect(),
             is_c: Vec::new(),
             cf: None,
@@ -3041,7 +2978,9 @@ fn build_hierarchy(
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
-        });
+        };
+        update_level_caches(cfg, &mut next_level, need_l1, need_cheb, true)?;
+        levels.push(next_level);
 
         if do_stats {
             level_stats.push(LevelStats {
@@ -3298,30 +3237,86 @@ fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
     diag_inv_from_csr_with_floor(a, 0.0, false)
 }
 
-fn estimate_lambda_max(a: &CsrMatrix<f64>, d_inv: &[f64], iters: usize) -> f64 {
-    let n = a.nrows();
-    let mut v = vec![0.0; n];
-    for i in 0..n {
-        v[i] = 1.0 + (i % 7) as f64 * 0.01;
+fn make_d_sqrt_inv(diag_inv: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; diag_inv.len()];
+    for (dst, &d) in out.iter_mut().zip(diag_inv.iter()) {
+        *dst = if d > 0.0 { d.sqrt() } else { 0.0 };
     }
-    let mut w = vec![0.0; n];
-    let mut t = vec![0.0; n];
-    let mut lam = 0.0;
-    let nit = iters.max(3);
-    for _ in 0..nit {
-        a.spmv_scaled(1.0, &v, 0.0, &mut t).ok();
-        for i in 0..n {
-            w[i] = d_inv[i] * t[i];
+    out
+}
+
+fn compute_cheb_data(
+    cfg: &AMGConfig,
+    a: &CsrMatrix<f64>,
+    _diag_inv: &[f64],
+    d_sqrt_inv: &[f64],
+) -> Result<ChebData, KError> {
+    let mut lam_max = chebyshev::estimate_lmax_sym(a, d_sqrt_inv, cfg.chebyshev_power_steps)?;
+    if !lam_max.is_finite() || lam_max <= 0.0 {
+        let mut fallback: f64 = 0.0;
+        let row_ptr = a.row_ptr();
+        let col_idx = a.col_idx();
+        let vals = a.values();
+        for i in 0..a.nrows() {
+            let rs = row_ptr[i];
+            let re = row_ptr[i + 1];
+            let mut diag = 0.0f64;
+            let mut sum = 0.0f64;
+            for p in rs..re {
+                let j = col_idx[p];
+                let v = vals[p].abs();
+                if j == i {
+                    diag = v;
+                } else {
+                    sum += v;
+                }
+            }
+            if diag > 0.0 {
+                fallback = fallback.max(sum / diag);
+            }
         }
-        let num = dot(&v, &w);
-        let den = dot(&v, &v).max(1e-30);
-        lam = num / den;
-        let nw = dot(&w, &w).sqrt().max(1e-30);
-        for i in 0..n {
-            v[i] = w[i] / nw;
-        }
+        lam_max = fallback;
     }
-    lam.max(1e-12)
+    if !lam_max.is_finite() || lam_max <= 0.0 {
+        lam_max = 1.0;
+    }
+    let safety = cfg.chebyshev_safety.max(1.0);
+    lam_max *= safety;
+    if !lam_max.is_finite() || lam_max <= 0.0 {
+        lam_max = safety.max(1.0);
+    }
+    let ratio = cfg.chebyshev_lower_ratio.clamp(1e-6, 0.99);
+    let lam_min = (ratio * lam_max).max(1e-30);
+    Ok(ChebData {
+        lambda_max: lam_max,
+        lambda_min: lam_min,
+    })
+}
+
+fn update_level_caches(
+    cfg: &AMGConfig,
+    level: &mut AMGLevel,
+    need_l1: bool,
+    need_cheb: bool,
+    recompute_cheb: bool,
+) -> Result<(), KError> {
+    if need_l1 {
+        level.l1_inv = Some(l1_diag_inv(&level.a));
+    } else {
+        level.l1_inv = None;
+    }
+    if need_cheb {
+        let d_sqrt = make_d_sqrt_inv(&level.diag_inv);
+        if recompute_cheb || level.cheb.is_none() {
+            let cheb = compute_cheb_data(cfg, &level.a, &level.diag_inv, &d_sqrt)?;
+            level.cheb = Some(cheb);
+        }
+        level.d_sqrt_inv = Some(d_sqrt);
+    } else {
+        level.d_sqrt_inv = None;
+        level.cheb = None;
+    }
+    Ok(())
 }
 
 /// CSR * CSR using per-row growing maps (Gustavson-style, simple).
@@ -4072,6 +4067,14 @@ mod tests {
     use super::*;
     use faer::Mat;
     use std::cmp::Ordering;
+    use std::sync::{Mutex, OnceLock};
+
+    fn relax_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    mod chebyshev;
 
     #[inline]
     fn feq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
@@ -4164,6 +4167,7 @@ mod tests {
             p: CsrMatrix::identity(1),
             r: CsrMatrix::identity(1),
             diag_inv: vec![1.0],
+            d_sqrt_inv: None,
             l1_inv: None,
             cheb: None,
             agg_of: vec![0],
@@ -4190,6 +4194,7 @@ mod tests {
             p: CsrMatrix::identity(n),
             r: CsrMatrix::identity(n),
             diag_inv: diag_inv_from_csr(a).unwrap(),
+            d_sqrt_inv: None,
             l1_inv: None,
             cheb: None,
             agg_of: vec![0; n.max(1)],
@@ -4211,6 +4216,7 @@ mod tests {
 
     #[test]
     fn phase_selection_logic() {
+        let _guard = relax_lock().lock().unwrap();
         reset_relax_counts();
         let levels = vec![identity_level(), identity_level(), identity_level()];
         let policy = RelaxPolicy {
@@ -4698,44 +4704,6 @@ mod tests {
     }
 
     #[test]
-    fn chebyshev_degree_improves() {
-        let n = 10;
-        let a = poisson1d(n);
-        let d = diag_inv_from_csr(&a).unwrap();
-        let lmax = estimate_lambda_max(&a, &d, 10);
-        assert!(lmax > 1.8 && lmax < 2.1);
-        let lmin = 0.3 * lmax;
-        let rhs = vec![1.0; n];
-        let mut ws = AMGWorkspace::new(n);
-        let mut z2 = vec![0.0; n];
-        AMG::chebyshev_smooth(&a, &d, &rhs, &mut z2, 2, lmin, lmax, &mut ws).unwrap();
-        a.spmv_scaled(1.0, &z2, 0.0, &mut ws.work[..n]).unwrap();
-        let mut r2 = 0.0;
-        for i in 0..n {
-            let ri = rhs[i] - ws.work[i];
-            r2 += ri * ri;
-        }
-        let mut z4 = vec![0.0; n];
-        AMG::chebyshev_smooth(&a, &d, &rhs, &mut z4, 4, lmin, lmax, &mut ws).unwrap();
-        a.spmv_scaled(1.0, &z4, 0.0, &mut ws.work[..n]).unwrap();
-        let mut r4 = 0.0;
-        for i in 0..n {
-            let ri = rhs[i] - ws.work[i];
-            r4 += ri * ri;
-        }
-        let mut z8 = vec![0.0; n];
-        AMG::chebyshev_smooth(&a, &d, &rhs, &mut z8, 8, lmin, lmax, &mut ws).unwrap();
-        a.spmv_scaled(1.0, &z8, 0.0, &mut ws.work[..n]).unwrap();
-        let mut r8 = 0.0;
-        for i in 0..n {
-            let ri = rhs[i] - ws.work[i];
-            r8 += ri * ri;
-        }
-        assert!(r4 < r2);
-        assert!(r8 < r4);
-    }
-
-    #[test]
     fn refresh_updates_caches() {
         let a = poisson1d(4);
         let mut amg_l1 = AMGBuilder::new()
@@ -4761,7 +4729,7 @@ mod tests {
 
         let mut amg_ch = AMGBuilder::new()
             .grid_relax_type_all(RelaxType::Chebyshev)
-            .chebyshev_recompute(true)
+            .chebyshev_recompute_esteig(true)
             .build(&Mat::<f64>::zeros(0, 0))
             .unwrap();
         amg_ch.setup(&a).unwrap();
@@ -4770,6 +4738,10 @@ mod tests {
             .as_ref()
             .unwrap()
             .lambda_max;
+        let old_ds = amg_ch.state.as_ref().unwrap().levels[0]
+            .d_sqrt_inv
+            .as_ref()
+            .unwrap()[0];
         let mut a3 = a.clone();
         let rp3 = a3.row_ptr();
         for p in rp3[0]..rp3[1] {
@@ -4783,7 +4755,12 @@ mod tests {
             .as_ref()
             .unwrap()
             .lambda_max;
+        let new_ds = amg_ch.state.as_ref().unwrap().levels[0]
+            .d_sqrt_inv
+            .as_ref()
+            .unwrap()[0];
         assert!((new_l - old_l).abs() > 1e-6);
+        assert!((new_ds - old_ds).abs() > 1e-12);
     }
 
     #[test]
