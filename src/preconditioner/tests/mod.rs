@@ -50,6 +50,7 @@ fn default_apply_mut_forwards_to_apply() {
     assert_eq!(pc.calls.load(Ordering::Relaxed), 1);
 }
 
+mod asm_amg;
 mod classical;
 mod coarsen;
 mod deflation;

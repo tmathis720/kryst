@@ -4,7 +4,7 @@
 
 use crate::core::traits::MatVec;
 use crate::error::KError;
-use crate::preconditioner::{PcSide, legacy::Preconditioner};
+use crate::preconditioner::{PcSide, legacy::Preconditioner as LegacyPreconditioner};
 use crate::solver::legacy::LinearSolver;
 use std::sync::Mutex;
 // Extra imports to support LinOp-based setup/apply (f64 case)
@@ -13,6 +13,8 @@ use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::CsrOp;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
+use crate::preconditioner::PcCaps;
+use crate::preconditioner::Preconditioner as DynPreconditioner;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
@@ -184,7 +186,7 @@ where
     }
 }
 
-impl<M, V, T> Preconditioner<M, V> for AdditiveSchwarz<M, V, T>
+impl<M, V, T> LegacyPreconditioner<M, V> for AdditiveSchwarz<M, V, T>
 where
     M: MatVec<V> + Clone + Send + Sync,
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
@@ -1017,5 +1019,393 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     pub fn set_dense_threshold(&mut self, n: usize) -> &mut Self {
         self.dense_threshold = n;
         self
+    }
+}
+
+// ===== Modern ASM implementation used by AMG-DD =====================================
+
+/// Combination rule for overlapping subdomain solves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsmCombine {
+    /// Classical additive Schwarz (overlapped contributions summed, optionally weighted).
+    Additive,
+    /// Restricted additive Schwarz (inject only interior/core unknowns per subdomain).
+    Restricted,
+    /// Optimized RAS/ORAS-style weighting (smooth partition of unity on overlap).
+    Optimized,
+}
+
+/// Local solver choice for each subdomain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsmLocalSolver {
+    /// ILU(0) on the subdomain matrix.
+    ILU,
+}
+
+/// Configuration for the standalone ASM preconditioner.
+#[derive(Clone, Debug)]
+pub struct AsmConfig {
+    pub overlap: usize,
+    pub combine: AsmCombine,
+    pub local_solver: AsmLocalSolver,
+    pub local_sweeps: usize,
+    pub weight_partition_of_unity: bool,
+    pub deterministic: bool,
+    pub nparts: Option<usize>,
+}
+
+impl Default for AsmConfig {
+    fn default() -> Self {
+        Self {
+            overlap: 0,
+            combine: AsmCombine::Additive,
+            local_solver: AsmLocalSolver::ILU,
+            local_sweeps: 1,
+            weight_partition_of_unity: true,
+            deterministic: true,
+            nparts: None,
+        }
+    }
+}
+
+/// Builder for [`Asm`].
+#[derive(Clone, Debug)]
+pub struct AsmBuilder {
+    cfg: AsmConfig,
+}
+
+impl AsmBuilder {
+    pub fn new() -> Self {
+        Self {
+            cfg: AsmConfig::default(),
+        }
+    }
+
+    pub fn overlap(mut self, k: usize) -> Self {
+        self.cfg.overlap = k;
+        self
+    }
+
+    pub fn combine(mut self, combine: AsmCombine) -> Self {
+        self.cfg.combine = combine;
+        self
+    }
+
+    pub fn local_solver(mut self, solver: AsmLocalSolver) -> Self {
+        self.cfg.local_solver = solver;
+        self
+    }
+
+    pub fn local_sweeps(mut self, sweeps: usize) -> Self {
+        self.cfg.local_sweeps = sweeps.max(1);
+        self
+    }
+
+    pub fn weight_partition_of_unity(mut self, enabled: bool) -> Self {
+        self.cfg.weight_partition_of_unity = enabled;
+        self
+    }
+
+    pub fn deterministic(mut self, deterministic: bool) -> Self {
+        self.cfg.deterministic = deterministic;
+        self
+    }
+
+    pub fn parts(mut self, nparts: usize) -> Self {
+        self.cfg.nparts = Some(nparts.max(1));
+        self
+    }
+
+    pub fn build(self) -> Asm {
+        Asm::with_config(self.cfg)
+    }
+}
+
+impl Default for AsmBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// In-memory representation of a single overlapping subdomain.
+struct AsmSubdomain {
+    pro2glob: Vec<usize>,
+    restrict: Vec<usize>,
+    restrict_local: Vec<usize>,
+    matrix: Arc<CsrMatrix<f64>>,
+    solver: LocalSolver,
+    rhs: Mutex<Vec<f64>>,
+    sol: Mutex<Vec<f64>>,
+    weights: Vec<f64>,
+}
+
+impl AsmSubdomain {
+    fn new(
+        matrix: Arc<CsrMatrix<f64>>,
+        pro2glob: Vec<usize>,
+        restrict: Vec<usize>,
+        weights: Vec<f64>,
+        solver: LocalSolver,
+    ) -> Self {
+        let n = pro2glob.len();
+        let restrict_local = restrict
+            .iter()
+            .map(|g| {
+                pro2glob
+                    .binary_search(g)
+                    .expect("restrict idx not in subdomain")
+            })
+            .collect();
+        Self {
+            rhs: Mutex::new(vec![0.0; n]),
+            sol: Mutex::new(vec![0.0; n]),
+            pro2glob,
+            restrict,
+            restrict_local,
+            matrix,
+            solver,
+            weights,
+        }
+    }
+}
+
+enum LocalSolver {
+    Ilu(IluCsr),
+}
+
+impl LocalSolver {
+    fn from_config(kind: AsmLocalSolver, mat: &Arc<CsrMatrix<f64>>) -> Result<Self, KError> {
+        match kind {
+            AsmLocalSolver::ILU => {
+                let cfg = IluCsrConfig {
+                    kind: IluKind::Ilu0,
+                    pivot: PivotStrategy::DiagonalPerturbation,
+                    pivot_threshold: 1e-12,
+                    diag_perturb_factor: 1e-10,
+                    level_sched: cfg!(feature = "rayon"),
+                    numeric_update_fixed: true,
+                    logging: 0,
+                    reordering: ReorderingOptions::default(),
+                };
+                let mut ilu = IluCsr::new_with_config(cfg);
+                let op = CsrOp::new(mat.clone());
+                ilu.setup(&op)?;
+                Ok(LocalSolver::Ilu(ilu))
+            }
+        }
+    }
+
+    fn apply(&self, rhs: &[f64], sol: &mut [f64]) -> Result<(), KError> {
+        match self {
+            LocalSolver::Ilu(ilu) => ilu.apply(PcSide::Left, rhs, sol),
+        }
+    }
+
+    fn update_numeric(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
+        match self {
+            LocalSolver::Ilu(ilu) => {
+                let op = CsrOp::new(mat.clone());
+                ilu.update_numeric(&op)
+            }
+        }
+    }
+
+    fn update_symbolic(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
+        match self {
+            LocalSolver::Ilu(ilu) => {
+                let op = CsrOp::new(mat.clone());
+                ilu.update_symbolic(&op)
+            }
+        }
+    }
+}
+
+struct AsmState {
+    a_fine: Arc<CsrMatrix<f64>>,
+    subdomains: Vec<AsmSubdomain>,
+}
+
+/// Lightweight additive/restricted Schwarz preconditioner used by AMG-DD.
+pub struct Asm {
+    cfg: AsmConfig,
+    state: Option<AsmState>,
+    last_sid: Option<StructureId>,
+    last_vid: Option<ValuesId>,
+}
+
+impl Asm {
+    pub fn builder() -> AsmBuilder {
+        AsmBuilder::new()
+    }
+
+    pub fn with_config(cfg: AsmConfig) -> Self {
+        Self {
+            cfg,
+            state: None,
+            last_sid: None,
+            last_vid: None,
+        }
+    }
+
+    pub fn dimension(&self) -> Option<usize> {
+        self.state.as_ref().map(|s| s.a_fine.nrows())
+    }
+
+    pub fn matrix(&self) -> Option<&Arc<CsrMatrix<f64>>> {
+        self.state.as_ref().map(|s| &s.a_fine)
+    }
+
+    fn build_subdomains(&self, csr: &Arc<CsrMatrix<f64>>) -> Result<Vec<AsmSubdomain>, KError> {
+        let n = csr.nrows();
+        let rp = csr.row_ptr();
+        let mut nnz_per_row = vec![0usize; n];
+        for i in 0..n {
+            nnz_per_row[i] = rp[i + 1] - rp[i];
+        }
+        let nparts = self
+            .cfg
+            .nparts
+            .unwrap_or_else(|| crate::parallel::threads::current_rayon_threads().max(1));
+        let owner_of = greedy_nnz_balanced_partition(n, nparts, Some(&nnz_per_row));
+        let adj = build_adjacency(csr.as_ref());
+        let overlapped = expand_overlap(&adj, &owner_of, self.cfg.overlap);
+        let weighting = match (self.cfg.combine, self.cfg.weight_partition_of_unity) {
+            (AsmCombine::Additive, true) => Weighting::Uniform,
+            (AsmCombine::Restricted, true) => Weighting::Uniform,
+            (AsmCombine::Optimized, true) => Weighting::SmoothLinear,
+            _ => Weighting::None,
+        };
+        let mut metas: Vec<SubdomainMeta> = overlapped
+            .iter()
+            .enumerate()
+            .map(|(s, idx)| SubdomainMeta {
+                indices: idx.clone(),
+                interior_mask: idx.iter().map(|&gi| owner_of[gi] == s).collect(),
+                weights: vec![1.0; idx.len()],
+            })
+            .collect();
+        if !matches!(weighting, Weighting::None) {
+            compute_weights(&mut metas, &owner_of, &adj, weighting, n);
+        }
+
+        let mut subdomains = Vec::with_capacity(overlapped.len());
+        for (s, meta) in metas.into_iter().enumerate() {
+            let pro2glob = meta.indices;
+            let restrict: Vec<usize> = match self.cfg.combine {
+                AsmCombine::Additive => pro2glob.clone(),
+                AsmCombine::Restricted | AsmCombine::Optimized => pro2glob
+                    .iter()
+                    .copied()
+                    .filter(|&gi| owner_of[gi] == s)
+                    .collect(),
+            };
+            let mat = Arc::new(csr.as_ref().submatrix(&pro2glob));
+            let solver = LocalSolver::from_config(self.cfg.local_solver, &mat)?;
+            let weights = if matches!(weighting, Weighting::None) {
+                vec![1.0; pro2glob.len()]
+            } else {
+                meta.weights
+            };
+            subdomains.push(AsmSubdomain::new(mat, pro2glob, restrict, weights, solver));
+        }
+        Ok(subdomains)
+    }
+
+    fn apply_impl(&self, rhs: &[f64], out: &mut [f64]) -> Result<(), KError> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("ASM not set up".into()))?;
+        if rhs.len() != out.len() {
+            return Err(KError::InvalidInput("ASM apply dimension mismatch".into()));
+        }
+        for yi in out.iter_mut() {
+            *yi = 0.0;
+        }
+        for sub in &state.subdomains {
+            let mut rhs_loc = sub.rhs.lock().unwrap();
+            let mut sol_loc = sub.sol.lock().unwrap();
+            for (li, &gi) in sub.pro2glob.iter().enumerate() {
+                rhs_loc[li] = rhs[gi];
+                sol_loc[li] = 0.0;
+            }
+            sub.solver.apply(&rhs_loc, &mut sol_loc)?;
+            match self.cfg.combine {
+                AsmCombine::Additive | AsmCombine::Optimized => {
+                    for (li, &gi) in sub.pro2glob.iter().enumerate() {
+                        out[gi] += sub.weights[li] * sol_loc[li];
+                    }
+                }
+                AsmCombine::Restricted => {
+                    for (&gi, &li) in sub.restrict.iter().zip(sub.restrict_local.iter()) {
+                        out[gi] += sub.weights[li] * sol_loc[li];
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DynPreconditioner for Asm {
+    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let csr = csr_from_linop(op, 0.0)?;
+        let subdomains = self.build_subdomains(&csr)?;
+        self.state = Some(AsmState {
+            a_fine: csr.clone(),
+            subdomains,
+        });
+        self.last_sid = Some(op.structure_id());
+        self.last_vid = Some(op.values_id());
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, rhs: &[f64], out: &mut [f64]) -> Result<(), KError> {
+        self.apply_impl(rhs, out)
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+
+    fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        if Some(op.structure_id()) != self.last_sid {
+            return Err(KError::Unsupported(
+                "ASM numeric update requires identical sparsity pattern".into(),
+            ));
+        }
+        let csr = csr_from_linop(op, 0.0)?;
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| KError::InvalidInput("ASM not set up".into()))?;
+        for sub in state.subdomains.iter_mut() {
+            let fresh = csr.as_ref().submatrix(&sub.pro2glob);
+            let mat = Arc::make_mut(&mut sub.matrix);
+            mat.values_mut().copy_from_slice(fresh.values());
+            sub.solver.update_numeric(&sub.matrix)?;
+        }
+        state.a_fine = csr.clone();
+        self.last_vid = Some(op.values_id());
+        Ok(())
+    }
+
+    fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let csr = csr_from_linop(op, 0.0)?;
+        let mut subdomains = self.build_subdomains(&csr)?;
+        for sub in subdomains.iter_mut() {
+            sub.solver.update_symbolic(&sub.matrix)?;
+        }
+        self.state = Some(AsmState {
+            a_fine: csr.clone(),
+            subdomains,
+        });
+        self.last_sid = Some(op.structure_id());
+        self.last_vid = Some(op.values_id());
+        Ok(())
+    }
+
+    fn capabilities(&self) -> PcCaps {
+        PcCaps::default()
     }
 }
