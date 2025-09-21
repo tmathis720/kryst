@@ -1,4 +1,5 @@
 use super::strength::Strength;
+use super::strength_nodal::NodalStrength;
 use super::util::DofLayout;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,6 +187,18 @@ pub fn build_aggregates(s_in: &Strength, algo: AggAlgo, opts: &AggOpts) -> (Vec<
 
     let agg = aggregates_from_seeds(&s, &is_seed);
     (agg, is_seed)
+}
+
+pub fn build_aggregates_nodal(
+    s: &NodalStrength,
+    algo: AggAlgo,
+    opts: &AggOpts,
+) -> (Vec<usize>, Vec<bool>) {
+    let strength = Strength {
+        row_ptr: s.row_ptr.clone(),
+        col_idx: s.col_idx.clone(),
+    };
+    build_aggregates(&strength, algo, opts)
 }
 
 pub fn lift_node_aggregates_to_dofs(
