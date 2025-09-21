@@ -155,6 +155,24 @@ pub enum CycleType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KrylovAlgo {
+    FCG,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KCycle {
+    /// Levels (0 = finest) where the Krylov smoother is enabled.
+    pub levels: Vec<usize>,
+    /// Number of Krylov iterations when enabled.
+    pub iters: usize,
+    pub algo: KrylovAlgo,
+    /// Apply the Krylov smoother after the standard post-smoothing step.
+    pub place_post: bool,
+    /// Apply the Krylov smoother before the standard post-smoothing step.
+    pub place_pre: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MixedPrecision {
     pub smooth: bool,
     pub residual: bool,
@@ -312,6 +330,7 @@ pub struct AMGConfig {
     pub aggressive_mis_k: usize,
     pub max_strong_per_row: Option<usize>,
     pub cycle_type: CycleType,
+    pub kcycle: Option<KCycle>,
     pub fmg_nu_pre: usize,
     pub fmg_nu_post: usize,
     pub fmg_gamma: usize,
@@ -405,6 +424,7 @@ impl Default for AMGConfig {
             aggressive_mis_k: 2,
             max_strong_per_row: None,
             cycle_type: CycleType::V,
+            kcycle: None,
             fmg_nu_pre: 1,
             fmg_nu_post: 1,
             fmg_gamma: 1,
@@ -465,6 +485,18 @@ impl AMGBuilder {
     pub fn cycle_w(mut self, gamma: usize) -> Self {
         let g = gamma.max(2);
         self.cfg.cycle_type = CycleType::W { gamma: g };
+        self
+    }
+    pub fn cycle(mut self, c: CycleType) -> Self {
+        self.cfg.cycle_type = c;
+        self
+    }
+    pub fn kcycle(mut self, kc: KCycle) -> Self {
+        self.cfg.kcycle = Some(kc);
+        self
+    }
+    pub fn disable_kcycle(mut self) -> Self {
+        self.cfg.kcycle = None;
         self
     }
     pub fn max_levels(mut self, v: usize) -> Self {
@@ -994,6 +1026,12 @@ struct AMGWorkspace {
     residual: Vec<f64>,
     coarse_rhs: Vec<f64>,
     fine_corr: Vec<f64>,
+    k_zeta: Vec<f64>,
+    k_p: Vec<f64>,
+    k_ap: Vec<f64>,
+    k_temp: Vec<f64>,
+    k_work: Vec<f64>,
+    k_residual: Vec<f64>,
     mp: Option<MixedWs>,
 }
 
@@ -1005,6 +1043,12 @@ impl AMGWorkspace {
             residual: vec![0.0; cap],
             coarse_rhs: vec![0.0; cap],
             fine_corr: vec![0.0; cap],
+            k_zeta: vec![0.0; cap],
+            k_p: vec![0.0; cap],
+            k_ap: vec![0.0; cap],
+            k_temp: vec![0.0; cap],
+            k_work: vec![0.0; cap],
+            k_residual: vec![0.0; cap],
             mp: None,
         }
     }
@@ -1019,6 +1063,12 @@ impl AMGWorkspace {
         grow(&mut self.residual, n);
         grow(&mut self.coarse_rhs, n);
         grow(&mut self.fine_corr, n);
+        grow(&mut self.k_zeta, n);
+        grow(&mut self.k_p, n);
+        grow(&mut self.k_ap, n);
+        grow(&mut self.k_temp, n);
+        grow(&mut self.k_work, n);
+        grow(&mut self.k_residual, n);
     }
 
     fn ensure_mixed(&mut self, n: usize) {
@@ -1187,6 +1237,78 @@ struct RelaxPolicy {
     kind: [RelaxType; 4],
     sweeps: [usize; 4],
     omega: f64,
+}
+
+trait CyclePolicy: Send + Sync {
+    fn gamma_visits(&self, level: usize) -> usize;
+    fn k_presmooth(&self, _level: usize) -> Option<(KrylovAlgo, usize)> {
+        None
+    }
+    fn k_postsmooth(&self, _level: usize) -> Option<(KrylovAlgo, usize)> {
+        None
+    }
+}
+
+struct VPolicy;
+
+impl CyclePolicy for VPolicy {
+    fn gamma_visits(&self, _level: usize) -> usize {
+        1
+    }
+}
+
+struct WPolicy {
+    gamma: usize,
+}
+
+impl CyclePolicy for WPolicy {
+    fn gamma_visits(&self, _level: usize) -> usize {
+        self.gamma.max(1)
+    }
+}
+
+struct KPolicy {
+    base: CycleType,
+    cfg: KCycle,
+}
+
+impl KPolicy {
+    fn new(base: CycleType, mut cfg: KCycle) -> Self {
+        cfg.levels.sort_unstable();
+        cfg.levels.dedup();
+        cfg.iters = cfg.iters.max(1);
+        Self { base, cfg }
+    }
+
+    fn contains(&self, level: usize) -> bool {
+        self.cfg.levels.binary_search(&level).is_ok()
+    }
+}
+
+impl CyclePolicy for KPolicy {
+    fn gamma_visits(&self, _level: usize) -> usize {
+        match self.base {
+            CycleType::V => 1,
+            CycleType::W { gamma } => gamma.max(2),
+        }
+        .max(1)
+    }
+
+    fn k_presmooth(&self, level: usize) -> Option<(KrylovAlgo, usize)> {
+        if self.cfg.place_pre && self.contains(level) {
+            Some((self.cfg.algo, self.cfg.iters))
+        } else {
+            None
+        }
+    }
+
+    fn k_postsmooth(&self, level: usize) -> Option<(KrylovAlgo, usize)> {
+        if self.cfg.place_post && self.contains(level) {
+            Some((self.cfg.algo, self.cfg.iters))
+        } else {
+            None
+        }
+    }
 }
 
 struct AmgHierarchy {
@@ -1858,6 +1980,7 @@ pub struct AMG {
     state: Option<AmgHierarchy>,
     last_sid: Option<StructureId>,
     last_vid: Option<ValuesId>,
+    cycle_policy: Box<dyn CyclePolicy + Send + Sync>,
     cfg: AMGConfig,
     stats: Option<AmgStats>,
     runtime: Mutex<AmgRuntime>,
@@ -1865,12 +1988,14 @@ pub struct AMG {
 
 impl Default for AMG {
     fn default() -> Self {
+        let cfg = AMGConfig::default();
         Self {
             csr: None,
             state: None,
             last_sid: None,
             last_vid: None,
-            cfg: AMGConfig::default(),
+            cycle_policy: Self::make_cycle_policy(&cfg),
+            cfg,
             stats: None,
             runtime: Mutex::new(AmgRuntime::default()),
         }
@@ -1889,8 +2014,19 @@ impl AMG {
             cfg.spd_diag_floor = 0.0;
         }
         Self {
+            cycle_policy: Self::make_cycle_policy(&cfg),
             cfg,
             ..Default::default()
+        }
+    }
+
+    fn make_cycle_policy(cfg: &AMGConfig) -> Box<dyn CyclePolicy + Send + Sync> {
+        match (&cfg.cycle_type, cfg.kcycle.as_ref()) {
+            (CycleType::V, None) => Box::new(VPolicy),
+            (CycleType::W { gamma }, None) => Box::new(WPolicy {
+                gamma: (*gamma).max(2),
+            }),
+            (base, Some(kc)) => Box::new(KPolicy::new(*base, kc.clone())),
         }
     }
 
@@ -3363,6 +3499,274 @@ impl AMG {
 
     // ---- Multigrid cycle ----------------------------------------------------
 
+    fn smooth_dispatch(
+        relax: RelaxType,
+        sweeps: usize,
+        lvl: &AMGLevel,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+        cfg: &AMGConfig,
+    ) -> Result<(), KError> {
+        if sweeps == 0 {
+            return Ok(());
+        }
+        match relax {
+            RelaxType::Jacobi => Self::jacobi_smooth_sparse(
+                cfg.jacobi_omega,
+                &lvl.a,
+                &lvl.diag_inv,
+                rhs,
+                sol,
+                sweeps,
+                ws,
+            ),
+            RelaxType::GaussSeidel => {
+                Self::gs_forward(1.0, &lvl.a, &lvl.diag_inv, rhs, sol, sweeps)
+            }
+            RelaxType::GaussSeidelBackward => {
+                Self::gs_backward(1.0, &lvl.a, &lvl.diag_inv, rhs, sol, sweeps)
+            }
+            RelaxType::SymmetricGaussSeidel => {
+                Self::sym_gs(1.0, &lvl.a, &lvl.diag_inv, rhs, sol, sweeps)
+            }
+            RelaxType::L1Jacobi => {
+                let l1 = lvl
+                    .l1_inv
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("L1Jacobi cache missing".into()))?;
+                Self::l1_jacobi(cfg.jacobi_omega, &lvl.a, l1, rhs, sol, sweeps, ws)
+            }
+            RelaxType::Chebyshev => {
+                let cheb = lvl
+                    .cheb
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("Chebyshev cache missing".into()))?;
+                let degree = cfg.chebyshev_degree.max(1);
+                for _ in 0..sweeps {
+                    Self::apply_chebyshev(&lvl.a, &lvl.diag_inv, rhs, sol, degree, cheb, ws)?;
+                }
+                Ok(())
+            }
+            RelaxType::Fsai => {
+                let data = lvl
+                    .fsai
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
+                for _ in 0..sweeps {
+                    Self::fsai_smooth(&data.g, &data.gt, &lvl.a, rhs, sol, cfg.fsai_damping, ws)?;
+                }
+                Ok(())
+            }
+            other => Err(KError::InvalidInput(format!(
+                "RelaxType {other:?} not yet supported",
+            ))),
+        }
+    }
+
+    fn apply_precond_one_sweep(
+        &self,
+        level: usize,
+        r: &[f64],
+        out: &mut [f64],
+        work: &mut [f64],
+        temp: &mut [f64],
+        residual: &mut [f64],
+    ) -> Result<(), KError> {
+        let h = self
+            .state
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let lvl = h
+            .levels
+            .get(level)
+            .ok_or_else(|| KError::InvalidInput("level out of range".into()))?;
+        let n = lvl.a.nrows();
+        if r.len() != n
+            || out.len() != n
+            || work.len() != n
+            || temp.len() != n
+            || residual.len() != n
+        {
+            return Err(KError::InvalidInput(
+                "krylov preconditioner: level size mismatch".into(),
+            ));
+        }
+        out.fill(0.0);
+
+        match self.cfg.relax_type {
+            RelaxType::Jacobi => {
+                for i in 0..n {
+                    out[i] = self.cfg.jacobi_omega * lvl.diag_inv[i] * r[i];
+                }
+                Ok(())
+            }
+            RelaxType::GaussSeidel => Self::gs_forward(1.0, &lvl.a, &lvl.diag_inv, r, out, 1),
+            RelaxType::GaussSeidelBackward => {
+                Self::gs_backward(1.0, &lvl.a, &lvl.diag_inv, r, out, 1)
+            }
+            RelaxType::SymmetricGaussSeidel => Self::sym_gs(1.0, &lvl.a, &lvl.diag_inv, r, out, 1),
+            RelaxType::L1Jacobi => {
+                let l1 = lvl
+                    .l1_inv
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("L1Jacobi cache missing".into()))?;
+                work.fill(0.0);
+                lvl.a.spmv_scaled(1.0, out, 0.0, work)?;
+                for i in 0..n {
+                    out[i] += self.cfg.jacobi_omega * l1[i] * (r[i] - work[i]);
+                }
+                Ok(())
+            }
+            RelaxType::Chebyshev => {
+                let cheb = lvl
+                    .cheb
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("Chebyshev cache missing".into()))?;
+                let bounds = ChebBounds {
+                    lam_max: cheb.lambda_max,
+                    lam_min: cheb.lambda_min,
+                };
+                chebyshev::chebyshev_smooth_csr(
+                    &lvl.a,
+                    &lvl.diag_inv,
+                    r,
+                    out,
+                    self.cfg.chebyshev_degree.max(1),
+                    &bounds,
+                    residual,
+                    temp,
+                    work,
+                )
+            }
+            RelaxType::Fsai => {
+                let data = lvl
+                    .fsai
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
+                residual.fill(0.0);
+                work.fill(0.0);
+                temp.fill(0.0);
+                Self::fsai_smooth_core(
+                    &data.g,
+                    &data.gt,
+                    &lvl.a,
+                    r,
+                    out,
+                    self.cfg.fsai_damping,
+                    residual,
+                    work,
+                    temp,
+                )
+            }
+            other => Err(KError::InvalidInput(format!(
+                "RelaxType {other:?} not yet supported",
+            ))),
+        }
+    }
+    fn krylov_smooth(
+        &self,
+        algo: KrylovAlgo,
+        iters: usize,
+        level: usize,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if iters == 0 {
+            return Ok(());
+        }
+        match algo {
+            KrylovAlgo::FCG => self.krylov_smooth_pcg(iters, level, rhs, sol, ws),
+        }
+    }
+
+    fn krylov_smooth_pcg(
+        &self,
+        iters: usize,
+        level: usize,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if iters == 0 {
+            return Ok(());
+        }
+        let h = self
+            .state
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let lvl = h
+            .levels
+            .get(level)
+            .ok_or_else(|| KError::InvalidInput("level out of range".into()))?;
+        let a = &lvl.a;
+        let n = a.nrows();
+        if rhs.len() != n || sol.len() != n {
+            return Err(KError::InvalidInput(
+                "krylov smoother: dimension mismatch".into(),
+            ));
+        }
+        ws.ensure(n);
+
+        a.spmv_scaled(1.0, sol, 0.0, &mut ws.work[..n])?;
+        for i in 0..n {
+            ws.residual[i] = rhs[i] - ws.work[i];
+        }
+
+        ws.k_residual[..n].copy_from_slice(&ws.residual[..n]);
+        self.apply_precond_one_sweep(
+            level,
+            &ws.k_residual[..n],
+            &mut ws.k_zeta[..n],
+            &mut ws.k_work[..n],
+            &mut ws.k_temp[..n],
+            &mut ws.k_ap[..n],
+        )?;
+        ws.k_p[..n].copy_from_slice(&ws.k_zeta[..n]);
+
+        let mut rz_old = dot(&ws.residual[..n], &ws.k_zeta[..n]);
+        if !rz_old.is_finite() || rz_old.abs() < 1e-300 {
+            return Ok(());
+        }
+
+        for _ in 0..iters {
+            a.spmv_scaled(1.0, &ws.k_p[..n], 0.0, &mut ws.k_ap[..n])?;
+            let denom = dot(&ws.k_p[..n], &ws.k_ap[..n]);
+            if !denom.is_finite() || denom.abs() < 1e-300 {
+                break;
+            }
+            let alpha = rz_old / denom;
+            for i in 0..n {
+                sol[i] += alpha * ws.k_p[i];
+                ws.residual[i] -= alpha * ws.k_ap[i];
+            }
+
+            ws.k_residual[..n].copy_from_slice(&ws.residual[..n]);
+            self.apply_precond_one_sweep(
+                level,
+                &ws.k_residual[..n],
+                &mut ws.k_zeta[..n],
+                &mut ws.k_work[..n],
+                &mut ws.k_temp[..n],
+                &mut ws.k_ap[..n],
+            )?;
+            let rz_new = dot(&ws.residual[..n], &ws.k_zeta[..n]);
+            if !rz_new.is_finite() {
+                break;
+            }
+            if rz_new.abs() < 1e-300 {
+                break;
+            }
+            let beta = rz_new / rz_old;
+            for i in 0..n {
+                ws.k_p[i] = ws.k_zeta[i] + beta * ws.k_p[i];
+            }
+            rz_old = rz_new;
+        }
+        Ok(())
+    }
+
     fn restrict_apply(
         lvl: &AMGLevel,
         fine_res: &[f64],
@@ -3378,7 +3782,6 @@ impl AMG {
     fn cycle_profiled(
         &self,
         level: usize,
-        gamma: usize,
         rhs: &[f64],
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
@@ -3392,6 +3795,7 @@ impl AMG {
 
         let a = &h.levels[level].a;
         let pol = &h.policy;
+        let cycle_pol = &*self.cycle_policy;
         let mut lv = CycleLevelTiming {
             level,
             ..Default::default()
@@ -3549,7 +3953,7 @@ impl AMG {
             Self::restrict_apply(&h.levels[level], &ws.residual[..n], &mut local_coarse[..nc])
         })?;
 
-        let gamma = gamma.max(1);
+        let gamma = cycle_pol.gamma_visits(level).max(1);
         for t in 0..gamma {
             let mut zc = vec![0.0; nc];
             if level + 1 == lc {
@@ -3561,7 +3965,6 @@ impl AMG {
             } else {
                 self.cycle_profiled(
                     level + 1,
-                    gamma,
                     &local_coarse[..nc],
                     &mut zc,
                     ws,
@@ -3604,6 +4007,12 @@ impl AMG {
         }
         ws.coarse_rhs = local_coarse;
 
+        if let Some((algo, iters)) = cycle_pol.k_presmooth(level) {
+            with_timing(prof, &mut lv.post_smooth, || {
+                self.krylov_smooth(algo, iters, level, rhs, sol, ws)
+            })?;
+        }
+
         // Post-smooth
         let phase_post = if level == 0 {
             RelaxPhase::Fine
@@ -3623,6 +4032,12 @@ impl AMG {
             )
         })?;
 
+        if let Some((algo, iters)) = cycle_pol.k_postsmooth(level) {
+            with_timing(prof, &mut lv.post_smooth, || {
+                self.krylov_smooth(algo, iters, level, rhs, sol, ws)
+            })?;
+        }
+
         if let Some(c) = cyc {
             c.per_level.push(lv);
         }
@@ -3632,12 +4047,11 @@ impl AMG {
     fn cycle(
         &self,
         level: usize,
-        gamma: usize,
         rhs: &[f64],
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
     ) -> Result<(), KError> {
-        self.cycle_profiled(level, gamma, rhs, sol, ws, None)
+        self.cycle_profiled(level, rhs, sol, ws, None)
     }
 
     #[inline]
@@ -3648,7 +4062,7 @@ impl AMG {
         sol: &mut [f64],
         ws: &mut AMGWorkspace,
     ) -> Result<(), KError> {
-        self.cycle(level, 1, rhs, sol, ws)
+        self.cycle(level, rhs, sol, ws)
     }
 
     pub fn fmg_solve(&self, _b: &[f64], _x: &mut [f64]) -> Result<(), KError> {
@@ -3798,17 +4212,14 @@ impl Preconditioner for AMG {
         } else {
             let mut ws = AMGWorkspace::new(h.finest().a.nrows());
             let do_prof = self.cfg.logging_level >= 2;
-            let gamma = match self.cfg.cycle_type {
-                CycleType::V => 1,
-                CycleType::W { gamma } => gamma.max(2),
-            };
             if do_prof {
                 let mut cyc = CycleTimings::default();
                 let t_all = tic();
                 z.fill(0.0);
-                self.cycle_profiled(0, gamma, r, z, &mut ws, Some(&mut cyc))?;
+                self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
                 cyc.total_cycle = toc(t_all);
                 cyc.cycle_type = self.cfg.cycle_type;
+                cyc.kcycle = self.cfg.kcycle.clone();
                 if let Ok(mut rt) = self.runtime.lock() {
                     rt.last_cycle = Some(cyc.clone());
                 }
@@ -3817,7 +4228,7 @@ impl Preconditioner for AMG {
                 }
             } else {
                 z.fill(0.0);
-                self.cycle(0, gamma, r, z, &mut ws)?;
+                self.cycle(0, r, z, &mut ws)?;
             }
             Ok(())
         }
@@ -5899,6 +6310,7 @@ pub struct CycleTimings {
     pub per_level: Vec<CycleLevelTiming>,
     pub total_cycle: Duration,
     pub cycle_type: CycleType,
+    pub kcycle: Option<KCycle>,
 }
 
 impl Default for CycleTimings {
@@ -5907,6 +6319,7 @@ impl Default for CycleTimings {
             per_level: Vec::new(),
             total_cycle: Duration::default(),
             cycle_type: CycleType::V,
+            kcycle: None,
         }
     }
 }
@@ -6030,10 +6443,13 @@ fn print_setup_tables(stats: &AmgStats) {
 }
 
 fn print_cycle_table(c: &CycleTimings) {
-    let desc = match c.cycle_type {
+    let mut desc = match c.cycle_type {
         CycleType::V => "V-cycle".to_string(),
         CycleType::W { gamma } => format!("W-cycle(gamma={gamma})"),
     };
+    if c.kcycle.is_some() {
+        desc.push_str(" + K");
+    }
     println!("{desc} timings (ms): level | pre mv axpy R coarse P post");
     let ms = |d: Duration| (d.as_secs_f64() * 1e3).round() as u64;
     for lv in &c.per_level {
@@ -6159,6 +6575,7 @@ mod tests {
     }
 
     mod chebyshev;
+    mod cycle_policy;
     mod fsai_smoother;
     mod mixed_precision;
     mod rank_galerkin;
