@@ -10,6 +10,7 @@ pub mod monitor;
 pub mod partition;
 pub mod permutation;
 pub mod profiling;
+pub mod reduction;
 pub mod reordering;
 #[cfg(feature = "tuning")]
 pub mod tuning;

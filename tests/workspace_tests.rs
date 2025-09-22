@@ -60,3 +60,46 @@ fn gmres_workspace_allocation_stable_and_sized() {
     assert_eq!(ws.cs.len(), restart);
     assert_eq!(ws.sn.len(), restart);
 }
+
+#[test]
+fn ensure_block_reuses_buffer() {
+    let mut ws = Workspace::default();
+    ws.ensure_block(6, 4);
+    let buf = ws.block_buf.as_ref().expect("block vec allocated");
+    assert_eq!(buf.nrows(), 6);
+    assert!(buf.ncols() >= 4);
+    let base_ptr = buf.as_slice().as_ptr();
+
+    // Request fewer columns: should reuse existing allocation.
+    ws.ensure_block(6, 2);
+    let buf_small = ws.block_buf.as_ref().unwrap();
+    assert_eq!(buf_small.as_slice().as_ptr(), base_ptr);
+
+    // Request more columns: should grow allocation.
+    ws.ensure_block(6, 8);
+    let buf_large = ws.block_buf.as_ref().unwrap();
+    assert!(buf_large.ncols() >= 8);
+    assert!(buf_large.as_slice().as_ptr() != base_ptr);
+}
+
+#[test]
+fn ensure_tsqr_grows_monotonically() {
+    let mut ws = Workspace::default();
+    ws.ensure_tsqr(3);
+    let tsqr = ws.tsqr.as_ref().expect("tsqr allocated");
+    assert_eq!(tsqr.w_max, 3);
+    assert_eq!(tsqr.taus.len(), 3);
+    assert_eq!(tsqr.rmat.len(), 9);
+
+    // Smaller request should keep existing allocation.
+    ws.ensure_tsqr(2);
+    let tsqr_small = ws.tsqr.as_ref().unwrap();
+    assert_eq!(tsqr_small.w_max, 3);
+
+    // Larger request should grow buffers.
+    ws.ensure_tsqr(5);
+    let tsqr_large = ws.tsqr.as_ref().unwrap();
+    assert_eq!(tsqr_large.w_max, 5);
+    assert_eq!(tsqr_large.taus.len(), 5);
+    assert_eq!(tsqr_large.rmat.len(), 25);
+}
