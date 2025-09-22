@@ -14,6 +14,8 @@ pub struct Workspace {
     pub sn: Vec<f64>,
     pub g: Vec<f64>,
     pub blk_scratch: Vec<f64>,
+    pub block_buf: Option<BlockVec>,
+    pub tsqr: Option<TsqrWorkspace>,
     // Shared communication arenas
     pub send_arena: crate::utils::buffer_pool::BufferPool<u8>,
     pub recv_arena: crate::utils::buffer_pool::BufferPool<u8>,
@@ -32,6 +34,74 @@ pub struct GmresSpec {
     pub block_s: usize,
 }
 
+/// Column-major storage reused for block Krylov vectors.
+#[derive(Debug, Clone)]
+pub struct BlockVec {
+    data: Vec<f64>,
+    n: usize,
+    p: usize,
+}
+
+impl BlockVec {
+    pub fn new(n: usize, p: usize) -> Self {
+        Self {
+            data: vec![0.0; n.saturating_mul(p)],
+            n,
+            p,
+        }
+    }
+
+    #[inline]
+    pub fn nrows(&self) -> usize {
+        self.n
+    }
+
+    #[inline]
+    pub fn ncols(&self) -> usize {
+        self.p
+    }
+
+    #[inline]
+    pub fn col(&self, j: usize) -> &[f64] {
+        let offset = j * self.n;
+        &self.data[offset..offset + self.n]
+    }
+
+    #[inline]
+    pub fn col_mut(&mut self, j: usize) -> &mut [f64] {
+        let offset = j * self.n;
+        &mut self.data[offset..offset + self.n]
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[f64] {
+        &self.data
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [f64] {
+        &mut self.data
+    }
+}
+
+/// Scratch buffers for TSQR factorizations.
+#[derive(Debug, Clone)]
+pub struct TsqrWorkspace {
+    pub taus: Vec<f64>,
+    pub rmat: Vec<f64>,
+    pub w_max: usize,
+}
+
+impl TsqrWorkspace {
+    pub fn with_width(w_max: usize) -> Self {
+        Self {
+            taus: vec![0.0; w_max],
+            rmat: vec![0.0; w_max.saturating_mul(w_max)],
+            w_max,
+        }
+    }
+}
+
 impl Workspace {
     pub fn new(n: usize) -> Self {
         let mut ws = Self::default();
@@ -45,6 +115,36 @@ impl Workspace {
     pub fn ensure_comm_bytes(&mut self, max_send: usize, max_recv: usize) {
         self.send_arena.ensure_len(max_send);
         self.recv_arena.ensure_len(max_recv);
+    }
+
+    /// Ensure the reusable block vector has capacity `n x p`.
+    pub fn ensure_block(&mut self, n: usize, p: usize) {
+        if p == 0 {
+            self.block_buf = None;
+            return;
+        }
+        let replace = match self.block_buf {
+            Some(ref buf) if buf.nrows() == n && buf.ncols() >= p => false,
+            _ => true,
+        };
+        if replace {
+            self.block_buf = Some(BlockVec::new(n, p));
+        }
+    }
+
+    /// Ensure the TSQR workspace supports panels up to width `w_max`.
+    pub fn ensure_tsqr(&mut self, w_max: usize) {
+        if w_max == 0 {
+            self.tsqr = None;
+            return;
+        }
+        let replace = match self.tsqr {
+            Some(ref tsqr) if tsqr.w_max >= w_max => false,
+            _ => true,
+        };
+        if replace {
+            self.tsqr = Some(TsqrWorkspace::with_width(w_max));
+        }
     }
 
     #[inline]

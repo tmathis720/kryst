@@ -1,5 +1,6 @@
 use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
+use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
 
 /// Recompute the true residual norm ||r||_2 where r = b - A x.
 ///
@@ -55,4 +56,78 @@ pub fn reported_residual_norm(
             comm.dot(r_true, r_true).sqrt()
         }
     }
+}
+
+/// Handle for a fused pair of asynchronous dot products.
+#[derive(Debug)]
+pub struct AsyncDot2 {
+    pub handle: AllreduceHandle<(f64, f64)>,
+    pub local: (f64, f64),
+}
+
+/// Launch a fused pair of dot products asynchronously.
+pub fn dot2_async<C: AsyncComm + ?Sized>(
+    comm: &C,
+    x1: &[f64],
+    y1: &[f64],
+    x2: &[f64],
+    y2: &[f64],
+    opt: &ReductOptions,
+) -> AsyncDot2 {
+    debug_assert_eq!(x1.len(), y1.len());
+    debug_assert_eq!(x2.len(), y2.len());
+    let mut a = 0.0;
+    let mut b = 0.0;
+    for ((&xi, &yi), (&xj, &yj)) in x1.iter().zip(y1).zip(x2.iter().zip(y2)) {
+        a += xi * yi;
+        b += xj * yj;
+    }
+    let (handle, local) = comm
+        .allreduce2_async(a, b, opt)
+        .expect("async reduction launch");
+    AsyncDot2 { handle, local }
+}
+
+/// Handle for a batch of asynchronous dot products.
+#[derive(Debug)]
+pub struct AsyncDotN {
+    pub handle: AllreduceHandle<Vec<f64>>,
+    pub local: Vec<f64>,
+}
+
+/// Launch multiple dot products asynchronously.
+pub fn dotn_async<C: AsyncComm + ?Sized>(
+    comm: &C,
+    pairs: &[(/*x*/ &[f64], /*y*/ &[f64])],
+    opt: &ReductOptions,
+) -> AsyncDotN {
+    let mut loc = vec![0.0; pairs.len()];
+    for (k, (x, y)) in pairs.iter().enumerate() {
+        debug_assert_eq!(x.len(), y.len());
+        let mut sum = 0.0;
+        for i in 0..x.len() {
+            sum += x[i] * y[i];
+        }
+        loc[k] = sum;
+    }
+    let (handle, local) = comm
+        .allreduce_n_async(loc.clone(), opt)
+        .expect("async reduction launch");
+    AsyncDotN { handle, local }
+}
+
+/// Launch an asynchronous squared-norm reduction.
+pub fn nrm2_async<C: AsyncComm + ?Sized>(
+    comm: &C,
+    x: &[f64],
+    opt: &ReductOptions,
+) -> (AllreduceHandle<(f64, f64)>, f64) {
+    let mut sumsq = 0.0;
+    for &xi in x {
+        sumsq += xi * xi;
+    }
+    let (handle, local) = comm
+        .allreduce2_async(sumsq, 0.0, opt)
+        .expect("async reduction launch");
+    (handle, local.0)
 }
