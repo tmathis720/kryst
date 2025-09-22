@@ -25,7 +25,9 @@ fn sample_block_matrix() -> CsrMatrix<f64> {
 
 #[test]
 fn nodal_row_basis_is_locally_orthonormal() {
-    let _guard = super::relax_lock().lock().unwrap();
+    let _guard = super::relax_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let a = sample_block_matrix();
 
@@ -99,7 +101,9 @@ fn nodal_row_basis_is_locally_orthonormal() {
 
 #[test]
 fn nodal_tentative_is_deterministic() {
-    let _guard = super::relax_lock().lock().unwrap();
+    let _guard = super::relax_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let a = sample_block_matrix();
 
@@ -139,7 +143,9 @@ fn nodal_tentative_is_deterministic() {
 
 #[test]
 fn restriction_respects_component_modes() {
-    let _guard = super::relax_lock().lock().unwrap();
+    let _guard = super::relax_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let a = sample_block_matrix();
     let mut amg = AMGBuilder::new()
@@ -191,7 +197,9 @@ fn restriction_respects_component_modes() {
 
 #[test]
 fn scalar_and_nodal_singleton_match() {
-    let _guard = super::relax_lock().lock().unwrap();
+    let _guard = super::relax_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let row_ptr = vec![0, 4, 8, 12, 16];
     let col_idx = vec![
@@ -257,7 +265,9 @@ fn scalar_and_nodal_singleton_match() {
 
 #[test]
 fn nodal_numeric_refresh_updates_values() {
-    let _guard = super::relax_lock().lock().unwrap();
+    let _guard = super::relax_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     let a = sample_block_matrix();
     let mut amg = AMGBuilder::new()

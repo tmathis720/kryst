@@ -119,7 +119,9 @@ fn chebyshev_recompute_toggle_and_safety() -> Result<(), KError> {
 
 #[test]
 fn pcg_with_chebyshev_smoother_converges() -> Result<(), KError> {
-    let _guard = super::relax_lock().lock().unwrap();
+    let _guard = super::relax_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let n = 64;
     let a = poisson1d(n);
     let mut amg = AMGBuilder::new()

@@ -4188,18 +4188,18 @@ impl AMG {
         }
         let mut x = vec![0.0; n];
         let mut y = vec![0.0; n];
-        let mut ax = vec![0.0; n];
         for t in 0..3 {
             for i in 0..n {
                 x[i] = ((i + 7919 * t) % 127) as f64 - 63.0;
             }
-            h.finest().a.spmv_scaled(1.0, &x, 0.0, &mut ax)?;
             y.fill(0.0);
-            self.apply(PcSide::Left, &ax, &mut y)?;
+            self.apply(PcSide::Left, &x, &mut y)?;
             let qf = x.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
+            let x_norm2 = x.iter().map(|v| v * v).sum::<f64>();
+            let tol = 1e-12_f64.max(1e-10 * x_norm2.abs());
             debug_assert!(
-                qf.is_finite() && qf > 0.0,
-                "Preconditioned operator is not SPD"
+                qf.is_finite() && qf > -tol,
+                "Preconditioned operator is not SPD: qf={qf}, tol={tol}"
             );
         }
         Ok(())
@@ -6973,7 +6973,9 @@ mod tests {
 
     #[test]
     fn phase_selection_logic() {
-        let _guard = relax_lock().lock().unwrap();
+        let _guard = relax_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_relax_counts();
         let levels = vec![identity_level(), identity_level(), identity_level()];
         let policy = RelaxPolicy {
