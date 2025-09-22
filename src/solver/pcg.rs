@@ -669,7 +669,41 @@ impl PcgSolver {
 
         if let Some(handle) = pending_rho.take() {
             counters.num_global_reductions += 1;
-            let _ = <C as AllreduceOps>::wait_pair(handle);
+            rho_curr = <C as AllreduceOps>::wait_pair(handle).0;
+            if !rho_curr.is_finite() || rho_curr < 0.0 {
+                return Err(KError::IndefinitePreconditioner);
+            }
+
+            reported_residual = match self.norm_type {
+                CgNormType::Preconditioned => rho_curr.sqrt(),
+                CgNormType::Unpreconditioned | CgNormType::None => {
+                    let (h_nr, _) = crate::solver::common::nrm2_async(comm, r, &opt);
+                    counters.num_global_reductions += 1;
+                    <C as AllreduceOps>::wait_pair(h_nr).0.sqrt()
+                }
+                CgNormType::Natural => {
+                    let (h_z, _) = crate::solver::common::nrm2_async(comm, z, &opt);
+                    counters.num_global_reductions += 1;
+                    <C as AllreduceOps>::wait_pair(h_z).0.sqrt()
+                }
+            };
+
+            if let Some(ms) = monitors {
+                for m in ms {
+                    m(iterations, reported_residual);
+                }
+            }
+            if let Some(m) = &self.true_residual_monitor {
+                m(iterations, self.nrm2(r, comm));
+            }
+
+            let (reason, mut stats) = self.conv.check(reported_residual, rnorm0, iterations);
+            if !matches!(reason, ConvergedReason::Continued) {
+                stats.final_residual = self.nrm2(r, comm);
+                counters.residual_replacements = residual_replacements;
+                stats.counters = counters;
+                return Ok(stats);
+            }
         }
 
         counters.residual_replacements = residual_replacements;
