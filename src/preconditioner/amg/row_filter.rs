@@ -273,10 +273,14 @@ pub fn compensate_nodal_diag(
         }
         let inv = invert_small_matrix(&gram)?;
         let mut diag_updates = vec![0.0; block_size];
+        let mut rhs_diag = vec![0.0; block_size];
+        for q in 0..block_size {
+            rhs_diag[q] = rhs[(q, q)];
+        }
         for q in 0..block_size {
             let mut sum = 0.0;
             for k in 0..block_size {
-                sum += rhs[(q, k)] * inv[k * block_size + q];
+                sum += inv[q * block_size + k] * rhs_diag[k];
             }
             diag_updates[q] = omega * sum;
         }
