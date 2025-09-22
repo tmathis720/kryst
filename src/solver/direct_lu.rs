@@ -133,11 +133,11 @@ where
         }
 
         // For direct solvers, always converged in 1 iteration
-        Ok(crate::utils::convergence::SolveStats {
-            iterations: 1,
-            final_residual: T::zero(),
-            reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
-        })
+        Ok(crate::utils::convergence::SolveStats::new(
+            1,
+            T::zero(),
+            crate::utils::convergence::ConvergedReason::ConvergedAtol,
+        ))
     }
 }
 
@@ -214,11 +214,11 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<M
             }
         }
 
-        Ok(crate::utils::convergence::SolveStats {
-            iterations: 1,
-            final_residual: T::zero(),
-            reason: crate::utils::convergence::ConvergedReason::ConvergedAtol,
-        })
+        Ok(crate::utils::convergence::SolveStats::new(
+            1,
+            T::zero(),
+            crate::utils::convergence::ConvergedReason::ConvergedAtol,
+        ))
     }
 }
 

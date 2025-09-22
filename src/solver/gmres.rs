@@ -221,11 +221,7 @@ impl LinearSolver for GmresSolver {
 
         let mut total_iters = 0usize;
         let mut res = beta;
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res,
-            reason: ConvergedReason::Continued,
-        };
+        let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
 
         if let Some(ms) = monitors {
             for m in ms {

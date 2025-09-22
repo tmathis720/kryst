@@ -44,7 +44,8 @@ use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MinresSolver, PcaGmresSolver, PcaPcMode, PcgSolver,
+    MinresSolver, PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver,
+    PcgVariant,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::str::FromStr;
@@ -116,6 +117,7 @@ pub struct KspContext {
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
+    pending_pcg: PendingPcg,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,6 +134,12 @@ struct PendingFgmres {
     orthog: Option<crate::solver::fgmres::Orthog>,
     reorthog: Option<bool>,
     happy_breakdown: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingPcg {
+    pipelined: Option<bool>,
+    replace_every: Option<usize>,
 }
 
 impl Default for KspContext {
@@ -200,6 +208,7 @@ impl KspContext {
             last_pc_vid: None,
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
+            pending_pcg: PendingPcg::default(),
         }
     }
 
@@ -224,10 +233,12 @@ impl KspContext {
             }
             SolverType::BiCgStab => Some(Box::new(BiCgStabSolver::new(self.rtol, self.maxits))),
             SolverType::Cgs => Some(Box::new(CgsSolver::new(self.rtol, self.maxits))),
-            SolverType::Pcg => Some(Box::new(
-                PcgSolver::new(self.rtol, self.maxits)
-                    .with_norm(crate::solver::pcg::CgNormType::Preconditioned),
-            )),
+            SolverType::Pcg => Some(Box::new({
+                let mut s = PcgSolver::new(self.rtol, self.maxits)
+                    .with_norm(crate::solver::pcg::CgNormType::Preconditioned);
+                self.apply_pcg_pending_to(&mut s);
+                s
+            })),
             SolverType::Minres => Some(Box::new(MinresSolver::new(self.rtol, self.maxits))),
             SolverType::PcaGmres => {
                 let mut s = PcaGmresSolver::new(self.restart, 1, 1, self.rtol, self.maxits);
@@ -484,6 +495,30 @@ impl KspContext {
                 s.set_trust_region(r);
             }
         }
+        let mut pcg_pending_updated = false;
+        if let Some(flag) = opts.cg_pipelined {
+            if flag && Self::normalize_side(self.pc_side) != PcSide::Left {
+                return Err(KError::InvalidInput(
+                    "Pipelined PCG requires left preconditioning".into(),
+                ));
+            }
+            self.pending_pcg.pipelined = Some(flag);
+            pcg_pending_updated = true;
+        }
+        if let Some(repl) = opts.cg_replace_every {
+            self.pending_pcg.replace_every = Some(repl);
+            pcg_pending_updated = true;
+        }
+        if pcg_pending_updated {
+            let snapshot = self.pending_pcg.clone();
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<PcgSolver>())
+            {
+                Self::apply_pcg_pending(&snapshot, s);
+            }
+        }
         self.invalidate_setup();
         Ok(self)
     }
@@ -516,6 +551,27 @@ impl KspContext {
         if let Some(f) = self.pending_fgmres.happy_breakdown {
             s.set_happy_breakdown(f);
         }
+    }
+
+    fn apply_pcg_pending(pending: &PendingPcg, s: &mut PcgSolver) {
+        if let Some(flag) = pending.pipelined {
+            if flag {
+                let replace_every = pending
+                    .replace_every
+                    .unwrap_or(PCG_PIPELINED_DEFAULT_REPLACE_EVERY);
+                s.set_variant(PcgVariant::Pipelined { replace_every });
+            } else {
+                s.set_variant(PcgVariant::Classic);
+            }
+        } else if matches!(s.variant(), PcgVariant::Pipelined { .. }) {
+            if let Some(replace_every) = pending.replace_every {
+                s.set_variant(PcgVariant::Pipelined { replace_every });
+            }
+        }
+    }
+
+    fn apply_pcg_pending_to(&self, s: &mut PcgSolver) {
+        Self::apply_pcg_pending(&self.pending_pcg, s);
     }
 
     /// Configure both KSP and PC from their respective option sets.
@@ -771,11 +827,7 @@ impl KspContext {
                 );
             }
             pc.direct_solve(pmat.as_ref(), b, x)?;
-            return Ok(SolveStats {
-                iterations: 1,
-                final_residual: 0.0,
-                reason: ConvergedReason::ConvergedAtol,
-            });
+            return Ok(SolveStats::new(1, 0.0, ConvergedReason::ConvergedAtol));
         }
 
         // Configure solver preconditioning side and validate compatibility

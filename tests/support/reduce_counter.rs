@@ -5,6 +5,7 @@ use std::sync::{
 
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::reduction::{CommDeterministic, Packet, ReproMode};
+use kryst::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
 
 #[derive(Clone)]
 pub struct CountingComm<C> {
@@ -110,5 +111,42 @@ impl<C: Comm + CommDeterministic + Clone> CommDeterministic for CountingComm<C> 
     fn allreduce_det<const N: usize>(&self, local: &Packet<N>, mode: ReproMode) -> Packet<N> {
         self.reduces.fetch_add(1, Ordering::Relaxed);
         self.inner.allreduce_det(local, mode)
+    }
+}
+
+impl<C: Comm + AllreduceOps + Clone> AllreduceOps for CountingComm<C> {
+    fn allreduce2_async(
+        &self,
+        a: f64,
+        b: f64,
+        opt: &ReductOptions,
+    ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), kryst::error::KError> {
+        self.reduces.fetch_add(1, Ordering::Relaxed);
+        self.inner.allreduce2_async(a, b, opt)
+    }
+
+    fn allreduce_n_async(
+        &self,
+        data: Vec<f64>,
+        opt: &ReductOptions,
+    ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), kryst::error::KError> {
+        self.reduces.fetch_add(1, Ordering::Relaxed);
+        self.inner.allreduce_n_async(data, opt)
+    }
+
+    fn test_pair(h: &mut AllreduceHandle<(f64, f64)>) -> Option<(f64, f64)> {
+        <C as AllreduceOps>::test_pair(h)
+    }
+
+    fn test_vec(h: &mut AllreduceHandle<Vec<f64>>) -> Option<Vec<f64>> {
+        <C as AllreduceOps>::test_vec(h)
+    }
+
+    fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+        <C as AllreduceOps>::wait_pair(h)
+    }
+
+    fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+        <C as AllreduceOps>::wait_vec(h)
     }
 }

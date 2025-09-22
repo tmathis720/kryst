@@ -40,6 +40,15 @@ pub enum ConvergedReason {
 }
 
 /// Statistics from a solve operation.
+#[derive(Clone, Debug, Default)]
+pub struct SolverCounters {
+    /// Number of global reduction operations executed by the solver.
+    pub num_global_reductions: usize,
+    /// Number of residual replacement events performed during the solve.
+    pub residual_replacements: usize,
+}
+
+/// Statistics from a solve operation.
 #[derive(Clone, Debug)]
 pub struct SolveStats<R> {
     /// Number of iterations performed
@@ -48,6 +57,26 @@ pub struct SolveStats<R> {
     pub final_residual: R,
     /// Reason for stopping
     pub reason: ConvergedReason,
+    /// Additional counters collected during the solve.
+    pub counters: SolverCounters,
+}
+
+impl<R> SolveStats<R> {
+    /// Construct a new statistics record with zeroed counters.
+    pub fn new(iterations: usize, final_residual: R, reason: ConvergedReason) -> Self {
+        Self {
+            iterations,
+            final_residual,
+            reason,
+            counters: SolverCounters::default(),
+        }
+    }
+
+    /// Attach solver counters to an existing statistics record.
+    pub fn with_counters(mut self, counters: SolverCounters) -> Self {
+        self.counters = counters;
+        self
+    }
 }
 
 impl<R> Convergence<R>
@@ -78,50 +107,30 @@ where
     pub fn check(&self, rnorm: R, bnorm: R, iters: usize) -> (ConvergedReason, SolveStats<R>) {
         // Absolute tolerance test first (most restrictive)
         if rnorm <= self.atol {
-            let stats = SolveStats {
-                iterations: iters,
-                final_residual: rnorm,
-                reason: ConvergedReason::ConvergedAtol,
-            };
+            let stats = SolveStats::new(iters, rnorm, ConvergedReason::ConvergedAtol);
             return (ConvergedReason::ConvergedAtol, stats);
         }
 
         // Relative tolerance test
         if rnorm <= self.rtol * bnorm {
-            let stats = SolveStats {
-                iterations: iters,
-                final_residual: rnorm,
-                reason: ConvergedReason::ConvergedRtol,
-            };
+            let stats = SolveStats::new(iters, rnorm, ConvergedReason::ConvergedRtol);
             return (ConvergedReason::ConvergedRtol, stats);
         }
 
         // Divergence test
         if rnorm >= self.dtol * bnorm {
-            let stats = SolveStats {
-                iterations: iters,
-                final_residual: rnorm,
-                reason: ConvergedReason::DivergedDtol,
-            };
+            let stats = SolveStats::new(iters, rnorm, ConvergedReason::DivergedDtol);
             return (ConvergedReason::DivergedDtol, stats);
         }
 
         // Maximum iterations test
         if iters >= self.max_iters {
-            let stats = SolveStats {
-                iterations: iters,
-                final_residual: rnorm,
-                reason: ConvergedReason::DivergedMaxIts,
-            };
+            let stats = SolveStats::new(iters, rnorm, ConvergedReason::DivergedMaxIts);
             return (ConvergedReason::DivergedMaxIts, stats);
         }
 
         // Continue iterating
-        let stats = SolveStats {
-            iterations: iters,
-            final_residual: rnorm,
-            reason: ConvergedReason::Continued,
-        };
+        let stats = SolveStats::new(iters, rnorm, ConvergedReason::Continued);
         (ConvergedReason::Continued, stats)
     }
 }
@@ -142,11 +151,9 @@ where
             reason,
             ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
         );
-        let legacy_stats = SolveStats {
-            iterations: stats.iterations,
-            final_residual: stats.final_residual,
-            reason: stats.reason,
-        };
+        let mut legacy_stats =
+            SolveStats::new(stats.iterations, stats.final_residual, stats.reason);
+        legacy_stats.counters = stats.counters;
         (
             converged || reason != ConvergedReason::Continued,
             legacy_stats,
@@ -290,11 +297,7 @@ mod tests {
 
     #[test]
     fn test_solve_stats_clone() {
-        let stats = SolveStats {
-            iterations: 42,
-            final_residual: 1e-8,
-            reason: ConvergedReason::ConvergedRtol,
-        };
+        let stats = SolveStats::new(42, 1e-8, ConvergedReason::ConvergedRtol);
 
         let cloned = stats.clone();
         assert_eq!(cloned.iterations, 42);
@@ -304,11 +307,7 @@ mod tests {
 
     #[test]
     fn test_solve_stats_debug() {
-        let stats = SolveStats {
-            iterations: 10,
-            final_residual: 1e-6,
-            reason: ConvergedReason::ConvergedAtol,
-        };
+        let stats = SolveStats::new(10, 1e-6, ConvergedReason::ConvergedAtol);
 
         let debug_str = format!("{:?}", stats);
         assert!(debug_str.contains("10"));

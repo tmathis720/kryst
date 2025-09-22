@@ -474,6 +474,58 @@ pub fn poisson_2d(n_x: usize, n_y: usize) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
 
+/// Generate a 3D Poisson matrix on an `n_x` by `n_y` by `n_z` grid using the 7-point stencil.
+///
+/// The resulting matrix is symmetric positive definite with size `(n_x*n_y*n_z)`.
+pub fn poisson_3d(n_x: usize, n_y: usize, n_z: usize) -> CsrMatrix<f64> {
+    let n = n_x * n_y * n_z;
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::with_capacity(n * 7);
+    let mut vals = Vec::with_capacity(n * 7);
+    row_ptr.push(0);
+
+    for k in 0..n_z {
+        for j in 0..n_y {
+            for i in 0..n_x {
+                let idx = (k * n_y + j) * n_x + i;
+
+                if k > 0 {
+                    col_idx.push(idx - n_x * n_y);
+                    vals.push(-1.0);
+                }
+                if j > 0 {
+                    col_idx.push(idx - n_x);
+                    vals.push(-1.0);
+                }
+                if i > 0 {
+                    col_idx.push(idx - 1);
+                    vals.push(-1.0);
+                }
+
+                col_idx.push(idx);
+                vals.push(6.0);
+
+                if i + 1 < n_x {
+                    col_idx.push(idx + 1);
+                    vals.push(-1.0);
+                }
+                if j + 1 < n_y {
+                    col_idx.push(idx + n_x);
+                    vals.push(-1.0);
+                }
+                if k + 1 < n_z {
+                    col_idx.push(idx + n_x * n_y);
+                    vals.push(-1.0);
+                }
+
+                row_ptr.push(col_idx.len());
+            }
+        }
+    }
+
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
 /// Generate a random symmetric positive definite banded matrix.
 ///
 /// `bandwidth` controls the half-bandwidth; larger values yield denser matrices.
@@ -631,5 +683,15 @@ mod tests {
         assert_eq!(c.row_ptr(), a.row_ptr());
         assert_eq!(c.col_idx(), a.col_idx());
         assert_eq!(c.values(), a.values());
+    }
+
+    #[test]
+    fn poisson_3d_basic() {
+        let a = poisson_3d(2, 2, 2);
+        assert_eq!(a.nrows(), 8);
+        assert_eq!(a.ncols(), 8);
+        assert_eq!(a.row_ptr(), &[0, 4, 8, 12, 16, 20, 24, 28, 32]);
+        assert_eq!(&a.col_idx()[0..4], &[0, 1, 2, 4]);
+        assert_eq!(&a.values()[0..4], &[6.0, -1.0, -1.0, -1.0]);
     }
 }

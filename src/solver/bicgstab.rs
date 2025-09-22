@@ -218,15 +218,12 @@ impl LinearSolver for BiCgStabSolver {
             }
         }
         if res0 <= thr {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: res0,
-                reason: if res0 <= self.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                },
-            });
+            let reason = if res0 <= self.atol {
+                ConvergedReason::ConvergedAtol
+            } else {
+                ConvergedReason::ConvergedRtol
+            };
+            return Ok(SolveStats::new(0, res0, reason));
         }
 
         // Parameters
@@ -239,11 +236,7 @@ impl LinearSolver for BiCgStabSolver {
         let eps_alpha = 1e-30_f64;
         let eps_omega = 1e-30_f64;
 
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res0,
-            reason: ConvergedReason::Continued,
-        };
+        let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
 
         for k in 1..=self.maxits {
             // ρ_k = <r_hat, r> (Right/unpreconditioned) or <r_hat, z> (Left)
@@ -524,11 +517,11 @@ impl LinearSolver for BiCgStabSolver {
 
         // Max iters
         let r_norm = Self::nrm2(r, comm);
-        Ok(SolveStats {
-            iterations: self.maxits,
-            final_residual: r_norm,
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        Ok(SolveStats::new(
+            self.maxits,
+            r_norm,
+            ConvergedReason::DivergedMaxIts,
+        ))
     }
 }
 

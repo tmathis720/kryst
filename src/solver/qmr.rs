@@ -139,15 +139,12 @@ impl LinearSolver for QmrSolver {
             }
         }
         if res <= thr {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: res,
-                reason: if res <= self.conv.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                },
-            });
+            let reason = if res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else {
+                ConvergedReason::ConvergedRtol
+            };
+            return Ok(SolveStats::new(0, res, reason));
         }
 
         let eps = 1e-300_f64;
@@ -224,10 +221,10 @@ impl LinearSolver for QmrSolver {
             }
         }
 
-        Ok(SolveStats {
-            iterations: self.conv.max_iters,
-            final_residual: res,
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        Ok(SolveStats::new(
+            self.conv.max_iters,
+            res,
+            ConvergedReason::DivergedMaxIts,
+        ))
     }
 }

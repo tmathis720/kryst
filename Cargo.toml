@@ -113,3 +113,7 @@ harness = false
 [[bench]]
 name = "spmv"
 harness = false
+
+[[bench]]
+name = "pcg_pipelined_scaling"
+harness = false
