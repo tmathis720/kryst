@@ -452,6 +452,17 @@ where
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.base.update_numeric(op)?;
+        let updated = csr_from_linop(op, 0.0)?;
+        let updated = updated.as_ref();
+        if self.a.row_ptr() != updated.row_ptr() || self.a.col_idx() != updated.col_idx() {
+            return Err(KError::InvalidInput(
+                "deflation numeric update requires unchanged sparsity; call update_symbolic instead"
+                    .into(),
+            ));
+        }
+        self.a
+            .values_mut()
+            .copy_from_slice(updated.values());
         csr_spmm_dense(&self.a, self.z.as_ref(), self.az.as_mut())?;
         self.refresh_e()
     }
