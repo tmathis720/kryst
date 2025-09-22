@@ -460,9 +460,7 @@ where
                     .into(),
             ));
         }
-        self.a
-            .values_mut()
-            .copy_from_slice(updated.values());
+        self.a.values_mut().copy_from_slice(updated.values());
         csr_spmm_dense(&self.a, self.z.as_ref(), self.az.as_mut())?;
         self.refresh_e()
     }

@@ -204,62 +204,27 @@ where
         for zi in z.as_mut().iter_mut() {
             *zi = T::zero();
         }
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            // Each block's result is a (indices, x_blk) pair
-            let block_results: Vec<(Vec<usize>, Vec<T>)> = self
-                .subdomains
-                .par_iter()
-                .zip(self.local_blocks.par_iter())
-                .map(|(indices, (a_sub, ksp_mutex))| {
-                    let r_blk = V::from(indices.iter().map(|&i| r.as_ref()[i]).collect());
-                    let mut x_blk = V::from(vec![T::zero(); indices.len()]);
-                    let mut ksp = ksp_mutex.lock().unwrap();
-                    let _ = ksp.solve(
-                        a_sub,
-                        None,
-                        &r_blk,
-                        &mut x_blk,
-                        PcSide::Left,
-                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                        None,
-                        None,
-                    );
-                    (indices.clone(), x_blk.as_ref().to_vec())
-                })
-                .collect();
-            // Serial reduction: sum all block results into z
-            for (indices, x_blk) in block_results {
+        self.subdomains
+            .iter()
+            .zip(self.local_blocks.iter())
+            .for_each(|(indices, (a_sub, ksp_mutex))| {
+                let r_blk = V::from(indices.iter().map(|&i| r.as_ref()[i]).collect());
+                let mut x_blk = V::from(vec![T::zero(); indices.len()]);
+                let mut ksp = ksp_mutex.lock().unwrap();
+                let _ = ksp.solve(
+                    a_sub,
+                    None,
+                    &r_blk,
+                    &mut x_blk,
+                    PcSide::Left,
+                    &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                    None,
+                    None,
+                );
                 for (j, &gi) in indices.iter().enumerate() {
-                    z.as_mut()[gi] = z.as_ref()[gi] + x_blk[j];
+                    z.as_mut()[gi] = z.as_ref()[gi] + x_blk.as_ref()[j];
                 }
-            }
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            self.subdomains
-                .iter()
-                .zip(self.local_blocks.iter())
-                .for_each(|(indices, (a_sub, ksp_mutex))| {
-                    let r_blk = V::from(indices.iter().map(|&i| r.as_ref()[i]).collect());
-                    let mut x_blk = V::from(vec![T::zero(); indices.len()]);
-                    let mut ksp = ksp_mutex.lock().unwrap();
-                    let _ = ksp.solve(
-                        a_sub,
-                        None,
-                        &r_blk,
-                        &mut x_blk,
-                        PcSide::Left,
-                        &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
-                        None,
-                        None,
-                    );
-                    for (j, &gi) in indices.iter().enumerate() {
-                        z.as_mut()[gi] = z.as_ref()[gi] + x_blk.as_ref()[j];
-                    }
-                });
-        }
+            });
         Ok(())
     }
 }
@@ -429,6 +394,13 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         // Zero the output
         for yi in y.iter_mut() {
             *yi = 0.0;
+        }
+
+        if self.blocks_meta.is_empty() {
+            // Legacy/fallback path hit when callers used the generic setup routine
+            // instead of the LinOp-aware one. We still have `subdomains` and
+            // `local_blocks` populated, so reuse that data directly.
+            return self.apply_dense_blocks_legacy(x, y);
         }
 
         #[cfg(feature = "rayon")]
@@ -813,6 +785,35 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     }
 }
 
+impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
+    fn apply_dense_blocks_legacy(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if self.subdomains.len() != self.local_blocks.len() {
+            return Err(KError::InvalidInput(
+                "ASM legacy apply: subdomains/local_blocks length mismatch".into(),
+            ));
+        }
+        for (indices, (a_sub, ksp_mutex)) in self.subdomains.iter().zip(self.local_blocks.iter()) {
+            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
+            let mut x_blk = vec![0.0; indices.len()];
+            let mut ksp = ksp_mutex.lock().unwrap();
+            let _ = ksp.solve(
+                a_sub,
+                None,
+                &r_blk,
+                &mut x_blk,
+                PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            );
+            for (j, &gi) in indices.iter().enumerate() {
+                y[gi] += x_blk[j];
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(all(test, feature = "dense-direct"))]
 mod tests {
     use super::*;
@@ -831,7 +832,7 @@ mod tests {
         asm.setup(&a, || LuSolver::<f64>::new());
         let r = vec![1.0, 2.0, 3.0, 4.0];
         let mut z = vec![0.0; 4];
-        Preconditioner::apply(&asm, PcSide::Left, &r, &mut z).unwrap();
+        crate::preconditioner::Preconditioner::apply(&asm, PcSide::Left, &r, &mut z).unwrap();
         // For identity, ASM should return the input
         assert_eq!(z, r);
     }
@@ -1371,7 +1372,7 @@ impl DynPreconditioner for Asm {
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         if Some(op.structure_id()) != self.last_sid {
             return Err(KError::Unsupported(
-                "ASM numeric update requires identical sparsity pattern".into(),
+                "ASM numeric update requires identical sparsity pattern",
             ));
         }
         let csr = csr_from_linop(op, 0.0)?;

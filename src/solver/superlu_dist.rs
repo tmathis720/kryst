@@ -1370,7 +1370,11 @@ impl DistributedTriangularSolver {
         comm: &UniverseComm,
         #[cfg(feature = "superlu3d")] grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
-        let root_rank = solve_data.block_owners[block_id];
+        let root_rank = solve_data
+            .block_owners
+            .get(block_id)
+            .copied()
+            .unwrap_or(distribution.grid.my_rank);
 
         #[cfg(feature = "logging")]
         log::debug!(
@@ -1394,11 +1398,11 @@ impl DistributedTriangularSolver {
             let right = 2 * g3.my_pdepth + 2;
             if left < layers {
                 let r = g3.coords_to_rank(g3.my_prow, g3.my_pcol, left);
-                solve_data.isend(data, r, block_id, (block_id << 8) + left, comm)?;
+                solve_data.isend(data, r, (block_id << 8) + left, block_id, comm)?;
             }
             if right < layers {
                 let r = g3.coords_to_rank(g3.my_prow, g3.my_pcol, right);
-                solve_data.isend(data, r, block_id, (block_id << 8) + right, comm)?;
+                solve_data.isend(data, r, (block_id << 8) + right, block_id, comm)?;
             }
         }
 

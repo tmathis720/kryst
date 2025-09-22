@@ -191,10 +191,10 @@ pub fn compensate_scalar_rows(
         let corr = omega * (num / den);
         if let Some(diag) = a.diag_mut(i) {
             let new_val = *diag - corr;
-            if let Some(min_allowed) = min_diag {
-                if new_val <= min_allowed {
-                    continue;
-                }
+            if let Some(min_allowed) = min_diag
+                && new_val <= min_allowed
+            {
+                continue;
             }
             *diag = new_val;
         } else {
@@ -288,10 +288,10 @@ pub fn compensate_nodal_diag(
             let row = row_start + q;
             if let Some(diag) = a.diag_mut(row) {
                 let new_val = *diag - diag_updates[q];
-                if let Some(min_allowed) = min_diag {
-                    if new_val <= min_allowed {
-                        continue;
-                    }
+                if let Some(min_allowed) = min_diag
+                    && new_val <= min_allowed
+                {
+                    continue;
                 }
                 *diag = new_val;
             } else {

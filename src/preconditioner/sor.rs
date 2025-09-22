@@ -171,6 +171,7 @@ where
                 (_, s) if s.contains(MatSorType::SYMMETRIC_SWEEP) => {
                     self.forward_sweep(a, x, y_mut);
                     let tmp = y_mut.to_vec();
+                    y_mut.fill(T::zero());
                     self.backward_sweep(a, &tmp, y_mut);
                 }
                 (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_LOWER) => {
@@ -206,7 +207,7 @@ where
             }
             let xi = x[i];
             let yi = (xi - sigma) * self.inv_diag[i];
-            y[i] = yi;
+            y[i] = (T::one() - self.omega) * xi + self.omega * yi;
         }
     }
 

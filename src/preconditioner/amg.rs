@@ -878,22 +878,22 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
         }
     }
 
-    if let Some(mp) = cfg.mixed_precision {
-        if mp.smoothers_enabled() {
-            for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
-                if i == RelaxPhase::Coarsest.ix() {
-                    continue;
-                }
-                match rt {
-                    RelaxType::Jacobi
-                    | RelaxType::L1Jacobi
-                    | RelaxType::Chebyshev
-                    | RelaxType::Fsai => {}
-                    other => {
-                        return Err(KError::InvalidInput(format!(
-                            "Mixed-precision smoothing only supports Jacobi, L1Jacobi, Chebyshev, or Fsai; got {other:?}"
-                        )));
-                    }
+    if let Some(mp) = cfg.mixed_precision
+        && mp.smoothers_enabled()
+    {
+        for (i, &rt) in cfg.grid_relax_type.iter().enumerate() {
+            if i == RelaxPhase::Coarsest.ix() {
+                continue;
+            }
+            match rt {
+                RelaxType::Jacobi
+                | RelaxType::L1Jacobi
+                | RelaxType::Chebyshev
+                | RelaxType::Fsai => {}
+                other => {
+                    return Err(KError::InvalidInput(format!(
+                        "Mixed-precision smoothing only supports Jacobi, L1Jacobi, Chebyshev, or Fsai; got {other:?}"
+                    )));
                 }
             }
         }
@@ -1002,8 +1002,7 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
                 RelaxType::Jacobi | RelaxType::L1Jacobi | RelaxType::SymmetricGaussSeidel => {}
                 other => {
                     return Err(KError::InvalidInput(format!(
-                        "SPD mode requires a symmetric positive definite smoother for flexible presmoothing; got {:?}",
-                        other
+                        "SPD mode requires a symmetric positive definite smoother for flexible presmoothing; got {other:?}"
                     )));
                 }
             }
@@ -2249,7 +2248,7 @@ impl AMG {
                 && self.cfg.adaptive_samples > 0
                 && h.levels[l].cf.is_none()
                 && h.levels[l + 1].a.nrows() > self.cfg.max_coarse_size
-                && tp_opt.as_ref().map_or(false, |tp| tp.num_functions == 1)
+                && tp_opt.as_ref().is_some_and(|tp| tp.num_functions == 1)
             {
                 let omega = if self.cfg.adaptive_smooth_omega == 0.0 {
                     self.cfg.jacobi_omega
@@ -2489,8 +2488,7 @@ impl AMG {
                             a_coarse = a_fix;
                         } else {
                             return Err(KError::InvalidInput(format!(
-                                "AMG: Galerkin identity failed at level {l}: worst rel={:.3e} (retry={:.3e})",
-                                worst, worst2
+                                "AMG: Galerkin identity failed at level {l}: worst rel={worst:.3e} (retry={worst2:.3e})"
                             )));
                         }
                     }
@@ -2535,8 +2533,7 @@ impl AMG {
                             a_coarse = a_fix;
                         } else {
                             return Err(KError::InvalidInput(format!(
-                                "AMG: Galerkin identity failed at level {l}: worst rel={:.3e} (retry={:.3e})",
-                                worst, worst2
+                                "AMG: Galerkin identity failed at level {l}: worst rel={worst:.3e} (retry={worst2:.3e})"
                             )));
                         }
                     }
@@ -4607,7 +4604,7 @@ fn build_hierarchy(
             })
             .collect();
         let mut tn_opt: Option<TentativeNodal> = None;
-        if let Some(_) = layout {
+        if layout.is_some() {
             let n_agg = tp.n_coarse;
             let mut rows_per_agg: Vec<Vec<usize>> = vec![Vec::new(); n_agg];
             for (row, &g) in agg.iter().enumerate() {
@@ -4922,8 +4919,7 @@ fn build_hierarchy(
                     map_opt = None;
                 } else {
                     return Err(KError::InvalidInput(format!(
-                        "AMG: Galerkin identity failed at level {level}: worst rel={:.3e} (retry={:.3e})",
-                        worst, worst2
+                        "AMG: Galerkin identity failed at level {level}: worst rel={worst:.3e} (retry={worst2:.3e})"
                     )));
                 }
             }
@@ -5733,11 +5729,11 @@ fn fsai_enrich_pattern(
     accum.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut merged: Vec<(usize, f64)> = Vec::new();
     for (col, val) in accum {
-        if let Some(last) = merged.last_mut() {
-            if last.0 == col {
-                last.1 += val;
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.0 == col
+        {
+            last.1 += val;
+            continue;
         }
         merged.push((col, val));
     }
@@ -5833,7 +5829,7 @@ fn fsai_drop_entries(
         cols = new_cols;
         vals = new_vals;
     }
-    let mut pairs: Vec<(usize, f64)> = cols.into_iter().zip(vals.into_iter()).collect();
+    let mut pairs: Vec<(usize, f64)> = cols.into_iter().zip(vals).collect();
     pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut out_cols = Vec::with_capacity(pairs.len());
     let mut out_vals = Vec::with_capacity(pairs.len());

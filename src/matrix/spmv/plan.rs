@@ -132,7 +132,7 @@ impl Default for SpmvTuning {
 
 /// Builds an SpMV plan using the provided tuning configuration.
 pub fn build(matrix: &CsrMatrix<f64>, tuning: &SpmvTuning) -> SpmvPlan {
-    let mut plan = SpmvPlan::build_scalar(matrix);
+    let plan = SpmvPlan::build_scalar(matrix);
 
     #[cfg(feature = "simd")]
     {

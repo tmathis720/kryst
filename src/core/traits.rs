@@ -476,7 +476,7 @@ impl KernelOp<f64> for DistributedKernel {
         if beta == 0.0 {
             y.copy_from_slice(&local);
         } else {
-            let original: Vec<f64> = y.iter().copied().collect();
+            let original: Vec<f64> = y.to_vec();
             for (out, (accum, orig)) in y
                 .iter_mut()
                 .zip(local.into_iter().zip(original.into_iter()))
@@ -503,7 +503,7 @@ impl KernelOp<f64> for DistributedKernel {
         if beta == 0.0 {
             y.copy_from_slice(&local);
         } else {
-            let original: Vec<f64> = y.iter().copied().collect();
+            let original: Vec<f64> = y.to_vec();
             for (out, (accum, orig)) in y
                 .iter_mut()
                 .zip(local.into_iter().zip(original.into_iter()))
@@ -671,7 +671,7 @@ impl AmgKernel for DistributedAmgKernel {
         if beta == 0.0 {
             y.copy_from_slice(&local);
         } else {
-            let original: Vec<f64> = y.iter().copied().collect();
+            let original: Vec<f64> = y.to_vec();
             for (out, (accum, orig)) in y
                 .iter_mut()
                 .zip(local.into_iter().zip(original.into_iter()))
