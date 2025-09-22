@@ -4,6 +4,38 @@ use crate::error::KError;
 use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static WAIT_PAIR_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WAIT_VEC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+fn record_wait_pair() {
+    WAIT_PAIR_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+fn record_wait_vec() {
+    WAIT_VEC_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub mod test_hooks {
+    use super::*;
+
+    /// Reset the asynchronous reduction completion counters. Intended for tests.
+    pub fn reset_wait_counters() {
+        WAIT_PAIR_COUNT.store(0, Ordering::Relaxed);
+        WAIT_VEC_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    /// Return the number of completed pair and vector reductions recorded so far.
+    pub fn wait_counters() -> (usize, usize) {
+        (
+            WAIT_PAIR_COUNT.load(Ordering::Relaxed),
+            WAIT_VEC_COUNT.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// Reduction execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +222,7 @@ impl AllreduceOps for crate::parallel::NoComm {
     }
 
     fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+        record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
             _ => unreachable!(),
@@ -197,6 +230,7 @@ impl AllreduceOps for crate::parallel::NoComm {
     }
 
     fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+        record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
             _ => unreachable!(),
@@ -250,6 +284,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
     }
 
     fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+        record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
             AllreduceHandle::Rayon { rx } => rx.recv().unwrap(),
@@ -258,6 +293,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
     }
 
     fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+        record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
             AllreduceHandle::Rayon { rx } => rx.recv().unwrap(),
@@ -369,6 +405,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
     }
 
     fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+        record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
             AllreduceHandle::Mpi { req, buf, convert } => {
@@ -380,6 +417,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
     }
 
     fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+        record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
             AllreduceHandle::Mpi { req, buf, convert } => {
@@ -464,6 +502,7 @@ impl AllreduceOps for crate::parallel::UniverseComm {
     }
 
     fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+        record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
             #[cfg(feature = "mpi")]
@@ -483,6 +522,7 @@ impl AllreduceOps for crate::parallel::UniverseComm {
     }
 
     fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+        record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
             #[cfg(feature = "mpi")]

@@ -120,11 +120,7 @@ impl LinearSolver for TfqmrSolver {
         let r_tld = r.clone();
         let mut rho = dot(&r_tld, r);
         let res0 = norm2(r);
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res0,
-            reason: ConvergedReason::Continued,
-        };
+        let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
         for m in mons {
             m(0, res0);
         }

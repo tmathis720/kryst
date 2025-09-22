@@ -88,6 +88,22 @@ pub fn dot2_async<C: AsyncComm + ?Sized>(
     AsyncDot2 { handle, local }
 }
 
+/// Launch a single dot product asynchronously. The result is encoded in the
+/// first entry of the returned pair.
+pub fn dot1_async<C: AsyncComm + ?Sized>(
+    comm: &C,
+    x: &[f64],
+    y: &[f64],
+    opt: &ReductOptions,
+) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), crate::error::KError> {
+    debug_assert_eq!(x.len(), y.len());
+    let mut sum = 0.0;
+    for i in 0..x.len() {
+        sum += x[i] * y[i];
+    }
+    comm.allreduce2_async(sum, 0.0, opt)
+}
+
 /// Handle for a batch of asynchronous dot products.
 #[derive(Debug)]
 pub struct AsyncDotN {

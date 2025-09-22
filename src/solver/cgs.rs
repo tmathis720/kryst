@@ -144,11 +144,7 @@ impl LinearSolver for CgsSolver {
         })?;
         // Zero-length fast path
         if b.is_empty() {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: 0.0,
-                reason: ConvergedReason::ConvergedAtol,
-            });
+            return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
         }
 
         let (r, v, u, p, q, upq, w) = Self::acquire(n, work);
@@ -184,11 +180,7 @@ impl LinearSolver for CgsSolver {
         let (reason0, s0) = self.conv.check(rnorm, res0_reported, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             // ensure final_residual is true residual (already computed as rnorm)
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: rnorm,
-                reason: s0.reason,
-            });
+            return Ok(SolveStats::new(0, rnorm, s0.reason));
         }
 
         // CGS parameters
@@ -252,11 +244,7 @@ impl LinearSolver for CgsSolver {
             // convergence / divergence tests against res0_reported
             let (reason, s) = self.conv.check(rnorm, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: rnorm,
-                    reason: s.reason,
-                });
+                return Ok(SolveStats::new(k, rnorm, s.reason));
             }
 
             // rho, beta updates
@@ -284,10 +272,10 @@ impl LinearSolver for CgsSolver {
         // Max-its: recompute true residual and report divergence
         let mut tmp = vec![0.0; n];
         let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-        Ok(SolveStats {
-            iterations: iters,
-            final_residual: true_res,
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        Ok(SolveStats::new(
+            iters,
+            true_res,
+            ConvergedReason::DivergedMaxIts,
+        ))
     }
 }

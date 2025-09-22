@@ -4499,11 +4499,7 @@ impl Solver<CsrMatrix<f64>> for SuperLuDistSolver {
         let mut xb = x.to_vec();
         self.solve_factored(&b.to_vec(), &mut xb, comm)?;
         x.copy_from_slice(&xb);
-        Ok(SolveStats {
-            iterations: 1,
-            final_residual: 0.0,
-            reason: ConvergedReason::ConvergedAtol,
-        })
+        Ok(SolveStats::new(1, 0.0, ConvergedReason::ConvergedAtol))
     }
 
     fn reuse_factorization(&self) -> bool {

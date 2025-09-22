@@ -5,7 +5,9 @@ use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::solver::common::dot1_async;
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
+use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductMode, ReductOptions};
 use std::any::Any;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +23,21 @@ pub enum CgNormType {
     None,
 }
 
+/// Supported PCG algorithmic variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcgVariant {
+    /// Classic Hestenes-Stiefel style PCG.
+    Classic,
+    /// Pipelined CG with asynchronous reductions.
+    Pipelined {
+        /// Residual replacement interval (0 disables replacement).
+        replace_every: usize,
+    },
+}
+
+/// Default replacement interval for pipelined CG.
+pub const PCG_PIPELINED_DEFAULT_REPLACE_EVERY: usize = 50;
+
 pub struct PcgSolver {
     pub(crate) conv: Convergence<f64>,
     norm_type: CgNormType,
@@ -33,6 +50,8 @@ pub struct PcgSolver {
     /// `false` and the provided `x` is exactly the zero vector, the solver
     /// skips the initial matvec and assumes a zero guess.
     initial_guess_nonzero: bool,
+    variant: PcgVariant,
+    async_reduction: ReductOptions,
 }
 
 impl PcgSolver {
@@ -48,6 +67,8 @@ impl PcgSolver {
             reduction: ReductionOptions::default(),
             true_residual_monitor: None,
             initial_guess_nonzero: false,
+            variant: PcgVariant::Classic,
+            async_reduction: ReductOptions::default(),
         }
     }
 
@@ -82,6 +103,34 @@ impl PcgSolver {
     pub fn with_true_residual_monitor(mut self, m: Box<dyn Fn(usize, f64) + Send + Sync>) -> Self {
         self.true_residual_monitor = Some(m);
         self
+    }
+
+    pub fn with_variant(mut self, variant: PcgVariant) -> Self {
+        self.variant = variant;
+        self
+    }
+
+    pub fn set_variant(&mut self, variant: PcgVariant) {
+        self.variant = variant;
+    }
+
+    pub fn variant(&self) -> PcgVariant {
+        self.variant
+    }
+
+    pub fn set_async_reduction_options(&mut self, opt: ReductOptions) {
+        self.async_reduction = opt;
+    }
+
+    fn async_options(&self) -> ReductOptions {
+        let mut opt = self.async_reduction.clone();
+        opt.mode = match self.reduction.mode {
+            ReproMode::Fast => ReductMode::Fast,
+            ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
+                ReductMode::Deterministic
+            }
+        };
+        opt
     }
 
     /// Indicate whether the supplied initial guess is nonzero.
@@ -133,7 +182,7 @@ impl PcgSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn solve_with_comm<C: Comm + CommDeterministic>(
+    pub fn solve_with_comm<C: Comm + CommDeterministic + AllreduceOps>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
@@ -148,7 +197,27 @@ impl PcgSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn solve_impl<C: Comm + CommDeterministic>(
+    fn solve_impl<C: Comm + CommDeterministic + AllreduceOps>(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &C,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        match self.variant {
+            PcgVariant::Classic => self.solve_classic(a, pc, b, x, pc_side, comm, monitors, work),
+            PcgVariant::Pipelined { .. } => {
+                self.solve_pipelined(a, pc, b, x, pc_side, comm, monitors, work)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_classic<C: Comm + CommDeterministic>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
@@ -249,11 +318,7 @@ impl PcgSolver {
         let (reason0, s0) = self.conv.check(res0, res0, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             let true_res = self.nrm2(r, comm);
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: true_res,
-                reason: s0.reason,
-            });
+            return Ok(SolveStats::new(0, true_res, s0.reason));
         }
         let mut iters = 0usize;
         for k in 1..=self.conv.max_iters {
@@ -273,11 +338,11 @@ impl PcgSolver {
                 return Err(KError::IndefiniteMatrix);
             }
             if p_ap <= eps {
-                return Ok(SolveStats {
-                    iterations: k - 1,
-                    final_residual: self.nrm2(r, comm),
-                    reason: ConvergedReason::ConvergedHappyBreakdown,
-                });
+                return Ok(SolveStats::new(
+                    k - 1,
+                    self.nrm2(r, comm),
+                    ConvergedReason::ConvergedHappyBreakdown,
+                ));
             }
 
             let alpha = rho / p_ap;
@@ -325,22 +390,294 @@ impl PcgSolver {
             let (reason, mut s) = self.conv.check(res_check, res0, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 s.final_residual = self.nrm2(r, comm);
-                return Ok(SolveStats {
-                    iterations: k,
-                    final_residual: s.final_residual,
-                    reason: s.reason,
-                });
+                return Ok(SolveStats::new(k, s.final_residual, s.reason));
             }
 
             rho_prev = rho;
             rho = rho_new;
         }
 
-        Ok(SolveStats {
-            iterations: iters,
-            final_residual: self.nrm2(r, comm),
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        Ok(SolveStats::new(
+            iters,
+            self.nrm2(r, comm),
+            ConvergedReason::DivergedMaxIts,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_pipelined<C: Comm + CommDeterministic + AllreduceOps>(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        mut pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &C,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        if pc_side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "pipelined PCG requires left preconditioning with SPD M".into(),
+            ));
+        }
+
+        let n = b.len();
+        if x.len() != n {
+            return Err(KError::InvalidInput("dimension mismatch: x,b".into()));
+        }
+
+        let mut counters = SolverCounters::default();
+
+        // Acquire buffers either from workspace or allocate temporaries
+        let mut r_store = Vec::new();
+        let mut z_store = Vec::new();
+        let mut p_store = Vec::new();
+        let mut ap_store = Vec::new();
+
+        let (r, z, p, ap): (&mut [f64], &mut [f64], &mut [f64], &mut [f64]);
+
+        if let Some(wk) = work {
+            Self::take_or_resize(&mut wk.tmp1, n);
+            Self::take_or_resize(&mut wk.tmp2, n);
+            while wk.q.len() < 2 {
+                wk.q.push(vec![0.0; n]);
+            }
+            for v in &mut wk.q[0..2] {
+                Self::take_or_resize(v, n);
+            }
+            r = wk.tmp1.as_mut_slice();
+            z = wk.tmp2.as_mut_slice();
+            let (pbuf, rest) = wk.q.split_at_mut(1);
+            p = pbuf[0].as_mut_slice();
+            ap = rest[0].as_mut_slice();
+        } else {
+            r_store.resize(n, 0.0);
+            z_store.resize(n, 0.0);
+            p_store.resize(n, 0.0);
+            ap_store.resize(n, 0.0);
+            r = r_store.as_mut_slice();
+            z = z_store.as_mut_slice();
+            p = p_store.as_mut_slice();
+            ap = ap_store.as_mut_slice();
+        }
+
+        // r = b - A x
+        let zero_guess = !self.initial_guess_nonzero && x.iter().all(|&xi| xi == 0.0);
+        if zero_guess {
+            r.copy_from_slice(b);
+        } else {
+            a.matvec(x, ap);
+            for i in 0..n {
+                r[i] = b[i] - ap[i];
+            }
+        }
+
+        // z = M^{-1} r
+        if let Some(pc) = pc.as_mut() {
+            pc.apply(pc_side, r, z)?;
+        } else {
+            z.copy_from_slice(r);
+        }
+
+        p.copy_from_slice(z);
+
+        let mut opt = self.async_options();
+        if opt.max_inflight == 0 {
+            opt.max_inflight = 1;
+        }
+
+        // rho0 = <r0, z0>
+        let (h_rho0, _) = dot1_async(comm, r, z, &opt)?;
+        let rho0 = {
+            counters.num_global_reductions += 1;
+            <C as AllreduceOps>::wait_pair(h_rho0).0
+        };
+        if !rho0.is_finite() || rho0 < 0.0 {
+            return Err(KError::IndefinitePreconditioner);
+        }
+
+        // Initial residual norm ||r||
+        let (h_rnorm0, _) = crate::solver::common::nrm2_async(comm, r, &opt);
+        let rnorm0_sq = {
+            counters.num_global_reductions += 1;
+            <C as AllreduceOps>::wait_pair(h_rnorm0).0
+        };
+        let rnorm0 = rnorm0_sq.sqrt();
+        if rnorm0 == 0.0 {
+            return Ok(
+                SolveStats::new(0, 0.0, ConvergedReason::ConvergedRtol).with_counters(counters)
+            );
+        }
+
+        let mut reported_residual = match self.norm_type {
+            CgNormType::Preconditioned => rho0.sqrt(),
+            CgNormType::Unpreconditioned | CgNormType::None => rnorm0_sq.sqrt(),
+            CgNormType::Natural => {
+                let (h_z, _) = crate::solver::common::nrm2_async(comm, z, &opt);
+                counters.num_global_reductions += 1;
+                <C as AllreduceOps>::wait_pair(h_z).0.sqrt()
+            }
+        };
+
+        if let Some(ms) = monitors {
+            for m in ms {
+                m(0, reported_residual);
+            }
+        }
+        if let Some(m) = &self.true_residual_monitor {
+            m(0, self.nrm2(r, comm));
+        }
+
+        let (reason0, mut stats) = self.conv.check(reported_residual, rnorm0, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            stats.final_residual = self.nrm2(r, comm);
+            counters.residual_replacements = 0;
+            stats.counters = counters;
+            return Ok(stats);
+        }
+
+        let replace_every = match self.variant {
+            PcgVariant::Pipelined { replace_every } => replace_every,
+            PcgVariant::Classic => 0,
+        };
+
+        let mut rho_curr = rho0;
+        let mut rho_prev = rho0;
+        let mut pending_rho: Option<AllreduceHandle<(f64, f64)>> = None;
+        let mut iterations = 0usize;
+        let mut residual_replacements = 0usize;
+
+        while iterations < self.conv.max_iters {
+            if iterations > 0 {
+                let handle = pending_rho
+                    .take()
+                    .expect("pipelined PCG pending rho handle");
+                rho_curr = {
+                    counters.num_global_reductions += 1;
+                    <C as AllreduceOps>::wait_pair(handle).0
+                };
+                if !rho_curr.is_finite() || rho_curr < 0.0 {
+                    return Err(KError::IndefinitePreconditioner);
+                }
+
+                reported_residual = match self.norm_type {
+                    CgNormType::Preconditioned => rho_curr.sqrt(),
+                    CgNormType::Unpreconditioned | CgNormType::None => {
+                        let (h_nr, _) = crate::solver::common::nrm2_async(comm, r, &opt);
+                        counters.num_global_reductions += 1;
+                        <C as AllreduceOps>::wait_pair(h_nr).0.sqrt()
+                    }
+                    CgNormType::Natural => {
+                        let (h_z, _) = crate::solver::common::nrm2_async(comm, z, &opt);
+                        counters.num_global_reductions += 1;
+                        <C as AllreduceOps>::wait_pair(h_z).0.sqrt()
+                    }
+                };
+
+                if let Some(ms) = monitors {
+                    for m in ms {
+                        m(iterations, reported_residual);
+                    }
+                }
+                if let Some(m) = &self.true_residual_monitor {
+                    m(iterations, self.nrm2(r, comm));
+                }
+
+                let (reason, mut stats) = self.conv.check(reported_residual, rnorm0, iterations);
+                if !matches!(reason, ConvergedReason::Continued) {
+                    stats.final_residual = self.nrm2(r, comm);
+                    counters.residual_replacements = residual_replacements;
+                    stats.counters = counters;
+                    return Ok(stats);
+                }
+            }
+
+            if iterations >= self.conv.max_iters {
+                break;
+            }
+
+            if iterations > 0 {
+                let beta = if rho_prev == 0.0 {
+                    0.0
+                } else {
+                    rho_curr / rho_prev
+                };
+                for i in 0..n {
+                    p[i] = z[i] + beta * p[i];
+                }
+            }
+
+            a.matvec(p, ap);
+
+            let mut pp_ap_local = 0.0;
+            for i in 0..n {
+                pp_ap_local += p[i] * ap[i];
+            }
+
+            let (h_ppap, _) = comm.allreduce2_async(pp_ap_local, 0.0, &opt)?;
+            let pp_ap = {
+                counters.num_global_reductions += 1;
+                <C as AllreduceOps>::wait_pair(h_ppap).0
+            };
+            if !pp_ap.is_finite() {
+                return Err(KError::IndefiniteMatrix);
+            }
+            if pp_ap.abs() <= f64::EPSILON {
+                return Ok(SolveStats::new(
+                    iterations,
+                    self.nrm2(r, comm),
+                    ConvergedReason::ConvergedHappyBreakdown,
+                )
+                .with_counters({
+                    counters.residual_replacements = residual_replacements;
+                    counters
+                }));
+            }
+
+            let alpha = rho_curr / pp_ap;
+            for i in 0..n {
+                x[i] += alpha * p[i];
+                r[i] -= alpha * ap[i];
+            }
+
+            if let Some(pc) = pc.as_mut() {
+                pc.apply(pc_side, r, z)?;
+            } else {
+                z.copy_from_slice(r);
+            }
+
+            if replace_every > 0 && ((iterations + 1) % replace_every == 0) {
+                a.matvec(x, ap);
+                for i in 0..n {
+                    r[i] = b[i] - ap[i];
+                }
+                if let Some(pc) = pc.as_mut() {
+                    pc.apply(pc_side, r, z)?;
+                } else {
+                    z.copy_from_slice(r);
+                }
+                residual_replacements += 1;
+            }
+
+            let (h_rho_next, _) = dot1_async(comm, r, z, &opt)?;
+            pending_rho = Some(h_rho_next);
+
+            rho_prev = rho_curr;
+            iterations += 1;
+        }
+
+        if let Some(handle) = pending_rho.take() {
+            counters.num_global_reductions += 1;
+            let _ = <C as AllreduceOps>::wait_pair(handle);
+        }
+
+        counters.residual_replacements = residual_replacements;
+        let final_res = self.nrm2(r, comm);
+        Ok(
+            SolveStats::new(iterations, final_res, ConvergedReason::DivergedMaxIts)
+                .with_counters(counters),
+        )
     }
 }
 

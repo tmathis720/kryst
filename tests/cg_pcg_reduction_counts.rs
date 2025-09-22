@@ -46,4 +46,5 @@ fn pcg_reduction_counts() {
         .unwrap();
     let expected = 2 + 2 * stats.iterations;
     assert_eq!(comm.reduces.load(Ordering::Relaxed), expected);
+    assert_eq!(stats.counters.num_global_reductions, 0);
 }

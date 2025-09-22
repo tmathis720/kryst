@@ -176,6 +176,20 @@ pub static SPECS: &[Spec] = &[
         doc: "precond|unprecond|natural|none",
     },
     Spec {
+        flag: "-ksp_cg_pipelined",
+        key: "ksp_cg_pipelined",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "toggle pipelined PCG",
+    },
+    Spec {
+        flag: "-ksp_cg_replace_every",
+        key: "ksp_cg_replace_every",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "residual replacement interval for pipelined PCG",
+    },
+    Spec {
         flag: "-ksp_cg_single_reduction",
         key: "ksp_cg_single_reduction",
         arity: Arity::Zero,

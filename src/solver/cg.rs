@@ -187,11 +187,7 @@ impl CgSolver {
 
         // Zero-length fast path
         if b.is_empty() {
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: 0.0,
-                reason: ConvergedReason::ConvergedAtol,
-            });
+            return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
         }
 
         let (r, z, p, ap, tmp) = Self::acquire(n, work);
@@ -255,11 +251,7 @@ impl CgSolver {
 
         p.copy_from_slice(z);
 
-        let mut stats = SolveStats {
-            iterations: 0,
-            final_residual: res0_reported,
-            reason: ConvergedReason::Continued,
-        };
+        let mut stats = SolveStats::new(0, res0_reported, ConvergedReason::Continued);
 
         // Convergence check at iteration 0 (baseline = res0_reported)
         let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
@@ -364,11 +356,11 @@ impl CgSolver {
 
         // Max-its reached: use current residual for final reporting
         let true_res = Self::nrm2(r, comm);
-        Ok(SolveStats {
-            iterations: self.conv.max_iters,
-            final_residual: true_res,
-            reason: ConvergedReason::DivergedMaxIts,
-        })
+        Ok(SolveStats::new(
+            self.conv.max_iters,
+            true_res,
+            ConvergedReason::DivergedMaxIts,
+        ))
     }
 }
 

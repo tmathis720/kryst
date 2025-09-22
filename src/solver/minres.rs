@@ -159,15 +159,12 @@ impl LinearSolver for MinresSolver {
                 w.tmp1[i] = b[i] - w.tmp1[i];
             }
             let true_res = Self::nrm2(&w.tmp1, comm);
-            return Ok(SolveStats {
-                iterations: 0,
-                final_residual: true_res,
-                reason: if true_res <= self.conv.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                },
-            });
+            let reason = if true_res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else {
+                ConvergedReason::ConvergedRtol
+            };
+            return Ok(SolveStats::new(0, true_res, reason));
         }
 
         // 4) initialize v and “w” search direction

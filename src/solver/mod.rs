@@ -204,7 +204,7 @@ pub use bicgstab::BiCgStabSolver;
 pub mod cgs;
 pub use cgs::CgsSolver;
 pub mod pcg;
-pub use pcg::PcgSolver;
+pub use pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
 pub mod minres;
 pub use minres::MinresSolver;
 // Dense direct modules are gated; opt-in via `dense-direct`.
