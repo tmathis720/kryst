@@ -1,6 +1,6 @@
 //! Flexible GMRES (FGMRES) over &dyn LinOp<f64>, right-preconditioned, object-safe.
 
-use crate::context::ksp_context::{GmresSpec, Workspace};
+use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
@@ -17,6 +17,12 @@ pub enum Orthog {
     Modified,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FgmresVariant {
+    Classical,
+    Pipelined,
+}
+
 pub struct FgmresSolver {
     pub rtol: f64,
     pub atol: f64,
@@ -31,6 +37,11 @@ pub struct FgmresSolver {
     pub on_restart: Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
     /// Whether to treat near-zero residual as a happy breakdown
     pub happy_breakdown: bool,
+    pub variant: FgmresVariant,
+    /// Strategy for the second orthogonalization pass
+    pub reorth: ReorthPolicy,
+    /// Threshold used by the "if-needed" reorthogonalization strategy
+    pub reorth_tol: f64,
 }
 
 impl FgmresSolver {
@@ -46,6 +57,9 @@ impl FgmresSolver {
             preallocate: false,
             on_restart: None,
             happy_breakdown: true,
+            variant: FgmresVariant::Classical,
+            reorth: ReorthPolicy::IfNeeded,
+            reorth_tol: 0.7,
         }
     }
 
@@ -133,6 +147,7 @@ impl FgmresSolver {
         let mut total_iters = 0usize;
         let mut res = beta0;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         if let Some(mons) = monitors {
             for m in mons {
@@ -146,7 +161,13 @@ impl FgmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            return Ok(stats);
+            let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+            let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let counters = crate::utils::convergence::SolverCounters {
+                num_global_reductions: reductions,
+                residual_replacements: 0,
+            };
+            return Ok(stats.with_counters(counters));
         }
 
         while total_iters < self.maxits {
@@ -160,59 +181,80 @@ impl FgmresSolver {
             let mut converged = false;
 
             for j in 0..m_this {
-                {
-                    let (vj, zj) = ws.v_and_z_mut(j);
-                    if let Some(pc_) = pc.as_deref_mut() {
-                        pc_.apply_mut(pc_side, vj, zj)?;
-                    } else {
-                        zj.copy_from_slice(vj);
-                    }
-                }
-                {
-                    let (zj, tmp2) = ws.z_and_tmp2_mut(j);
-                    a.matvec(zj, tmp2);
-                }
-
-                for i in 0..=j {
-                    let hij = {
-                        let vi = &ws.v_mem[i * n..(i + 1) * n];
-                        let hij = Self::dot(&ws.tmp2, vi, comm);
-                        for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
-                            *w_i -= hij * vi_val;
+                match self.variant {
+                    FgmresVariant::Classical => {
+                        {
+                            let (vj, zj) = ws.v_and_z_mut(j);
+                            if let Some(pc_) = pc.as_deref_mut() {
+                                pc_.apply_mut(pc_side, vj, zj)?;
+                            } else {
+                                zj.copy_from_slice(vj);
+                            }
                         }
-                        hij
-                    };
-                    *ws.h_at_mut(i, j) = hij;
-                }
+                        {
+                            let (zj, tmp2) = ws.z_and_tmp2_mut(j);
+                            a.matvec(zj, tmp2);
+                        }
 
-                if matches!(self.orthog, Orthog::Modified) {
-                    for i in 0..=j {
-                        let corr = {
-                            let vi = &ws.v_mem[i * n..(i + 1) * n];
-                            let corr = Self::dot(&ws.tmp2, vi, comm);
-                            if corr.abs() > 1e-12 {
+                        for i in 0..=j {
+                            let hij = {
+                                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                let hij = Self::dot(&ws.tmp2, vi, comm);
                                 for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
-                                    *w_i -= corr * vi_val;
+                                    *w_i -= hij * vi_val;
+                                }
+                                hij
+                            };
+                            *ws.h_at_mut(i, j) = hij;
+                        }
+
+                        if matches!(self.orthog, Orthog::Modified) {
+                            for i in 0..=j {
+                                let corr = {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                    let corr = Self::dot(&ws.tmp2, vi, comm);
+                                    if corr.abs() > 1e-12 {
+                                        for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
+                                            *w_i -= corr * vi_val;
+                                        }
+                                    }
+                                    corr
+                                };
+                                if corr.abs() > 1e-12 {
+                                    *ws.h_at_mut(i, j) += corr;
                                 }
                             }
-                            corr
-                        };
-                        if corr.abs() > 1e-12 {
-                            *ws.h_at_mut(i, j) += corr;
+                        }
+
+                        let hij1 = Self::nrm2(&ws.tmp2, comm);
+                        *ws.h_at_mut(j + 1, j) = hij1;
+
+                        if hij1 > 0.0 {
+                            for i in 0..n {
+                                ws.tmp2[i] /= hij1;
+                            }
+                            ws.copy_tmp2_into_vcol(j + 1);
+                        } else {
+                            ws.v_col(j + 1).fill(0.0);
                         }
                     }
-                }
-
-                let hij1 = Self::nrm2(&ws.tmp2, comm);
-                *ws.h_at_mut(j + 1, j) = hij1;
-
-                if hij1 > 0.0 {
-                    for i in 0..n {
-                        ws.tmp2[i] /= hij1;
+                    FgmresVariant::Pipelined => {
+                        {
+                            let (vj, zj) = ws.v_and_z_mut(j);
+                            if let Some(pc_) = pc.as_deref_mut() {
+                                pc_.apply_mut(pc_side, vj, zj)?;
+                            } else {
+                                zj.copy_from_slice(vj);
+                            }
+                        }
+                        {
+                            let (zj, tmp2) = ws.z_and_tmp2_mut(j);
+                            a.matvec(zj, tmp2);
+                        }
+                        ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
+                        let _ =
+                            ws.pipelined_arnoldi_step(j, n, comm, self.reorth, self.reorth_tol)?;
                     }
-                    ws.copy_tmp2_into_vcol(j + 1);
-                } else {
-                    ws.v_col(j + 1).fill(0.0);
                 }
 
                 ws.apply_prev_givens_to_col(j, j);
@@ -322,7 +364,13 @@ impl FgmresSolver {
                 ConvergedReason::DivergedMaxIts
             };
         }
-        Ok(stats)
+        let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+        let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+        let counters = crate::utils::convergence::SolverCounters {
+            num_global_reductions: reductions,
+            residual_replacements: 0,
+        };
+        Ok(stats.with_counters(counters))
     }
 }
 
@@ -362,14 +410,25 @@ impl FgmresSolver {
         self.orthog = o;
     }
     pub fn set_reorthog(&mut self, flag: bool) {
-        self.orthog = if flag {
-            Orthog::Modified
+        self.reorth = if flag {
+            ReorthPolicy::Always
         } else {
-            Orthog::Classical
+            ReorthPolicy::Never
         };
+    }
+
+    pub fn set_reorth_policy(&mut self, policy: ReorthPolicy) {
+        self.reorth = policy;
+    }
+
+    pub fn set_reorth_tol(&mut self, tol: f64) {
+        self.reorth_tol = tol.max(0.0);
     }
     pub fn set_happy_breakdown(&mut self, flag: bool) {
         self.happy_breakdown = flag;
+    }
+    pub fn set_variant(&mut self, variant: FgmresVariant) {
+        self.variant = variant;
     }
 
     #[cfg(test)]
@@ -377,7 +436,7 @@ impl FgmresSolver {
         (
             self.restart,
             self.orthog,
-            matches!(self.orthog, Orthog::Modified),
+            !matches!(self.reorth, ReorthPolicy::Never),
             self.happy_breakdown,
         )
     }

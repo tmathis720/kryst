@@ -16,6 +16,10 @@ pub struct Workspace {
     pub blk_scratch: Vec<f64>,
     pub block_buf: Option<BlockVec>,
     pub tsqr: Option<TsqrWorkspace>,
+    pub pipelined_w: Vec<f64>,
+    pub pipelined_wtmp: Vec<f64>,
+    pub pipelined_payload: Vec<f64>,
+    pub reduction: crate::utils::reduction::ReductOptions,
     // Shared communication arenas
     pub send_arena: crate::utils::buffer_pool::BufferPool<u8>,
     pub recv_arena: crate::utils::buffer_pool::BufferPool<u8>,
@@ -23,6 +27,19 @@ pub struct Workspace {
     n: usize,
     m: usize,
     need_z: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReorthPolicy {
+    Never,
+    IfNeeded,
+    Always,
+}
+
+impl Default for ReorthPolicy {
+    fn default() -> Self {
+        ReorthPolicy::IfNeeded
+    }
 }
 
 /// Specification for sizing GMRES/FGMRES workspaces.
@@ -197,12 +214,27 @@ impl Workspace {
         ensure_len(&mut self.cs, m);
         ensure_len(&mut self.sn, m);
         ensure_len(&mut self.g, g_len);
+        ensure_len(&mut self.pipelined_w, n);
+        ensure_len(&mut self.pipelined_wtmp, n);
+        ensure_len(&mut self.pipelined_payload, m + 2);
 
         if spec.block_s > 0 {
             ensure_len(&mut self.blk_scratch, n * spec.block_s);
         } else {
             self.blk_scratch.clear();
         }
+    }
+
+    pub fn set_reduction_options(&mut self, opt: crate::utils::reduction::ReductOptions) {
+        self.reduction = opt;
+    }
+
+    pub fn set_reduction_mode(&mut self, mode: crate::utils::reduction::ReductMode) {
+        self.reduction.mode = mode;
+    }
+
+    pub fn reduction_options(&self) -> &crate::utils::reduction::ReductOptions {
+        &self.reduction
     }
 
     #[inline]
@@ -380,6 +412,131 @@ impl Workspace {
         let t = c * self.g[j] + s * self.g[j + 1];
         self.g[j + 1] = -s * self.g[j] + c * self.g[j + 1];
         self.g[j] = t;
+    }
+
+    pub fn pipelined_arnoldi_step(
+        &mut self,
+        k: usize,
+        n: usize,
+        comm: &crate::parallel::UniverseComm,
+        policy: ReorthPolicy,
+        tol: f64,
+    ) -> Result<usize, crate::error::KError> {
+        debug_assert!(k < self.m);
+
+        let w = &self.pipelined_w[..n];
+        let payload_len = k + 2;
+        let send = {
+            let payload = &mut self.pipelined_payload[..payload_len];
+            for i in 0..=k {
+                let vi = &self.v_mem[i * n..(i + 1) * n];
+                payload[i] = vi.iter().zip(w).map(|(a, b)| a * b).sum();
+            }
+            payload[k + 1] = w.iter().map(|val| val * val).sum();
+            payload.to_vec()
+        };
+        let opt = self.reduction.clone();
+        let (handle, _) = <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::
+            allreduce_n_async(comm, send, &opt)?;
+        let glob =
+            <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::wait_vec(
+                handle,
+            );
+
+        let mut reductions = 1usize;
+
+        self.pipelined_wtmp[..n].copy_from_slice(w);
+
+        let mut sum_h2 = 0.0;
+        for i in 0..=k {
+            let hij = glob[i];
+            sum_h2 += hij * hij;
+            let vi = &self.v_mem[i * n..(i + 1) * n];
+            for idx in 0..n {
+                self.pipelined_wtmp[idx] -= hij * vi[idx];
+            }
+            *self.h_at_mut(i, k) = hij;
+        }
+
+        let total_norm_sq = glob[k + 1];
+        let mut hnext_sq = (total_norm_sq - sum_h2).max(0.0);
+        if !hnext_sq.is_finite() {
+            hnext_sq = 0.0;
+        }
+
+        let tol = tol.max(0.0);
+        let tol_sq = tol * tol;
+        let trigger_reorth = match policy {
+            ReorthPolicy::Never => false,
+            ReorthPolicy::Always => true,
+            ReorthPolicy::IfNeeded => total_norm_sq > 0.0 && hnext_sq < tol_sq * total_norm_sq,
+        };
+
+        if trigger_reorth {
+            reductions += 1;
+
+            let send = {
+                let payload = &mut self.pipelined_payload[..payload_len];
+                for i in 0..=k {
+                    let vi = &self.v_mem[i * n..(i + 1) * n];
+                    payload[i] = vi
+                        .iter()
+                        .zip(&self.pipelined_wtmp[..n])
+                        .map(|(a, b)| a * b)
+                        .sum();
+                }
+                payload[k + 1] = self.pipelined_wtmp[..n].iter().map(|val| val * val).sum();
+                payload.to_vec()
+            };
+            let (handle, _) =
+                <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::
+                    allreduce_n_async(comm, send, &opt)?;
+            let corr =
+                <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::wait_vec(
+                    handle,
+                );
+
+            let mut delta_norm_sq = 0.0;
+            for i in 0..=k {
+                let delta = corr[i];
+                delta_norm_sq += delta * delta;
+                let vi = &self.v_mem[i * n..(i + 1) * n];
+                for idx in 0..n {
+                    self.pipelined_wtmp[idx] -= delta * vi[idx];
+                }
+                let hij = *self.h_at_mut(i, k) + delta;
+                *self.h_at_mut(i, k) = hij;
+            }
+
+            sum_h2 = 0.0;
+            for i in 0..=k {
+                let hij = *self.h_at_mut(i, k);
+                sum_h2 += hij * hij;
+            }
+
+            let wtmp_norm_sq = corr[k + 1];
+            hnext_sq = (wtmp_norm_sq - delta_norm_sq).max(0.0);
+            if !hnext_sq.is_finite() {
+                hnext_sq = 0.0;
+            }
+        }
+
+        let hnext = hnext_sq.sqrt();
+        *self.h_at_mut(k + 1, k) = hnext;
+
+        let base = (k + 1) * n;
+        if hnext > 0.0 {
+            let inv = 1.0 / hnext;
+            for idx in 0..n {
+                self.v_mem[base + idx] = self.pipelined_wtmp[idx] * inv;
+            }
+        } else {
+            for idx in 0..n {
+                self.v_mem[base + idx] = 0.0;
+            }
+        }
+
+        Ok(reductions)
     }
 }
 
