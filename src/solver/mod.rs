@@ -13,6 +13,8 @@ pub use api::Solver;
 pub mod adapters;
 pub use adapters::LegacyDirectAdapter;
 
+pub mod block;
+
 /// Object-safe linear solver operating on `f64` slices and [`LinOp`] operators.
 pub trait LinearSolver: Send + Any {
     type Error;
