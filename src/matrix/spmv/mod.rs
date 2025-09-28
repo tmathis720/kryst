@@ -8,6 +8,7 @@ pub mod simd_csr;
 pub use self::plan::{KernelKind, SpmvPlan, SpmvTuning, build as build_plan};
 pub use self::scalar::{spmv_scaled_csr, spmv_t_scaled_csr};
 
+use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
 use faer::{MatMut, MatRef};
@@ -93,6 +94,42 @@ pub fn spmv_csr_parallel(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result
         let sum = unsafe { lane_dot_gather_unchecked(&vv[rs..re], &cj[rs..re], x) };
         yi[0] = sum;
     });
+    Ok(())
+}
+
+pub fn spmm_csr_dense(a: &CsrMatrix<f64>, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError> {
+    let (m, n) = (a.nrows(), a.ncols());
+    if x.nrows() != n || y.nrows() != m || x.ncols() != y.ncols() {
+        return Err(KError::InvalidInput(
+            "spmm_csr_dense: dimension mismatch".into(),
+        ));
+    }
+
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    let p = x.ncols();
+    let xn = x.nrows();
+    let yn = y.nrows();
+    let x_data = x.as_slice();
+    let y_data = y.as_mut_slice();
+    y_data.fill(0.0);
+
+    for i in 0..m {
+        let row_start = rp[i];
+        let row_end = rp[i + 1];
+        for pos in row_start..row_end {
+            let j = cj[pos];
+            let aij = vv[pos];
+            let x_base = j;
+            for col in 0..p {
+                let y_idx = col * yn + i;
+                let x_idx = col * xn + x_base;
+                y_data[y_idx] += aij * x_data[x_idx];
+            }
+        }
+    }
+
     Ok(())
 }
 

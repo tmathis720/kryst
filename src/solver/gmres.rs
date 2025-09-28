@@ -31,10 +31,15 @@ pub enum GmresOrthog {
     Cgs,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GmresVariant {
     Classical,
     Pipelined,
+    SStep {
+        s: usize,
+        reorth: ReorthPolicy,
+        max_cond: f64,
+    },
 }
 
 pub struct GmresSolver {
@@ -82,13 +87,21 @@ impl GmresSolver {
     }
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, side: PcSide) {
+        let block_s = match self.variant {
+            GmresVariant::SStep { s, .. } => s,
+            _ => 0,
+        };
         let spec = GmresSpec {
             n,
             m: self.restart,
             need_z: matches!(side, PcSide::Right),
-            block_s: 0,
+            block_s,
         };
         w.acquire_gmres(spec);
+    }
+
+    pub fn reorth_policy(&self) -> ReorthPolicy {
+        self.reorth
     }
 
     fn apply_precond(
@@ -137,6 +150,99 @@ impl GmresSolver {
             for (xi, &zj) in x.iter_mut().zip(z) {
                 *xi += yj * zj;
             }
+        }
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    fn mat_idx(ld: usize, row: usize, col: usize) -> usize {
+        col * ld + row
+    }
+
+    #[allow(dead_code)]
+    fn chol_upper(mat: &mut [f64], n: usize) -> Result<(), KError> {
+        for j in 0..n {
+            for i in 0..=j {
+                let mut sum = mat[Self::mat_idx(n, i, j)];
+                for k in 0..i {
+                    let left = mat[Self::mat_idx(n, k, i)];
+                    let right = mat[Self::mat_idx(n, k, j)];
+                    sum -= left * right;
+                }
+                if i == j {
+                    if sum <= 0.0 || !sum.is_finite() {
+                        return Err(KError::FactorError(
+                            "s-step GMRES: Cholesky factorization failed".into(),
+                        ));
+                    }
+                    mat[Self::mat_idx(n, i, j)] = sum.sqrt();
+                } else {
+                    let diag = mat[Self::mat_idx(n, i, i)];
+                    if diag == 0.0 {
+                        return Err(KError::FactorError(
+                            "s-step GMRES: zero diagonal during Cholesky".into(),
+                        ));
+                    }
+                    mat[Self::mat_idx(n, i, j)] = sum / diag;
+                }
+            }
+            for i in (j + 1)..n {
+                mat[Self::mat_idx(n, i, j)] = 0.0;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn triangular_solve_right_upper(r: &[f64], block: usize, data: &mut [f64], nrows: usize) {
+        // Solve X R = data in-place for X, where data holds W' (nrows x block)
+        // stored column-major. After the solve, data contains Q.
+        for col in 0..block {
+            let mut col_slice = vec![0.0; nrows];
+            // copy target column (W' column)
+            for row in 0..nrows {
+                col_slice[row] = data[col * nrows + row];
+            }
+            for k in 0..col {
+                let r_kj = r[Self::mat_idx(block, k, col)];
+                if r_kj != 0.0 {
+                    for row in 0..nrows {
+                        col_slice[row] -= r_kj * data[k * nrows + row];
+                    }
+                }
+            }
+            let diag = r[Self::mat_idx(block, col, col)];
+            if diag != 0.0 {
+                for row in 0..nrows {
+                    data[col * nrows + row] = col_slice[row] / diag;
+                }
+            } else {
+                for row in 0..nrows {
+                    data[col * nrows + row] = 0.0;
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn estimate_triangular_condition(r: &[f64], block: usize) -> f64 {
+        let mut max_diag = 0.0;
+        let mut min_diag = f64::MAX;
+        for j in 0..block {
+            let diag = r[Self::mat_idx(block, j, j)].abs();
+            if diag > max_diag {
+                max_diag = diag;
+            }
+            if diag < min_diag {
+                min_diag = diag;
+            }
+        }
+        if min_diag <= 0.0 {
+            f64::INFINITY
+        } else if max_diag == 0.0 {
+            0.0
+        } else {
+            max_diag / min_diag
         }
     }
 }
@@ -256,6 +362,12 @@ impl LinearSolver for GmresSolver {
             return Ok(stats.with_counters(counters));
         }
 
+        if matches!(self.variant, GmresVariant::SStep { .. }) {
+            return Err(KError::NotImplemented(
+                "GMRES s-step variant is not yet implemented".into(),
+            ));
+        }
+
         'outer: loop {
             let mut k_steps = 0usize;
             for k in 0..self.restart {
@@ -355,6 +467,9 @@ impl LinearSolver for GmresSolver {
                         }
                         PcSide::Symmetric => unreachable!(),
                     },
+                    GmresVariant::SStep { .. } => {
+                        unreachable!("s-step path should exit before iteration loop")
+                    }
                 }
 
                 ws.apply_prev_givens_to_col(k, k);

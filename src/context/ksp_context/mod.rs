@@ -52,7 +52,7 @@ use crate::utils::reduction::{ReductMode, ReductOptions};
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
-pub use workspace::{GmresSpec, ReorthPolicy, Workspace};
+pub use workspace::{BlockVec, GmresSStepWorkspace, GmresSpec, ReorthPolicy, Workspace};
 
 /// Supported solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +122,13 @@ pub struct KspContext {
     pending_pcg: PendingPcg,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingGmresVariant {
+    Classical,
+    Pipelined,
+    SStep,
+}
+
 #[derive(Clone, Debug, Default)]
 struct PendingGmres {
     restart: Option<usize>,
@@ -129,7 +136,9 @@ struct PendingGmres {
     reorth: Option<ReorthPolicy>,
     reorth_tol: Option<f64>,
     happy_breakdown: Option<bool>,
-    variant: Option<crate::solver::gmres::GmresVariant>,
+    variant: Option<PendingGmresVariant>,
+    sstep: Option<usize>,
+    sstep_max_cond: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -439,17 +448,23 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
-                let v = match variant.as_str() {
-                    "classical" => crate::solver::gmres::GmresVariant::Classical,
-                    "pipelined" => crate::solver::gmres::GmresVariant::Pipelined,
+                let pv = match variant.as_str() {
+                    "classical" => PendingGmresVariant::Classical,
+                    "pipelined" => PendingGmresVariant::Pipelined,
+                    "sstep" => PendingGmresVariant::SStep,
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined')"
+                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined'|'sstep')"
                         )));
                     }
                 };
-                s.set_variant(v);
-                self.pending_gmres.variant = Some(v);
+                self.pending_gmres.variant = Some(pv);
+            }
+            if let Some(sstep) = opts.gmres_sstep {
+                self.pending_gmres.sstep = Some(sstep);
+            }
+            if let Some(cond) = opts.gmres_sstep_max_cond {
+                self.pending_gmres.sstep_max_cond = Some(cond);
             }
         } else {
             if let Some(r) = opts.effective_restart_for(KspType::GMRES) {
@@ -484,15 +499,31 @@ impl KspContext {
             }
             if let Some(ref variant) = opts.gmres_variant {
                 self.pending_gmres.variant = Some(match variant.as_str() {
-                    "classical" => crate::solver::gmres::GmresVariant::Classical,
-                    "pipelined" => crate::solver::gmres::GmresVariant::Pipelined,
+                    "classical" => PendingGmresVariant::Classical,
+                    "pipelined" => PendingGmresVariant::Pipelined,
+                    "sstep" => PendingGmresVariant::SStep,
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined')"
+                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined'|'sstep')"
                         )));
                     }
                 });
             }
+            if let Some(sstep) = opts.gmres_sstep {
+                self.pending_gmres.sstep = Some(sstep);
+            }
+            if let Some(cond) = opts.gmres_sstep_max_cond {
+                self.pending_gmres.sstep_max_cond = Some(cond);
+            }
+        }
+
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<GmresSolver>())
+        {
+            let snapshot = self.pending_gmres.clone();
+            Self::apply_gmres_pending(&snapshot, s);
         }
 
         // --- FGMRES options ---
@@ -648,25 +679,71 @@ impl KspContext {
         Ok(self)
     }
 
-    fn apply_gmres_pending_to(&self, s: &mut GmresSolver) {
-        if let Some(r) = self.pending_gmres.restart {
+    fn apply_gmres_pending(pending: &PendingGmres, s: &mut GmresSolver) {
+        if let Some(r) = pending.restart {
             s.set_restart(r);
         }
-        if let Some(o) = self.pending_gmres.orthog {
+        if let Some(o) = pending.orthog {
             s.set_orthog(o);
         }
-        if let Some(p) = self.pending_gmres.reorth {
+        if let Some(p) = pending.reorth {
             s.set_reorth_policy(p);
         }
-        if let Some(tol) = self.pending_gmres.reorth_tol {
+        if let Some(tol) = pending.reorth_tol {
             s.set_reorth_tol(tol);
         }
-        if let Some(f) = self.pending_gmres.happy_breakdown {
+        if let Some(f) = pending.happy_breakdown {
             s.set_happy_breakdown(f);
         }
-        if let Some(v) = self.pending_gmres.variant {
-            s.set_variant(v);
+        let mut variant_kind = pending.variant;
+        if variant_kind.is_none()
+            && matches!(s.variant, crate::solver::gmres::GmresVariant::SStep { .. })
+            && (pending.sstep.is_some() || pending.sstep_max_cond.is_some())
+        {
+            variant_kind = Some(PendingGmresVariant::SStep);
         }
+
+        if let Some(kind) = variant_kind {
+            match kind {
+                PendingGmresVariant::Classical => {
+                    s.set_variant(crate::solver::gmres::GmresVariant::Classical);
+                }
+                PendingGmresVariant::Pipelined => {
+                    s.set_variant(crate::solver::gmres::GmresVariant::Pipelined);
+                }
+                PendingGmresVariant::SStep => {
+                    let current = match s.variant {
+                        crate::solver::gmres::GmresVariant::SStep {
+                            s,
+                            reorth,
+                            max_cond,
+                        } => Some((s, reorth, max_cond)),
+                        _ => None,
+                    };
+                    let block_s = pending
+                        .sstep
+                        .or_else(|| current.map(|(s, _, _)| s))
+                        .unwrap_or(2);
+                    let max_cond = pending
+                        .sstep_max_cond
+                        .or_else(|| current.map(|(_, _, cond)| cond))
+                        .unwrap_or(1e8);
+                    let reorth = pending
+                        .reorth
+                        .or_else(|| current.map(|(_, r, _)| r))
+                        .unwrap_or_else(|| s.reorth_policy());
+                    s.set_variant(crate::solver::gmres::GmresVariant::SStep {
+                        s: block_s,
+                        reorth,
+                        max_cond,
+                    });
+                }
+            }
+        }
+    }
+
+    fn apply_gmres_pending_to(&self, s: &mut GmresSolver) {
+        Self::apply_gmres_pending(&self.pending_gmres, s);
     }
 
     fn apply_fgmres_pending_to(&self, s: &mut FgmresSolver) {

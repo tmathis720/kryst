@@ -41,8 +41,12 @@ pub struct KspOptions {
     pub gmres_reorth_tol: Option<f64>,
     /// If true, treat near-zero residual as a happy breakdown and stop
     pub gmres_happy_breakdown: Option<bool>,
-    /// GMRES algorithm variant: "classical" | "pipelined"
+    /// GMRES algorithm variant: "classical" | "pipelined" | "sstep"
     pub gmres_variant: Option<String>,
+    /// Block size for s-step GMRES panels
+    pub gmres_sstep: Option<usize>,
+    /// Conditioning guard for s-step QR (default 1e8)
+    pub gmres_sstep_max_cond: Option<f64>,
 
     /// Override restart for FGMRES; falls back to `restart` if unset
     pub fgmres_restart: Option<usize>,
@@ -296,6 +300,13 @@ impl Sink for KspOptions {
                 set_opt!(&mut self.gmres_reorth_tol, parse_as::<f64>(v, spec)?)
             }
             "ksp_gmres_variant" => set_opt!(&mut self.gmres_variant, v.to_string()),
+            "ksp_gmres_sstep" => set_opt!(
+                &mut self.gmres_sstep,
+                ensure_ge_1("ksp_gmres_sstep", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_gmres_sstep_max_cond" => {
+                set_opt!(&mut self.gmres_sstep_max_cond, parse_as::<f64>(v, spec)?)
+            }
             "ksp_reduction" => set_opt!(&mut self.reduction, v.to_string()),
             "ksp_fgmres_restart" => set_opt!(
                 &mut self.fgmres_restart,
