@@ -19,6 +19,7 @@ pub struct Workspace {
     pub pipelined_w: Vec<f64>,
     pub pipelined_wtmp: Vec<f64>,
     pub pipelined_payload: Vec<f64>,
+    pub gmres_sstep: Option<GmresSStepWorkspace>,
     pub reduction: crate::utils::reduction::ReductOptions,
     // Shared communication arenas
     pub send_arena: crate::utils::buffer_pool::BufferPool<u8>,
@@ -68,6 +69,19 @@ impl BlockVec {
         }
     }
 
+    pub fn resize(&mut self, n: usize, p: usize) {
+        if self.n != n || self.p != p {
+            self.data.resize(n.saturating_mul(p), 0.0);
+            self.n = n;
+            self.p = p;
+        } else {
+            let need = n.saturating_mul(p);
+            if self.data.len() != need {
+                self.data.resize(need, 0.0);
+            }
+        }
+    }
+
     #[inline]
     pub fn nrows(&self) -> usize {
         self.n
@@ -98,6 +112,44 @@ impl BlockVec {
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [f64] {
         &mut self.data
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GmresSStepWorkspace {
+    pub w: BlockVec,
+    pub q: BlockVec,
+    pub aq: BlockVec,
+    pub gram: Vec<f64>,
+    pub c_prev: Vec<f64>,
+    pub payload: Vec<f64>,
+    pub r: Vec<f64>,
+}
+
+impl GmresSStepWorkspace {
+    pub fn new(n: usize, s: usize, m: usize) -> Self {
+        let mut ws = Self {
+            w: BlockVec::new(n, s),
+            q: BlockVec::new(n, s),
+            aq: BlockVec::new(n, s),
+            gram: vec![0.0; s.saturating_mul(s)],
+            c_prev: vec![0.0; m.saturating_mul(s)],
+            payload: vec![0.0; s.saturating_mul(s + 1) / 2 + m.saturating_mul(s)],
+            r: vec![0.0; s.saturating_mul(s)],
+        };
+        ws.ensure(n, s, m);
+        ws
+    }
+
+    pub fn ensure(&mut self, n: usize, s: usize, m: usize) {
+        self.w.resize(n, s);
+        self.q.resize(n, s);
+        self.aq.resize(n, s);
+        ensure_len(&mut self.gram, s.saturating_mul(s));
+        ensure_len(&mut self.c_prev, m.saturating_mul(s));
+        let payload_len = s.saturating_mul(s + 1) / 2 + m.saturating_mul(s);
+        ensure_len(&mut self.payload, payload_len);
+        ensure_len(&mut self.r, s.saturating_mul(s));
     }
 }
 
@@ -164,6 +216,29 @@ impl Workspace {
         }
     }
 
+    pub fn ensure_sstep(&mut self, n: usize, s: usize, m: usize) {
+        if s == 0 {
+            self.gmres_sstep = None;
+            return;
+        }
+        let need_new = match self.gmres_sstep {
+            Some(ref buf) => {
+                buf.w.nrows() != n || buf.w.ncols() < s || buf.c_prev.len() < m.saturating_mul(s)
+            }
+            None => true,
+        };
+        if need_new {
+            self.gmres_sstep = Some(GmresSStepWorkspace::new(n, s, m));
+        } else if let Some(ref mut buf) = self.gmres_sstep {
+            buf.ensure(n, s, m);
+        }
+    }
+
+    #[inline]
+    pub fn sstep_mut(&mut self) -> Option<&mut GmresSStepWorkspace> {
+        self.gmres_sstep.as_mut()
+    }
+
     #[inline]
     pub fn n(&self) -> usize {
         self.n
@@ -223,6 +298,8 @@ impl Workspace {
         } else {
             self.blk_scratch.clear();
         }
+
+        self.ensure_sstep(n, spec.block_s, m);
     }
 
     pub fn set_reduction_options(&mut self, opt: crate::utils::reduction::ReductOptions) {
