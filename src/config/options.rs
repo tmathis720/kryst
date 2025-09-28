@@ -26,6 +26,8 @@ pub struct KspOptions {
     pub dtol: Option<f64>,
     pub maxits: Option<usize>,
     pub restart: Option<usize>,
+    /// Reduction mode for global dot products: "fast" | "deterministic"
+    pub reduction: Option<String>,
     // GMRES/FGMRES-specific (backward-compatible; all optional)
     /// Override restart for GMRES; falls back to `restart` if unset
     pub gmres_restart: Option<usize>,
@@ -33,8 +35,14 @@ pub struct KspOptions {
     pub gmres_orthog: Option<String>,
     /// If true, perform a second orthogonalization pass (reorthogonalization)
     pub gmres_reorthog: Option<bool>,
+    /// GMRES reorthogonalization mode: "never" | "ifneeded" | "always"
+    pub gmres_reorth: Option<String>,
+    /// GMRES reorthogonalization tolerance used by the if-needed strategy
+    pub gmres_reorth_tol: Option<f64>,
     /// If true, treat near-zero residual as a happy breakdown and stop
     pub gmres_happy_breakdown: Option<bool>,
+    /// GMRES algorithm variant: "classical" | "pipelined"
+    pub gmres_variant: Option<String>,
 
     /// Override restart for FGMRES; falls back to `restart` if unset
     pub fgmres_restart: Option<usize>,
@@ -42,8 +50,14 @@ pub struct KspOptions {
     pub fgmres_orthog: Option<String>,
     /// If true, perform a second orthogonalization pass (reorthogonalization)
     pub fgmres_reorthog: Option<bool>,
+    /// FGMRES reorthogonalization mode: "never" | "ifneeded" | "always"
+    pub fgmres_reorth: Option<String>,
+    /// FGMRES reorthogonalization tolerance used by the if-needed strategy
+    pub fgmres_reorth_tol: Option<f64>,
     /// If true, treat near-zero residual as a happy breakdown and stop
     pub fgmres_happy_breakdown: Option<bool>,
+    /// FGMRES algorithm variant: "classical" | "pipelined"
+    pub fgmres_variant: Option<String>,
     pub pc_side: Option<String>,
     pub matrix_file: Option<String>,
     pub rhs_file: Option<String>,
@@ -277,11 +291,21 @@ impl Sink for KspOptions {
             ),
             // Additional GMRES/FGMRES keys
             "ksp_gmres_orthog" => set_opt!(&mut self.gmres_orthog, v.to_string()),
+            "ksp_gmres_reorth" => set_opt!(&mut self.gmres_reorth, v.to_string()),
+            "ksp_gmres_reorth_tol" => {
+                set_opt!(&mut self.gmres_reorth_tol, parse_as::<f64>(v, spec)?)
+            }
+            "ksp_gmres_variant" => set_opt!(&mut self.gmres_variant, v.to_string()),
+            "ksp_reduction" => set_opt!(&mut self.reduction, v.to_string()),
             "ksp_fgmres_restart" => set_opt!(
                 &mut self.fgmres_restart,
                 ensure_ge_1("ksp_fgmres_restart", parse_as::<usize>(v, spec)?)?
             ),
             "ksp_fgmres_orthog" => set_opt!(&mut self.fgmres_orthog, v.to_string()),
+            "ksp_fgmres_reorth" => set_opt!(&mut self.fgmres_reorth, v.to_string()),
+            "ksp_fgmres_reorth_tol" => {
+                set_opt!(&mut self.fgmres_reorth_tol, parse_as::<f64>(v, spec)?)
+            }
             "ksp_pc_side" => set_opt!(&mut self.pc_side, v.to_string()),
             "matrix" => set_opt!(&mut self.matrix_file, v.to_string()),
             "rhs" => set_opt!(&mut self.rhs_file, v.to_string()),
@@ -612,6 +636,9 @@ impl KspOptions {
                     .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MAX_IT: {v}")))?,
             );
         }
+        if let Ok(v) = std::env::var("KRYST_KSP_REDUCTION") {
+            me.reduction = Some(v);
+        }
         if let Ok(v) = std::env::var("KRYST_KSP_RESTART") {
             let n: usize = v
                 .parse()
@@ -623,6 +650,9 @@ impl KspOptions {
                 .parse()
                 .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_GMRES_RESTART: {v}")))?;
             me.gmres_restart = Some(ensure_ge_1("KRYST_KSP_GMRES_RESTART", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_GMRES_VARIANT") {
+            me.gmres_variant = Some(v);
         }
         if let Ok(v) = std::env::var("KRYST_KSP_FGMRES_RESTART") {
             let n: usize = v.parse().map_err(|_| {
@@ -1124,6 +1154,18 @@ mod tests {
         assert_eq!(k.gmres_reorthog, Some(false));
 
         let k = parse_with_layers(
+            "-ksp_gmres_reorth ifneeded\n",
+            &["-ksp_gmres_reorth", "never"],
+        );
+        assert_eq!(k.gmres_reorth.as_deref(), Some("never"));
+
+        let k = parse_with_layers(
+            "-ksp_gmres_reorth_tol 0.6\n",
+            &["-ksp_gmres_reorth_tol", "0.25"],
+        );
+        assert_eq!(k.gmres_reorth_tol, Some(0.25));
+
+        let k = parse_with_layers(
             "-ksp_gmres_happy_breakdown true\n",
             &["-ksp_gmres_happy_breakdown", "false"],
         );
@@ -1141,6 +1183,18 @@ mod tests {
             &["-ksp_fgmres_reorthog", "false"],
         );
         assert_eq!(k.fgmres_reorthog, Some(false));
+
+        let k = parse_with_layers(
+            "-ksp_fgmres_reorth always\n",
+            &["-ksp_fgmres_reorth", "ifneeded"],
+        );
+        assert_eq!(k.fgmres_reorth.as_deref(), Some("ifneeded"));
+
+        let k = parse_with_layers(
+            "-ksp_fgmres_reorth_tol 0.9\n",
+            &["-ksp_fgmres_reorth_tol", "0.3"],
+        );
+        assert_eq!(k.fgmres_reorth_tol, Some(0.3));
 
         let k = parse_with_layers(
             "-ksp_fgmres_happy_breakdown false\n",
@@ -1345,6 +1399,12 @@ mod old_tests {
         assert_eq!(opts.skip_real_r_check, Some(true));
         assert_eq!(opts.epsmac, Some(1e-15));
         assert_eq!(opts.guard_zero_residual, Some(1e-14));
+    }
+
+    #[test]
+    fn cli_sets_ksp_reduction_mode() {
+        let opts = KspOptions::from_args(&["-ksp_reduction", "deterministic"]).unwrap();
+        assert_eq!(opts.reduction.as_deref(), Some("deterministic"));
     }
 
     #[test]

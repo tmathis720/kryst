@@ -48,10 +48,11 @@ use crate::solver::{
     PcgVariant,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::reduction::{ReductMode, ReductOptions};
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
-pub use workspace::{GmresSpec, Workspace};
+pub use workspace::{GmresSpec, ReorthPolicy, Workspace};
 
 /// Supported solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +115,7 @@ pub struct KspContext {
     pc_reuse: PcReusePolicy,
     last_pc_sid: Option<StructureId>,
     last_pc_vid: Option<ValuesId>,
+    reduction_opts: ReductOptions,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
@@ -124,16 +126,20 @@ pub struct KspContext {
 struct PendingGmres {
     restart: Option<usize>,
     orthog: Option<crate::solver::gmres::GmresOrthog>,
-    reorthog: Option<bool>,
+    reorth: Option<ReorthPolicy>,
+    reorth_tol: Option<f64>,
     happy_breakdown: Option<bool>,
+    variant: Option<crate::solver::gmres::GmresVariant>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct PendingFgmres {
     restart: Option<usize>,
     orthog: Option<crate::solver::fgmres::Orthog>,
-    reorthog: Option<bool>,
+    reorth: Option<ReorthPolicy>,
+    reorth_tol: Option<f64>,
     happy_breakdown: Option<bool>,
+    variant: Option<crate::solver::fgmres::FgmresVariant>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,6 +160,27 @@ impl KspContext {
         match side {
             PcSide::Symmetric => PcSide::Left,
             s => s,
+        }
+    }
+
+    fn parse_reorth_policy(label: &str) -> Result<ReorthPolicy, KError> {
+        match label.to_lowercase().as_str() {
+            "never" => Ok(ReorthPolicy::Never),
+            "ifneeded" | "if-needed" => Ok(ReorthPolicy::IfNeeded),
+            "always" => Ok(ReorthPolicy::Always),
+            other => Err(KError::SolveError(format!(
+                "Unrecognized reorth policy: {other} (expected 'never'|'ifneeded'|'always')"
+            ))),
+        }
+    }
+
+    fn parse_reduction_mode(label: &str) -> Result<ReductMode, KError> {
+        match label.to_lowercase().as_str() {
+            "fast" => Ok(ReductMode::Fast),
+            "deterministic" => Ok(ReductMode::Deterministic),
+            other => Err(KError::SolveError(format!(
+                "Unrecognized ksp_reduction mode: {other} (expected 'fast'|'deterministic')"
+            ))),
         }
     }
 
@@ -206,6 +233,7 @@ impl KspContext {
             pc_reuse: PcReusePolicy::Auto,
             last_pc_sid: None,
             last_pc_vid: None,
+            reduction_opts: ReductOptions::default(),
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
@@ -358,6 +386,13 @@ impl KspContext {
         if let Some(ref side) = opts.pc_side {
             self.set_pc_side_from_str(side)?;
         }
+        if let Some(ref mode) = opts.reduction {
+            let parsed = Self::parse_reduction_mode(mode)?;
+            self.reduction_opts.mode = parsed;
+            if let Some(ref mut w) = self.work {
+                w.set_reduction_mode(parsed);
+            }
+        }
 
         // --- GMRES options ---
         if let Some(s) = self
@@ -383,13 +418,38 @@ impl KspContext {
                 s.set_orthog(o);
                 self.pending_gmres.orthog = Some(o);
             }
-            if let Some(flag) = opts.gmres_reorthog {
+            if let Some(ref mode) = opts.gmres_reorth {
+                let policy = Self::parse_reorth_policy(mode)?;
+                s.set_reorth_policy(policy);
+                self.pending_gmres.reorth = Some(policy);
+            } else if let Some(flag) = opts.gmres_reorthog {
                 s.set_reorthog(flag);
-                self.pending_gmres.reorthog = Some(flag);
+                self.pending_gmres.reorth = Some(if flag {
+                    ReorthPolicy::Always
+                } else {
+                    ReorthPolicy::Never
+                });
+            }
+            if let Some(tol) = opts.gmres_reorth_tol {
+                s.set_reorth_tol(tol);
+                self.pending_gmres.reorth_tol = Some(tol);
             }
             if let Some(flag) = opts.gmres_happy_breakdown {
                 s.set_happy_breakdown(flag);
                 self.pending_gmres.happy_breakdown = Some(flag);
+            }
+            if let Some(ref variant) = opts.gmres_variant {
+                let v = match variant.as_str() {
+                    "classical" => crate::solver::gmres::GmresVariant::Classical,
+                    "pipelined" => crate::solver::gmres::GmresVariant::Pipelined,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined')"
+                        )));
+                    }
+                };
+                s.set_variant(v);
+                self.pending_gmres.variant = Some(v);
             }
         } else {
             if let Some(r) = opts.effective_restart_for(KspType::GMRES) {
@@ -407,11 +467,31 @@ impl KspContext {
                     }
                 });
             }
-            if let Some(flag) = opts.gmres_reorthog {
-                self.pending_gmres.reorthog = Some(flag);
+            if let Some(ref mode) = opts.gmres_reorth {
+                self.pending_gmres.reorth = Some(Self::parse_reorth_policy(mode)?);
+            } else if let Some(flag) = opts.gmres_reorthog {
+                self.pending_gmres.reorth = Some(if flag {
+                    ReorthPolicy::Always
+                } else {
+                    ReorthPolicy::Never
+                });
+            }
+            if let Some(tol) = opts.gmres_reorth_tol {
+                self.pending_gmres.reorth_tol = Some(tol);
             }
             if let Some(flag) = opts.gmres_happy_breakdown {
                 self.pending_gmres.happy_breakdown = Some(flag);
+            }
+            if let Some(ref variant) = opts.gmres_variant {
+                self.pending_gmres.variant = Some(match variant.as_str() {
+                    "classical" => crate::solver::gmres::GmresVariant::Classical,
+                    "pipelined" => crate::solver::gmres::GmresVariant::Pipelined,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined')"
+                        )));
+                    }
+                });
             }
         }
 
@@ -440,13 +520,38 @@ impl KspContext {
                 s.set_orthog(o);
                 self.pending_fgmres.orthog = Some(o);
             }
-            if let Some(flag) = opts.fgmres_reorthog {
+            if let Some(ref mode) = opts.fgmres_reorth {
+                let policy = Self::parse_reorth_policy(mode)?;
+                s.set_reorth_policy(policy);
+                self.pending_fgmres.reorth = Some(policy);
+            } else if let Some(flag) = opts.fgmres_reorthog {
                 s.set_reorthog(flag);
-                self.pending_fgmres.reorthog = Some(flag);
+                self.pending_fgmres.reorth = Some(if flag {
+                    ReorthPolicy::Always
+                } else {
+                    ReorthPolicy::Never
+                });
+            }
+            if let Some(tol) = opts.fgmres_reorth_tol {
+                s.set_reorth_tol(tol);
+                self.pending_fgmres.reorth_tol = Some(tol);
             }
             if let Some(flag) = opts.fgmres_happy_breakdown {
                 s.set_happy_breakdown(flag);
                 self.pending_fgmres.happy_breakdown = Some(flag);
+            }
+            if let Some(ref variant) = opts.fgmres_variant {
+                let v = match variant.as_str() {
+                    "classical" => crate::solver::fgmres::FgmresVariant::Classical,
+                    "pipelined" => crate::solver::fgmres::FgmresVariant::Pipelined,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_fgmres_variant: {other} (expected 'classical'|'pipelined')"
+                        )));
+                    }
+                };
+                s.set_variant(v);
+                self.pending_fgmres.variant = Some(v);
             }
         } else {
             if let Some(r) = opts.effective_restart_for(KspType::FGMRES) {
@@ -464,11 +569,31 @@ impl KspContext {
                     }
                 });
             }
-            if let Some(flag) = opts.fgmres_reorthog {
-                self.pending_fgmres.reorthog = Some(flag);
+            if let Some(ref mode) = opts.fgmres_reorth {
+                self.pending_fgmres.reorth = Some(Self::parse_reorth_policy(mode)?);
+            } else if let Some(flag) = opts.fgmres_reorthog {
+                self.pending_fgmres.reorth = Some(if flag {
+                    ReorthPolicy::Always
+                } else {
+                    ReorthPolicy::Never
+                });
+            }
+            if let Some(tol) = opts.fgmres_reorth_tol {
+                self.pending_fgmres.reorth_tol = Some(tol);
             }
             if let Some(flag) = opts.fgmres_happy_breakdown {
                 self.pending_fgmres.happy_breakdown = Some(flag);
+            }
+            if let Some(ref variant) = opts.fgmres_variant {
+                self.pending_fgmres.variant = Some(match variant.as_str() {
+                    "classical" => crate::solver::fgmres::FgmresVariant::Classical,
+                    "pipelined" => crate::solver::fgmres::FgmresVariant::Pipelined,
+                    other => {
+                        return Err(KError::SolveError(format!(
+                            "Unrecognized ksp_fgmres_variant: {other} (expected 'classical'|'pipelined')"
+                        )));
+                    }
+                });
             }
         }
 
@@ -530,11 +655,17 @@ impl KspContext {
         if let Some(o) = self.pending_gmres.orthog {
             s.set_orthog(o);
         }
-        if let Some(f) = self.pending_gmres.reorthog {
-            s.set_reorthog(f);
+        if let Some(p) = self.pending_gmres.reorth {
+            s.set_reorth_policy(p);
+        }
+        if let Some(tol) = self.pending_gmres.reorth_tol {
+            s.set_reorth_tol(tol);
         }
         if let Some(f) = self.pending_gmres.happy_breakdown {
             s.set_happy_breakdown(f);
+        }
+        if let Some(v) = self.pending_gmres.variant {
+            s.set_variant(v);
         }
     }
 
@@ -545,11 +676,17 @@ impl KspContext {
         if let Some(o) = self.pending_fgmres.orthog {
             s.set_orthog(o);
         }
-        if let Some(f) = self.pending_fgmres.reorthog {
-            s.set_reorthog(f);
+        if let Some(p) = self.pending_fgmres.reorth {
+            s.set_reorth_policy(p);
+        }
+        if let Some(tol) = self.pending_fgmres.reorth_tol {
+            s.set_reorth_tol(tol);
         }
         if let Some(f) = self.pending_fgmres.happy_breakdown {
             s.set_happy_breakdown(f);
+        }
+        if let Some(v) = self.pending_fgmres.variant {
+            s.set_variant(v);
         }
     }
 
@@ -796,6 +933,9 @@ impl KspContext {
             .unwrap_or(true)
         {
             self.work = Some(Workspace::new(m));
+            if let Some(ref mut w) = self.work {
+                w.set_reduction_options(self.reduction_opts.clone());
+            }
             if let Some(ref mut solver) = self.solver
                 && let Some(ref mut w) = self.work
             {
@@ -1121,6 +1261,7 @@ mod tests {
 
     #[test]
     fn gmres_options_apply_immediately_and_when_staged() {
+        use crate::context::ksp_context::ReorthPolicy;
         use crate::solver::gmres::{GmresOrthog, GmresSolver};
         let mut ksp = KspContext::new();
 
@@ -1128,7 +1269,8 @@ mod tests {
         let opts = KspOptions {
             gmres_restart: Some(47),
             gmres_orthog: Some("mgs".into()),
-            gmres_reorthog: Some(true),
+            gmres_reorth: Some("always".into()),
+            gmres_reorth_tol: Some(0.55),
             gmres_happy_breakdown: Some(true),
             ..Default::default()
         };
@@ -1148,19 +1290,24 @@ mod tests {
         assert_eq!(orth, GmresOrthog::Mgs);
         assert!(reo);
         assert!(hb);
+        assert!(matches!(s.reorth, ReorthPolicy::Always));
+        assert!((s.reorth_tol - 0.55).abs() < 1e-12);
     }
 
     #[test]
     fn fgmres_options_apply() {
-        use crate::solver::fgmres::{FgmresSolver, Orthog};
+        use crate::context::ksp_context::ReorthPolicy;
+        use crate::solver::fgmres::{FgmresSolver, FgmresVariant, Orthog};
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Fgmres).unwrap();
 
         let opts = KspOptions {
             fgmres_restart: Some(25),
             fgmres_orthog: Some("cgs".into()),
-            fgmres_reorthog: Some(false),
+            fgmres_reorth: Some("never".into()),
+            fgmres_reorth_tol: Some(0.42),
             fgmres_happy_breakdown: Some(true),
+            fgmres_variant: Some("pipelined".into()),
             ..Default::default()
         };
         ksp.set_from_options(&opts).unwrap();
@@ -1177,5 +1324,25 @@ mod tests {
         assert_eq!(orth, Orthog::Classical);
         assert!(!reo);
         assert!(hb);
+        assert_eq!(s.variant, FgmresVariant::Pipelined);
+        assert!(matches!(s.reorth, ReorthPolicy::Never));
+        assert!((s.reorth_tol - 0.42).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reduction_option_updates_workspace() {
+        use crate::utils::reduction::ReductMode;
+        let mut ksp = KspContext::new();
+        ksp.work = Some(Workspace::new(4));
+        let opts = KspOptions {
+            reduction: Some("deterministic".into()),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        let ws = ksp.work.as_ref().unwrap();
+        assert!(matches!(
+            ws.reduction_options().mode,
+            ReductMode::Deterministic
+        ));
     }
 }
