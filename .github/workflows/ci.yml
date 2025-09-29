@@ -185,3 +185,17 @@ jobs:
           echo "[CI] Running MPI-enabled tests with 4 processes..."
           mpirun --oversubscribe -np 4 \
             cargo test --locked --verbose --features mpi -- --nocapture --ignored
+
+  bench-smoke:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref_name, 'release/')
+    needs: build-and-unit-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Criterion smoke test
+        run: cargo bench -- spmv_vs_spmm -- --sample-size 10

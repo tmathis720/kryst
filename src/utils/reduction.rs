@@ -1,13 +1,51 @@
+use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 
 use crate::error::KError;
 use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static WAIT_PAIR_COUNT: AtomicUsize = AtomicUsize::new(0);
 static WAIT_VEC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only counters that track how many global reductions were launched.
+#[derive(Clone, Debug, Default)]
+pub struct ReductionCounters {
+    /// Number of distinct allreduce operations.
+    pub allreduces: usize,
+    /// Total number of scalar entries reduced across all operations.
+    pub reduced_scalars: usize,
+}
+
+static TEST_COUNTER_ENABLED: AtomicBool = AtomicBool::new(false);
+static TEST_COUNTERS: Lazy<Mutex<ReductionCounters>> =
+    Lazy::new(|| Mutex::new(ReductionCounters::default()));
+
+fn record_reduction(len: usize) {
+    if TEST_COUNTER_ENABLED.load(Ordering::Relaxed) {
+        let mut guard = TEST_COUNTERS.lock().unwrap();
+        guard.allreduces += 1;
+        guard.reduced_scalars += len;
+    }
+}
+
+/// Enable or disable the global reduction counter used in tests.
+pub fn install_test_counter(enable: bool) {
+    TEST_COUNTER_ENABLED.store(enable, Ordering::SeqCst);
+    if !enable {
+        let mut guard = TEST_COUNTERS.lock().unwrap();
+        *guard = ReductionCounters::default();
+    }
+}
+
+/// Take the current reduction counters, resetting the stored values to zero.
+pub fn take_test_counter() -> ReductionCounters {
+    let mut guard = TEST_COUNTERS.lock().unwrap();
+    std::mem::take(&mut *guard)
+}
 
 #[inline]
 fn record_wait_pair() {
@@ -195,6 +233,7 @@ impl AllreduceOps for crate::parallel::NoComm {
         b: f64,
         _opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
+        record_reduction(2);
         let sum = (a, b);
         Ok((AllreduceHandle::new_ready(sum), sum))
     }
@@ -204,6 +243,7 @@ impl AllreduceOps for crate::parallel::NoComm {
         data: Vec<f64>,
         _opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
+        record_reduction(data.len());
         Ok((AllreduceHandle::new_ready(data.clone()), data))
     }
 
@@ -246,6 +286,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         b: f64,
         _opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
+        record_reduction(2);
         let (tx, rx) = std::sync::mpsc::channel();
         let local = (a, b);
         rayon::spawn_fifo(move || {
@@ -259,6 +300,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         data: Vec<f64>,
         _opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
+        record_reduction(data.len());
         let (tx, rx) = std::sync::mpsc::channel();
         let local = data.clone();
         rayon::spawn_fifo(move || {
@@ -313,6 +355,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         if matches!(opt.mode, ReductMode::Deterministic) {
             return Err(KError::Unsupported("deterministic reductions"));
         }
+        record_reduction(2);
         let mut buf = vec![a, b];
         let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
         let rc = unsafe {
@@ -347,6 +390,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         if matches!(opt.mode, ReductMode::Deterministic) {
             return Err(KError::Unsupported("deterministic reductions"));
         }
+        record_reduction(data.len());
         let mut buf = data.clone();
         let count = buf.len();
         let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
