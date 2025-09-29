@@ -1,3 +1,4 @@
+use crate::core::block::BlockVec;
 use crate::solver::gmres::AugmentationPolicy;
 
 #[derive(Debug, Clone, Default)]
@@ -140,69 +141,6 @@ pub struct GmresSpec {
     pub m: usize,
     pub need_z: bool,
     pub block_s: usize,
-}
-
-/// Column-major storage reused for block Krylov vectors.
-#[derive(Debug, Clone)]
-pub struct BlockVec {
-    data: Vec<f64>,
-    n: usize,
-    p: usize,
-}
-
-impl BlockVec {
-    pub fn new(n: usize, p: usize) -> Self {
-        Self {
-            data: vec![0.0; n.saturating_mul(p)],
-            n,
-            p,
-        }
-    }
-
-    pub fn resize(&mut self, n: usize, p: usize) {
-        if self.n != n || self.p != p {
-            self.data.resize(n.saturating_mul(p), 0.0);
-            self.n = n;
-            self.p = p;
-        } else {
-            let need = n.saturating_mul(p);
-            if self.data.len() != need {
-                self.data.resize(need, 0.0);
-            }
-        }
-    }
-
-    #[inline]
-    pub fn nrows(&self) -> usize {
-        self.n
-    }
-
-    #[inline]
-    pub fn ncols(&self) -> usize {
-        self.p
-    }
-
-    #[inline]
-    pub fn col(&self, j: usize) -> &[f64] {
-        let offset = j * self.n;
-        &self.data[offset..offset + self.n]
-    }
-
-    #[inline]
-    pub fn col_mut(&mut self, j: usize) -> &mut [f64] {
-        let offset = j * self.n;
-        &mut self.data[offset..offset + self.n]
-    }
-
-    #[inline]
-    pub fn as_slice(&self) -> &[f64] {
-        &self.data
-    }
-
-    #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [f64] {
-        &mut self.data
-    }
 }
 
 #[derive(Debug, Clone)]
