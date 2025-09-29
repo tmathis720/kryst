@@ -31,6 +31,13 @@ pub enum GmresOrthog {
     Cgs,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AugmentationPolicy {
+    None,
+    GmresDR { k: usize },
+    Lgmres { ell: usize },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GmresVariant {
     Classical,
@@ -56,6 +63,7 @@ pub struct GmresSolver {
     /// Whether to treat near-zero residual as a happy breakdown
     pub happy_breakdown: bool,
     pub variant: GmresVariant,
+    pub augmentation: AugmentationPolicy,
 }
 
 impl GmresSolver {
@@ -74,6 +82,7 @@ impl GmresSolver {
             reorth_tol: 0.7,
             happy_breakdown: true,
             variant: GmresVariant::Classical,
+            augmentation: AugmentationPolicy::None,
         }
     }
 
@@ -98,10 +107,25 @@ impl GmresSolver {
             block_s,
         };
         w.acquire_gmres(spec);
+        let rmax = self.augmentation_dim();
+        if rmax > 0 {
+            w.gmres_recycle
+                .configure(n, rmax, self.augmentation.clone());
+        } else {
+            w.gmres_recycle.configure(n, 0, AugmentationPolicy::None);
+        }
     }
 
     pub fn reorth_policy(&self) -> ReorthPolicy {
         self.reorth
+    }
+
+    fn augmentation_dim(&self) -> usize {
+        match self.augmentation {
+            AugmentationPolicy::None => 0,
+            AugmentationPolicy::GmresDR { k } => k.min(self.restart),
+            AugmentationPolicy::Lgmres { ell } => ell.min(self.restart),
+        }
     }
 
     fn apply_precond(

@@ -1,3 +1,5 @@
+use crate::solver::gmres::AugmentationPolicy;
+
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
     pub tmp1: Vec<f64>,
@@ -20,6 +22,7 @@ pub struct Workspace {
     pub pipelined_wtmp: Vec<f64>,
     pub pipelined_payload: Vec<f64>,
     pub gmres_sstep: Option<GmresSStepWorkspace>,
+    pub gmres_recycle: RecyclingSpace,
     pub reduction: crate::utils::reduction::ReductOptions,
     // Shared communication arenas
     pub send_arena: crate::utils::buffer_pool::BufferPool<u8>,
@@ -28,6 +31,93 @@ pub struct Workspace {
     n: usize,
     m: usize,
     need_z: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecyclingSpace {
+    u: Vec<f64>,
+    au: Vec<f64>,
+    n: usize,
+    rmax: usize,
+    cols: usize,
+    policy: AugmentationPolicy,
+}
+
+impl Default for RecyclingSpace {
+    fn default() -> Self {
+        Self {
+            u: Vec::new(),
+            au: Vec::new(),
+            n: 0,
+            rmax: 0,
+            cols: 0,
+            policy: AugmentationPolicy::None,
+        }
+    }
+}
+
+impl RecyclingSpace {
+    pub fn configure(&mut self, n: usize, rmax: usize, policy: AugmentationPolicy) {
+        if self.n != n || self.rmax != rmax {
+            self.u.resize(n.saturating_mul(rmax), 0.0);
+            self.au.resize(n.saturating_mul(rmax), 0.0);
+            self.n = n;
+            self.rmax = rmax;
+            self.cols = 0;
+        }
+        self.policy = policy;
+    }
+
+    #[inline]
+    pub fn policy(&self) -> AugmentationPolicy {
+        self.policy.clone()
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.rmax
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    pub fn clear(&mut self) {
+        self.cols = 0;
+    }
+
+    pub fn col(&self, j: usize) -> &[f64] {
+        let n = self.n;
+        &self.u[j * n..(j + 1) * n]
+    }
+
+    pub fn col_mut(&mut self, j: usize) -> &mut [f64] {
+        let n = self.n;
+        &mut self.u[j * n..(j + 1) * n]
+    }
+
+    pub fn a_col(&self, j: usize) -> &[f64] {
+        let n = self.n;
+        &self.au[j * n..(j + 1) * n]
+    }
+
+    pub fn a_col_mut(&mut self, j: usize) -> &mut [f64] {
+        let n = self.n;
+        &mut self.au[j * n..(j + 1) * n]
+    }
+
+    pub fn push_from(&mut self, u: &[f64], au: &[f64]) {
+        if self.cols >= self.rmax {
+            return;
+        }
+        let n = self.n;
+        let dst_u = &mut self.u[self.cols * n..(self.cols + 1) * n];
+        let dst_au = &mut self.au[self.cols * n..(self.cols + 1) * n];
+        dst_u.copy_from_slice(u);
+        dst_au.copy_from_slice(au);
+        self.cols += 1;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
