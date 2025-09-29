@@ -52,7 +52,8 @@ use crate::utils::reduction::{ReductMode, ReductOptions};
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
-pub use workspace::{BlockVec, GmresSStepWorkspace, GmresSpec, ReorthPolicy, Workspace};
+pub use crate::core::block::BlockVec;
+pub use workspace::{GmresSStepWorkspace, GmresSpec, ReorthPolicy, Workspace};
 
 /// Supported solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

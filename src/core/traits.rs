@@ -13,6 +13,8 @@ pub trait MatTransVec<V> {
 }
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
+use crate::core::block::BlockVec;
+use crate::error::KError;
 use crate::matrix::op::LinOp;
 use faer::traits::ComplexField;
 
@@ -36,6 +38,52 @@ where
             panic!("t_matvec not supported");
         }
         LinOp::t_matvec(self, &x[..], &mut y[..]);
+    }
+}
+
+/// Optional extension trait for block matvec operations while remaining matrix-free.
+pub trait BlockOp {
+    /// Apply the operator to multiple columns at once. Default implementation calls
+    /// [`apply`](Self::apply) per column to remain format agnostic.
+    fn apply_many(&self, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError> {
+        if x.ncols() != y.ncols() {
+            return Err(KError::InvalidInput(format!(
+                "apply_many column mismatch: {} vs {}",
+                x.ncols(),
+                y.ncols()
+            )));
+        }
+        for c in 0..x.ncols() {
+            self.apply(x.col(c), y.col_mut(c))?;
+        }
+        Ok(())
+    }
+
+    /// Apply the operator to a single column.
+    fn apply(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
+
+    /// Apply the transpose of the operator if available.
+    fn apply_t(&self, _x: &[f64], _y: &mut [f64]) -> Result<(), KError> {
+        Err(KError::Unsupported("transpose not available".into()))
+    }
+}
+
+impl<T> BlockOp for T
+where
+    T: LinOp<S = f64> + ?Sized,
+{
+    fn apply(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        LinOp::try_matvec(self, x, y)
+    }
+
+    fn apply_t(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if !LinOp::supports_transpose(self) {
+            return Err(KError::Unsupported(
+                "LinOp::t_matvec called but transpose not supported".into(),
+            ));
+        }
+        LinOp::t_matvec(self, x, y);
+        Ok(())
     }
 }
 
