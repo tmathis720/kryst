@@ -89,7 +89,7 @@ pub static SPECS: &[Spec] = &[
         key: "ksp_gmres_variant",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "GMRES variant: classical|pipelined",
+        doc: "GMRES variant: classical|pipelined|sstep[:s]",
     },
     Spec {
         flag: "-ksp_gmres_reorthog",

@@ -47,9 +47,27 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 ### Monitoring & Automation
 
 - **Iteration Monitoring**: Real-time convergence tracking with `IterationMonitor`
-- **Parameter Tuning**: Automated optimization with `ParameterTuner` and grid search  
+- **Parameter Tuning**: Automated optimization with `ParameterTuner` and grid search
 - **Data Export**: CSV output for convergence analysis with `enable_csv_logging()`
 - **Performance Metrics**: Comprehensive timing and convergence rate analysis
+
+### Latency-aware solver knobs
+
+The Krylov drivers expose command-line options to balance global reductions
+against additional local work. The most common flags mirror PETSc's `-ksp_*`
+options and can be combined with the deterministic reduction feature for
+reproducible CI runs.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-ksp_cg_pipelined <bool>` | `false` | Enable the pipelined PCG algorithm (≈1 allreduce / iteration). |
+| `-ksp_gmres_variant classical|pipelined|sstep[:s]` | `classical` | Select the GMRES variant. `sstep` accepts an optional block size `s` (currently parsed but reported as not yet implemented). |
+| `-ksp_residual_replacement <iters>` | `50` | Force periodic residual recomputation in pipelined CG to control drift (`0` disables). |
+| `-ksp_reorthog never|ifneeded|always` | `ifneeded` | Control Gram-Schmidt reorthogonalisation in GMRES and FGMRES. |
+
+Each solver also records the number of global reductions performed in
+`SolveStats::counters.num_global_reductions`, making it easy to assert expected
+latency costs in automated tests.
 
 ### Architecture
 - **PETSc-style API**: Unified KSP context for runtime solver selection

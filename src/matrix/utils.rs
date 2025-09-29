@@ -200,6 +200,160 @@ pub fn spgemm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, 
     spgemm_with_drop_tol(a, b, 1e-12)
 }
 
+/// Canonical Poisson stencil helpers used by solver tests and benchmarks.
+pub mod poisson {
+    use super::*;
+
+    /// Return the 5-point finite-difference discretisation of the 2-D Poisson
+    /// operator on an `n × n` grid.
+    pub fn poisson_5pt_2d(n: usize) -> CsrMatrix<f64> {
+        super::poisson_2d(n, n)
+    }
+
+    /// Return the 7-point finite-difference discretisation of the 3-D Poisson
+    /// operator on an `n × n × n` grid.
+    pub fn poisson_7pt_3d(n: usize) -> CsrMatrix<f64> {
+        super::poisson_3d(n, n, n)
+    }
+}
+
+/// Build an SPD anisotropic diffusion operator with a rotated principal axis.
+///
+/// The diffusion tensor is `R diag(1, eps) Rᵀ` with rotation angle `theta`.
+/// The discretisation uses a nine-point stencil so that cross-derivative terms
+/// are represented explicitly; the diagonal entry is chosen to preserve row
+/// sum symmetry so the matrix remains SPD.
+pub fn anisotropic_poisson_2d(n: usize, theta: f64, eps: f64) -> CsrMatrix<f64> {
+    assert!(n > 1, "grid must be at least 2 × 2");
+    let nx = n;
+    let ny = n;
+    let mut row_ptr = Vec::with_capacity(nx * ny + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+
+    let c = theta.cos();
+    let s = theta.sin();
+    let d11 = c * c + eps * s * s;
+    let d22 = s * s + eps * c * c;
+    let d12 = (1.0 - eps) * s * c;
+
+    let mut push_entry = |i: usize, j: usize, v: f64| {
+        col_idx.push(j);
+        vals.push(v);
+    };
+
+    for y in 0..ny {
+        for x in 0..nx {
+            let idx = y * nx + x;
+            let mut diag = 0.0;
+
+            // West/East diffusion
+            if x > 0 {
+                push_entry(idx, idx - 1, -d11);
+                diag += d11;
+            }
+            if x + 1 < nx {
+                push_entry(idx, idx + 1, -d11);
+                diag += d11;
+            }
+
+            // South/North diffusion
+            if y > 0 {
+                push_entry(idx, idx - nx, -d22);
+                diag += d22;
+            }
+            if y + 1 < ny {
+                push_entry(idx, idx + nx, -d22);
+                diag += d22;
+            }
+
+            // Cross derivatives (nine-point stencil). The discretisation uses
+            // the symmetric form so that opposite corners receive opposite
+            // signs which keeps the assembled matrix SPD for eps > 0.
+            if x > 0 && y > 0 {
+                push_entry(idx, idx - nx - 1, -d12);
+                diag += d12.abs();
+            }
+            if x > 0 && y + 1 < ny {
+                push_entry(idx, idx + nx - 1, d12);
+                diag += d12.abs();
+            }
+            if x + 1 < nx && y > 0 {
+                push_entry(idx, idx - nx + 1, d12);
+                diag += d12.abs();
+            }
+            if x + 1 < nx && y + 1 < ny {
+                push_entry(idx, idx + nx + 1, -d12);
+                diag += d12.abs();
+            }
+
+            push_entry(idx, idx, diag);
+            row_ptr.push(col_idx.len());
+        }
+    }
+
+    CsrMatrix::from_csr(nx * ny, nx * ny, row_ptr, col_idx, vals)
+}
+
+/// Build a non-symmetric convection–diffusion operator on an `n × n` grid.
+///
+/// The diffusion part is the standard 5-point Laplacian, while the
+/// convection term uses a simple upwind bias controlled by the Peclet number.
+pub fn convection_diffusion_2d(n: usize, peclet: f64) -> CsrMatrix<f64> {
+    assert!(n > 1, "grid must be at least 2 × 2");
+    let nx = n;
+    let ny = n;
+    let mut row_ptr = Vec::with_capacity(nx * ny + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+
+    let upwind = 0.5 * peclet;
+
+    let mut push_entry = |i: usize, j: usize, v: f64| {
+        col_idx.push(j);
+        vals.push(v);
+    };
+
+    for y in 0..ny {
+        for x in 0..nx {
+            let idx = y * nx + x;
+            let mut diag = 4.0;
+
+            if x > 0 {
+                push_entry(idx, idx - 1, -1.0 - upwind);
+                diag += 1.0 + upwind;
+            }
+            if x + 1 < nx {
+                push_entry(idx, idx + 1, -1.0 + upwind);
+                diag += 1.0 - upwind;
+            }
+            if y > 0 {
+                push_entry(idx, idx - nx, -1.0 - upwind);
+                diag += 1.0 + upwind;
+            }
+            if y + 1 < ny {
+                push_entry(idx, idx + nx, -1.0 + upwind);
+                diag += 1.0 - upwind;
+            }
+
+            push_entry(idx, idx, diag);
+            row_ptr.push(col_idx.len());
+        }
+    }
+
+    CsrMatrix::from_csr(nx * ny, nx * ny, row_ptr, col_idx, vals)
+}
+
+/// Generate a reproducible random right-hand side vector of length `n` using a
+/// deterministic seed. Values lie in `[-0.5, 0.5)`.
+pub fn random_rhs(n: usize, seed: u64) -> Vec<f64> {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    (0..n).map(|_| rng.r#gen::<f64>() - 0.5).collect()
+}
+
 #[cfg(feature = "simd")]
 /// Returns the crate-wide default tuning for the SIMD SpMV plan builder.
 pub fn default_spmv_tuning() -> SpmvTuning {
