@@ -45,7 +45,7 @@ pub(crate) fn non_galerkin_filter_coarse(
                     l1 += vals[t].abs();
                 }
             }
-            for (order_pos, &t) in idx.iter().enumerate() {
+            for &t in idx.iter() {
                 let col = pc[t];
                 let v = vals[t];
                 if col == i {

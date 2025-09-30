@@ -2,6 +2,7 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
+use crate::preconditioner::Preconditioner;
 use crate::preconditioner::jacobi::Jacobi;
 use crate::solver::LinearSolver;
 use crate::solver::gmres::GmresSolver;

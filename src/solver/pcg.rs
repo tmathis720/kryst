@@ -36,6 +36,7 @@ pub enum PcgVariant {
 }
 
 /// Default replacement interval for pipelined CG.
+///
 pub const PCG_PIPELINED_DEFAULT_REPLACE_EVERY: usize = 50;
 
 pub struct PcgSolver {
@@ -510,7 +511,7 @@ impl PcgSolver {
             );
         }
 
-        let mut reported_residual = match self.norm_type {
+        let _ = match self.norm_type {
             CgNormType::Preconditioned => rho0.sqrt(),
             CgNormType::Unpreconditioned | CgNormType::None => rnorm0_sq.sqrt(),
             CgNormType::Natural => {
@@ -520,18 +521,20 @@ impl PcgSolver {
             }
         };
 
+        let actual_res0 = self.nrm2(r, comm);
+        counters.num_global_reductions += 1;
         if let Some(ms) = monitors {
             for m in ms {
-                m(0, reported_residual);
+                m(0, actual_res0);
             }
         }
         if let Some(m) = &self.true_residual_monitor {
-            m(0, self.nrm2(r, comm));
+            m(0, actual_res0);
         }
 
-        let (reason0, mut stats) = self.conv.check(reported_residual, rnorm0, 0);
+        let (reason0, mut stats) = self.conv.check(actual_res0, rnorm0, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            stats.final_residual = self.nrm2(r, comm);
+            stats.final_residual = actual_res0;
             counters.residual_replacements = 0;
             stats.counters = counters;
             return Ok(stats);
@@ -547,21 +550,187 @@ impl PcgSolver {
         let mut pending_rho: Option<AllreduceHandle<(f64, f64)>> = None;
         let mut iterations = 0usize;
         let mut residual_replacements = 0usize;
+        let mut force_restart = false;
 
-        while iterations < self.conv.max_iters {
-            if iterations > 0 {
-                let handle = pending_rho
-                    .take()
-                    .expect("pipelined PCG pending rho handle");
-                rho_curr = {
+        'solve: loop {
+            while iterations < self.conv.max_iters {
+                if iterations > 0 {
+                    let handle = pending_rho
+                        .take()
+                        .expect("pipelined PCG pending rho handle");
+                    rho_curr = {
+                        counters.num_global_reductions += 1;
+                        <C as AllreduceOps>::wait_pair(handle).0
+                    };
+                    if !rho_curr.is_finite() || rho_curr < 0.0 {
+                        return Err(KError::IndefinitePreconditioner);
+                    }
+
+                    let _ = match self.norm_type {
+                        CgNormType::Preconditioned => rho_curr.sqrt(),
+                        CgNormType::Unpreconditioned | CgNormType::None => {
+                            let (h_nr, _) = crate::solver::common::nrm2_async(comm, r, &opt);
+                            counters.num_global_reductions += 1;
+                            <C as AllreduceOps>::wait_pair(h_nr).0.sqrt()
+                        }
+                        CgNormType::Natural => {
+                            let (h_z, _) = crate::solver::common::nrm2_async(comm, z, &opt);
+                            counters.num_global_reductions += 1;
+                            <C as AllreduceOps>::wait_pair(h_z).0.sqrt()
+                        }
+                    };
+
+                    let actual_res = self.nrm2(r, comm);
                     counters.num_global_reductions += 1;
-                    <C as AllreduceOps>::wait_pair(handle).0
+
+                    if let Some(ms) = monitors {
+                        for m in ms {
+                            m(iterations, actual_res);
+                        }
+                    }
+                    if let Some(m) = &self.true_residual_monitor {
+                        m(iterations, actual_res);
+                    }
+
+                    let (reason, mut stats) = self.conv.check(actual_res, rnorm0, iterations);
+                    if !matches!(reason, ConvergedReason::Continued) {
+                        stats.final_residual = actual_res;
+                        let tol = self.conv.atol.max(self.conv.rtol * rnorm0);
+                        if actual_res > tol {
+                            // Residual drift: explicitly recompute to realign and continue.
+                            a.matvec(x, ap);
+                            for i in 0..n {
+                                r[i] = b[i] - ap[i];
+                            }
+                            if let Some(pc) = pc.as_mut() {
+                                pc.apply(pc_side, r, z)?;
+                            } else {
+                                z.copy_from_slice(r);
+                            }
+                            residual_replacements += 1;
+                            p.copy_from_slice(z);
+                            rho_prev = 0.0;
+
+                            rho_curr = self.dot(r, z, comm);
+                            counters.num_global_reductions += 1;
+                            if !rho_curr.is_finite() || rho_curr < 0.0 {
+                                return Err(KError::IndefinitePreconditioner);
+                            }
+
+                            let _ = match self.norm_type {
+                                CgNormType::Preconditioned => rho_curr.sqrt(),
+                                CgNormType::Unpreconditioned | CgNormType::None => {
+                                    counters.num_global_reductions += 1;
+                                    self.nrm2(r, comm)
+                                }
+                                CgNormType::Natural => {
+                                    counters.num_global_reductions += 1;
+                                    self.nrm2(z, comm)
+                                }
+                            };
+
+                            let (h_rho_next, _) = dot1_async(comm, r, z, &opt)?;
+                            pending_rho = Some(h_rho_next);
+                            counters.residual_replacements = residual_replacements;
+                            continue;
+                        }
+
+                        counters.residual_replacements = residual_replacements;
+                        stats.counters = counters;
+                        return Ok(stats);
+                    }
+                }
+
+                if iterations >= self.conv.max_iters {
+                    break;
+                }
+
+                if iterations > 0 {
+                    let beta = if rho_prev == 0.0 {
+                        0.0
+                    } else {
+                        rho_curr / rho_prev
+                    };
+                    for i in 0..n {
+                        p[i] = z[i] + beta * p[i];
+                    }
+                }
+
+                a.matvec(p, ap);
+
+                let mut pp_ap_local = 0.0;
+                for i in 0..n {
+                    pp_ap_local += p[i] * ap[i];
+                }
+
+                let (h_ppap, _) = comm.allreduce2_async(pp_ap_local, 0.0, &opt)?;
+                let pp_ap = {
+                    counters.num_global_reductions += 1;
+                    <C as AllreduceOps>::wait_pair(h_ppap).0
                 };
+                if !pp_ap.is_finite() {
+                    return Err(KError::IndefiniteMatrix);
+                }
+                if pp_ap.abs() <= f64::EPSILON {
+                    return Ok(SolveStats::new(
+                        iterations,
+                        self.nrm2(r, comm),
+                        ConvergedReason::ConvergedHappyBreakdown,
+                    )
+                    .with_counters({
+                        counters.residual_replacements = residual_replacements;
+                        counters
+                    }));
+                }
+
+                let alpha = rho_curr / pp_ap;
+                for i in 0..n {
+                    x[i] += alpha * p[i];
+                    r[i] -= alpha * ap[i];
+                }
+
+                if let Some(pc) = pc.as_mut() {
+                    pc.apply(pc_side, r, z)?;
+                } else {
+                    z.copy_from_slice(r);
+                }
+
+                if replace_every > 0 && ((iterations + 1) % replace_every == 0) {
+                    a.matvec(x, ap);
+                    for i in 0..n {
+                        r[i] = b[i] - ap[i];
+                    }
+                    if let Some(pc) = pc.as_mut() {
+                        pc.apply(pc_side, r, z)?;
+                    } else {
+                        z.copy_from_slice(r);
+                    }
+                    residual_replacements += 1;
+                    p.copy_from_slice(z);
+                    rho_prev = 0.0;
+                    force_restart = true;
+                }
+
+                let (h_rho_next, _) = dot1_async(comm, r, z, &opt)?;
+                pending_rho = Some(h_rho_next);
+
+                if force_restart {
+                    rho_prev = 0.0;
+                    force_restart = false;
+                } else {
+                    rho_prev = rho_curr;
+                }
+                iterations += 1;
+            }
+
+            if let Some(handle) = pending_rho.take() {
+                counters.num_global_reductions += 1;
+                rho_curr = <C as AllreduceOps>::wait_pair(handle).0;
                 if !rho_curr.is_finite() || rho_curr < 0.0 {
                     return Err(KError::IndefinitePreconditioner);
                 }
 
-                reported_residual = match self.norm_type {
+                let _ = match self.norm_type {
                     CgNormType::Preconditioned => rho_curr.sqrt(),
                     CgNormType::Unpreconditioned | CgNormType::None => {
                         let (h_nr, _) = crate::solver::common::nrm2_async(comm, r, &opt);
@@ -575,135 +744,75 @@ impl PcgSolver {
                     }
                 };
 
+                let actual_res = self.nrm2(r, comm);
+                counters.num_global_reductions += 1;
+
                 if let Some(ms) = monitors {
                     for m in ms {
-                        m(iterations, reported_residual);
+                        m(iterations, actual_res);
                     }
                 }
                 if let Some(m) = &self.true_residual_monitor {
-                    m(iterations, self.nrm2(r, comm));
+                    m(iterations, actual_res);
                 }
 
-                let (reason, mut stats) = self.conv.check(reported_residual, rnorm0, iterations);
+                let (reason, mut stats) = self.conv.check(actual_res, rnorm0, iterations);
                 if !matches!(reason, ConvergedReason::Continued) {
-                    stats.final_residual = self.nrm2(r, comm);
+                    stats.final_residual = actual_res;
+                    let tol = self.conv.atol.max(self.conv.rtol * rnorm0);
+                    if actual_res > tol {
+                        if iterations >= self.conv.max_iters {
+                            counters.residual_replacements = residual_replacements;
+                            break 'solve;
+                        }
+
+                        a.matvec(x, ap);
+                        for i in 0..n {
+                            r[i] = b[i] - ap[i];
+                        }
+                        if let Some(pc) = pc.as_mut() {
+                            pc.apply(pc_side, r, z)?;
+                        } else {
+                            z.copy_from_slice(r);
+                        }
+                        residual_replacements += 1;
+                        p.copy_from_slice(z);
+                        rho_prev = 0.0;
+
+                        rho_curr = self.dot(r, z, comm);
+                        counters.num_global_reductions += 1;
+                        if !rho_curr.is_finite() || rho_curr < 0.0 {
+                            return Err(KError::IndefinitePreconditioner);
+                        }
+
+                        let _ = match self.norm_type {
+                            CgNormType::Preconditioned => rho_curr.sqrt(),
+                            CgNormType::Unpreconditioned | CgNormType::None => {
+                                counters.num_global_reductions += 1;
+                                self.nrm2(r, comm)
+                            }
+                            CgNormType::Natural => {
+                                counters.num_global_reductions += 1;
+                                self.nrm2(z, comm)
+                            }
+                        };
+
+                        let (h_rho_next, _) = dot1_async(comm, r, z, &opt)?;
+                        pending_rho = Some(h_rho_next);
+                        if iterations < self.conv.max_iters {
+                            force_restart = true;
+                        }
+                        counters.residual_replacements = residual_replacements;
+                        continue 'solve;
+                    }
+
                     counters.residual_replacements = residual_replacements;
                     stats.counters = counters;
                     return Ok(stats);
                 }
             }
 
-            if iterations >= self.conv.max_iters {
-                break;
-            }
-
-            if iterations > 0 {
-                let beta = if rho_prev == 0.0 {
-                    0.0
-                } else {
-                    rho_curr / rho_prev
-                };
-                for i in 0..n {
-                    p[i] = z[i] + beta * p[i];
-                }
-            }
-
-            a.matvec(p, ap);
-
-            let mut pp_ap_local = 0.0;
-            for i in 0..n {
-                pp_ap_local += p[i] * ap[i];
-            }
-
-            let (h_ppap, _) = comm.allreduce2_async(pp_ap_local, 0.0, &opt)?;
-            let pp_ap = {
-                counters.num_global_reductions += 1;
-                <C as AllreduceOps>::wait_pair(h_ppap).0
-            };
-            if !pp_ap.is_finite() {
-                return Err(KError::IndefiniteMatrix);
-            }
-            if pp_ap.abs() <= f64::EPSILON {
-                return Ok(SolveStats::new(
-                    iterations,
-                    self.nrm2(r, comm),
-                    ConvergedReason::ConvergedHappyBreakdown,
-                )
-                .with_counters({
-                    counters.residual_replacements = residual_replacements;
-                    counters
-                }));
-            }
-
-            let alpha = rho_curr / pp_ap;
-            for i in 0..n {
-                x[i] += alpha * p[i];
-                r[i] -= alpha * ap[i];
-            }
-
-            if let Some(pc) = pc.as_mut() {
-                pc.apply(pc_side, r, z)?;
-            } else {
-                z.copy_from_slice(r);
-            }
-
-            if replace_every > 0 && ((iterations + 1) % replace_every == 0) {
-                a.matvec(x, ap);
-                for i in 0..n {
-                    r[i] = b[i] - ap[i];
-                }
-                if let Some(pc) = pc.as_mut() {
-                    pc.apply(pc_side, r, z)?;
-                } else {
-                    z.copy_from_slice(r);
-                }
-                residual_replacements += 1;
-            }
-
-            let (h_rho_next, _) = dot1_async(comm, r, z, &opt)?;
-            pending_rho = Some(h_rho_next);
-
-            rho_prev = rho_curr;
-            iterations += 1;
-        }
-
-        if let Some(handle) = pending_rho.take() {
-            counters.num_global_reductions += 1;
-            rho_curr = <C as AllreduceOps>::wait_pair(handle).0;
-            if !rho_curr.is_finite() || rho_curr < 0.0 {
-                return Err(KError::IndefinitePreconditioner);
-            }
-
-            reported_residual = match self.norm_type {
-                CgNormType::Preconditioned => rho_curr.sqrt(),
-                CgNormType::Unpreconditioned | CgNormType::None => {
-                    let (h_nr, _) = crate::solver::common::nrm2_async(comm, r, &opt);
-                    counters.num_global_reductions += 1;
-                    <C as AllreduceOps>::wait_pair(h_nr).0.sqrt()
-                }
-                CgNormType::Natural => {
-                    let (h_z, _) = crate::solver::common::nrm2_async(comm, z, &opt);
-                    counters.num_global_reductions += 1;
-                    <C as AllreduceOps>::wait_pair(h_z).0.sqrt()
-                }
-            };
-
-            if let Some(ms) = monitors {
-                for m in ms {
-                    m(iterations, reported_residual);
-                }
-            }
-            if let Some(m) = &self.true_residual_monitor {
-                m(iterations, self.nrm2(r, comm));
-            }
-
-            let (reason, mut stats) = self.conv.check(reported_residual, rnorm0, iterations);
-            if !matches!(reason, ConvergedReason::Continued) {
-                stats.final_residual = self.nrm2(r, comm);
-                counters.residual_replacements = residual_replacements;
-                stats.counters = counters;
-                return Ok(stats);
-            }
+            break 'solve;
         }
 
         counters.residual_replacements = residual_replacements;

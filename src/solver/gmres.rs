@@ -365,6 +365,12 @@ impl LinearSolver for GmresSolver {
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
+        if matches!(self.variant, GmresVariant::SStep { .. }) {
+            return Err(KError::NotImplemented(
+                "GMRES s-step variant is not yet implemented".into(),
+            ));
+        }
+
         if let Some(ms) = monitors {
             for m in ms {
                 m(0, res);
@@ -384,12 +390,6 @@ impl LinearSolver for GmresSolver {
                 residual_replacements: 0,
             };
             return Ok(stats.with_counters(counters));
-        }
-
-        if matches!(self.variant, GmresVariant::SStep { .. }) {
-            return Err(KError::NotImplemented(
-                "GMRES s-step variant is not yet implemented".into(),
-            ));
         }
 
         'outer: loop {

@@ -993,10 +993,14 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         gmres_restart,
         gmres_orthog,
         gmres_reorthog,
+        gmres_reorth,
+        gmres_reorth_tol,
         gmres_happy_breakdown,
         fgmres_restart,
         fgmres_orthog,
         fgmres_reorthog,
+        fgmres_reorth,
+        fgmres_reorth_tol,
         fgmres_happy_breakdown,
         pc_side,
         matrix_file,
@@ -1105,7 +1109,6 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 mod tests {
     use super::*;
     use crate::error::KError;
-    use crate::preconditioner::ilu_options::{IluKind, PivotPolicy, ReorderingType, TriSolveType};
 
     #[test]
     fn ksp_bool_toggle() {

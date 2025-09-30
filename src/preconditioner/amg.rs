@@ -1610,7 +1610,6 @@ fn local_qr(
 fn energy_polish(
     a: &CsrMatrix<f64>,
     d_inv: &[f64],
-    r: usize,
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
     p_vals: &mut [f64],
@@ -1680,7 +1679,6 @@ fn apply_post_interp(
             energy_polish(
                 ctx.a.expect("EnergyPolish requires A"),
                 ctx.d_inv.expect("EnergyPolish requires diag_inv"),
-                ctx.r,
                 p_row_ptr,
                 p_col_idx,
                 p_vals,
@@ -5865,7 +5863,6 @@ fn fsai_factor_values(
             pat.sort_unstable();
         }
         let mut pass = 0usize;
-        let mut solved = None;
         loop {
             let m = pat.len();
             if m == 0 {
@@ -5878,26 +5875,27 @@ fn fsai_factor_values(
             } else {
                 rhs[0] = 1.0;
             }
-            solved = solve_fsai_system(&base, &rhs, m, lambda);
-            if solved.is_none() {
-                pat.clear();
-                pat.push(row);
-                let diag = csr_lookup(a, row, row);
-                let val = if diag.abs() > 0.0 { 1.0 / diag } else { 1.0 };
-                col_idx.push(row);
-                values.push(val);
-                row_ptr.push(col_idx.len());
-                break;
-            }
+            let solved = match solve_fsai_system(&base, &rhs, m, lambda) {
+                Some(sol) => sol,
+                None => {
+                    pat.clear();
+                    pat.push(row);
+                    let diag = csr_lookup(a, row, row);
+                    let val = if diag.abs() > 0.0 { 1.0 / diag } else { 1.0 };
+                    col_idx.push(row);
+                    values.push(val);
+                    row_ptr.push(col_idx.len());
+                    break;
+                }
+            };
             if adaptive_passes > 0 && pass < adaptive_passes {
-                let added = fsai_enrich_pattern(a, pat, solved.as_ref().unwrap(), cap);
+                let added = fsai_enrich_pattern(a, pat, &solved, cap);
                 if added > 0 {
                     pass += 1;
                     continue;
                 }
             }
-            let (cols, vals) =
-                fsai_drop_entries(a, row, pat, solved.as_ref().unwrap(), drop_tol, cap);
+            let (cols, vals) = fsai_drop_entries(a, row, pat, &solved, drop_tol, cap);
             pat.clear();
             pat.extend(cols.iter().copied());
             col_idx.extend_from_slice(&cols);
@@ -6836,12 +6834,12 @@ mod tests {
         let mut j_prev = usize::MAX;
         let mut acc = 0.0;
 
-        let mut push_acc = |row: usize,
-                            col: usize,
-                            v: f64,
-                            row_ptr: &mut [usize],
-                            col_idx: &mut Vec<usize>,
-                            vals: &mut Vec<f64>| {
+        let push_acc = |row: usize,
+                        col: usize,
+                        v: f64,
+                        row_ptr: &mut [usize],
+                        col_idx: &mut Vec<usize>,
+                        vals: &mut Vec<f64>| {
             if v != 0.0 {
                 col_idx.push(col);
                 vals.push(v);

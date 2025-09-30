@@ -1,4 +1,3 @@
-use super::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::amg::coarsen::{
     AggAlgo, AggOpts, build_aggregates, lift_node_aggregates_to_dofs,

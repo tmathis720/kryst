@@ -1,4 +1,3 @@
-use super::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::amg::prolong::{TentativeP, smooth_tentative_sa_multi};
 

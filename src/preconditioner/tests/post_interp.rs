@@ -1,4 +1,3 @@
-use super::*;
 use crate::preconditioner::amg::{RowScaleMode, row_scaling};
 
 #[test]

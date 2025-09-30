@@ -238,33 +238,29 @@ pub fn anisotropic_poisson_2d(n: usize, theta: f64, eps: f64) -> CsrMatrix<f64> 
     let d22 = s * s + eps * c * c;
     let d12 = (1.0 - eps) * s * c;
 
-    let mut push_entry = |i: usize, j: usize, v: f64| {
-        col_idx.push(j);
-        vals.push(v);
-    };
-
     for y in 0..ny {
         for x in 0..nx {
             let idx = y * nx + x;
             let mut diag = 0.0;
+            let mut entries: Vec<(usize, f64)> = Vec::with_capacity(9);
 
             // West/East diffusion
             if x > 0 {
-                push_entry(idx, idx - 1, -d11);
+                entries.push((idx - 1, -d11));
                 diag += d11;
             }
             if x + 1 < nx {
-                push_entry(idx, idx + 1, -d11);
+                entries.push((idx + 1, -d11));
                 diag += d11;
             }
 
             // South/North diffusion
             if y > 0 {
-                push_entry(idx, idx - nx, -d22);
+                entries.push((idx - nx, -d22));
                 diag += d22;
             }
             if y + 1 < ny {
-                push_entry(idx, idx + nx, -d22);
+                entries.push((idx + nx, -d22));
                 diag += d22;
             }
 
@@ -272,23 +268,41 @@ pub fn anisotropic_poisson_2d(n: usize, theta: f64, eps: f64) -> CsrMatrix<f64> 
             // the symmetric form so that opposite corners receive opposite
             // signs which keeps the assembled matrix SPD for eps > 0.
             if x > 0 && y > 0 {
-                push_entry(idx, idx - nx - 1, -d12);
+                entries.push((idx - nx - 1, -d12));
                 diag += d12.abs();
             }
             if x > 0 && y + 1 < ny {
-                push_entry(idx, idx + nx - 1, d12);
+                entries.push((idx + nx - 1, d12));
                 diag += d12.abs();
             }
             if x + 1 < nx && y > 0 {
-                push_entry(idx, idx - nx + 1, d12);
+                entries.push((idx - nx + 1, d12));
                 diag += d12.abs();
             }
             if x + 1 < nx && y + 1 < ny {
-                push_entry(idx, idx + nx + 1, -d12);
+                entries.push((idx + nx + 1, -d12));
                 diag += d12.abs();
             }
 
-            push_entry(idx, idx, diag);
+            entries.push((idx, diag));
+
+            // Ensure the CSR row is strictly sorted so downstream routines do
+            // not hit the faer CSR validation assert.
+            entries.sort_unstable_by_key(|&(j, _)| j);
+            let mut deduped: Vec<(usize, f64)> = Vec::with_capacity(entries.len());
+            for (j, v) in entries.into_iter() {
+                if let Some((last_j, last_v)) = deduped.last_mut() {
+                    if *last_j == j {
+                        *last_v += v;
+                        continue;
+                    }
+                }
+                deduped.push((j, v));
+            }
+            for (j, v) in deduped {
+                col_idx.push(j);
+                vals.push(v);
+            }
             row_ptr.push(col_idx.len());
         }
     }
@@ -311,34 +325,46 @@ pub fn convection_diffusion_2d(n: usize, peclet: f64) -> CsrMatrix<f64> {
 
     let upwind = 0.5 * peclet;
 
-    let mut push_entry = |i: usize, j: usize, v: f64| {
-        col_idx.push(j);
-        vals.push(v);
-    };
-
     for y in 0..ny {
         for x in 0..nx {
             let idx = y * nx + x;
             let mut diag = 4.0;
+            let mut entries: Vec<(usize, f64)> = Vec::with_capacity(5);
 
             if x > 0 {
-                push_entry(idx, idx - 1, -1.0 - upwind);
+                entries.push((idx - 1, -1.0 - upwind));
                 diag += 1.0 + upwind;
             }
             if x + 1 < nx {
-                push_entry(idx, idx + 1, -1.0 + upwind);
+                entries.push((idx + 1, -1.0 + upwind));
                 diag += 1.0 - upwind;
             }
             if y > 0 {
-                push_entry(idx, idx - nx, -1.0 - upwind);
+                entries.push((idx - nx, -1.0 - upwind));
                 diag += 1.0 + upwind;
             }
             if y + 1 < ny {
-                push_entry(idx, idx + nx, -1.0 + upwind);
+                entries.push((idx + nx, -1.0 + upwind));
                 diag += 1.0 - upwind;
             }
 
-            push_entry(idx, idx, diag);
+            entries.push((idx, diag));
+
+            entries.sort_unstable_by_key(|&(j, _)| j);
+            let mut deduped: Vec<(usize, f64)> = Vec::with_capacity(entries.len());
+            for (j, v) in entries.into_iter() {
+                if let Some((last_j, last_v)) = deduped.last_mut() {
+                    if *last_j == j {
+                        *last_v += v;
+                        continue;
+                    }
+                }
+                deduped.push((j, v));
+            }
+            for (j, v) in deduped {
+                col_idx.push(j);
+                vals.push(v);
+            }
             row_ptr.push(col_idx.len());
         }
     }
@@ -349,8 +375,8 @@ pub fn convection_diffusion_2d(n: usize, peclet: f64) -> CsrMatrix<f64> {
 /// Generate a reproducible random right-hand side vector of length `n` using a
 /// deterministic seed. Values lie in `[-0.5, 0.5)`.
 pub fn random_rhs(n: usize, seed: u64) -> Vec<f64> {
-    use rand::{Rng, SeedableRng};
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    let mut rng = StdRng::seed_from_u64(seed);
     (0..n).map(|_| rng.r#gen::<f64>() - 0.5).collect()
 }
 
