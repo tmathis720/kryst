@@ -3,6 +3,9 @@
 //! This example solves a small non-symmetric system and shows how to
 //! optionally apply a Jacobi preconditioner. It also demonstrates error
 //! handling when the right-hand side contains invalid values.
+//! 
+//! to run:
+//! cargo run --example hypre_gmres_demo
 
 use faer::mat;
 use kryst::core::traits::MatVec;

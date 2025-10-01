@@ -1,4 +1,6 @@
 //! HYPRE-Inspired AMG Preconditioner Demo (updated API, no legacy bridge)
+//! to run:
+//! cargo run --example hypre_amg_demo
 
 use faer::Mat;
 use kryst::error::KError;
@@ -6,7 +8,7 @@ use kryst::preconditioner::amg::{AMGBuilder, CoarsenType, InterpType, RelaxType}
 use kryst::preconditioner::{PcSide, Preconditioner};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("    HYPRE-Inspired AMG Preconditioner Demo (dense faer::Mat)");
+    println!("    HYPRE-Inspired AMG Preconditioner Demo");
     println!("============================================================\n");
 
     // Create test problems of varying difficulty
@@ -116,7 +118,8 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
         .strong_threshold(0.25)
         .coarsening_type(CoarsenType::HMIS)
         .interpolation_type(InterpType::Extended)
-        .relaxation_type(RelaxType::GaussSeidel)
+        // Symmetric Gauss-Seidel satisfies SPD validation while matching HYPRE defaults.
+        .relaxation_type(RelaxType::SymmetricGaussSeidel)
         .smoothing_sweeps(2, 2)
         .enable_logging()
         .build(&a)?;
@@ -267,7 +270,7 @@ fn demo_safety_features() -> Result<(), KError> {
     }
 
     // Note: We can't easily create NaN in this context, so we skip that test here.
-    println!("ℹ️  IEEE NaN/Inf checks would be tested with problematic matrices");
+    println!("IEEE NaN/Inf checks would be tested with problematic matrices");
 
     // Robust build + apply
     let mut robust_amg = AMGBuilder::new()

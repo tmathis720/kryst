@@ -326,7 +326,8 @@ impl LinOp for DistCsrOp {
     type S = f64;
 
     fn dims(&self) -> (usize, usize) {
-        (self.n_global, self.n_global)
+        // Expose local rows so Krylov solvers operate on rank-local vectors.
+        (self.n_local, self.n_local)
     }
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {

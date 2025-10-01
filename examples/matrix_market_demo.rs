@@ -314,35 +314,23 @@ fn build_menu(analysis: &Analysis, is_parallel: bool) -> MenuPlan {
         notes.push(
             "Distributed ILUT/AMG/SuperLU_DIST support is pending; falling back to Jacobi/none PCs for now.",
         );
-
-        specs.push(RunSpec {
-            name: "FGMRES(50) + Jacobi (R)",
-            solver: SolverType::Fgmres,
-            pc_side: PcSide::Right,
-            pc: PcConfigSpec::Type {
-                pc_type: PcType::Jacobi,
-                options: None,
-            },
-            setup: Some(fgmres_hook()),
-        });
-
-        specs.push(RunSpec {
-            name: "FGMRES(50) + None (R)",
-            solver: SolverType::Fgmres,
-            pc_side: PcSide::Right,
-            pc: PcConfigSpec::Type {
-                pc_type: PcType::None,
-                options: None,
-            },
-            setup: Some(fgmres_hook()),
-        });
-
         specs.push(RunSpec {
             name: "BiCGStab + Jacobi (L)",
             solver: SolverType::BiCgStab,
             pc_side: PcSide::Left,
             pc: PcConfigSpec::Type {
                 pc_type: PcType::Jacobi,
+                options: None,
+            },
+            setup: None,
+        });
+
+        specs.push(RunSpec {
+            name: "BiCGStab + None (L)",
+            solver: SolverType::BiCgStab,
+            pc_side: PcSide::Left,
+            pc: PcConfigSpec::Type {
+                pc_type: PcType::None,
                 options: None,
             },
             setup: None,

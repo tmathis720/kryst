@@ -2,6 +2,11 @@
 //!
 //! This example shows how to parse and use all the AMG and ILU options
 //! in the Kryst linear solver library.
+//! 
+//! to run:
+//! ```sh
+//! cargo run --example amg_options_demo -- -ksp_type cg -pc_type ilu -pc_ilu_type ilu0 -pc_ilu_reordering_type rcm
+//! ```
 
 use kryst::config::options::{KspOptions, PcOptions, parse_all_options};
 use std::env;

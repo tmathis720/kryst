@@ -9,6 +9,7 @@ use crate::{
         format::{AsFormat, FormatHint},
         op::{DenseOp, LinOp, wrap_with_comm},
         sparse::CsrMatrix,
+        DistCsrOp,
     },
 };
 
@@ -196,6 +197,24 @@ pub fn materialize_linop_with_hint(
         });
     }
 
+    // Distributed CSR operator — expose the on-processor block for lightweight PCs.
+    if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = std::sync::Arc::new(dist.a_on.clone());
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => {
+                let csc = AsFormat::to_csc_cached(&dist.a_on, drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let dense = dist.a_on.to_dense();
+                wrap_with_comm(std::sync::Arc::new(dense), comm)
+            }
+        });
+    }
+
     // DenseOp wrapper
     if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
         let inner = dense_op.inner();
@@ -231,7 +250,12 @@ pub fn materialize_linop_with_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::op_shell::MatShell;
+    use crate::matrix::{
+        op_shell::MatShell,
+        sparse::CsrMatrix,
+        DistCsrOp,
+    };
+    use crate::parallel::{NoComm, UniverseComm};
 
     #[test]
     fn to_csr_cached_returns_guidance_on_unsupported_type() {
@@ -262,5 +286,28 @@ mod tests {
             "should reference dense target"
         );
         assert!(msg.contains("DenseOp"), "should suggest DenseOp");
+    }
+
+    #[test]
+    fn materialize_accepts_dist_csr_ops() {
+        let comm = UniverseComm::NoComm(NoComm);
+        let part = vec![0, 1];
+        let local = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![2.0]);
+        let dist = DistCsrOp::from_local_rows(1, 0, &local, &part, comm.clone()).unwrap();
+
+        let view = materialize_linop_with_hint(&dist, FormatHint::Csr, 0.0).unwrap();
+        let csr = view
+            .as_any()
+            .downcast_ref::<CsrMatrix<f64>>()
+            .expect("converted CSR matrix");
+        assert_eq!(csr.dims(), (1, 1));
+        assert_eq!(csr.values(), &[2.0]);
+
+        let dense = materialize_linop_with_hint(&dist, FormatHint::Dense, 0.0).unwrap();
+        let mat = dense
+            .as_any()
+            .downcast_ref::<faer::Mat<f64>>()
+            .expect("converted dense matrix");
+        assert_eq!(mat[(0, 0)], 2.0);
     }
 }

@@ -2,6 +2,8 @@
 //
 // This program demonstrates that BiCGStab now uses workspace buffers
 // instead of allocating temporary vectors on each iteration.
+// to run:
+// cargo run --example bicgstab_workspace_verification
 
 use faer::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};

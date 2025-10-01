@@ -7,6 +7,9 @@
 //! - Command-line option support
 //! - Iteration monitoring
 //! - Preconditioner integration
+//! 
+//! to run:
+//! cargo run --features=logging --example bicgstab_workspace_demo
 
 use faer::Mat;
 use kryst::context::ksp_context::{KspContext, SolverType};

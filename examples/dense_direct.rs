@@ -1,4 +1,6 @@
 // Example: Solve a random SPD system using LU and QR direct solvers from kryst.
+// to run:
+// cargo run --features=dense-direct --example dense_direct
 
 #[cfg(feature = "dense-direct")]
 use faer::Mat;
