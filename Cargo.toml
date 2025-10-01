@@ -42,6 +42,8 @@ smallvec = "1.13"
 parking_lot = { version = "0.12", optional = true }
 oorandom = "11"
 wide = { version = "0.7", optional = true }
+rand_distr = "0.4"
+rand = "0.8"
 
 [dev-dependencies]
 rand = "0.8"

@@ -7,6 +7,7 @@ mod gmres_left_right;
 mod gmres_right_z_basis;
 mod gmres_variants;
 mod gmres_workspace_reuse;
+mod idrs;
 mod stability;
 mod sync_counts;
 

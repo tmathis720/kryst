@@ -203,6 +203,11 @@ pub mod fgmres;
 pub use fgmres::FgmresSolver;
 pub mod bicgstab;
 pub use bicgstab::BiCgStabSolver;
+pub mod idrs;
+pub use idrs::{
+    BreakdownRepair as IdrsBreakdownRepair, IdrsBuilder, IdrsOptions, IdrsSolver,
+    Omega as IdrsOmega, ShadowP as IdrsShadowP,
+};
 pub mod cgs;
 pub use cgs::CgsSolver;
 pub mod pcg;
