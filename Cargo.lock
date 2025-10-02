@@ -973,6 +973,7 @@ dependencies = [
  "iai-callgrind",
  "log",
  "mpi",
+ "num-complex",
  "num-traits",
  "num_cpus",
  "once_cell",

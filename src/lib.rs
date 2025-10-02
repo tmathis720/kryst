@@ -19,6 +19,11 @@
 //! (default [`crate::parallel::threads::DEFAULT_PAR_CUTOFF`]). Control the pool
 //! size with `KRYST_THREADS` or `RAYON_NUM_THREADS`. See
 //! [`crate::parallel::threads`] for details.
+//!
+//! ### Scalars
+//! Internal linear algebra now operates on a crate-wide scalar alias `S`.
+//! The default build keeps `S = f64`, while enabling the `complex` feature
+//! switches to `Complex64` without changing public solver interfaces.
 
 pub mod parallel;
 

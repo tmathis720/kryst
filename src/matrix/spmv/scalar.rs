@@ -1,5 +1,7 @@
 //! Scalar sparse matrix-vector multiplication kernels.
 
+use crate::algebra::scalar::{KrystScalar, S};
+
 /// Computes `y = alpha * A * x + beta * y` for a matrix stored in CSR format.
 ///
 /// This is the baseline SpMV kernel and remains the reference implementation
@@ -11,11 +13,11 @@ pub fn spmv_scaled_csr(
     m: usize,
     row_ptr: &[usize],
     col_idx: &[usize],
-    vals: &[f64],
-    alpha: f64,
-    x: &[f64],
-    beta: f64,
-    y: &mut [f64],
+    vals: &[S],
+    alpha: S,
+    x: &[S],
+    beta: S,
+    y: &mut [S],
 ) {
     assert_eq!(row_ptr.len(), m + 1);
     assert_eq!(col_idx.len(), vals.len());
@@ -24,29 +26,29 @@ pub fn spmv_scaled_csr(
     }
     assert!(y.len() >= m);
 
-    if beta == 0.0 {
-        y[..m].fill(0.0);
-    } else if beta != 1.0 {
+    if beta == S::zero() {
+        y[..m].fill(S::zero());
+    } else if beta != S::one() {
         for yi in &mut y[..m] {
             *yi *= beta;
         }
     }
 
     for i in 0..m {
-        let mut acc = 0.0f64;
+        let mut acc = S::zero();
         let mut p = row_ptr[i];
         let end = row_ptr[i + 1];
 
         while p + 3 < end {
-            acc += vals[p] * x[col_idx[p]]
-                + vals[p + 1] * x[col_idx[p + 1]]
-                + vals[p + 2] * x[col_idx[p + 2]]
-                + vals[p + 3] * x[col_idx[p + 3]];
+            acc = vals[p].mul_add(x[col_idx[p]], acc);
+            acc = vals[p + 1].mul_add(x[col_idx[p + 1]], acc);
+            acc = vals[p + 2].mul_add(x[col_idx[p + 2]], acc);
+            acc = vals[p + 3].mul_add(x[col_idx[p + 3]], acc);
             p += 4;
         }
 
         while p < end {
-            acc += vals[p] * x[col_idx[p]];
+            acc = vals[p].mul_add(x[col_idx[p]], acc);
             p += 1;
         }
 
@@ -59,18 +61,18 @@ pub fn spmv_t_scaled_csr(
     m: usize,
     row_ptr: &[usize],
     col_idx: &[usize],
-    vals: &[f64],
-    alpha: f64,
-    x: &[f64],
-    beta: f64,
-    y: &mut [f64],
+    vals: &[S],
+    alpha: S,
+    x: &[S],
+    beta: S,
+    y: &mut [S],
 ) {
     assert_eq!(row_ptr.len(), m + 1);
     assert!(col_idx.len() == vals.len());
 
-    if beta == 0.0 {
-        y.fill(0.0);
-    } else if beta != 1.0 {
+    if beta == S::zero() {
+        y.fill(S::zero());
+    } else if beta != S::one() {
         for yi in y.iter_mut() {
             *yi *= beta;
         }
@@ -78,7 +80,7 @@ pub fn spmv_t_scaled_csr(
 
     for i in 0..m {
         let xi = x[i];
-        if xi == 0.0 {
+        if xi == S::zero() {
             continue;
         }
         let rs = row_ptr[i];

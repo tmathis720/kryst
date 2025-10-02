@@ -3,4 +3,4 @@
 pub mod blas;
 pub mod scalar;
 
-pub use scalar::{RealScalar, Scalar};
+pub use scalar::{KrystScalar, R, S};
