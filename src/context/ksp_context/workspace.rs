@@ -1,26 +1,27 @@
+use crate::algebra::scalar::{KrystScalar, S};
 use crate::core::block::BlockVec;
 use crate::solver::gmres::AugmentationPolicy;
 
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
-    pub tmp1: Vec<f64>,
-    pub tmp2: Vec<f64>,
+    pub tmp1: Vec<S>,
+    pub tmp2: Vec<S>,
     // Legacy buffers for solvers not yet migrated
     pub q: Vec<Vec<f64>>,
     pub z: Vec<Vec<f64>>,
     pub h: Vec<Vec<f64>>,
-    pub v_mem: Vec<f64>,
-    pub z_mem: Vec<f64>,
+    pub v_mem: Vec<S>,
+    pub z_mem: Vec<S>,
     // Column-major Hessenberg storage for GMRES/FGMRES
-    pub h_mem: Vec<f64>,
+    pub h_mem: Vec<S>,
     pub cs: Vec<f64>,
     pub sn: Vec<f64>,
-    pub g: Vec<f64>,
-    pub blk_scratch: Vec<f64>,
+    pub g: Vec<S>,
+    pub blk_scratch: Vec<S>,
     pub block_buf: Option<BlockVec>,
     pub tsqr: Option<TsqrWorkspace>,
-    pub pipelined_w: Vec<f64>,
-    pub pipelined_wtmp: Vec<f64>,
+    pub pipelined_w: Vec<S>,
+    pub pipelined_wtmp: Vec<S>,
     pub pipelined_payload: Vec<f64>,
     pub gmres_sstep: Option<GmresSStepWorkspace>,
     pub gmres_recycle: RecyclingSpace,
@@ -202,8 +203,8 @@ impl TsqrWorkspace {
 impl Workspace {
     pub fn new(n: usize) -> Self {
         let mut ws = Self::default();
-        ws.tmp1.resize(n, 0.0);
-        ws.tmp2.resize(n, 0.0);
+        ws.tmp1.resize(n, S::zero());
+        ws.tmp2.resize(n, S::zero());
         ws.n = n;
         ws
     }
@@ -343,7 +344,7 @@ impl Workspace {
     }
 
     #[inline]
-    pub fn v_col(&mut self, j: usize) -> &mut [f64] {
+    pub fn v_col(&mut self, j: usize) -> &mut [S] {
         debug_assert!(j <= self.m);
         let n = self.n;
         let off = j.checked_mul(n).expect("v offset overflow");
@@ -351,7 +352,7 @@ impl Workspace {
     }
 
     #[inline]
-    pub fn z_col(&mut self, j: usize) -> &mut [f64] {
+    pub fn z_col(&mut self, j: usize) -> &mut [S] {
         debug_assert!(self.need_z && j < self.m);
         let n = self.n;
         let off = j.checked_mul(n).expect("z offset overflow");
@@ -359,18 +360,18 @@ impl Workspace {
     }
 
     #[inline]
-    pub fn h_at(&self, i: usize, j: usize) -> f64 {
+    pub fn h_at(&self, i: usize, j: usize) -> S {
         debug_assert!(i <= self.m && j < self.m);
         self.h_mem[j * (self.m + 1) + i]
     }
     #[inline]
-    pub fn h_at_mut(&mut self, i: usize, j: usize) -> &mut f64 {
+    pub fn h_at_mut(&mut self, i: usize, j: usize) -> &mut S {
         debug_assert!(i <= self.m && j < self.m);
         let idx = j * (self.m + 1) + i;
         &mut self.h_mem[idx]
     }
 
-    pub fn v_cols2(&mut self, a: usize, b: usize) -> (&mut [f64], &mut [f64]) {
+    pub fn v_cols2(&mut self, a: usize, b: usize) -> (&mut [S], &mut [S]) {
         debug_assert!(a <= self.m && b <= self.m && a != b);
         let n = self.n;
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
@@ -386,7 +387,7 @@ impl Workspace {
         }
     }
 
-    pub fn z_cols2(&mut self, a: usize, b: usize) -> (&mut [f64], &mut [f64]) {
+    pub fn z_cols2(&mut self, a: usize, b: usize) -> (&mut [S], &mut [S]) {
         debug_assert!(self.need_z && a < self.m && b < self.m && a != b);
         let n = self.n;
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
@@ -404,39 +405,39 @@ impl Workspace {
 
     // --- Composite view helpers -------------------------------------------------
     #[inline]
-    pub fn v_and_z_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+    pub fn v_and_z_mut(&mut self, j: usize) -> (&[S], &mut [S]) {
         debug_assert!(self.need_z && j < self.m);
         let n = self.n;
         let off = j * n;
-        let vj: &[f64] = &self.v_mem[off..off + n];
-        let zj: &mut [f64] = &mut self.z_mem[off..off + n];
+        let vj: &[S] = &self.v_mem[off..off + n];
+        let zj: &mut [S] = &mut self.z_mem[off..off + n];
         (vj, zj)
     }
 
     #[inline]
-    pub fn tmp1_and_z_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+    pub fn tmp1_and_z_mut(&mut self, j: usize) -> (&[S], &mut [S]) {
         debug_assert!(self.need_z && j < self.m);
         let n = self.n;
-        let tmp: &[f64] = &self.tmp1[..n];
-        let z: &mut [f64] = &mut self.z_mem[j * n..(j + 1) * n];
+        let tmp: &[S] = &self.tmp1[..n];
+        let z: &mut [S] = &mut self.z_mem[j * n..(j + 1) * n];
         (tmp, z)
     }
 
     #[inline]
-    pub fn tmp2_and_z_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+    pub fn tmp2_and_z_mut(&mut self, j: usize) -> (&[S], &mut [S]) {
         debug_assert!(self.need_z && j < self.m);
         let n = self.n;
-        let tmp: &[f64] = &self.tmp2[..n];
-        let z: &mut [f64] = &mut self.z_mem[j * n..(j + 1) * n];
+        let tmp: &[S] = &self.tmp2[..n];
+        let z: &mut [S] = &mut self.z_mem[j * n..(j + 1) * n];
         (tmp, z)
     }
 
     #[inline]
-    pub fn z_and_tmp2_mut(&mut self, j: usize) -> (&[f64], &mut [f64]) {
+    pub fn z_and_tmp2_mut(&mut self, j: usize) -> (&[S], &mut [S]) {
         debug_assert!(self.need_z && j < self.m);
         let n = self.n;
-        let z: &[f64] = &self.z_mem[j * n..(j + 1) * n];
-        let tmp: &mut [f64] = &mut self.tmp2[..n];
+        let z: &[S] = &self.z_mem[j * n..(j + 1) * n];
+        let tmp: &mut [S] = &mut self.tmp2[..n];
         (z, tmp)
     }
 
@@ -475,7 +476,7 @@ impl Workspace {
 
     // --- Hessenberg helpers -----------------------------------------------------
     #[inline]
-    pub fn h2_mut(&mut self, i: usize, j: usize) -> (&mut f64, &mut f64) {
+    pub fn h2_mut(&mut self, i: usize, j: usize) -> (&mut S, &mut S) {
         debug_assert!(i < self.m && j < self.m);
         let ld = self.ld_h();
         let base = j * ld + i;
@@ -647,7 +648,7 @@ impl Workspace {
 
 /// Grow vector to `need` length without zeroing. Never shrinks silently.
 #[inline]
-fn ensure_len(v: &mut Vec<f64>, need: usize) {
+fn ensure_len<T: Copy>(v: &mut Vec<T>, need: usize) {
     if v.len() != need {
         if v.capacity() < need {
             v.reserve_exact(need - v.capacity());
