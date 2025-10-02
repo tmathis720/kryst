@@ -1,23 +1,16 @@
-use super::scalar::{RealScalar, Scalar};
+use crate::algebra::scalar::{KrystScalar, R, S};
 
-/// Compute the dot product \(x^\mathrm{H} y\).
 #[inline]
-pub fn dot<S>(x: &[S], y: &[S]) -> S
-where
-    S: Scalar,
-{
+pub fn dot_conj(x: &[S], y: &[S]) -> S {
+    debug_assert_eq!(x.len(), y.len());
     let mut acc = S::zero();
     for i in 0..x.len() {
-        acc = acc + x[i].conj() * y[i];
+        acc = x[i].conj().mul_add(y[i], acc);
     }
     acc
 }
 
-/// Compute the Euclidean norm of a vector.
 #[inline]
-pub fn nrm2<S>(x: &[S]) -> <S as Scalar>::Real
-where
-    S: Scalar,
-{
-    dot(x, x).real().sqrt()
+pub fn nrm2(x: &[S]) -> R {
+    dot_conj(x, x).abs().sqrt()
 }

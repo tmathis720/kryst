@@ -22,6 +22,11 @@ pub use convert::{
 pub use csc::CscMatrix;
 pub use sparse::CsrMatrix;
 
+use crate::algebra::scalar::S;
+
+pub type Csr = crate::matrix::sparse::CsrMatrix<S>;
+pub type Csc = crate::matrix::csc::CscMatrix<S>;
+
 pub use dist_csr::DistCsrOp;
 pub use op::{ChangeIds, CsrOp, DenseOp, LinOp, StructureId, ValuesId};
 pub use op_shell::MatShell;

@@ -44,7 +44,7 @@ parking_lot = { version = "0.12", optional = true }
 oorandom = "11"
 wide = { version = "0.7", optional = true }
 rand_distr = "0.4"
-rand = "0.8"
+num-complex = { version = "0.4", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -79,6 +79,7 @@ mat-values-fingerprint = []
 
 # Optional, OFF by default, so new PCs must target the modern trait.
 legacy-pc-bridge = []
+complex = ["dep:num-complex"]
 
 [[example]]
 name = "mpi_amg_gmres_demo"
