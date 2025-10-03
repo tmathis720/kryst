@@ -2,6 +2,7 @@ use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::core::block::BlockVec;
+use crate::solver::common::givens::{apply_complex_givens, build_complex_givens};
 use crate::solver::gmres::AugmentationPolicy;
 
 #[derive(Debug, Clone, Default)]
@@ -19,8 +20,8 @@ pub struct Workspace {
     pub z_mem: Vec<S>,
     // Column-major Hessenberg storage for GMRES/FGMRES
     pub h_mem: Vec<S>,
-    pub cs: Vec<f64>,
-    pub sn: Vec<f64>,
+    pub cs: Vec<R>,
+    pub sn: Vec<S>,
     pub g: Vec<S>,
     pub blk_scratch: Vec<S>,
     pub bridge: BridgeScratch,
@@ -499,9 +500,7 @@ impl Workspace {
             let c = self.cs[i];
             let s = self.sn[i];
             let (hij, hij1) = self.h2_mut(i, j);
-            let t = c * *hij + s * *hij1;
-            *hij1 = -s * *hij + c * *hij1;
-            *hij = t;
+            apply_complex_givens(hij, hij1, c, s);
         }
     }
 
@@ -510,23 +509,19 @@ impl Workspace {
         let ld = self.ld_h();
         let hkk = self.h_mem[j * ld + j];
         let hk1k = self.h_mem[j * ld + j + 1];
-        let (c, s) = if hk1k == 0.0 {
-            (1.0, 0.0)
-        } else {
-            let r = (hkk * hkk + hk1k * hk1k).sqrt();
-            (hkk / r, hk1k / r)
-        };
+        let (c, s) = build_complex_givens(hkk, hk1k);
         self.cs[j] = c;
         self.sn[j] = s;
         let (hjj, hj1j) = self.h2_mut(j, j);
-        let t = c * *hjj + s * *hj1j;
-        *hj1j = -s * *hjj + c * *hj1j;
-        *hjj = t;
-        let t = c * self.g[j] + s * self.g[j + 1];
-        self.g[j + 1] = -s * self.g[j] + c * self.g[j + 1];
-        self.g[j] = t;
+        apply_complex_givens(hjj, hj1j, c, s);
+        let gk = self.g[j];
+        let gk1 = self.g[j + 1];
+        let c_s = S::from_real(c);
+        self.g[j] = c_s * gk + s * gk1;
+        self.g[j + 1] = -s.conj() * gk + c_s * gk1;
     }
 
+    #[cfg(not(feature = "complex"))]
     pub fn pipelined_arnoldi_step(
         &mut self,
         k: usize,
@@ -650,6 +645,21 @@ impl Workspace {
         }
 
         Ok(reductions)
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn pipelined_arnoldi_step(
+        &mut self,
+        k: usize,
+        n: usize,
+        _comm: &crate::parallel::UniverseComm,
+        _policy: ReorthPolicy,
+        _tol: f64,
+    ) -> Result<usize, crate::error::KError> {
+        let _ = (k, n);
+        Err(crate::error::KError::NotImplemented(
+            "pipelined GMRES is not yet implemented for complex scalars".into(),
+        ))
     }
 }
 

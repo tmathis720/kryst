@@ -1,8 +1,13 @@
 //! Flexible GMRES (FGMRES) over &dyn LinOp<f64>, right-preconditioned, object-safe.
 
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::matrix::op_bridge::matvec_s;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
@@ -64,12 +69,12 @@ impl FgmresSolver {
     }
 
     #[inline]
-    fn dot(x: &[f64], y: &[f64], _comm: &UniverseComm) -> f64 {
-        x.iter().zip(y).map(|(a, b)| a * b).sum()
+    fn dot(x: &[S], y: &[S]) -> S {
+        dot_conj(x, y)
     }
     #[inline]
-    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
-        Self::dot(x, x, comm).sqrt()
+    fn nrm2(x: &[S]) -> R {
+        nrm2(x)
     }
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, m: usize) {
@@ -121,38 +126,44 @@ impl FgmresSolver {
         })?;
         self.ensure_workspace(ws, n, block_m);
 
-        a.matvec(x, &mut ws.tmp1);
+        let mons = monitors.unwrap_or(&[]);
+
+        let mut x_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(x, &mut x_s);
+        let mut b_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(b, &mut b_s);
+
+        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
         for i in 0..n {
-            ws.tmp1[i] = b[i] - ws.tmp1[i];
+            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
         }
-        let mut beta0 = Self::nrm2(&ws.tmp1, comm);
-        let bnorm = Self::nrm2(b, comm).max(1e-32);
+        let mut beta0 = Self::nrm2(&ws.tmp1[..n]);
+        let bnorm = nrm2(&b_s).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
         if beta0 > 0.0 {
-            for i in 0..n {
-                ws.tmp2[i] = ws.tmp1[i] / beta0;
+            let inv = S::from_real(1.0 / beta0);
+            for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
+                *dst = src * inv;
             }
             ws.copy_tmp2_into_vcol(0);
         } else {
-            ws.v_col(0).fill(0.0);
+            ws.v_col(0).fill(S::zero());
         }
 
-        ws.h_mem.fill(0.0);
+        ws.h_mem.fill(S::zero());
         ws.cs.fill(0.0);
-        ws.sn.fill(0.0);
-        ws.g.fill(0.0);
-        ws.g[0] = beta0;
+        ws.sn.fill(S::zero());
+        ws.g.fill(S::zero());
+        ws.g[0] = S::from_real(beta0);
 
         let mut total_iters = 0usize;
         let mut res = beta0;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
-        if let Some(mons) = monitors {
-            for m in mons {
-                m(0, res);
-            }
+        for m in mons {
+            m(0, res);
         }
         if res <= thr {
             stats.final_residual = res;
@@ -161,6 +172,10 @@ impl FgmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
+            copy_scalar_to_real_in(&x_s, x);
+            let tmp = ws.bridge.xr(n);
+            let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+            stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
             let counters = crate::utils::convergence::SolverCounters {
@@ -185,75 +200,109 @@ impl FgmresSolver {
                     FgmresVariant::Classical => {
                         {
                             let (vj, zj) = ws.v_and_z_mut(j);
-                            if let Some(pc_) = pc.as_deref_mut() {
-                                pc_.apply_mut(pc_side, vj, zj)?;
+                            if let Some(pc_) = pc.as_mut() {
+                                #[cfg(not(feature = "complex"))]
+                                {
+                                    let vj_r: &[f64] =
+                                        unsafe { &*(vj as *const [S] as *const [f64]) };
+                                    let zj_r: &mut [f64] =
+                                        unsafe { &mut *(zj as *mut [S] as *mut [f64]) };
+                                    (*pc_).apply_mut(pc_side, vj_r, zj_r)?;
+                                }
+                                #[cfg(feature = "complex")]
+                                {
+                                    let xr = ws.bridge.xr(n);
+                                    let yr = ws.bridge.yr(n);
+                                    copy_scalar_to_real_in(vj, xr);
+                                    (*pc_).apply_mut(pc_side, xr, yr)?;
+                                    copy_real_to_scalar_in(yr, zj);
+                                }
                             } else {
                                 zj.copy_from_slice(vj);
                             }
                         }
                         {
-                            let (zj, tmp2) = ws.z_and_tmp2_mut(j);
-                            a.matvec(zj, tmp2);
+                            let base = j * n;
+                            ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                            matvec_s(a, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
                         }
 
-                        for i in 0..=j {
-                            let hij = {
+                        let mut hvals = vec![S::zero(); j + 1];
+                        {
+                            let tmp2 = &mut ws.tmp2[..n];
+                            for i in 0..=j {
                                 let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                let hij = Self::dot(&ws.tmp2, vi, comm);
-                                for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
+                                let hij = Self::dot(vi, tmp2);
+                                hvals[i] = hij;
+                                for (w_i, &vi_val) in tmp2.iter_mut().zip(vi) {
                                     *w_i -= hij * vi_val;
                                 }
-                                hij
-                            };
-                            *ws.h_at_mut(i, j) = hij;
-                        }
-
-                        if matches!(self.orthog, Orthog::Modified) {
-                            for i in 0..=j {
-                                let corr = {
+                            }
+                            if matches!(self.orthog, Orthog::Modified) {
+                                for i in 0..=j {
                                     let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    let corr = Self::dot(&ws.tmp2, vi, comm);
+                                    let corr = Self::dot(vi, tmp2);
                                     if corr.abs() > 1e-12 {
-                                        for (w_i, &vi_val) in ws.tmp2.iter_mut().zip(vi) {
+                                        for (w_i, &vi_val) in tmp2.iter_mut().zip(vi) {
                                             *w_i -= corr * vi_val;
                                         }
+                                        hvals[i] += corr;
                                     }
-                                    corr
-                                };
-                                if corr.abs() > 1e-12 {
-                                    *ws.h_at_mut(i, j) += corr;
                                 }
                             }
                         }
+                        for i in 0..=j {
+                            *ws.h_at_mut(i, j) = hvals[i];
+                        }
 
-                        let hij1 = Self::nrm2(&ws.tmp2, comm);
-                        *ws.h_at_mut(j + 1, j) = hij1;
+                        let hij1 = nrm2(&ws.tmp2[..n]);
+                        *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
 
                         if hij1 > 0.0 {
-                            for i in 0..n {
-                                ws.tmp2[i] /= hij1;
+                            let inv = S::from_real(1.0 / hij1);
+                            for val in &mut ws.tmp2[..n] {
+                                *val *= inv;
                             }
                             ws.copy_tmp2_into_vcol(j + 1);
                         } else {
-                            ws.v_col(j + 1).fill(0.0);
+                            ws.v_col(j + 1).fill(S::zero());
                         }
                     }
                     FgmresVariant::Pipelined => {
+                        #[cfg(feature = "complex")]
                         {
-                            let (vj, zj) = ws.v_and_z_mut(j);
-                            if let Some(pc_) = pc.as_deref_mut() {
-                                pc_.apply_mut(pc_side, vj, zj)?;
-                            } else {
-                                zj.copy_from_slice(vj);
+                            return Err(KError::NotImplemented(
+                                "Pipelined FGMRES is not yet implemented for complex scalars",
+                            ));
+                        }
+                        #[cfg(not(feature = "complex"))]
+                        {
+                            {
+                                let (vj, zj) = ws.v_and_z_mut(j);
+                                if let Some(pc_) = pc.as_mut() {
+                                    let vj_r: &[f64] =
+                                        unsafe { &*(vj as *const [S] as *const [f64]) };
+                                    let zj_r: &mut [f64] =
+                                        unsafe { &mut *(zj as *mut [S] as *mut [f64]) };
+                                    (*pc_).apply_mut(pc_side, vj_r, zj_r)?;
+                                } else {
+                                    zj.copy_from_slice(vj);
+                                }
                             }
+                            {
+                                let base = j * n;
+                                ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                                matvec_s(a, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+                            }
+                            ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
+                            let _ = ws.pipelined_arnoldi_step(
+                                j,
+                                n,
+                                comm,
+                                self.reorth,
+                                self.reorth_tol,
+                            )?;
                         }
-                        {
-                            let (zj, tmp2) = ws.z_and_tmp2_mut(j);
-                            a.matvec(zj, tmp2);
-                        }
-                        ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
-                        let _ =
-                            ws.pipelined_arnoldi_step(j, n, comm, self.reorth, self.reorth_tol)?;
                     }
                 }
 
@@ -264,10 +313,8 @@ impl FgmresSolver {
                 total_iters += 1;
                 arnoldi_steps = j + 1;
 
-                if let Some(mons) = monitors {
-                    for m in mons {
-                        m(total_iters, res);
-                    }
+                for m in mons {
+                    m(total_iters, res);
                 }
 
                 let res0 = beta0;
@@ -291,7 +338,7 @@ impl FgmresSolver {
             }
 
             let k = arnoldi_steps;
-            let mut y = vec![0.0; k];
+            let mut y = vec![S::zero(); k];
             for i in (0..k).rev() {
                 let mut sum = ws.g[i];
                 for l in (i + 1)..k {
@@ -302,7 +349,7 @@ impl FgmresSolver {
 
             for i in 0..k {
                 let zi = &ws.z_mem[i * n..(i + 1) * n];
-                for (xj, &zij) in x.iter_mut().zip(zi) {
+                for (xj, &zij) in x_s.iter_mut().zip(zi) {
                     *xj += y[i] * zij;
                 }
             }
@@ -321,38 +368,40 @@ impl FgmresSolver {
                 break;
             }
 
-            a.matvec(x, &mut ws.tmp1);
+            matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
             for i in 0..n {
-                ws.tmp1[i] = b[i] - ws.tmp1[i];
+                ws.tmp1[i] = b_s[i] - ws.tmp1[i];
             }
-            beta0 = Self::nrm2(&ws.tmp1, comm);
-            ws.h_mem.fill(0.0);
+            beta0 = Self::nrm2(&ws.tmp1[..n]);
+
+            ws.h_mem.fill(S::zero());
             ws.cs.fill(0.0);
-            ws.sn.fill(0.0);
-            ws.g.fill(0.0);
-            ws.g[0] = beta0;
+            ws.sn.fill(S::zero());
+            ws.g.fill(S::zero());
+            ws.g[0] = S::from_real(beta0);
             if beta0 > 0.0 {
-                for i in 0..n {
-                    ws.tmp2[i] = ws.tmp1[i] / beta0;
+                let inv = S::from_real(1.0 / beta0);
+                for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
+                    *dst = src * inv;
                 }
                 ws.copy_tmp2_into_vcol(0);
             } else {
-                ws.v_col(0).fill(0.0);
+                ws.v_col(0).fill(S::zero());
             }
 
-            // Allow both legacy hook and the new Preconditioner::on_restart to adjust PC
             if let Some(hook) = self.on_restart.as_mut() {
                 hook(total_iters, beta0)?;
             }
-            if let Some(pc_) = pc.as_deref_mut() {
-                pc_.on_restart(total_iters, beta0)?;
+            if let Some(pc_) = pc.as_mut() {
+                (*pc_).on_restart(total_iters, beta0)?;
             }
         }
 
         stats.iterations = total_iters;
 
-        // Compute true residual at exit for reporting
-        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut ws.tmp1);
+        copy_scalar_to_real_in(&x_s, x);
+        let tmp = ws.bridge.xr(n);
+        let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
         stats.final_residual = true_res;
 
         if matches!(stats.reason, ConvergedReason::Continued) {

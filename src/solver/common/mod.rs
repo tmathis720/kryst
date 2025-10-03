@@ -1,3 +1,5 @@
+pub mod givens;
+
 use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
 use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};

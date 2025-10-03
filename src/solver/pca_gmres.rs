@@ -5,6 +5,7 @@ use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -13,6 +14,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
+use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,12 +87,12 @@ impl PcaGmresSolver {
         }
 
         // Hessenberg
-        if w.h.len() < m + 1 {
-            w.h.resize(m + 1, Vec::new());
+        if w.h_s.len() < m {
+            w.h_s.resize(m, Vec::new());
         }
-        for row in &mut w.h[..m + 1] {
-            if row.len() != m {
-                row.resize(m, 0.0);
+        for col in &mut w.h_s[..m] {
+            if col.len() != m + 1 {
+                col.resize(m + 1, S::zero());
             }
         }
 
@@ -105,7 +107,7 @@ impl PcaGmresSolver {
             w.cs.resize(m, 0.0);
         }
         if w.sn.len() < m {
-            w.sn.resize(m, 0.0);
+            w.sn.resize(m, S::zero());
         }
         if w.g.len() < m + 1 {
             w.g.resize(m + 1, S::zero());
@@ -147,12 +149,13 @@ impl PcaGmresSolver {
         v_basis: &[Vec<S>],
         k: usize,
         w: &mut [S],
-        h: &mut [Vec<f64>],
+        hcols: &mut [Vec<S>],
     ) -> R {
+        let hcol = &mut hcols[k];
         // First pass
         for i in 0..=k {
             let hij: S = dot_conj(&v_basis[i], w);
-            h[i][k] = hij.real();
+            hcol[i] = hij;
             for (wi, &vi) in w.iter_mut().zip(&v_basis[i]) {
                 *wi -= hij * vi;
             }
@@ -162,30 +165,21 @@ impl PcaGmresSolver {
             for i in 0..=k {
                 let corr: S = dot_conj(&v_basis[i], w);
                 if corr.abs() > 1e-12 {
-                    h[i][k] += corr.real();
+                    hcol[i] += corr;
                     for (wi, &vi) in w.iter_mut().zip(&v_basis[i]) {
                         *wi -= corr * vi;
                     }
                 }
             }
         }
-        nrm2(w)
-    }
-
-    #[inline]
-    fn apply_givens(hij: &mut f64, hij1: &mut f64, c: f64, s: f64) {
-        let t = c * (*hij) + s * (*hij1);
-        *hij1 = -s * (*hij) + c * (*hij1);
-        *hij = t;
-    }
-    #[inline]
-    fn givens(a: f64, b: f64) -> (f64, f64) {
-        if b == 0.0 {
-            (1.0, 0.0)
-        } else {
-            let r = (a * a + b * b).sqrt();
-            (a / r, b / r)
+        let hnorm = nrm2(w);
+        if hcol.len() > k + 1 {
+            hcol[k + 1] = S::from_real(hnorm);
+            for val in hcol.iter_mut().skip(k + 2) {
+                *val = S::zero();
+            }
         }
+        hnorm
     }
 }
 
@@ -205,14 +199,14 @@ impl LinearSolver for PcaGmresSolver {
         if w.z_s.len() < m {
             w.z_s.resize(m, Vec::new());
         }
-        if w.h.len() < m + 1 {
-            w.h.resize(m + 1, Vec::new());
+        if w.h_s.len() < m {
+            w.h_s.resize(m, Vec::new());
         }
         if w.cs.len() < m {
             w.cs.resize(m, 0.0);
         }
         if w.sn.len() < m {
-            w.sn.resize(m, 0.0);
+            w.sn.resize(m, S::zero());
         }
         if w.g.len() < m + 1 {
             w.g.resize(m + 1, S::zero());
@@ -268,10 +262,18 @@ impl LinearSolver for PcaGmresSolver {
         };
         self.ensure_workspace(ws, n);
 
+        let mut x_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(&x[..], &mut x_s);
+        let mut write_back = |xs: &[S]| {
+            copy_scalar_to_real_in(xs, x);
+        };
+        let mut b_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(b, &mut b_s);
+
         // r = b - A x
-        matvec_s(a, x, &mut ws.tmp1, &mut ws.bridge);
+        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
         for i in 0..n {
-            ws.tmp1[i] = S::from_real(b[i]) - ws.tmp1[i];
+            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
         }
 
         // Initialize v0 and g[0] according to mode
@@ -320,13 +322,13 @@ impl LinearSolver for PcaGmresSolver {
             }
         };
 
-        ws.h.iter_mut().for_each(|row| row.fill(0.0));
+        ws.h_s.iter_mut().for_each(|row| row.fill(S::zero()));
         ws.cs.fill(0.0);
-        ws.sn.fill(0.0);
+        ws.sn.fill(S::zero());
         ws.g.fill(S::zero());
         ws.g[0] = S::from_real(beta0);
 
-        let bnorm = b.iter().map(|&bi| bi * bi).sum::<R>().sqrt().max(1e-32);
+        let bnorm = nrm2(&b_s).max(1e-32);
         let thr = self.conv.atol.max(self.conv.rtol * bnorm);
 
         let mut total_iters = 0usize;
@@ -345,6 +347,7 @@ impl LinearSolver for PcaGmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
+            write_back(&x_s);
             return Ok(stats);
         }
 
@@ -380,8 +383,7 @@ impl LinearSolver for PcaGmresSolver {
                 }
 
                 // Orthonormalize against V
-                let hnorm = self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h);
-                ws.h[k + 1][k] = hnorm;
+                let hnorm = self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h_s);
 
                 // v_{k+1}
                 let vnext = &mut ws.q_s[k + 1][..];
@@ -394,29 +396,15 @@ impl LinearSolver for PcaGmresSolver {
                     vnext.fill(S::zero());
                 }
 
-                // Apply stored Givens
-                for i in 0..k {
-                    let (top, rest) = ws.h.split_at_mut(i + 1);
-                    let hij = &mut top[i][k];
-                    let hij1 = &mut rest[0][k];
-                    Self::apply_givens(hij, hij1, ws.cs[i], ws.sn[i]);
-                }
-                // New Givens
-                let (top, rest) = ws.h.split_at_mut(k + 1);
-                let hjk = &mut top[k][k];
-                let hj1k = &mut rest[0][k];
-                let (c, s) = Self::givens(*hjk, *hj1k);
-                ws.cs[k] = c;
-                ws.sn[k] = s;
-                Self::apply_givens(hjk, hj1k, c, s);
-
-                // Update RHS g
-                let gk = ws.g[k];
-                let gk1 = ws.g[k + 1];
-                let c_s = S::from_real(c);
-                let s_s = S::from_real(s);
-                ws.g[k] = c_s * gk + s_s * gk1;
-                ws.g[k + 1] = -s_s * gk + c_s * gk1;
+                let hcol = &mut ws.h_s[k];
+                apply_prev_givens_to_col(&mut hcol[..=k + 1], k, &ws.cs, &ws.sn);
+                apply_new_givens_and_update_g(
+                    &mut hcol[..=k + 1],
+                    k,
+                    &mut ws.cs,
+                    &mut ws.sn,
+                    &mut ws.g,
+                );
 
                 res = ws.g[k + 1].abs(); // estimate; equals true ||r|| for Right/None, precond ||M^{-1}r|| for Left
                 total_iters += 1;
@@ -445,10 +433,10 @@ impl LinearSolver for PcaGmresSolver {
             let mut y = vec![S::zero(); k];
             for i in (0..k).rev() {
                 let mut sum = ws.g[i];
-                for l in (i + 1)..k {
-                    sum -= S::from_real(ws.h[i][l]) * y[l];
+                for j in (i + 1)..k {
+                    sum -= ws.h_s[j][i] * y[j];
                 }
-                y[i] = sum / S::from_real(ws.h[i][i]);
+                y[i] = sum / ws.h_s[i][i];
             }
 
             // Update x with V or Z depending on mode
@@ -456,7 +444,7 @@ impl LinearSolver for PcaGmresSolver {
                 PcaPcMode::Right => {
                     for i in 0..k {
                         let zi = &ws.z_s[i][..];
-                        for (xj, &zij) in x.iter_mut().zip(zi) {
+                        for (xj, &zij) in x_s.iter_mut().zip(zi) {
                             *xj += y[i] * zij;
                         }
                     }
@@ -464,7 +452,7 @@ impl LinearSolver for PcaGmresSolver {
                 PcaPcMode::None | PcaPcMode::Left => {
                     for i in 0..k {
                         let vi = &ws.q_s[i][..];
-                        for (xj, &vij) in x.iter_mut().zip(vi) {
+                        for (xj, &vij) in x_s.iter_mut().zip(vi) {
                             *xj += y[i] * vij;
                         }
                     }
@@ -472,9 +460,9 @@ impl LinearSolver for PcaGmresSolver {
             }
 
             // Restart: r = b - A x, rebuild v0 based on mode
-            matvec_s(a, x, &mut ws.tmp1, &mut ws.bridge);
+            matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
             for i in 0..n {
-                ws.tmp1[i] = S::from_real(b[i]) - ws.tmp1[i];
+                ws.tmp1[i] = b_s[i] - ws.tmp1[i];
             }
             let beta0_new: R = match mode {
                 PcaPcMode::None => {
@@ -520,9 +508,9 @@ impl LinearSolver for PcaGmresSolver {
             };
 
             // Reset Hessenberg and RHS for next cycle
-            ws.h.iter_mut().for_each(|row| row.fill(0.0));
+            ws.h_s.iter_mut().for_each(|row| row.fill(S::zero()));
             ws.cs.fill(0.0);
-            ws.sn.fill(0.0);
+            ws.sn.fill(S::zero());
             ws.g.fill(S::zero());
             ws.g[0] = S::from_real(beta0_new);
 
@@ -541,9 +529,9 @@ impl LinearSolver for PcaGmresSolver {
         }
 
         // Report *true* residual at the end for consistency
-        matvec_s(a, x, &mut ws.tmp1, &mut ws.bridge);
+        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
         for i in 0..n {
-            ws.tmp1[i] = b[i] - ws.tmp1[i];
+            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
         }
         let true_res: R = nrm2(&ws.tmp1);
         let (_r, mut s) = self.conv.check(true_res, bnorm, total_iters);
@@ -560,6 +548,7 @@ impl LinearSolver for PcaGmresSolver {
                 ConvergedReason::DivergedMaxIts
             };
         }
+        write_back(&x_s);
         Ok(s)
     }
 }
@@ -573,5 +562,35 @@ impl PcaGmresSolver {
     }
     pub fn set_reorthog(&mut self, flag: bool) {
         self.modified_gs = flag;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algebra::blas::{dot_conj, nrm2};
+    use crate::context::ksp_context::Workspace;
+
+    #[test]
+    fn arnoldi_project_and_normalize_orthonormalizes_vector() {
+        let solver = PcaGmresSolver::new(2, 1, 1, 1e-6, 10);
+        let n = 2;
+        let mut ws = Workspace::new(n);
+        solver.ensure_workspace(&mut ws, n);
+
+        ws.q_s[0][0] = S::one();
+        ws.q_s[0][1] = S::zero();
+        ws.h_s.iter_mut().for_each(|col| col.fill(S::zero()));
+
+        let mut w = vec![S::zero(); n];
+        w[1] = S::one();
+
+        let hnorm = solver.project_and_normalize(&ws.q_s, 0, &mut w, &mut ws.h_s);
+
+        assert!((hnorm - 1.0).abs() < 1e-12);
+        assert!((nrm2(&w) - 1.0).abs() < 1e-12);
+        assert!(dot_conj(&ws.q_s[0], &w).abs() < 1e-12);
+        assert!(ws.h_s[0][0].abs() < 1e-12);
+        assert!((ws.h_s[0][1].abs() - 1.0).abs() < 1e-12);
     }
 }
