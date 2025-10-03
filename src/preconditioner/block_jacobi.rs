@@ -12,11 +12,15 @@
 // 2. Call `setup` with the system matrix to factorize each block.
 // 3. Use `apply` to apply the preconditioner to a vector.
 
+use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::prelude::*;
 use crate::core::traits::{MatrixGet, RowPattern};
+use crate::error::KError;
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::op::CsrOp;
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::sparse::CsrMatrix;
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::PcSide;
 #[cfg(not(feature = "dense-direct"))]
 use crate::preconditioner::Preconditioner; // bring trait into scope for IluCsr::setup/apply
@@ -50,6 +54,17 @@ pub struct BlockJacobi<T> {
 }
 
 impl BlockJacobi<f64> {
+    pub fn dims(&self) -> (usize, usize) {
+        let n = self
+            .blocks
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .map_or(0, |idx| idx + 1);
+        (n, n)
+    }
+
     /// Setup the Block-Jacobi preconditioner by factorizing each block.
     ///
     /// For each block, extracts the submatrix, factorizes it with LU, and stores the solver.
@@ -220,6 +235,118 @@ impl BlockJacobi<f64> {
                     }
                 }
             }
+        }
+    }
+}
+
+impl KPreconditioner for BlockJacobi<f64> {
+    type Scalar = S;
+
+    fn dims(&self) -> (usize, usize) {
+        self.dims()
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        let _ = side;
+        let (nrows, ncols) = self.dims();
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!(
+                "BlockJacobi::apply_s mismatched input/output: x={}, y={}",
+                x.len(),
+                y.len()
+            )));
+        }
+        if nrows != 0 && (x.len() != nrows || y.len() != ncols) {
+            return Err(KError::InvalidInput(format!(
+                "BlockJacobi::apply_s dimension mismatch: dims=({nrows}, {ncols}), len={}",
+                x.len()
+            )));
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let xr = scratch.copy_scalar_into_real(x);
+            let yr = scratch.yr(x.len());
+            self.apply(xr, yr);
+            scratch.copy_real_into_scalar(yr, y);
+        }
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let xr: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
+            let yr: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
+            self.apply(xr, yr);
+            let _ = scratch;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::traits::{MatrixGet, RowPattern};
+    use crate::preconditioner::PcSide;
+    use std::marker::PhantomData;
+
+    struct TestDiagMatrix {
+        diag: Vec<f64>,
+        pattern: Vec<Vec<usize>>,
+    }
+
+    impl TestDiagMatrix {
+        fn new(diag: Vec<f64>) -> Self {
+            let pattern = (0..diag.len()).map(|i| vec![i]).collect();
+            Self { diag, pattern }
+        }
+    }
+
+    impl RowPattern for TestDiagMatrix {
+        fn row_indices(&self, i: usize) -> &[usize] {
+            &self.pattern[i]
+        }
+    }
+
+    impl MatrixGet<f64> for TestDiagMatrix {
+        fn get(&self, i: usize, j: usize) -> f64 {
+            if i == j { self.diag[i] } else { 0.0 }
+        }
+    }
+
+    #[test]
+    fn apply_bridge_matches_real() {
+        let mut pc = BlockJacobi {
+            blocks: vec![vec![0], vec![1]],
+            #[cfg(feature = "dense-direct")]
+            block_factors: Vec::new(),
+            #[cfg(not(feature = "dense-direct"))]
+            block_factors_ilu: Vec::new(),
+            #[cfg(not(feature = "dense-direct"))]
+            _marker: PhantomData,
+        };
+
+        let a = TestDiagMatrix::new(vec![4.0, 9.0]);
+        pc.setup(&a);
+
+        let rhs_real = vec![8.0, 18.0];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        pc.apply(&rhs_real, &mut out_real);
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_real.len()];
+        let mut scratch = BridgeScratch::default();
+        KPreconditioner::apply_s(&pc, PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("block jacobi bridge apply");
+
+        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-12);
         }
     }
 }

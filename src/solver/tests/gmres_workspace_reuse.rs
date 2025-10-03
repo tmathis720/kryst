@@ -4,7 +4,7 @@ mod tests_gmres_workspace_reuse {
     use crate::error::KError;
     use crate::parallel::{NoComm, UniverseComm};
     use crate::preconditioner::PcSide;
-    use crate::solver::{LinearSolver, gmres::GmresSolver};
+    use crate::solver::gmres::GmresSolver;
     use faer::Mat;
 
     #[test]
@@ -18,7 +18,7 @@ mod tests_gmres_workspace_reuse {
         let comm = UniverseComm::NoComm(NoComm);
 
         // First solve to allocate workspace
-        solver.solve(
+        solver.solve_f64(
             &a,
             None,
             &b,
@@ -35,7 +35,7 @@ mod tests_gmres_workspace_reuse {
 
         // Solve again and ensure buffers are reused
         x = [0.0, 0.0];
-        solver.solve(
+        solver.solve_f64(
             &a,
             None,
             &b,

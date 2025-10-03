@@ -4,6 +4,10 @@ use std::cmp::Ordering as CmpOrdering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{
@@ -13,6 +17,8 @@ use crate::matrix::{
 };
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
@@ -4204,6 +4210,17 @@ impl AMG {
 // ===== Preconditioner trait (new API) =======================================
 
 impl Preconditioner for AMG {
+    fn dims(&self) -> (usize, usize) {
+        if let Some(state) = self.state.as_ref() {
+            let n = state.finest().a.nrows();
+            (n, n)
+        } else if let Some(csr) = self.csr.as_ref() {
+            (csr.nrows(), csr.ncols())
+        } else {
+            (0, 0)
+        }
+    }
+
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
         validate_truncation_and_caps(&self.cfg)?;
@@ -4328,6 +4345,31 @@ impl Preconditioner for AMG {
         {
             print_setup_tables(s);
         }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for AMG {
+    type Scalar = S;
+
+    fn dims(&self) -> (usize, usize) {
+        Preconditioner::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        let n = x.len();
+        debug_assert_eq!(y.len(), n);
+        let xr = scratch.copy_scalar_into_real(x);
+        let yr = scratch.yr(n);
+        self.apply(side, xr, yr)?;
+        scratch.copy_real_into_scalar(yr, y);
         Ok(())
     }
 }

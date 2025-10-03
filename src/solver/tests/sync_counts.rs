@@ -59,11 +59,10 @@ fn gmres_classic_reduction_count_within_expected_bounds() -> Result<(), KError> 
     let mut solver = GmresSolver::new(12, 1e-8, 500);
     solver.set_variant(GmresVariant::Classical);
     let mut ws = Workspace::default();
-    let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
     let comm = UniverseComm::NoComm(NoComm);
     let mut x = vec![0.0; a.nrows()];
-    let stats = solver.solve(
-        op,
+    let stats = solver.solve_f64(
+        &a,
         None,
         &b,
         &mut x,

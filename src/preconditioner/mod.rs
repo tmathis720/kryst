@@ -135,6 +135,15 @@ impl PcReusePolicy {
 /// and may return [`KError::IndefinitePreconditioner`] if the contract is
 /// violated.
 pub trait Preconditioner: Send + Sync {
+    /// Dimensions `(nrows, ncols)` of the preconditioner application.
+    ///
+    /// Defaults to `(0, 0)` when the implementation cannot provide the size.
+    /// Implementations should override this once the information is available
+    /// so solvers can pre-size workspaces.
+    fn dims(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
     /// Build any factorization/hierarchy once from the system matrix.
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
 

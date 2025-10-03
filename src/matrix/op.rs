@@ -1,7 +1,11 @@
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
 use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
+#[cfg(feature = "complex")]
+use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
@@ -209,13 +213,39 @@ where
 
 /// Convenience trait for callers that only operate on real scalars.
 pub trait LinOpF64 {
+    fn dims(&self) -> (usize, usize);
     fn matvec(&self, x: &[f64], y: &mut [f64]);
 }
 
 impl LinOpF64 for GenericCsrOp<f64> {
     #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    #[inline]
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         <Self as LinOp>::matvec(self, x, y)
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KLinOp for GenericCsrOp<num_complex::Complex64> {
+    type Scalar = num_complex::Complex64;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        self.matrix.dims()
+    }
+
+    #[inline]
+    fn matvec_s(
+        &self,
+        x: &[num_complex::Complex64],
+        y: &mut [num_complex::Complex64],
+        _scratch: &mut BridgeScratch,
+    ) {
+        <Self as LinOp>::matvec(self, x, y);
     }
 }
 
@@ -459,8 +489,25 @@ impl LinOp for CsrOp {
 
 impl LinOpF64 for CsrOp {
     #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    #[inline]
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         <Self as LinOp>::matvec(self, x, y)
+    }
+}
+
+impl LinOpF64 for dyn LinOp<S = f64> + '_ {
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        LinOp::dims(self)
+    }
+
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        LinOp::matvec(self, x, y)
     }
 }
 
@@ -557,6 +604,18 @@ impl LinOp for Mat<f64> {
     }
 }
 
+impl LinOpF64 for Mat<f64> {
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        <Self as LinOp>::matvec(self, x, y)
+    }
+}
+
 use crate::matrix::sparse::SparseMatrix;
 impl LinOp for CsrMatrix<f64> {
     type S = f64;
@@ -594,6 +653,18 @@ impl LinOp for CsrMatrix<f64> {
     }
     fn values_id(&self) -> ValuesId {
         ValuesId(0)
+    }
+}
+
+impl LinOpF64 for CsrMatrix<f64> {
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        <Self as LinOp>::matvec(self, x, y)
     }
 }
 

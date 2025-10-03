@@ -33,6 +33,7 @@ pub mod context;
 pub mod core;
 pub mod error;
 pub mod matrix;
+pub mod ops;
 pub mod preconditioner;
 pub mod reduction;
 pub mod solver;

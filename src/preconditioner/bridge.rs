@@ -7,7 +7,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 
 #[inline]
 pub fn apply_pc_s(
-    pc: &dyn Preconditioner,
+    pc: &(dyn Preconditioner + '_),
     side: PcSide,
     x: &[S],
     y: &mut [S],

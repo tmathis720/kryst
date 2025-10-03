@@ -1,7 +1,7 @@
 //! Simple test to debug the matrix loading and solver issues
 //!
 //! This version keeps the CSR path only (no dense transformation).
-//! 
+//!
 //! to run:
 //! cargo run --example debug_matrix_test
 

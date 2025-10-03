@@ -10,8 +10,7 @@ use faer::Mat;
 use faer::linalg::solvers::SolveCore;
 use kryst::context::ksp_context::Workspace;
 use kryst::preconditioner::PcSide;
-use kryst::solver::LinearSolver;
-use kryst::solver::{CgSolver, GmresSolver};
+use kryst::solver::{CgSolver, GmresSolver, LinearSolver};
 use rand::Rng;
 
 /// Helper function to generate a random symmetric positive definite (SPD) matrix `A` and a random right-hand side `b`.
@@ -43,7 +42,7 @@ fn cg_vs_direct_on_spd() {
     let mut ws = Workspace::new(n);
     solver.setup_workspace(&mut ws);
     let stats = solver
-        .solve(
+        .solve_f64(
             &a,
             None,
             &b,
@@ -86,7 +85,7 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let mut x_gmres = vec![0.0; n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
     let stats = solver
-        .solve(&a, None, &b, &mut x_gmres, PcSide::Left, &comm, None, None)
+        .solve_f64(&a, None, &b, &mut x_gmres, PcSide::Left, &comm, None, None)
         .unwrap();
     assert!(matches!(
         stats.reason,

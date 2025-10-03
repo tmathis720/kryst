@@ -16,18 +16,18 @@
 //! GMRES/FGMRES.
 
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
 use crate::error::KError;
-use crate::matrix::op::LinOp;
-use crate::matrix::op_bridge::matvec_s;
-use crate::parallel::UniverseComm;
-use crate::preconditioner::bridge::apply_pc_s;
+use crate::matrix::op::{LinOp, LinOpF64};
+use crate::ops::klinop::KLinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::ops::wrap::{as_s_op, as_s_pc};
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::solver::common::recompute_true_residual_norm;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -158,6 +158,458 @@ impl GmresSolver {
         }
     }
 
+    fn true_residual_norm<A: KLinOp<Scalar = S> + ?Sized>(
+        a: &A,
+        b: &[S],
+        x: &[S],
+        comm: &UniverseComm,
+        tmp: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> R {
+        a.matvec_s(x, tmp, scratch);
+        let mut local = 0.0;
+        for i in 0..tmp.len() {
+            let diff = b[i] - tmp[i];
+            tmp[i] = diff;
+            let mag2 = (diff.conj() * diff).real();
+            local += mag2;
+        }
+        let sum = if comm.size() == 1 {
+            local
+        } else {
+            comm.allreduce_sum(local)
+        };
+        sum.sqrt()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve<A, P>(
+        &mut self,
+        a: &A,
+        pc: Option<&P>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+        P: KPreconditioner<Scalar = S> + ?Sized,
+    {
+        let (m, n) = a.dims();
+        if m != n || b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput(
+                "GMRES: dimension mismatch or non-square operator".into(),
+            ));
+        }
+
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
+
+        let mut owned_ws;
+        let ws = if let Some(w) = work {
+            w
+        } else {
+            owned_ws = Workspace::new(n);
+            &mut owned_ws
+        };
+        self.ensure_workspace(ws, n, pc_side);
+
+        let mons = monitors.unwrap_or(&[]);
+
+        a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
+        for i in 0..n {
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
+        }
+
+        ws.h_mem.fill(S::zero());
+        ws.cs.fill(0.0);
+        ws.sn.fill(S::zero());
+        ws.g.fill(S::zero());
+
+        let mut res: R;
+        let beta: R = match pc_side {
+            PcSide::Left => {
+                if let Some(pc) = pc {
+                    let tmp2 = &mut ws.tmp2[..n];
+                    pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                } else {
+                    ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                }
+                let beta = nrm2(&ws.tmp2[..n]);
+                if beta > 0.0 {
+                    let inv = S::from_real(1.0 / beta);
+                    for val in &mut ws.tmp2[..n] {
+                        *val *= inv;
+                    }
+                    ws.copy_tmp2_into_vcol(0);
+                } else {
+                    ws.v_col(0).fill(S::zero());
+                }
+                beta
+            }
+            PcSide::Right => {
+                let beta = nrm2(&ws.tmp1[..n]);
+                if beta > 0.0 {
+                    let inv = S::from_real(1.0 / beta);
+                    for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
+                        *dst = src * inv;
+                    }
+                    ws.copy_tmp2_into_vcol(0);
+                } else {
+                    ws.v_col(0).fill(S::zero());
+                }
+                beta
+            }
+            PcSide::Symmetric => unreachable!(),
+        };
+
+        ws.g[0] = S::from_real(beta);
+        let bnorm = nrm2(b).max(1e-32);
+        let thr = self.conv.atol.max(self.conv.rtol * bnorm);
+
+        let mut total_iters = 0usize;
+        res = beta;
+        let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
+
+        if matches!(self.variant, GmresVariant::SStep { .. }) {
+            return Err(KError::NotImplemented(
+                "GMRES s-step variant is not yet implemented".into(),
+            ));
+        }
+
+        for m in mons {
+            m(0, res);
+        }
+        if res <= thr {
+            stats.reason = if res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else {
+                ConvergedReason::ConvergedRtol
+            };
+            stats.final_residual = res;
+            let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
+            stats.final_residual = true_res;
+            let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+            let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let counters = crate::utils::convergence::SolverCounters {
+                num_global_reductions: reductions,
+                residual_replacements: 0,
+            };
+            return Ok(stats.with_counters(counters));
+        }
+
+        'outer: loop {
+            let mut k_steps = 0usize;
+            for k in 0..self.restart {
+                match self.variant {
+                    GmresVariant::Classical => match pc_side {
+                        PcSide::Left => {
+                            let vk = &ws.v_mem[k * n..(k + 1) * n];
+                            a.matvec_s(vk, &mut ws.tmp1, &mut ws.bridge);
+                            if let Some(pc) = pc {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                            } else {
+                                ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                            }
+                            let mut hvals = vec![S::zero(); k + 1];
+                            {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                for i in 0..=k {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                    let hij = dot_conj(vi, tmp2);
+                                    hvals[i] = hij;
+                                    for (w, &vi_j) in tmp2.iter_mut().zip(vi) {
+                                        *w -= hij * vi_j;
+                                    }
+                                }
+                            }
+                            for i in 0..=k {
+                                *ws.h_at_mut(i, k) = hvals[i];
+                            }
+                            let hnext = nrm2(&ws.tmp2[..n]);
+                            *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
+                            if hnext > 0.0 {
+                                let inv = S::from_real(1.0 / hnext);
+                                for val in &mut ws.tmp2[..n] {
+                                    *val *= inv;
+                                }
+                                ws.copy_tmp2_into_vcol(k + 1);
+                            } else {
+                                ws.v_col(k + 1).fill(S::zero());
+                            }
+                        }
+                        PcSide::Right => {
+                            let vk = &ws.v_mem[k * n..(k + 1) * n];
+                            if let Some(pc) = pc {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                pc.apply_s(PcSide::Right, vk, tmp2, &mut ws.bridge)?;
+                            } else {
+                                ws.tmp2[..n].copy_from_slice(vk);
+                            }
+                            {
+                                let (tmp2, zk) = ws.tmp2_and_z_mut(k);
+                                zk.copy_from_slice(tmp2);
+                            }
+                            a.matvec_s(&ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
+                            let mut hvals = vec![S::zero(); k + 1];
+                            {
+                                let tmp1 = &mut ws.tmp1[..n];
+                                for i in 0..=k {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                    let hij = dot_conj(vi, tmp1);
+                                    hvals[i] = hij;
+                                    for (w, &vi_j) in tmp1.iter_mut().zip(vi) {
+                                        *w -= hij * vi_j;
+                                    }
+                                }
+                            }
+                            for i in 0..=k {
+                                *ws.h_at_mut(i, k) = hvals[i];
+                            }
+                            let hnext = nrm2(&ws.tmp1[..n]);
+                            *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
+                            if hnext > 0.0 {
+                                let inv = S::from_real(1.0 / hnext);
+                                for val in &mut ws.tmp1[..n] {
+                                    *val *= inv;
+                                }
+                                ws.copy_tmp1_into_vcol(k + 1);
+                            } else {
+                                ws.v_col(k + 1).fill(S::zero());
+                            }
+                        }
+                        PcSide::Symmetric => unreachable!(),
+                    },
+                    GmresVariant::Pipelined => {
+                        #[cfg(feature = "complex")]
+                        {
+                            return Err(KError::NotImplemented(
+                                "Pipelined GMRES is not yet implemented for complex scalars".into(),
+                            ));
+                        }
+                        #[cfg(not(feature = "complex"))]
+                        {
+                            match pc_side {
+                                PcSide::Left => {
+                                    let vk = &ws.v_mem[k * n..(k + 1) * n];
+                                    a.matvec_s(vk, &mut ws.tmp1, &mut ws.bridge);
+                                    if let Some(pc) = pc {
+                                        pc.apply_s(
+                                            PcSide::Left,
+                                            &ws.tmp1[..n],
+                                            ws.pipelined_w.as_mut_slice(),
+                                            &mut ws.bridge,
+                                        )?;
+                                    } else {
+                                        ws.pipelined_w[..n].copy_from_slice(&ws.tmp1[..n]);
+                                    }
+                                    let _ = ws.pipelined_arnoldi_step(
+                                        k,
+                                        n,
+                                        comm,
+                                        self.reorth,
+                                        self.reorth_tol,
+                                    )?;
+                                }
+                                PcSide::Right => {
+                                    let vk = &ws.v_mem[k * n..(k + 1) * n];
+                                    if let Some(pc) = pc {
+                                        pc.apply_s(
+                                            PcSide::Right,
+                                            vk,
+                                            &mut ws.tmp2[..n],
+                                            &mut ws.bridge,
+                                        )?;
+                                    } else {
+                                        ws.tmp2[..n].copy_from_slice(vk);
+                                    }
+                                    {
+                                        let (tmp2, zk) = ws.tmp2_and_z_mut(k);
+                                        zk.copy_from_slice(tmp2);
+                                    }
+                                    a.matvec_s(
+                                        &ws.tmp2[..n],
+                                        ws.pipelined_w.as_mut_slice(),
+                                        &mut ws.bridge,
+                                    );
+                                    let _ = ws.pipelined_arnoldi_step(
+                                        k,
+                                        n,
+                                        comm,
+                                        self.reorth,
+                                        self.reorth_tol,
+                                    )?;
+                                }
+                                PcSide::Symmetric => unreachable!(),
+                            }
+                        }
+                    }
+                    GmresVariant::SStep { .. } => {
+                        unreachable!("s-step path should exit before iteration loop")
+                    }
+                }
+
+                ws.apply_prev_givens_to_col(k, k);
+                ws.apply_final_givens_and_update_g(k);
+
+                res = ws.g[k + 1].abs();
+                total_iters += 1;
+                k_steps = k + 1;
+
+                for m in mons {
+                    m(total_iters, res);
+                }
+
+                if res <= thr || total_iters >= self.conv.max_iters {
+                    break;
+                }
+            }
+
+            if k_steps == 0 {
+                break;
+            }
+
+            let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
+            match pc_side {
+                PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
+                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
+                PcSide::Symmetric => unreachable!(),
+            }
+
+            a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
+            for i in 0..n {
+                ws.tmp1[i] = b[i] - ws.tmp1[i];
+            }
+            res = match pc_side {
+                PcSide::Left => {
+                    if let Some(pc) = pc {
+                        let tmp2 = &mut ws.tmp2[..n];
+                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    } else {
+                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                    }
+                    nrm2(&ws.tmp2[..n])
+                }
+                PcSide::Right => nrm2(&ws.tmp1[..n]),
+                PcSide::Symmetric => unreachable!(),
+            };
+
+            stats.iterations = total_iters;
+            stats.final_residual = res;
+
+            if res <= thr || total_iters >= self.conv.max_iters {
+                break 'outer;
+            }
+
+            ws.h_mem.fill(S::zero());
+            ws.cs.fill(0.0);
+            ws.sn.fill(S::zero());
+            ws.g.fill(S::zero());
+
+            let beta = match pc_side {
+                PcSide::Left => {
+                    if let Some(pc) = pc {
+                        let tmp2 = &mut ws.tmp2[..n];
+                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    } else {
+                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                    }
+                    let beta = nrm2(&ws.tmp2[..n]);
+                    if beta > 0.0 {
+                        let inv = S::from_real(1.0 / beta);
+                        for val in &mut ws.tmp2[..n] {
+                            *val *= inv;
+                        }
+                        ws.copy_tmp2_into_vcol(0);
+                    } else {
+                        ws.v_col(0).fill(S::zero());
+                    }
+                    beta
+                }
+                PcSide::Right => {
+                    let beta = nrm2(&ws.tmp1[..n]);
+                    if beta > 0.0 {
+                        let inv = S::from_real(1.0 / beta);
+                        for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
+                            *dst = src * inv;
+                        }
+                        ws.copy_tmp2_into_vcol(0);
+                    } else {
+                        ws.v_col(0).fill(S::zero());
+                    }
+                    beta
+                }
+                PcSide::Symmetric => unreachable!(),
+            };
+
+            ws.g[0] = S::from_real(beta);
+            res = beta;
+
+            for m in mons {
+                m(total_iters, res);
+            }
+        }
+
+        let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
+        stats.final_residual = true_res;
+
+        let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+        let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+        let counters = crate::utils::convergence::SolverCounters {
+            num_global_reductions: reductions,
+            residual_replacements: 0,
+        };
+        Ok(stats.with_counters(counters))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_f64<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError>
+    where
+        A: LinOpF64 + crate::matrix::op::LinOp<S = f64> + Send + Sync + ?Sized,
+    {
+        let op = as_s_op(a);
+        let pc_wrapper = pc.map(as_s_pc);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|w| w as &dyn KPreconditioner<Scalar = S>);
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
+            let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            self.solve(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+        }
+        #[cfg(feature = "complex")]
+        {
+            let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+            let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+            let result = self.solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            if let Ok(_) = result {
+                for (dst, src) in x.iter_mut().zip(x_s.iter()) {
+                    *dst = src.real();
+                }
+            }
+            result
+        }
+    }
+
     #[allow(dead_code)]
     #[inline]
     fn mat_idx(ld: usize, row: usize, col: usize) -> usize {
@@ -276,395 +728,7 @@ impl LinearSolver for GmresSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        let pc: Option<&dyn Preconditioner> = pc.as_deref();
-        let (m, n) = a.dims();
-        if m != n || b.len() != n || x.len() != n {
-            return Err(KError::InvalidInput(
-                "GMRES: dimension mismatch or non-square operator".into(),
-            ));
-        }
-
-        let pc_side = match pc_side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
-        };
-
-        let mut owned_ws;
-        let ws = if let Some(w) = work {
-            w
-        } else {
-            owned_ws = Workspace::new(n);
-            &mut owned_ws
-        };
-        self.ensure_workspace(ws, n, pc_side);
-
-        let mons = monitors.unwrap_or(&[]);
-
-        let mut x_s = vec![S::zero(); n];
-        copy_real_to_scalar_in(x, &mut x_s);
-        let mut b_s = vec![S::zero(); n];
-        copy_real_to_scalar_in(b, &mut b_s);
-
-        // r0 = b - A x
-        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
-        for i in 0..n {
-            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
-        }
-
-        ws.h_mem.fill(S::zero());
-        ws.cs.fill(0.0);
-        ws.sn.fill(S::zero());
-        ws.g.fill(S::zero());
-
-        let mut res: R;
-        let beta: R = match pc_side {
-            PcSide::Left => {
-                if let Some(pc) = pc {
-                    let tmp2 = &mut ws.tmp2[..n];
-                    apply_pc_s(pc, PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                } else {
-                    ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
-                }
-                let beta = nrm2(&ws.tmp2[..n]);
-                if beta > 0.0 {
-                    let inv = S::from_real(1.0 / beta);
-                    for val in &mut ws.tmp2[..n] {
-                        *val *= inv;
-                    }
-                    ws.copy_tmp2_into_vcol(0);
-                } else {
-                    ws.v_col(0).fill(S::zero());
-                }
-                beta
-            }
-            PcSide::Right => {
-                let beta = nrm2(&ws.tmp1[..n]);
-                if beta > 0.0 {
-                    let inv = S::from_real(1.0 / beta);
-                    for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
-                        *dst = src * inv;
-                    }
-                    ws.copy_tmp2_into_vcol(0);
-                } else {
-                    ws.v_col(0).fill(S::zero());
-                }
-                beta
-            }
-            PcSide::Symmetric => unreachable!(),
-        };
-
-        ws.g[0] = S::from_real(beta);
-        let bnorm = nrm2(&b_s).max(1e-32);
-        let thr = self.conv.atol.max(self.conv.rtol * bnorm);
-
-        let mut total_iters = 0usize;
-        res = beta;
-        let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
-        let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
-
-        if matches!(self.variant, GmresVariant::SStep { .. }) {
-            return Err(KError::NotImplemented(
-                "GMRES s-step variant is not yet implemented".into(),
-            ));
-        }
-
-        for m in mons {
-            m(0, res);
-        }
-        if res <= thr {
-            stats.reason = if res <= self.conv.atol {
-                ConvergedReason::ConvergedAtol
-            } else {
-                ConvergedReason::ConvergedRtol
-            };
-            stats.final_residual = res;
-            copy_scalar_to_real_in(&x_s, x);
-            let tmp = ws.bridge.xr(n);
-            let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
-            stats.final_residual = true_res;
-            let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-            let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
-            let counters = crate::utils::convergence::SolverCounters {
-                num_global_reductions: reductions,
-                residual_replacements: 0,
-            };
-            return Ok(stats.with_counters(counters));
-        }
-
-        'outer: loop {
-            let mut k_steps = 0usize;
-            for k in 0..self.restart {
-                match self.variant {
-                    GmresVariant::Classical => match pc_side {
-                        PcSide::Left => {
-                            let vk = &ws.v_mem[k * n..(k + 1) * n];
-                            matvec_s(a, vk, &mut ws.tmp1, &mut ws.bridge);
-                            if let Some(pc) = pc {
-                                let tmp2 = &mut ws.tmp2[..n];
-                                apply_pc_s(pc, PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                            } else {
-                                ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
-                            }
-                            let mut hvals = vec![S::zero(); k + 1];
-                            {
-                                let tmp2 = &mut ws.tmp2[..n];
-                                for i in 0..=k {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    let hij = dot_conj(vi, tmp2);
-                                    hvals[i] = hij;
-                                    for (w, &vi_j) in tmp2.iter_mut().zip(vi) {
-                                        *w -= hij * vi_j;
-                                    }
-                                }
-                            }
-                            for i in 0..=k {
-                                *ws.h_at_mut(i, k) = hvals[i];
-                            }
-                            let hnext = nrm2(&ws.tmp2[..n]);
-                            *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
-                            if hnext > 0.0 {
-                                let inv = S::from_real(1.0 / hnext);
-                                for val in &mut ws.tmp2[..n] {
-                                    *val *= inv;
-                                }
-                                ws.copy_tmp2_into_vcol(k + 1);
-                            } else {
-                                ws.v_col(k + 1).fill(S::zero());
-                            }
-                        }
-                        PcSide::Right => {
-                            let vk = &ws.v_mem[k * n..(k + 1) * n];
-                            if let Some(pc) = pc {
-                                let tmp2 = &mut ws.tmp2[..n];
-                                apply_pc_s(pc, PcSide::Right, vk, tmp2, &mut ws.bridge)?;
-                            } else {
-                                ws.tmp2[..n].copy_from_slice(vk);
-                            }
-                            {
-                                let (tmp2, zk) = ws.tmp2_and_z_mut(k);
-                                zk.copy_from_slice(tmp2);
-                            }
-                            matvec_s(a, &ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
-                            let mut hvals = vec![S::zero(); k + 1];
-                            {
-                                let tmp1 = &mut ws.tmp1[..n];
-                                for i in 0..=k {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    let hij = dot_conj(vi, tmp1);
-                                    hvals[i] = hij;
-                                    for (w, &vi_j) in tmp1.iter_mut().zip(vi) {
-                                        *w -= hij * vi_j;
-                                    }
-                                }
-                            }
-                            for i in 0..=k {
-                                *ws.h_at_mut(i, k) = hvals[i];
-                            }
-                            let hnext = nrm2(&ws.tmp1[..n]);
-                            *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
-                            if hnext > 0.0 {
-                                let inv = S::from_real(1.0 / hnext);
-                                for val in &mut ws.tmp1[..n] {
-                                    *val *= inv;
-                                }
-                                ws.copy_tmp1_into_vcol(k + 1);
-                            } else {
-                                ws.v_col(k + 1).fill(S::zero());
-                            }
-                        }
-                        PcSide::Symmetric => unreachable!(),
-                    },
-                    GmresVariant::Pipelined => {
-                        #[cfg(feature = "complex")]
-                        {
-                            return Err(KError::NotImplemented(
-                                "Pipelined GMRES is not yet implemented for complex scalars",
-                            ));
-                        }
-                        #[cfg(not(feature = "complex"))]
-                        {
-                            match pc_side {
-                                PcSide::Left => {
-                                    let vk = &ws.v_mem[k * n..(k + 1) * n];
-                                    matvec_s(a, vk, &mut ws.tmp1, &mut ws.bridge);
-                                    if let Some(pc) = pc {
-                                        apply_pc_s(
-                                            pc,
-                                            PcSide::Left,
-                                            &ws.tmp1[..n],
-                                            ws.pipelined_w.as_mut_slice(),
-                                            &mut ws.bridge,
-                                        )?;
-                                    } else {
-                                        ws.pipelined_w[..n].copy_from_slice(&ws.tmp1[..n]);
-                                    }
-                                    let _ = ws.pipelined_arnoldi_step(
-                                        k,
-                                        n,
-                                        comm,
-                                        self.reorth,
-                                        self.reorth_tol,
-                                    )?;
-                                }
-                                PcSide::Right => {
-                                    let vk = &ws.v_mem[k * n..(k + 1) * n];
-                                    if let Some(pc) = pc {
-                                        apply_pc_s(
-                                            pc,
-                                            PcSide::Right,
-                                            vk,
-                                            &mut ws.tmp2[..n],
-                                            &mut ws.bridge,
-                                        )?;
-                                    } else {
-                                        ws.tmp2[..n].copy_from_slice(vk);
-                                    }
-                                    {
-                                        let (tmp2, zk) = ws.tmp2_and_z_mut(k);
-                                        zk.copy_from_slice(tmp2);
-                                    }
-                                    matvec_s(
-                                        a,
-                                        &ws.tmp2[..n],
-                                        ws.pipelined_w.as_mut_slice(),
-                                        &mut ws.bridge,
-                                    );
-                                    let _ = ws.pipelined_arnoldi_step(
-                                        k,
-                                        n,
-                                        comm,
-                                        self.reorth,
-                                        self.reorth_tol,
-                                    )?;
-                                }
-                                PcSide::Symmetric => unreachable!(),
-                            }
-                        }
-                    }
-                    GmresVariant::SStep { .. } => {
-                        unreachable!("s-step path should exit before iteration loop")
-                    }
-                }
-
-                ws.apply_prev_givens_to_col(k, k);
-                ws.apply_final_givens_and_update_g(k);
-
-                res = ws.g[k + 1].abs();
-                total_iters += 1;
-                k_steps = k + 1;
-
-                for m in mons {
-                    m(total_iters, res);
-                }
-
-                if res <= thr || total_iters >= self.conv.max_iters {
-                    break;
-                }
-            }
-
-            if k_steps == 0 {
-                break;
-            }
-
-            let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
-            match pc_side {
-                PcSide::Left => Self::axpy_update_vcols(&mut x_s, ws, k_steps, &y),
-                PcSide::Right => Self::axpy_update_zcols(&mut x_s, ws, k_steps, &y),
-                PcSide::Symmetric => unreachable!(),
-            }
-
-            // Recompute residual
-            matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
-            for i in 0..n {
-                ws.tmp1[i] = b_s[i] - ws.tmp1[i];
-            }
-            res = match pc_side {
-                PcSide::Left => {
-                    if let Some(pc) = pc {
-                        let tmp2 = &mut ws.tmp2[..n];
-                        apply_pc_s(pc, PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                    } else {
-                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
-                    }
-                    nrm2(&ws.tmp2[..n])
-                }
-                PcSide::Right => nrm2(&ws.tmp1[..n]),
-                PcSide::Symmetric => unreachable!(),
-            };
-
-            stats.iterations = total_iters;
-            stats.final_residual = res;
-
-            if res <= thr || total_iters >= self.conv.max_iters {
-                break 'outer;
-            }
-
-            // Prepare next cycle
-            ws.h_mem.fill(S::zero());
-            ws.cs.fill(0.0);
-            ws.sn.fill(S::zero());
-            ws.g.fill(S::zero());
-
-            let beta = match pc_side {
-                PcSide::Left => {
-                    if let Some(pc) = pc {
-                        let tmp2 = &mut ws.tmp2[..n];
-                        apply_pc_s(pc, PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                    } else {
-                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
-                    }
-                    let beta = nrm2(&ws.tmp2[..n]);
-                    if beta > 0.0 {
-                        let inv = S::from_real(1.0 / beta);
-                        for val in &mut ws.tmp2[..n] {
-                            *val *= inv;
-                        }
-                        ws.copy_tmp2_into_vcol(0);
-                    } else {
-                        ws.v_col(0).fill(S::zero());
-                    }
-                    beta
-                }
-                PcSide::Right => {
-                    let beta = nrm2(&ws.tmp1[..n]);
-                    if beta > 0.0 {
-                        let inv = S::from_real(1.0 / beta);
-                        for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
-                            *dst = src * inv;
-                        }
-                        ws.copy_tmp2_into_vcol(0);
-                    } else {
-                        ws.v_col(0).fill(S::zero());
-                    }
-                    beta
-                }
-                PcSide::Symmetric => unreachable!(),
-            };
-            ws.g[0] = S::from_real(beta);
-        }
-
-        copy_scalar_to_real_in(&x_s, x);
-        let tmp = ws.bridge.xr(n);
-        let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
-        let (mut reason, mut s) = self.conv.check(true_res, bnorm, total_iters);
-        s.final_residual = true_res;
-        if matches!(reason, ConvergedReason::Continued) {
-            reason = if true_res <= self.conv.atol {
-                ConvergedReason::ConvergedAtol
-            } else if true_res <= self.conv.rtol * bnorm {
-                ConvergedReason::ConvergedRtol
-            } else {
-                ConvergedReason::DivergedMaxIts
-            };
-            s.reason = reason;
-        }
-        let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-        let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
-        let counters = crate::utils::convergence::SolverCounters {
-            num_global_reductions: reductions,
-            residual_replacements: 0,
-        };
-        Ok(s.with_counters(counters))
+        self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)
     }
 }
 

@@ -2,7 +2,6 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
-use crate::solver::LinearSolver;
 use crate::solver::gmres::{GmresSolver, GmresVariant};
 
 use super::util;
@@ -17,19 +16,9 @@ fn solve_with_variant(
     solver.set_variant(variant);
     let mut x = vec![0.0; b.len()];
     let mut ws = Workspace::default();
-    let op: &dyn crate::matrix::op::LinOp<S = f64> = a;
     let comm = UniverseComm::NoComm(NoComm);
-    let stats = solver.solve(
-        op,
-        None,
-        b,
-        &mut x,
-        PcSide::Left,
-        &comm,
-        None,
-        Some(&mut ws),
-    )?;
-    let rtrue = util::true_residual_norm(op, &x, b);
+    let stats = solver.solve_f64(a, None, b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
+    let rtrue = util::true_residual_norm(a, &x, b);
     Ok((x, stats.iterations, rtrue))
 }
 
@@ -64,10 +53,9 @@ fn gmres_sstep_reports_not_implemented() {
     let mut x = vec![0.0; a.nrows()];
     let mut ws = Workspace::default();
     let comm = UniverseComm::NoComm(NoComm);
-    let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
     let err = solver
-        .solve(
-            op,
+        .solve_f64(
+            &a,
             None,
             &b,
             &mut x,

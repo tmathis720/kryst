@@ -1,7 +1,7 @@
 //! Unified Matrix Market demo covering serial and MPI runs with multiple solver/preconditioner
 //! combinations. The example keeps the solver boundary matrix-free and reports iteration metrics
 //! that are relevant for driven-cavity style matrices.
-//! 
+//!
 //! to run:
 //! cargo mpirun -n 2 --features=mpi --example matrix_market_demo
 //! or for serial:
