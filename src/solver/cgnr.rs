@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -11,7 +13,7 @@ use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use crate::utils::profiling::StageGuard;
 
 pub struct CgnrSolver {
-    pub(crate) conv: Convergence<f64>,
+    pub(crate) conv: Convergence,
 }
 
 impl CgnrSolver {

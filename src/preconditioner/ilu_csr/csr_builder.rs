@@ -1,4 +1,5 @@
-use crate::algebra::scalar::Scalar;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use num_traits::Zero;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -96,7 +97,7 @@ pub enum Meta<R> {
 }
 
 /// Trait for building a single sparse row under a given ILU policy.
-pub trait RowBuilder<S: Scalar> {
+pub trait RowBuilder<S: KrystScalar> {
     /// Reset the builder for a new row without allocating.
     fn clear(&mut self);
     /// Update an existing column value. The column is guaranteed to be present
@@ -116,13 +117,13 @@ pub struct Ilu0Row<'a, S> {
     vals: &'a mut [S],
 }
 
-impl<'a, S: Scalar> Ilu0Row<'a, S> {
+impl<'a, S: KrystScalar> Ilu0Row<'a, S> {
     pub fn new(cols: &'a [usize], vals: &'a mut [S]) -> Self {
         Self { cols, vals }
     }
 }
 
-impl<'a, S: Scalar> RowBuilder<S> for Ilu0Row<'a, S> {
+impl<'a, S: KrystScalar> RowBuilder<S> for Ilu0Row<'a, S> {
     fn clear(&mut self) {}
 
     fn push_existing(&mut self, col: usize, val: S) {
@@ -137,7 +138,7 @@ impl<'a, S: Scalar> RowBuilder<S> for Ilu0Row<'a, S> {
 }
 
 /// ILU(k) row builder using fixed-size arrays for candidate fills.
-pub struct IlukRow<S: Scalar, const CAP: usize> {
+pub struct IlukRow<S: KrystScalar, const CAP: usize> {
     pub used: usize,
     pub max_level: u32,
     pub cand_col: [usize; CAP],
@@ -145,7 +146,7 @@ pub struct IlukRow<S: Scalar, const CAP: usize> {
     pub cand_val: [S; CAP],
 }
 
-impl<S: Scalar, const CAP: usize> IlukRow<S, CAP> {
+impl<S: KrystScalar, const CAP: usize> IlukRow<S, CAP> {
     pub fn new(max_level: u32) -> Self {
         Self {
             used: 0,
@@ -197,7 +198,7 @@ impl<S: Scalar, const CAP: usize> IlukRow<S, CAP> {
     }
 }
 
-impl<S: Scalar, const CAP: usize> RowBuilder<S> for IlukRow<S, CAP> {
+impl<S: KrystScalar, const CAP: usize> RowBuilder<S> for IlukRow<S, CAP> {
     fn clear(&mut self) {
         self.used = 0;
     }
@@ -232,40 +233,40 @@ impl<S: Scalar, const CAP: usize> RowBuilder<S> for IlukRow<S, CAP> {
 }
 
 #[derive(Clone)]
-struct HeapElem<S: Scalar> {
+struct HeapElem<S: KrystScalar> {
     mag: S::Real,
     col: usize,
     val: S,
 }
 
-impl<S: Scalar> PartialEq for HeapElem<S> {
+impl<S: KrystScalar> PartialEq for HeapElem<S> {
     fn eq(&self, other: &Self) -> bool {
         self.mag == other.mag
     }
 }
 
-impl<S: Scalar> Eq for HeapElem<S> {}
+impl<S: KrystScalar> Eq for HeapElem<S> {}
 
-impl<S: Scalar> PartialOrd for HeapElem<S> {
+impl<S: KrystScalar> PartialOrd for HeapElem<S> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.mag.partial_cmp(&other.mag)
     }
 }
 
-impl<S: Scalar> Ord for HeapElem<S> {
+impl<S: KrystScalar> Ord for HeapElem<S> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
     }
 }
 
 /// ILUT row builder using a magnitude-based capped heap.
-pub struct IlutRow<S: Scalar> {
+pub struct IlutRow<S: KrystScalar> {
     p: usize,
     drop_tol: S::Real,
     heap: BinaryHeap<Reverse<HeapElem<S>>>,
 }
 
-impl<S: Scalar> IlutRow<S> {
+impl<S: KrystScalar> IlutRow<S> {
     pub fn new(p: usize, drop_tol: S::Real) -> Self {
         Self {
             p,
@@ -275,7 +276,7 @@ impl<S: Scalar> IlutRow<S> {
     }
 }
 
-impl<S: Scalar> RowBuilder<S> for IlutRow<S> {
+impl<S: KrystScalar> RowBuilder<S> for IlutRow<S> {
     fn clear(&mut self) {
         self.heap.clear();
     }

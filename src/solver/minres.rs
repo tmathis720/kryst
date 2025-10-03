@@ -2,6 +2,8 @@
 //
 // … (header doc unchanged) …
 
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -12,7 +14,7 @@ use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
 pub struct MinresSolver {
-    pub conv: Convergence<f64>, // { rtol, atol, dtol, max_iters }
+    pub conv: Convergence, // { rtol, atol, dtol, max_iters }
 }
 
 impl MinresSolver {

@@ -15,6 +15,8 @@
 //! in column-major form. The legacy `Workspace.z` (Vec<Vec<_>>) is not used by
 //! GMRES/FGMRES.
 
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -51,7 +53,7 @@ pub enum GmresVariant {
 
 pub struct GmresSolver {
     pub restart: usize,
-    pub conv: Convergence<f64>,
+    pub conv: Convergence,
     /// Happy breakdown tolerance
     pub haptol: f64,
     /// Orthogonalization flavor (currently not altering algorithmic path)

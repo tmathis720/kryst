@@ -1,4 +1,5 @@
-use crate::algebra::scalar::{KrystScalar, R, S};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 
 #[inline]
 pub fn dot_conj(x: &[S], y: &[S]) -> S {

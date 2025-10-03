@@ -2,6 +2,8 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; monitors report the true `||r||`.
 
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -11,7 +13,7 @@ use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 pub struct QmrSolver {
-    pub conv: Convergence<f64>,
+    pub conv: Convergence,
 }
 
 impl QmrSolver {

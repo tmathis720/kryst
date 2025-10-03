@@ -8,6 +8,8 @@
 //! - Monitors report the true residual `||r||_2`.
 //! - Parallel safety: all inner products/norms use `UniverseComm`.
 
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -20,7 +22,7 @@ use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 pub struct CgsSolver {
-    pub(crate) conv: Convergence<f64>,
+    pub(crate) conv: Convergence,
 }
 
 /// Relative threshold for CGS breakdown detection.

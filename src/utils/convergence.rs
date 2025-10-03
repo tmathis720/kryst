@@ -1,6 +1,7 @@
 //! Convergence tracking & tolerance checks for iterative solvers.
 
-use crate::algebra::scalar::RealScalar;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 
 /// Convergence criteria for iterative solvers.
 ///
@@ -9,7 +10,7 @@ use crate::algebra::scalar::RealScalar;
 /// - **Absolute tolerance**: `‖r‖ ≤ atol`
 /// - **Divergence threshold**: `‖r‖ ≥ dtol * ‖b‖`
 /// - **Maximum iterations**: `iterations ≥ max_iters`
-pub struct Convergence<R: RealScalar> {
+pub struct Convergence {
     /// Relative tolerance: ‖r‖/‖b‖ ≤ rtol ⇒ converge
     pub rtol: R,
     /// Absolute tolerance: ‖r‖ ≤ atol ⇒ converge
@@ -79,10 +80,7 @@ impl<R> SolveStats<R> {
     }
 }
 
-impl<R> Convergence<R>
-where
-    R: RealScalar + core::ops::Mul<Output = R>,
-{
+impl Convergence {
     /// Create new convergence criteria.
     pub fn new(rtol: R, atol: R, dtol: R, max_iters: usize) -> Self {
         Self {
@@ -136,10 +134,7 @@ where
 }
 
 // Legacy convenience method for backward compatibility
-impl<R> Convergence<R>
-where
-    R: RealScalar + core::ops::Mul<Output = R>,
-{
+impl Convergence {
     /// Legacy method for backward compatibility.
     /// Returns (should_stop, stats) given current `res_norm` and iteration `i`.
     ///

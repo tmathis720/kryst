@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -40,7 +42,7 @@ pub enum PcgVariant {
 pub const PCG_PIPELINED_DEFAULT_REPLACE_EVERY: usize = 50;
 
 pub struct PcgSolver {
-    pub(crate) conv: Convergence<f64>,
+    pub(crate) conv: Convergence,
     norm_type: CgNormType,
     reduction: ReductionOptions,
     true_residual_monitor: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
