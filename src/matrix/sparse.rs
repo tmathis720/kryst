@@ -19,7 +19,7 @@ use faer::traits::ComplexField;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
 #[cfg(feature = "simd")]
-use crate::matrix::spmv::{SpmvPlan, SpmvTuning, build_plan as build_spmv_plan};
+use crate::matrix::spmv::{SpmvPlan, SpmvTuning, build_plan_owned as build_spmv_plan};
 
 /// CSR matrix wrapper for Faer sparse matrices.
 ///
@@ -40,7 +40,7 @@ pub struct CsrMatrix<T> {
     /// dense representation.
     diag_pos: Vec<Option<usize>>,
     #[cfg(feature = "simd")]
-    spmv_plan: Option<SpmvPlan>,
+    spmv_plan: Option<SpmvPlan<f64>>,
 }
 
 impl<
@@ -211,7 +211,7 @@ impl<
                 let beta = *(&beta as *const T as *const f64);
                 let x = std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len());
                 let y_slice = std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len());
-                plan.apply(alpha, x, beta, y_slice);
+                plan.apply_scaled(alpha, x, beta, y_slice);
             }
             return Ok(());
         }
@@ -371,7 +371,14 @@ impl<T> CsrMatrix<T> {
 impl CsrMatrix<f64> {
     /// Builds (or rebuilds) the SIMD-aware SpMV plan using the provided tuning.
     pub fn build_spmv_plan(&mut self, tuning: &SpmvTuning) {
-        self.spmv_plan = Some(build_spmv_plan(self, tuning));
+        let owned = crate::matrix::csr::CsrMatrix::new(
+            self.nrows(),
+            self.ncols(),
+            self.row_ptr().to_vec(),
+            self.col_idx().to_vec(),
+            self.values().to_vec(),
+        );
+        self.spmv_plan = Some(build_spmv_plan(owned, tuning));
     }
 
     /// Clears any cached SpMV plan, forcing the scalar fallback on the next

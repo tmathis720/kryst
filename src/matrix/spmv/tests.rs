@@ -1,7 +1,9 @@
+use crate::matrix::spmv::SpmvTuning;
 #[cfg(feature = "simd")]
-use crate::matrix::spmv::{SpmvTuning, sellc, simd_csr};
+use crate::matrix::spmv::{sellc, simd_csr};
 use crate::matrix::{
     csc::CscMatrix,
+    csr::CsrMatrix as GenericCsrMatrix,
     sparse::{CsrMatrix, SparseMatrix},
     spmv::{
         TBackend, spmm_csr_block, spmv_csr_parallel, spmv_scaled_csr, spmv_t_scaled_csr,
@@ -49,6 +51,93 @@ fn scalar_kernel_matches_matrix_apply() {
     );
     for (lhs, rhs) in y_scale.iter().zip(y_ref.iter()) {
         assert!((lhs - (2.0 * 2.0 + 0.5 * rhs)).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn spmv_plan_scalar_matches_kernel() {
+    use crate::matrix::spmv::plan;
+
+    let matrix = GenericCsrMatrix::new(
+        4,
+        4,
+        vec![0, 2, 4, 7, 8],
+        vec![0, 3, 1, 2, 0, 2, 3, 1],
+        vec![1.0, -2.0, 3.0, 4.0, 0.5, -1.5, 2.0, 1.25],
+    );
+    let tuning = SpmvTuning {
+        allow_simd: false,
+        ..Default::default()
+    };
+    let plan = plan::build(&matrix, &tuning);
+
+    let x = vec![0.75, -1.0, 0.5, 2.0];
+    let mut y_plan = vec![0.0; matrix.nrows];
+    plan.apply_scaled(1.0, &x, 0.0, &mut y_plan);
+
+    let mut y_ref = vec![0.0; matrix.nrows];
+    crate::matrix::spmv::spmv_scaled_csr(
+        matrix.nrows,
+        &matrix.rowptr,
+        &matrix.colind,
+        &matrix.values,
+        1.0,
+        &x,
+        0.0,
+        &mut y_ref,
+    );
+
+    for (lhs, rhs) in y_plan.iter().zip(y_ref.iter()) {
+        assert!((lhs - rhs).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn spmv_csr_scalar_matches_real_reference() {
+    use crate::algebra::prelude::*;
+
+    let a_real = GenericCsrMatrix::new(
+        3,
+        3,
+        vec![0, 2, 3, 4],
+        vec![0, 2, 1, 2],
+        vec![1.0, 2.0, -3.0, 4.0],
+    );
+    let x_real = vec![1.0, 2.0, -1.0];
+    let mut y_real = vec![0.0; 3];
+    spmv_scaled_csr(
+        a_real.nrows,
+        &a_real.rowptr,
+        &a_real.colind,
+        &a_real.values,
+        1.0,
+        &x_real,
+        0.0,
+        &mut y_real,
+    );
+
+    let a_scalar = GenericCsrMatrix::new(
+        3,
+        3,
+        vec![0, 2, 3, 4],
+        vec![0, 2, 1, 2],
+        vec![
+            S::from_real(1.0),
+            S::from_real(2.0),
+            S::from_real(-3.0),
+            S::from_real(4.0),
+        ],
+    );
+    let x_scalar: Vec<S> = x_real.iter().copied().map(S::from_real).collect();
+    let mut y_scalar = vec![S::zero(); 3];
+    crate::matrix::spmv::spmv_csr_scalar(&a_scalar, &x_scalar, &mut y_scalar);
+
+    for i in 0..3 {
+        assert!((y_scalar[i].real() - y_real[i]).abs() < 1e-12);
+        #[cfg(feature = "complex")]
+        {
+            assert_eq!(y_scalar[i], y_scalar[i].conj());
+        }
     }
 }
 

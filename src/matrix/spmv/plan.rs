@@ -1,8 +1,11 @@
 //! Runtime SpMV plan selection and metadata.
 
+#[cfg(feature = "simd")]
+use core::any::TypeId;
 use std::time::Instant;
 
-use crate::matrix::sparse::CsrMatrix;
+use crate::algebra::scalar::KrystScalar;
+use crate::matrix::csr::CsrMatrix;
 
 use super::scalar;
 #[cfg(feature = "simd")]
@@ -10,7 +13,7 @@ use super::{sellc, simd_csr};
 
 /// Identifies the selected kernel implementation inside a [`SpmvPlan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KernelKind {
+pub enum SpmvKernel {
     Scalar,
     #[cfg(feature = "simd")]
     CsrSimdGather,
@@ -21,24 +24,26 @@ pub enum KernelKind {
 /// Per-matrix runtime plan describing how sparse matrix-vector products should
 /// be executed.
 #[derive(Clone, Debug)]
-pub struct SpmvPlan {
-    pub kind: KernelKind,
+pub struct SpmvPlan<S: KrystScalar> {
+    pub kernel: SpmvKernel,
+    pub nrows: usize,
+    pub ncols: usize,
     pub row_ptr: Vec<usize>,
     pub col_idx: Vec<usize>,
-    pub vals: Vec<f64>,
+    pub vals: Vec<S>,
     #[cfg(feature = "simd")]
     pub sell: Option<sellc::SellCStorage>,
     #[cfg(feature = "simd")]
     lanes: usize,
 }
 
-impl SpmvPlan {
+impl<S: KrystScalar> SpmvPlan<S> {
     /// Applies the selected kernel to compute `y = alpha * A * x + beta * y`.
     #[inline]
-    pub fn apply(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
-        match self.kind {
-            KernelKind::Scalar => scalar::spmv_scaled_csr(
-                self.nrows(),
+    pub fn apply_scaled(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
+        match self.kernel {
+            SpmvKernel::Scalar => scalar::spmv_scaled_csr(
+                self.nrows,
                 &self.row_ptr,
                 &self.col_idx,
                 &self.vals,
@@ -48,13 +53,23 @@ impl SpmvPlan {
                 y,
             ),
             #[cfg(feature = "simd")]
-            KernelKind::CsrSimdGather => {
+            SpmvKernel::CsrSimdGather => {
+                debug_assert_eq!(TypeId::of::<S>(), TypeId::of::<f64>());
+                let alpha = unsafe { *(&alpha as *const S as *const f64) };
+                let beta = unsafe { *(&beta as *const S as *const f64) };
+                let x = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len()) };
+                let y =
+                    unsafe { std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len()) };
+                let vals = unsafe {
+                    std::slice::from_raw_parts(self.vals.as_ptr() as *const f64, self.vals.len())
+                };
+
                 if self.lanes <= 1 {
                     simd_csr::fallback_scalar(
-                        self.nrows(),
+                        self.nrows,
                         &self.row_ptr,
                         &self.col_idx,
-                        &self.vals,
+                        vals,
                         alpha,
                         x,
                         beta,
@@ -63,10 +78,10 @@ impl SpmvPlan {
                 } else {
                     simd_csr::dispatch_spmv_scaled_csr_simd_gather(
                         self.lanes,
-                        self.nrows(),
+                        self.nrows,
                         &self.row_ptr,
                         &self.col_idx,
-                        &self.vals,
+                        vals,
                         alpha,
                         x,
                         beta,
@@ -75,11 +90,16 @@ impl SpmvPlan {
                 }
             }
             #[cfg(feature = "simd")]
-            KernelKind::SellC => {
+            SpmvKernel::SellC => {
                 let sell = self
                     .sell
                     .as_ref()
                     .expect("SELL-C plan missing storage for SellC kernel");
+                let alpha = unsafe { *(&alpha as *const S as *const f64) };
+                let beta = unsafe { *(&beta as *const S as *const f64) };
+                let x = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len()) };
+                let y =
+                    unsafe { std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len()) };
                 dispatch_sellc(self.lanes, sell, alpha, x, beta, y);
             }
         }
@@ -88,16 +108,18 @@ impl SpmvPlan {
     /// Returns the number of rows stored in the CSR representation.
     #[inline]
     pub fn nrows(&self) -> usize {
-        self.row_ptr.len().saturating_sub(1)
+        self.nrows
     }
 
-    /// Builds a scalar-only plan.
-    pub fn build_scalar(matrix: &CsrMatrix<f64>) -> Self {
+    /// Builds a scalar-only plan by cloning the CSR structure.
+    pub fn build_scalar(matrix: &CsrMatrix<S>) -> Self {
         Self {
-            kind: KernelKind::Scalar,
-            row_ptr: matrix.row_ptr().to_vec(),
-            col_idx: matrix.col_idx().to_vec(),
-            vals: matrix.values().to_vec(),
+            kernel: SpmvKernel::Scalar,
+            nrows: matrix.nrows,
+            ncols: matrix.ncols,
+            row_ptr: matrix.rowptr.clone(),
+            col_idx: matrix.colind.clone(),
+            vals: matrix.values.clone(),
             #[cfg(feature = "simd")]
             sell: None,
             #[cfg(feature = "simd")]
@@ -130,92 +152,116 @@ impl Default for SpmvTuning {
     }
 }
 
-/// Builds an SpMV plan using the provided tuning configuration.
-pub fn build(matrix: &CsrMatrix<f64>, tuning: &SpmvTuning) -> SpmvPlan {
-    let mut plan = SpmvPlan::build_scalar(matrix);
+/// Builds an SpMV plan from a borrowed CSR matrix.
+pub fn build<S: KrystScalar>(matrix: &CsrMatrix<S>, tuning: &SpmvTuning) -> SpmvPlan<S> {
+    build_owned(matrix.clone(), tuning)
+}
+
+/// Builds an SpMV plan while taking ownership of the CSR storage.
+pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) -> SpmvPlan<S> {
+    let CsrMatrix {
+        nrows,
+        ncols,
+        rowptr,
+        colind,
+        values,
+    } = matrix;
+
+    #[allow(unused_mut)]
+    let mut plan = SpmvPlan {
+        kernel: SpmvKernel::Scalar,
+        nrows,
+        ncols,
+        row_ptr: rowptr,
+        col_idx: colind,
+        vals: values,
+        #[cfg(feature = "simd")]
+        sell: None,
+        #[cfg(feature = "simd")]
+        lanes: 1,
+    };
+
+    #[cfg(not(feature = "simd"))]
+    let _ = tuning;
 
     #[cfg(feature = "simd")]
     {
-        if !tuning.allow_simd {
-            return plan;
-        }
-        let nnz = plan.col_idx.len();
-        if nnz < tuning.min_nnz_for_simd {
-            return plan;
-        }
+        if TypeId::of::<S>() == TypeId::of::<f64>() && tuning.allow_simd {
+            let nnz = plan.col_idx.len();
+            if nnz >= tuning.min_nnz_for_simd {
+                let lanes = simd_csr::detect_simd_lanes();
+                if lanes > 1 && plan.nrows > 0 {
+                    let mut lmin = usize::MAX;
+                    let mut lmax = 0usize;
+                    for row in 0..plan.nrows {
+                        let len = plan.row_ptr[row + 1] - plan.row_ptr[row];
+                        if len == 0 {
+                            continue;
+                        }
+                        lmin = lmin.min(len);
+                        lmax = lmax.max(len);
+                    }
+                    let is_uniformish = if lmin == usize::MAX {
+                        true
+                    } else {
+                        lmax <= lmin.saturating_mul(2) && lmax <= 128
+                    };
 
-        let lanes = simd_csr::detect_simd_lanes();
-        if lanes <= 1 {
-            return plan;
-        }
+                    let mut best_kernel = SpmvKernel::CsrSimdGather;
+                    let mut best_sell = None;
+                    let bench_runs = tuning.bench_nsamples;
 
-        let m = matrix.nrows();
-        if m == 0 {
-            return plan;
-        }
+                    let mut y_buf = vec![0.0f64; plan.nrows];
+                    let x_buf = vec![1.0f64; plan.ncols.max(1)];
+                    let vals = unsafe {
+                        std::slice::from_raw_parts(
+                            plan.vals.as_ptr() as *const f64,
+                            plan.vals.len(),
+                        )
+                    };
 
-        let mut lmin = usize::MAX;
-        let mut lmax = 0usize;
-        for row in 0..m {
-            let len = plan.row_ptr[row + 1] - plan.row_ptr[row];
-            if len == 0 {
-                continue;
+                    let gather_time = microbench(bench_runs, || {
+                        simd_csr::dispatch_spmv_scaled_csr_simd_gather(
+                            lanes,
+                            plan.nrows,
+                            &plan.row_ptr,
+                            &plan.col_idx,
+                            vals,
+                            1.0,
+                            &x_buf,
+                            0.0,
+                            &mut y_buf,
+                        );
+                    });
+
+                    let prefer_sell = tuning.prefer_sellc || !is_uniformish;
+                    if prefer_sell {
+                        let sell_c = round_up_to_multiple(tuning.sell_c.max(lanes), lanes);
+                        let sell_sigma = tuning.sell_sigma.max(sell_c);
+                        let sell = sellc::csr_to_sellc(
+                            plan.nrows,
+                            plan.ncols,
+                            &plan.row_ptr,
+                            &plan.col_idx,
+                            vals,
+                            sell_c,
+                            sell_sigma,
+                        );
+                        let sell_time = microbench(bench_runs, || {
+                            dispatch_sellc(lanes, &sell, 1.0, &x_buf, 0.0, &mut y_buf);
+                        });
+                        if sell_time < gather_time {
+                            best_kernel = SpmvKernel::SellC;
+                            best_sell = Some(sell);
+                        }
+                    }
+
+                    plan.kernel = best_kernel;
+                    plan.lanes = lanes;
+                    plan.sell = best_sell;
+                }
             }
-            lmin = lmin.min(len);
-            lmax = lmax.max(len);
         }
-        let is_uniformish = if lmin == usize::MAX {
-            true
-        } else {
-            lmax <= lmin.saturating_mul(2) && lmax <= 128
-        };
-
-        let mut best_kind = KernelKind::CsrSimdGather;
-        let mut best_sell = None;
-        let bench_runs = tuning.bench_nsamples;
-
-        let mut y_buf = vec![0.0f64; matrix.nrows()];
-        let x_buf = vec![1.0f64; matrix.ncols().max(1)];
-
-        let gather_time = microbench(bench_runs, || {
-            simd_csr::dispatch_spmv_scaled_csr_simd_gather(
-                lanes,
-                plan.nrows(),
-                &plan.row_ptr,
-                &plan.col_idx,
-                &plan.vals,
-                1.0,
-                &x_buf,
-                0.0,
-                &mut y_buf,
-            );
-        });
-
-        let prefer_sell = tuning.prefer_sellc || !is_uniformish;
-        if prefer_sell {
-            let sell_c = round_up_to_multiple(tuning.sell_c.max(lanes), lanes);
-            let sell_sigma = tuning.sell_sigma.max(sell_c);
-            let sell = sellc::csr_to_sellc(
-                matrix.nrows(),
-                matrix.ncols(),
-                &plan.row_ptr,
-                &plan.col_idx,
-                &plan.vals,
-                sell_c,
-                sell_sigma,
-            );
-            let sell_time = microbench(bench_runs, || {
-                dispatch_sellc(lanes, &sell, 1.0, &x_buf, 0.0, &mut y_buf);
-            });
-            if sell_time < gather_time {
-                best_kind = KernelKind::SellC;
-                best_sell = Some(sell);
-            }
-        }
-
-        plan.kind = best_kind;
-        plan.lanes = lanes;
-        plan.sell = best_sell;
     }
 
     plan

@@ -4,6 +4,7 @@ pub mod dense;
 pub use dense::DenseMatrix;
 pub mod convert;
 pub mod csc;
+pub mod csr;
 pub mod dist_csr;
 pub mod format;
 mod format_impls;
@@ -30,5 +31,5 @@ pub type Csr = crate::matrix::sparse::CsrMatrix<S>;
 pub type Csc = crate::matrix::csc::CscMatrix<S>;
 
 pub use dist_csr::DistCsrOp;
-pub use op::{ChangeIds, CsrOp, DenseOp, LinOp, StructureId, ValuesId};
+pub use op::{ChangeIds, CsrOp, DenseOp, GenericCsrOp, LinOp, LinOpF64, StructureId, ValuesId};
 pub use op_shell::MatShell;
