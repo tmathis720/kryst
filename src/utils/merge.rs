@@ -1,4 +1,5 @@
-use crate::algebra::scalar::Scalar;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 
 /// Map a slice of value slots into an iterator over references into the
 /// underlying value array.
@@ -10,7 +11,7 @@ pub fn map_vals<'a, S>(vals: &'a [S], slots: &'a [usize]) -> impl Iterator<Item 
 /// Lookup a value within a sorted sparse row returning `None` if the column is
 /// absent.
 #[inline]
-pub fn lookup_in_row<S: Scalar>(cols: &[usize], vals: &[S], col: usize) -> Option<S> {
+pub fn lookup_in_row<S: KrystScalar>(cols: &[usize], vals: &[S], col: usize) -> Option<S> {
     match cols.binary_search(&col) {
         Ok(pos) => Some(vals[pos]),
         Err(_) => None,
@@ -20,7 +21,7 @@ pub fn lookup_in_row<S: Scalar>(cols: &[usize], vals: &[S], col: usize) -> Optio
 /// Compute the dot product of two sparse rows up to a column limit by
 /// simultaneously walking both index arrays.
 #[inline]
-pub fn merged_dot_prefix<S: Scalar>(
+pub fn merged_dot_prefix<S: KrystScalar>(
     a_cols: &[usize],
     a_vals: &[S],
     b_cols: &[usize],
@@ -57,7 +58,7 @@ pub fn merged_dot_prefix<S: Scalar>(
 /// first row and only accumulates products where columns match and are greater
 /// than `start_col`.
 #[inline]
-pub fn merged_dot_strict_upper<S: Scalar>(
+pub fn merged_dot_strict_upper<S: KrystScalar>(
     a_cols: &[usize],
     a_vals: &[S],
     start_col: usize,
@@ -89,7 +90,7 @@ pub fn merged_dot_strict_upper<S: Scalar>(
 /// Kahan compensated variant of [`merged_dot_prefix`] for improved numerical
 /// reproducibility.
 #[inline]
-pub fn merged_dot_prefix_kahan<S: Scalar>(
+pub fn merged_dot_prefix_kahan<S: KrystScalar>(
     a_cols: &[usize],
     a_vals: &[S],
     b_cols: &[usize],

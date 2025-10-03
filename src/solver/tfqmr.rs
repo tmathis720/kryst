@@ -2,17 +2,22 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; residuals are reported as the true `||r||`.
 
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::matrix::op_bridge::matvec_s;
 use crate::parallel::UniverseComm;
+use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
 pub struct TfqmrSolver {
-    pub conv: Convergence<f64>,
+    pub conv: Convergence,
     pub resid_recalc_every: usize,
     pub breakdown_eps: f64,
 }
@@ -33,18 +38,16 @@ impl TfqmrSolver {
 
     fn setup_tfqmr_workspace(work: &mut Workspace, n: usize) {
         if work.tmp1.len() != n {
-            work.tmp1.resize(n, 0.0);
+            work.tmp1.resize(n, S::zero());
         }
         if work.tmp2.len() != n {
-            work.tmp2.resize(n, 0.0);
+            work.tmp2.resize(n, S::zero());
         }
-        while work.q.len() < 6 {
-            work.q.push(vec![0.0; n]);
-        }
-        for v in &mut work.q[..6] {
-            if v.len() != n {
-                v.resize(n, 0.0);
-            }
+        let need = 6usize
+            .checked_mul(n)
+            .expect("tfqmr scratch length overflow");
+        if work.blk_scratch.len() != need {
+            work.blk_scratch.resize(need, S::zero());
         }
     }
 }
@@ -93,33 +96,30 @@ impl LinearSolver for TfqmrSolver {
         TfqmrSolver::setup_tfqmr_workspace(w, n);
 
         let (r, au) = (&mut w.tmp1, &mut w.tmp2);
-        let (u_slice, rest) = w.q.split_at_mut(1);
-        let (v_slice, rest) = rest.split_at_mut(1);
-        let (wv_slice, rest) = rest.split_at_mut(1);
-        let (yv_slice, rest) = rest.split_at_mut(1);
-        let (d_slice, rest) = rest.split_at_mut(1);
-        let (qv_slice, _) = rest.split_at_mut(1);
-        let (u, v, wv, yv, d, qv) = (
-            &mut u_slice[0][..],
-            &mut v_slice[0][..],
-            &mut wv_slice[0][..],
-            &mut yv_slice[0][..],
-            &mut d_slice[0][..],
-            &mut qv_slice[0][..],
-        );
+        let scratch = &mut w.blk_scratch;
+        debug_assert_eq!(scratch.len(), 6 * n);
+        let (u, rest) = scratch.split_at_mut(n);
+        let (v, rest) = rest.split_at_mut(n);
+        let (wv, rest) = rest.split_at_mut(n);
+        let (yv, rest) = rest.split_at_mut(n);
+        let (d, qv) = rest.split_at_mut(n);
+        if w.bridge_tmp.len() != n {
+            w.bridge_tmp.resize(n, S::zero());
+        }
 
-        a.matvec(x, r);
+        matvec_s(a, x, r, &mut w.bridge);
         for i in 0..n {
-            r[i] = b[i] - r[i];
+            r[i] = S::from_real(b[i]) - r[i];
         }
         if let Some(pc) = pc {
-            let rin = r.clone();
-            pc.apply(pc_side, &rin, r)?;
+            let tmp = &mut w.bridge_tmp[..n];
+            tmp.copy_from_slice(r);
+            apply_pc_s(pc, pc_side, tmp, r, &mut w.bridge)?;
         }
 
         let r_tld = r.clone();
-        let mut rho = dot(&r_tld, r);
-        let res0 = norm2(r);
+        let mut rho: S = dot_conj(&r_tld, r);
+        let res0: R = nrm2(r);
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
         for m in mons {
             m(0, res0);
@@ -136,21 +136,22 @@ impl LinearSolver for TfqmrSolver {
 
         yv.clone_from_slice(r);
         wv.clone_from_slice(r);
-        d.fill(0.0);
-        let mut theta_prev = 0.0;
-        let mut eta_prev = 0.0;
-        let mut dpold = res0;
-        let mut true_res = res0;
+        d.fill(S::zero());
+        let mut theta_prev: R = 0.0;
+        let mut eta_prev: S = S::zero();
+        let mut dpold: R = res0;
+        let mut true_res: R = res0;
 
         for k in 1..=self.conv.max_iters {
-            v.fill(0.0);
-            a.matvec(yv, v);
+            v.fill(S::zero());
+            matvec_s(a, yv, v, &mut w.bridge);
             if let Some(pc) = pc {
-                let vin = v.to_vec();
-                pc.apply(pc_side, &vin, v)?;
+                let tmp = &mut w.bridge_tmp[..n];
+                tmp.copy_from_slice(v);
+                apply_pc_s(pc, pc_side, tmp, v, &mut w.bridge)?;
             }
 
-            let sigma = dot(&r_tld, v);
+            let sigma: S = dot_conj(&r_tld, v);
             if !sigma.is_finite() || sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.final_residual = true_res;
@@ -158,7 +159,7 @@ impl LinearSolver for TfqmrSolver {
                 return Ok(stats);
             }
             let alpha = rho / sigma;
-            if !alpha.is_finite() || alpha == 0.0 {
+            if !alpha.is_finite() || alpha == S::zero() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
                 stats.reason = ConvergedReason::DivergedDtol;
@@ -168,7 +169,7 @@ impl LinearSolver for TfqmrSolver {
             for i in 0..n {
                 u[i] = r[i] - alpha * v[i];
             }
-            let mut tau_local = (norm2(u) * dpold).sqrt();
+            let mut tau_local: R = (nrm2(u) * dpold).sqrt();
 
             for mstep in 0..2 {
                 if mstep == 0 {
@@ -179,25 +180,26 @@ impl LinearSolver for TfqmrSolver {
                 for i in 0..n {
                     au[i] = u[i] + qv[i];
                 }
-                let tmp_in = au.to_vec();
-                a.matvec(&tmp_in, au);
+                let tmp = &mut w.bridge_tmp[..n];
+                tmp.copy_from_slice(au);
+                matvec_s(a, tmp, au, &mut w.bridge);
                 if let Some(pc) = pc {
-                    let tmp2 = au.to_vec();
-                    pc.apply(pc_side, &tmp2, au)?;
+                    tmp.copy_from_slice(au);
+                    apply_pc_s(pc, pc_side, tmp, au, &mut w.bridge)?;
                 }
                 for i in 0..n {
                     r[i] -= alpha * au[i];
                 }
 
                 {
-                    let src: &[f64] = if mstep == 0 { &u[..] } else { &qv[..] };
-                    let psi = norm2(src) / tau_local.max(1e-300);
-                    let c = 1.0 / (1.0 + psi * psi).sqrt();
-                    let eta = c * c * alpha;
-                    let cf = if k == 1 && mstep == 0 {
-                        0.0
+                    let src: &[S] = if mstep == 0 { &u[..] } else { &qv[..] };
+                    let psi: R = nrm2(src) / tau_local.max(1e-300);
+                    let c: R = 1.0 / (1.0 + psi * psi).sqrt();
+                    let eta: S = S::from_real(c * c) * alpha;
+                    let cf: S = if k == 1 && mstep == 0 {
+                        S::zero()
                     } else {
-                        theta_prev * theta_prev * (eta_prev / alpha)
+                        S::from_real(theta_prev * theta_prev) * (eta_prev / alpha)
                     };
                     for i in 0..n {
                         d[i] = src[i] + cf * d[i];
@@ -205,7 +207,7 @@ impl LinearSolver for TfqmrSolver {
                     }
 
                     let iter_count = 2 * (k - 1) + mstep + 1;
-                    let dpest = ((2 * k + mstep + 1) as f64).sqrt() * tau_local;
+                    let dpest: R = ((2 * k + mstep + 1) as f64).sqrt() * tau_local;
                     for mfn in mons {
                         mfn(iter_count, dpest);
                     }
@@ -222,15 +224,16 @@ impl LinearSolver for TfqmrSolver {
                                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                             ))
                     {
-                        a.matvec(x, au);
+                        matvec_s(a, x, au, &mut w.bridge);
                         for i in 0..n {
-                            au[i] = b[i] - au[i];
+                            au[i] = S::from_real(b[i]) - au[i];
                         }
                         if let Some(pc) = pc {
-                            let tmp = au.to_vec();
-                            pc.apply(pc_side, &tmp, au)?;
+                            let tmp = &mut w.bridge_tmp[..n];
+                            tmp.copy_from_slice(au);
+                            apply_pc_s(pc, pc_side, tmp, au, &mut w.bridge)?;
                         }
-                        true_res = norm2(au);
+                        true_res = nrm2(au);
                         stats.final_residual = true_res;
                     } else {
                         stats.final_residual = dpest;
@@ -252,7 +255,7 @@ impl LinearSolver for TfqmrSolver {
                 }
             }
 
-            let rho_new = dot(&r_tld, r);
+            let rho_new: S = dot_conj(&r_tld, r);
             if !rho_new.is_finite() || rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.reason = ConvergedReason::DivergedDtol;
@@ -266,18 +269,19 @@ impl LinearSolver for TfqmrSolver {
                 yv[i] = r[i] + beta * (qv[i] + beta * yv[i]);
             }
 
-            dpold = norm2(r);
+            dpold = nrm2(r);
 
             if self.resid_recalc_every == 1 {
-                a.matvec(x, au);
+                matvec_s(a, x, au, &mut w.bridge);
                 for i in 0..n {
-                    au[i] = b[i] - au[i];
+                    au[i] = S::from_real(b[i]) - au[i];
                 }
                 if let Some(pc) = pc {
-                    let tmp = au.clone();
-                    pc.apply(pc_side, &tmp, au)?;
+                    let tmp = &mut w.bridge_tmp[..n];
+                    tmp.copy_from_slice(au);
+                    apply_pc_s(pc, pc_side, tmp, au, &mut w.bridge)?;
                 }
-                true_res = norm2(au);
+                true_res = nrm2(au);
                 stats.final_residual = true_res;
                 let (reason, s2) = self.conv.check(true_res, res0, 2 * k);
                 stats = s2;
@@ -299,16 +303,6 @@ impl LinearSolver for TfqmrSolver {
         }
         Ok(stats)
     }
-}
-
-#[inline]
-fn dot(x: &[f64], y: &[f64]) -> f64 {
-    x.iter().zip(y).map(|(a, b)| a * b).sum()
-}
-
-#[inline]
-fn norm2(x: &[f64]) -> f64 {
-    dot(x, x).sqrt()
 }
 
 #[cfg(test)]

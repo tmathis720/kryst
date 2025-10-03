@@ -8,6 +8,7 @@ pub mod dist_csr;
 pub mod format;
 mod format_impls;
 pub mod op;
+pub mod op_bridge;
 pub mod op_shell;
 pub mod parcsr;
 pub mod sparse;
@@ -22,7 +23,8 @@ pub use convert::{
 pub use csc::CscMatrix;
 pub use sparse::CsrMatrix;
 
-use crate::algebra::scalar::S;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 
 pub type Csr = crate::matrix::sparse::CsrMatrix<S>;
 pub type Csc = crate::matrix::csc::CscMatrix<S>;

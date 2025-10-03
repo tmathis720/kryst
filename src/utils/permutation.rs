@@ -1,4 +1,5 @@
-use crate::algebra::scalar::Scalar;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 
 /// Permutation with cached inverse mapping.
@@ -25,14 +26,14 @@ impl Permutation {
     }
 
     /// Apply permutation to a vector: y(new) = x(old)[p[new]]
-    pub fn apply_vec<S: Scalar>(&self, x_old: &[S], y_new: &mut [S]) {
+    pub fn apply_vec<S: KrystScalar>(&self, x_old: &[S], y_new: &mut [S]) {
         for (i, y) in y_new.iter_mut().enumerate() {
             *y = x_old[self.p[i]];
         }
     }
 
     /// Apply transpose permutation to a vector: y(old) = x(new)[pinv[old]]
-    pub fn apply_vec_t<S: Scalar>(&self, x_new: &[S], y_old: &mut [S]) {
+    pub fn apply_vec_t<S: KrystScalar>(&self, x_new: &[S], y_old: &mut [S]) {
         for (i, y) in y_old.iter_mut().enumerate() {
             *y = x_new[self.pinv[i]];
         }

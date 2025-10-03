@@ -1,6 +1,7 @@
 //! Scalar sparse matrix-vector multiplication kernels.
 
-use crate::algebra::scalar::{KrystScalar, S};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 
 /// Computes `y = alpha * A * x + beta * y` for a matrix stored in CSR format.
 ///

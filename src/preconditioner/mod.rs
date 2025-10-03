@@ -41,6 +41,8 @@
 use crate::error::KError;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::LinOp;
+
+pub mod bridge;
 #[cfg(feature = "legacy-pc-bridge")]
 use faer::Mat;
 use std::str::FromStr;

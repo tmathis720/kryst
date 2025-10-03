@@ -4,6 +4,8 @@
 //! If [`PcSide`] is not `Left`, the solver returns `InvalidInput`.
 //! Residual norm is the preconditioned norm `||M^{-1} r||`; final stats include true `||r||`.
 
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -32,7 +34,7 @@ pub enum CgNormType {
 }
 
 pub struct CgSolver {
-    pub(crate) conv: Convergence<f64>,
+    pub(crate) conv: Convergence,
     norm_type: CgNormType,
     trust_region: Option<f64>,
     true_residual_monitor: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,

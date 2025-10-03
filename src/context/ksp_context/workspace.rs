@@ -1,4 +1,6 @@
-use crate::algebra::scalar::{KrystScalar, S};
+use crate::algebra::bridge::BridgeScratch;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::core::block::BlockVec;
 use crate::solver::gmres::AugmentationPolicy;
 
@@ -7,6 +9,9 @@ pub struct Workspace {
     pub tmp1: Vec<S>,
     pub tmp2: Vec<S>,
     // Legacy buffers for solvers not yet migrated
+    pub q_s: Vec<Vec<S>>,
+    pub z_s: Vec<Vec<S>>,
+    pub h_s: Vec<Vec<S>>,
     pub q: Vec<Vec<f64>>,
     pub z: Vec<Vec<f64>>,
     pub h: Vec<Vec<f64>>,
@@ -18,6 +23,8 @@ pub struct Workspace {
     pub sn: Vec<f64>,
     pub g: Vec<S>,
     pub blk_scratch: Vec<S>,
+    pub bridge: BridgeScratch,
+    pub bridge_tmp: Vec<S>,
     pub block_buf: Option<BlockVec>,
     pub tsqr: Option<TsqrWorkspace>,
     pub pipelined_w: Vec<S>,
