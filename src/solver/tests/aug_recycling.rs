@@ -2,7 +2,6 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
-use crate::solver::LinearSolver;
 use crate::solver::gmres::{AugmentationPolicy, GmresSolver};
 
 use super::util;
@@ -16,10 +15,8 @@ fn gmres_configures_recycling_workspace() -> Result<(), KError> {
     let mut x = vec![0.0; a.nrows()];
     let mut ws = Workspace::default();
     let comm = UniverseComm::NoComm(NoComm);
-    let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
-
-    solver.solve(
-        op,
+    solver.solve_f64(
+        &a,
         None,
         &b,
         &mut x,
