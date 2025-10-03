@@ -36,6 +36,8 @@ pub mod matrix;
 pub mod preconditioner;
 pub mod reduction;
 pub mod solver;
+#[cfg(any(test, feature = "examples"))]
+pub mod testkit;
 pub mod utils;
 
 // Re-exports for convenience
