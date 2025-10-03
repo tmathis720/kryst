@@ -5,8 +5,10 @@ pub mod sellc;
 #[cfg(feature = "simd")]
 pub mod simd_csr;
 
-pub use self::plan::{KernelKind, SpmvPlan, SpmvTuning, build as build_plan};
-pub use self::scalar::{spmv_scaled_csr, spmv_t_scaled_csr};
+pub use self::plan::{
+    SpmvKernel, SpmvPlan, SpmvTuning, build as build_plan, build_owned as build_plan_owned,
+};
+pub use self::scalar::{spmv_csr_scalar, spmv_scaled_csr, spmv_t_scaled_csr};
 
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;

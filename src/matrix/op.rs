@@ -1,4 +1,7 @@
+use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
+use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
 use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
@@ -84,6 +87,135 @@ impl ChangeIds {
     }
     pub fn bump_values(&self) {
         self.vid.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Scalar-generic CSR linear operator backed by [`ScalarCsrMatrix`].
+///
+/// This lightweight wrapper wires the scalar-polymorphic sparse matrix storage
+/// into the [`LinOp`] trait by constructing an [`SpmvPlan`](ScalarSpmvPlan) at
+/// creation time. Real builds continue to select SIMD kernels when available
+/// while complex builds transparently fall back to the portable scalar path.
+pub struct GenericCsrOp<S: KrystScalar> {
+    matrix: Arc<ScalarCsrMatrix<S>>,
+    plan: ScalarSpmvPlan<S>,
+    ids: ChangeIds,
+    comm: UniverseComm,
+}
+
+impl<S: KrystScalar> GenericCsrOp<S> {
+    /// Wraps an [`Arc`] around the provided matrix and builds an SpMV plan
+    /// using the supplied tuning parameters.
+    pub fn new(matrix: Arc<ScalarCsrMatrix<S>>, tuning: &SpmvTuning) -> Self {
+        let plan = spmv_plan::build(matrix.as_ref(), tuning);
+        let ids = ChangeIds::default();
+        ids.bump_structure();
+        ids.bump_values();
+        Self {
+            matrix,
+            plan,
+            ids,
+            comm: UniverseComm::NoComm(NoComm),
+        }
+    }
+
+    /// Builds an operator from an owned matrix by first wrapping it in an
+    /// [`Arc`] for cheap cloning.
+    pub fn from_matrix(matrix: ScalarCsrMatrix<S>, tuning: &SpmvTuning) -> Self {
+        Self::new(Arc::new(matrix), tuning)
+    }
+
+    /// Returns the underlying CSR matrix.
+    pub fn matrix(&self) -> &ScalarCsrMatrix<S> {
+        self.matrix.as_ref()
+    }
+
+    /// Returns a reference to the cached SpMV plan.
+    pub fn plan(&self) -> &ScalarSpmvPlan<S> {
+        &self.plan
+    }
+
+    /// Rebuilds the internal SpMV plan using the latest tuning parameters.
+    pub fn rebuild_plan(&mut self, tuning: &SpmvTuning) {
+        self.plan = spmv_plan::build(self.matrix.as_ref(), tuning);
+        self.ids.bump_values();
+    }
+
+    /// Attaches a communicator to the operator, mirroring the legacy API.
+    pub fn with_comm(mut self, comm: UniverseComm) -> Self {
+        self.comm = comm;
+        self
+    }
+
+    /// Marks the sparsity pattern as changed for cache bookkeeping.
+    pub fn mark_structure_changed(&self) {
+        self.ids.bump_structure();
+    }
+
+    /// Marks only the numeric values as changed.
+    pub fn mark_values_changed(&self) {
+        self.ids.bump_values();
+    }
+}
+
+impl<S> LinOp for GenericCsrOp<S>
+where
+    S: KrystScalar + ComplexField<Real = f64>,
+{
+    type S = S;
+
+    fn dims(&self) -> (usize, usize) {
+        self.matrix.dims()
+    }
+
+    fn matvec(&self, x: &[S], y: &mut [S]) {
+        let (m, n) = self.matrix.dims();
+        debug_assert_eq!(x.len(), n);
+        debug_assert_eq!(y.len(), m);
+        self.plan.apply_scaled(S::one(), x, S::zero(), y);
+    }
+
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let (m, n) = self.matrix.dims();
+        if x.len() != n || y.len() != m {
+            return Err(KError::InvalidInput(format!(
+                "GenericCsrOp::matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                m,
+                n,
+                x.len(),
+                y.len()
+            )));
+        }
+        self.plan.apply_scaled(S::one(), x, S::zero(), y);
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn structure_id(&self) -> StructureId {
+        self.ids.structure_id()
+    }
+
+    fn values_id(&self) -> ValuesId {
+        self.ids.values_id()
+    }
+
+    fn comm(&self) -> UniverseComm {
+        self.comm.clone()
+    }
+}
+
+/// Convenience trait for callers that only operate on real scalars.
+pub trait LinOpF64 {
+    fn matvec(&self, x: &[f64], y: &mut [f64]);
+}
+
+impl LinOpF64 for GenericCsrOp<f64> {
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        <Self as LinOp>::matvec(self, x, y)
     }
 }
 
@@ -322,6 +454,13 @@ impl LinOp for CsrOp {
     }
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+}
+
+impl LinOpF64 for CsrOp {
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        <Self as LinOp>::matvec(self, x, y)
     }
 }
 
@@ -579,4 +718,75 @@ where
     T: LinOp + ?Sized + 'static,
 {
     Arc::new(WithCommOp::new(op, comm)) as Arc<dyn LinOp<S = T::S>>
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(feature = "complex")]
+    use crate::algebra::prelude::*;
+    use crate::matrix::spmv::scalar::spmv_csr_scalar;
+
+    #[test]
+    fn generic_csr_op_matches_scalar_kernel() {
+        let matrix = Arc::new(ScalarCsrMatrix::new(
+            3,
+            3,
+            vec![0, 2, 4, 5],
+            vec![0, 2, 1, 2, 0],
+            vec![1.0, -2.0, 3.5, 0.5, 4.0],
+        ));
+        let tuning = SpmvTuning {
+            allow_simd: false,
+            ..Default::default()
+        };
+        let op = GenericCsrOp::new(matrix.clone(), &tuning);
+
+        let x = vec![0.75, -1.25, 2.0];
+        let (m, _) = matrix.dims();
+        let mut y = vec![0.0; m];
+        LinOp::matvec(&op, &x, &mut y);
+
+        let mut y_ref = vec![0.0; m];
+        spmv_csr_scalar(matrix.as_ref(), &x, &mut y_ref);
+
+        for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
+            assert!((lhs - rhs).abs() < 1e-12);
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn generic_csr_op_complex_matches_scalar_kernel() {
+        use num_complex::Complex64;
+
+        let matrix = Arc::new(ScalarCsrMatrix::new(
+            2,
+            3,
+            vec![0, 2, 3],
+            vec![0, 1, 2],
+            vec![S::from_real(1.0), S::from_real(-0.5), S::from_real(2.25)],
+        ));
+        let tuning = SpmvTuning {
+            allow_simd: false,
+            ..Default::default()
+        };
+        let op = GenericCsrOp::new(matrix.clone(), &tuning);
+
+        let x: Vec<S> = vec![
+            S::from_real(1.0),
+            S::from_real(-2.0),
+            Complex64::new(0.5, 0.75),
+        ];
+        let (m, _) = matrix.dims();
+        let mut y = vec![S::zero(); m];
+        LinOp::matvec(&op, &x, &mut y);
+
+        let mut y_ref = vec![S::zero(); m];
+        spmv_csr_scalar(matrix.as_ref(), &x, &mut y_ref);
+
+        for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
+            assert!((lhs - rhs).abs() < 1e-12);
+        }
+    }
 }

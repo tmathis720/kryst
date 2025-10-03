@@ -5,11 +5,12 @@ use faer::Mat;
 use crate::{
     error::KError,
     matrix::{
-        csc::CscMatrix,
-        format::{AsFormat, FormatHint},
-        op::{DenseOp, LinOp, wrap_with_comm},
-        sparse::CsrMatrix,
         DistCsrOp,
+        csc::CscMatrix,
+        csr::CsrMatrix as ScalarCsrMatrix,
+        format::{AsFormat, FormatHint},
+        op::{DenseOp, GenericCsrOp, LinOp, wrap_with_comm},
+        sparse::CsrMatrix,
     },
 };
 
@@ -36,6 +37,9 @@ fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) ->
         "  • If you have a CSR matrix (`CsrMatrix<f64>`), wrap it with `CsrOp` likewise:\n",
     );
     help.push_str("      let op = CsrOp::new(Arc::new(csr));\n");
+    help.push_str(
+        "  • If you have a generic CSR operator (`GenericCsrOp<f64>`), conversions clone its storage automatically.\n",
+    );
     help.push_str("  • If this is your own LinOp type, implement `matrix::format::AsFormat` for it to enable cached conversions.\n");
     help.push_str(
         "  • If running distributed, attach the communicator with `wrap_with_comm(op, comm)`.\n",
@@ -47,6 +51,16 @@ fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) ->
     }
 
     KError::InvalidInput(help)
+}
+
+fn scalar_csr_to_sparse(matrix: &ScalarCsrMatrix<f64>) -> CsrMatrix<f64> {
+    CsrMatrix::from_csr(
+        matrix.nrows,
+        matrix.ncols,
+        matrix.rowptr.clone(),
+        matrix.colind.clone(),
+        matrix.values.clone(),
+    )
 }
 
 /// Try to borrow a CSR matrix if the operator is already CSR.
@@ -66,6 +80,10 @@ pub fn to_csr_cached(
 ) -> Result<Arc<CsrMatrix<f64>>, KError> {
     if let Some(csr) = try_as_csr(pmat) {
         return Ok(Arc::new(csr.clone()));
+    }
+    if let Some(generic) = pmat.as_any().downcast_ref::<GenericCsrOp<f64>>() {
+        let csr = scalar_csr_to_sparse(generic.matrix());
+        return Ok(Arc::new(csr));
     }
     if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.to_csr_cached(drop_tol));
@@ -103,6 +121,10 @@ pub fn to_csc_cached(
     if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.to_csc_cached(drop_tol));
     }
+    if let Some(generic) = pmat.as_any().downcast_ref::<GenericCsrOp<f64>>() {
+        let csr = scalar_csr_to_sparse(generic.matrix());
+        return Ok(AsFormat::to_csc_cached(&csr, drop_tol));
+    }
     if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(csr.to_csc_cached(drop_tol));
     }
@@ -127,6 +149,10 @@ pub fn csc_from_linop(
 pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
     if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.clone());
+    }
+    if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
+        let csr = scalar_csr_to_sparse(generic.matrix());
+        return Ok(csr.to_dense());
     }
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(csr.to_dense());
@@ -168,6 +194,20 @@ pub fn materialize_linop_with_hint(
     }
 
     // CSR matrix
+    if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
+        let csr = scalar_csr_to_sparse(generic.matrix());
+        return Ok(match hint {
+            FormatHint::Csr => wrap_with_comm(Arc::new(csr.clone()), comm),
+            FormatHint::Csc => {
+                let csc = AsFormat::to_csc_cached(&csr, drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let dense = csr.to_dense();
+                wrap_with_comm(std::sync::Arc::new(dense), comm)
+            }
+        });
+    }
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(match hint {
             FormatHint::Csr => wrap_with_comm(std::sync::Arc::new(csr.clone()), comm),
@@ -250,11 +290,7 @@ pub fn materialize_linop_with_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::{
-        op_shell::MatShell,
-        sparse::CsrMatrix,
-        DistCsrOp,
-    };
+    use crate::matrix::{DistCsrOp, op_shell::MatShell, sparse::CsrMatrix};
     use crate::parallel::{NoComm, UniverseComm};
 
     #[test]
