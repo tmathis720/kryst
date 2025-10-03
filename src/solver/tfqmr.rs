@@ -5,6 +5,7 @@
 use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -107,7 +108,13 @@ impl LinearSolver for TfqmrSolver {
             w.bridge_tmp.resize(n, S::zero());
         }
 
-        matvec_s(a, x, r, &mut w.bridge);
+        let mut x_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(&x[..], &mut x_s);
+        let mut write_back = |xs: &[S]| {
+            copy_scalar_to_real_in(xs, x);
+        };
+
+        matvec_s(a, &x_s, r, &mut w.bridge);
         for i in 0..n {
             r[i] = S::from_real(b[i]) - r[i];
         }
@@ -127,10 +134,12 @@ impl LinearSolver for TfqmrSolver {
 
         if res0 <= self.conv.atol.max(self.conv.rtol * res0.max(1e-300)) {
             stats.reason = ConvergedReason::ConvergedAtol;
+            write_back(&x_s);
             return Ok(stats);
         }
         if !rho.is_finite() || rho.abs() < self.breakdown_eps {
             stats.reason = ConvergedReason::DivergedDtol;
+            write_back(&x_s);
             return Ok(stats);
         }
 
@@ -156,6 +165,7 @@ impl LinearSolver for TfqmrSolver {
                 stats.iterations = k;
                 stats.final_residual = true_res;
                 stats.reason = ConvergedReason::DivergedDtol;
+                write_back(&x_s);
                 return Ok(stats);
             }
             let alpha = rho / sigma;
@@ -163,6 +173,7 @@ impl LinearSolver for TfqmrSolver {
                 stats.iterations = k;
                 stats.final_residual = true_res;
                 stats.reason = ConvergedReason::DivergedDtol;
+                write_back(&x_s);
                 return Ok(stats);
             }
 
@@ -203,7 +214,7 @@ impl LinearSolver for TfqmrSolver {
                     };
                     for i in 0..n {
                         d[i] = src[i] + cf * d[i];
-                        x[i] += eta * d[i];
+                        x_s[i] += eta * d[i];
                     }
 
                     let iter_count = 2 * (k - 1) + mstep + 1;
@@ -224,7 +235,7 @@ impl LinearSolver for TfqmrSolver {
                                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                             ))
                     {
-                        matvec_s(a, x, au, &mut w.bridge);
+                        matvec_s(a, &x_s, au, &mut w.bridge);
                         for i in 0..n {
                             au[i] = S::from_real(b[i]) - au[i];
                         }
@@ -243,6 +254,7 @@ impl LinearSolver for TfqmrSolver {
                         reason,
                         ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                     ) {
+                        write_back(&x_s);
                         return Ok(stats);
                     }
                 }
@@ -259,6 +271,7 @@ impl LinearSolver for TfqmrSolver {
             if !rho_new.is_finite() || rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.reason = ConvergedReason::DivergedDtol;
+                write_back(&x_s);
                 return Ok(stats);
             }
             let beta = rho_new / rho;
@@ -272,7 +285,7 @@ impl LinearSolver for TfqmrSolver {
             dpold = nrm2(r);
 
             if self.resid_recalc_every == 1 {
-                matvec_s(a, x, au, &mut w.bridge);
+                matvec_s(a, &x_s, au, &mut w.bridge);
                 for i in 0..n {
                     au[i] = S::from_real(b[i]) - au[i];
                 }
@@ -289,6 +302,7 @@ impl LinearSolver for TfqmrSolver {
                     reason,
                     ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                 ) {
+                    write_back(&x_s);
                     return Ok(stats);
                 }
             }
@@ -301,6 +315,7 @@ impl LinearSolver for TfqmrSolver {
         ) {
             stats.reason = ConvergedReason::DivergedMaxIts;
         }
+        write_back(&x_s);
         Ok(stats)
     }
 }
