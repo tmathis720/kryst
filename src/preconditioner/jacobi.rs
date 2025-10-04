@@ -6,13 +6,6 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
-use crate::algebra::prelude::*;
-#[cfg(feature = "complex")]
-use crate::ops::kpc::KPreconditioner;
-
 pub struct Jacobi {
     pub(crate) diag_inv: Vec<f64>,
     n: usize,
@@ -116,29 +109,5 @@ impl PcIntrospect for Jacobi {
             fill_ratio: 0.0,
             applies: self.applies.load(Ordering::Relaxed),
         }
-    }
-}
-
-#[cfg(feature = "complex")]
-impl KPreconditioner for Jacobi {
-    type Scalar = S;
-
-    fn dims(&self) -> (usize, usize) {
-        Preconditioner::dims(self)
-    }
-
-    fn apply_s(
-        &self,
-        side: PcSide,
-        x: &[S],
-        y: &mut [S],
-        scratch: &mut BridgeScratch,
-    ) -> Result<(), KError> {
-        debug_assert_eq!(x.len(), y.len());
-        let xr = scratch.copy_scalar_into_real(x);
-        let yr = scratch.yr(x.len());
-        self.apply(side, xr, yr)?;
-        scratch.copy_real_into_scalar(yr, y);
-        Ok(())
     }
 }

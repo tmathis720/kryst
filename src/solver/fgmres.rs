@@ -1,4 +1,5 @@
-//! Flexible GMRES (FGMRES) over &dyn LinOp<f64>, right-preconditioned, object-safe.
+//! Flexible GMRES (FGMRES) over the scalar-generic [`KLinOp`] interface with optional
+//! mutable preconditioning support.
 
 use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
@@ -7,11 +8,13 @@ use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::matrix::op_bridge::matvec_s;
+use crate::ops::klinop::KLinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::ops::wrap::{as_s_op, as_s_pc_mut};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::solver::common::recompute_true_residual_norm;
+use crate::solver::common::recompute_true_residual_norm_s;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use std::any::Any;
 
@@ -89,25 +92,31 @@ impl FgmresSolver {
     // legacy helpers for in-place Givens rotations removed; Workspace now handles
     // orthogonalization and updating of the Hessenberg system.
 
-    pub fn solve_flexible(
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_k<A>(
         &mut self,
-        a: &dyn LinOp<S = f64>,
-        mut pc: Option<&mut dyn Preconditioner>,
-        b: &[f64],
-        x: &mut [f64],
+        a: &A,
+        mut pc: Option<&mut dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
         work: Option<&mut Workspace>,
-    ) -> Result<SolveStats<f64>, KError> {
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
         let (m, n) = a.dims();
         if m != n {
             return Err(KError::InvalidInput(
-                "FGMRES requires a square operator".into(),
+                "FGMRES requires a square operator".to_string(),
             ));
         }
         if b.len() != n || x.len() != n {
-            return Err(KError::InvalidInput("FGMRES: vector size mismatch".into()));
+            return Err(KError::InvalidInput(
+                "FGMRES: vector size mismatch".to_string(),
+            ));
         }
 
         let pc_side = match pc_side {
@@ -121,25 +130,31 @@ impl FgmresSolver {
             self.restart
         };
 
-        let ws = work.ok_or_else(|| {
-            KError::InvalidInput("FGMRES requires caller-provided Workspace".into())
-        })?;
+        let mut owned_ws;
+        let ws = if let Some(w) = work {
+            w
+        } else {
+            owned_ws = Workspace::new(n);
+            &mut owned_ws
+        };
         self.ensure_workspace(ws, n, block_m);
 
         let mons = monitors.unwrap_or(&[]);
 
-        let mut x_s = vec![S::zero(); n];
-        copy_real_to_scalar_in(x, &mut x_s);
-        let mut b_s = vec![S::zero(); n];
-        copy_real_to_scalar_in(b, &mut b_s);
-
-        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
+        a.matvec_s(x, &mut ws.tmp1[..n], &mut ws.bridge);
         for i in 0..n {
-            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
         }
+
         let mut beta0 = Self::nrm2(&ws.tmp1[..n]);
-        let bnorm = nrm2(&b_s).max(1e-32);
+        let bnorm = Self::nrm2(b).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
+
+        ws.h_mem.fill(S::zero());
+        ws.cs.fill(0.0);
+        ws.sn.fill(S::zero());
+        ws.g.fill(S::zero());
+        ws.g[0] = S::from_real(beta0);
 
         if beta0 > 0.0 {
             let inv = S::from_real(1.0 / beta0);
@@ -150,12 +165,6 @@ impl FgmresSolver {
         } else {
             ws.v_col(0).fill(S::zero());
         }
-
-        ws.h_mem.fill(S::zero());
-        ws.cs.fill(0.0);
-        ws.sn.fill(S::zero());
-        ws.g.fill(S::zero());
-        ws.g[0] = S::from_real(beta0);
 
         let mut total_iters = 0usize;
         let mut res = beta0;
@@ -172,9 +181,8 @@ impl FgmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            copy_scalar_to_real_in(&x_s, x);
-            let tmp = ws.bridge.xr(n);
-            let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+            let true_res =
+                recompute_true_residual_norm_s(a, b, x, comm, &mut ws.tmp1[..n], &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -198,34 +206,22 @@ impl FgmresSolver {
             for j in 0..m_this {
                 match self.variant {
                     FgmresVariant::Classical => {
-                        {
-                            let (vj, zj) = ws.v_and_z_mut(j);
-                            if let Some(pc_) = pc.as_mut() {
-                                #[cfg(not(feature = "complex"))]
-                                {
-                                    let vj_r: &[f64] =
-                                        unsafe { &*(vj as *const [S] as *const [f64]) };
-                                    let zj_r: &mut [f64] =
-                                        unsafe { &mut *(zj as *mut [S] as *mut [f64]) };
-                                    (*pc_).apply_mut(pc_side, vj_r, zj_r)?;
-                                }
-                                #[cfg(feature = "complex")]
-                                {
-                                    let xr = ws.bridge.xr(n);
-                                    let yr = ws.bridge.yr(n);
-                                    copy_scalar_to_real_in(vj, xr);
-                                    (*pc_).apply_mut(pc_side, xr, yr)?;
-                                    copy_real_to_scalar_in(yr, zj);
-                                }
-                            } else {
-                                zj.copy_from_slice(vj);
-                            }
+                        let base = j * n;
+                        ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
+                        if let Some(pc_ref) = pc.as_deref_mut() {
+                            pc_ref.apply_mut_s(
+                                pc_side,
+                                &ws.tmp1[..n],
+                                &mut ws.tmp2[..n],
+                                &mut ws.bridge,
+                            )?;
+                            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
+                        } else {
+                            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
                         }
-                        {
-                            let base = j * n;
-                            ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
-                            matvec_s(a, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
-                        }
+
+                        ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                        a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
 
                         let mut hvals = vec![S::zero(); j + 1];
                         {
@@ -272,36 +268,31 @@ impl FgmresSolver {
                         #[cfg(feature = "complex")]
                         {
                             return Err(KError::NotImplemented(
-                                "Pipelined FGMRES is not yet implemented for complex scalars",
+                                "Pipelined FGMRES is not yet implemented for complex scalars"
+                                    .to_string(),
                             ));
                         }
                         #[cfg(not(feature = "complex"))]
                         {
-                            {
-                                let (vj, zj) = ws.v_and_z_mut(j);
-                                if let Some(pc_) = pc.as_mut() {
-                                    let vj_r: &[f64] =
-                                        unsafe { &*(vj as *const [S] as *const [f64]) };
-                                    let zj_r: &mut [f64] =
-                                        unsafe { &mut *(zj as *mut [S] as *mut [f64]) };
-                                    (*pc_).apply_mut(pc_side, vj_r, zj_r)?;
-                                } else {
-                                    zj.copy_from_slice(vj);
-                                }
+                            let base = j * n;
+                            ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
+                            if let Some(pc_ref) = pc.as_deref_mut() {
+                                pc_ref.apply_mut_s(
+                                    pc_side,
+                                    &ws.tmp1[..n],
+                                    &mut ws.tmp2[..n],
+                                    &mut ws.bridge,
+                                )?;
+                                ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
+                            } else {
+                                ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
                             }
-                            {
-                                let base = j * n;
-                                ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
-                                matvec_s(a, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
-                            }
+
+                            ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                            a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+
                             ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
-                            let _ = ws.pipelined_arnoldi_step(
-                                j,
-                                n,
-                                comm,
-                                self.reorth,
-                                self.reorth_tol,
-                            )?;
+                            ws.pipelined_arnoldi_step(j, n, comm, self.reorth, self.reorth_tol)?;
                         }
                     }
                 }
@@ -349,7 +340,7 @@ impl FgmresSolver {
 
             for i in 0..k {
                 let zi = &ws.z_mem[i * n..(i + 1) * n];
-                for (xj, &zij) in x_s.iter_mut().zip(zi) {
+                for (xj, &zij) in x.iter_mut().zip(zi) {
                     *xj += y[i] * zij;
                 }
             }
@@ -368,9 +359,9 @@ impl FgmresSolver {
                 break;
             }
 
-            matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
+            a.matvec_s(x, &mut ws.tmp1[..n], &mut ws.bridge);
             for i in 0..n {
-                ws.tmp1[i] = b_s[i] - ws.tmp1[i];
+                ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
             beta0 = Self::nrm2(&ws.tmp1[..n]);
 
@@ -392,16 +383,15 @@ impl FgmresSolver {
             if let Some(hook) = self.on_restart.as_mut() {
                 hook(total_iters, beta0)?;
             }
-            if let Some(pc_) = pc.as_mut() {
-                (*pc_).on_restart(total_iters, beta0)?;
+            if let Some(pc_ref) = pc.as_deref_mut() {
+                pc_ref.on_restart_s(total_iters, beta0)?;
             }
         }
 
         stats.iterations = total_iters;
 
-        copy_scalar_to_real_in(&x_s, x);
-        let tmp = ws.bridge.xr(n);
-        let true_res = recompute_true_residual_norm(a, b, x, comm, tmp);
+        let true_res =
+            recompute_true_residual_norm_s(a, b, x, comm, &mut ws.tmp1[..n], &mut ws.bridge);
         stats.final_residual = true_res;
 
         if matches!(stats.reason, ConvergedReason::Continued) {
@@ -421,6 +411,49 @@ impl FgmresSolver {
         };
         Ok(stats.with_counters(counters))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_f64(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        let (_, n) = a.dims();
+        if b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput(
+                "FGMRES: vector size mismatch".to_string(),
+            ));
+        }
+
+        let mut x_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(x, &mut x_s);
+        let mut b_s = vec![S::zero(); n];
+        copy_real_to_scalar_in(b, &mut b_s);
+
+        let op = as_s_op(a);
+        let mut pc_storage = pc.map(as_s_pc_mut);
+        let stats = self.solve_k(
+            &op,
+            pc_storage
+                .as_mut()
+                .map(|w| w as &mut dyn KPreconditioner<Scalar = S>),
+            &b_s,
+            &mut x_s,
+            pc_side,
+            comm,
+            monitors,
+            work,
+        )?;
+
+        copy_scalar_to_real_in(&x_s, x);
+        Ok(stats)
+    }
 }
 
 impl LinearSolver for FgmresSolver {
@@ -431,7 +464,7 @@ impl LinearSolver for FgmresSolver {
     }
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
-        // Sizing is performed in solve_flexible() once n is known.
+        // Sizing is performed in solve_f64()/solve_k once n is known.
         let _ = w;
     }
 
@@ -446,8 +479,7 @@ impl LinearSolver for FgmresSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        // Delegate directly to the flexible path with mutable PC support.
-        self.solve_flexible(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
     }
 }
 

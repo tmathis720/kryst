@@ -7,6 +7,7 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{PcSide, Preconditioner as PreconditionerF64};
+use core::marker::PhantomData;
 
 /// Adapter that exposes an `f64` operator via the scalar-generic [`KLinOp`] interface.
 pub struct F64AsSOp<'a, A: LinOpF64 + LinOp<S = f64> + ?Sized> {
@@ -55,11 +56,35 @@ where
         #[cfg(feature = "complex")]
         {
             let n = x.len();
-            let xr = scratch.xr(n);
-            let yr = scratch.yr(n);
+            let (xr, yr) = scratch.real_pair(n);
             copy_scalar_to_real_in(x, xr);
             <A as LinOpF64>::matvec(self.inner, xr, yr);
             copy_real_to_scalar_in(yr, y);
+        }
+    }
+
+    #[inline]
+    fn supports_t_matvec_s(&self) -> bool {
+        <A as LinOp>::supports_transpose(self.inner)
+    }
+
+    #[inline]
+    fn t_matvec_s(&self, x: &[S], y: &mut [S], scratch: &mut BridgeScratch) {
+        #[cfg(not(feature = "complex"))]
+        {
+            let _ = scratch;
+            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
+            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
+            <A as LinOp>::t_matvec(self.inner, x_r, y_r);
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let need = x.len().max(y.len());
+            let (xr, yr) = scratch.real_pair(need);
+            copy_scalar_to_real_in(x, &mut xr[..x.len()]);
+            <A as LinOp>::t_matvec(self.inner, &xr[..x.len()], &mut yr[..y.len()]);
+            copy_real_to_scalar_in(&yr[..y.len()], y);
         }
     }
 }
@@ -111,12 +136,110 @@ where
         #[cfg(feature = "complex")]
         {
             let n = x.len();
-            let xr = scratch.xr(n);
-            let yr = scratch.yr(n);
+            let (xr, yr) = scratch.real_pair(n);
             copy_scalar_to_real_in(x, xr);
             <P as PreconditionerF64>::apply(self.inner, side, xr, yr)?;
             copy_real_to_scalar_in(yr, y);
             Ok(())
         }
+    }
+}
+
+/// Mutable adapter that exposes an `f64` preconditioner via [`KPreconditioner`].
+pub struct F64AsSPcMut<'a, P: PreconditionerF64 + ?Sized> {
+    inner: *mut P,
+    _marker: PhantomData<&'a mut P>,
+}
+
+impl<'a, P: PreconditionerF64 + ?Sized> F64AsSPcMut<'a, P> {
+    #[inline]
+    pub fn new(inner: &'a mut P) -> Self {
+        Self {
+            inner: inner as *mut P,
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[inline]
+pub fn as_s_pc_mut<'a, P: PreconditionerF64 + ?Sized>(pc: &'a mut P) -> F64AsSPcMut<'a, P> {
+    F64AsSPcMut::new(pc)
+}
+
+unsafe impl<'a, P> Send for F64AsSPcMut<'a, P> where P: PreconditionerF64 + Send + Sync + ?Sized {}
+unsafe impl<'a, P> Sync for F64AsSPcMut<'a, P> where P: PreconditionerF64 + Send + Sync + ?Sized {}
+
+impl<'a, P> KPreconditioner for F64AsSPcMut<'a, P>
+where
+    P: PreconditionerF64 + Send + Sync + ?Sized,
+{
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        unsafe { <P as PreconditionerF64>::dims(&*self.inner) }
+    }
+
+    #[inline]
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        #[cfg(not(feature = "complex"))]
+        {
+            let _ = scratch;
+            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
+            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
+            return unsafe { <P as PreconditionerF64>::apply(&*self.inner, side, x_r, y_r) };
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let n = x.len();
+            let (xr, yr) = scratch.real_pair(n);
+            copy_scalar_to_real_in(x, xr);
+            unsafe {
+                <P as PreconditionerF64>::apply(&*self.inner, side, xr, yr)?;
+            }
+            copy_real_to_scalar_in(yr, y);
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        #[cfg(not(feature = "complex"))]
+        {
+            let _ = scratch;
+            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
+            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
+            unsafe { <P as PreconditionerF64>::apply_mut(&mut *self.inner, side, x_r, y_r) }
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let n = x.len();
+            let (xr, yr) = scratch.real_pair(n);
+            copy_scalar_to_real_in(x, xr);
+            unsafe {
+                <P as PreconditionerF64>::apply_mut(&mut *self.inner, side, xr, yr)?;
+            }
+            copy_real_to_scalar_in(yr, y);
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn on_restart_s(&mut self, outer_iter: usize, residual_norm: R) -> Result<(), KError> {
+        unsafe { <P as PreconditionerF64>::on_restart(&mut *self.inner, outer_iter, residual_norm) }
     }
 }

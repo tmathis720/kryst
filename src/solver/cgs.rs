@@ -8,15 +8,20 @@
 //! - Monitors report the true residual `||r||_2`.
 //! - Parallel safety: all inner products/norms use `UniverseComm`.
 
+use crate::algebra::blas::dot_conj;
+use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use crate::matrix::op::LinOp;
+use crate::matrix::op::{LinOp, LinOpF64};
+use crate::ops::klinop::KLinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::{Comm, UniverseComm};
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::recompute_true_residual_norm;
+use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 #[cfg(feature = "logging")]
@@ -27,9 +32,85 @@ pub struct CgsSolver {
 
 /// Relative threshold for CGS breakdown detection.
 /// Trigger when |rho| or |sigma| is smaller than BRK_REL * scale.
-const BRK_REL: f64 = 1e-12;
+const BRK_REL: R = 1e-12;
 /// Absolute floor to guard subnormals.
-const BRK_ABS: f64 = 1e-300;
+const BRK_ABS: R = 1e-300;
+
+#[cfg(feature = "complex")]
+use num_complex::Complex64;
+
+fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
+    if comm.size() == 1 {
+        value
+    } else {
+        comm.allreduce_sum(value)
+    }
+}
+
+fn reduce_scalar<C: Comm>(comm: &C, value: S) -> S {
+    if comm.size() == 1 {
+        value
+    } else {
+        #[cfg(feature = "complex")]
+        {
+            let local: Complex64 = value;
+            let (re, im) = comm.allreduce_sum2(local.re, local.im);
+            Complex64::new(re, im)
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            S::from_real(comm.allreduce_sum(value.real()))
+        }
+    }
+}
+
+fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
+    let local = dot_conj(x, y);
+    reduce_scalar(comm, local)
+}
+
+fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
+    let local = dot_conj(x, x).real();
+    reduce_real(comm, local).sqrt()
+}
+
+struct CgsWorkspace<'a> {
+    r: &'a mut [S],
+    v: &'a mut [S],
+    u: &'a mut [S],
+    p: &'a mut [S],
+    q: &'a mut [S],
+    upq: &'a mut [S],
+    w: &'a mut [S],
+    scratch: &'a mut BridgeScratch,
+}
+
+impl<'a> CgsWorkspace<'a> {
+    fn acquire(n: usize, work: &'a mut Workspace) -> Self {
+        take_or_resize(&mut work.tmp1, n);
+        take_or_resize(&mut work.tmp2, n);
+        while work.q_s.len() < 5 {
+            work.q_s.push(Vec::new());
+        }
+        for buf in &mut work.q_s[..5] {
+            take_or_resize(buf, n);
+        }
+        let (q0, rest) = work.q_s.split_at_mut(1);
+        let (q1, rest) = rest.split_at_mut(1);
+        let (q2, rest) = rest.split_at_mut(1);
+        let (q3, q4) = rest.split_at_mut(1);
+        Self {
+            r: &mut work.tmp1[..n],
+            v: &mut work.tmp2[..n],
+            u: &mut q0[0][..n],
+            p: &mut q1[0][..n],
+            q: &mut q2[0][..n],
+            upq: &mut q3[0][..n],
+            w: &mut q4[0][..n],
+            scratch: &mut work.bridge,
+        }
+    }
+}
 
 impl CgsSolver {
     pub fn new(rtol: f64, maxits: usize) -> Self {
@@ -43,62 +124,217 @@ impl CgsSolver {
         }
     }
 
-    #[inline]
-    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 {
-        comm.dot(x, y)
-    }
-    #[inline]
-    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
-        Self::dot(x, x, comm).sqrt()
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_comm<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        let _ = pc;
+        let _ = pc_side;
+        #[cfg(feature = "logging")]
+        let _guard = StageGuard::new("CGS");
+
+        let (m, n) = a.dims();
+        if m != n {
+            return Err(KError::InvalidInput(
+                "CGS requires a square operator".into(),
+            ));
+        }
+        if b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput("CGS: vector length mismatch".into()));
+        }
+
+        let work = work.ok_or_else(|| {
+            KError::InvalidInput("CGS requires a Workspace; use KSP or Workspace::new(n)".into())
+        })?;
+
+        if b.is_empty() {
+            return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
+        }
+
+        let buffers = CgsWorkspace::acquire(n, work);
+        let CgsWorkspace {
+            r,
+            v,
+            u,
+            p,
+            q,
+            upq,
+            w,
+            scratch,
+        } = buffers;
+        let monitors = monitors.unwrap_or(&[]);
+
+        let mut r_tld = vec![S::zero(); n];
+
+        if x.iter().any(|&xi| xi != S::zero()) {
+            a.matvec_s(x, &mut *v, &mut *scratch);
+            for i in 0..n {
+                r[i] = b[i] - v[i];
+            }
+        } else {
+            r.copy_from_slice(b);
+        }
+        r_tld.copy_from_slice(r);
+
+        let rtld_norm = norm2(&r_tld, comm);
+
+        let mut rnorm = norm2(r, comm);
+        let res0_reported = rnorm;
+
+        for m in monitors {
+            m(0, rnorm);
+        }
+
+        let (reason0, s0) = self.conv.check(rnorm, res0_reported, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            return Ok(SolveStats::new(0, rnorm, s0.reason));
+        }
+
+        let mut rho = dot(&r_tld, r, comm);
+        let mut r_norm = norm2(r, comm);
+        let mut rho_abs = rho.abs();
+        let mut rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
+        if rho_abs <= rho_thr {
+            return Err(KError::IndefiniteMatrix);
+        }
+
+        u.copy_from_slice(r);
+        p.copy_from_slice(u);
+
+        let mut iters = 0usize;
+        for k in 1..=self.conv.max_iters {
+            iters = k;
+
+            a.matvec_s(p, &mut *v, &mut *scratch);
+
+            let sigma = dot(&r_tld, v, comm);
+            let sigma_abs = sigma.abs();
+            let v_norm = norm2(v, comm);
+            let sigma_thr = BRK_ABS.max(BRK_REL * rtld_norm * v_norm);
+            if sigma_abs <= sigma_thr {
+                return Err(KError::IndefiniteMatrix);
+            }
+            let alpha = rho / sigma;
+
+            for i in 0..n {
+                q[i] = u[i] - alpha * v[i];
+            }
+
+            for i in 0..n {
+                let sum = u[i] + q[i];
+                x[i] += alpha * sum;
+                upq[i] = sum;
+            }
+
+            a.matvec_s(upq, &mut *w, &mut *scratch);
+            for i in 0..n {
+                r[i] -= alpha * w[i];
+            }
+
+            rnorm = norm2(r, comm);
+            for m in monitors {
+                m(k, rnorm);
+            }
+
+            let (reason, s) = self.conv.check(rnorm, res0_reported, k);
+            if !matches!(reason, ConvergedReason::Continued) {
+                return Ok(SolveStats::new(k, rnorm, s.reason));
+            }
+
+            let rho_old = rho;
+            rho = dot(&r_tld, r, comm);
+            r_norm = norm2(r, comm);
+            rho_abs = rho.abs();
+            rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
+            if rho_abs <= rho_thr {
+                return Err(KError::IndefiniteMatrix);
+            }
+            let beta = rho / rho_old;
+
+            for i in 0..n {
+                u[i] = r[i] + beta * q[i];
+            }
+            for i in 0..n {
+                p[i] = u[i] + beta * (q[i] + beta * p[i]);
+            }
+        }
+
+        let true_res = recompute_true_residual_norm_s(a, b, x, comm, &mut *w, &mut *scratch);
+        Ok(SolveStats::new(
+            iters,
+            true_res,
+            ConvergedReason::DivergedMaxIts,
+        ))
     }
 
-    #[inline]
-    fn take_or_resize(buf: &mut Vec<f64>, n: usize) {
-        if buf.len() != n {
-            buf.resize(n, 0.0);
-        }
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_with_comm(a, pc, b, x, pc_side, comm, monitors, work)
     }
 
-    /// Acquire all CGS work vectors from `Workspace` (no steady-state allocs).
-    /// We use:
-    ///   tmp1 = r, tmp2 = v
-    ///   q[0] = u, q[1] = p, q[2] = q, q[3] = upq, q[4] = w (A*(u+q))
-    fn acquire(
-        n: usize,
-        work: &mut Workspace,
-    ) -> (
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-        &mut [f64],
-    ) {
-        Self::take_or_resize(&mut work.tmp1, n); // r
-        Self::take_or_resize(&mut work.tmp2, n); // v
-        while work.q.len() < 5 {
-            work.q.push(Vec::new());
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_f64<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn PreconditionerF64>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError>
+    where
+        A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
+    {
+        let op = as_s_op(a);
+        let pc_wrapper = pc.map(as_s_pc);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|w| w as &dyn KPreconditioner<Scalar = S>);
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
+            let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            self.solve(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
         }
-        for k in 0..5 {
-            Self::take_or_resize(&mut work.q[k], n);
+        #[cfg(feature = "complex")]
+        {
+            let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+            let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+            let result = self.solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            if result.is_ok() {
+                for (dst, src) in x.iter_mut().zip(x_s.iter()) {
+                    *dst = src.real();
+                }
+            }
+            result
         }
-        let r = &mut work.tmp1[..];
-        let v = &mut work.tmp2[..];
-        let (u, p, q, upq, w) = {
-            let (q0, rest) = work.q.split_at_mut(1);
-            let (q1, rest) = rest.split_at_mut(1);
-            let (q2, rest) = rest.split_at_mut(1);
-            let (q3, q4) = rest.split_at_mut(1);
-            (
-                &mut q0[0][..],
-                &mut q1[0][..],
-                &mut q2[0][..],
-                &mut q3[0][..],
-                &mut q4[0][..],
-            )
-        };
-        (r, v, u, p, q, upq, w)
     }
 }
 
@@ -110,8 +346,8 @@ impl LinearSolver for CgsSolver {
     }
 
     fn setup_workspace(&mut self, work: &mut Workspace) {
-        if work.q.len() < 5 {
-            work.q.resize(5, Vec::new());
+        if work.q_s.len() < 5 {
+            work.q_s.resize(5, Vec::new());
         }
     }
 
@@ -126,158 +362,6 @@ impl LinearSolver for CgsSolver {
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        let pc: Option<&dyn Preconditioner> = pc.as_deref();
-        #[cfg(feature = "logging")]
-        let _guard = StageGuard::new("CGS");
-
-        let (m, n) = a.dims();
-        if m != n {
-            return Err(KError::InvalidInput(
-                "CGS requires a square operator".into(),
-            ));
-        }
-        if b.len() != n || x.len() != n {
-            return Err(KError::InvalidInput("CGS: vector length mismatch".into()));
-        }
-
-        // Require a Workspace to avoid heap leaks and repeated allocs.
-        let work = work.ok_or_else(|| {
-            KError::InvalidInput("CGS requires a Workspace; use KSP or Workspace::new(n)".into())
-        })?;
-        // Zero-length fast path
-        if b.is_empty() {
-            return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
-        }
-
-        let (r, v, u, p, q, upq, w) = Self::acquire(n, work);
-        let mut r_tld = vec![0.0; n]; // shadow residual (fixed)
-
-        let _ = pc; // unused for now
-        let _ = pc_side;
-
-        // r = b - A x
-        if x.iter().any(|&xi| xi != 0.0) {
-            a.matvec(x, v);
-            for i in 0..n {
-                r[i] = b[i] - v[i];
-            }
-        } else {
-            r.copy_from_slice(b);
-        }
-        r_tld.copy_from_slice(r);
-
-        // Norm of shadow residual used to scale breakdown thresholds
-        let rtld_norm = Self::nrm2(&r_tld, comm);
-
-        // initial values
-        let mut rnorm = Self::nrm2(r, comm);
-        let res0_reported = rnorm;
-
-        if let Some(ms) = monitors {
-            for m in ms {
-                m(0, rnorm);
-            }
-        }
-        // quick exit via convergence policy against res0_reported baseline
-        let (reason0, s0) = self.conv.check(rnorm, res0_reported, 0);
-        if !matches!(reason0, ConvergedReason::Continued) {
-            // ensure final_residual is true residual (already computed as rnorm)
-            return Ok(SolveStats::new(0, rnorm, s0.reason));
-        }
-
-        // CGS parameters
-        let mut rho = Self::dot(&r_tld, r, comm); // (r~, r)
-        // Robust breakdown check for rho
-        let r_norm = Self::nrm2(r, comm);
-        let rho_abs = rho.abs();
-        let rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
-        if rho_abs <= rho_thr {
-            return Err(KError::IndefiniteMatrix); // classic breakdown
-        }
-
-        // First iter: u = r, p = u
-        u.copy_from_slice(r);
-        p.copy_from_slice(u);
-
-        let mut rho_old: f64;
-        let mut iters = 0usize;
-        for k in 1..=self.conv.max_iters {
-            iters = k;
-
-            // v = A p
-            a.matvec(p, v);
-
-            let sigma = Self::dot(&r_tld, v, comm); // (r~, v)
-            // Robust breakdown check for sigma
-            let v_norm = Self::nrm2(v, comm);
-            let sigma_abs = sigma.abs();
-            let sigma_thr = BRK_ABS.max(BRK_REL * rtld_norm * v_norm);
-            if sigma_abs <= sigma_thr {
-                return Err(KError::IndefiniteMatrix); // breakdown
-            }
-            let alpha = rho / sigma;
-
-            // q = u - alpha v
-            for i in 0..n {
-                q[i] = u[i] - alpha * v[i];
-            }
-
-            // x += alpha * (u + q)
-            for i in 0..n {
-                x[i] += alpha * (u[i] + q[i]);
-            }
-
-            // r -= alpha * A (u + q)
-            for i in 0..n {
-                upq[i] = u[i] + q[i];
-            }
-            a.matvec(upq, w);
-            for i in 0..n {
-                r[i] -= alpha * w[i];
-            }
-
-            rnorm = Self::nrm2(r, comm);
-            if let Some(ms) = monitors {
-                for m in ms {
-                    m(k, rnorm);
-                }
-            }
-
-            // convergence / divergence tests against res0_reported
-            let (reason, s) = self.conv.check(rnorm, res0_reported, k);
-            if !matches!(reason, ConvergedReason::Continued) {
-                return Ok(SolveStats::new(k, rnorm, s.reason));
-            }
-
-            // rho, beta updates
-            rho_old = rho;
-            rho = Self::dot(&r_tld, r, comm);
-            // Robust breakdown check for rho update
-            let r_norm = Self::nrm2(r, comm);
-            let rho_abs = rho.abs();
-            let rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
-            if rho_abs <= rho_thr {
-                return Err(KError::IndefiniteMatrix); // breakdown
-            }
-            let beta = rho / rho_old;
-
-            // u = r + beta q
-            for i in 0..n {
-                u[i] = r[i] + beta * q[i];
-            }
-            // p = u + beta (q + beta p)
-            for i in 0..n {
-                p[i] = u[i] + beta * (q[i] + beta * p[i]);
-            }
-        }
-
-        // Max-its: recompute true residual and report divergence
-        let mut tmp = vec![0.0; n];
-        let true_res = recompute_true_residual_norm(a, b, x, comm, &mut tmp);
-        Ok(SolveStats::new(
-            iters,
-            true_res,
-            ConvergedReason::DivergedMaxIts,
-        ))
+        self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)
     }
 }

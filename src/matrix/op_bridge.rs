@@ -21,8 +21,7 @@ pub fn matvec_s(a: &(dyn LinOp<S = f64> + '_), x: &[S], y: &mut [S], scratch: &m
     #[cfg(feature = "complex")]
     {
         let n = x.len();
-        let xr = scratch.xr(n);
-        let yr = scratch.yr(n);
+        let (xr, yr) = scratch.real_pair(n);
         copy_scalar_to_real_in(x, xr);
         a.matvec(xr, yr);
         copy_real_to_scalar_in(yr, y);

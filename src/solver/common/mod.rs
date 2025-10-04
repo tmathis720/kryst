@@ -1,8 +1,24 @@
+pub mod buffer;
 pub mod givens;
 
+use crate::algebra::blas::dot_conj;
+use crate::algebra::bridge::BridgeScratch;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::matrix::op::LinOp;
+use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm};
 use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
+
+pub use buffer::take_or_resize;
+
+fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
+    if comm.size() == 1 {
+        value
+    } else {
+        comm.allreduce_sum(value)
+    }
+}
 
 /// Recompute the true residual norm ||r||_2 where r = b - A x.
 ///
@@ -27,6 +43,30 @@ pub fn recompute_true_residual_norm<C: Comm>(
     } else {
         comm.allreduce_sum(local).sqrt()
     }
+}
+
+#[inline]
+pub fn recompute_true_residual_norm_s<A, C>(
+    a: &A,
+    b: &[S],
+    x: &[S],
+    comm: &C,
+    tmp: &mut [S],
+    scratch: &mut BridgeScratch,
+) -> R
+where
+    A: KLinOp<Scalar = S> + ?Sized,
+    C: Comm,
+{
+    debug_assert_eq!(b.len(), x.len());
+    debug_assert_eq!(tmp.len(), x.len());
+
+    a.matvec_s(x, tmp, scratch);
+    for i in 0..tmp.len() {
+        tmp[i] = b[i] - tmp[i];
+    }
+    let local = dot_conj(tmp, tmp).real();
+    reduce_real(comm, local).sqrt()
 }
 
 /// Compute the residual norm used for iteration monitors (the "reported" norm):
@@ -106,6 +146,30 @@ pub fn dot1_async<C: AsyncComm + ?Sized>(
     comm.allreduce2_async(sum, 0.0, opt)
 }
 
+/// Launch a single dot product asynchronously on scalar slices. The result is
+/// encoded in the first entry of the returned pair.
+pub fn dot1_async_s<C: AsyncComm + ?Sized>(
+    comm: &C,
+    x: &[S],
+    y: &[S],
+    opt: &ReductOptions,
+) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), crate::error::KError> {
+    debug_assert_eq!(x.len(), y.len());
+
+    #[cfg(not(feature = "complex"))]
+    unsafe {
+        let xr: &[f64] = &*(x as *const [S] as *const [f64]);
+        let yr: &[f64] = &*(y as *const [S] as *const [f64]);
+        return dot1_async(comm, xr, yr, opt);
+    }
+
+    #[cfg(feature = "complex")]
+    {
+        let sum = dot_conj(x, y).real();
+        comm.allreduce2_async(sum, 0.0, opt)
+    }
+}
+
 /// Handle for a batch of asynchronous dot products.
 #[derive(Debug)]
 pub struct AsyncDotN {
@@ -148,4 +212,26 @@ pub fn nrm2_async<C: AsyncComm + ?Sized>(
         .allreduce2_async(sumsq, 0.0, opt)
         .expect("async reduction launch");
     (handle, local.0)
+}
+
+/// Launch an asynchronous squared-norm reduction on scalar slices.
+pub fn nrm2_async_s<C: AsyncComm + ?Sized>(
+    comm: &C,
+    x: &[S],
+    opt: &ReductOptions,
+) -> (AllreduceHandle<(f64, f64)>, f64) {
+    #[cfg(not(feature = "complex"))]
+    unsafe {
+        let xr: &[f64] = &*(x as *const [S] as *const [f64]);
+        return nrm2_async(comm, xr, opt);
+    }
+
+    #[cfg(feature = "complex")]
+    {
+        let sumsq = dot_conj(x, x).real();
+        let (handle, local) = comm
+            .allreduce2_async(sumsq, 0.0, opt)
+            .expect("async reduction launch");
+        (handle, local.0)
+    }
 }

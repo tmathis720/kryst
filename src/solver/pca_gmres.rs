@@ -5,13 +5,15 @@ use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
+#[cfg(feature = "complex")]
+use crate::algebra::scalar::copy_scalar_to_real_in;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use crate::matrix::op::LinOp;
-use crate::matrix::op_bridge::matvec_s;
+use crate::matrix::op::{LinOp, LinOpF64};
+use crate::ops::klinop::KLinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
-use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
@@ -127,14 +129,14 @@ impl PcaGmresSolver {
     /// Apply (immutable) preconditioner or act as identity when None.
     #[inline]
     fn apply_pc(
-        pc: Option<&dyn Preconditioner>,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
         side: PcSide,
         x: &[S],
         y: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
         if let Some(p) = pc {
-            apply_pc_s(p, side, x, y, scratch)
+            p.apply_s(side, x, y, scratch)
         } else {
             y.copy_from_slice(x);
             Ok(())
@@ -220,11 +222,30 @@ impl LinearSolver for PcaGmresSolver {
         b: &[f64],
         x: &mut [f64],
         pc_side_arg: PcSide,
-        _comm: &UniverseComm,
+        comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        let pc_in: Option<&dyn Preconditioner> = pc.as_deref();
+        self.solve_f64(a, pc.as_deref(), b, x, pc_side_arg, comm, monitors, work)
+    }
+}
+
+impl PcaGmresSolver {
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_k<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side_arg: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
         let (m, n) = a.dims();
         if m != n || b.len() != n || x.len() != n {
             return Err(KError::InvalidInput(
@@ -232,8 +253,7 @@ impl LinearSolver for PcaGmresSolver {
             ));
         }
 
-        // Determine the *effective* mode (degrade to None if pc is absent).
-        let has_pc = pc_in.is_some();
+        let has_pc = pc.is_some();
         let mode = if has_pc {
             self.pc_mode
         } else {
@@ -244,7 +264,6 @@ impl LinearSolver for PcaGmresSolver {
             PcaPcMode::Right => PcSide::Right,
         };
 
-        // Enforce semantics: if a preconditioner is active, side must match the mode.
         if has_pc && pc_side_arg != expected_side {
             return Err(KError::InvalidInput(format!(
                 "PCA-GMRES: pc_mode={:?} expects pc_side={:?}, got {:?}",
@@ -252,7 +271,6 @@ impl LinearSolver for PcaGmresSolver {
             )));
         }
 
-        // Workspace
         let mut owned;
         let ws = if let Some(w) = work {
             w
@@ -262,21 +280,11 @@ impl LinearSolver for PcaGmresSolver {
         };
         self.ensure_workspace(ws, n);
 
-        let mut x_s = vec![S::zero(); n];
-        copy_real_to_scalar_in(&x[..], &mut x_s);
-        let mut write_back = |xs: &[S]| {
-            copy_scalar_to_real_in(xs, x);
-        };
-        let mut b_s = vec![S::zero(); n];
-        copy_real_to_scalar_in(b, &mut b_s);
-
-        // r = b - A x
-        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
+        a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
         for i in 0..n {
-            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
         }
 
-        // Initialize v0 and g[0] according to mode
         let beta0: R = match mode {
             PcaPcMode::None => {
                 let beta = nrm2(&ws.tmp1);
@@ -292,8 +300,7 @@ impl LinearSolver for PcaGmresSolver {
                 beta
             }
             PcaPcMode::Left => {
-                // v0 = M^{-1} r / ||M^{-1}r||
-                Self::apply_pc(pc_in, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
+                Self::apply_pc(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
                 let beta = nrm2(&ws.tmp2);
                 let v0 = &mut ws.q_s[0][..];
                 if beta > 0.0 {
@@ -307,7 +314,6 @@ impl LinearSolver for PcaGmresSolver {
                 beta
             }
             PcaPcMode::Right => {
-                // v0 = r / ||r||  (Arnoldi on A M^{-1})
                 let beta = nrm2(&ws.tmp1);
                 let v0 = &mut ws.q_s[0][..];
                 if beta > 0.0 {
@@ -328,17 +334,16 @@ impl LinearSolver for PcaGmresSolver {
         ws.g.fill(S::zero());
         ws.g[0] = S::from_real(beta0);
 
-        let bnorm = nrm2(&b_s).max(1e-32);
+        let bnorm = nrm2(b).max(1e-32);
         let thr = self.conv.atol.max(self.conv.rtol * bnorm);
 
         let mut total_iters = 0usize;
         let mut res = beta0;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let mons = monitors.unwrap_or(&[]);
 
-        if let Some(mons) = monitors {
-            for m in mons {
-                m(0, res);
-            }
+        for m in mons {
+            m(0, res);
         }
         if res <= thr {
             stats.final_residual = res;
@@ -347,45 +352,34 @@ impl LinearSolver for PcaGmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            write_back(&x_s);
             return Ok(stats);
         }
+
+        let _ = comm;
 
         'outer: while total_iters < self.conv.max_iters {
             let max_k = self.restart.min(self.conv.max_iters - total_iters);
             let mut arnoldi_steps = 0usize;
 
             for k in 0..max_k {
-                // w = Arnoldi matvec depending on mode
                 match mode {
                     PcaPcMode::None => {
-                        // w = A v_k
-                        matvec_s(a, &ws.q_s[k], &mut ws.tmp1, &mut ws.bridge);
+                        a.matvec_s(&ws.q_s[k], &mut ws.tmp1, &mut ws.bridge);
                     }
                     PcaPcMode::Left => {
-                        // w = M^{-1} A v_k
-                        matvec_s(a, &ws.q_s[k], &mut ws.tmp1, &mut ws.bridge);
-                        Self::apply_pc(
-                            pc_in,
-                            PcSide::Left,
-                            &ws.tmp1,
-                            &mut ws.tmp2,
-                            &mut ws.bridge,
-                        )?;
+                        a.matvec_s(&ws.q_s[k], &mut ws.tmp1, &mut ws.bridge);
+                        Self::apply_pc(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
                         ws.tmp1.copy_from_slice(&ws.tmp2);
                     }
                     PcaPcMode::Right => {
-                        // z_k = M^{-1} v_k; w = A z_k
                         let zk = &mut ws.z_s[k][..];
-                        Self::apply_pc(pc_in, PcSide::Right, &ws.q_s[k], zk, &mut ws.bridge)?;
-                        matvec_s(a, zk, &mut ws.tmp1, &mut ws.bridge);
+                        Self::apply_pc(pc, PcSide::Right, &ws.q_s[k], zk, &mut ws.bridge)?;
+                        a.matvec_s(zk, &mut ws.tmp1, &mut ws.bridge);
                     }
                 }
 
-                // Orthonormalize against V
                 let hnorm = self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h_s);
 
-                // v_{k+1}
                 let vnext = &mut ws.q_s[k + 1][..];
                 if hnorm > 0.0 {
                     let denom = S::from_real(hnorm);
@@ -406,14 +400,12 @@ impl LinearSolver for PcaGmresSolver {
                     &mut ws.g,
                 );
 
-                res = ws.g[k + 1].abs(); // estimate; equals true ||r|| for Right/None, precond ||M^{-1}r|| for Left
+                res = ws.g[k + 1].abs();
                 total_iters += 1;
                 arnoldi_steps = k + 1;
 
-                if let Some(mons) = monitors {
-                    for m in mons {
-                        m(total_iters, res);
-                    }
+                for m in mons {
+                    m(total_iters, res);
                 }
                 let (reason, sstats) = self.conv.check(res, beta0, total_iters);
                 stats = sstats;
@@ -428,7 +420,6 @@ impl LinearSolver for PcaGmresSolver {
                 }
             }
 
-            // Back-substitute
             let k = arnoldi_steps;
             let mut y = vec![S::zero(); k];
             for i in (0..k).rev() {
@@ -439,12 +430,11 @@ impl LinearSolver for PcaGmresSolver {
                 y[i] = sum / ws.h_s[i][i];
             }
 
-            // Update x with V or Z depending on mode
             match mode {
                 PcaPcMode::Right => {
                     for i in 0..k {
                         let zi = &ws.z_s[i][..];
-                        for (xj, &zij) in x_s.iter_mut().zip(zi) {
+                        for (xj, &zij) in x.iter_mut().zip(zi) {
                             *xj += y[i] * zij;
                         }
                     }
@@ -452,17 +442,16 @@ impl LinearSolver for PcaGmresSolver {
                 PcaPcMode::None | PcaPcMode::Left => {
                     for i in 0..k {
                         let vi = &ws.q_s[i][..];
-                        for (xj, &vij) in x_s.iter_mut().zip(vi) {
+                        for (xj, &vij) in x.iter_mut().zip(vi) {
                             *xj += y[i] * vij;
                         }
                     }
                 }
             }
 
-            // Restart: r = b - A x, rebuild v0 based on mode
-            matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
+            a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
             for i in 0..n {
-                ws.tmp1[i] = b_s[i] - ws.tmp1[i];
+                ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
             let beta0_new: R = match mode {
                 PcaPcMode::None => {
@@ -479,7 +468,7 @@ impl LinearSolver for PcaGmresSolver {
                     beta
                 }
                 PcaPcMode::Left => {
-                    Self::apply_pc(pc_in, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
+                    Self::apply_pc(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
                     let beta = nrm2(&ws.tmp2);
                     let v0 = &mut ws.q_s[0][..];
                     if beta > 0.0 {
@@ -507,7 +496,6 @@ impl LinearSolver for PcaGmresSolver {
                 }
             };
 
-            // Reset Hessenberg and RHS for next cycle
             ws.h_s.iter_mut().for_each(|row| row.fill(S::zero()));
             ws.cs.fill(0.0);
             ws.sn.fill(S::zero());
@@ -528,10 +516,9 @@ impl LinearSolver for PcaGmresSolver {
             }
         }
 
-        // Report *true* residual at the end for consistency
-        matvec_s(a, &x_s, &mut ws.tmp1, &mut ws.bridge);
+        a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
         for i in 0..n {
-            ws.tmp1[i] = b_s[i] - ws.tmp1[i];
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
         }
         let true_res: R = nrm2(&ws.tmp1);
         let (_r, mut s) = self.conv.check(true_res, bnorm, total_iters);
@@ -548,18 +535,57 @@ impl LinearSolver for PcaGmresSolver {
                 ConvergedReason::DivergedMaxIts
             };
         }
-        write_back(&x_s);
         Ok(s)
     }
-}
 
-impl PcaGmresSolver {
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_f64<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError>
+    where
+        A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
+    {
+        let op = as_s_op(a);
+        let pc_wrapper = pc.map(as_s_pc);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|w| w as &dyn KPreconditioner<Scalar = S>);
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
+            let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            self.solve_k(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+            let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+            let result = self.solve_k(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            if result.is_ok() {
+                copy_scalar_to_real_in(&x_s, x);
+            }
+            result
+        }
+    }
+
     pub fn set_restart(&mut self, restart: usize) {
         self.restart = restart.max(1);
     }
+
     pub fn set_pc_mode(&mut self, mode: PcaPcMode) {
         self.pc_mode = mode;
     }
+
     pub fn set_reorthog(&mut self, flag: bool) {
         self.modified_gs = flag;
     }

@@ -1,16 +1,10 @@
 use std::sync::Arc;
 
-#[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
-use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
-#[cfg(feature = "complex")]
-use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 use once_cell::sync::OnceCell;
@@ -1148,46 +1142,6 @@ impl Preconditioner for IluCsr {
             is_spd: false,
             side_restriction: Some(PcSide::Left),
         }
-    }
-}
-
-#[cfg(feature = "complex")]
-impl KPreconditioner for IluCsr {
-    type Scalar = S;
-
-    fn dims(&self) -> (usize, usize) {
-        Preconditioner::dims(self)
-    }
-
-    fn apply_s(
-        &self,
-        side: PcSide,
-        x: &[S],
-        y: &mut [S],
-        scratch: &mut BridgeScratch,
-    ) -> Result<(), KError> {
-        if x.len() != y.len() {
-            return Err(KError::InvalidInput(format!(
-                "IluCsr::apply_s mismatched input/output lengths: x={}, y={}",
-                x.len(),
-                y.len()
-            )));
-        }
-
-        let (nrows, ncols) = Preconditioner::dims(self);
-        if nrows != 0 && (x.len() != nrows || y.len() != ncols) {
-            return Err(KError::InvalidInput(format!(
-                "IluCsr::apply_s dimension mismatch: dims=({nrows}, {ncols}), len={}",
-                x.len()
-            )));
-        }
-
-        let xr = scratch.copy_scalar_into_real(x);
-        let yr = scratch.yr(x.len());
-        self.apply(side, xr, yr)?;
-        scratch.copy_real_into_scalar(yr, y);
-
-        Ok(())
     }
 }
 
