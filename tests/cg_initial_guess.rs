@@ -1,5 +1,5 @@
 use kryst::context::ksp_context::Workspace;
-use kryst::matrix::op::LinOp;
+use kryst::matrix::op::{LinOp, LinOpF64};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::{CgSolver, LinearSolver};
@@ -29,6 +29,18 @@ impl LinOp for CountingOp {
     }
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl LinOpF64 for CountingOp {
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        <Self as LinOp>::matvec(self, x, y)
     }
 }
 

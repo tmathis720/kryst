@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
@@ -5,6 +6,9 @@ use mpi::raw::AsRaw;
 use std::marker::PhantomData;
 #[cfg(any(feature = "mpi", feature = "rayon"))]
 use std::sync::Arc;
+
+mod reduce;
+pub use reduce::{allreduce_sum_scalar_slice_in_place, global_dot_conj, global_dot_conj_repro};
 
 // Opaque request that can represent multiple backends. Use a `PhantomData`
 // to tie the lifetime when MPI support is disabled.
@@ -55,6 +59,20 @@ pub trait Comm: Send + Sync + 'static {
     fn allreduce_sum_slice(&self, v: &mut [f64]) {
         for x in v.iter_mut() {
             *x = self.allreduce_sum(*x);
+        }
+    }
+
+    /// Reduce a single scalar `S` (sum) across ranks.
+    #[inline]
+    fn allreduce_sum_scalar(&self, z: S) -> S {
+        #[cfg(feature = "complex")]
+        {
+            let (re, im) = self.allreduce_sum2(z.real(), z.imag());
+            S::from_parts(re, im)
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            S::from_real(self.allreduce_sum(z.real()))
         }
     }
 
@@ -227,6 +245,24 @@ impl UniverseComm {
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => 0,
         }
+    }
+
+    /// Sum a single scalar across all ranks (fast path).
+    #[inline]
+    pub fn allreduce_sum_scalar(&self, z: S) -> S {
+        reduce::allreduce_sum_scalar_impl(self, z)
+    }
+
+    /// Deterministic scalar sum across all ranks.
+    #[inline]
+    pub fn allreduce_sum_scalar_repro(&self, z: S) -> S {
+        reduce::allreduce_sum_scalar_repro_impl(self, z)
+    }
+
+    /// Sum a slice of scalars in place across all ranks (fast path).
+    #[inline]
+    pub fn allreduce_sum_scalar_slice(&self, data: &mut [S]) {
+        reduce::allreduce_sum_scalar_slice_in_place(self, data)
     }
 }
 

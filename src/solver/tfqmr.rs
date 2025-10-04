@@ -545,7 +545,7 @@ mod tests {
         };
         let x_true = [1.0, 2.0, 3.0, 4.0, 5.0];
         let mut b = [0.0; 5];
-        a.matvec(&x_true, &mut b);
+        crate::matrix::op::LinOp::matvec(&a, &x_true, &mut b);
         let mut x = [0.0; 5];
         let mut w = Workspace::new(5);
         let mut solver = TfqmrSolver::new(1e-12, 500);

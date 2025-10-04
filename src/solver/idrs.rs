@@ -204,6 +204,9 @@ struct IdrsWorkspace {
     d_r: Vec<Vec<S>>,
     d_r_raw: Vec<Vec<S>>,
     d_x: Vec<Vec<S>>,
+    g_hist: Vec<Vec<S>>,
+    g_hist_raw: Vec<Vec<S>>,
+    g_hist_x: Vec<Vec<S>>,
     r: Vec<S>,
     r_true: Vec<S>,
     v: Vec<S>,
@@ -224,6 +227,9 @@ impl IdrsWorkspace {
             self.d_r.resize(s + 1, vec![S::zero(); n]);
             self.d_r_raw.resize(s + 1, vec![S::zero(); n]);
             self.d_x.resize(s + 1, vec![S::zero(); n]);
+            self.g_hist.resize(s, vec![S::zero(); n]);
+            self.g_hist_raw.resize(s, vec![S::zero(); n]);
+            self.g_hist_x.resize(s, vec![S::zero(); n]);
             self.r.resize(n, S::zero());
             self.r_true.resize(n, S::zero());
             self.v.resize(n, S::zero());
@@ -241,6 +247,15 @@ impl IdrsWorkspace {
             if self.d_x.len() != need {
                 self.d_x.resize_with(need, || vec![S::zero(); n]);
             }
+            if self.g_hist.len() != s {
+                self.g_hist.resize_with(s, || vec![S::zero(); n]);
+            }
+            if self.g_hist_raw.len() != s {
+                self.g_hist_raw.resize_with(s, || vec![S::zero(); n]);
+            }
+            if self.g_hist_x.len() != s {
+                self.g_hist_x.resize_with(s, || vec![S::zero(); n]);
+            }
             for buf in &mut self.d_r {
                 if buf.len() != n {
                     buf.resize(n, S::zero());
@@ -252,6 +267,21 @@ impl IdrsWorkspace {
                 }
             }
             for buf in &mut self.d_x {
+                if buf.len() != n {
+                    buf.resize(n, S::zero());
+                }
+            }
+            for buf in &mut self.g_hist {
+                if buf.len() != n {
+                    buf.resize(n, S::zero());
+                }
+            }
+            for buf in &mut self.g_hist_raw {
+                if buf.len() != n {
+                    buf.resize(n, S::zero());
+                }
+            }
+            for buf in &mut self.g_hist_x {
                 if buf.len() != n {
                     buf.resize(n, S::zero());
                 }
@@ -278,6 +308,18 @@ impl IdrsWorkspace {
     fn p_col_mut(&mut self, j: usize) -> &mut [S] {
         let n = self.n;
         &mut self.p[j * n..(j + 1) * n]
+    }
+
+    fn push_history_from_buffers(&mut self) {
+        if self.s == 0 {
+            return;
+        }
+        self.g_hist.rotate_right(1);
+        self.g_hist_raw.rotate_right(1);
+        self.g_hist_x.rotate_right(1);
+        self.g_hist[0].clone_from_slice(&self.d_r[0]);
+        self.g_hist_raw[0].clone_from_slice(&self.d_r_raw[0]);
+        self.g_hist_x[0].clone_from_slice(&self.d_x[0]);
     }
 
     fn normalize_column(
@@ -436,7 +478,7 @@ impl IdrsSolver {
         let n = self.ws.n;
         let s = self.ws.s;
         for i in 0..s {
-            let vec = &self.ws.d_r[i + 1];
+            let vec = &self.ws.g_hist[i];
             for j in 0..s {
                 let col = self.ws.p_col(j);
                 let dot = dot_reduce(comm, col, &vec[..n]);
@@ -699,6 +741,8 @@ impl IdrsSolver {
                 self.ws.r_true[i] += newest_r_raw[i];
             }
 
+            self.ws.push_history_from_buffers();
+
             res_norm = norm2(&self.ws.r_true[..n], comm);
             stats.dots += 1;
             self.monitor(monitors, step + 1, res_norm);
@@ -751,7 +795,7 @@ impl IdrsSolver {
                     return Err(KError::BreakdownOrIndefinite);
                 }
 
-                let src_r = &self.ws.d_r[1..=self.opts.s];
+                let src_r = &self.ws.g_hist[..self.opts.s];
                 Self::combine_delta(&mut self.ws.v[..n], &self.ws.c, src_r, -S::one());
                 for i in 0..n {
                     self.ws.v[i] += self.ws.r[i];
@@ -776,21 +820,21 @@ impl IdrsSolver {
                     self.ws.d_r.rotate_right(1);
                     self.ws.d_r_raw.rotate_right(1);
                     self.ws.d_x.rotate_right(1);
-                    let (newest_x, rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
-                    let (newest_r, rest_r) = self.ws.d_r.split_first_mut().expect("nonempty");
-                    let (newest_r_raw, rest_rr) =
+                    let (newest_x, _rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
+                    let (newest_r, _rest_r) = self.ws.d_r.split_first_mut().expect("nonempty");
+                    let (newest_r_raw, _rest_rr) =
                         self.ws.d_r_raw.split_first_mut().expect("nonempty");
-                    let src_x = &rest_x[..self.opts.s];
+                    let src_x = &self.ws.g_hist_x[..self.opts.s];
                     Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
                     for i in 0..n {
                         newest_x[i] += omega_block * self.ws.v[i];
                     }
-                    let src_r = &rest_r[..self.opts.s];
+                    let src_r = &self.ws.g_hist[..self.opts.s];
                     Self::combine_delta(newest_r, &self.ws.c, src_r, -S::one());
                     for i in 0..n {
                         newest_r[i] -= omega_block * self.ws.t[i];
                     }
-                    let src_rr = &rest_rr[..self.opts.s];
+                    let src_rr = &self.ws.g_hist_raw[..self.opts.s];
                     Self::combine_delta(newest_r_raw, &self.ws.c, src_rr, -S::one());
                     for i in 0..n {
                         newest_r_raw[i] -= omega_block * self.ws.t_raw[i];
@@ -799,11 +843,11 @@ impl IdrsSolver {
                     self.ws.d_x.rotate_right(1);
                     self.ws.d_r.rotate_right(1);
                     self.ws.d_r_raw.rotate_right(1);
-                    let (newest_x, rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
+                    let (newest_x, _rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
                     let (newest_r, _rest_r) = self.ws.d_r.split_first_mut().expect("nonempty");
                     let (newest_r_raw, _rest_rr) =
                         self.ws.d_r_raw.split_first_mut().expect("nonempty");
-                    let src_x = &rest_x[..self.opts.s];
+                    let src_x = &self.ws.g_hist_x[..self.opts.s];
                     Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
                     for i in 0..n {
                         newest_x[i] += omega_block * self.ws.v[i];
@@ -831,6 +875,8 @@ impl IdrsSolver {
                     self.ws.r[i] += newest_r[i];
                     self.ws.r_true[i] += newest_r_raw[i];
                 }
+
+                self.ws.push_history_from_buffers();
 
                 iteration += 1;
 

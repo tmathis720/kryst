@@ -45,6 +45,12 @@ pub trait KrystScalar:
     /// Extract the real part (identity for real, `.re` for complex).
     fn real(self) -> Self::Real;
 
+    /// Extract the imaginary part (zero for real scalars).
+    fn imag(self) -> Self::Real;
+
+    /// Construct a scalar from its real and imaginary components.
+    fn from_parts(re: Self::Real, im: Self::Real) -> Self;
+
     // Basic ops we need everywhere
     fn abs(self) -> Self::Real; // |z| for complex, |x| for real
     fn conj(self) -> Self; // identity for real
@@ -78,6 +84,16 @@ impl KrystScalar for f64 {
     #[inline]
     fn real(self) -> Self::Real {
         self
+    }
+
+    #[inline]
+    fn imag(self) -> Self::Real {
+        0.0
+    }
+
+    #[inline]
+    fn from_parts(re: Self::Real, _im: Self::Real) -> Self {
+        re
     }
 
     #[inline]
@@ -128,6 +144,16 @@ impl KrystScalar for Complex64 {
     #[inline]
     fn real(self) -> Self::Real {
         self.re
+    }
+
+    #[inline]
+    fn imag(self) -> Self::Real {
+        self.im
+    }
+
+    #[inline]
+    fn from_parts(re: Self::Real, im: Self::Real) -> Self {
+        Complex64::new(re, im)
     }
 
     #[inline]
