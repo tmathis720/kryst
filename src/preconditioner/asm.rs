@@ -24,6 +24,13 @@ use crate::solver::direct_lu::LuSolver;
 use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
 use std::sync::Arc;
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::preconditioner::pc_bridge::{apply_pc_mut_s, apply_pc_s};
+
 /// Additive Schwarz (overlapping block Jacobi) preconditioner.
 /// Each block is solved independently (possibly in parallel), and the results are summed.
 pub struct AdditiveSchwarz<M, V, T> {
@@ -1408,5 +1415,35 @@ impl DynPreconditioner for Asm {
 
     fn capabilities(&self) -> PcCaps {
         PcCaps::default()
+    }
+}
+
+#[cfg(feature = "complex")]
+impl crate::ops::kpc::KPreconditioner for Asm {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        self.dimension().map(|n| (n, n)).unwrap_or((0, 0))
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_mut_s(self, side, x, y, scratch)
     }
 }

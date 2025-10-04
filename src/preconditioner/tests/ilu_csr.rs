@@ -249,3 +249,47 @@ fn ilu0_with_rcm_setup() {
         .unwrap();
     assert!(y.iter().all(|v| v.is_finite()));
 }
+
+#[cfg(feature = "complex")]
+#[test]
+fn ilu_csr_apply_s_matches_real_path() {
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::PcSide;
+
+    let n = 5;
+    let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let cfg = IluCsrConfig {
+        kind: IluKind::Ilu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: 1e-12,
+        diag_perturb_factor: 1e-10,
+        level_sched: false,
+        numeric_update_fixed: true,
+        logging: 0,
+        reordering: ReorderingOptions::default(),
+    };
+    let mut pc = IluCsr::new_with_config(cfg);
+    pc.setup(&a).expect("ilu setup");
+
+    let rhs_real: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+    let mut out_real = vec![0.0; n];
+    pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+        .expect("ilu apply real");
+
+    let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+    let mut out_s = vec![S::zero(); n];
+    let mut scratch = BridgeScratch::default();
+    pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+        .expect("ilu apply_s");
+
+    for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+        assert!(
+            (ys.real() - yr).abs() < 1e-12,
+            "expected real match, got {} vs {}",
+            ys,
+            yr
+        );
+    }
+}

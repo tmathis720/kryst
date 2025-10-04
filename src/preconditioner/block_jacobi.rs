@@ -12,11 +12,21 @@
 // 2. Call `setup` with the system matrix to factorize each block.
 // 3. Use `apply` to apply the preconditioner to a vector.
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::traits::{MatrixGet, RowPattern};
+#[cfg(feature = "complex")]
+use crate::error::KError;
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::op::CsrOp;
 #[cfg(not(feature = "dense-direct"))]
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::PcSide;
 #[cfg(not(feature = "dense-direct"))]
 use crate::preconditioner::Preconditioner; // bring trait into scope for IluCsr::setup/apply
@@ -235,16 +245,54 @@ impl BlockJacobi<f64> {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for BlockJacobi<f64> {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        self.dims()
+    }
+
+    fn apply_s(
+        &self,
+        _side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!(
+                "BlockJacobi::apply_s dimension mismatch: x.len()={}, y.len()={}",
+                x.len(),
+                y.len()
+            )));
+        }
+
+        let n = x.len();
+        let (xr, yr) = scratch.real_pair(n);
+        copy_scalar_to_real_in(x, xr);
+        self.apply(xr, yr);
+        copy_real_to_scalar_in(yr, y);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::bridge::BridgeScratch;
-    use crate::algebra::prelude::*;
     use crate::core::traits::{MatrixGet, RowPattern};
     use crate::error::KError;
-    use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::PcSide;
+    #[cfg(not(feature = "dense-direct"))]
     use std::marker::PhantomData;
+
+    #[cfg(feature = "complex")]
+    use crate::algebra::bridge::BridgeScratch;
+    #[cfg(feature = "complex")]
+    use crate::algebra::prelude::*;
+    #[cfg(feature = "complex")]
+    use crate::ops::kpc::KPreconditioner;
 
     struct TestDiagMatrix {
         diag: Vec<f64>,
@@ -285,8 +333,9 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "complex")]
     #[test]
-    fn apply_bridge_matches_real() {
+    fn apply_s_matches_real_path() {
         let mut pc = BlockJacobi {
             blocks: vec![vec![0], vec![1]],
             #[cfg(feature = "dense-direct")]
@@ -307,10 +356,8 @@ mod tests {
         let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
         let mut out_s = vec![S::zero(); rhs_real.len()];
         let mut scratch = BridgeScratch::default();
-        let wrapper = crate::ops::wrap::as_s_pc(&pc);
-        wrapper
-            .apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
-            .expect("block jacobi bridge apply");
+        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("block jacobi apply_s");
 
         for (ys, yr) in out_s.iter().zip(out_real.iter()) {
             assert!((ys.real() - yr).abs() < 1e-12);

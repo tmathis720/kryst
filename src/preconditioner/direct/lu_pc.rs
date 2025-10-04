@@ -1,5 +1,9 @@
+use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 
@@ -41,5 +45,25 @@ impl Preconditioner for LuPc {
 
     fn required_format(&self) -> crate::matrix::format::FormatHint {
         crate::matrix::format::FormatHint::Dense
+    }
+}
+
+impl KPreconditioner for LuPc {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as Preconditioner>::dims(self)
+    }
+
+    #[inline]
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_s(self, side, x, y, scratch)
     }
 }

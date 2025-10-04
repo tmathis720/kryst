@@ -7,6 +7,17 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
+
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use once_cell::sync::OnceCell;
 
 mod csr_builder;
@@ -1142,6 +1153,36 @@ impl Preconditioner for IluCsr {
             is_spd: false,
             side_restriction: Some(PcSide::Left),
         }
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for IluCsr {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        Preconditioner::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
     }
 }
 

@@ -51,6 +51,7 @@ pub trait KPreconditioner: Send + Sync {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl<T> KPreconditioner for T
 where
     T: PreconditionerF64 + Send + Sync,

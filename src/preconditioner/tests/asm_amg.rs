@@ -103,3 +103,84 @@ fn asm_numeric_update_refreshes_values() {
     asm.apply(crate::preconditioner::PcSide::Left, &rhs, &mut out)
         .unwrap();
 }
+
+#[cfg(feature = "complex")]
+#[test]
+fn asm_apply_s_matches_real_path() {
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::PcSide;
+
+    let a = Arc::new(poisson_1d(6));
+    let op = CsrOp::new(a.clone());
+    let mut cfg = AsmConfig::default();
+    cfg.overlap = 1;
+    cfg.combine = AsmCombine::Additive;
+    cfg.local_solver = AsmLocalSolver::ILU;
+    cfg.deterministic = true;
+    let mut asm = Asm::with_config(cfg);
+    asm.setup(&op).expect("asm setup");
+
+    let rhs_real: Vec<f64> = (0..6).map(|i| (i + 1) as f64).collect();
+    let mut out_real = vec![0.0; rhs_real.len()];
+    asm.apply(PcSide::Left, &rhs_real, &mut out_real)
+        .expect("asm apply real");
+
+    let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+    let mut out_s = vec![S::zero(); rhs_real.len()];
+    let mut scratch = BridgeScratch::default();
+    asm.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+        .expect("asm apply_s");
+
+    for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+        assert!(
+            (ys.real() - yr).abs() < 1e-10,
+            "expected real match, got {} vs {}",
+            ys,
+            yr
+        );
+    }
+}
+
+#[cfg(feature = "complex")]
+#[test]
+fn asm_amg_apply_s_matches_real_path() {
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::PcSide;
+
+    let a = Arc::new(poisson_1d(8));
+    let op = CsrOp::new(a.clone());
+    let mut asm_cfg = AsmConfig::default();
+    asm_cfg.overlap = 1;
+    asm_cfg.combine = AsmCombine::Restricted;
+    asm_cfg.local_solver = AsmLocalSolver::ILU;
+    asm_cfg.deterministic = true;
+    let mut two_cfg = TwoLevelConfig::default();
+    two_cfg.mode = TwoLevelMode::AdditiveCoarse;
+    two_cfg.coarse_every = 1;
+    let mut pc = AsmAmg::with_configs(asm_cfg, two_cfg);
+    pc.setup(&op).expect("asm_amg setup");
+
+    let rhs_real: Vec<f64> = (0..8).map(|i| (i + 1) as f64).collect();
+    let mut out_real = vec![0.0; rhs_real.len()];
+    pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+        .expect("asm_amg apply real");
+
+    let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+    let mut out_s = vec![S::zero(); rhs_real.len()];
+    let mut scratch = BridgeScratch::default();
+    pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+        .expect("asm_amg apply_s");
+
+    for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+        assert!(
+            (ys.real() - yr).abs() < 1e-10,
+            "expected real match, got {} vs {}",
+            ys,
+            yr
+        );
+    }
+}

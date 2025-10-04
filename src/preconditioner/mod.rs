@@ -355,6 +355,46 @@ impl Preconditioner for LegacyOpPreconditioner {
     }
 }
 
+#[cfg(all(feature = "legacy-pc-bridge", feature = "complex"))]
+impl crate::ops::kpc::KPreconditioner for LegacyOpPreconditioner {
+    type Scalar = crate::S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        let guard = self.scratch.lock().unwrap();
+        let n = guard.x.len();
+        if n == 0 { (0, 0) } else { (n, n) }
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[crate::S],
+        y: &mut [crate::S],
+        scratch: &mut crate::algebra::bridge::BridgeScratch,
+    ) -> Result<(), KError> {
+        crate::preconditioner::bridge::apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[crate::S],
+        y: &mut [crate::S],
+        scratch: &mut crate::algebra::bridge::BridgeScratch,
+    ) -> Result<(), KError> {
+        crate::preconditioner::bridge::apply_pc_mut_s(self, side, x, y, scratch)
+    }
+
+    fn on_restart_s(
+        &mut self,
+        outer_iter: usize,
+        residual_norm: <Self::Scalar as crate::algebra::prelude::KrystScalar>::Real,
+    ) -> Result<(), KError> {
+        self.on_restart(outer_iter, residual_norm)
+    }
+}
+
 #[cfg(not(feature = "legacy-pc-bridge"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "legacy-pc-bridge")))]
 pub struct LegacyOpPreconditioner {
