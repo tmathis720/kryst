@@ -5,10 +5,20 @@
 //! factored sparse approximate inverse for SPD matrices (FSAI), targeting
 //! linear-ish build time in nnz(A) with small per-column dense solves.
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::{PcSide, Preconditioner};
 
 use faer::Mat;
@@ -417,6 +427,36 @@ impl Preconditioner for FsaiCsr {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for FsaiCsr {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        (self.g.nrows(), self.g.ncols())
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+}
+
 // -------------------------- SPAI: build/apply ----------------------------
 
 impl SpaiCsr {
@@ -652,6 +692,36 @@ impl Preconditioner for SpaiCsr {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for SpaiCsr {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        (self.m.nrows(), self.m.ncols())
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+}
+
 // ---------------------------- Assembly helper ----------------------------
 
 fn assemble_csr(
@@ -722,6 +792,69 @@ impl SpaiCsr {
             params,
             last_sid: None,
             last_vid: None,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "complex"))]
+mod tests {
+    use super::*;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::ops::kpc::KPreconditioner;
+
+    fn poisson_1d_matrix() -> CsrMatrix<f64> {
+        let row_ptr = vec![0, 2, 5, 7];
+        let col_idx = vec![0, 1, 0, 1, 2, 1, 2];
+        let values = vec![2.0, -1.0, -1.0, 2.0, -1.0, -1.0, 2.0];
+        CsrMatrix::from_csr(3, 3, row_ptr, col_idx, values)
+    }
+
+    #[test]
+    fn fsai_apply_s_matches_real_path() {
+        let a = poisson_1d_matrix();
+        let pc = ApproxInvBuilder::new(ApproxInvKind::FSAI)
+            .levels(1)
+            .build_fsai(&a)
+            .expect("fsai build");
+
+        let rhs_real = vec![1.0, 2.0, 3.0];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("fsai apply real");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("fsai apply_s");
+
+        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn spai_apply_s_matches_real_path() {
+        let a = poisson_1d_matrix();
+        let pc = ApproxInvBuilder::new(ApproxInvKind::SPAI)
+            .levels(1)
+            .build_spai(&a)
+            .expect("spai build");
+
+        let rhs_real = vec![1.5, -0.5, 0.25];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("spai apply real");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("spai apply_s");
+
+        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-10);
         }
     }
 }

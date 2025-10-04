@@ -70,9 +70,17 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*};
 use crate::utils::metrics::{Counters, SolveTimer};
@@ -1489,7 +1497,13 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
     }
 
     /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
-    fn apply(&self, _side: PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
+        self.apply_slice(side, x.as_slice(), y.as_mut_slice())
+    }
+}
+
+impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
+    fn apply_slice(&self, _side: PcSide, x: &[T], y: &mut [T]) -> Result<(), KError> {
         let n = self.l.nrows();
         if x.len() != n || y.len() != n {
             return Err(KError::InvalidInput(format!(
@@ -1546,6 +1560,40 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
 
 /// Legacy ILU(0) type alias for backward compatibility
 pub type Ilu0<T> = Ilu<T>;
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for Ilu<f64> {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        (self.l.nrows(), self.l.ncols())
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        let n = self.l.nrows();
+        if x.len() != n || y.len() != n {
+            return Err(KError::InvalidInput(format!(
+                "Ilu::apply_s dimension mismatch: expected {}, got x={} y={}",
+                n,
+                x.len(),
+                y.len()
+            )));
+        }
+
+        let (xr, yr) = scratch.real_pair(n);
+        copy_scalar_to_real_in(x, xr);
+        self.apply_slice(side, xr, yr)?;
+        copy_real_to_scalar_in(yr, y);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1717,6 +1765,45 @@ mod tests {
         use crate::preconditioner::PcSide;
         let apply_result = ilu.apply(PcSide::Left, &x, &mut y);
         assert!(apply_result.is_ok());
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn apply_s_matches_real_path() {
+        use crate::algebra::bridge::BridgeScratch;
+        use crate::algebra::prelude::*;
+        use crate::ops::kpc::KPreconditioner;
+
+        let matrix = faer::Mat::from_fn(3, 3, |i, j| if i == j { 4.0 } else { -1.0 });
+
+        let mut ilu = Ilu::new();
+        use crate::preconditioner::legacy::Preconditioner;
+        ilu.setup(&matrix).expect("ilu setup");
+
+        let rhs_real = vec![1.0f64, 2.0, 3.0];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        Preconditioner::<faer::Mat<f64>, Vec<f64>>::apply(
+            &ilu,
+            crate::preconditioner::PcSide::Left,
+            &rhs_real,
+            &mut out_real,
+        )
+        .expect("ilu real apply");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        ilu.apply_s(
+            crate::preconditioner::PcSide::Left,
+            &rhs_s,
+            &mut out_s,
+            &mut scratch,
+        )
+        .expect("ilu apply_s");
+
+        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-10);
+        }
     }
 
     #[cfg(feature = "rayon")]

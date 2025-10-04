@@ -1,11 +1,21 @@
 use std::sync::Mutex;
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::spmv::csr_spmm_dense;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::amg::AMG;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::{FormatHint, PcCaps, PcSide, Preconditioner};
 use faer::{Mat, MatRef};
 
@@ -385,6 +395,11 @@ impl<PB> Preconditioner for DeflationPC<PB>
 where
     PB: Preconditioner,
 {
+    fn dims(&self) -> (usize, usize) {
+        let n = self.fine_dim();
+        (n, n)
+    }
+
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.base.setup(op)
     }
@@ -504,4 +519,93 @@ pub fn with_amg_deflation<PB: Preconditioner>(
         amg.extract_coarse_space(opts)?
     };
     DeflationPC::new(base, a, coarse, opts)
+}
+
+#[cfg(feature = "complex")]
+impl<PB> KPreconditioner for DeflationPC<PB>
+where
+    PB: Preconditioner,
+{
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as Preconditioner>::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+}
+
+#[cfg(all(test, feature = "complex"))]
+mod tests {
+    use super::*;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::matrix::op::CsrOp;
+    use crate::matrix::sparse::CsrMatrix;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::{DeflationOptions, Jacobi, PcSide, ZSource};
+    use faer::Mat;
+    use std::sync::Arc;
+
+    #[test]
+    fn apply_s_matches_real_path() {
+        let n = 4;
+        let row_ptr = vec![0, 1, 2, 3, 4];
+        let col_idx = vec![0, 1, 2, 3];
+        let values = vec![4.0, 5.0, 6.0, 7.0];
+        let a = CsrMatrix::from_csr(n, n, row_ptr, col_idx, values);
+
+        let mut z = Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            z[(i, 0)] = 1.0;
+        }
+        let coarse = AmgCoarseSpace {
+            z,
+            local_range: None,
+        };
+        let opts = DeflationOptions {
+            z_source: ZSource::External,
+            cond_cap: None,
+            augment_initial_guess: false,
+        };
+
+        let base = Jacobi::new();
+        let mut pc = DeflationPC::new(base, &a, coarse, &opts).expect("deflation construction");
+        let op = CsrOp::new(Arc::new(a.clone()));
+        pc.setup(&op).expect("deflation setup");
+
+        let rhs_real = vec![1.0, -2.0, 3.5, -4.5];
+        let mut out_real = vec![0.0; n];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("apply real");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); n];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("apply_s");
+
+        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-12);
+        }
+    }
 }

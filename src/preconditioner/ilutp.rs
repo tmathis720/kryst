@@ -7,7 +7,15 @@
 //! The algorithm follows the approach described in Saad's "Iterative Methods for
 //! Sparse Linear Systems" with modifications for numerical stability.
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::error::KError;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::legacy::Preconditioner;
 use faer::Mat;
 use std::cmp::Ordering;
@@ -229,6 +237,18 @@ impl Ilutp {
 
         Ok(())
     }
+
+    fn apply_slice(&self, input: &[f64], output: &mut [f64]) -> Result<(), KError> {
+        let n = input.len();
+        if output.len() != n || self.l_factor.nrows() != n {
+            return Err(KError::SolveError("Vector size mismatch".to_string()));
+        }
+
+        let mut temp = vec![0.0; n];
+        self.forward_solve(input, &mut temp)?;
+        self.backward_solve(&temp, output)?;
+        Ok(())
+    }
 }
 
 impl Default for Ilutp {
@@ -250,19 +270,40 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
         input: &Vec<f64>,
         output: &mut Vec<f64>,
     ) -> Result<(), KError> {
-        let n = input.len();
-        if output.len() != n || self.l_factor.nrows() != n {
-            return Err(KError::SolveError("Vector size mismatch".to_string()));
+        self.apply_slice(input, output)
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for Ilutp {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        let n = self.l_factor.nrows();
+        (n, n)
+    }
+
+    fn apply_s(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!(
+                "Ilutp::apply_s dimension mismatch: x.len()={}, y.len()={}",
+                x.len(),
+                y.len()
+            )));
         }
 
-        let mut temp = vec![0.0; n];
-
-        // Forward solve: Ly = Pb
-        self.forward_solve(input, &mut temp)?;
-
-        // Backward solve: Ux = y
-        self.backward_solve(&temp, output)?;
-
+        let n = x.len();
+        let (xr, yr) = scratch.real_pair(n);
+        copy_scalar_to_real_in(x, xr);
+        self.apply_slice(xr, yr)?;
+        copy_real_to_scalar_in(yr, y);
         Ok(())
     }
 }
@@ -311,5 +352,48 @@ mod tests {
         assert_eq!(ilutp.max_fill, 15);
         assert_eq!(ilutp.drop_tol, 1e-8);
         assert_eq!(ilutp.perm_tol, 0.1);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn apply_s_matches_real_path() {
+        use crate::algebra::bridge::BridgeScratch;
+        use crate::algebra::prelude::*;
+        use crate::ops::kpc::KPreconditioner;
+
+        let mut ilutp = Ilutp::with_params(4, 1e-6, 0.05);
+
+        let mut matrix = Mat::zeros(2, 2);
+        matrix[(0, 0)] = 5.0;
+        matrix[(0, 1)] = -1.0;
+        matrix[(1, 0)] = -2.0;
+        matrix[(1, 1)] = 6.0;
+        ilutp.setup(&matrix).unwrap();
+
+        let rhs_real = vec![3.0f64, -1.0];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        ilutp
+            .apply(
+                crate::preconditioner::PcSide::Left,
+                &rhs_real,
+                &mut out_real,
+            )
+            .expect("ilutp real apply");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        ilutp
+            .apply_s(
+                crate::preconditioner::PcSide::Left,
+                &rhs_s,
+                &mut out_s,
+                &mut scratch,
+            )
+            .expect("ilutp apply_s");
+
+        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-10);
+        }
     }
 }

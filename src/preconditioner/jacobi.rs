@@ -1,6 +1,11 @@
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
 use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
@@ -90,12 +95,74 @@ impl Preconditioner for Jacobi {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for Jacobi {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_s(
+        &self,
+        _side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput(format!(
+                "Jacobi::apply_s dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+
+        for i in 0..self.n {
+            y[i] = x[i] * S::from_real(self.diag_inv[i]);
+        }
+        self.applies.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacobi {
     fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
         self.recompute(a)
     }
     fn apply(&self, side: PcSide, r: &Vec<f64>, z: &mut Vec<f64>) -> Result<(), KError> {
         crate::preconditioner::Preconditioner::apply(self, side, r.as_slice(), z.as_mut_slice())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::ops::kpc::KPreconditioner;
+
+    #[test]
+    fn apply_s_matches_real_path() {
+        let mut pc = Jacobi::new();
+        let dense = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { [4.0, 9.0][i] } else { 0.0 });
+        pc.setup(&dense).expect("jacobi setup");
+
+        let rhs_real = [8.0, 18.0];
+        let mut out_real = [0.0; 2];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("jacobi apply real");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("jacobi apply_s");
+
+        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-12);
+        }
     }
 }
 

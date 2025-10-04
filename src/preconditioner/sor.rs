@@ -18,12 +18,22 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.2.
 //! - https://en.wikipedia.org/wiki/Successive_over-relaxation
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use bitflags::bitflags;
 use num_traits::Float;
@@ -396,5 +406,77 @@ impl ObjPreconditioner for SorPc {
 
     fn required_format(&self) -> crate::matrix::format::FormatHint {
         crate::matrix::format::FormatHint::Csr
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for SorPc {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+
+    fn on_restart_s(&mut self, outer_iter: usize, residual_norm: R) -> Result<(), KError> {
+        ObjPreconditioner::on_restart(self, outer_iter, residual_norm)
+    }
+}
+
+#[cfg(all(test, feature = "complex"))]
+mod tests {
+    use super::*;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::matrix::op::CsrOp;
+    use crate::matrix::sparse::CsrMatrix;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::PcSide;
+    use std::sync::Arc;
+
+    #[test]
+    fn apply_s_matches_real_path() {
+        let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
+        let row_ptr = vec![0, 1, 2];
+        let col_idx = vec![0, 1];
+        let values = vec![4.0, 9.0];
+        let csr = Arc::new(CsrMatrix::from_csr(2, 2, row_ptr, col_idx, values));
+        let op = CsrOp::new(csr);
+        pc.setup(&op).expect("sor setup");
+
+        let rhs_real = [8.0, 18.0];
+        let mut out_real = [0.0; 2];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("sor apply real");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("sor apply_s");
+
+        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-12);
+        }
     }
 }

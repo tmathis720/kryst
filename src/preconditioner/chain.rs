@@ -11,9 +11,19 @@
 //! let chain = PcFactory::construct_deferred_pc_chain(specs, &p).unwrap();
 //! ```
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::LinOp;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::cell::RefCell;
 
@@ -126,6 +136,40 @@ impl Preconditioner for PcChain {
             st.update_symbolic(view.as_ref())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for PcChain {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        Preconditioner::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+
+    fn on_restart_s(&mut self, outer_iter: usize, residual_norm: R) -> Result<(), KError> {
+        Preconditioner::on_restart(self, outer_iter, residual_norm)
     }
 }
 

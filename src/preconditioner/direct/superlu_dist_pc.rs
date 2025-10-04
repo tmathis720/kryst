@@ -3,6 +3,15 @@ use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::apply_pc_s;
+
 #[cfg(feature = "superlu_dist")]
 use crate::matrix::sparse::CsrMatrix;
 
@@ -81,5 +90,26 @@ impl Preconditioner for SuperLuDistPc {
 
     fn required_format(&self) -> crate::matrix::format::FormatHint {
         crate::matrix::format::FormatHint::Csr
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for SuperLuDistPc {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as Preconditioner>::dims(self)
+    }
+
+    #[inline]
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_s(self, side, x, y, scratch)
     }
 }

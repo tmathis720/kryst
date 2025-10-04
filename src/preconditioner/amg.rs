@@ -4,6 +4,10 @@ use std::cmp::Ordering as CmpOrdering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{
@@ -13,6 +17,12 @@ use crate::matrix::{
 };
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
@@ -4343,6 +4353,36 @@ impl Preconditioner for AMG {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for AMG {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <Self as Preconditioner>::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+}
+
 // ===== Legacy adapter (unchanged external signature) ========================
 
 impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for AMG {
@@ -7627,6 +7667,63 @@ mod tests {
         let h = amg.state.as_ref().unwrap();
         for l in 0..h.coarsest_ix() {
             assert_eq!(h.levels[l].num_functions, 2);
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    mod bridge {
+        use super::*;
+        use crate::algebra::bridge::BridgeScratch;
+        use crate::algebra::prelude::*;
+        use crate::ops::kpc::KPreconditioner;
+        use crate::preconditioner::PcSide;
+
+        fn poisson_1d(n: usize) -> CsrMatrix<f64> {
+            let mut row_ptr = Vec::with_capacity(n + 1);
+            let mut col_idx = Vec::new();
+            let mut values = Vec::new();
+            row_ptr.push(0);
+            for i in 0..n {
+                if i > 0 {
+                    col_idx.push(i - 1);
+                    values.push(-1.0);
+                }
+                col_idx.push(i);
+                values.push(2.0);
+                if i + 1 < n {
+                    col_idx.push(i + 1);
+                    values.push(-1.0);
+                }
+                row_ptr.push(col_idx.len());
+            }
+            CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
+        }
+
+        #[test]
+        fn apply_s_matches_real_path() {
+            let a = poisson_1d(12);
+            let mut amg = AMGBuilder::new()
+                .relaxation_type(RelaxType::Jacobi)
+                .grid_relax_type_all(RelaxType::Jacobi)
+                .build(&Mat::<f64>::zeros(0, 0))
+                .expect("amg build");
+            amg.setup(&a).expect("amg setup");
+
+            let rhs: Vec<f64> = (0..a.nrows()).map(|i| (i as f64).sin()).collect();
+            let mut out_real = vec![0.0; rhs.len()];
+            amg.apply(PcSide::Left, &rhs, &mut out_real)
+                .expect("real amg apply");
+
+            let rhs_s: Vec<S> = rhs.iter().copied().map(S::from_real).collect();
+            let mut out_s = vec![S::zero(); rhs_s.len()];
+            let mut scratch = BridgeScratch::default();
+            amg.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+                .expect("scalar amg apply");
+
+            for (yr, ys) in out_real.iter().zip(out_s.iter()) {
+                assert!((ys.real() - yr).abs() < 1e-10, "real mismatch");
+                assert!(ys.imag().abs() < 1e-12, "imag component drift");
+            }
         }
     }
 }

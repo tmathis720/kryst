@@ -7,6 +7,13 @@ use crate::preconditioner::amg::{AMGConfig, CycleType};
 use crate::preconditioner::asm::{Asm, AsmConfig};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::preconditioner::pc_bridge::{apply_pc_mut_s, apply_pc_s};
+
 use super::amg::AMG;
 
 /// Two-level combination strategy.
@@ -210,5 +217,38 @@ impl Preconditioner for AsmAmg {
 
     fn capabilities(&self) -> PcCaps {
         PcCaps::default()
+    }
+}
+
+#[cfg(feature = "complex")]
+impl crate::ops::kpc::KPreconditioner for AsmAmg {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        self.asm
+            .dimension()
+            .map(|n| (n, n))
+            .unwrap_or_else(|| self.amg.dims())
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_s(self, side, x, y, scratch)
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_mut_s(self, side, x, y, scratch)
     }
 }

@@ -19,8 +19,16 @@
 //! # References
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::traits::MatShape;
 use crate::error::KError;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::legacy::Preconditioner;
 
 /// Sparse row structure for storing L/U factors.
@@ -70,6 +78,53 @@ impl<T: num_traits::Float + Clone + std::fmt::Debug> Ilup<T> {
             u: Vec::new(),
             n: 0,
         }
+    }
+}
+
+impl<T> Ilup<T>
+where
+    T: num_traits::Float + Clone + std::fmt::Debug + PartialOrd,
+{
+    fn apply_slice(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        r: &[T],
+        z: &mut [T],
+    ) -> Result<(), KError> {
+        let n = self.n;
+        if r.len() != n || z.len() != n {
+            return Err(KError::InvalidInput(format!(
+                "Ilup::apply dimension mismatch: n={}, r.len()={}, z.len()={}",
+                n,
+                r.len(),
+                z.len()
+            )));
+        }
+
+        let mut y = vec![T::zero(); n];
+        for i in 0..n {
+            let mut sum = r[i];
+            for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
+                sum = sum - self.l[i].vals[j_idx] * y[j];
+            }
+            y[i] = sum;
+        }
+
+        for i in (0..n).rev() {
+            let mut sum = y[i];
+            for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
+                if j > i {
+                    sum = sum - self.u[i].vals[j_idx] * z[j];
+                }
+            }
+            if let Some(idx) = self.u[i].cols.iter().position(|&col| col == i) {
+                z[i] = sum / self.u[i].vals[idx];
+            } else {
+                z[i] = sum;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -146,34 +201,40 @@ where
     /// Apply ILU(p) preconditioner: solve Ly = r, then Uz = y.
     ///
     /// Forward substitution for L, then backward substitution for U.
-    fn apply(&self, _side: crate::preconditioner::PcSide, r: &V, z: &mut V) -> Result<(), KError> {
-        let n = self.n;
-        let r = r.as_ref();
-        let z = z.as_mut();
-        let mut y = vec![T::zero(); n];
-        // Forward substitution: solve L y = r
-        for i in 0..n {
-            let mut sum = r[i];
-            for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
-                sum = sum - self.l[i].vals[j_idx] * y[j];
-            }
-            y[i] = sum;
+    fn apply(&self, side: crate::preconditioner::PcSide, r: &V, z: &mut V) -> Result<(), KError> {
+        self.apply_slice(side, r.as_ref(), z.as_mut())
+    }
+}
+
+#[cfg(feature = "complex")]
+impl KPreconditioner for Ilup<f64> {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_s(
+        &self,
+        side: crate::preconditioner::PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!(
+                "Ilup::apply_s dimension mismatch: x.len()={}, y.len()={}",
+                x.len(),
+                y.len()
+            )));
         }
-        // Backward substitution: solve U z = y
-        for i in (0..n).rev() {
-            let mut sum = y[i];
-            for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
-                if j > i {
-                    sum = sum - self.u[i].vals[j_idx] * z[j];
-                }
-            }
-            // Diagonal entry must exist for U(i,i)
-            if let Some(idx) = self.u[i].cols.iter().position(|&col| col == i) {
-                z[i] = sum / self.u[i].vals[idx];
-            } else {
-                z[i] = sum;
-            }
-        }
+
+        let n = x.len();
+        let (xr, yr) = scratch.real_pair(n);
+        copy_scalar_to_real_in(x, xr);
+        self.apply_slice(side, xr, yr)?;
+        copy_real_to_scalar_in(yr, y);
         Ok(())
     }
 }
@@ -256,5 +317,43 @@ mod tests {
         )
         .unwrap();
         assert!(z.iter().all(|&zi| zi.is_finite()));
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn apply_s_matches_real_path() {
+        use crate::algebra::bridge::BridgeScratch;
+        use crate::algebra::prelude::*;
+        use crate::ops::kpc::KPreconditioner;
+
+        type Mat = DenseMat<f64>;
+        let a = Mat::new(vec![vec![4.0f64, 1.0], vec![1.5, 3.5]]);
+        let mut pc: Ilup<f64> = Ilup::new(1);
+        pc.setup(&a).unwrap();
+
+        let rhs_real = vec![6.0f64, 4.0];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        Preconditioner::<Mat, Vec<f64>>::apply(
+            &pc,
+            crate::preconditioner::PcSide::Left,
+            &rhs_real,
+            &mut out_real,
+        )
+        .expect("ilup real apply");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(
+            crate::preconditioner::PcSide::Left,
+            &rhs_s,
+            &mut out_s,
+            &mut scratch,
+        )
+        .expect("ilup apply_s");
+
+        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-10);
+        }
     }
 }

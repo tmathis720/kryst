@@ -25,13 +25,21 @@
 //   SPAI PRECONDITIONER
 // =====================
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
 use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::{StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::pc_bridge::apply_pc_s;
 use faer::linalg::solvers::SolveCore;
 use faer::prelude::SolveLstsq;
 use num_traits::Float;
@@ -455,6 +463,30 @@ where
     }
 }
 
+#[cfg(feature = "complex")]
+impl<M> KPreconditioner for ApproxInv<M, Vec<f64>, f64>
+where
+    M: MatVec<Vec<f64>> + Send + Sync + 'static,
+{
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        let n = self.inv_rows.len();
+        (n, n)
+    }
+
+    fn apply_s(
+        &self,
+        side: crate::preconditioner::PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        apply_pc_s(self, side, x, y, scratch)
+    }
+}
+
 // Helper: get nrows from a if possible
 // Attempts to downcast to known matrix traits to extract the number of rows.
 fn get_nrows<M: 'static>(a: &M) -> Option<usize> {
@@ -486,9 +518,17 @@ fn get_row_pattern<M: 'static>(a: &M) -> Option<&dyn crate::core::traits::RowPat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "complex")]
+    use crate::algebra::bridge::BridgeScratch;
+    #[cfg(feature = "complex")]
+    use crate::algebra::prelude::*;
     use crate::core::traits::MatVec;
+    #[cfg(feature = "complex")]
+    use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::legacy::Preconditioner;
     use approx::assert_relative_eq;
+    #[cfg(feature = "complex")]
+    use std::sync::Arc;
 
     /// Simple dense matrix for testing
     #[derive(Clone)]
@@ -604,6 +644,50 @@ mod tests {
         assert_relative_eq!(x[1], y[1], epsilon = 1e-12);
         assert_relative_eq!(x[2], y[2], epsilon = 1e-12);
         assert_relative_eq!(x[3], y[3], epsilon = 1e-12);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn approxinv_apply_s_matches_real_path() {
+        use crate::matrix::op::CsrOp;
+        use crate::matrix::sparse::CsrMatrix;
+
+        let n = 3;
+        let pattern = SparsityPattern::Manual((0..n).map(|i| vec![i]).collect());
+        let mut spai =
+            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
+
+        let csr = Arc::new(CsrMatrix::identity(n));
+        let op = CsrOp::new(csr);
+        spai.setup(&op as &dyn crate::matrix::op::LinOp<S = f64>)
+            .expect("setup should succeed for identity operator");
+
+        let rhs_real = vec![1.0, 2.0, 3.0];
+        let mut out_real = vec![0.0; n];
+        crate::preconditioner::Preconditioner::apply(
+            &spai,
+            crate::preconditioner::PcSide::Left,
+            &rhs_real,
+            &mut out_real,
+        )
+        .expect("real apply should succeed");
+
+        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let mut out_s = vec![S::zero(); n];
+        let mut scratch = BridgeScratch::default();
+        crate::ops::kpc::KPreconditioner::apply_s(
+            &spai,
+            crate::preconditioner::PcSide::Left,
+            &rhs_s,
+            &mut out_s,
+            &mut scratch,
+        )
+        .expect("apply_s should bridge to real implementation");
+
+        for (expected, actual) in out_real.iter().zip(out_s.iter()) {
+            assert_relative_eq!(*expected, actual.real(), epsilon = 1e-12);
+            assert_relative_eq!(0.0, actual.imag(), epsilon = 1e-12);
+        }
     }
 
     #[test]
