@@ -4,8 +4,12 @@ use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::error::KError;
 use crate::matrix::op::{LinOp, LinOpF64};
+use crate::matrix::op_bridge::matvec_s as bridge_matvec_s;
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::{PcSide, Preconditioner as PreconditionerF64};
 use core::marker::PhantomData;
 
@@ -45,22 +49,7 @@ where
 
     #[inline]
     fn matvec_s(&self, x: &[S], y: &mut [S], scratch: &mut BridgeScratch) {
-        #[cfg(not(feature = "complex"))]
-        {
-            let _ = scratch;
-            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
-            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
-            <A as LinOpF64>::matvec(self.inner, x_r, y_r);
-        }
-
-        #[cfg(feature = "complex")]
-        {
-            let n = x.len();
-            let (xr, yr) = scratch.real_pair(n);
-            copy_scalar_to_real_in(x, xr);
-            <A as LinOpF64>::matvec(self.inner, xr, yr);
-            copy_real_to_scalar_in(yr, y);
-        }
+        bridge_matvec_s(self.inner, x, y, scratch);
     }
 
     #[inline]
@@ -125,23 +114,7 @@ where
         y: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        #[cfg(not(feature = "complex"))]
-        {
-            let _ = scratch;
-            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
-            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
-            return <P as PreconditionerF64>::apply(self.inner, side, x_r, y_r);
-        }
-
-        #[cfg(feature = "complex")]
-        {
-            let n = x.len();
-            let (xr, yr) = scratch.real_pair(n);
-            copy_scalar_to_real_in(x, xr);
-            <P as PreconditionerF64>::apply(self.inner, side, xr, yr)?;
-            copy_real_to_scalar_in(yr, y);
-            Ok(())
-        }
+        bridge_apply_pc_s(self.inner, side, x, y, scratch)
     }
 }
 
@@ -188,25 +161,7 @@ where
         y: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        #[cfg(not(feature = "complex"))]
-        {
-            let _ = scratch;
-            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
-            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
-            return unsafe { <P as PreconditionerF64>::apply(&*self.inner, side, x_r, y_r) };
-        }
-
-        #[cfg(feature = "complex")]
-        {
-            let n = x.len();
-            let (xr, yr) = scratch.real_pair(n);
-            copy_scalar_to_real_in(x, xr);
-            unsafe {
-                <P as PreconditionerF64>::apply(&*self.inner, side, xr, yr)?;
-            }
-            copy_real_to_scalar_in(yr, y);
-            Ok(())
-        }
+        bridge_apply_pc_s(unsafe { &*self.inner }, side, x, y, scratch)
     }
 
     #[inline]
@@ -217,25 +172,7 @@ where
         y: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        #[cfg(not(feature = "complex"))]
-        {
-            let _ = scratch;
-            let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
-            let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
-            unsafe { <P as PreconditionerF64>::apply_mut(&mut *self.inner, side, x_r, y_r) }
-        }
-
-        #[cfg(feature = "complex")]
-        {
-            let n = x.len();
-            let (xr, yr) = scratch.real_pair(n);
-            copy_scalar_to_real_in(x, xr);
-            unsafe {
-                <P as PreconditionerF64>::apply_mut(&mut *self.inner, side, xr, yr)?;
-            }
-            copy_real_to_scalar_in(yr, y);
-            Ok(())
-        }
+        bridge_apply_pc_mut_s(unsafe { &mut *self.inner }, side, x, y, scratch)
     }
 
     #[inline]

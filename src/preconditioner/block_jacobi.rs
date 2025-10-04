@@ -241,6 +241,7 @@ mod tests {
     use crate::algebra::bridge::BridgeScratch;
     use crate::algebra::prelude::*;
     use crate::core::traits::{MatrixGet, RowPattern};
+    use crate::error::KError;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::PcSide;
     use std::marker::PhantomData;
@@ -266,6 +267,21 @@ mod tests {
     impl MatrixGet<f64> for TestDiagMatrix {
         fn get(&self, i: usize, j: usize) -> f64 {
             if i == j { self.diag[i] } else { 0.0 }
+        }
+    }
+
+    impl crate::preconditioner::Preconditioner for BlockJacobi<f64> {
+        fn dims(&self) -> (usize, usize) {
+            Self::dims(self)
+        }
+
+        fn setup(&mut self, _a: &dyn crate::matrix::op::LinOp<S = f64>) -> Result<(), KError> {
+            Ok(())
+        }
+
+        fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+            BlockJacobi::apply(self, x, y);
+            Ok(())
         }
     }
 

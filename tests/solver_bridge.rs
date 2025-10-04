@@ -13,7 +13,7 @@ use kryst::preconditioner::Jacobi;
 use kryst::preconditioner::amg::{AMGBuilder, RelaxType};
 use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig};
 use kryst::preconditioner::{PcSide, Preconditioner};
-use kryst::solver::{BiCgStabSolver, CgSolver, LinearSolver};
+use kryst::solver::{BiCgStabSolver, CgSolver, GmresSolver, LinearSolver};
 
 use faer::Mat;
 use std::sync::Arc;
@@ -41,6 +41,47 @@ impl KLinOp for NativeDiagOp {
         for ((yi, &di), &xi) in y.iter_mut().zip(self.diag.iter()).zip(x.iter()) {
             *yi = di * xi;
         }
+    }
+}
+
+struct NativeJacobiPc {
+    inv_diag: Vec<S>,
+}
+
+impl NativeJacobiPc {
+    fn new(diag: &[S]) -> Self {
+        let inv_diag = diag.iter().map(|&d| d.inv()).collect();
+        Self { inv_diag }
+    }
+}
+
+impl KPreconditioner for NativeJacobiPc {
+    type Scalar = S;
+
+    fn dims(&self) -> (usize, usize) {
+        let n = self.inv_diag.len();
+        (n, n)
+    }
+
+    fn apply_s(
+        &self,
+        _side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        if x.len() != self.inv_diag.len() || y.len() != self.inv_diag.len() {
+            return Err(KError::InvalidInput(format!(
+                "NativeJacobiPc::apply_s dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.inv_diag.len(),
+                x.len(),
+                y.len()
+            )));
+        }
+        for ((yi, &wi), &xi) in y.iter_mut().zip(self.inv_diag.iter()).zip(x.iter()) {
+            *yi = wi * xi;
+        }
+        Ok(())
     }
 }
 
@@ -172,6 +213,105 @@ fn cg_runs_with_native_and_wrapped_backends() {
         assert!(yi.real().is_finite(), "pc output {i} should be finite");
         assert!(bi.real().is_finite());
     }
+}
+
+#[test]
+fn gmres_runs_with_native_s_backend() {
+    let diag = vec![4.0, 5.0, 6.0, 7.0];
+    let diag_s: Vec<S> = diag.iter().copied().map(S::from_real).collect();
+    let x_true: Vec<S> = vec![
+        S::from_real(1.0),
+        S::from_real(-1.0),
+        S::from_real(2.0),
+        S::from_real(0.5),
+    ];
+    let b: Vec<S> = diag_s
+        .iter()
+        .zip(x_true.iter())
+        .map(|(&d, &x)| d * x)
+        .collect();
+    let mut x = vec![S::zero(); diag.len()];
+
+    let mut gmres = GmresSolver::new(8, 1e-12, 64);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut workspace = Workspace::new(diag.len());
+    gmres.setup_workspace(&mut workspace);
+
+    let op = NativeDiagOp::new(diag_s.clone());
+    let pc = NativeJacobiPc::new(&diag_s);
+
+    let _stats = gmres
+        .solve(
+            &op,
+            Some(&pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut workspace),
+        )
+        .expect("native GMRES solve");
+
+    let mut scratch = BridgeScratch::default();
+    let mut ax = vec![S::zero(); diag.len()];
+    op.matvec_s(&x, &mut ax, &mut scratch);
+    for (ai, bi) in ax.iter_mut().zip(b.iter()) {
+        *ai -= *bi;
+    }
+    assert!(nrm2(&ax) < 1e-10);
+}
+
+#[test]
+fn gmres_runs_with_wrapped_f64_backends() {
+    let diag = vec![3.0, 4.0, 5.0];
+    let x_true = vec![1.0, -2.0, 0.5];
+    let n = diag.len();
+
+    let row_ptr: Vec<usize> = (0..=n).collect();
+    let col_idx: Vec<usize> = (0..n).collect();
+    let values = diag.clone();
+    let csr = Arc::new(RealCsrMatrix::from_csr(n, n, row_ptr, col_idx, values));
+    let op_f64 = CsrOp::new(csr);
+
+    let mut jacobi = Jacobi::new();
+    jacobi.setup(&op_f64).expect("jacobi setup");
+
+    let op = as_s_op(&op_f64);
+    let pc = as_s_pc(&jacobi);
+
+    let b: Vec<S> = diag
+        .iter()
+        .zip(x_true.iter())
+        .map(|(&d, &x)| S::from_real(d * x))
+        .collect();
+    let mut x = vec![S::zero(); n];
+
+    let mut gmres = GmresSolver::new(6, 1e-12, 64);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut workspace = Workspace::new(n);
+    gmres.setup_workspace(&mut workspace);
+
+    let _stats = gmres
+        .solve(
+            &op,
+            Some(&pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut workspace),
+        )
+        .expect("wrapped GMRES solve");
+
+    let mut scratch = BridgeScratch::default();
+    let mut ax = vec![S::zero(); n];
+    op.matvec_s(&x, &mut ax, &mut scratch);
+    for (ai, bi) in ax.iter_mut().zip(b.iter()) {
+        *ai -= *bi;
+    }
+    assert!(nrm2(&ax) < 1e-10);
 }
 
 #[test]
