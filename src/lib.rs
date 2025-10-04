@@ -37,7 +37,6 @@ pub mod ops;
 pub mod preconditioner;
 pub mod reduction;
 pub mod solver;
-#[cfg(any(test, feature = "examples"))]
 pub mod testkit;
 pub mod utils;
 

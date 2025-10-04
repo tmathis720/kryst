@@ -25,7 +25,7 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{UniverseComm, global_dot_conj};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
@@ -167,19 +167,10 @@ impl GmresSolver {
         scratch: &mut BridgeScratch,
     ) -> R {
         a.matvec_s(x, tmp, scratch);
-        let mut local = 0.0;
         for i in 0..tmp.len() {
-            let diff = b[i] - tmp[i];
-            tmp[i] = diff;
-            let mag2 = (diff.conj() * diff).real();
-            local += mag2;
+            tmp[i] = b[i] - tmp[i];
         }
-        let sum = if comm.size() == 1 {
-            local
-        } else {
-            comm.allreduce_sum(local)
-        };
-        sum.sqrt()
+        global_dot_conj(comm, tmp, tmp).real().sqrt()
     }
 
     #[allow(clippy::too_many_arguments)]

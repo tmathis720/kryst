@@ -4,7 +4,6 @@
 //! If [`PcSide`] is not `Left`, the solver returns `InvalidInput`.
 //! Residual norm is the preconditioned norm `||M^{-1} r||`; final stats include true `||r||`.
 
-use crate::algebra::blas::dot_conj;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -25,42 +24,27 @@ use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
 
-fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
-    if comm.size() == 1 {
-        value
-    } else {
-        comm.allreduce_sum(value)
-    }
-}
-
-#[cfg(feature = "complex")]
-fn reduce_pair<C: Comm>(comm: &C, real: R, imag: R) -> (R, R) {
-    if comm.size() == 1 {
-        (real, imag)
-    } else {
-        comm.allreduce_sum2(real, imag)
-    }
-}
-
 fn dot<C: Comm>(u: &[S], v: &[S], comm: &C) -> R {
-    let local = dot_conj(u, v);
+    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(u, v));
     #[cfg(feature = "complex")]
     {
-        let (real_sum, imag_sum) = reduce_pair(comm, local.real(), local.im);
         debug_assert!(
-            imag_sum.abs() <= 1e-12 * real_sum.abs().max(1.0) + 1e-30,
-            "CG detected non-real inner product: {real_sum} + {imag_sum}i",
+            global.imag().abs() <= 1e-12 * global.real().abs().max(1.0) + 1e-30,
+            "CG detected non-real inner product: {} + {}i",
+            global.real(),
+            global.imag()
         );
-        real_sum
+        global.real()
     }
     #[cfg(not(feature = "complex"))]
     {
-        reduce_real(comm, local.real())
+        global.real()
     }
 }
 
 fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    dot(x, x, comm).abs().sqrt()
+    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
+    global.real().abs().sqrt()
 }
 
 struct CgWorkspace<'a> {

@@ -1,5 +1,3 @@
-#[cfg(feature = "complex")]
-use crate::algebra::blas::dot_conj;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -45,15 +43,6 @@ pub enum PcgVariant {
 /// Default replacement interval for pipelined CG.
 ///
 pub const PCG_PIPELINED_DEFAULT_REPLACE_EVERY: usize = 50;
-
-#[cfg(feature = "complex")]
-fn reduce_real<C: Comm>(comm: &C, value: f64) -> f64 {
-    if comm.size() == 1 {
-        value
-    } else {
-        comm.allreduce_sum(value)
-    }
-}
 
 pub struct PcgSolver {
     pub(crate) conv: Convergence,
@@ -234,8 +223,8 @@ impl PcgSolver {
 
         #[cfg(feature = "complex")]
         {
-            let local = dot_conj(u, v).real();
-            reduce_real(comm, local)
+            let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(u, v));
+            global.real()
         }
     }
 

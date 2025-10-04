@@ -2,7 +2,6 @@
 //
 // … (header doc unchanged) …
 
-use crate::algebra::blas::dot_conj;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
@@ -18,42 +17,13 @@ use crate::solver::common::recompute_true_residual_norm_s;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
-#[cfg(feature = "complex")]
-use num_complex::Complex64;
-
-fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
-    if comm.size() == 1 {
-        value
-    } else {
-        comm.allreduce_sum(value)
-    }
-}
-
-fn reduce_scalar<C: Comm>(comm: &C, value: S) -> S {
-    if comm.size() == 1 {
-        value
-    } else {
-        #[cfg(feature = "complex")]
-        {
-            let local: Complex64 = value;
-            let (re, im) = comm.allreduce_sum2(local.re, local.im);
-            Complex64::new(re, im)
-        }
-        #[cfg(not(feature = "complex"))]
-        {
-            S::from_real(comm.allreduce_sum(value.real()))
-        }
-    }
-}
-
 fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    let local = dot_conj(x, y);
-    reduce_scalar(comm, local)
+    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
 }
 
 fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let local = dot_conj(x, x).real();
-    reduce_real(comm, local).sqrt()
+    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
+    global.real().sqrt()
 }
 
 struct MinresWorkspace<'a> {
@@ -468,7 +438,7 @@ mod tests {
 
         let x_true = vec![1.0, 2.0, 3.0];
         let mut b = vec![0.0; n];
-        aop.matvec(&x_true, &mut b);
+        crate::matrix::op::LinOp::matvec(&aop, &x_true, &mut b);
 
         let r0_norm = b.iter().map(|&v| v * v).sum::<f64>().sqrt();
 
@@ -488,7 +458,7 @@ mod tests {
             .unwrap();
 
         let mut r_final = vec![0.0; n];
-        aop.matvec(&x, &mut r_final);
+        crate::matrix::op::LinOp::matvec(&aop, &x, &mut r_final);
         for i in 0..n {
             r_final[i] = b[i] - r_final[i];
         }
@@ -564,7 +534,7 @@ mod tests {
 
         let x_true = vec![1.0, 1.0];
         let mut b = vec![0.0; 2];
-        aop.matvec(&x_true, &mut b);
+        crate::matrix::op::LinOp::matvec(&aop, &x_true, &mut b);
 
         let mut x = vec![0.0; 2];
         let mut solver = MinresSolver::new(1e-12, 100);
@@ -582,7 +552,7 @@ mod tests {
             .unwrap();
 
         let mut r = vec![0.0; 2];
-        aop.matvec(&x, &mut r);
+        crate::matrix::op::LinOp::matvec(&aop, &x, &mut r);
         for i in 0..2 {
             r[i] = b[i] - r[i];
         }

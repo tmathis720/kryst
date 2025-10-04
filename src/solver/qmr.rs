@@ -2,7 +2,6 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; monitors report the true `||r||`.
 
-use crate::algebra::blas::dot_conj;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -18,9 +17,6 @@ use crate::solver::LinearSolver;
 use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
-
-#[cfg(feature = "complex")]
-use num_complex::Complex64;
 
 pub struct QmrSolver {
     pub conv: Convergence,
@@ -315,39 +311,13 @@ impl LinearSolver for QmrSolver {
     }
 }
 
-fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
-    if comm.size() == 1 {
-        value
-    } else {
-        comm.allreduce_sum(value)
-    }
-}
-
-fn reduce_scalar<C: Comm>(comm: &C, value: S) -> S {
-    if comm.size() == 1 {
-        value
-    } else {
-        #[cfg(feature = "complex")]
-        {
-            let local: Complex64 = value;
-            let (re, im) = comm.allreduce_sum2(local.re, local.im);
-            Complex64::new(re, im)
-        }
-        #[cfg(not(feature = "complex"))]
-        {
-            S::from_real(comm.allreduce_sum(value.real()))
-        }
-    }
-}
-
 fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    let local = dot_conj(x, y);
-    reduce_scalar(comm, local)
+    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
 }
 
 fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let local = dot_conj(x, x).real();
-    reduce_real(comm, local).sqrt()
+    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
+    global.real().sqrt()
 }
 
 struct QmrWorkspace<'a> {

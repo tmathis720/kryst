@@ -1,7 +1,6 @@
 pub mod buffer;
 pub mod givens;
 
-use crate::algebra::blas::dot_conj;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -13,11 +12,7 @@ use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
 pub use buffer::take_or_resize;
 
 fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
-    if comm.size() == 1 {
-        value
-    } else {
-        comm.allreduce_sum(value)
-    }
+    comm.allreduce_sum_scalar(S::from_real(value)).real()
 }
 
 /// Recompute the true residual norm ||r||_2 where r = b - A x.
@@ -41,7 +36,7 @@ pub fn recompute_true_residual_norm<C: Comm>(
     if comm.size() == 1 {
         local.sqrt()
     } else {
-        comm.allreduce_sum(local).sqrt()
+        comm.allreduce_sum_scalar(S::from_real(local)).real().sqrt()
     }
 }
 
@@ -65,8 +60,8 @@ where
     for i in 0..tmp.len() {
         tmp[i] = b[i] - tmp[i];
     }
-    let local = dot_conj(tmp, tmp).real();
-    reduce_real(comm, local).sqrt()
+    let local = crate::algebra::blas::dot_conj(tmp, tmp);
+    comm.allreduce_sum_scalar(local).real().sqrt()
 }
 
 /// Compute the residual norm used for iteration monitors (the "reported" norm):
