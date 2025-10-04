@@ -1,5 +1,6 @@
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
+use crate::matrix::op::{LinOp, LinOpF64};
 
 /// Internal, scalar-generic linear operator for solvers.
 ///
@@ -36,5 +37,32 @@ pub trait KLinOp: Send + Sync {
         _scratch: &mut BridgeScratch,
     ) {
         panic!("KLinOp::t_matvec_s called but supports_t_matvec_s() == false");
+    }
+}
+
+impl<T> KLinOp for T
+where
+    T: LinOpF64 + LinOp<S = f64> + Send + Sync,
+{
+    type Scalar = f64;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <T as LinOpF64>::dims(self)
+    }
+
+    #[inline]
+    fn matvec_s(&self, x: &[f64], y: &mut [f64], _scratch: &mut BridgeScratch) {
+        <T as LinOpF64>::matvec(self, x, y)
+    }
+
+    #[inline]
+    fn supports_t_matvec_s(&self) -> bool {
+        <T as LinOp>::supports_transpose(self)
+    }
+
+    #[inline]
+    fn t_matvec_s(&self, x: &[f64], y: &mut [f64], _scratch: &mut BridgeScratch) {
+        <T as LinOp>::t_matvec(self, x, y)
     }
 }

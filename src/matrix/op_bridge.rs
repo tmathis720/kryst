@@ -5,7 +5,10 @@ use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::matrix::op::LinOp;
 
 #[inline]
-pub fn matvec_s(a: &(dyn LinOp<S = f64> + '_), x: &[S], y: &mut [S], scratch: &mut BridgeScratch) {
+pub fn matvec_s<A>(a: &A, x: &[S], y: &mut [S], scratch: &mut BridgeScratch)
+where
+    A: LinOp<S = f64> + ?Sized,
+{
     debug_assert_eq!(x.len(), y.len());
 
     #[cfg(not(feature = "complex"))]

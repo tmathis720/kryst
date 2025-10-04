@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::op::{LinOp, StructureId, ValuesId};
+use super::op::{LinOp, LinOpF64, StructureId, ValuesId};
 
 /// Matrix-free "shell" operator.
 pub struct MatShell<S> {
@@ -77,5 +77,17 @@ impl LinOp for MatShell<f64> {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl LinOpF64 for MatShell<f64> {
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        LinOp::dims(self)
+    }
+
+    #[inline]
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        LinOp::matvec(self, x, y)
     }
 }

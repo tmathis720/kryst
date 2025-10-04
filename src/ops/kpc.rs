@@ -2,6 +2,7 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::preconditioner::PcSide;
+use crate::preconditioner::Preconditioner as PreconditionerF64;
 
 /// Internal, scalar-generic preconditioner interface.
 ///
@@ -47,5 +48,48 @@ pub trait KPreconditioner: Send + Sync {
     ) -> Result<(), KError> {
         let _ = (outer_iter, residual_norm);
         Ok(())
+    }
+}
+
+impl<T> KPreconditioner for T
+where
+    T: PreconditionerF64 + Send + Sync,
+{
+    type Scalar = f64;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        <T as PreconditionerF64>::dims(self)
+    }
+
+    #[inline]
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[f64],
+        y: &mut [f64],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        <T as PreconditionerF64>::apply(self, side, x, y)
+    }
+
+    #[inline]
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[f64],
+        y: &mut [f64],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        <T as PreconditionerF64>::apply_mut(self, side, x, y)
+    }
+
+    #[inline]
+    fn on_restart_s(
+        &mut self,
+        outer_iter: usize,
+        residual_norm: <Self::Scalar as KrystScalar>::Real,
+    ) -> Result<(), KError> {
+        <T as PreconditionerF64>::on_restart(self, outer_iter, residual_norm)
     }
 }

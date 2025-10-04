@@ -447,6 +447,7 @@ impl<'a> TfqmrWorkspace<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::op::LinOpF64;
     use std::sync::{Arc, Mutex};
 
     struct Dense {
@@ -472,6 +473,18 @@ mod tests {
 
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    impl LinOpF64 for Dense {
+        #[inline]
+        fn dims(&self) -> (usize, usize) {
+            LinOp::dims(self)
+        }
+
+        #[inline]
+        fn matvec(&self, x: &[f64], y: &mut [f64]) {
+            LinOp::matvec(self, x, y)
         }
     }
 
