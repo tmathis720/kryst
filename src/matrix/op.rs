@@ -247,6 +247,21 @@ impl KLinOp for GenericCsrOp<num_complex::Complex64> {
     ) {
         <Self as LinOp>::matvec(self, x, y);
     }
+
+    #[inline]
+    fn supports_t_matvec_s(&self) -> bool {
+        <Self as LinOp>::supports_transpose(self)
+    }
+
+    #[inline]
+    fn t_matvec_s(
+        &self,
+        x: &[num_complex::Complex64],
+        y: &mut [num_complex::Complex64],
+        _scratch: &mut BridgeScratch,
+    ) {
+        <Self as LinOp>::t_matvec(self, x, y);
+    }
 }
 
 // --- Optional wrappers for dense and CSR matrices -------------------------

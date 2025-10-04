@@ -1,6 +1,5 @@
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
-use crate::matrix::op::LinOpF64;
 
 /// Internal, scalar-generic linear operator for solvers.
 ///
@@ -20,21 +19,22 @@ pub trait KLinOp: Send + Sync {
     /// `scratch` allows adapters to reuse temporary buffers when bridging
     /// between scalar types. Native-`S` implementations may ignore it.
     fn matvec_s(&self, x: &[Self::Scalar], y: &mut [Self::Scalar], scratch: &mut BridgeScratch);
-}
 
-impl<T> KLinOp for T
-where
-    T: LinOpF64 + Send + Sync,
-{
-    type Scalar = f64;
-
-    #[inline]
-    fn dims(&self) -> (usize, usize) {
-        <T as LinOpF64>::dims(self)
+    /// Whether the operator exposes a transpose/adjoint matvec.
+    fn supports_t_matvec_s(&self) -> bool {
+        false
     }
 
-    #[inline]
-    fn matvec_s(&self, x: &[f64], y: &mut [f64], _scratch: &mut BridgeScratch) {
-        <T as LinOpF64>::matvec(self, x, y);
+    /// Perform `y <- A^T x` (or `A^H x` in complex builds).
+    ///
+    /// Default implementation panics unless overridden by operators that
+    /// advertise transpose support via [`supports_t_matvec_s`].
+    fn t_matvec_s(
+        &self,
+        _x: &[Self::Scalar],
+        _y: &mut [Self::Scalar],
+        _scratch: &mut BridgeScratch,
+    ) {
+        panic!("KLinOp::t_matvec_s called but supports_t_matvec_s() == false");
     }
 }

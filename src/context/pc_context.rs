@@ -481,8 +481,12 @@ impl PcFactory {
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // The concrete operator format is deferred to the preconditioner itself.
         match info.pc_type {
-            PcType::Amg => Err(KError::NotImplemented("AMG not yet implemented".into())),
-            PcType::Asm => Err(KError::NotImplemented("ASM not yet implemented".into())),
+            PcType::Amg => Err(KError::NotImplemented(
+                "AMG not yet implemented".to_string(),
+            )),
+            PcType::Asm => Err(KError::NotImplemented(
+                "ASM not yet implemented".to_string(),
+            )),
             _ => Self::create_preconditioner(info.pc_type, info.options.as_ref()),
         }
     }

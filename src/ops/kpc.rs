@@ -2,7 +2,6 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::preconditioner::PcSide;
-use crate::preconditioner::Preconditioner as PreconditionerF64;
 
 /// Internal, scalar-generic preconditioner interface.
 ///
@@ -23,27 +22,30 @@ pub trait KPreconditioner: Send + Sync {
         y: &mut [Self::Scalar],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError>;
-}
 
-impl<T> KPreconditioner for T
-where
-    T: PreconditionerF64 + Send + Sync,
-{
-    type Scalar = f64;
-
-    #[inline]
-    fn dims(&self) -> (usize, usize) {
-        <T as PreconditionerF64>::dims(self)
+    /// Apply the preconditioner in a mutable/flexible mode.
+    ///
+    /// By default this delegates to [`apply_s`], preserving backwards compatibility for
+    /// immutable preconditioners while allowing flexible algorithms (e.g., FGMRES) to
+    /// request a mutable handle when available.
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[Self::Scalar],
+        y: &mut [Self::Scalar],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        self.apply_s(side, x, y, scratch)
     }
 
-    #[inline]
-    fn apply_s(
-        &self,
-        side: PcSide,
-        x: &[f64],
-        y: &mut [f64],
-        _scratch: &mut BridgeScratch,
+    /// Optional hook invoked at solver restarts.
+    #[allow(unused_variables)]
+    fn on_restart_s(
+        &mut self,
+        outer_iter: usize,
+        residual_norm: <Self::Scalar as KrystScalar>::Real,
     ) -> Result<(), KError> {
-        <T as PreconditionerF64>::apply(self, side, x, y)
+        let _ = (outer_iter, residual_norm);
+        Ok(())
     }
 }

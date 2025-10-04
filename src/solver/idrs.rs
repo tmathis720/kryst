@@ -1,5 +1,12 @@
+use crate::algebra::blas::dot_conj;
+use crate::algebra::bridge::BridgeScratch;
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::matrix::op::LinOp;
+use crate::matrix::op::{LinOp, LinOpF64};
+use crate::ops::klinop::KLinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
@@ -8,6 +15,50 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 use std::cmp::min;
+
+#[cfg(feature = "complex")]
+use num_complex::Complex64;
+
+fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
+    if comm.size() == 1 {
+        value
+    } else {
+        comm.allreduce_sum(value)
+    }
+}
+
+fn reduce_scalar<C: Comm>(comm: &C, value: S) -> S {
+    #[cfg(feature = "complex")]
+    {
+        if comm.size() == 1 {
+            value
+        } else {
+            let (real, imag) = comm.allreduce_sum2(value.re, value.im);
+            Complex64::new(real, imag)
+        }
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        if comm.size() == 1 {
+            value
+        } else {
+            comm.allreduce_sum(value)
+        }
+    }
+}
+
+fn dot_reduce<C: Comm>(comm: &C, a: &[S], b: &[S]) -> S {
+    let local = dot_conj(a, b);
+    reduce_scalar(comm, local)
+}
+
+fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
+    let local = x.iter().fold(0.0, |acc, &val| {
+        let mag = val.abs();
+        acc + mag * mag
+    });
+    reduce_real(comm, local).sqrt()
+}
 
 #[derive(Clone, Debug)]
 pub struct IdrsOptions {
@@ -146,18 +197,19 @@ impl IdrsBuilder {
 struct IdrsWorkspace {
     n: usize,
     s: usize,
-    p: Vec<f64>,
-    ph_r: Vec<f64>,
-    ph_drn: Vec<f64>,
-    c: Vec<f64>,
-    d_r: Vec<Vec<f64>>,
-    d_r_raw: Vec<Vec<f64>>,
-    d_x: Vec<Vec<f64>>,
-    r: Vec<f64>,
-    r_true: Vec<f64>,
-    v: Vec<f64>,
-    t: Vec<f64>,
-    t_raw: Vec<f64>,
+    p: Vec<S>,
+    ph_r: Vec<S>,
+    ph_drn: Vec<S>,
+    c: Vec<S>,
+    d_r: Vec<Vec<S>>,
+    d_r_raw: Vec<Vec<S>>,
+    d_x: Vec<Vec<S>>,
+    r: Vec<S>,
+    r_true: Vec<S>,
+    v: Vec<S>,
+    t: Vec<S>,
+    t_raw: Vec<S>,
+    scratch: BridgeScratch,
 }
 
 impl IdrsWorkspace {
@@ -165,64 +217,65 @@ impl IdrsWorkspace {
         if self.n != n || self.s != s {
             self.n = n;
             self.s = s;
-            self.p.resize(n.saturating_mul(s), 0.0);
-            self.ph_r.resize(s, 0.0);
-            self.ph_drn.resize(s.saturating_mul(s), 0.0);
-            self.c.resize(s, 0.0);
-            self.d_r.resize(s + 1, vec![0.0; n]);
-            self.d_r_raw.resize(s + 1, vec![0.0; n]);
-            self.d_x.resize(s + 1, vec![0.0; n]);
-            self.r.resize(n, 0.0);
-            self.r_true.resize(n, 0.0);
-            self.v.resize(n, 0.0);
-            self.t.resize(n, 0.0);
-            self.t_raw.resize(n, 0.0);
+            self.p.resize(n.saturating_mul(s), S::zero());
+            self.ph_r.resize(s, S::zero());
+            self.ph_drn.resize(s.saturating_mul(s), S::zero());
+            self.c.resize(s, S::zero());
+            self.d_r.resize(s + 1, vec![S::zero(); n]);
+            self.d_r_raw.resize(s + 1, vec![S::zero(); n]);
+            self.d_x.resize(s + 1, vec![S::zero(); n]);
+            self.r.resize(n, S::zero());
+            self.r_true.resize(n, S::zero());
+            self.v.resize(n, S::zero());
+            self.t.resize(n, S::zero());
+            self.t_raw.resize(n, S::zero());
+            self.scratch = BridgeScratch::default();
         } else {
             let need = s + 1;
             if self.d_r.len() != need {
-                self.d_r.resize_with(need, || vec![0.0; n]);
+                self.d_r.resize_with(need, || vec![S::zero(); n]);
             }
             if self.d_r_raw.len() != need {
-                self.d_r_raw.resize_with(need, || vec![0.0; n]);
+                self.d_r_raw.resize_with(need, || vec![S::zero(); n]);
             }
             if self.d_x.len() != need {
-                self.d_x.resize_with(need, || vec![0.0; n]);
+                self.d_x.resize_with(need, || vec![S::zero(); n]);
             }
             for buf in &mut self.d_r {
                 if buf.len() != n {
-                    buf.resize(n, 0.0);
+                    buf.resize(n, S::zero());
                 }
             }
             for buf in &mut self.d_r_raw {
                 if buf.len() != n {
-                    buf.resize(n, 0.0);
+                    buf.resize(n, S::zero());
                 }
             }
             for buf in &mut self.d_x {
                 if buf.len() != n {
-                    buf.resize(n, 0.0);
+                    buf.resize(n, S::zero());
                 }
             }
-            self.p.resize(n.saturating_mul(s), 0.0);
-            self.ph_r.resize(s, 0.0);
-            self.ph_drn.resize(s.saturating_mul(s), 0.0);
-            self.c.resize(s, 0.0);
-            self.r.resize(n, 0.0);
-            self.r_true.resize(n, 0.0);
-            self.v.resize(n, 0.0);
-            self.t.resize(n, 0.0);
-            self.t_raw.resize(n, 0.0);
+            self.p.resize(n.saturating_mul(s), S::zero());
+            self.ph_r.resize(s, S::zero());
+            self.ph_drn.resize(s.saturating_mul(s), S::zero());
+            self.c.resize(s, S::zero());
+            self.r.resize(n, S::zero());
+            self.r_true.resize(n, S::zero());
+            self.v.resize(n, S::zero());
+            self.t.resize(n, S::zero());
+            self.t_raw.resize(n, S::zero());
         }
     }
 
     #[inline]
-    fn p_col(&self, j: usize) -> &[f64] {
+    fn p_col(&self, j: usize) -> &[S] {
         let n = self.n;
         &self.p[j * n..(j + 1) * n]
     }
 
     #[inline]
-    fn p_col_mut(&mut self, j: usize) -> &mut [f64] {
+    fn p_col_mut(&mut self, j: usize) -> &mut [S] {
         let n = self.n;
         &mut self.p[j * n..(j + 1) * n]
     }
@@ -234,14 +287,16 @@ impl IdrsWorkspace {
         stats: &mut IdrsStats,
     ) -> Result<(), KError> {
         let col = self.p_col_mut(col_idx);
-        let local = col.iter().map(|x| x * x).sum::<f64>();
-        let norm_sq = comm.all_reduce_f64(local);
+        let local = col
+            .iter()
+            .fold(0.0, |acc, &val| acc + val.abs() * val.abs());
+        let norm_sq = reduce_real(comm, local);
         stats.dots += 1;
         let norm = norm_sq.sqrt();
         if norm <= f64::EPSILON {
             return Err(KError::BreakdownOrIndefinite);
         }
-        let inv = 1.0 / norm;
+        let inv = S::from_real(1.0 / norm);
         for val in col.iter_mut() {
             *val *= inv;
         }
@@ -256,15 +311,15 @@ impl IdrsWorkspace {
     ) -> Result<(), KError> {
         let n = self.n;
         for k in 0..col_idx {
-            let mut local = 0.0;
-            for i in 0..n {
-                local += self.p[k * n + i] * self.p[col_idx * n + i];
-            }
-            let dot = comm.all_reduce_f64(local);
+            let coeff = {
+                let prev = &self.p[k * n..(k + 1) * n];
+                let col = &self.p[col_idx * n..(col_idx + 1) * n];
+                dot_reduce(comm, prev, col)
+            };
             stats.dots += 1;
             for i in 0..n {
                 let idx = col_idx * n + i;
-                self.p[idx] -= dot * self.p[k * n + i];
+                self.p[idx] -= coeff * self.p[k * n + i];
             }
         }
         self.normalize_column(col_idx, comm, stats)
@@ -303,7 +358,8 @@ impl IdrsSolver {
                     {
                         let col = self.ws.p_col_mut(j);
                         for val in col.iter_mut() {
-                            *val = StandardNormal.sample(&mut rng);
+                            let sample = StandardNormal.sample(&mut rng);
+                            *val = S::from_real(sample);
                         }
                     }
                     self.ws.orthonormalize_column(j, comm, stats)?;
@@ -327,11 +383,11 @@ impl IdrsSolver {
                 for (col_idx, &blk) in unique.iter().enumerate() {
                     {
                         let col = self.ws.p_col_mut(col_idx);
-                        col.fill(0.0);
+                        col.fill(S::zero());
                         let mut count = 0usize;
                         for (i, &part) in partition.iter().enumerate() {
                             if part == blk {
-                                col[i] = 1.0;
+                                col[i] = S::one();
                                 count += 1;
                             }
                         }
@@ -355,7 +411,7 @@ impl IdrsSolver {
                     {
                         let dst = self.ws.p_col_mut(j);
                         for i in 0..n {
-                            dst[i] = p[(i, j)];
+                            dst[i] = S::from_real(p[(i, j)]);
                         }
                     }
                     self.ws.normalize_column(j, comm, stats)?;
@@ -370,13 +426,9 @@ impl IdrsSolver {
         let s = self.ws.s;
         for j in 0..s {
             let col = self.ws.p_col(j);
-            let mut accum = 0.0;
-            for i in 0..n {
-                accum += col[i] * self.ws.r[i];
-            }
-            self.ws.ph_r[j] = accum;
+            let dot = dot_reduce(comm, col, &self.ws.r[..n]);
+            self.ws.ph_r[j] = dot;
         }
-        comm.allreduce_sum_slice(&mut self.ws.ph_r);
         stats.dots += s;
     }
 
@@ -387,14 +439,10 @@ impl IdrsSolver {
             let vec = &self.ws.d_r[i + 1];
             for j in 0..s {
                 let col = self.ws.p_col(j);
-                let mut accum = 0.0;
-                for k in 0..n {
-                    accum += col[k] * vec[k];
-                }
-                self.ws.ph_drn[i * s + j] = accum;
+                let dot = dot_reduce(comm, col, &vec[..n]);
+                self.ws.ph_drn[i * s + j] = dot;
             }
         }
-        comm.allreduce_sum_slice(&mut self.ws.ph_drn);
         stats.dots += s * s;
     }
 
@@ -405,7 +453,7 @@ impl IdrsSolver {
         }
         let mut a = self.ws.ph_drn.clone();
         let mut b = self.ws.ph_r.clone();
-        self.ws.c.fill(0.0);
+        self.ws.c.fill(S::zero());
         for k in 0..s {
             let mut pivot_row = k;
             let mut pivot = a[k * s + k].abs();
@@ -427,8 +475,12 @@ impl IdrsSolver {
             }
             let diag = a[k * s + k];
             for i in (k + 1)..s {
-                let factor = a[i * s + k] / diag;
-                if factor != 0.0 {
+                let factor = if diag == S::zero() {
+                    S::zero()
+                } else {
+                    a[i * s + k] / diag
+                };
+                if factor != S::zero() {
                     for j in k..s {
                         a[i * s + j] -= factor * a[k * s + j];
                     }
@@ -450,70 +502,65 @@ impl IdrsSolver {
         Ok(())
     }
 
-    fn combine_delta(dst: &mut [f64], coeffs: &[f64], src: &[Vec<f64>], scale: f64) {
+    fn combine_delta(dst: &mut [S], coeffs: &[S], src: &[Vec<S>], scale: S) {
         let n = dst.len();
-        dst.fill(0.0);
+        dst.fill(S::zero());
         for (col, &coeff) in src.iter().zip(coeffs.iter()) {
-            if coeff == 0.0 {
+            if coeff == S::zero() {
                 continue;
             }
             for i in 0..n {
                 dst[i] += coeff * col[i];
             }
         }
-        if scale != 1.0 {
+        if scale != S::one() {
             for val in dst.iter_mut() {
                 *val *= scale;
             }
         }
     }
 
-    fn apply_matvec(
-        a: &dyn LinOp<S = f64>,
-        pc: Option<&mut &mut dyn Preconditioner>,
-        x: &[f64],
-        raw: &mut [f64],
-        precond: &mut [f64],
+    fn apply_matvec<A: KLinOp<Scalar = S> + ?Sized>(
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        x: &[S],
+        raw: &mut [S],
+        precond: &mut [S],
+        scratch: &mut BridgeScratch,
         stats: &mut IdrsStats,
     ) -> Result<(), KError> {
-        a.try_matvec(x, raw)?;
+        a.matvec_s(x, raw, scratch);
         stats.matvecs += 1;
         if let Some(pc_ref) = pc {
-            (*pc_ref).apply(PcSide::Left, raw, precond)?;
+            pc_ref.apply_s(PcSide::Left, raw, precond, scratch)?;
         } else {
             precond.copy_from_slice(raw);
         }
         Ok(())
     }
 
-    fn omega_value(&self, comm: &UniverseComm, stats: &mut IdrsStats, t: &[f64], v: &[f64]) -> f64 {
-        let mut local_tv = 0.0;
-        let mut local_tt = 0.0;
-        for i in 0..t.len() {
-            local_tv += t[i] * v[i];
-            local_tt += t[i] * t[i];
-        }
-        let (tv, tt) = comm.allreduce_sum2(local_tv, local_tt);
+    fn omega_value(&self, comm: &UniverseComm, stats: &mut IdrsStats, t: &[S], v: &[S]) -> S {
+        let tv = dot_reduce(comm, t, v);
+        let tt = dot_reduce(comm, t, t);
         stats.dots += 2;
-        let mut omega = if tt.abs() <= f64::EPSILON {
-            0.0
+        let tt_real = tt.real();
+        let mut omega = if tt_real.abs() <= f64::EPSILON {
+            S::zero()
         } else {
-            tv / tt
+            tv / S::from_real(tt_real)
         };
         if let Omega::MinResidualClipped { cos_min, kappa } = self.opts.omega_strategy {
-            let mut local_vv = 0.0;
-            for &vi in v {
-                local_vv += vi * vi;
-            }
-            let vv = comm.all_reduce_f64(local_vv);
+            let local_vv = v.iter().fold(0.0, |acc, &vi| acc + vi.abs() * vi.abs());
+            let vv = reduce_real(comm, local_vv);
             stats.dots += 1;
-            let denom = (tt * vv).sqrt();
+            let denom = (tt_real * vv).sqrt();
             if denom > 0.0 {
-                let cos = tv / denom;
+                let cos = if denom > 0.0 { tv.real() / denom } else { 0.0 };
                 if cos.abs() < cos_min {
-                    let sign = if tv >= 0.0 { 1.0 } else { -1.0 };
-                    let target = cos_min * denom / tt.max(1e-32);
-                    omega = kappa * omega + (1.0 - kappa) * sign * target;
+                    let sign = if tv.real() >= 0.0 { 1.0 } else { -1.0 };
+                    let target = cos_min * denom / tt_real.max(1e-32);
+                    omega = S::from_real(kappa) * omega
+                        + S::from_real(1.0 - kappa) * S::from_real(sign * target);
                 }
             }
         }
@@ -528,84 +575,72 @@ impl IdrsSolver {
             m(iter, res);
         }
     }
-}
-
-impl LinearSolver for IdrsSolver {
-    type Error = KError;
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
 
     #[allow(clippy::too_many_arguments)]
-    fn solve(
+    fn solve_internal<A>(
         &mut self,
-        a: &dyn LinOp<S = f64>,
-        pc: Option<&mut dyn Preconditioner>,
-        b: &[f64],
-        x: &mut [f64],
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
-        _work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<SolveStats<f64>, Self::Error> {
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
         let (m, n) = a.dims();
         if m != n {
             return Err(KError::InvalidInput(
-                "IDR(s) requires square operator".into(),
+                "IDR(s) requires square operator".to_string(),
             ));
         }
         if b.len() != n || x.len() != n {
             return Err(KError::InvalidInput(
-                "IDR(s): vector length mismatch".into(),
+                "IDR(s): vector length mismatch".to_string(),
             ));
         }
         if !matches!(pc_side, PcSide::Left) {
             return Err(KError::InvalidInput(
-                "IDR(s) currently supports only left preconditioning".into(),
+                "IDR(s) currently supports only left preconditioning".to_string(),
             ));
         }
         if self.opts.s == 0 {
-            return Err(KError::InvalidInput("IDR(s): s must be >= 1".into()));
+            return Err(KError::InvalidInput("IDR(s): s must be >= 1".to_string()));
         }
 
         self.ws.ensure(n, self.opts.s);
         let mut stats = IdrsStats::default();
 
         let monitors = monitors.unwrap_or(&[]);
-        let mut pc_opt = pc;
 
         self.random_bump = 0;
 
-        if x.iter().all(|&xi| xi == 0.0) {
-            self.ws.r_true.copy_from_slice(b);
+        if x.iter().all(|&xi| xi == S::zero()) {
+            self.ws.r_true[..n].copy_from_slice(b);
         } else {
-            a.try_matvec(x, &mut self.ws.t_raw)?;
+            a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
             stats.matvecs += 1;
             for i in 0..n {
                 self.ws.r_true[i] = b[i] - self.ws.t_raw[i];
             }
         }
-        if let Some(pc_ref) = pc_opt.as_mut() {
-            (*pc_ref).apply(PcSide::Left, &self.ws.r_true, &mut self.ws.r)?;
+        if let Some(pc_ref) = pc {
+            pc_ref.apply_s(
+                PcSide::Left,
+                &self.ws.r_true[..n],
+                &mut self.ws.r[..n],
+                &mut self.ws.scratch,
+            )?;
         } else {
-            self.ws.r.copy_from_slice(&self.ws.r_true);
+            self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
         }
 
-        let mut local_bnorm = 0.0;
-        for &bi in b {
-            local_bnorm += bi * bi;
-        }
-        let bnorm = comm.all_reduce_f64(local_bnorm).sqrt();
+        let bnorm = norm2(&b[..n], comm);
         stats.dots += 1;
         let norm_scale = if bnorm > 0.0 { bnorm } else { 1.0 };
-        let mut local_res = 0.0;
-        for &ri in &self.ws.r_true {
-            local_res += ri * ri;
-        }
-        let mut res_norm = comm.all_reduce_f64(local_res).sqrt();
+        let mut res_norm = norm2(&self.ws.r_true[..n], comm);
         stats.dots += 1;
         self.monitor(monitors, 0, res_norm);
         if res_norm <= self.opts.tol * norm_scale {
@@ -620,32 +655,27 @@ impl LinearSolver for IdrsSolver {
         self.build_shadow_space(comm, &mut stats)?;
 
         for buf in &mut self.ws.d_r {
-            buf.fill(0.0);
+            buf.fill(S::zero());
         }
         for buf in &mut self.ws.d_r_raw {
-            buf.fill(0.0);
+            buf.fill(S::zero());
         }
         for buf in &mut self.ws.d_x {
-            buf.fill(0.0);
+            buf.fill(S::zero());
         }
 
-        // Initialization: s minimum-norm steps
         for step in 0..min(self.opts.s, self.opts.maxit) {
             Self::apply_matvec(
                 a,
-                pc_opt.as_mut(),
-                &self.ws.r,
-                &mut self.ws.t_raw,
-                &mut self.ws.v,
+                pc,
+                &self.ws.r[..n],
+                &mut self.ws.t_raw[..n],
+                &mut self.ws.v[..n],
+                &mut self.ws.scratch,
                 &mut stats,
             )?;
-            let mut local_vr = 0.0;
-            let mut local_vv = 0.0;
-            for i in 0..n {
-                local_vr += self.ws.v[i] * self.ws.r[i];
-                local_vv += self.ws.v[i] * self.ws.v[i];
-            }
-            let (vr, vv) = comm.allreduce_sum2(local_vr, local_vv);
+            let vr = dot_reduce(comm, &self.ws.v[..n], &self.ws.r[..n]);
+            let vv = dot_reduce(comm, &self.ws.v[..n], &self.ws.v[..n]);
             stats.dots += 2;
             if vv.abs() <= f64::EPSILON {
                 return Err(KError::BreakdownOrIndefinite);
@@ -669,11 +699,7 @@ impl LinearSolver for IdrsSolver {
                 self.ws.r_true[i] += newest_r_raw[i];
             }
 
-            let mut local_res = 0.0;
-            for &ri in &self.ws.r_true {
-                local_res += ri * ri;
-            }
-            res_norm = comm.all_reduce_f64(local_res).sqrt();
+            res_norm = norm2(&self.ws.r_true[..n], comm);
             stats.dots += 1;
             self.monitor(monitors, step + 1, res_norm);
             if res_norm <= self.opts.tol * norm_scale {
@@ -688,7 +714,7 @@ impl LinearSolver for IdrsSolver {
 
         let mut attempts = 0usize;
         let mut iteration = min(self.opts.s, self.opts.maxit);
-        let mut omega_block = 0.0;
+        let mut omega_block = S::zero();
         while iteration < self.opts.maxit {
             for inner in 0..=self.opts.s {
                 self.compute_ph_r(comm, &mut stats);
@@ -726,7 +752,7 @@ impl LinearSolver for IdrsSolver {
                 }
 
                 let src_r = &self.ws.d_r[1..=self.opts.s];
-                Self::combine_delta(&mut self.ws.v, &self.ws.c, src_r, -1.0);
+                Self::combine_delta(&mut self.ws.v[..n], &self.ws.c, src_r, -S::one());
                 for i in 0..n {
                     self.ws.v[i] += self.ws.r[i];
                 }
@@ -734,13 +760,15 @@ impl LinearSolver for IdrsSolver {
                 if inner == 0 {
                     Self::apply_matvec(
                         a,
-                        pc_opt.as_mut(),
-                        &self.ws.v,
-                        &mut self.ws.t_raw,
-                        &mut self.ws.t,
+                        pc,
+                        &self.ws.v[..n],
+                        &mut self.ws.t_raw[..n],
+                        &mut self.ws.t[..n],
+                        &mut self.ws.scratch,
                         &mut stats,
                     )?;
-                    omega_block = self.omega_value(comm, &mut stats, &self.ws.t, &self.ws.v);
+                    omega_block =
+                        self.omega_value(comm, &mut stats, &self.ws.t[..n], &self.ws.v[..n]);
                     if omega_block.abs() <= f64::EPSILON {
                         return Err(KError::BreakdownOrIndefinite);
                     }
@@ -753,17 +781,17 @@ impl LinearSolver for IdrsSolver {
                     let (newest_r_raw, rest_rr) =
                         self.ws.d_r_raw.split_first_mut().expect("nonempty");
                     let src_x = &rest_x[..self.opts.s];
-                    Self::combine_delta(newest_x, &self.ws.c, src_x, -1.0);
+                    Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
                     for i in 0..n {
                         newest_x[i] += omega_block * self.ws.v[i];
                     }
                     let src_r = &rest_r[..self.opts.s];
-                    Self::combine_delta(newest_r, &self.ws.c, src_r, -1.0);
+                    Self::combine_delta(newest_r, &self.ws.c, src_r, -S::one());
                     for i in 0..n {
                         newest_r[i] -= omega_block * self.ws.t[i];
                     }
                     let src_rr = &rest_rr[..self.opts.s];
-                    Self::combine_delta(newest_r_raw, &self.ws.c, src_rr, -1.0);
+                    Self::combine_delta(newest_r_raw, &self.ws.c, src_rr, -S::one());
                     for i in 0..n {
                         newest_r_raw[i] -= omega_block * self.ws.t_raw[i];
                     }
@@ -776,16 +804,17 @@ impl LinearSolver for IdrsSolver {
                     let (newest_r_raw, _rest_rr) =
                         self.ws.d_r_raw.split_first_mut().expect("nonempty");
                     let src_x = &rest_x[..self.opts.s];
-                    Self::combine_delta(newest_x, &self.ws.c, src_x, -1.0);
+                    Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
                     for i in 0..n {
                         newest_x[i] += omega_block * self.ws.v[i];
                     }
                     Self::apply_matvec(
                         a,
-                        pc_opt.as_mut(),
-                        newest_x,
-                        &mut self.ws.t_raw,
-                        &mut self.ws.t,
+                        pc,
+                        &*newest_x,
+                        &mut self.ws.t_raw[..n],
+                        &mut self.ws.t[..n],
+                        &mut self.ws.scratch,
                         &mut stats,
                     )?;
                     for i in 0..n {
@@ -807,23 +836,26 @@ impl LinearSolver for IdrsSolver {
 
                 if let Some(freq) = self.opts.monitor_true_residual_every {
                     if iteration % freq == 0 {
-                        a.try_matvec(x, &mut self.ws.t_raw)?;
+                        a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
                         stats.matvecs += 1;
                         for i in 0..n {
                             self.ws.r_true[i] = b[i] - self.ws.t_raw[i];
                         }
-                        if let Some(pc_ref) = pc_opt.as_mut() {
-                            (*pc_ref).apply(PcSide::Left, &self.ws.r_true, &mut self.ws.r)?;
+                        if let Some(pc_ref) = pc {
+                            pc_ref.apply_s(
+                                PcSide::Left,
+                                &self.ws.r_true[..n],
+                                &mut self.ws.r[..n],
+                                &mut self.ws.scratch,
+                            )?;
+                        } else {
+                            self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
                         }
                         stats.residual_replacements += 1;
                     }
                 }
 
-                let mut local_res = 0.0;
-                for &ri in &self.ws.r_true {
-                    local_res += ri * ri;
-                }
-                res_norm = comm.all_reduce_f64(local_res).sqrt();
+                res_norm = norm2(&self.ws.r_true[..n], comm);
                 stats.dots += 1;
                 self.monitor(monitors, iteration, res_norm);
                 if res_norm <= self.opts.tol * norm_scale {
@@ -851,5 +883,86 @@ impl LinearSolver for IdrsSolver {
             residual_replacements: stats.residual_replacements,
         };
         Ok(out)
+    }
+
+    pub fn solve_k<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_internal(a, pc, b, x, pc_side, comm, monitors)
+    }
+
+    pub fn solve_f64<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+    ) -> Result<SolveStats<f64>, KError>
+    where
+        A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
+    {
+        let op = as_s_op(a);
+        let pc_wrapper = pc.map(as_s_pc);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|p| p as &dyn KPreconditioner<Scalar = S>);
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
+            let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            self.solve_internal(&op, pc_ref, b_s, x_s, pc_side, comm, monitors)
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+            let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+            let result = self.solve_internal(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors);
+            if result.is_ok() {
+                for (dst, src) in x.iter_mut().zip(x_s.iter()) {
+                    *dst = src.real();
+                }
+            }
+            result
+        }
+    }
+}
+
+impl LinearSolver for IdrsSolver {
+    type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn setup_workspace(&mut self, _work: &mut crate::context::ksp_context::Workspace) {}
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        _work: Option<&mut crate::context::ksp_context::Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
+        self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors)
     }
 }

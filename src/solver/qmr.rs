@@ -2,15 +2,25 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; monitors report the true `||r||`.
 
+use crate::algebra::blas::dot_conj;
+use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use crate::matrix::op::LinOp;
+use crate::matrix::op::{LinOp, LinOpF64};
+use crate::ops::klinop::KLinOp;
+use crate::ops::kpc::KPreconditioner;
+use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::{Comm, UniverseComm};
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use std::any::Any;
+
+#[cfg(feature = "complex")]
+use num_complex::Complex64;
 
 pub struct QmrSolver {
     pub conv: Convergence,
@@ -28,129 +38,96 @@ impl QmrSolver {
         }
     }
 
-    #[inline]
-    fn dot(x: &[f64], y: &[f64], comm: &UniverseComm) -> f64 {
-        comm.dot(x, y)
-    }
-
-    #[inline]
-    fn nrm2(x: &[f64], comm: &UniverseComm) -> f64 {
-        Self::dot(x, x, comm).sqrt()
-    }
-
-    fn ensure_workspace(work: &mut Workspace, n: usize) {
-        let need = 6; // r_tld, p, p_tld, v, v_tld, s
-        if work.tmp1.len() != n {
-            work.tmp1.resize(n, 0.0);
-        }
-        if work.tmp2.len() != n {
-            work.tmp2.resize(n, 0.0);
-        }
-        while work.q.len() < need {
-            work.q.push(Vec::new());
-        }
-        for q in &mut work.q[..need] {
-            if q.len() != n {
-                q.resize(n, 0.0);
-            }
-        }
-    }
-}
-
-impl LinearSolver for QmrSolver {
-    type Error = KError;
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn setup_workspace(&mut self, work: &mut Workspace) {
-        let n = work.tmp1.len();
-        Self::ensure_workspace(work, n);
-    }
-
-    fn solve(
+    #[allow(clippy::too_many_arguments)]
+    fn solve_internal<A>(
         &mut self,
-        a: &dyn LinOp<S = f64>,
-        _pc: Option<&mut dyn Preconditioner>,
-        b: &[f64],
-        x: &mut [f64],
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
         pc_side: PcSide,
-        _comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
         work: Option<&mut Workspace>,
-    ) -> Result<SolveStats<f64>, Self::Error> {
-        let (m, ncols) = a.dims();
-        if m != ncols {
-            return Err(KError::InvalidInput("QMR requires square A".into()));
-        }
-        if b.len() != m || x.len() != ncols {
-            return Err(KError::InvalidInput("QMR: size mismatch".into()));
-        }
-        if !a.supports_transpose() {
-            return Err(KError::InvalidInput("QMR requires A^T".into()));
-        }
-
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
         if matches!(pc_side, PcSide::Symmetric) {
             return Err(KError::InvalidInput(
-                "QMR: symmetric preconditioning not supported".into(),
+                "QMR: symmetric preconditioning not supported".to_string(),
             ));
         }
-        let _pc: Option<&dyn Preconditioner> = _pc.as_deref();
-        let _ = _pc;
-        let _ = pc_side;
+        let _ = pc; // Preconditioning support is not wired yet.
 
-        let mons = monitors.unwrap_or(&[]);
-        let mut local_work;
-        let w = match work {
-            Some(w) => w,
+        let (m, ncols) = a.dims();
+        if m != ncols {
+            return Err(KError::InvalidInput(
+                "QMR requires a square operator".to_string(),
+            ));
+        }
+        if b.len() != m || x.len() != ncols {
+            return Err(KError::InvalidInput(
+                "QMR: vector size mismatch".to_string(),
+            ));
+        }
+        if !a.supports_t_matvec_s() {
+            return Err(KError::InvalidInput(
+                "QMR requires t_matvec; provide an operator that implements A^T·x".to_string(),
+            ));
+        }
+
+        let monitors = monitors.unwrap_or(&[]);
+
+        let mut owned_workspace: Workspace;
+        let work: &mut Workspace = match work {
+            Some(ws) => ws,
             None => {
-                local_work = Workspace::new(ncols);
-                Self::ensure_workspace(&mut local_work, ncols);
-                &mut local_work
+                owned_workspace = Workspace::new(ncols);
+                &mut owned_workspace
             }
         };
-        Self::ensure_workspace(w, ncols);
+        let buffers = QmrWorkspace::acquire(work, ncols);
+        let QmrWorkspace {
+            r,
+            t,
+            r_tld,
+            p,
+            p_tld,
+            v,
+            v_tld,
+            s,
+            tmp_true,
+            scratch,
+        } = buffers;
 
-        let (r, t) = (&mut w.tmp1, &mut w.tmp2);
-        let (r_tld, p, p_tld, v, v_tld, s) = {
-            let (a, rest) = w.q.split_at_mut(1);
-            let (b, rest) = rest.split_at_mut(1);
-            let (c, rest) = rest.split_at_mut(1);
-            let (d, rest) = rest.split_at_mut(1);
-            let (e, rest) = rest.split_at_mut(1);
-            let (f, _) = rest.split_at_mut(1);
-            (
-                &mut a[0], &mut b[0], &mut c[0], &mut d[0], &mut e[0], &mut f[0],
-            )
-        };
-
-        // r = b - A x
-        a.matvec(x, r);
-        for i in 0..ncols {
-            r[i] = b[i] - r[i];
+        if x.iter().any(|&xi| xi != S::zero()) {
+            a.matvec_s(x, r, scratch);
+            for (ri, &bi) in r.iter_mut().zip(b.iter()) {
+                let ai = *ri;
+                *ri = bi - ai;
+            }
+        } else {
+            r.copy_from_slice(b);
         }
         r_tld.copy_from_slice(r);
 
-        let mut res = Self::nrm2(r, _comm);
-        let bnorm = Self::nrm2(b, _comm).max(1e-32);
-        let thr = self.conv.atol.max(self.conv.rtol * bnorm);
-        if !mons.is_empty() {
-            for m in mons {
-                m(0, res);
-            }
-        }
-        if res <= thr {
-            let reason = if res <= self.conv.atol {
-                ConvergedReason::ConvergedAtol
-            } else {
-                ConvergedReason::ConvergedRtol
-            };
-            return Ok(SolveStats::new(0, res, reason));
+        let mut res = norm2(r, comm);
+        let bnorm = norm2(b, comm).max(1e-32);
+
+        for m in monitors {
+            m(0, res);
         }
 
-        let eps = 1e-300_f64;
-        let mut rho = Self::dot(r_tld, r, _comm);
+        let (reason0, mut stats0) = self.conv.check(res, bnorm, 0);
+        if !matches!(reason0, ConvergedReason::Continued) {
+            let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+            stats0.final_residual = true_res;
+            return Ok(stats0);
+        }
+
+        let eps = 1e-300;
+        let mut rho = dot(r_tld, r, comm);
         if rho.abs() <= eps {
             return Err(KError::IndefiniteMatrix);
         }
@@ -160,22 +137,27 @@ impl LinearSolver for QmrSolver {
                 p.copy_from_slice(r);
                 p_tld.copy_from_slice(r_tld);
             } else {
-                let rho_new = Self::dot(r_tld, r, _comm);
+                let rho_new = dot(r_tld, r, comm);
                 if rho_new.abs() <= eps {
                     return Err(KError::IndefiniteMatrix);
                 }
                 let beta = rho_new / rho;
                 for i in 0..ncols {
-                    p[i] = r[i] + beta * p[i];
-                    p_tld[i] = r_tld[i] + beta * p_tld[i];
+                    let ri = r[i];
+                    let old_p = p[i];
+                    p[i] = ri + beta * old_p;
+
+                    let ri_tld = r_tld[i];
+                    let old_pt = p_tld[i];
+                    p_tld[i] = ri_tld + beta * old_pt;
                 }
                 rho = rho_new;
             }
 
-            a.matvec(p, v);
-            a.t_matvec(p_tld, v_tld);
+            a.matvec_s(p, v, scratch);
+            a.t_matvec_s(p_tld, v_tld, scratch);
 
-            let sigma = Self::dot(p_tld, v, _comm);
+            let sigma = dot(p_tld, v, comm);
             if sigma.abs() <= eps {
                 return Err(KError::IndefiniteMatrix);
             }
@@ -184,49 +166,235 @@ impl LinearSolver for QmrSolver {
             for i in 0..ncols {
                 s[i] = r[i] - alpha * v[i];
             }
-            a.matvec(s, t);
+            a.matvec_s(s, t, scratch);
 
-            let tt = Self::dot(t, t, _comm);
+            let tt = dot(t, t, comm).real();
             if tt <= eps || !tt.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
-            let ts = Self::dot(t, s, _comm);
-            let omega = ts / tt;
+            let ts = dot(t, s, comm);
+            let omega = ts / S::from_real(tt);
 
             for i in 0..ncols {
                 x[i] += alpha * p[i] + omega * s[i];
             }
             for i in 0..ncols {
-                r[i] = s[i] - omega * t[i];
+                let si = s[i];
+                let ti = t[i];
+                r[i] = si - omega * ti;
+                r_tld[i] = si - omega.conj() * ti;
             }
 
-            // true residual
-            a.matvec(x, t);
-            for i in 0..ncols {
-                t[i] = b[i] - t[i];
-            }
-            res = Self::nrm2(t, _comm);
-
-            if !mons.is_empty() {
-                for m in mons {
-                    m(k + 1, res);
-                }
+            res = norm2(r, comm);
+            for m in monitors {
+                m(k + 1, res);
             }
 
-            let (reason, mut st) = self.conv.check(res, bnorm, k + 1);
-            if matches!(
-                reason,
-                ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
-            ) {
-                st.final_residual = res;
-                return Ok(st);
+            let (reason, mut stats) = self.conv.check(res, bnorm, k + 1);
+            if !matches!(reason, ConvergedReason::Continued) {
+                let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+                stats.final_residual = true_res;
+                return Ok(stats);
             }
         }
 
+        let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
         Ok(SolveStats::new(
             self.conv.max_iters,
-            res,
+            true_res,
             ConvergedReason::DivergedMaxIts,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_k<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_internal(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_f64<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn PreconditionerF64>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError>
+    where
+        A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
+    {
+        let op = as_s_op(a);
+        let pc_wrapper = pc.map(as_s_pc);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|w| w as &dyn KPreconditioner<Scalar = S>);
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
+            let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            self.solve_internal(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+            let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+            let result =
+                self.solve_internal(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            if result.is_ok() {
+                for (dst, src) in x.iter_mut().zip(x_s.iter()) {
+                    *dst = src.real();
+                }
+            }
+            result
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn PreconditionerF64>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError>
+    where
+        A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
+    {
+        self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+}
+
+impl LinearSolver for QmrSolver {
+    type Error = KError;
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn setup_workspace(&mut self, work: &mut Workspace) {
+        if work.q_s.len() < 6 {
+            work.q_s.resize(6, Vec::new());
+        }
+    }
+
+    fn solve(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, Self::Error> {
+        let pc = pc.map(|m| m as &dyn PreconditionerF64);
+        self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+}
+
+fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
+    if comm.size() == 1 {
+        value
+    } else {
+        comm.allreduce_sum(value)
+    }
+}
+
+fn reduce_scalar<C: Comm>(comm: &C, value: S) -> S {
+    if comm.size() == 1 {
+        value
+    } else {
+        #[cfg(feature = "complex")]
+        {
+            let local: Complex64 = value;
+            let (re, im) = comm.allreduce_sum2(local.re, local.im);
+            Complex64::new(re, im)
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            S::from_real(comm.allreduce_sum(value.real()))
+        }
+    }
+}
+
+fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
+    let local = dot_conj(x, y);
+    reduce_scalar(comm, local)
+}
+
+fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
+    let local = dot_conj(x, x).real();
+    reduce_real(comm, local).sqrt()
+}
+
+struct QmrWorkspace<'a> {
+    r: &'a mut [S],
+    t: &'a mut [S],
+    r_tld: &'a mut [S],
+    p: &'a mut [S],
+    p_tld: &'a mut [S],
+    v: &'a mut [S],
+    v_tld: &'a mut [S],
+    s: &'a mut [S],
+    tmp_true: &'a mut [S],
+    scratch: &'a mut BridgeScratch,
+}
+
+impl<'a> QmrWorkspace<'a> {
+    fn acquire(work: &'a mut Workspace, n: usize) -> Self {
+        take_or_resize(&mut work.tmp1, n);
+        take_or_resize(&mut work.tmp2, n);
+        if work.bridge_tmp.len() != n {
+            work.bridge_tmp.resize(n, S::zero());
+        }
+        while work.q_s.len() < 6 {
+            work.q_s.push(Vec::new());
+        }
+        for buf in &mut work.q_s[..6] {
+            take_or_resize(buf, n);
+        }
+
+        let (r_tld_slice, rest) = work.q_s.split_at_mut(1);
+        let (p_slice, rest) = rest.split_at_mut(1);
+        let (p_tld_slice, rest) = rest.split_at_mut(1);
+        let (v_slice, rest) = rest.split_at_mut(1);
+        let (v_tld_slice, rest) = rest.split_at_mut(1);
+        let (s_slice, _) = rest.split_at_mut(1);
+
+        Self {
+            r: &mut work.tmp1[..n],
+            t: &mut work.tmp2[..n],
+            r_tld: &mut r_tld_slice[0][..n],
+            p: &mut p_slice[0][..n],
+            p_tld: &mut p_tld_slice[0][..n],
+            v: &mut v_slice[0][..n],
+            v_tld: &mut v_tld_slice[0][..n],
+            s: &mut s_slice[0][..n],
+            tmp_true: &mut work.bridge_tmp[..n],
+            scratch: &mut work.bridge,
+        }
     }
 }
