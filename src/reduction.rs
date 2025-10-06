@@ -1,5 +1,8 @@
 use crate::parallel::Comm;
 
+#[cfg(feature = "mpi")]
+use crate::parallel::MpiComm;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReproMode {
     Fast,
@@ -226,67 +229,99 @@ impl<const N: usize> PacketAccum<N> for DDP<N> {
     }
 }
 
-pub trait CommDeterministic {
+pub trait CommDeterministic: Comm {
     fn allreduce_det<const N: usize>(&self, local: &Packet<N>, mode: ReproMode) -> Packet<N>;
 }
 
-use crate::parallel::UniverseComm;
+fn allreduce_packet_det<const N: usize, C>(
+    comm: &C,
+    local: &Packet<N>,
+    mode: ReproMode,
+) -> Packet<N>
+where
+    C: Comm,
+{
+    if matches!(mode, ReproMode::Fast) {
+        let mut tmp = local.clone();
+        comm.allreduce_sum_slice(&mut tmp.v);
+        return tmp;
+    }
+
+    let size = comm.size();
+    let rank = comm.rank();
+    if size == 1 {
+        return local.clone();
+    }
+
+    if rank == 0 {
+        match mode {
+            ReproMode::DeterministicAccurate => {
+                let mut acc = DDP::<N>::new();
+                acc.add(local);
+                for src in 1..size {
+                    let mut buf = Packet::<N>::default();
+                    {
+                        let mut recv = comm.irecv_from(&mut buf.v, src as i32);
+                        comm.wait_all(std::slice::from_mut(&mut recv));
+                    }
+                    acc.add(&buf);
+                }
+                let total = acc.finish();
+                for dest in 1..size {
+                    let mut send = comm.isend_to(&total.v, dest as i32);
+                    comm.wait_all(std::slice::from_mut(&mut send));
+                }
+                total
+            }
+            _ => {
+                let mut acc = KahanP::<N>::new();
+                acc.add(local);
+                for src in 1..size {
+                    let mut buf = Packet::<N>::default();
+                    {
+                        let mut recv = comm.irecv_from(&mut buf.v, src as i32);
+                        comm.wait_all(std::slice::from_mut(&mut recv));
+                    }
+                    acc.add(&buf);
+                }
+                let total = acc.finish();
+                for dest in 1..size {
+                    let mut send = comm.isend_to(&total.v, dest as i32);
+                    comm.wait_all(std::slice::from_mut(&mut send));
+                }
+                total
+            }
+        }
+    } else {
+        let mut send = comm.isend_to(&local.v, 0);
+        comm.wait_all(std::slice::from_mut(&mut send));
+        let mut buf = Packet::<N>::default();
+        {
+            let mut recv = comm.irecv_from(&mut buf.v, 0);
+            comm.wait_all(std::slice::from_mut(&mut recv));
+        }
+        buf
+    }
+}
+
+use crate::parallel::{NoComm, UniverseComm};
 
 impl CommDeterministic for UniverseComm {
     fn allreduce_det<const N: usize>(&self, local: &Packet<N>, mode: ReproMode) -> Packet<N> {
-        if matches!(mode, ReproMode::Fast) {
-            let mut tmp = local.clone();
-            self.allreduce_sum_slice(&mut tmp.v);
-            return tmp;
-        }
-        let size = self.size();
-        let rank = self.rank();
-        if size == 1 {
-            return local.clone();
-        }
-        if rank == 0 {
-            match mode {
-                ReproMode::DeterministicAccurate => {
-                    let mut acc = DDP::<N>::new();
-                    acc.add(local);
-                    for src in 1..size {
-                        let mut buf = Packet::<N>::default();
-                        let mut r = self.irecv_from(&mut buf.v, src as i32);
-                        self.wait_all(std::slice::from_mut(&mut r));
-                        acc.add(&buf);
-                    }
-                    let total = acc.finish();
-                    for dest in 1..size {
-                        let mut s = self.isend_to(&total.v, dest as i32);
-                        self.wait_all(std::slice::from_mut(&mut s));
-                    }
-                    total
-                }
-                _ => {
-                    let mut acc = KahanP::<N>::new();
-                    acc.add(local);
-                    for src in 1..size {
-                        let mut buf = Packet::<N>::default();
-                        let mut r = self.irecv_from(&mut buf.v, src as i32);
-                        self.wait_all(std::slice::from_mut(&mut r));
-                        acc.add(&buf);
-                    }
-                    let total = acc.finish();
-                    for dest in 1..size {
-                        let mut s = self.isend_to(&total.v, dest as i32);
-                        self.wait_all(std::slice::from_mut(&mut s));
-                    }
-                    total
-                }
-            }
-        } else {
-            let mut s = self.isend_to(&local.v, 0);
-            self.wait_all(std::slice::from_mut(&mut s));
-            let mut buf = Packet::<N>::default();
-            let mut r = self.irecv_from(&mut buf.v, 0);
-            self.wait_all(std::slice::from_mut(&mut r));
-            buf
-        }
+        allreduce_packet_det(self, local, mode)
+    }
+}
+
+impl CommDeterministic for NoComm {
+    fn allreduce_det<const N: usize>(&self, local: &Packet<N>, _mode: ReproMode) -> Packet<N> {
+        local.clone()
+    }
+}
+
+#[cfg(feature = "mpi")]
+impl CommDeterministic for MpiComm {
+    fn allreduce_det<const N: usize>(&self, local: &Packet<N>, mode: ReproMode) -> Packet<N> {
+        allreduce_packet_det(self, local, mode)
     }
 }
 
@@ -297,14 +332,9 @@ pub struct DotEngine {
 
 impl DotEngine {
     pub fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
-        let local = if self.opts.mode == ReproMode::Fast {
-            u.iter().zip(v).map(|(a, b)| a * b).sum()
-        } else if self.opts.single_thread_local {
-            dot_local_slice(u, v, self.opts.mode)
-        } else {
-            dot_local_deterministic_parallel(u, v, self.opts.chunk_len, self.opts.mode)
+        let packet = Packet::<1> {
+            v: [self.dot_local(u, v)],
         };
-        let packet = Packet::<1> { v: [local] };
         let g = comm.allreduce_det(&packet, self.opts.mode);
         g.v[0]
     }
@@ -313,5 +343,137 @@ impl DotEngine {
         let packet = Packet::<2> { v: [a, b] };
         let g = comm.allreduce_det(&packet, self.opts.mode);
         (g.v[0], g.v[1])
+    }
+
+    fn dot_local(&self, u: &[f64], v: &[f64]) -> f64 {
+        if self.opts.mode == ReproMode::Fast {
+            u.iter().zip(v).map(|(a, b)| a * b).sum()
+        } else if self.opts.single_thread_local {
+            dot_local_slice(u, v, self.opts.mode)
+        } else {
+            dot_local_deterministic_parallel(u, v, self.opts.chunk_len, self.opts.mode)
+        }
+    }
+
+    pub fn dot_many_into<C: Comm + CommDeterministic>(
+        &self,
+        pairs: &[(&[f64], &[f64])],
+        out: &mut [f64],
+        comm: &C,
+    ) {
+        if pairs.len() != out.len() {
+            panic!(
+                "dot_many_into length mismatch: {} pairs for {} slots",
+                pairs.len(),
+                out.len()
+            );
+        }
+        if pairs.is_empty() {
+            return;
+        }
+
+        for ((u, v), slot) in pairs.iter().zip(out.iter_mut()) {
+            if u.len() != v.len() {
+                panic!(
+                    "dot_many_into vector length mismatch: {} vs {}",
+                    u.len(),
+                    v.len()
+                );
+            }
+            *slot = self.dot_local(u, v);
+        }
+
+        let width = self.opts.packet_width.max(1).min(4);
+        let mode = self.opts.mode;
+        let mut idx = 0;
+        while idx < out.len() {
+            let chunk_len = (out.len() - idx).min(width);
+            match chunk_len {
+                1 => {
+                    let packet = Packet::<1> { v: [out[idx]] };
+                    let reduced = comm.allreduce_det(&packet, mode);
+                    out[idx] = reduced.v[0];
+                }
+                2 => {
+                    let packet = Packet::<2> {
+                        v: [out[idx], out[idx + 1]],
+                    };
+                    let reduced = comm.allreduce_det(&packet, mode);
+                    out[idx..idx + 2].copy_from_slice(&reduced.v);
+                }
+                3 => {
+                    let packet = Packet::<3> {
+                        v: [out[idx], out[idx + 1], out[idx + 2]],
+                    };
+                    let reduced = comm.allreduce_det(&packet, mode);
+                    out[idx..idx + 3].copy_from_slice(&reduced.v);
+                }
+                _ => {
+                    let packet = Packet::<4> {
+                        v: [out[idx], out[idx + 1], out[idx + 2], out[idx + 3]],
+                    };
+                    let reduced = comm.allreduce_det(&packet, mode);
+                    out[idx..idx + 4].copy_from_slice(&reduced.v);
+                }
+            }
+            idx += chunk_len;
+        }
+    }
+
+    pub fn dot_many<C: Comm + CommDeterministic>(
+        &self,
+        pairs: &[(&[f64], &[f64])],
+        comm: &C,
+    ) -> Vec<f64> {
+        let mut out = vec![0.0; pairs.len()];
+        self.dot_many_into(pairs, &mut out, comm);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel::NoComm;
+
+    #[test]
+    fn dot_engine_many_matches_individual_dots() {
+        let mut opts = ReductionOptions::default();
+        opts.packet_width = 4;
+        let engine = DotEngine { opts };
+        let a = vec![1.0, -2.0, 3.5, 0.75];
+        let b = vec![0.5, 1.5, -2.0, 4.0];
+        let c = vec![1.25, -0.5, 3.0, -1.0];
+        let pairs = [(&a[..], &b[..]), (&a[..], &c[..])];
+        let mut out = vec![0.0; pairs.len()];
+        engine.dot_many_into(&pairs, &mut out, &NoComm);
+
+        let single_ab = engine.dot(&a, &b, &NoComm);
+        let single_ac = engine.dot(&a, &c, &NoComm);
+        assert!((out[0] - single_ab).abs() < 1e-12);
+        assert!((out[1] - single_ac).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dot_engine_many_batches_more_than_packet_width() {
+        let mut opts = ReductionOptions::default();
+        opts.packet_width = 3;
+        let engine = DotEngine { opts };
+
+        let inputs: Vec<Vec<f64>> = (0..5)
+            .map(|i| vec![i as f64 + 1.0, (i as f64 - 0.5) * 0.75])
+            .collect();
+        let mut pairs = Vec::new();
+        for idx in 0..inputs.len() {
+            let next = (idx + 1) % inputs.len();
+            pairs.push((&inputs[idx][..], &inputs[next][..]));
+        }
+        let mut out = vec![0.0; pairs.len()];
+        engine.dot_many_into(pairs.as_slice(), &mut out, &NoComm);
+
+        for (idx, (u, v)) in pairs.iter().enumerate() {
+            let expected = engine.dot(u, v, &NoComm);
+            assert!((out[idx] - expected).abs() < 1e-12);
+        }
     }
 }

@@ -1,7 +1,6 @@
 //! Flexible GMRES (FGMRES) over the scalar-generic [`KLinOp`] interface with optional
 //! mutable preconditioning support.
 
-use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
@@ -11,11 +10,14 @@ use crate::matrix::op::LinOp;
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
-use crate::parallel::UniverseComm;
+use crate::parallel::{
+    UniverseComm, global_dot_conj_many_into, global_nrm2, global_nrm2_many_into,
+};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::recompute_true_residual_norm_s;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+use smallvec::SmallVec;
 use std::any::Any;
 
 /// Orthogonalization flavor
@@ -69,15 +71,6 @@ impl FgmresSolver {
             reorth: ReorthPolicy::IfNeeded,
             reorth_tol: 0.7,
         }
-    }
-
-    #[inline]
-    fn dot(x: &[S], y: &[S]) -> S {
-        dot_conj(x, y)
-    }
-    #[inline]
-    fn nrm2(x: &[S]) -> R {
-        nrm2(x)
     }
 
     fn ensure_workspace(&self, w: &mut Workspace, n: usize, m: usize) {
@@ -146,8 +139,10 @@ impl FgmresSolver {
             ws.tmp1[i] = b[i] - ws.tmp1[i];
         }
 
-        let mut beta0 = Self::nrm2(&ws.tmp1[..n]);
-        let bnorm = Self::nrm2(b).max(1e-32);
+        let mut norms = [R::zero(); 2];
+        global_nrm2_many_into(comm, &[&ws.tmp1[..n], b], &mut norms);
+        let mut beta0 = norms[0];
+        let bnorm = norms[1].max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
         ws.h_mem.fill(S::zero());
@@ -223,26 +218,53 @@ impl FgmresSolver {
                         ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
                         a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
 
-                        let mut hvals = vec![S::zero(); j + 1];
+                        let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
+                        hvals.resize(j + 1, S::zero());
                         {
-                            let tmp2 = &mut ws.tmp2[..n];
+                            let tmp2_slice: &[S] = &ws.tmp2[..n];
+                            let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
+                                SmallVec::with_capacity(j + 1);
                             for i in 0..=j {
                                 let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                let hij = Self::dot(vi, tmp2);
-                                hvals[i] = hij;
+                                pairs.push((vi, tmp2_slice));
+                            }
+                            global_dot_conj_many_into(comm, pairs.as_slice(), hvals.as_mut_slice());
+                        }
+                        {
+                            let tmp2 = &mut ws.tmp2[..n];
+                            for (i, hij) in hvals.iter().copied().enumerate() {
+                                let vi = &ws.v_mem[i * n..(i + 1) * n];
                                 for (w_i, &vi_val) in tmp2.iter_mut().zip(vi) {
                                     *w_i -= hij * vi_val;
                                 }
                             }
-                            if matches!(self.orthog, Orthog::Modified) {
+                        }
+                        if matches!(self.orthog, Orthog::Modified) {
+                            let mut corr: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
+                            corr.resize(j + 1, S::zero());
+                            {
+                                let tmp2_slice: &[S] = &ws.tmp2[..n];
+                                let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
+                                    SmallVec::with_capacity(j + 1);
                                 for i in 0..=j {
                                     let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    let corr = Self::dot(vi, tmp2);
-                                    if corr.abs() > 1e-12 {
+                                    pairs.push((vi, tmp2_slice));
+                                }
+                                global_dot_conj_many_into(
+                                    comm,
+                                    pairs.as_slice(),
+                                    corr.as_mut_slice(),
+                                );
+                            }
+                            {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                for (i, corr_val) in corr.into_iter().enumerate() {
+                                    if corr_val.abs() > 1e-12 {
+                                        let vi = &ws.v_mem[i * n..(i + 1) * n];
                                         for (w_i, &vi_val) in tmp2.iter_mut().zip(vi) {
-                                            *w_i -= corr * vi_val;
+                                            *w_i -= corr_val * vi_val;
                                         }
-                                        hvals[i] += corr;
+                                        hvals[i] += corr_val;
                                     }
                                 }
                             }
@@ -251,7 +273,7 @@ impl FgmresSolver {
                             *ws.h_at_mut(i, j) = hvals[i];
                         }
 
-                        let hij1 = nrm2(&ws.tmp2[..n]);
+                        let hij1 = global_nrm2(comm, &ws.tmp2[..n]);
                         *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
 
                         if hij1 > 0.0 {
@@ -363,7 +385,7 @@ impl FgmresSolver {
             for i in 0..n {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
-            beta0 = Self::nrm2(&ws.tmp1[..n]);
+            beta0 = global_nrm2(comm, &ws.tmp1[..n]);
 
             ws.h_mem.fill(S::zero());
             ws.cs.fill(0.0);

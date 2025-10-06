@@ -10,21 +10,12 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{Comm, UniverseComm, global_dot_conj_many_into, global_nrm2_many_into};
 use crate::preconditioner::{self, PcSide, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::recompute_true_residual_norm_s;
+use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
-
-fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
-}
-
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
-    global.real().sqrt()
-}
 
 struct MinresWorkspace<'a> {
     v_prev: &'a mut [S],
@@ -159,13 +150,16 @@ impl MinresSolver {
             tmp2.copy_from_slice(tmp1);
         }
 
-        let mut res = norm2(tmp2, comm);
+        let mut batched_norms = [0.0; 2];
+        let tmp2_view: &[S] = &tmp2[..n];
+        global_nrm2_many_into(comm, &[tmp2_view, b], &mut batched_norms);
+        let mut res = batched_norms[0];
         let res0 = res;
         for m in monitors {
             m(0, res);
         }
 
-        let bnorm = norm2(b, comm).max(1e-32);
+        let bnorm = batched_norms[1].max(1e-32);
         let thr = self.conv.atol.max(self.conv.rtol * bnorm);
         if res <= thr {
             let reason = if res <= self.conv.atol {
@@ -192,6 +186,8 @@ impl MinresSolver {
         let mut final_reason = ConvergedReason::Continued;
         let mut iters = 0usize;
 
+        let mut dot_results = [S::zero(); 3];
+
         for k in 1..=self.conv.max_iters {
             iters = k;
 
@@ -202,16 +198,62 @@ impl MinresSolver {
                 tmp2.copy_from_slice(tmp1);
             }
 
-            let alpha = dot(v_k, tmp2, comm).real();
+            let (alpha, prev_projection, tmp2_norm_sq) = {
+                let v_k_view: &[S] = &v_k[..n];
+                let v_prev_view: &[S] = &v_prev[..n];
+                let tmp2_view: &[S] = &tmp2[..n];
+
+                let mut pairs: [(&[S], &[S]); 3] = [(&[], &[]); 3];
+                let mut used = 0usize;
+                pairs[used] = (v_k_view, tmp2_view);
+                used += 1;
+                if k > 1 {
+                    pairs[used] = (v_prev_view, tmp2_view);
+                    used += 1;
+                }
+                pairs[used] = (tmp2_view, tmp2_view);
+                used += 1;
+
+                global_dot_conj_many_into(comm, &pairs[..used], &mut dot_results[..used]);
+
+                let alpha = dot_result_to_real(dot_results[0]);
+                let prev_proj = if k > 1 {
+                    dot_result_to_real(dot_results[1])
+                } else {
+                    0.0
+                };
+                let tmp2_norm_sq = dot_result_to_real(dot_results[used - 1]);
+                (alpha, prev_proj, tmp2_norm_sq)
+            };
+
             let alpha_s = S::from_real(alpha);
             let beta_s = S::from_real(beta);
             for i in 0..n {
                 v_next[i] = tmp2[i] - alpha_s * v_k[i] - beta_s * v_prev[i];
             }
-            let beta_next = norm2(v_next, comm);
+
+            let mut beta_next_sq = tmp2_norm_sq - alpha * alpha;
+            if k > 1 {
+                beta_next_sq =
+                    tmp2_norm_sq + beta * beta - alpha * alpha - 2.0 * beta * prev_projection;
+            }
+            if beta_next_sq < 0.0 {
+                beta_next_sq = 0.0;
+            }
+            if comm.size() <= 1 {
+                let mut local_sq = 0.0;
+                for &val in &v_next[..n] {
+                    let mag = val.abs();
+                    local_sq += mag * mag;
+                }
+                beta_next_sq = local_sq;
+            }
+            let mut beta_next = beta_next_sq.sqrt();
+            if beta_next <= 1e-30 {
+                beta_next = 0.0;
+            }
             if beta_next == 0.0 {
                 final_reason = ConvergedReason::ConvergedAtol;
-                beta = beta_next;
                 break;
             }
             if beta_next != 0.0 {

@@ -13,10 +13,12 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::common::dot_result_to_real;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use smallvec::SmallVec;
 use std::any::Any;
 
 #[cfg(feature = "logging")]
@@ -24,27 +26,13 @@ use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
 
-fn dot<C: Comm>(u: &[S], v: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(u, v));
-    #[cfg(feature = "complex")]
-    {
-        debug_assert!(
-            global.imag().abs() <= 1e-12 * global.real().abs().max(1.0) + 1e-30,
-            "CG detected non-real inner product: {} + {}i",
-            global.real(),
-            global.imag()
-        );
-        global.real()
-    }
-    #[cfg(not(feature = "complex"))]
-    {
-        global.real()
-    }
+fn norm2(x: &[S], comm: &UniverseComm) -> R {
+    global_nrm2(comm, x)
 }
 
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
-    global.real().abs().sqrt()
+fn dot(u: &[S], v: &[S], comm: &UniverseComm) -> R {
+    let global = global_dot_conj(comm, u, v);
+    dot_result_to_real(global)
 }
 
 struct CgWorkspace<'a> {
@@ -163,20 +151,19 @@ impl CgSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn solve_with_comm<A, C>(
+    pub fn solve_with_comm<A>(
         &mut self,
         a: &A,
         pc: Option<&dyn KPreconditioner<Scalar = S>>,
         b: &[S],
         x: &mut [S],
         pc_side: PcSide,
-        comm: &C,
+        comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: KLinOp<Scalar = S> + ?Sized,
-        C: Comm,
     {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CG");
@@ -226,14 +213,45 @@ impl CgSolver {
             z.copy_from_slice(r);
         }
 
-        let mut rho = dot(r, z, comm);
+        let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
+        let want_natural = matches!(self.norm_type, CgNormType::Natural);
+
+        let (mut rho, rsq, znorm) = {
+            let mut dot_pairs: SmallVec<[(&[S], &[S]); 3]> = SmallVec::new();
+            dot_pairs.push((&r[..], &z[..]));
+            if want_unpre {
+                dot_pairs.push((&r[..], &r[..]));
+            }
+            if want_natural {
+                dot_pairs.push((&z[..], &z[..]));
+            }
+
+            let mut dot_results: SmallVec<[S; 3]> = SmallVec::new();
+            dot_results.resize(dot_pairs.len(), S::zero());
+            global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
+
+            let mut result_idx = 0;
+            let rho = dot_result_to_real(dot_results[result_idx]);
+            result_idx += 1;
+            let rsq = if want_unpre {
+                let value = dot_results[result_idx];
+                result_idx += 1;
+                Some(dot_result_to_real(value))
+            } else {
+                None
+            };
+            let znorm = if want_natural {
+                let value = dot_results[result_idx];
+                Some(dot_result_to_real(value))
+            } else {
+                None
+            };
+            (rho, rsq, znorm)
+        };
         let mut rho_prev = rho;
         if rho <= 0.0 || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
-
-        let rsq = matches!(self.norm_type, CgNormType::Unpreconditioned).then(|| dot(r, r, comm));
-        let znorm = matches!(self.norm_type, CgNormType::Natural).then(|| dot(z, z, comm));
         let mut xnorm = if self.trust_region.is_some() {
             norm2(x, comm)
         } else {
@@ -321,14 +339,45 @@ impl CgSolver {
                 z.copy_from_slice(r);
             }
 
-            let rho_new = dot(r, z, comm);
-            if rho_new <= 0.0 || !rho_new.is_finite() {
-                return Err(KError::IndefinitePreconditioner);
-            }
+            let (rho_new, rsq_new, znorm_new) = {
+                let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
+                let want_natural = matches!(self.norm_type, CgNormType::Natural);
 
-            let rsq_new =
-                matches!(self.norm_type, CgNormType::Unpreconditioned).then(|| dot(r, r, comm));
-            let znorm_new = matches!(self.norm_type, CgNormType::Natural).then(|| dot(z, z, comm));
+                let mut dot_pairs: SmallVec<[(&[S], &[S]); 3]> = SmallVec::new();
+                dot_pairs.push((&r[..], &z[..]));
+                if want_unpre {
+                    dot_pairs.push((&r[..], &r[..]));
+                }
+                if want_natural {
+                    dot_pairs.push((&z[..], &z[..]));
+                }
+
+                let mut dot_results: SmallVec<[S; 3]> = SmallVec::new();
+                dot_results.resize(dot_pairs.len(), S::zero());
+                global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
+
+                let mut result_idx = 0;
+                let rho_new = dot_result_to_real(dot_results[result_idx]);
+                result_idx += 1;
+                if rho_new <= 0.0 || !rho_new.is_finite() {
+                    return Err(KError::IndefinitePreconditioner);
+                }
+
+                let rsq_new = if want_unpre {
+                    let value = dot_results[result_idx];
+                    result_idx += 1;
+                    Some(dot_result_to_real(value))
+                } else {
+                    None
+                };
+                let znorm_new = if want_natural {
+                    let value = dot_results[result_idx];
+                    Some(dot_result_to_real(value))
+                } else {
+                    None
+                };
+                (rho_new, rsq_new, znorm_new)
+            };
 
             let res_reported = match self.norm_type {
                 CgNormType::Preconditioned => rho_new.abs().sqrt(),

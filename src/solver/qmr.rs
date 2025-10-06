@@ -11,10 +11,12 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{
+    UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2, global_nrm2_many_into,
+};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize};
+use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -108,8 +110,11 @@ impl QmrSolver {
         }
         r_tld.copy_from_slice(r);
 
-        let mut res = norm2(r, comm);
-        let bnorm = norm2(b, comm).max(1e-32);
+        let mut norms = [0.0; 2];
+        let r_view: &[S] = &r[..];
+        global_nrm2_many_into(comm, &[r_view, b], &mut norms);
+        let mut res = norms[0];
+        let bnorm = norms[1].max(1e-32);
 
         for m in monitors {
             m(0, res);
@@ -164,11 +169,15 @@ impl QmrSolver {
             }
             a.matvec_s(s, t, scratch);
 
-            let tt = dot(t, t, comm).real();
+            let mut reductions = [S::zero(); 2];
+            let t_view: &[S] = &t[..];
+            let s_view: &[S] = &s[..];
+            global_dot_conj_many_into(comm, &[(t_view, t_view), (t_view, s_view)], &mut reductions);
+            let tt = dot_result_to_real(reductions[0]);
             if tt <= eps || !tt.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
-            let ts = dot(t, s, comm);
+            let ts = reductions[1];
             let omega = ts / S::from_real(tt);
 
             for i in 0..ncols {
@@ -311,13 +320,12 @@ impl LinearSolver for QmrSolver {
     }
 }
 
-fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
+fn dot(x: &[S], y: &[S], comm: &UniverseComm) -> S {
+    global_dot_conj(comm, x, y)
 }
 
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
-    global.real().sqrt()
+fn norm2(x: &[S], comm: &UniverseComm) -> R {
+    global_nrm2(comm, x)
 }
 
 struct QmrWorkspace<'a> {

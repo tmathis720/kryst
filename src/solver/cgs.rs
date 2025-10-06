@@ -17,10 +17,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{UniverseComm, global_dot_conj_many_into};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize};
+use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 #[cfg(feature = "logging")]
@@ -35,13 +35,11 @@ const BRK_REL: R = 1e-12;
 /// Absolute floor to guard subnormals.
 const BRK_ABS: R = 1e-300;
 
-fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
-}
-
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
-    global.real().sqrt()
+#[inline]
+fn norm_from_dot(result: S) -> R {
+    let real = dot_result_to_real(result);
+    let clamped = if real >= R::zero() { real } else { R::zero() };
+    clamped.sqrt()
 }
 
 struct CgsWorkspace<'a> {
@@ -157,9 +155,16 @@ impl CgsSolver {
         }
         r_tld.copy_from_slice(r);
 
-        let rtld_norm = norm2(&r_tld, comm);
-
-        let mut rnorm = norm2(r, comm);
+        let dot_pairs = [
+            (&r_tld[..], &r[..]),
+            (&r[..], &r[..]),
+            (&r_tld[..], &r_tld[..]),
+        ];
+        let mut dot_results = [S::zero(); 3];
+        global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+        let mut rho = dot_results[0];
+        let mut rnorm = norm_from_dot(dot_results[1]);
+        let rtld_norm = norm_from_dot(dot_results[2]);
         let res0_reported = rnorm;
 
         for m in monitors {
@@ -171,8 +176,7 @@ impl CgsSolver {
             return Ok(SolveStats::new(0, rnorm, s0.reason));
         }
 
-        let mut rho = dot(&r_tld, r, comm);
-        let mut r_norm = norm2(r, comm);
+        let mut r_norm = rnorm;
         let mut rho_abs = rho.abs();
         let mut rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
         if rho_abs <= rho_thr {
@@ -188,9 +192,12 @@ impl CgsSolver {
 
             a.matvec_s(p, &mut *v, &mut *scratch);
 
-            let sigma = dot(&r_tld, v, comm);
+            let dot_pairs = [(&r_tld[..], &v[..]), (&v[..], &v[..])];
+            let mut dot_results = [S::zero(); 2];
+            global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+            let sigma = dot_results[0];
             let sigma_abs = sigma.abs();
-            let v_norm = norm2(v, comm);
+            let v_norm = norm_from_dot(dot_results[1]);
             let sigma_thr = BRK_ABS.max(BRK_REL * rtld_norm * v_norm);
             if sigma_abs <= sigma_thr {
                 return Err(KError::IndefiniteMatrix);
@@ -212,7 +219,10 @@ impl CgsSolver {
                 r[i] -= alpha * w[i];
             }
 
-            rnorm = norm2(r, comm);
+            let dot_pairs = [(&r[..], &r[..]), (&r_tld[..], &r[..])];
+            let mut dot_results = [S::zero(); 2];
+            global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+            rnorm = norm_from_dot(dot_results[0]);
             for m in monitors {
                 m(k, rnorm);
             }
@@ -223,8 +233,9 @@ impl CgsSolver {
             }
 
             let rho_old = rho;
-            rho = dot(&r_tld, r, comm);
-            r_norm = norm2(r, comm);
+            let rho_new = dot_results[1];
+            rho = rho_new;
+            r_norm = rnorm;
             rho_abs = rho.abs();
             rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
             if rho_abs <= rho_thr {

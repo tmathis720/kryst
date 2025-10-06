@@ -1,4 +1,3 @@
-use crate::algebra::blas::dot_conj;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -7,7 +6,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{
+    UniverseComm, allreduce_sum_scalar_with_mode, global_dot_conj, global_dot_conj_many_into,
+    global_nrm2, global_reduction_mode,
+};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
@@ -16,48 +18,16 @@ use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 use std::cmp::min;
 
-#[cfg(feature = "complex")]
-use num_complex::Complex64;
-
-fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
-    if comm.size() == 1 {
-        value
-    } else {
-        comm.allreduce_sum(value)
-    }
+fn reduce_real(comm: &UniverseComm, value: R) -> R {
+    allreduce_sum_scalar_with_mode(comm, S::from_real(value), global_reduction_mode()).real()
 }
 
-fn reduce_scalar<C: Comm>(comm: &C, value: S) -> S {
-    #[cfg(feature = "complex")]
-    {
-        if comm.size() == 1 {
-            value
-        } else {
-            let (real, imag) = comm.allreduce_sum2(value.re, value.im);
-            Complex64::new(real, imag)
-        }
-    }
-    #[cfg(not(feature = "complex"))]
-    {
-        if comm.size() == 1 {
-            value
-        } else {
-            comm.allreduce_sum(value)
-        }
-    }
+fn dot_reduce(comm: &UniverseComm, a: &[S], b: &[S]) -> S {
+    global_dot_conj(comm, a, b)
 }
 
-fn dot_reduce<C: Comm>(comm: &C, a: &[S], b: &[S]) -> S {
-    let local = dot_conj(a, b);
-    reduce_scalar(comm, local)
-}
-
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let local = x.iter().fold(0.0, |acc, &val| {
-        let mag = val.abs();
-        acc + mag * mag
-    });
-    reduce_real(comm, local).sqrt()
+fn norm2(x: &[S], comm: &UniverseComm) -> R {
+    global_nrm2(comm, x)
 }
 
 #[derive(Clone, Debug)]
@@ -582,9 +552,11 @@ impl IdrsSolver {
     }
 
     fn omega_value(&self, comm: &UniverseComm, stats: &mut IdrsStats, t: &[S], v: &[S]) -> S {
-        let tv = dot_reduce(comm, t, v);
-        let tt = dot_reduce(comm, t, t);
-        stats.dots += 2;
+        let mut reductions = [S::zero(); 2];
+        global_dot_conj_many_into(comm, &[(t, v), (t, t)], &mut reductions);
+        stats.dots += reductions.len();
+        let tv = reductions[0];
+        let tt = reductions[1];
         let tt_real = tt.real();
         let mut omega = if tt_real.abs() <= f64::EPSILON {
             S::zero()
@@ -716,9 +688,15 @@ impl IdrsSolver {
                 &mut self.ws.scratch,
                 &mut stats,
             )?;
-            let vr = dot_reduce(comm, &self.ws.v[..n], &self.ws.r[..n]);
-            let vv = dot_reduce(comm, &self.ws.v[..n], &self.ws.v[..n]);
-            stats.dots += 2;
+            let mut reductions = [S::zero(); 2];
+            let dot_pairs = [
+                (&self.ws.v[..n], &self.ws.r[..n]),
+                (&self.ws.v[..n], &self.ws.v[..n]),
+            ];
+            global_dot_conj_many_into(comm, &dot_pairs, &mut reductions);
+            stats.dots += reductions.len();
+            let vr = reductions[0];
+            let vv = reductions[1];
             if vv.abs() <= f64::EPSILON {
                 return Err(KError::BreakdownOrIndefinite);
             }

@@ -1,4 +1,5 @@
 use crate::algebra::prelude::*;
+use crate::reduction::ReproMode;
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
@@ -8,7 +9,21 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 mod reduce;
-pub use reduce::{allreduce_sum_scalar_slice_in_place, global_dot_conj, global_dot_conj_repro};
+#[cfg(feature = "mpi")]
+pub use reduce::allreduce_sum_scalar_mpi_sys;
+pub use reduce::{
+    GlobalReductionModeGuard, allreduce_sum_scalar_slice_in_place,
+    allreduce_sum_scalar_slice_owned, allreduce_sum_scalar_slice_owned_with_mode,
+    allreduce_sum_scalar_slice_with_mode, allreduce_sum_scalar_with_mode, global_dot_conj,
+    global_dot_conj_accurate, global_dot_conj_many, global_dot_conj_many_accurate,
+    global_dot_conj_many_into, global_dot_conj_many_into_accurate, global_dot_conj_many_into_repro,
+    global_dot_conj_many_into_with_mode, global_dot_conj_many_repro,
+    global_dot_conj_many_with_mode, global_dot_conj_repro, global_dot_conj_with_mode, global_nrm2,
+    global_nrm2_accurate, global_nrm2_many, global_nrm2_many_accurate, global_nrm2_many_into,
+    global_nrm2_many_into_accurate, global_nrm2_many_into_repro, global_nrm2_many_into_with_mode,
+    global_nrm2_many_repro, global_nrm2_many_with_mode, global_nrm2_repro, global_nrm2_with_mode,
+    global_reduction_mode, set_global_reduction_mode, set_global_reduction_mode_scoped,
+};
 
 // Opaque request that can represent multiple backends. Use a `PhantomData`
 // to tie the lifetime when MPI support is disabled.
@@ -235,6 +250,14 @@ impl PartialEq for UniverseComm {
 impl Eq for UniverseComm {}
 
 impl UniverseComm {
+    #[cfg(feature = "mpi")]
+    pub(crate) fn as_mpi(&self) -> Option<&mpi::topology::SimpleCommunicator> {
+        match self {
+            UniverseComm::Mpi(comm) => Some(&comm.world),
+            _ => None,
+        }
+    }
+
     pub fn id(&self) -> u64 {
         match self {
             UniverseComm::NoComm(_) => 0,
@@ -256,13 +279,49 @@ impl UniverseComm {
     /// Deterministic scalar sum across all ranks.
     #[inline]
     pub fn allreduce_sum_scalar_repro(&self, z: S) -> S {
-        reduce::allreduce_sum_scalar_repro_impl(self, z)
+        reduce::allreduce_sum_scalar_repro_impl(self, z, ReproMode::Deterministic)
+    }
+
+    /// Accurate scalar sum across all ranks.
+    #[inline]
+    pub fn allreduce_sum_scalar_accurate(&self, z: S) -> S {
+        reduce::allreduce_sum_scalar_repro_impl(self, z, ReproMode::DeterministicAccurate)
+    }
+
+    /// Deterministic scalar sum across all ranks using the requested reproducibility mode.
+    #[inline]
+    pub fn allreduce_sum_scalar_repro_with_mode(&self, z: S, mode: ReproMode) -> S {
+        reduce::allreduce_sum_scalar_repro_impl(self, z, mode)
+    }
+
+    /// Sum a single scalar across all ranks using the raw `mpi_sys` interface.
+    #[cfg(feature = "mpi")]
+    #[inline]
+    pub fn allreduce_sum_scalar_raw(&self, z: S) -> S {
+        reduce::allreduce_sum_scalar_mpi_sys(self, z)
     }
 
     /// Sum a slice of scalars in place across all ranks (fast path).
     #[inline]
     pub fn allreduce_sum_scalar_slice(&self, data: &mut [S]) {
         reduce::allreduce_sum_scalar_slice_in_place(self, data)
+    }
+
+    /// Sum a slice of scalars across all ranks and return the result in a new buffer.
+    #[inline]
+    pub fn allreduce_sum_scalar_slice_owned(&self, data: &[S]) -> Vec<S> {
+        reduce::allreduce_sum_scalar_slice_owned(self, data)
+    }
+
+    /// Sum a slice of scalars across all ranks using the requested reproducibility mode and
+    /// return the result in a new buffer.
+    #[inline]
+    pub fn allreduce_sum_scalar_slice_owned_with_mode(
+        &self,
+        data: &[S],
+        mode: ReproMode,
+    ) -> Vec<S> {
+        reduce::allreduce_sum_scalar_slice_owned_with_mode(self, data, mode)
     }
 }
 
