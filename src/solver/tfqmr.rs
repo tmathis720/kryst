@@ -2,7 +2,6 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; residuals are reported as the true `||r||`.
 
-use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -12,10 +11,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::UniverseComm;
+use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::take_or_resize;
+use crate::solver::common::{dot_result_to_real, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -46,7 +45,7 @@ impl TfqmrSolver {
         b: &[S],
         x: &mut [S],
         mut pc_side: PcSide,
-        _comm: &UniverseComm,
+        comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
@@ -103,8 +102,15 @@ impl TfqmrSolver {
 
         r_tld.copy_from_slice(r);
 
-        let mut rho: S = dot_conj(r_tld, r);
-        let res0: R = nrm2(r);
+        let mut reductions = [S::zero(); 2];
+        let initial_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
+        global_dot_conj_many_into(comm, &initial_pairs, &mut reductions);
+        let mut rho: S = reductions[0];
+        let mut res_sq: R = dot_result_to_real(reductions[1]);
+        if res_sq < 0.0 {
+            res_sq = 0.0;
+        }
+        let res0: R = res_sq.sqrt();
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
         for m in monitors {
             m(0, res0);
@@ -138,7 +144,7 @@ impl TfqmrSolver {
                 pc.apply_s(pc_side, tmp_pc, v, scratch)?;
             }
 
-            let sigma: S = dot_conj(r_tld, v);
+            let sigma: S = global_dot_conj(comm, r_tld, v);
             if !sigma.is_finite() || sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.final_residual = true_res;
@@ -156,7 +162,8 @@ impl TfqmrSolver {
             for i in 0..n {
                 u[i] = r[i] - alpha * v[i];
             }
-            let mut tau_local: R = (nrm2(u) * dpold).sqrt();
+            let u_norm = global_nrm2(comm, u);
+            let mut tau_local: R = (u_norm * dpold).sqrt();
 
             for mstep in 0..2 {
                 if mstep == 0 {
@@ -178,7 +185,12 @@ impl TfqmrSolver {
                 }
 
                 let src: &[S] = if mstep == 0 { &u[..] } else { &qv[..] };
-                let psi: R = nrm2(src) / tau_local.max(1e-300);
+                let src_norm = if mstep == 0 {
+                    u_norm
+                } else {
+                    global_nrm2(comm, src)
+                };
+                let psi: R = src_norm / tau_local.max(1e-300);
                 let c: R = 1.0 / (1.0 + psi * psi).sqrt();
                 let eta: S = S::from_real(c * c) * alpha;
                 let cf: S = if k == 1 && mstep == 0 {
@@ -217,7 +229,7 @@ impl TfqmrSolver {
                         tmp_pc.copy_from_slice(&au[..]);
                         pc.apply_s(pc_side, tmp_pc, au, scratch)?;
                     }
-                    true_res = nrm2(au);
+                    true_res = global_nrm2(comm, au);
                     stats.final_residual = true_res;
                 } else {
                     stats.final_residual = dpest;
@@ -238,7 +250,9 @@ impl TfqmrSolver {
                 }
             }
 
-            let rho_new: S = dot_conj(r_tld, r);
+            let update_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
+            global_dot_conj_many_into(comm, &update_pairs, &mut reductions);
+            let rho_new: S = reductions[0];
             if !rho_new.is_finite() || rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.reason = ConvergedReason::DivergedDtol;
@@ -253,7 +267,11 @@ impl TfqmrSolver {
                 yv[i] = r[i] + beta * (qv[i] + beta * yv[i]);
             }
 
-            dpold = nrm2(r);
+            let mut rr = dot_result_to_real(reductions[1]);
+            if rr < 0.0 {
+                rr = 0.0;
+            }
+            dpold = rr.sqrt();
 
             if self.resid_recalc_every == 1 {
                 a.matvec_s(x, au, scratch);
@@ -264,7 +282,7 @@ impl TfqmrSolver {
                     tmp_pc.copy_from_slice(&au[..]);
                     pc.apply_s(pc_side, tmp_pc, au, scratch)?;
                 }
-                true_res = nrm2(au);
+                true_res = global_nrm2(comm, au);
                 stats.final_residual = true_res;
                 let (reason, s2) = self.conv.check(true_res, res0, 2 * k);
                 stats = s2;

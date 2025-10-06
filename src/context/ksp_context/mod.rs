@@ -40,8 +40,9 @@ use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
-use crate::parallel::Comm;
+use crate::parallel::{Comm, set_global_reduction_mode, set_global_reduction_mode_scoped};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
     MinresSolver, PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver,
@@ -187,11 +188,26 @@ impl KspContext {
     fn parse_reduction_mode(label: &str) -> Result<ReductMode, KError> {
         match label.to_lowercase().as_str() {
             "fast" => Ok(ReductMode::Fast),
-            "deterministic" => Ok(ReductMode::Deterministic),
+            "deterministic" | "det" => Ok(ReductMode::Deterministic),
+            "deterministic-accurate" | "deterministic_accurate" | "accurate" => {
+                Ok(ReductMode::DeterministicAccurate)
+            }
             other => Err(KError::SolveError(format!(
-                "Unrecognized ksp_reduction mode: {other} (expected 'fast'|'deterministic')"
+                "Unrecognized ksp_reduction mode: {other} (expected 'fast'|'deterministic'|'deterministic-accurate')"
             ))),
         }
+    }
+
+    fn repro_from_mode(mode: ReductMode) -> ReproMode {
+        match mode {
+            ReductMode::Fast => ReproMode::Fast,
+            ReductMode::Deterministic => ReproMode::Deterministic,
+            ReductMode::DeterministicAccurate => ReproMode::DeterministicAccurate,
+        }
+    }
+
+    fn apply_global_reduction_mode(&self) {
+        set_global_reduction_mode(Self::repro_from_mode(self.reduction_opts.mode));
     }
 
     /// Validate that `side` is compatible with `solver_type` (if set).
@@ -298,6 +314,7 @@ impl KspContext {
             }
         };
         self.solver = solver;
+        self.apply_global_reduction_mode();
         // Fail fast if an explicit side was set and is incompatible with the selected solver
         if self.pc_side_explicit {
             self.check_pc_side_now(self.pc_side)?
@@ -402,6 +419,7 @@ impl KspContext {
             if let Some(ref mut w) = self.work {
                 w.set_reduction_mode(parsed);
             }
+            self.apply_global_reduction_mode();
         }
 
         // --- GMRES options ---
@@ -1048,7 +1066,10 @@ impl KspContext {
             return Ok(SolveStats::new(1, 0.0, ConvergedReason::ConvergedAtol));
         }
 
-        // Configure solver preconditioning side and validate compatibility
+        // Ensure the configured reduction mode is active while solving and configure
+        // solver preconditioning side, validating compatibility along the way.
+        let _reduction_mode_guard =
+            set_global_reduction_mode_scoped(Self::repro_from_mode(self.reduction_opts.mode));
         self.configure_pc_side()?;
 
         let amat = self
@@ -1421,6 +1442,17 @@ mod tests {
         assert!(matches!(
             ws.reduction_options().mode,
             ReductMode::Deterministic
+        ));
+
+        let opts = KspOptions {
+            reduction: Some("deterministic-accurate".into()),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        let ws = ksp.work.as_ref().unwrap();
+        assert!(matches!(
+            ws.reduction_options().mode,
+            ReductMode::DeterministicAccurate
         ));
     }
 }

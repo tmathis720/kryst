@@ -6,13 +6,35 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::matrix::op::LinOp;
 use crate::ops::klinop::KLinOp;
-use crate::parallel::{Comm, UniverseComm};
-use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
+use crate::parallel::{Comm, UniverseComm, global_nrm2, global_reduction_mode};
+use crate::reduction::{CommDeterministic, Packet, ReproMode, dot_local_slice};
+#[cfg(feature = "complex")]
+use crate::reduction::{DDP, KahanP};
+use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductMode, ReductOptions};
 
 pub use buffer::take_or_resize;
 
-fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
-    comm.allreduce_sum_scalar(S::from_real(value)).real()
+/// Convert a conjugated dot-product result into its real scalar component.
+///
+/// In complex builds we sanity-check that the imaginary component is within a
+/// small tolerance of zero so solvers can surface unexpected non-Hermitian
+/// reductions during debug runs.
+#[inline]
+pub fn dot_result_to_real(global: S) -> R {
+    #[cfg(feature = "complex")]
+    {
+        debug_assert!(
+            global.imag().abs() <= 1e-12 * global.real().abs().max(1.0) + 1e-30,
+            "non-real inner product detected: {} + {}i",
+            global.real(),
+            global.imag()
+        );
+        global.real()
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        global.real()
+    }
 }
 
 /// Recompute the true residual norm ||r||_2 where r = b - A x.
@@ -20,7 +42,7 @@ fn reduce_real<C: Comm>(comm: &C, value: R) -> R {
 /// This uses the provided `comm` for the dot-product reduction so it works in
 /// both serial and distributed settings.
 #[inline]
-pub fn recompute_true_residual_norm<C: Comm>(
+pub fn recompute_true_residual_norm<C: Comm + CommDeterministic>(
     a: &dyn LinOp<S = f64>,
     b: &[f64],
     x: &[f64],
@@ -33,25 +55,225 @@ pub fn recompute_true_residual_norm<C: Comm>(
         tmp[i] = b[i] - tmp[i];
         local += tmp[i] * tmp[i];
     }
-    if comm.size() == 1 {
-        local.sqrt()
+    let mode = global_reduction_mode();
+    let summed = if comm.size() == 1 {
+        local
     } else {
-        comm.allreduce_sum_scalar(S::from_real(local)).real().sqrt()
+        match mode {
+            ReproMode::Fast => comm.allreduce_sum_scalar(S::from_real(local)).real(),
+            _ => {
+                let packet = Packet::<1> { v: [local] };
+                comm.allreduce_det(&packet, mode).v[0]
+            }
+        }
+    };
+
+    let clamped = if summed >= 0.0 { summed } else { 0.0 };
+    clamped.sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel::{NoComm, UniverseComm, set_global_reduction_mode_scoped};
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    struct IdentityOp;
+
+    impl LinOp for IdentityOp {
+        type S = f64;
+
+        fn dims(&self) -> (usize, usize) {
+            (2, 2)
+        }
+
+        fn matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
+            y.copy_from_slice(x);
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct MockComm {
+        fast_calls: AtomicUsize,
+        det_calls: AtomicUsize,
+        fast_value: f64,
+        det_value: f64,
+    }
+
+    impl MockComm {
+        fn new(fast_value: f64, det_value: f64) -> Self {
+            Self {
+                fast_calls: AtomicUsize::new(0),
+                det_calls: AtomicUsize::new(0),
+                fast_value,
+                det_value,
+            }
+        }
+
+        fn reset(&self) {
+            self.fast_calls.store(0, Ordering::Relaxed);
+            self.det_calls.store(0, Ordering::Relaxed);
+        }
+    }
+
+    impl Comm for MockComm {
+        type Vec = Vec<f64>;
+        type Request<'a> = ();
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            2
+        }
+
+        fn barrier(&self) {}
+
+        #[cfg(feature = "mpi")]
+        fn scatter<T: Clone + mpi::datatype::Equivalence>(
+            &self,
+            _global: &[T],
+            _out: &mut [T],
+            _root: usize,
+        ) {
+            unimplemented!("scatter is not used in tests");
+        }
+
+        #[cfg(not(feature = "mpi"))]
+        fn scatter<T: Clone>(&self, _global: &[T], _out: &mut [T], _root: usize) {
+            unimplemented!("scatter is not used in tests");
+        }
+
+        #[cfg(feature = "mpi")]
+        fn gather<T: Clone + mpi::datatype::Equivalence>(
+            &self,
+            _local: &[T],
+            _out: &mut Vec<T>,
+            _root: usize,
+        ) {
+            unimplemented!("gather is not used in tests");
+        }
+
+        #[cfg(not(feature = "mpi"))]
+        fn gather<T: Clone>(&self, _local: &[T], _out: &mut Vec<T>, _root: usize) {
+            unimplemented!("gather is not used in tests");
+        }
+
+        fn all_reduce_f64(&self, _local: f64) -> f64 {
+            self.fast_value
+        }
+
+        fn allreduce_sum(&self, _x: f64) -> f64 {
+            self.fast_value
+        }
+
+        fn allreduce_sum2(&self, _a: f64, _b: f64) -> (f64, f64) {
+            (self.fast_value, self.fast_value)
+        }
+
+        fn allreduce_sum_slice(&self, _v: &mut [f64]) {
+            unimplemented!("slice reductions are not used in tests");
+        }
+
+        fn allreduce_sum_scalar(&self, _z: S) -> S {
+            self.fast_calls.fetch_add(1, Ordering::Relaxed);
+            S::from_real(self.fast_value)
+        }
+
+        fn split(&self, _color: i32, _key: i32) -> UniverseComm {
+            UniverseComm::NoComm(NoComm)
+        }
+
+        fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {
+            unimplemented!("irecv is not used in tests");
+        }
+
+        fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {
+            unimplemented!("isend is not used in tests");
+        }
+
+        fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {
+            unimplemented!("irecv_u64 is not used in tests");
+        }
+
+        fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {
+            unimplemented!("isend_u64 is not used in tests");
+        }
+
+        fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
+    }
+
+    impl CommDeterministic for MockComm {
+        fn allreduce_det<const N: usize>(&self, _local: &Packet<N>, mode: ReproMode) -> Packet<N> {
+            self.det_calls.fetch_add(1, Ordering::Relaxed);
+            let value = match mode {
+                ReproMode::Fast => self.fast_value,
+                _ => self.det_value,
+            };
+            let mut out = Packet::<N>::default();
+            for slot in out.v.iter_mut() {
+                *slot = value;
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn recompute_true_residual_norm_respects_global_mode() {
+        let op = IdentityOp;
+        let b = [2.0, -1.0];
+        let x = [1.0, 0.0];
+        let comm = MockComm::new(2.0, 4.0);
+        let mut tmp = vec![0.0; 2];
+
+        {
+            let _guard = set_global_reduction_mode_scoped(ReproMode::Fast);
+            tmp.fill(0.0);
+            let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp);
+            assert!((norm - 2.0_f64.sqrt()).abs() < 1e-12);
+        }
+        assert_eq!(comm.fast_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(comm.det_calls.load(Ordering::Relaxed), 0);
+
+        comm.reset();
+        {
+            let _guard = set_global_reduction_mode_scoped(ReproMode::Deterministic);
+            tmp.fill(0.0);
+            let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp);
+            assert!((norm - 2.0).abs() < 1e-12);
+        }
+        assert_eq!(comm.fast_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(comm.det_calls.load(Ordering::Relaxed), 1);
+
+        comm.reset();
+        {
+            let _guard = set_global_reduction_mode_scoped(ReproMode::DeterministicAccurate);
+            tmp.fill(0.0);
+            let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp);
+            assert!((norm - 2.0).abs() < 1e-12);
+        }
+        assert_eq!(comm.fast_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(comm.det_calls.load(Ordering::Relaxed), 1);
     }
 }
 
 #[inline]
-pub fn recompute_true_residual_norm_s<A, C>(
+pub fn recompute_true_residual_norm_s<A>(
     a: &A,
     b: &[S],
     x: &[S],
-    comm: &C,
+    comm: &UniverseComm,
     tmp: &mut [S],
     scratch: &mut BridgeScratch,
 ) -> R
 where
     A: KLinOp<Scalar = S> + ?Sized,
-    C: Comm,
 {
     debug_assert_eq!(b.len(), x.len());
     debug_assert_eq!(tmp.len(), x.len());
@@ -60,8 +282,7 @@ where
     for i in 0..tmp.len() {
         tmp[i] = b[i] - tmp[i];
     }
-    let local = crate::algebra::blas::dot_conj(tmp, tmp);
-    comm.allreduce_sum_scalar(local).real().sqrt()
+    global_nrm2(comm, tmp)
 }
 
 /// Compute the residual norm used for iteration monitors (the "reported" norm):
@@ -102,6 +323,15 @@ pub struct AsyncDot2 {
     pub local: (f64, f64),
 }
 
+#[inline]
+fn reduct_to_repro(mode: ReductMode) -> ReproMode {
+    match mode {
+        ReductMode::Fast => ReproMode::Fast,
+        ReductMode::Deterministic => ReproMode::Deterministic,
+        ReductMode::DeterministicAccurate => ReproMode::DeterministicAccurate,
+    }
+}
+
 /// Launch a fused pair of dot products asynchronously.
 pub fn dot2_async<C: AsyncComm + ?Sized>(
     comm: &C,
@@ -113,12 +343,9 @@ pub fn dot2_async<C: AsyncComm + ?Sized>(
 ) -> AsyncDot2 {
     debug_assert_eq!(x1.len(), y1.len());
     debug_assert_eq!(x2.len(), y2.len());
-    let mut a = 0.0;
-    let mut b = 0.0;
-    for ((&xi, &yi), (&xj, &yj)) in x1.iter().zip(y1).zip(x2.iter().zip(y2)) {
-        a += xi * yi;
-        b += xj * yj;
-    }
+    let mode = reduct_to_repro(opt.mode);
+    let a = dot_local_slice(x1, y1, mode);
+    let b = dot_local_slice(x2, y2, mode);
     let (handle, local) = comm
         .allreduce2_async(a, b, opt)
         .expect("async reduction launch");
@@ -134,10 +361,8 @@ pub fn dot1_async<C: AsyncComm + ?Sized>(
     opt: &ReductOptions,
 ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), crate::error::KError> {
     debug_assert_eq!(x.len(), y.len());
-    let mut sum = 0.0;
-    for i in 0..x.len() {
-        sum += x[i] * y[i];
-    }
+    let mode = reduct_to_repro(opt.mode);
+    let sum = dot_local_slice(x, y, mode);
     comm.allreduce2_async(sum, 0.0, opt)
 }
 
@@ -160,8 +385,9 @@ pub fn dot1_async_s<C: AsyncComm + ?Sized>(
 
     #[cfg(feature = "complex")]
     {
-        let sum = dot_conj(x, y).real();
-        comm.allreduce2_async(sum, 0.0, opt)
+        let mode = reduct_to_repro(opt.mode);
+        let Packet { v: [re, im] } = dot_conj_components(x, y, mode);
+        comm.allreduce2_async(re, im, opt)
     }
 }
 
@@ -179,13 +405,10 @@ pub fn dotn_async<C: AsyncComm + ?Sized>(
     opt: &ReductOptions,
 ) -> AsyncDotN {
     let mut loc = vec![0.0; pairs.len()];
+    let mode = reduct_to_repro(opt.mode);
     for (k, (x, y)) in pairs.iter().enumerate() {
         debug_assert_eq!(x.len(), y.len());
-        let mut sum = 0.0;
-        for i in 0..x.len() {
-            sum += x[i] * y[i];
-        }
-        loc[k] = sum;
+        loc[k] = dot_local_slice(x, y, mode);
     }
     let (handle, local) = comm
         .allreduce_n_async(loc.clone(), opt)
@@ -199,10 +422,8 @@ pub fn nrm2_async<C: AsyncComm + ?Sized>(
     x: &[f64],
     opt: &ReductOptions,
 ) -> (AllreduceHandle<(f64, f64)>, f64) {
-    let mut sumsq = 0.0;
-    for &xi in x {
-        sumsq += xi * xi;
-    }
+    let mode = reduct_to_repro(opt.mode);
+    let sumsq = dot_local_slice(x, x, mode);
     let (handle, local) = comm
         .allreduce2_async(sumsq, 0.0, opt)
         .expect("async reduction launch");
@@ -223,10 +444,48 @@ pub fn nrm2_async_s<C: AsyncComm + ?Sized>(
 
     #[cfg(feature = "complex")]
     {
-        let sumsq = dot_conj(x, x).real();
+        let mode = reduct_to_repro(opt.mode);
+        let Packet { v: [re, im] } = dot_conj_components(x, x, mode);
         let (handle, local) = comm
-            .allreduce2_async(sumsq, 0.0, opt)
+            .allreduce2_async(re, im, opt)
             .expect("async reduction launch");
         (handle, local.0)
+    }
+}
+
+#[cfg(feature = "complex")]
+fn dot_conj_components(x: &[S], y: &[S], mode: ReproMode) -> Packet<2> {
+    debug_assert_eq!(x.len(), y.len());
+    match mode {
+        ReproMode::Fast => {
+            let mut re = 0.0;
+            let mut im = 0.0;
+            for (&xi, &yi) in x.iter().zip(y) {
+                let prod = xi.conj() * yi;
+                re += prod.real();
+                im += prod.imag();
+            }
+            Packet { v: [re, im] }
+        }
+        ReproMode::Deterministic => {
+            let mut acc = KahanP::<2>::new();
+            for (&xi, &yi) in x.iter().zip(y) {
+                let prod = xi.conj() * yi;
+                acc.add(&Packet {
+                    v: [prod.real(), prod.imag()],
+                });
+            }
+            acc.finish()
+        }
+        ReproMode::DeterministicAccurate => {
+            let mut acc = DDP::<2>::new();
+            for (&xi, &yi) in x.iter().zip(y) {
+                let prod = xi.conj() * yi;
+                acc.add(&Packet {
+                    v: [prod.real(), prod.imag()],
+                });
+            }
+            acc.finish()
+        }
     }
 }

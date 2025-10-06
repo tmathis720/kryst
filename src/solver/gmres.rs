@@ -15,7 +15,6 @@
 //! in column-major form. The legacy `Workspace.z` (Vec<Vec<_>>) is not used by
 //! GMRES/FGMRES.
 
-use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -25,10 +24,13 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{UniverseComm, global_dot_conj};
+use crate::parallel::{
+    UniverseComm, global_dot_conj_many_into, global_nrm2, global_nrm2_many_into,
+};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use smallvec::SmallVec;
 use std::any::Any;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,7 +172,7 @@ impl GmresSolver {
         for i in 0..tmp.len() {
             tmp[i] = b[i] - tmp[i];
         }
-        global_dot_conj(comm, tmp, tmp).real().sqrt()
+        global_nrm2(comm, tmp)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -223,7 +225,7 @@ impl GmresSolver {
         ws.g.fill(S::zero());
 
         let mut res: R;
-        let beta: R = match pc_side {
+        let (beta, mut bnorm) = match pc_side {
             PcSide::Left => {
                 if let Some(pc) = pc {
                     let tmp2 = &mut ws.tmp2[..n];
@@ -231,7 +233,9 @@ impl GmresSolver {
                 } else {
                     ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                 }
-                let beta = nrm2(&ws.tmp2[..n]);
+                let mut norms = [R::zero(); 2];
+                global_nrm2_many_into(comm, &[&ws.tmp2[..n], b], &mut norms);
+                let beta = norms[0];
                 if beta > 0.0 {
                     let inv = S::from_real(1.0 / beta);
                     for val in &mut ws.tmp2[..n] {
@@ -241,10 +245,12 @@ impl GmresSolver {
                 } else {
                     ws.v_col(0).fill(S::zero());
                 }
-                beta
+                (beta, norms[1])
             }
             PcSide::Right => {
-                let beta = nrm2(&ws.tmp1[..n]);
+                let mut norms = [R::zero(); 2];
+                global_nrm2_many_into(comm, &[&ws.tmp1[..n], b], &mut norms);
+                let beta = norms[0];
                 if beta > 0.0 {
                     let inv = S::from_real(1.0 / beta);
                     for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
@@ -254,13 +260,13 @@ impl GmresSolver {
                 } else {
                     ws.v_col(0).fill(S::zero());
                 }
-                beta
+                (beta, norms[1])
             }
             PcSide::Symmetric => unreachable!(),
         };
 
         ws.g[0] = S::from_real(beta);
-        let bnorm = nrm2(b).max(1e-32);
+        bnorm = bnorm.max(1e-32);
         let thr = self.conv.atol.max(self.conv.rtol * bnorm);
 
         let mut total_iters = 0usize;
@@ -309,13 +315,26 @@ impl GmresSolver {
                             } else {
                                 ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                             }
-                            let mut hvals = vec![S::zero(); k + 1];
+                            let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(k + 1);
+                            hvals.resize(k + 1, S::zero());
                             {
-                                let tmp2 = &mut ws.tmp2[..n];
+                                let tmp2_slice: &[S] = &ws.tmp2[..n];
+                                let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
+                                    SmallVec::with_capacity(k + 1);
                                 for i in 0..=k {
                                     let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    let hij = dot_conj(vi, tmp2);
-                                    hvals[i] = hij;
+                                    pairs.push((vi, tmp2_slice));
+                                }
+                                global_dot_conj_many_into(
+                                    comm,
+                                    pairs.as_slice(),
+                                    hvals.as_mut_slice(),
+                                );
+                            }
+                            {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                for (i, hij) in hvals.iter().copied().enumerate() {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
                                     for (w, &vi_j) in tmp2.iter_mut().zip(vi) {
                                         *w -= hij * vi_j;
                                     }
@@ -324,7 +343,7 @@ impl GmresSolver {
                             for i in 0..=k {
                                 *ws.h_at_mut(i, k) = hvals[i];
                             }
-                            let hnext = nrm2(&ws.tmp2[..n]);
+                            let hnext = global_nrm2(comm, &ws.tmp2[..n]);
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
                             if hnext > 0.0 {
                                 let inv = S::from_real(1.0 / hnext);
@@ -349,13 +368,26 @@ impl GmresSolver {
                                 zk.copy_from_slice(tmp2);
                             }
                             a.matvec_s(&ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
-                            let mut hvals = vec![S::zero(); k + 1];
+                            let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(k + 1);
+                            hvals.resize(k + 1, S::zero());
                             {
-                                let tmp1 = &mut ws.tmp1[..n];
+                                let tmp1_slice: &[S] = &ws.tmp1[..n];
+                                let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
+                                    SmallVec::with_capacity(k + 1);
                                 for i in 0..=k {
                                     let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    let hij = dot_conj(vi, tmp1);
-                                    hvals[i] = hij;
+                                    pairs.push((vi, tmp1_slice));
+                                }
+                                global_dot_conj_many_into(
+                                    comm,
+                                    pairs.as_slice(),
+                                    hvals.as_mut_slice(),
+                                );
+                            }
+                            {
+                                let tmp1 = &mut ws.tmp1[..n];
+                                for (i, hij) in hvals.iter().copied().enumerate() {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
                                     for (w, &vi_j) in tmp1.iter_mut().zip(vi) {
                                         *w -= hij * vi_j;
                                     }
@@ -364,7 +396,7 @@ impl GmresSolver {
                             for i in 0..=k {
                                 *ws.h_at_mut(i, k) = hvals[i];
                             }
-                            let hnext = nrm2(&ws.tmp1[..n]);
+                            let hnext = global_nrm2(comm, &ws.tmp1[..n]);
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
                             if hnext > 0.0 {
                                 let inv = S::from_real(1.0 / hnext);
@@ -486,9 +518,9 @@ impl GmresSolver {
                     } else {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
-                    nrm2(&ws.tmp2[..n])
+                    global_nrm2(comm, &ws.tmp2[..n])
                 }
-                PcSide::Right => nrm2(&ws.tmp1[..n]),
+                PcSide::Right => global_nrm2(comm, &ws.tmp1[..n]),
                 PcSide::Symmetric => unreachable!(),
             };
 
@@ -512,7 +544,7 @@ impl GmresSolver {
                     } else {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
-                    let beta = nrm2(&ws.tmp2[..n]);
+                    let beta = global_nrm2(comm, &ws.tmp2[..n]);
                     if beta > 0.0 {
                         let inv = S::from_real(1.0 / beta);
                         for val in &mut ws.tmp2[..n] {
@@ -525,7 +557,7 @@ impl GmresSolver {
                     beta
                 }
                 PcSide::Right => {
-                    let beta = nrm2(&ws.tmp1[..n]);
+                    let beta = global_nrm2(comm, &ws.tmp1[..n]);
                     if beta > 0.0 {
                         let inv = S::from_real(1.0 / beta);
                         for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {

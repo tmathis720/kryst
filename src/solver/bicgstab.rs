@@ -18,7 +18,7 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
@@ -28,13 +28,12 @@ use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
 
-fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
+fn dot(x: &[S], y: &[S], comm: &UniverseComm) -> S {
+    global_dot_conj(comm, x, y)
 }
 
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
-    global.real().sqrt()
+fn norm2(x: &[S], comm: &UniverseComm) -> R {
+    global_nrm2(comm, x)
 }
 
 struct BiCgWorkspace<'a> {
@@ -384,7 +383,11 @@ impl BiCgStabSolver {
                 }
             }
 
-            let omega_den = dot(t, t, comm);
+            let mut omega_reds = [S::zero(), S::zero()];
+            let dot_pairs = [(&t[..], &t[..]), (&t[..], &s[..])];
+            global_dot_conj_many_into(comm, &dot_pairs, &mut omega_reds);
+
+            let omega_den = omega_reds[0];
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
@@ -393,7 +396,7 @@ impl BiCgStabSolver {
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
-            let omega = dot(t, s, comm) / omega_den;
+            let omega = omega_reds[1] / omega_den;
             if omega.abs() <= eps_omega || !omega.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");

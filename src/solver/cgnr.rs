@@ -7,10 +7,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize};
+use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -33,13 +33,15 @@ impl CgnrSolver {
     }
 }
 
-fn dot<C: Comm>(x: &[S], y: &[S], comm: &C) -> S {
-    comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, y))
+fn dot(x: &[S], y: &[S], comm: &UniverseComm) -> S {
+    global_dot_conj(comm, x, y)
 }
 
-fn norm2<C: Comm>(x: &[S], comm: &C) -> R {
-    let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(x, x));
-    global.real().sqrt()
+#[inline]
+fn norm_from_dot(result: S) -> R {
+    let real = dot_result_to_real(result);
+    let clamped = if real >= R::zero() { real } else { R::zero() };
+    clamped.sqrt()
 }
 
 struct CgnrWorkspace<'a> {
@@ -156,9 +158,12 @@ impl CgnrSolver {
         }
         p.copy_from_slice(zhat);
 
-        let mut rz = dot(z, zhat, comm);
-        let mut rnow = norm2(r, comm);
-        let bnorm = norm2(b, comm).max(1e-32);
+        let dot_pairs = [(&z[..], &zhat[..]), (&r[..], &r[..]), (b, b)];
+        let mut dot_results = [S::zero(); 3];
+        global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+        let mut rz = dot_results[0];
+        let mut rnow = norm_from_dot(dot_results[1]);
+        let bnorm = norm_from_dot(dot_results[2]).max(1e-32);
 
         for m in monitors {
             m(0, rnow);
@@ -176,7 +181,7 @@ impl CgnrSolver {
             iters = k;
 
             a.matvec_s(p, ap, scratch);
-            let denom = dot(ap, ap, comm).real();
+            let denom = dot_result_to_real(dot(ap, ap, comm));
             if denom <= 0.0 || !denom.is_finite() {
                 let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
                 return Ok(SolveStats::new(
@@ -200,8 +205,11 @@ impl CgnrSolver {
                 zhat.copy_from_slice(z);
             }
 
-            let rz_new = dot(z, zhat, comm);
-            rnow = norm2(r, comm);
+            let dot_pairs = [(&z[..], &zhat[..]), (&r[..], &r[..])];
+            let mut dot_results = [S::zero(); 2];
+            global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+            let rz_new = dot_results[0];
+            rnow = norm_from_dot(dot_results[1]);
 
             for m in monitors {
                 m(k, rnow);

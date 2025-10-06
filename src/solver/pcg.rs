@@ -8,11 +8,14 @@ use crate::matrix::op_bridge::matvec_s;
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
+#[cfg(feature = "complex")]
+use crate::reduction::Packet;
 use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
 use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductMode, ReductOptions};
+use smallvec::SmallVec;
 use std::any::Any;
 
 #[derive(Debug, Clone, Copy)]
@@ -168,9 +171,8 @@ impl PcgSolver {
         let mut opt = self.async_reduction.clone();
         opt.mode = match self.reduction.mode {
             ReproMode::Fast => ReductMode::Fast,
-            ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
-                ReductMode::Deterministic
-            }
+            ReproMode::Deterministic => ReductMode::Deterministic,
+            ReproMode::DeterministicAccurate => ReductMode::DeterministicAccurate,
         };
         opt
     }
@@ -223,8 +225,60 @@ impl PcgSolver {
 
         #[cfg(feature = "complex")]
         {
-            let global = comm.allreduce_sum_scalar(crate::algebra::blas::dot_conj(u, v));
-            global.real()
+            let local = crate::algebra::blas::dot_conj(u, v);
+            if matches!(self.reduction.mode, ReproMode::Fast) {
+                return comm.allreduce_sum_scalar(local).real();
+            }
+
+            let packet = Packet::<2> {
+                v: [local.real(), local.imag()],
+            };
+            let reduced = comm.allreduce_det(&packet, self.reduction.mode);
+            reduced.v[0]
+        }
+    }
+
+    #[inline]
+    fn dot_scalar_many<C: Comm + CommDeterministic>(
+        &self,
+        pairs: &[(&[S], &[S])],
+        comm: &C,
+        out: &mut [R],
+    ) {
+        assert_eq!(pairs.len(), out.len());
+        if pairs.is_empty() {
+            return;
+        }
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let engine = DotEngine {
+                opts: self.reduction,
+            };
+            let mut real_pairs: SmallVec<[(&[f64], &[f64]); 8]> =
+                SmallVec::with_capacity(pairs.len());
+            for &(u, v) in pairs {
+                let ur: &[f64] = unsafe { &*(u as *const [S] as *const [f64]) };
+                let vr: &[f64] = unsafe { &*(v as *const [S] as *const [f64]) };
+                real_pairs.push((ur, vr));
+            }
+            engine.dot_many_into(real_pairs.as_slice(), out, comm);
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            for ((u, v), slot) in pairs.iter().zip(out.iter_mut()) {
+                let local = crate::algebra::blas::dot_conj(u, v);
+                if matches!(self.reduction.mode, ReproMode::Fast) {
+                    *slot = comm.allreduce_sum_scalar(local).real();
+                } else {
+                    let packet = Packet::<2> {
+                        v: [local.real(), local.imag()],
+                    };
+                    let reduced = comm.allreduce_det(&packet, self.reduction.mode);
+                    *slot = reduced.v[0];
+                }
+            }
         }
     }
 
@@ -232,6 +286,22 @@ impl PcgSolver {
     fn nrm2_scalar<C: Comm + CommDeterministic>(&self, u: &[S], comm: &C) -> R {
         let val = self.dot_scalar(u, u, comm);
         val.abs().sqrt()
+    }
+
+    #[inline]
+    fn ensure_norm<C: Comm + CommDeterministic>(
+        &self,
+        vec: &[S],
+        comm: &C,
+        cache: &mut Option<R>,
+    ) -> R {
+        if let Some(val) = *cache {
+            val
+        } else {
+            let val = self.nrm2_scalar(vec, comm);
+            *cache = Some(val);
+            val
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -272,17 +342,55 @@ impl PcgSolver {
             z.copy_from_slice(r);
         }
 
-        let mut rho = self.dot_scalar(r, z, comm);
+        let need_r_norm_res = matches!(
+            self.norm_type,
+            CgNormType::Unpreconditioned | CgNormType::None
+        );
+        let need_z_norm_res = matches!(self.norm_type, CgNormType::Natural);
+        let need_r_norm_monitor = self.true_residual_monitor.is_some();
+
+        let mut initial_pairs: SmallVec<[(&[S], &[S]); 3]> = SmallVec::new();
+        initial_pairs.push((&r[..], &z[..]));
+        if need_r_norm_res || need_r_norm_monitor {
+            initial_pairs.push((&r[..], &r[..]));
+        }
+        if need_z_norm_res {
+            initial_pairs.push((&z[..], &z[..]));
+        }
+        let mut reductions: SmallVec<[R; 3]> = SmallVec::new();
+        reductions.resize(initial_pairs.len(), R::zero());
+        self.dot_scalar_many(initial_pairs.as_slice(), comm, reductions.as_mut_slice());
+
+        let mut idx = 0;
+        let mut rho = reductions[idx];
+        idx += 1;
         if rho <= 0.0 || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
+
+        let mut cached_r_norm = if need_r_norm_res || need_r_norm_monitor {
+            let value = reductions[idx];
+            idx += 1;
+            Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+        } else {
+            None
+        };
+        let cached_z_norm = if need_z_norm_res {
+            let value = reductions[idx];
+            Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+        } else {
+            None
+        };
         let mut rho_prev = rho;
+
+        drop(initial_pairs);
+        drop(reductions);
 
         let mut res = match self.norm_type {
             CgNormType::Preconditioned => rho.abs().sqrt(),
-            CgNormType::Unpreconditioned => self.nrm2_scalar(r, comm),
-            CgNormType::Natural => self.nrm2_scalar(z, comm),
-            CgNormType::None => self.nrm2_scalar(r, comm),
+            CgNormType::Unpreconditioned => cached_r_norm.unwrap(),
+            CgNormType::Natural => cached_z_norm.unwrap(),
+            CgNormType::None => cached_r_norm.unwrap(),
         };
         let res0 = res;
 
@@ -290,14 +398,15 @@ impl PcgSolver {
             m(0, res);
         }
         if let Some(m) = &self.true_residual_monitor {
-            m(0, self.nrm2_scalar(r, comm));
+            let value = self.ensure_norm(r, comm, &mut cached_r_norm);
+            m(0, value);
         }
 
         p.copy_from_slice(z);
 
         let (reason0, mut stats0) = self.conv.check(res, res0, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            stats0.final_residual = self.nrm2_scalar(r, comm);
+            stats0.final_residual = self.ensure_norm(r, comm, &mut cached_r_norm);
             return Ok(stats0);
         }
 
@@ -329,7 +438,28 @@ impl PcgSolver {
                 z.copy_from_slice(r);
             }
 
-            let mut rho_new = self.dot_scalar(r, z, comm);
+            let need_r_norm_res = matches!(
+                self.norm_type,
+                CgNormType::Unpreconditioned | CgNormType::None
+            );
+            let need_z_norm_res = matches!(self.norm_type, CgNormType::Natural);
+            let need_r_norm_monitor = self.true_residual_monitor.is_some();
+
+            let mut dot_pairs: SmallVec<[(&[S], &[S]); 3]> = SmallVec::new();
+            dot_pairs.push((&r[..], &z[..]));
+            if need_r_norm_res || need_r_norm_monitor {
+                dot_pairs.push((&r[..], &r[..]));
+            }
+            if need_z_norm_res {
+                dot_pairs.push((&z[..], &z[..]));
+            }
+            let mut dot_results: SmallVec<[R; 3]> = SmallVec::new();
+            dot_results.resize(dot_pairs.len(), R::zero());
+            self.dot_scalar_many(dot_pairs.as_slice(), comm, dot_results.as_mut_slice());
+
+            let mut idx = 0;
+            let mut rho_new = dot_results[idx];
+            idx += 1;
             if !rho_new.is_finite() || rho_new < 0.0 {
                 return Err(KError::IndefinitePreconditioner);
             }
@@ -337,39 +467,65 @@ impl PcgSolver {
                 rho_new = 0.0;
             }
 
-            res = match self.norm_type {
-                CgNormType::Preconditioned => rho_new.abs().sqrt(),
-                CgNormType::Unpreconditioned => self.nrm2_scalar(r, comm),
-                CgNormType::Natural => self.nrm2_scalar(z, comm),
-                CgNormType::None => res,
+            let mut r_norm = if need_r_norm_res || need_r_norm_monitor {
+                let value = dot_results[idx];
+                idx += 1;
+                Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+            } else {
+                None
             };
+            let mut z_norm = if need_z_norm_res {
+                let value = dot_results[idx];
+                Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+            } else {
+                None
+            };
+
+            drop(dot_pairs);
+            drop(dot_results);
+
+            match self.norm_type {
+                CgNormType::Preconditioned => {
+                    res = rho_new.abs().sqrt();
+                }
+                CgNormType::Unpreconditioned => {
+                    res = r_norm.unwrap();
+                }
+                CgNormType::Natural => {
+                    res = z_norm.unwrap();
+                }
+                CgNormType::None => {}
+            }
 
             for m in monitors {
                 m(k, res);
             }
             if let Some(m) = &self.true_residual_monitor {
-                m(k, self.nrm2_scalar(r, comm));
+                let value = self.ensure_norm(r, comm, &mut r_norm);
+                m(k, value);
             }
 
             let res_check = match self.norm_type {
                 CgNormType::Preconditioned => rho_new.abs().sqrt(),
-                CgNormType::Unpreconditioned => self.nrm2_scalar(r, comm),
-                CgNormType::Natural => self.nrm2_scalar(z, comm),
-                CgNormType::None => self.nrm2_scalar(r, comm),
+                CgNormType::Unpreconditioned => self.ensure_norm(r, comm, &mut r_norm),
+                CgNormType::Natural => self.ensure_norm(z, comm, &mut z_norm),
+                CgNormType::None => self.ensure_norm(r, comm, &mut r_norm),
             };
             let (reason, mut stats) = self.conv.check(res_check, res0, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                stats.final_residual = self.nrm2_scalar(r, comm);
+                stats.final_residual = self.ensure_norm(r, comm, &mut r_norm);
                 return Ok(stats);
             }
 
             rho_prev = rho;
             rho = rho_new;
+            cached_r_norm = r_norm;
         }
 
+        let final_res = self.ensure_norm(r, comm, &mut cached_r_norm);
         Ok(SolveStats::new(
             self.conv.max_iters,
-            self.nrm2_scalar(r, comm),
+            final_res,
             ConvergedReason::DivergedMaxIts,
         ))
     }

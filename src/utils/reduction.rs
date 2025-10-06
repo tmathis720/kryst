@@ -3,6 +3,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::error::KError;
 use crate::parallel::Comm;
+use crate::reduction::{CommDeterministic, Packet, ReproMode};
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
 use once_cell::sync::Lazy;
@@ -80,8 +81,19 @@ pub mod test_hooks {
 pub enum ReductMode {
     /// Fast, implementation-defined reduction path.
     Fast,
-    /// Deterministic tree reductions (future extension).
+    /// Deterministic tree reductions.
     Deterministic,
+    /// Deterministic reductions with extended-precision accumulation.
+    DeterministicAccurate,
+}
+
+#[inline]
+fn repro_mode_from_reduct(mode: ReductMode) -> ReproMode {
+    match mode {
+        ReductMode::Fast => ReproMode::Fast,
+        ReductMode::Deterministic => ReproMode::Deterministic,
+        ReductMode::DeterministicAccurate => ReproMode::DeterministicAccurate,
+    }
 }
 
 /// Options that control asynchronous reductions.
@@ -210,6 +222,52 @@ fn finalize_handle_vec(handle: &mut AllreduceHandle<Vec<f64>>, result: Vec<f64>)
 fn convert_pair(buf: &[f64]) -> (f64, f64) {
     debug_assert_eq!(buf.len(), 2);
     (buf[0], buf[1])
+}
+
+fn deterministic_reduce_vec<C>(comm: &C, data: &[f64], mode: ReproMode) -> Vec<f64>
+where
+    C: Comm + CommDeterministic,
+{
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(data.len());
+    let mut offset = 0;
+    while offset < data.len() {
+        let remaining = data.len() - offset;
+        let width = remaining.min(4);
+        match width {
+            4 => {
+                let mut chunk = [0.0f64; 4];
+                chunk.copy_from_slice(&data[offset..offset + 4]);
+                let packet = Packet::<4> { v: chunk };
+                let reduced = comm.allreduce_det(&packet, mode);
+                out.extend_from_slice(&reduced.v);
+            }
+            3 => {
+                let mut chunk = [0.0f64; 3];
+                chunk.copy_from_slice(&data[offset..offset + 3]);
+                let packet = Packet::<3> { v: chunk };
+                let reduced = comm.allreduce_det(&packet, mode);
+                out.extend_from_slice(&reduced.v);
+            }
+            2 => {
+                let mut chunk = [0.0f64; 2];
+                chunk.copy_from_slice(&data[offset..offset + 2]);
+                let packet = Packet::<2> { v: chunk };
+                let reduced = comm.allreduce_det(&packet, mode);
+                out.extend_from_slice(&reduced.v);
+            }
+            _ => {
+                let packet = Packet::<1> { v: [data[offset]] };
+                let reduced = comm.allreduce_det(&packet, mode);
+                out.push(reduced.v[0]);
+            }
+        }
+        offset += width;
+    }
+    out
 }
 
 #[cfg(feature = "mpi")]
@@ -352,8 +410,12 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         b: f64,
         opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
-        if matches!(opt.mode, ReductMode::Deterministic) {
-            return Err(KError::Unsupported("deterministic reductions"));
+        if let ReductMode::Deterministic | ReductMode::DeterministicAccurate = opt.mode {
+            record_reduction(2);
+            let packet = Packet::<2> { v: [a, b] };
+            let reduced = self.allreduce_det(&packet, repro_mode_from_reduct(opt.mode));
+            let result = (reduced.v[0], reduced.v[1]);
+            return Ok((AllreduceHandle::new_ready(result), (a, b)));
         }
         record_reduction(2);
         let mut buf = vec![a, b];
@@ -387,8 +449,10 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         data: Vec<f64>,
         opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
-        if matches!(opt.mode, ReductMode::Deterministic) {
-            return Err(KError::Unsupported("deterministic reductions"));
+        if let ReductMode::Deterministic | ReductMode::DeterministicAccurate = opt.mode {
+            record_reduction(data.len());
+            let reduced = deterministic_reduce_vec(self, &data, repro_mode_from_reduct(opt.mode));
+            return Ok((AllreduceHandle::new_ready(reduced), data));
         }
         record_reduction(data.len());
         let mut buf = data.clone();

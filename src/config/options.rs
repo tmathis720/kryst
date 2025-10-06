@@ -26,7 +26,7 @@ pub struct KspOptions {
     pub dtol: Option<f64>,
     pub maxits: Option<usize>,
     pub restart: Option<usize>,
-    /// Reduction mode for global dot products: "fast" | "deterministic"
+    /// Reduction mode for global dot products: "fast" | "deterministic" | "deterministic-accurate"
     pub reduction: Option<String>,
     // GMRES/FGMRES-specific (backward-compatible; all optional)
     /// Override restart for GMRES; falls back to `restart` if unset
@@ -1419,6 +1419,9 @@ mod old_tests {
     fn cli_sets_ksp_reduction_mode() {
         let opts = KspOptions::from_args(&["-ksp_reduction", "deterministic"]).unwrap();
         assert_eq!(opts.reduction.as_deref(), Some("deterministic"));
+
+        let opts = KspOptions::from_args(&["-ksp_reduction", "deterministic-accurate"]).unwrap();
+        assert_eq!(opts.reduction.as_deref(), Some("deterministic-accurate"));
     }
 
     #[test]
