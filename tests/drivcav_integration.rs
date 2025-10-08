@@ -4,6 +4,7 @@
 //! matrix reordering, and KspContext integration.
 
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::config::options::PcOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
@@ -55,31 +56,32 @@ fn test_ilutp_environment_parsing() -> Result<(), KError> {
 fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Create a well-posed test matrix (8x8 symmetric positive definite)
     let n = 8;
-    let mut matrix = Mat::zeros(n, n);
+    let mut matrix = Mat::<R>::zeros(n, n);
 
     // Create a simple symmetric positive definite matrix
     // Using a scaled identity + symmetric matrix
     for i in 0..n {
-        matrix[(i, i)] = 4.0; // Strong diagonal dominance
+        matrix[(i, i)] = S::from_real(4.0).real(); // Strong diagonal dominance
         if i > 0 {
-            matrix[(i, i - 1)] = -1.0;
-            matrix[(i - 1, i)] = -1.0; // Ensure symmetry
+            let off_diag = S::from_real(-1.0).real();
+            matrix[(i, i - 1)] = off_diag;
+            matrix[(i - 1, i)] = off_diag; // Ensure symmetry
         }
     }
 
     // Create a simple RHS that gives a known solution
     // Let's use x = [1, 2, 3, 4, 5, 6, 7, 8] as our target solution
-    let exact_solution: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+    let exact_solution: Vec<R> = (1..=n).map(|i| S::from_real(i as f64).real()).collect();
 
     // Compute b = A * exact_solution
-    let mut b = vec![0.0; n];
+    let mut b = vec![R::default(); n];
     for i in 0..n {
         for j in 0..n {
             b[i] += matrix[(i, j)] * exact_solution[j];
         }
     }
 
-    let mut x = vec![0.0; n];
+    let mut x = vec![R::default(); n];
 
     // Setup KspContext with ILUTP
     let mut ksp = KspContext::new();
@@ -117,15 +119,15 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Verify solution quality by computing residual ||Ax - b||
     let mut residual = b.clone();
     for i in 0..n {
-        let mut ax_i = 0.0;
+        let mut ax_i = R::default();
         for j in 0..n {
             ax_i += matrix[(i, j)] * x[j];
         }
         residual[i] -= ax_i;
     }
 
-    let residual_norm: f64 = residual.iter().map(|r| r * r).sum::<f64>().sqrt();
-    let rhs_norm: f64 = b.iter().map(|r| r * r).sum::<f64>().sqrt();
+    let residual_norm: R = residual.iter().map(|r| r * r).sum::<R>().sqrt();
+    let rhs_norm: R = b.iter().map(|r| r * r).sum::<R>().sqrt();
     let relative_residual = residual_norm / rhs_norm;
 
     println!("Final residual norm: {:.2e}", residual_norm);
@@ -139,12 +141,12 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     );
 
     // Verify solution accuracy against known exact solution
-    let mut solution_error = 0.0;
+    let mut solution_error = R::default();
     for i in 0..n {
         solution_error += (x[i] - exact_solution[i]).powi(2);
     }
     solution_error = solution_error.sqrt();
-    let exact_norm: f64 = exact_solution.iter().map(|s| s * s).sum::<f64>().sqrt();
+    let exact_norm: R = exact_solution.iter().map(|s| s * s).sum::<R>().sqrt();
     let relative_error = solution_error / exact_norm;
 
     println!("Solution error norm: {:.2e}", solution_error);
@@ -210,29 +212,31 @@ mod integration_benchmarks {
     fn bench_ilutp_vs_jacobi() -> Result<(), KError> {
         // Create a moderately sized test problem (100x100)
         let n = 100;
-        let mut matrix = Mat::zeros(n, n);
+        let mut matrix = Mat::<R>::zeros(n, n);
 
         // Create a more challenging matrix (tridiagonal with some off-diagonal terms)
         for i in 0..n {
-            matrix[(i, i)] = 4.0;
+            matrix[(i, i)] = S::from_real(4.0).real();
             if i > 0 {
-                matrix[(i, i - 1)] = -1.0;
+                matrix[(i, i - 1)] = S::from_real(-1.0).real();
             }
             if i < n - 1 {
-                matrix[(i, i + 1)] = -1.0;
+                matrix[(i, i + 1)] = S::from_real(-1.0).real();
             }
             // Add some fill to make it more interesting
             if i > 1 {
-                matrix[(i, i - 2)] = 0.1;
+                matrix[(i, i - 2)] = S::from_real(0.1).real();
             }
             if i < n - 2 {
-                matrix[(i, i + 2)] = 0.1;
+                matrix[(i, i + 2)] = S::from_real(0.1).real();
             }
         }
 
-        let b: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0).sin()).collect();
-        let mut x_jacobi = vec![0.0; n];
-        let mut x_ilutp = vec![0.0; n];
+        let b: Vec<R> = (0..n)
+            .map(|i| S::from_real((i as f64 + 1.0).sin()).real())
+            .collect();
+        let mut x_jacobi = vec![R::default(); n];
+        let mut x_ilutp = vec![R::default(); n];
 
         // Test with Jacobi preconditioner
         let start = Instant::now();

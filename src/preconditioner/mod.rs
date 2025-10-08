@@ -38,11 +38,14 @@
 //! let _stats = ksp.solve(&b, &mut x).unwrap();
 //! ```
 
+#[cfg(feature = "legacy-pc-bridge")]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::LinOp;
 
 pub mod bridge;
+pub mod pc_bridge;
 #[cfg(feature = "legacy-pc-bridge")]
 use faer::Mat;
 use std::str::FromStr;
@@ -277,20 +280,20 @@ use std::sync::Mutex;
 #[cfg(feature = "legacy-pc-bridge")]
 #[cfg_attr(docsrs, doc(cfg(feature = "legacy-pc-bridge")))]
 pub struct LegacyOpPreconditioner {
-    inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>,
+    inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<R>> + Send + Sync>,
     scratch: Mutex<Scratch>,
 }
 
 #[cfg(feature = "legacy-pc-bridge")]
 #[derive(Default)]
 struct Scratch {
-    x: Vec<f64>,
-    y: Vec<f64>,
+    x: Vec<R>,
+    y: Vec<R>,
 }
 
 #[cfg(feature = "legacy-pc-bridge")]
 impl LegacyOpPreconditioner {
-    pub fn new(inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<f64>> + Send + Sync>) -> Self {
+    pub fn new(inner: Box<dyn legacy::Preconditioner<Mat<f64>, Vec<R>> + Send + Sync>) -> Self {
         Self {
             inner,
             scratch: Mutex::new(Scratch::default()),
@@ -300,10 +303,10 @@ impl LegacyOpPreconditioner {
     #[inline]
     fn ensure_scratch(s: &mut Scratch, n: usize) {
         if s.x.len() != n {
-            s.x.resize(n, 0.0);
+            s.x.resize(n, R::default());
         }
         if s.y.len() != n {
-            s.y.resize(n, 0.0);
+            s.y.resize(n, R::default());
         }
     }
 }

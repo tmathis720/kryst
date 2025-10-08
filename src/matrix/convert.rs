@@ -337,13 +337,14 @@ mod tests {
             .downcast_ref::<CsrMatrix<f64>>()
             .expect("converted CSR matrix");
         assert_eq!(csr.dims(), (1, 1));
-        assert_eq!(csr.values(), &[2.0]);
+        assert_eq!(csr.values().len(), 1);
+        assert!((csr.values()[0] - 2.0).abs() <= f64::EPSILON);
 
         let dense = materialize_linop_with_hint(&dist, FormatHint::Dense, 0.0).unwrap();
         let mat = dense
             .as_any()
             .downcast_ref::<faer::Mat<f64>>()
             .expect("converted dense matrix");
-        assert_eq!(mat[(0, 0)], 2.0);
+        assert!((mat[(0, 0)] - 2.0).abs() <= f64::EPSILON);
     }
 }

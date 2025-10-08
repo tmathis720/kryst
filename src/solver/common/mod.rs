@@ -1,6 +1,8 @@
 pub mod buffer;
 pub mod givens;
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -9,7 +11,7 @@ use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm, global_nrm2, global_reduction_mode};
 use crate::reduction::{CommDeterministic, Packet, ReproMode, dot_local_slice};
 #[cfg(feature = "complex")]
-use crate::reduction::{DDP, KahanP};
+use crate::reduction::{DDP, KahanP, PacketAccum};
 use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductMode, ReductOptions};
 
 pub use buffer::take_or_resize;
@@ -319,8 +321,8 @@ pub fn reported_residual_norm(
 /// Handle for a fused pair of asynchronous dot products.
 #[derive(Debug)]
 pub struct AsyncDot2 {
-    pub handle: AllreduceHandle<(f64, f64)>,
-    pub local: (f64, f64),
+    pub handle: AllreduceHandle<(R, R)>,
+    pub local: (R, R),
 }
 
 #[inline]
@@ -344,8 +346,8 @@ pub fn dot2_async<C: AsyncComm + ?Sized>(
     debug_assert_eq!(x1.len(), y1.len());
     debug_assert_eq!(x2.len(), y2.len());
     let mode = reduct_to_repro(opt.mode);
-    let a = dot_local_slice(x1, y1, mode);
-    let b = dot_local_slice(x2, y2, mode);
+    let a: R = dot_local_slice(x1, y1, mode);
+    let b: R = dot_local_slice(x2, y2, mode);
     let (handle, local) = comm
         .allreduce2_async(a, b, opt)
         .expect("async reduction launch");
@@ -359,11 +361,11 @@ pub fn dot1_async<C: AsyncComm + ?Sized>(
     x: &[f64],
     y: &[f64],
     opt: &ReductOptions,
-) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), crate::error::KError> {
+) -> Result<(AllreduceHandle<(R, R)>, (R, R)), crate::error::KError> {
     debug_assert_eq!(x.len(), y.len());
     let mode = reduct_to_repro(opt.mode);
     let sum = dot_local_slice(x, y, mode);
-    comm.allreduce2_async(sum, 0.0, opt)
+    comm.allreduce2_async(sum, R::default(), opt)
 }
 
 /// Launch a single dot product asynchronously on scalar slices. The result is
@@ -373,7 +375,7 @@ pub fn dot1_async_s<C: AsyncComm + ?Sized>(
     x: &[S],
     y: &[S],
     opt: &ReductOptions,
-) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), crate::error::KError> {
+) -> Result<(AllreduceHandle<(R, R)>, (R, R)), crate::error::KError> {
     debug_assert_eq!(x.len(), y.len());
 
     #[cfg(not(feature = "complex"))]
@@ -394,8 +396,8 @@ pub fn dot1_async_s<C: AsyncComm + ?Sized>(
 /// Handle for a batch of asynchronous dot products.
 #[derive(Debug)]
 pub struct AsyncDotN {
-    pub handle: AllreduceHandle<Vec<f64>>,
-    pub local: Vec<f64>,
+    pub handle: AllreduceHandle<Vec<R>>,
+    pub local: Vec<R>,
 }
 
 /// Launch multiple dot products asynchronously.
@@ -404,7 +406,7 @@ pub fn dotn_async<C: AsyncComm + ?Sized>(
     pairs: &[(/*x*/ &[f64], /*y*/ &[f64])],
     opt: &ReductOptions,
 ) -> AsyncDotN {
-    let mut loc = vec![0.0; pairs.len()];
+    let mut loc = vec![R::default(); pairs.len()];
     let mode = reduct_to_repro(opt.mode);
     for (k, (x, y)) in pairs.iter().enumerate() {
         debug_assert_eq!(x.len(), y.len());
@@ -421,11 +423,11 @@ pub fn nrm2_async<C: AsyncComm + ?Sized>(
     comm: &C,
     x: &[f64],
     opt: &ReductOptions,
-) -> (AllreduceHandle<(f64, f64)>, f64) {
+) -> (AllreduceHandle<(R, R)>, R) {
     let mode = reduct_to_repro(opt.mode);
-    let sumsq = dot_local_slice(x, x, mode);
+    let sumsq: R = dot_local_slice(x, x, mode);
     let (handle, local) = comm
-        .allreduce2_async(sumsq, 0.0, opt)
+        .allreduce2_async(sumsq, R::default(), opt)
         .expect("async reduction launch");
     (handle, local.0)
 }
@@ -435,7 +437,7 @@ pub fn nrm2_async_s<C: AsyncComm + ?Sized>(
     comm: &C,
     x: &[S],
     opt: &ReductOptions,
-) -> (AllreduceHandle<(f64, f64)>, f64) {
+) -> (AllreduceHandle<(R, R)>, R) {
     #[cfg(not(feature = "complex"))]
     unsafe {
         let xr: &[f64] = &*(x as *const [S] as *const [f64]);

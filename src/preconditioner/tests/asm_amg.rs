@@ -1,3 +1,5 @@
+use crate::algebra::prelude::*;
+use crate::assert_vec_close;
 use crate::matrix::op::CsrOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::Preconditioner;
@@ -6,11 +8,11 @@ use crate::preconditioner::{
 };
 use std::sync::Arc;
 
-fn identity(n: usize) -> CsrMatrix<f64> {
+fn identity(n: usize) -> CsrMatrix<R> {
     CsrMatrix::identity(n)
 }
 
-fn poisson_1d(n: usize) -> CsrMatrix<f64> {
+fn poisson_1d(n: usize) -> CsrMatrix<R> {
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::new();
     let mut values = Vec::new();
@@ -18,13 +20,13 @@ fn poisson_1d(n: usize) -> CsrMatrix<f64> {
     for i in 0..n {
         if i > 0 {
             col_idx.push(i - 1);
-            values.push(-1.0);
+            values.push(R::from(-1.0));
         }
         col_idx.push(i);
-        values.push(2.0);
+        values.push(R::from(2.0));
         if i + 1 < n {
             col_idx.push(i + 1);
-            values.push(-1.0);
+            values.push(R::from(-1.0));
         }
         row_ptr.push(col_idx.len());
     }
@@ -42,11 +44,11 @@ fn asm_identity_matches_input() {
     cfg.deterministic = true;
     let mut asm = Asm::with_config(cfg);
     asm.setup(&op).unwrap();
-    let rhs = vec![1.0, 2.0, 3.0, 4.0];
-    let mut out = vec![0.0; rhs.len()];
+    let rhs = vec![R::from(1.0), R::from(2.0), R::from(3.0), R::from(4.0)];
+    let mut out: Vec<R> = vec![R::default(); rhs.len()];
     asm.apply(crate::preconditioner::PcSide::Left, &rhs, &mut out)
         .unwrap();
-    assert_eq!(rhs, out);
+    assert_vec_close!("asm identity", &rhs, &out);
 }
 
 #[test]
@@ -65,17 +67,15 @@ fn asm_amg_skip_coarse_matches_asm() {
     two.coarse_every = 5;
     let mut hybrid = AsmAmg::with_configs(cfg, two);
     hybrid.setup(&op).unwrap();
-    let rhs = vec![1.0; 8];
-    let mut y_asm = vec![0.0; 8];
-    let mut y_hybrid = vec![0.0; 8];
+    let rhs = vec![R::from(1.0); 8];
+    let mut y_asm: Vec<R> = vec![R::default(); 8];
+    let mut y_hybrid: Vec<R> = vec![R::default(); 8];
     asm.apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_asm)
         .unwrap();
     hybrid
         .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_hybrid)
         .unwrap();
-    for i in 0..rhs.len() {
-        assert!((y_asm[i] - y_hybrid[i]).abs() < 1e-12);
-    }
+    assert_vec_close!("asm vs asm+amg restricted", &y_asm, &y_hybrid);
 }
 
 #[test]
@@ -88,18 +88,18 @@ fn asm_numeric_update_refreshes_values() {
     cfg.local_solver = AsmLocalSolver::ILU;
     let mut asm = Asm::with_config(cfg);
     asm.setup(&op1).unwrap();
-    let mut rhs = vec![1.0; 6];
-    let mut out = vec![0.0; 6];
+    let mut rhs = vec![R::from(1.0); 6];
+    let mut out: Vec<R> = vec![R::default(); 6];
     asm.apply(crate::preconditioner::PcSide::Left, &rhs, &mut out)
         .unwrap();
     // Update numeric values by scaling matrix
     let mut scaled = poisson_1d(6);
     for v in scaled.values_mut() {
-        *v *= 2.0;
+        *v *= R::from(2.0);
     }
     let op2 = CsrOp::new(Arc::new(scaled));
     asm.update_numeric(&op2).unwrap();
-    rhs.iter_mut().for_each(|v| *v = 1.0);
+    rhs.iter_mut().for_each(|v| *v = R::from(1.0));
     asm.apply(crate::preconditioner::PcSide::Left, &rhs, &mut out)
         .unwrap();
 }
@@ -122,8 +122,8 @@ fn asm_apply_s_matches_real_path() {
     let mut asm = Asm::with_config(cfg);
     asm.setup(&op).expect("asm setup");
 
-    let rhs_real: Vec<f64> = (0..6).map(|i| (i + 1) as f64).collect();
-    let mut out_real = vec![0.0; rhs_real.len()];
+    let rhs_real: Vec<R> = (0..6).map(|i| R::from((i + 1) as f64)).collect();
+    let mut out_real: Vec<R> = vec![R::default(); rhs_real.len()];
     asm.apply(PcSide::Left, &rhs_real, &mut out_real)
         .expect("asm apply real");
 
@@ -135,7 +135,7 @@ fn asm_apply_s_matches_real_path() {
 
     for (ys, yr) in out_s.iter().zip(out_real.iter()) {
         assert!(
-            (ys.real() - yr).abs() < 1e-10,
+            (ys.real() - yr).abs() < R::from(1e-10),
             "expected real match, got {} vs {}",
             ys,
             yr
@@ -164,8 +164,8 @@ fn asm_amg_apply_s_matches_real_path() {
     let mut pc = AsmAmg::with_configs(asm_cfg, two_cfg);
     pc.setup(&op).expect("asm_amg setup");
 
-    let rhs_real: Vec<f64> = (0..8).map(|i| (i + 1) as f64).collect();
-    let mut out_real = vec![0.0; rhs_real.len()];
+    let rhs_real: Vec<R> = (0..8).map(|i| R::from((i + 1) as f64)).collect();
+    let mut out_real: Vec<R> = vec![R::default(); rhs_real.len()];
     pc.apply(PcSide::Left, &rhs_real, &mut out_real)
         .expect("asm_amg apply real");
 
@@ -177,7 +177,7 @@ fn asm_amg_apply_s_matches_real_path() {
 
     for (ys, yr) in out_s.iter().zip(out_real.iter()) {
         assert!(
-            (ys.real() - yr).abs() < 1e-10,
+            (ys.real() - yr).abs() < R::from(1e-10),
             "expected real match, got {} vs {}",
             ys,
             yr

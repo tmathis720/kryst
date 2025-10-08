@@ -20,7 +20,6 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
 use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
@@ -254,9 +253,9 @@ pub struct SorPc {
     mat_side: MatSorType,
     fshift: f64,
     a_csr: Option<Arc<CsrMatrix<f64>>>,
-    inv_diag: Vec<f64>,
+    inv_diag: Vec<R>,
     n: usize,
-    scratch: Mutex<Vec<f64>>, // reuse for symmetric sweep without heap activity
+    scratch: Mutex<Vec<R>>, // reuse for symmetric sweep without heap activity
 }
 
 impl SorPc {
@@ -275,7 +274,7 @@ impl SorPc {
 
     fn ensure_inv_diag(&mut self, a: &CsrMatrix<f64>) -> Result<(), KError> {
         let n = a.nrows().min(a.ncols());
-        self.inv_diag.resize(n, 0.0);
+        self.inv_diag.resize(n, R::zero());
         for i in 0..n {
             let rs = a.row_ptr()[i];
             let re = a.row_ptr()[i + 1];
@@ -296,7 +295,7 @@ impl SorPc {
         // resize scratch once
         let mut s = self.scratch.lock().unwrap();
         if s.len() != n {
-            s.resize(n, 0.0);
+            s.resize(n, R::zero());
         }
         Ok(())
     }

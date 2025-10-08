@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
@@ -20,7 +21,7 @@ fn pipelined_cg_reports_residual_replacements() -> Result<(), KError> {
     let mut ws = Workspace::default();
     let mut pc = Jacobi::new();
     pc.setup(op)?;
-    let mut x = vec![0.0; a.nrows()];
+    let mut x: Vec<R> = vec![R::default(); a.nrows()];
     let comm = UniverseComm::NoComm(NoComm);
     let stats = solver.solve(
         op,

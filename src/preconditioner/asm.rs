@@ -2,6 +2,10 @@
 //!
 //! Based on Saad, and inspired by PETSc's PCASM. Supports Rayon in shared memory and MPI for distributed vectors.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::preconditioner::{PcSide, legacy::Preconditioner as LegacyPreconditioner};
@@ -26,8 +30,6 @@ use std::sync::Arc;
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
-use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::{apply_pc_mut_s, apply_pc_s};
 
@@ -109,7 +111,7 @@ pub struct SubdomainMeta {
     /// Marks primary-owner DOFs inside the overlapped set.
     pub interior_mask: Vec<bool>,
     /// Weights aligned with `indices` (PoU weights for ASM; masked in RAS if desired).
-    pub weights: Vec<f64>,
+    pub weights: Vec<R>,
 }
 
 impl<M, V, T> AdditiveSchwarz<M, V, T>
@@ -296,7 +298,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
             .map(|(s, idx)| SubdomainMeta {
                 indices: idx.clone(),
                 interior_mask: idx.iter().map(|&gi| self.owner_of[gi] == s).collect(),
-                weights: vec![1.0; idx.len()],
+                weights: vec![S::one().real(); idx.len()],
             })
             .collect();
 
@@ -347,8 +349,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let _ = ksp.solve(
                             &dense,
                             None,
-                            &vec![0.0; idx.len()],
-                            &mut vec![0.0; idx.len()],
+                            &vec![R::zero(); idx.len()],
+                            &mut vec![R::zero(); idx.len()],
                             PcSide::Left,
                             &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                             None,
@@ -400,7 +402,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
 
         // Zero the output
         for yi in y.iter_mut() {
-            *yi = 0.0;
+            *yi = R::zero();
         }
 
         if self.blocks_meta.is_empty() {
@@ -413,7 +415,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            let block_results: Vec<(Vec<usize>, Vec<f64>, Vec<bool>, Vec<f64>)> =
+            let block_results: Vec<(Vec<usize>, Vec<R>, Vec<bool>, Vec<R>)> =
                 match self.block_solver_factory {
                     BlockSolverFactory::LuDense => self
                         .blocks_meta
@@ -421,8 +423,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         .zip(self.local_blocks.par_iter())
                         .map(|(meta, (a_sub_any, ksp_mutex))| {
                             let indices = &meta.indices;
-                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-                            let mut x_blk = vec![0.0; indices.len()];
+                            let r_blk: Vec<R> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![R::zero(); indices.len()];
                             let mut ksp = ksp_mutex.lock().unwrap();
                             let _ = ksp.solve(
                                 a_sub_any,
@@ -448,8 +450,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         .zip(self.local_blocks_csr.par_iter())
                         .map(|(meta, (_a_sub, ilu))| {
                             let indices = &meta.indices;
-                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-                            let mut x_blk = vec![0.0; indices.len()];
+                            let r_blk: Vec<R> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![R::zero(); indices.len()];
                             let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
                             (
                                 indices.clone(),
@@ -499,8 +501,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         .zip(self.local_blocks.iter())
                         .for_each(|(meta, (a_sub_any, ksp_mutex))| {
                             let indices = &meta.indices;
-                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-                            let mut x_blk = vec![0.0; indices.len()];
+                            let r_blk: Vec<R> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![R::zero(); indices.len()];
                             let mut ksp = ksp_mutex.lock().unwrap();
                             let _ = ksp.solve(
                                 a_sub_any,
@@ -544,8 +546,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         .zip(self.local_blocks_csr.iter())
                         .for_each(|(meta, (_a_sub, ilu))| {
                             let indices = &meta.indices;
-                            let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-                            let mut x_blk = vec![0.0; indices.len()];
+                            let r_blk: Vec<R> = indices.iter().map(|&i| x[i]).collect();
+                            let mut x_blk = vec![R::zero(); indices.len()];
                             let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
                             match self.asm_mode {
                                 AsmMode::ASM => {
@@ -610,8 +612,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let _ = ksp.solve(
                             &dense,
                             None,
-                            &vec![0.0; indices.len()],
-                            &mut vec![0.0; indices.len()],
+                            &vec![R::zero(); indices.len()],
+                            &mut vec![R::zero(); indices.len()],
                             PcSide::Left,
                             &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                             None,
@@ -702,7 +704,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
             .map(|(s, idx)| SubdomainMeta {
                 indices: idx.clone(),
                 interior_mask: idx.iter().map(|&gi| self.owner_of[gi] == s).collect(),
-                weights: vec![1.0; idx.len()],
+                weights: vec![S::one().real(); idx.len()],
             })
             .collect();
         self.cover_count = compute_weights(
@@ -728,8 +730,8 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let _ = ksp.solve(
                             &dense,
                             None,
-                            &vec![0.0; indices.len()],
-                            &mut vec![0.0; indices.len()],
+                            &vec![R::zero(); indices.len()],
+                            &mut vec![R::zero(); indices.len()],
                             PcSide::Left,
                             &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                             None,
@@ -801,7 +803,7 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         }
         for (indices, (a_sub, ksp_mutex)) in self.subdomains.iter().zip(self.local_blocks.iter()) {
             let r_blk: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-            let mut x_blk = vec![0.0; indices.len()];
+            let mut x_blk = vec![R::zero(); indices.len()];
             let mut ksp = ksp_mutex.lock().unwrap();
             let _ = ksp.solve(
                 a_sub,
@@ -917,13 +919,14 @@ fn compute_weights(
     }
 
     if matches!(weighting, Weighting::None) {
+        let one = S::one().real();
         for b in blocks.iter_mut() {
-            b.weights.resize(b.indices.len(), 1.0);
+            b.weights.resize(b.indices.len(), one);
         }
         return cover_count;
     }
 
-    let mut phi: Vec<Vec<f64>> = vec![Vec::new(); blocks.len()];
+    let mut phi: Vec<Vec<R>> = vec![Vec::new(); blocks.len()];
     for (s, b) in blocks.iter().enumerate() {
         let mut dist = vec![0usize; b.indices.len()];
         if !matches!(weighting, Weighting::Uniform) {
@@ -954,12 +957,13 @@ fn compute_weights(
                 dist[j] = *dmap.get(&gi).unwrap_or(&0);
             }
         }
-        let phi_s: Vec<f64> = match weighting {
-            Weighting::Uniform => vec![1.0; b.indices.len()],
-            Weighting::SmoothLinear => dist.iter().map(|&d| (d as f64) + 1.0).collect(),
+        let one = S::one().real();
+        let phi_s: Vec<R> = match weighting {
+            Weighting::Uniform => vec![one; b.indices.len()],
+            Weighting::SmoothLinear => dist.iter().map(|&d| (d as R) + one).collect(),
             Weighting::SmoothPoly(p) => dist
                 .iter()
-                .map(|&d| ((d as f64) + 1.0).powi(p as i32))
+                .map(|&d| ((d as R) + one).powi(p as i32))
                 .collect(),
             Weighting::None => unreachable!(),
         };
@@ -973,21 +977,22 @@ fn compute_weights(
         }
     }
 
+    let one = S::one().real();
     for (s, b) in blocks.iter_mut().enumerate() {
-        b.weights.resize(b.indices.len(), 1.0);
+        b.weights.resize(b.indices.len(), one);
         for (j, &gi) in b.indices.iter().enumerate() {
             let denom = match weighting {
-                Weighting::Uniform => cover_count[gi] as f64,
+                Weighting::Uniform => cover_count[gi] as R,
                 _ => {
-                    let mut sum = 0.0;
+                    let mut sum = R::default();
                     for &(t, pos) in &coverers[gi] {
                         sum += phi[t][pos];
                     }
-                    if sum <= 0.0 { 1.0 } else { sum }
+                    if sum <= R::default() { one } else { sum }
                 }
             };
             let num = match weighting {
-                Weighting::Uniform => 1.0,
+                Weighting::Uniform => one,
                 _ => {
                     let pos = b.indices.binary_search(&gi).unwrap();
                     phi[s][pos]
@@ -1142,9 +1147,9 @@ struct AsmSubdomain {
     restrict_local: Vec<usize>,
     matrix: Arc<CsrMatrix<f64>>,
     solver: LocalSolver,
-    rhs: Mutex<Vec<f64>>,
-    sol: Mutex<Vec<f64>>,
-    weights: Vec<f64>,
+    rhs: Mutex<Vec<R>>,
+    sol: Mutex<Vec<R>>,
+    weights: Vec<R>,
 }
 
 impl AsmSubdomain {
@@ -1152,7 +1157,7 @@ impl AsmSubdomain {
         matrix: Arc<CsrMatrix<f64>>,
         pro2glob: Vec<usize>,
         restrict: Vec<usize>,
-        weights: Vec<f64>,
+        weights: Vec<R>,
         solver: LocalSolver,
     ) -> Self {
         let n = pro2glob.len();
@@ -1165,8 +1170,8 @@ impl AsmSubdomain {
             })
             .collect();
         Self {
-            rhs: Mutex::new(vec![0.0; n]),
-            sol: Mutex::new(vec![0.0; n]),
+            rhs: Mutex::new(vec![R::zero(); n]),
+            sol: Mutex::new(vec![R::zero(); n]),
             pro2glob,
             restrict,
             restrict_local,
@@ -1289,7 +1294,7 @@ impl Asm {
             .map(|(s, idx)| SubdomainMeta {
                 indices: idx.clone(),
                 interior_mask: idx.iter().map(|&gi| owner_of[gi] == s).collect(),
-                weights: vec![1.0; idx.len()],
+                weights: vec![S::one().real(); idx.len()],
             })
             .collect();
         if !matches!(weighting, Weighting::None) {
@@ -1310,7 +1315,7 @@ impl Asm {
             let mat = Arc::new(csr.as_ref().submatrix(&pro2glob));
             let solver = LocalSolver::from_config(self.cfg.local_solver, &mat)?;
             let weights = if matches!(weighting, Weighting::None) {
-                vec![1.0; pro2glob.len()]
+                vec![S::one().real(); pro2glob.len()]
             } else {
                 meta.weights
             };
@@ -1328,14 +1333,14 @@ impl Asm {
             return Err(KError::InvalidInput("ASM apply dimension mismatch".into()));
         }
         for yi in out.iter_mut() {
-            *yi = 0.0;
+            *yi = R::zero();
         }
         for sub in &state.subdomains {
             let mut rhs_loc = sub.rhs.lock().unwrap();
             let mut sol_loc = sub.sol.lock().unwrap();
             for (li, &gi) in sub.pro2glob.iter().enumerate() {
                 rhs_loc[li] = rhs[gi];
-                sol_loc[li] = 0.0;
+                sol_loc[li] = R::zero();
             }
             sub.solver.apply(&rhs_loc, &mut sol_loc)?;
             match self.cfg.combine {

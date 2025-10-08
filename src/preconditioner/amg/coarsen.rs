@@ -1,3 +1,8 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
+
 use super::strength::Strength;
 use super::strength_nodal::NodalStrength;
 use super::util::DofLayout;

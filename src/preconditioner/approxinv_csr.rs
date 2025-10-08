@@ -7,7 +7,6 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
@@ -79,15 +78,19 @@ impl ApproxInvBuilder {
         self
     }
     pub fn drop_tol(mut self, t: f64) -> Self {
-        self.p.drop_tol = t.max(0.0);
+        self.p.drop_tol = t.max(S::zero().real());
         self
     }
     pub fn reg(mut self, r: f64) -> Self {
-        self.p.reg = if r >= 0.0 { r } else { 0.0 };
+        self.p.reg = if r >= S::zero().real() {
+            r
+        } else {
+            S::zero().real()
+        };
         self
     }
     pub fn max_cond(mut self, c: f64) -> Self {
-        self.p.max_cond = if c > 0.0 { c } else { 1e12 };
+        self.p.max_cond = if c > S::zero().real() { c } else { 1e12 };
         self
     }
     pub fn parallel(mut self, on: bool) -> Self {
@@ -134,7 +137,7 @@ fn csr_find(a: &CsrMatrix<f64>, row: usize, col: usize) -> f64 {
     let cols = &ci[rs..re];
     match cols.binary_search(&col) {
         Ok(k) => vv[rs + k],
-        Err(_) => 0.0,
+        Err(_) => S::zero().real(),
     }
 }
 
@@ -144,14 +147,14 @@ fn spmv_csr(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
     assert_eq!(y.len(), a.nrows());
     // clear y
     for yi in y.iter_mut() {
-        *yi = 0.0;
+        *yi = S::zero().real();
     }
     let rp = a.row_ptr();
     let ci = a.col_idx();
     let vv = a.values();
     for i in 0..a.nrows() {
         let (rs, re) = (rp[i], rp[i + 1]);
-        let mut sum = 0.0;
+        let mut sum = S::zero().real();
         for p in rs..re {
             sum += vv[p] * x[ci[p]];
         }
@@ -164,7 +167,7 @@ fn spmv_csr_transpose(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
     assert_eq!(x.len(), a.nrows());
     assert_eq!(y.len(), a.ncols());
     for yi in y.iter_mut() {
-        *yi = 0.0;
+        *yi = S::zero().real();
     }
     let rp = a.row_ptr();
     let ci = a.col_idx();
@@ -249,9 +252,9 @@ impl FsaiCsr {
         }
 
         // 2) For each column, solve (A_SS + reg I) g = e_i|_S
-        let mut trips: Vec<(usize, usize, f64)> = Vec::new();
-        let mut a_ss = Mat::<f64>::from_fn(1, 1, |_, _| 0.0); // resized per column
-        let mut b = vec![0.0f64; 1];
+        let mut trips: Vec<(usize, usize, R)> = Vec::new();
+        let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default()); // resized per column
+        let mut b = vec![R::default(); 1];
 
         for i in 0..n {
             let s = &pat[i];
@@ -260,8 +263,8 @@ impl FsaiCsr {
                 continue;
             }
             if a_ss.nrows() != m || a_ss.ncols() != m {
-                a_ss = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
-                b.resize(m, 0.0);
+                a_ss = Mat::<R>::from_fn(m, m, |_, _| R::default());
+                b.resize(m, R::default());
             }
             // A_SS
             for p in 0..m {
@@ -277,10 +280,10 @@ impl FsaiCsr {
             }
             // b = e_i restricted to S
             for k in 0..m {
-                b[k] = 0.0;
+                b[k] = R::default();
             }
             if let Ok(pos) = s.binary_search(&i) {
-                b[pos] = 1.0;
+                b[pos] = S::one().real();
             } else {
                 // enforce presence
                 // should not happen as we inserted i
@@ -288,9 +291,9 @@ impl FsaiCsr {
             }
 
             // Solve using QR (robust for SPD + reg)
-            let rhs = Mat::<f64>::from_fn(m, 1, |r, _| b[r]);
+            let rhs = Mat::<R>::from_fn(m, 1, |r, _| b[r]);
             let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
-            let mut norm2 = 0.0f64;
+            let mut norm2: R = R::default();
             for r in 0..m {
                 norm2 += sol[(r, 0)] * sol[(r, 0)];
             }
@@ -329,7 +332,7 @@ impl FsaiCsr {
 impl Preconditioner for FsaiCsr {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         // Always require CSR view
-        let csr = csr_from_linop(a, 0.0)?; // no drop on A
+        let csr = csr_from_linop(a, S::zero().real())?; // no drop on A
         let sid = a.structure_id();
         let vid = a.values_id();
 
@@ -363,7 +366,7 @@ impl Preconditioner for FsaiCsr {
             )));
         }
         let n = x.len();
-        let mut t = vec![0.0f64; n];
+        let mut t = vec![R::default(); n];
         spmv_csr_transpose(&self.g, x, &mut t);
         spmv_csr(&self.g, &t, y);
         Ok(())
@@ -375,13 +378,13 @@ impl Preconditioner for FsaiCsr {
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         // Re-solve per-column with fixed pattern and write values back into existing G
-        let csr = csr_from_linop(a, 0.0)?;
+        let csr = csr_from_linop(a, S::zero().real())?;
         let n = self.g.nrows().min(self.g.ncols());
-        let mut a_ss = Mat::<f64>::from_fn(1, 1, |_, _| 0.0);
-        let mut b = vec![0.0f64; 1];
+        let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default());
+        let mut b = vec![R::default(); 1];
 
         // We'll rebuild triplets but write into a fresh CSR to keep code simple and pattern stable
-        let mut trips: Vec<(usize, usize, f64)> = Vec::new();
+        let mut trips: Vec<(usize, usize, R)> = Vec::new();
         for i in 0..n {
             let s = &self.pat[i];
             let m = s.len();
@@ -389,8 +392,8 @@ impl Preconditioner for FsaiCsr {
                 continue;
             }
             if a_ss.nrows() != m || a_ss.ncols() != m {
-                a_ss = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
-                b.resize(m, 0.0);
+                a_ss = Mat::<R>::from_fn(m, m, |_, _| R::default());
+                b.resize(m, R::default());
             }
             for p in 0..m {
                 for q in 0..=p {
@@ -403,14 +406,14 @@ impl Preconditioner for FsaiCsr {
                 a_ss[(d, d)] += self.params.reg;
             }
             for k in 0..m {
-                b[k] = 0.0;
+                b[k] = R::default();
             }
             if let Ok(pos) = s.binary_search(&i) {
-                b[pos] = 1.0;
+                b[pos] = S::one().real();
             } else {
                 continue;
             }
-            let rhs = Mat::<f64>::from_fn(m, 1, |r, _| b[r]);
+            let rhs = Mat::<R>::from_fn(m, 1, |r, _| b[r]);
             let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
             // No pruning during update to preserve structure
             for (k, &row) in s.iter().enumerate() {
@@ -479,7 +482,7 @@ impl SpaiCsr {
         }
 
         // 2) Per-column normal equations: (A_S^T A_S + reg I) m = A_S^T e_j
-        let mut trips: Vec<(usize, usize, f64)> = Vec::new();
+        let mut trips: Vec<(usize, usize, R)> = Vec::new();
         let rp = a.row_ptr();
         let ci = a.col_idx();
         let vv = a.values();
@@ -496,8 +499,8 @@ impl SpaiCsr {
             for (pos, &g) in s.iter().enumerate() {
                 idx_in_s[g] = pos as i32;
             }
-            let mut nmat = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
-            let mut cvec = Mat::<f64>::from_fn(m, 1, |_, _| 0.0);
+            let mut nmat = Mat::<R>::from_fn(m, m, |_, _| R::default());
+            let mut cvec = Mat::<R>::from_fn(m, 1, |_, _| R::default());
 
             // c = row j of A restricted to S
             let (rj, rj2) = (rp[j], rp[j + 1]);
@@ -515,7 +518,7 @@ impl SpaiCsr {
                 let (rs, re) = (rp[i], rp[i + 1]);
                 // collect positions and values in S for this row
                 // small temporary buffer
-                let mut pos_tmp: smallvec::SmallVec<[(usize, f64); 32]> = smallvec::SmallVec::new();
+                let mut pos_tmp: smallvec::SmallVec<[(usize, R); 32]> = smallvec::SmallVec::new();
                 for p in rs..re {
                     let col = ci[p];
                     let pos = idx_in_s[col];
@@ -544,7 +547,7 @@ impl SpaiCsr {
             // Solve SPD system via QR (robust for small m)
             let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
             // prune
-            let mut norm2 = 0.0f64;
+            let mut norm2: R = R::default();
             for r in 0..m {
                 norm2 += sol[(r, 0)] * sol[(r, 0)];
             }
@@ -580,7 +583,7 @@ impl SpaiCsr {
 
 impl Preconditioner for SpaiCsr {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, 0.0)?;
+        let csr = csr_from_linop(a, S::zero().real())?;
         let sid = a.structure_id();
         let vid = a.values_id();
 
@@ -619,13 +622,13 @@ impl Preconditioner for SpaiCsr {
     }
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, 0.0)?;
+        let csr = csr_from_linop(a, S::zero().real())?;
         let n = self.m.nrows().min(self.m.ncols());
         let rp = csr.row_ptr();
         let ci = csr.col_idx();
         let vv = csr.values();
         let mut idx_in_s: Vec<i32> = vec![-1; n];
-        let mut trips: Vec<(usize, usize, f64)> = Vec::new();
+        let mut trips: Vec<(usize, usize, R)> = Vec::new();
 
         for j in 0..n {
             let s = &self.pat[j];
@@ -636,8 +639,8 @@ impl Preconditioner for SpaiCsr {
             for (pos, &g) in s.iter().enumerate() {
                 idx_in_s[g] = pos as i32;
             }
-            let mut nmat = Mat::<f64>::from_fn(m, m, |_, _| 0.0);
-            let mut cvec = Mat::<f64>::from_fn(m, 1, |_, _| 0.0);
+            let mut nmat = Mat::<R>::from_fn(m, m, |_, _| R::default());
+            let mut cvec = Mat::<R>::from_fn(m, 1, |_, _| R::default());
             // cvec
             let (rj, rj2) = (rp[j], rp[j + 1]);
             for pidx in rj..rj2 {
@@ -724,11 +727,7 @@ impl KPreconditioner for SpaiCsr {
 
 // ---------------------------- Assembly helper ----------------------------
 
-fn assemble_csr(
-    nrows: usize,
-    ncols: usize,
-    trips: &mut Vec<(usize, usize, f64)>,
-) -> CsrMatrix<f64> {
+fn assemble_csr(nrows: usize, ncols: usize, trips: &mut Vec<(usize, usize, R)>) -> CsrMatrix<f64> {
     // Sort by (row, col)
     trips.sort_unstable_by(|a, b| match a.0.cmp(&b.0) {
         std::cmp::Ordering::Equal => a.1.cmp(&b.1),
@@ -737,7 +736,7 @@ fn assemble_csr(
     // Build CSR arrays
     let mut row_ptr = vec![0usize; nrows + 1];
     let mut col_idx: Vec<usize> = Vec::with_capacity(trips.len());
-    let mut vals: Vec<f64> = Vec::with_capacity(trips.len());
+    let mut vals: Vec<R> = Vec::with_capacity(trips.len());
 
     let mut cur_row = 0usize;
     let mut acc = 0usize;
@@ -819,7 +818,7 @@ mod tests {
             .expect("fsai build");
 
         let rhs_real = vec![1.0, 2.0, 3.0];
-        let mut out_real = vec![0.0; rhs_real.len()];
+        let mut out_real = vec![S::zero().real(); rhs_real.len()];
         pc.apply(PcSide::Left, &rhs_real, &mut out_real)
             .expect("fsai apply real");
 
@@ -843,7 +842,7 @@ mod tests {
             .expect("spai build");
 
         let rhs_real = vec![1.5, -0.5, 0.25];
-        let mut out_real = vec![0.0; rhs_real.len()];
+        let mut out_real = vec![S::zero().real(); rhs_real.len()];
         pc.apply(PcSide::Left, &rhs_real, &mut out_real)
             .expect("spai apply real");
 

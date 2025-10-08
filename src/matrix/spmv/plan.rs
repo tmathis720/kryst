@@ -1,6 +1,6 @@
 //! Runtime SpMV plan selection and metadata.
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 use core::any::TypeId;
 use std::time::Instant;
 
@@ -8,16 +8,16 @@ use crate::algebra::scalar::KrystScalar;
 use crate::matrix::csr::CsrMatrix;
 
 use super::scalar;
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 use super::{sellc, simd_csr};
 
 /// Identifies the selected kernel implementation inside a [`SpmvPlan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpmvKernel {
     Scalar,
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", not(feature = "complex")))]
     CsrSimdGather,
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", not(feature = "complex")))]
     SellC,
 }
 
@@ -31,9 +31,9 @@ pub struct SpmvPlan<S: KrystScalar> {
     pub row_ptr: Vec<usize>,
     pub col_idx: Vec<usize>,
     pub vals: Vec<S>,
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", not(feature = "complex")))]
     pub sell: Option<sellc::SellCStorage>,
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", not(feature = "complex")))]
     lanes: usize,
 }
 
@@ -52,7 +52,7 @@ impl<S: KrystScalar> SpmvPlan<S> {
                 beta,
                 y,
             ),
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", not(feature = "complex")))]
             SpmvKernel::CsrSimdGather => {
                 debug_assert_eq!(TypeId::of::<S>(), TypeId::of::<f64>());
                 let alpha = unsafe { *(&alpha as *const S as *const f64) };
@@ -89,7 +89,7 @@ impl<S: KrystScalar> SpmvPlan<S> {
                     );
                 }
             }
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", not(feature = "complex")))]
             SpmvKernel::SellC => {
                 let sell = self
                     .sell
@@ -120,9 +120,9 @@ impl<S: KrystScalar> SpmvPlan<S> {
             row_ptr: matrix.rowptr.clone(),
             col_idx: matrix.colind.clone(),
             vals: matrix.values.clone(),
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", not(feature = "complex")))]
             sell: None,
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", not(feature = "complex")))]
             lanes: 1,
         }
     }
@@ -142,7 +142,7 @@ pub struct SpmvTuning {
 impl Default for SpmvTuning {
     fn default() -> Self {
         Self {
-            allow_simd: cfg!(feature = "simd"),
+            allow_simd: cfg!(all(feature = "simd", not(feature = "complex"))),
             prefer_sellc: true,
             sell_c: 16,
             sell_sigma: 64,
@@ -175,16 +175,16 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
         row_ptr: rowptr,
         col_idx: colind,
         vals: values,
-        #[cfg(feature = "simd")]
+        #[cfg(all(feature = "simd", not(feature = "complex")))]
         sell: None,
-        #[cfg(feature = "simd")]
+        #[cfg(all(feature = "simd", not(feature = "complex")))]
         lanes: 1,
     };
 
-    #[cfg(not(feature = "simd"))]
+    #[cfg(not(all(feature = "simd", not(feature = "complex"))))]
     let _ = tuning;
 
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", not(feature = "complex")))]
     {
         if TypeId::of::<S>() == TypeId::of::<f64>() && tuning.allow_simd {
             let nnz = plan.col_idx.len();
@@ -267,7 +267,7 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
     plan
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 fn dispatch_sellc(
     lanes: usize,
     storage: &sellc::SellCStorage,
@@ -289,7 +289,7 @@ fn dispatch_sellc(
     );
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 fn round_up_to_multiple(value: usize, multiple: usize) -> usize {
     if multiple == 0 {
         return value;

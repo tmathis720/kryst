@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
@@ -200,25 +200,25 @@ enum EFactor {
 
 #[derive(Default)]
 struct DeflationWorkspace {
-    coarse: Vec<f64>,
-    coarse_sol: Vec<f64>,
-    fine_tmp: Vec<f64>,
-    base_out: Vec<f64>,
+    coarse: Vec<R>,
+    coarse_sol: Vec<R>,
+    fine_tmp: Vec<R>,
+    base_out: Vec<R>,
 }
 
 impl DeflationWorkspace {
     fn ensure(&mut self, n: usize, k: usize) {
         if self.coarse.len() != k {
-            self.coarse.resize(k, 0.0);
+            self.coarse.resize(k, R::default());
         }
         if self.coarse_sol.len() != k {
-            self.coarse_sol.resize(k, 0.0);
+            self.coarse_sol.resize(k, R::default());
         }
         if self.fine_tmp.len() != n {
-            self.fine_tmp.resize(n, 0.0);
+            self.fine_tmp.resize(n, R::default());
         }
         if self.base_out.len() != n {
-            self.base_out.resize(n, 0.0);
+            self.base_out.resize(n, R::default());
         }
     }
 }
@@ -451,7 +451,7 @@ where
         }
 
         // base_out = M^{-1} fine_tmp
-        base_out.fill(0.0);
+        base_out.fill(R::default());
         self.base.apply(side, fine_tmp, base_out)?;
 
         for i in 0..n {

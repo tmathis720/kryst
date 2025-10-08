@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::parallel::Comm;
 use crate::reduction::{CommDeterministic, Packet, ReproMode};
@@ -128,8 +129,8 @@ pub enum AllreduceHandle<T> {
     #[cfg(feature = "mpi")]
     Mpi {
         req: mpi::ffi::MPI_Request,
-        buf: Vec<f64>,
-        convert: fn(&[f64]) -> T,
+        buf: Vec<R>,
+        convert: fn(&[R]) -> T,
     },
     /// Shared-memory emulation backed by a channel.
     Rayon { rx: Receiver<T> },
@@ -166,29 +167,29 @@ pub trait AllreduceOps {
     /// Launch a nonblocking reduction of two scalars and return the handle and local contributions.
     fn allreduce2_async(
         &self,
-        a: f64,
-        b: f64,
+        a: R,
+        b: R,
         opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError>;
+    ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError>;
 
     /// Launch a nonblocking reduction of an arbitrary-length vector of scalars.
     fn allreduce_n_async(
         &self,
-        data: Vec<f64>,
+        data: Vec<R>,
         opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError>;
+    ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError>;
 
     /// Poll a pair reduction and return the result if ready.
-    fn test_pair(h: &mut AllreduceHandle<(f64, f64)>) -> Option<(f64, f64)>;
+    fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)>;
 
     /// Poll a vector reduction and return the result if ready.
-    fn test_vec(h: &mut AllreduceHandle<Vec<f64>>) -> Option<Vec<f64>>;
+    fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>>;
 
     /// Block until the pair reduction completes.
-    fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64);
+    fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R);
 
     /// Block until the vector reduction completes.
-    fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64>;
+    fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R>;
 }
 
 /// Trait alias for communicators that support asynchronous reductions.
@@ -197,10 +198,7 @@ pub trait AsyncComm: Comm + AllreduceOps {}
 impl<T> AsyncComm for T where T: Comm + AllreduceOps + ?Sized {}
 
 /// Helper used by polling implementations to convert a completed handle into the ready state.
-fn finalize_handle_pair(
-    handle: &mut AllreduceHandle<(f64, f64)>,
-    result: (f64, f64),
-) -> (f64, f64) {
+fn finalize_handle_pair(handle: &mut AllreduceHandle<(R, R)>, result: (R, R)) -> (R, R) {
     *handle = AllreduceHandle::Ready(result);
     if let AllreduceHandle::Ready(val) = handle {
         *val
@@ -209,7 +207,7 @@ fn finalize_handle_pair(
     }
 }
 
-fn finalize_handle_vec(handle: &mut AllreduceHandle<Vec<f64>>, result: Vec<f64>) -> Vec<f64> {
+fn finalize_handle_vec(handle: &mut AllreduceHandle<Vec<R>>, result: Vec<R>) -> Vec<R> {
     *handle = AllreduceHandle::Ready(result);
     if let AllreduceHandle::Ready(val) = handle {
         val.clone()
@@ -219,12 +217,12 @@ fn finalize_handle_vec(handle: &mut AllreduceHandle<Vec<f64>>, result: Vec<f64>)
 }
 
 /// Convert a raw buffer into a pair.
-fn convert_pair(buf: &[f64]) -> (f64, f64) {
+fn convert_pair(buf: &[R]) -> (R, R) {
     debug_assert_eq!(buf.len(), 2);
     (buf[0], buf[1])
 }
 
-fn deterministic_reduce_vec<C>(comm: &C, data: &[f64], mode: ReproMode) -> Vec<f64>
+fn deterministic_reduce_vec<C>(comm: &C, data: &[R], mode: ReproMode) -> Vec<R>
 where
     C: Comm + CommDeterministic,
 {
@@ -287,10 +285,10 @@ fn mpi_wait_request(mut req: mpi::ffi::MPI_Request) {
 impl AllreduceOps for crate::parallel::NoComm {
     fn allreduce2_async(
         &self,
-        a: f64,
-        b: f64,
+        a: R,
+        b: R,
         _opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
+    ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
         record_reduction(2);
         let sum = (a, b);
         Ok((AllreduceHandle::new_ready(sum), sum))
@@ -298,28 +296,28 @@ impl AllreduceOps for crate::parallel::NoComm {
 
     fn allreduce_n_async(
         &self,
-        data: Vec<f64>,
+        data: Vec<R>,
         _opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
+    ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
         record_reduction(data.len());
         Ok((AllreduceHandle::new_ready(data.clone()), data))
     }
 
-    fn test_pair(h: &mut AllreduceHandle<(f64, f64)>) -> Option<(f64, f64)> {
+    fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
         match h {
             AllreduceHandle::Ready(val) => Some(*val),
             _ => None,
         }
     }
 
-    fn test_vec(h: &mut AllreduceHandle<Vec<f64>>) -> Option<Vec<f64>> {
+    fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>> {
         match h {
             AllreduceHandle::Ready(val) => Some(val.clone()),
             _ => None,
         }
     }
 
-    fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+    fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -327,7 +325,7 @@ impl AllreduceOps for crate::parallel::NoComm {
         }
     }
 
-    fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+    fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -340,10 +338,10 @@ impl AllreduceOps for crate::parallel::NoComm {
 impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
     fn allreduce2_async(
         &self,
-        a: f64,
-        b: f64,
+        a: R,
+        b: R,
         _opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
+    ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
         record_reduction(2);
         let (tx, rx) = std::sync::mpsc::channel();
         let local = (a, b);
@@ -355,9 +353,9 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
 
     fn allreduce_n_async(
         &self,
-        data: Vec<f64>,
+        data: Vec<R>,
         _opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
+    ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
         record_reduction(data.len());
         let (tx, rx) = std::sync::mpsc::channel();
         let local = data.clone();
@@ -367,7 +365,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         Ok((AllreduceHandle::Rayon { rx }, local))
     }
 
-    fn test_pair(h: &mut AllreduceHandle<(f64, f64)>) -> Option<(f64, f64)> {
+    fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
         match h {
             AllreduceHandle::Ready(val) => Some(*val),
             AllreduceHandle::Rayon { rx } => rx.try_recv().ok().map(|v| finalize_handle_pair(h, v)),
@@ -375,7 +373,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         }
     }
 
-    fn test_vec(h: &mut AllreduceHandle<Vec<f64>>) -> Option<Vec<f64>> {
+    fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>> {
         match h {
             AllreduceHandle::Ready(val) => Some(val.clone()),
             AllreduceHandle::Rayon { rx } => rx.try_recv().ok().map(|v| finalize_handle_vec(h, v)),
@@ -383,7 +381,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         }
     }
 
-    fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+    fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -392,7 +390,7 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         }
     }
 
-    fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+    fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -406,10 +404,10 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
 impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
     fn allreduce2_async(
         &self,
-        a: f64,
-        b: f64,
+        a: R,
+        b: R,
         opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
+    ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
         if let ReductMode::Deterministic | ReductMode::DeterministicAccurate = opt.mode {
             record_reduction(2);
             let packet = Packet::<2> { v: [a, b] };
@@ -446,13 +444,13 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
 
     fn allreduce_n_async(
         &self,
-        data: Vec<f64>,
+        data: Vec<R>,
         opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
+    ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
         if let ReductMode::Deterministic | ReductMode::DeterministicAccurate = opt.mode {
             record_reduction(data.len());
             let reduced = deterministic_reduce_vec(self, &data, repro_mode_from_reduct(opt.mode));
-            return Ok((AllreduceHandle::new_ready(reduced), data));
+            return Ok((AllreduceHandle::new_ready(reduced.clone()), reduced));
         }
         record_reduction(data.len());
         let mut buf = data.clone();
@@ -482,7 +480,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         ))
     }
 
-    fn test_pair(h: &mut AllreduceHandle<(f64, f64)>) -> Option<(f64, f64)> {
+    fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
         match h {
             AllreduceHandle::Ready(val) => Some(*val),
             AllreduceHandle::Mpi { req, buf, convert } => {
@@ -497,7 +495,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         }
     }
 
-    fn test_vec(h: &mut AllreduceHandle<Vec<f64>>) -> Option<Vec<f64>> {
+    fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>> {
         match h {
             AllreduceHandle::Ready(val) => Some(val.clone()),
             AllreduceHandle::Mpi { req, buf, convert } => {
@@ -512,7 +510,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         }
     }
 
-    fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+    fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -524,7 +522,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         }
     }
 
-    fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+    fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -540,10 +538,10 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
 impl AllreduceOps for crate::parallel::UniverseComm {
     fn allreduce2_async(
         &self,
-        a: f64,
-        b: f64,
+        a: R,
+        b: R,
         opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<(f64, f64)>, (f64, f64)), KError> {
+    ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
         match self {
             crate::parallel::UniverseComm::NoComm(comm) => comm.allreduce2_async(a, b, opt),
             #[cfg(feature = "mpi")]
@@ -559,9 +557,9 @@ impl AllreduceOps for crate::parallel::UniverseComm {
 
     fn allreduce_n_async(
         &self,
-        data: Vec<f64>,
+        data: Vec<R>,
         opt: &ReductOptions,
-    ) -> Result<(AllreduceHandle<Vec<f64>>, Vec<f64>), KError> {
+    ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
         match self {
             crate::parallel::UniverseComm::NoComm(comm) => comm.allreduce_n_async(data, opt),
             #[cfg(feature = "mpi")]
@@ -575,7 +573,7 @@ impl AllreduceOps for crate::parallel::UniverseComm {
         }
     }
 
-    fn test_pair(h: &mut AllreduceHandle<(f64, f64)>) -> Option<(f64, f64)> {
+    fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
         match h {
             AllreduceHandle::Ready(val) => Some(*val),
             #[cfg(feature = "mpi")]
@@ -592,7 +590,7 @@ impl AllreduceOps for crate::parallel::UniverseComm {
         }
     }
 
-    fn test_vec(h: &mut AllreduceHandle<Vec<f64>>) -> Option<Vec<f64>> {
+    fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>> {
         match h {
             AllreduceHandle::Ready(val) => Some(val.clone()),
             #[cfg(feature = "mpi")]
@@ -609,7 +607,7 @@ impl AllreduceOps for crate::parallel::UniverseComm {
         }
     }
 
-    fn wait_pair(h: AllreduceHandle<(f64, f64)>) -> (f64, f64) {
+    fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
@@ -629,7 +627,7 @@ impl AllreduceOps for crate::parallel::UniverseComm {
         }
     }
 
-    fn wait_vec(h: AllreduceHandle<Vec<f64>>) -> Vec<f64> {
+    fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,

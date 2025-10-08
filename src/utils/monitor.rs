@@ -29,6 +29,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
+use crate::algebra::prelude::*;
 use crate::preconditioner::stats::ParIluIterSample;
 
 pub enum Event<'a> {
@@ -41,7 +42,7 @@ pub enum Event<'a> {
     IluSetupEnd {
         iters: u32,
         converged: bool,
-        setup_time_s: f64,
+        setup_time_s: R,
     },
 }
 
@@ -92,15 +93,15 @@ pub struct ConvergenceStats {
     /// Total number of iterations performed
     pub total_iterations: usize,
     /// Initial residual norm
-    pub initial_residual: f64,
-    /// Final residual norm  
-    pub final_residual: f64,
+    pub initial_residual: R,
+    /// Final residual norm
+    pub final_residual: R,
     /// Average convergence rate per iteration
-    pub avg_convergence_rate: f64,
+    pub avg_convergence_rate: R,
     /// Best (fastest) convergence rate observed
-    pub best_convergence_rate: f64,
+    pub best_convergence_rate: R,
     /// Worst (slowest) convergence rate observed
-    pub worst_convergence_rate: f64,
+    pub worst_convergence_rate: R,
     /// Total solve time
     pub total_solve_time: Duration,
     /// Average time per iteration
@@ -119,9 +120,9 @@ pub struct IterationData {
     /// Iteration number (0-indexed)
     pub iteration: usize,
     /// Residual norm at this iteration
-    pub residual_norm: f64,
+    pub residual_norm: R,
     /// Convergence rate from previous iteration
-    pub convergence_rate: Option<f64>,
+    pub convergence_rate: Option<R>,
     /// Time taken for this iteration
     pub iteration_time: Duration,
     /// Time spent in preconditioner application
@@ -205,7 +206,7 @@ impl IterationMonitor {
     pub fn record_iteration(
         &mut self,
         iteration: usize,
-        residual_norm: f64,
+        residual_norm: R,
         pc_time: Option<Duration>,
     ) {
         let now = Instant::now();
@@ -220,7 +221,7 @@ impl IterationMonitor {
         // Compute convergence rate
         let convergence_rate = if iteration > 0 && self.compute_rates {
             if let Some(prev) = self.history.last() {
-                if prev.residual_norm > 0.0 && residual_norm > 0.0 {
+                if prev.residual_norm > R::default() && residual_norm > R::default() {
                     Some(residual_norm / prev.residual_norm)
                 } else {
                     None
@@ -262,7 +263,7 @@ impl IterationMonitor {
             let elapsed_s = self
                 .solve_start_time
                 .map(|t0| t0.elapsed().as_secs_f64())
-                .unwrap_or(0.0);
+                .unwrap_or_default();
 
             let _ = writeln!(
                 writer,
@@ -294,9 +295,17 @@ impl IterationMonitor {
     pub fn get_statistics(&self) -> ConvergenceStats {
         let total_iterations = self.history.len();
 
-        let initial_residual = self.history.first().map(|d| d.residual_norm).unwrap_or(0.0);
+        let initial_residual = self
+            .history
+            .first()
+            .map(|d| d.residual_norm)
+            .unwrap_or_default();
 
-        let final_residual = self.history.last().map(|d| d.residual_norm).unwrap_or(0.0);
+        let final_residual = self
+            .history
+            .last()
+            .map(|d| d.residual_norm)
+            .unwrap_or_default();
 
         let total_solve_time = self
             .solve_start_time
@@ -331,7 +340,7 @@ impl IterationMonitor {
             }
         };
 
-        let rates: Vec<f64> = self
+        let rates: Vec<R> = self
             .history
             .iter()
             .filter_map(|d| d.convergence_rate)
@@ -339,12 +348,14 @@ impl IterationMonitor {
 
         let (avg_convergence_rate, best_convergence_rate, worst_convergence_rate) =
             if !rates.is_empty() {
-                let avg = rates.iter().sum::<f64>() / (rates.len() as f64);
-                let best = rates.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                let worst = rates.iter().fold(0.0f64, |a, &b| a.max(b));
+                let len_r = S::from_real(rates.len() as f64).real();
+                let avg = rates.iter().copied().sum::<R>() / len_r;
+                let best = rates.iter().fold(R::INFINITY, |a, &b| a.min(b));
+                let worst = rates.iter().fold(R::default(), |a, &b| a.max(b));
                 (avg, best, worst)
             } else {
-                (1.0, 1.0, 1.0) // Default to no convergence
+                let one = S::one().real();
+                (one, one, one) // Default to no convergence
             };
 
         ConvergenceStats {
@@ -368,12 +379,12 @@ impl IterationMonitor {
     }
 
     /// Get the current residual norm (if any iterations recorded).
-    pub fn current_residual(&self) -> Option<f64> {
+    pub fn current_residual(&self) -> Option<R> {
         self.history.last().map(|d| d.residual_norm)
     }
 
     /// Get the recent convergence rate (average of last few iterations).
-    pub fn recent_convergence_rate(&self, window: usize) -> Option<f64> {
+    pub fn recent_convergence_rate(&self, window: usize) -> Option<R> {
         if self.history.len() < 2 {
             return None;
         }
@@ -382,7 +393,7 @@ impl IterationMonitor {
             .history
             .len()
             .saturating_sub(window.min(self.history.len()));
-        let recent_rates: Vec<f64> = self.history[start_idx..]
+        let recent_rates: Vec<R> = self.history[start_idx..]
             .iter()
             .filter_map(|d| d.convergence_rate)
             .collect();
@@ -390,12 +401,13 @@ impl IterationMonitor {
         if recent_rates.is_empty() {
             None
         } else {
-            Some(recent_rates.iter().sum::<f64>() / (recent_rates.len() as f64))
+            let len_r = S::from_real(recent_rates.len() as f64).real();
+            Some(recent_rates.iter().copied().sum::<R>() / len_r)
         }
     }
 
     /// Check if convergence has stagnated (poor convergence rate recently).
-    pub fn is_stagnating(&self, threshold: f64, window: usize) -> bool {
+    pub fn is_stagnating(&self, threshold: R, window: usize) -> bool {
         if let Some(recent_rate) = self.recent_convergence_rate(window) {
             recent_rate > threshold
         } else {
@@ -430,18 +442,30 @@ mod tests {
         monitor.start_solve();
 
         // Record some iterations
-        monitor.record_iteration(0, 1.0, None);
-        monitor.record_iteration(1, 0.5, Some(Duration::from_millis(10)));
-        monitor.record_iteration(2, 0.25, Some(Duration::from_millis(12)));
+        monitor.record_iteration(0, S::one().real(), None);
+        monitor.record_iteration(1, S::from_real(0.5).real(), Some(Duration::from_millis(10)));
+        monitor.record_iteration(
+            2,
+            S::from_real(0.25).real(),
+            Some(Duration::from_millis(12)),
+        );
 
         monitor.mark_converged("Relative tolerance achieved");
 
         let stats = monitor.get_statistics();
         assert_eq!(stats.total_iterations, 3);
-        assert_eq!(stats.initial_residual, 1.0);
-        assert_eq!(stats.final_residual, 0.25);
+        crate::assert_s_close!(
+            "initial residual",
+            S::from_real(stats.initial_residual),
+            S::one()
+        );
+        crate::assert_s_close!(
+            "final residual",
+            S::from_real(stats.final_residual),
+            S::from_real(0.25)
+        );
         assert!(stats.converged);
-        assert!(stats.avg_convergence_rate < 1.0); // Should be improving
+        assert!(stats.avg_convergence_rate < S::one().real()); // Should be improving
     }
 
     #[test]
@@ -449,12 +473,16 @@ mod tests {
         let mut monitor = IterationMonitor::new();
         monitor.start_solve();
 
-        monitor.record_iteration(0, 1.0, None);
-        monitor.record_iteration(1, 0.1, None); // Rate = 0.1
-        monitor.record_iteration(2, 0.01, None); // Rate = 0.1
+        monitor.record_iteration(0, S::one().real(), None);
+        monitor.record_iteration(1, S::from_real(0.1).real(), None); // Rate = 0.1
+        monitor.record_iteration(2, S::from_real(0.01).real(), None); // Rate = 0.1
 
         let recent_rate = monitor.recent_convergence_rate(2);
-        assert!((recent_rate.unwrap() - 0.1).abs() < 1e-10);
+        crate::assert_s_close!(
+            "recent rate",
+            S::from_real(recent_rate.unwrap()),
+            S::from_real(0.1)
+        );
     }
 
     #[test]
@@ -462,11 +490,11 @@ mod tests {
         let mut monitor = IterationMonitor::new();
         monitor.start_solve();
 
-        monitor.record_iteration(0, 1.0, None);
-        monitor.record_iteration(1, 0.99, None); // Poor rate = 0.99
-        monitor.record_iteration(2, 0.98, None); // Poor rate ≈ 0.99
+        monitor.record_iteration(0, S::one().real(), None);
+        monitor.record_iteration(1, S::from_real(0.99).real(), None); // Poor rate = 0.99
+        monitor.record_iteration(2, S::from_real(0.98).real(), None); // Poor rate ≈ 0.99
 
-        assert!(monitor.is_stagnating(0.95, 2));
-        assert!(!monitor.is_stagnating(0.999, 2));
+        assert!(monitor.is_stagnating(S::from_real(0.95).real(), 2));
+        assert!(!monitor.is_stagnating(S::from_real(0.999).real(), 2));
     }
 }

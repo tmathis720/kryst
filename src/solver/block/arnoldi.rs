@@ -1,5 +1,9 @@
 //! Block Arnoldi helpers.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::UniverseComm;
@@ -12,9 +16,9 @@ use super::kernels;
 pub struct ArnoldiOutput {
     /// Projection coefficients for each previously constructed block.
     /// Flattened as `block_index * p * p + row * p + col` with `p = block_size`.
-    pub coeffs: Vec<f64>,
+    pub coeffs: Vec<S>,
     /// Upper-triangular block returned by the Cholesky-QR step.
-    pub r_block: Vec<f64>,
+    pub r_block: Vec<S>,
 }
 
 /// Perform a block Arnoldi step.
@@ -32,7 +36,7 @@ pub fn block_arnoldi_step(
     w: &mut BlockVec,
     comm: &UniverseComm,
     work: &mut Workspace,
-    max_cond: f64,
+    _max_cond: R,
 ) -> Result<ArnoldiOutput, KError> {
     if basis.is_empty() {
         return Err(KError::InvalidInput(
@@ -43,7 +47,7 @@ pub fn block_arnoldi_step(
     let n = w.nrows();
     let num_blocks = basis.len();
 
-    let mut columns: Vec<&[f64]> = Vec::with_capacity(num_blocks * p);
+    let mut columns: Vec<&[S]> = Vec::with_capacity(num_blocks * p);
     for block in basis {
         if block.ncols() != p || block.nrows() != n {
             return Err(KError::InvalidInput(
@@ -55,61 +59,24 @@ pub fn block_arnoldi_step(
         }
     }
 
-    let mut c_local = vec![0.0; columns.len() * p];
+    let mut c_local = vec![S::zero(); columns.len() * p];
     kernels::tall_t_times_block(&columns, w, &mut c_local);
-    let mut g_local = vec![0.0; p * p];
-    kernels::gram_pxp(w, w, &mut g_local);
 
-    let mut payload = vec![0.0; c_local.len() + g_local.len()];
-    payload[..c_local.len()].copy_from_slice(&c_local);
-    payload[c_local.len()..].copy_from_slice(&g_local);
+    let mut payload = std::mem::take(&mut work.blk_payload);
+    payload.clear();
+    payload.reserve(pack_scalars_len(c_local.len()));
+    pack_scalars(&mut payload, &c_local);
 
-    let (handle, _send) = comm.allreduce_n_async(payload, work.reduction_options())?;
+    let (handle, send) = comm.allreduce_n_async(payload, work.reduction_options())?;
     let reduced = UniverseComm::wait_vec(handle);
-    let (c_global, g_global) = reduced.split_at(columns.len() * p);
+    work.blk_payload = send;
+    let c_global = unpack_scalars(&reduced);
 
-    kernels::block_project(&columns, c_global, columns.len(), p, w);
+    kernels::block_project(&columns, &c_global, columns.len(), p, w);
 
-    let mut s = g_global.to_vec();
-    for i in 0..p {
-        for j in 0..p {
-            let mut sum = 0.0;
-            for row in 0..columns.len() {
-                let lhs = c_global[row * p + i];
-                let rhs = c_global[row * p + j];
-                sum += lhs * rhs;
-            }
-            s[i * p + j] -= sum;
-        }
-    }
+    let r_block = classical_qr(w, work)?;
 
-    let mut r_block = s.clone();
-    let use_fallback = match chol_upper(&mut r_block, p) {
-        Ok(()) => {
-            let mut max_diag: f64 = 0.0;
-            let mut min_diag: f64 = f64::INFINITY;
-            for idx in 0..p {
-                let diag = r_block[idx * p + idx].abs();
-                max_diag = max_diag.max(diag);
-                min_diag = min_diag.min(diag);
-            }
-            if min_diag <= 0.0 {
-                true
-            } else {
-                let cond = max_diag / min_diag;
-                !cond.is_finite() || cond > max_cond
-            }
-        }
-        Err(_) => true,
-    };
-
-    if use_fallback {
-        r_block = classical_qr(w)?;
-    } else {
-        triangular_solve_right_upper(&r_block, p, w);
-    }
-
-    let mut coeffs = vec![0.0; num_blocks * p * p];
+    let mut coeffs = vec![S::zero(); num_blocks * p * p];
     for (block_idx, block_coeffs) in coeffs.chunks_mut(p * p).enumerate() {
         for row in 0..p {
             for col in 0..p {
@@ -121,62 +88,12 @@ pub fn block_arnoldi_step(
     Ok(ArnoldiOutput { coeffs, r_block })
 }
 
-fn chol_upper(mat: &mut [f64], n: usize) -> Result<(), KError> {
-    for j in 0..n {
-        for i in 0..=j {
-            let mut sum = mat[i * n + j];
-            for k in 0..i {
-                sum -= mat[k * n + i] * mat[k * n + j];
-            }
-            if i == j {
-                if sum <= 0.0 || !sum.is_finite() {
-                    return Err(KError::FactorError(
-                        "block Arnoldi: Cholesky factorisation failed".into(),
-                    ));
-                }
-                mat[i * n + j] = sum.sqrt();
-            } else {
-                let diag = mat[i * n + i];
-                if diag.abs() <= f64::EPSILON {
-                    return Err(KError::FactorError(
-                        "block Arnoldi: zero diagonal during Cholesky".into(),
-                    ));
-                }
-                mat[i * n + j] = sum / diag;
-            }
-        }
-        for i in (j + 1)..n {
-            mat[i * n + j] = 0.0;
-        }
-    }
-    Ok(())
-}
-
-fn triangular_solve_right_upper(r: &[f64], p: usize, block: &mut BlockVec) {
-    let n = block.nrows();
-    let mut row_buf = vec![0.0; p];
-    for row in 0..n {
-        for col in 0..p {
-            row_buf[col] = block.col(col)[row];
-        }
-        for j in (0..p).rev() {
-            let mut sum = row_buf[j];
-            for k in (j + 1)..p {
-                sum -= row_buf[k] * r[j * p + k];
-            }
-            row_buf[j] = sum / r[j * p + j];
-        }
-        for col in 0..p {
-            block.col_mut(col)[row] = row_buf[col];
-        }
-    }
-}
-
-fn classical_qr(block: &mut BlockVec) -> Result<Vec<f64>, KError> {
+fn classical_qr(block: &mut BlockVec, work: &mut Workspace) -> Result<Vec<S>, KError> {
     let p = block.ncols();
     let n = block.nrows();
-    let mut r = vec![0.0; p * p];
-    let mut col_buf = vec![0.0; n];
+    let mut r = vec![S::zero(); p * p];
+    work.blk_scratch.resize(n, S::zero());
+    let col_buf = &mut work.blk_scratch[..n];
     for j in 0..p {
         {
             let col = block.col(j);
@@ -184,29 +101,60 @@ fn classical_qr(block: &mut BlockVec) -> Result<Vec<f64>, KError> {
         }
         for i in 0..j {
             let qi = block.col(i);
-            let mut dot = 0.0;
-            for k in 0..n {
-                dot += qi[k] * col_buf[k];
-            }
+            let dot = dot_conj(qi, &col_buf[..]);
             r[i * p + j] = dot;
-            for k in 0..n {
-                col_buf[k] -= dot * qi[k];
+            for (buf, &qi_val) in col_buf.iter_mut().zip(qi.iter()) {
+                *buf -= dot * qi_val;
             }
         }
-        let mut norm_sq = 0.0;
-        for k in 0..n {
-            norm_sq += col_buf[k] * col_buf[k];
-        }
-        let norm = norm_sq.sqrt();
-        if norm <= f64::EPSILON {
+        let norm = nrm2(&col_buf[..]);
+        if norm <= R::default() {
             return Err(KError::FactorError(
                 "block Arnoldi: dependent block encountered".into(),
             ));
         }
-        r[j * p + j] = norm;
-        for k in 0..n {
-            block.col_mut(j)[k] = col_buf[k] / norm;
+        r[j * p + j] = S::from_real(norm);
+        let inv = S::from_real(1.0 / norm);
+        let col_mut = block.col_mut(j);
+        for (dst, &src) in col_mut.iter_mut().zip(col_buf.iter()) {
+            *dst = src * inv;
         }
     }
     Ok(r)
+}
+
+#[cfg(feature = "complex")]
+fn pack_scalars(payload: &mut Vec<R>, values: &[S]) {
+    for &val in values {
+        payload.push(val.real());
+        payload.push(val.imag());
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+fn pack_scalars(payload: &mut Vec<R>, values: &[S]) {
+    payload.extend(values.iter().map(|&val| val.real()));
+}
+
+#[cfg(feature = "complex")]
+fn pack_scalars_len(len: usize) -> usize {
+    len * 2
+}
+
+#[cfg(not(feature = "complex"))]
+fn pack_scalars_len(len: usize) -> usize {
+    len
+}
+
+#[cfg(feature = "complex")]
+fn unpack_scalars(buffer: &[R]) -> Vec<S> {
+    buffer
+        .chunks_exact(2)
+        .map(|chunk| S::from_parts(chunk[0], chunk[1]))
+        .collect()
+}
+
+#[cfg(not(feature = "complex"))]
+fn unpack_scalars(buffer: &[R]) -> Vec<S> {
+    buffer.iter().map(|&re| S::from_real(re)).collect()
 }

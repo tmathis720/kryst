@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -20,14 +22,6 @@ use std::cmp::min;
 
 fn reduce_real(comm: &UniverseComm, value: R) -> R {
     allreduce_sum_scalar_with_mode(comm, S::from_real(value), global_reduction_mode()).real()
-}
-
-fn dot_reduce(comm: &UniverseComm, a: &[S], b: &[S]) -> S {
-    global_dot_conj(comm, a, b)
-}
-
-fn norm2(x: &[S], comm: &UniverseComm) -> R {
-    global_nrm2(comm, x)
 }
 
 #[derive(Clone, Debug)]
@@ -301,7 +295,7 @@ impl IdrsWorkspace {
         let col = self.p_col_mut(col_idx);
         let local = col
             .iter()
-            .fold(0.0, |acc, &val| acc + val.abs() * val.abs());
+            .fold(R::default(), |acc, &val| acc + val.abs() * val.abs());
         let norm_sq = reduce_real(comm, local);
         stats.dots += 1;
         let norm = norm_sq.sqrt();
@@ -322,16 +316,16 @@ impl IdrsWorkspace {
         stats: &mut IdrsStats,
     ) -> Result<(), KError> {
         let n = self.n;
-        for k in 0..col_idx {
-            let coeff = {
-                let prev = &self.p[k * n..(k + 1) * n];
-                let col = &self.p[col_idx * n..(col_idx + 1) * n];
-                dot_reduce(comm, prev, col)
-            };
-            stats.dots += 1;
-            for i in 0..n {
-                let idx = col_idx * n + i;
-                self.p[idx] -= coeff * self.p[k * n + i];
+        {
+            let (prev_cols, tail) = self.p.split_at_mut(col_idx * n);
+            let (col, _) = tail.split_at_mut(n);
+            for k in 0..col_idx {
+                let prev = &prev_cols[k * n..(k + 1) * n];
+                let coeff = global_dot_conj(comm, prev, col);
+                stats.dots += 1;
+                for (entry, &prev_val) in col.iter_mut().zip(prev.iter()) {
+                    *entry -= coeff * prev_val;
+                }
             }
         }
         self.normalize_column(col_idx, comm, stats)
@@ -438,7 +432,7 @@ impl IdrsSolver {
         let s = self.ws.s;
         for j in 0..s {
             let col = self.ws.p_col(j);
-            let dot = dot_reduce(comm, col, &self.ws.r[..n]);
+            let dot = global_dot_conj(comm, col, &self.ws.r[..n]);
             self.ws.ph_r[j] = dot;
         }
         stats.dots += s;
@@ -451,7 +445,7 @@ impl IdrsSolver {
             let vec = &self.ws.g_hist[i];
             for j in 0..s {
                 let col = self.ws.p_col(j);
-                let dot = dot_reduce(comm, col, &vec[..n]);
+                let dot = global_dot_conj(comm, col, &vec[..n]);
                 self.ws.ph_drn[i * s + j] = dot;
             }
         }
@@ -486,17 +480,20 @@ impl IdrsSolver {
                 b.swap(k, pivot_row);
             }
             let diag = a[k * s + k];
+            let row_k = a[k * s..(k + 1) * s].to_vec();
+            let pivot_rhs = b[k];
             for i in (k + 1)..s {
-                let factor = if diag == S::zero() {
+                let row_i = &mut a[i * s..(i + 1) * s];
+                let factor = if diag.abs() <= R::default() {
                     S::zero()
                 } else {
-                    a[i * s + k] / diag
+                    row_i[k] / diag
                 };
-                if factor != S::zero() {
+                if factor.abs() > R::default() {
                     for j in k..s {
-                        a[i * s + j] -= factor * a[k * s + j];
+                        row_i[j] -= factor * row_k[j];
                     }
-                    b[i] -= factor * b[k];
+                    b[i] -= factor * pivot_rhs;
                 }
             }
         }
@@ -518,7 +515,7 @@ impl IdrsSolver {
         let n = dst.len();
         dst.fill(S::zero());
         for (col, &coeff) in src.iter().zip(coeffs.iter()) {
-            if coeff == S::zero() {
+            if coeff.abs() <= R::default() {
                 continue;
             }
             for i in 0..n {
@@ -564,7 +561,9 @@ impl IdrsSolver {
             tv / S::from_real(tt_real)
         };
         if let Omega::MinResidualClipped { cos_min, kappa } = self.opts.omega_strategy {
-            let local_vv = v.iter().fold(0.0, |acc, &vi| acc + vi.abs() * vi.abs());
+            let local_vv = v
+                .iter()
+                .fold(R::default(), |acc, &vi| acc + vi.abs() * vi.abs());
             let vv = reduce_real(comm, local_vv);
             stats.dots += 1;
             let denom = (tt_real * vv).sqrt();
@@ -631,7 +630,7 @@ impl IdrsSolver {
 
         self.random_bump = 0;
 
-        if x.iter().all(|&xi| xi == S::zero()) {
+        if x.iter().all(|&xi| xi.abs() <= R::default()) {
             self.ws.r_true[..n].copy_from_slice(b);
         } else {
             a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
@@ -651,10 +650,14 @@ impl IdrsSolver {
             self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
         }
 
-        let bnorm = norm2(&b[..n], comm);
+        let bnorm = global_nrm2(comm, &b[..n]);
         stats.dots += 1;
-        let norm_scale = if bnorm > 0.0 { bnorm } else { 1.0 };
-        let mut res_norm = norm2(&self.ws.r_true[..n], comm);
+        let norm_scale = if bnorm > R::default() {
+            bnorm
+        } else {
+            S::one().real()
+        };
+        let mut res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
         stats.dots += 1;
         self.monitor(monitors, 0, res_norm);
         if res_norm <= self.opts.tol * norm_scale {
@@ -721,7 +724,7 @@ impl IdrsSolver {
 
             self.ws.push_history_from_buffers();
 
-            res_norm = norm2(&self.ws.r_true[..n], comm);
+            res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
             stats.dots += 1;
             self.monitor(monitors, step + 1, res_norm);
             if res_norm <= self.opts.tol * norm_scale {
@@ -879,7 +882,7 @@ impl IdrsSolver {
                     }
                 }
 
-                res_norm = norm2(&self.ws.r_true[..n], comm);
+                res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
                 stats.dots += 1;
                 self.monitor(monitors, iteration, res_norm);
                 if res_norm <= self.opts.tol * norm_scale {

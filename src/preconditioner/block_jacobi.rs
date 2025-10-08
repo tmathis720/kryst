@@ -14,7 +14,7 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
@@ -86,7 +86,7 @@ impl BlockJacobi<f64> {
         for block in &self.blocks {
             let n = block.len();
             // Extract the n x n block submatrix
-            let mut data = vec![0.0; n * n];
+            let mut data = vec![R::default(); n * n];
             for (ii, &i) in block.iter().enumerate() {
                 let row = a.row_indices(i);
                 for (jj, &j) in block.iter().enumerate() {
@@ -104,8 +104,8 @@ impl BlockJacobi<f64> {
                 &mut lusolver,
                 &amat,
                 None,
-                &vec![0.0; n],
-                &mut vec![0.0; n],
+                &vec![R::default(); n],
+                &mut vec![R::default(); n],
                 PcSide::Left,
                 &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                 None,
@@ -162,7 +162,7 @@ impl BlockJacobi<f64> {
     pub fn apply(&self, r: &[f64], z: &mut [f64]) {
         // Zero out the output vector
         for zi in z.iter_mut() {
-            *zi = 0.0;
+            *zi = R::default();
         }
         #[cfg(all(feature = "rayon", feature = "dense-direct"))]
         {
@@ -178,7 +178,7 @@ impl BlockJacobi<f64> {
                     for &i in indices {
                         r_block.push(r[i]);
                     }
-                    let mut x_block = vec![0.0; indices.len()];
+                    let mut x_block = vec![R::default(); indices.len()];
                     // Solve the block system
                     lusolver.solve_cached(&r_block, &mut x_block);
                     // Write the solution back to the correct entries in z
@@ -196,7 +196,7 @@ impl BlockJacobi<f64> {
                 for &i in indices {
                     r_block.push(r[i]);
                 }
-                let mut x_block = vec![0.0; indices.len()];
+                let mut x_block = vec![R::default(); indices.len()];
                 // Solve the block system
                 lusolver.solve_cached(&r_block, &mut x_block);
                 // Write the solution back to the correct entries in z
@@ -219,7 +219,7 @@ impl BlockJacobi<f64> {
                         for &i in indices {
                             r_blk.push(r[i]);
                         }
-                        let mut x_blk = vec![0.0; indices.len()];
+                        let mut x_blk = vec![R::default(); indices.len()];
                         let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
                         let mut z_guard = z_arc.lock().unwrap();
                         for (&i, &xi) in indices.iter().zip(x_blk.iter()) {
@@ -234,7 +234,7 @@ impl BlockJacobi<f64> {
                     for &i in indices {
                         r_blk.push(r[i]);
                     }
-                    let mut x_blk = vec![0.0; indices.len()];
+                    let mut x_blk = vec![R::default(); indices.len()];
                     let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
                     for (&i, &xi) in indices.iter().zip(x_blk.iter()) {
                         z[i] = xi;
@@ -281,18 +281,15 @@ impl KPreconditioner for BlockJacobi<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::traits::{MatrixGet, RowPattern};
-    use crate::error::KError;
-    use crate::preconditioner::PcSide;
-    #[cfg(not(feature = "dense-direct"))]
-    use std::marker::PhantomData;
-
     #[cfg(feature = "complex")]
     use crate::algebra::bridge::BridgeScratch;
     #[cfg(feature = "complex")]
     use crate::algebra::prelude::*;
+    use crate::core::traits::{MatrixGet, RowPattern};
+    use crate::error::KError;
     #[cfg(feature = "complex")]
     use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::PcSide;
 
     struct TestDiagMatrix {
         diag: Vec<f64>,
@@ -350,7 +347,7 @@ mod tests {
         pc.setup(&a);
 
         let rhs_real = vec![8.0, 18.0];
-        let mut out_real = vec![0.0; rhs_real.len()];
+        let mut out_real = vec![R::default(); rhs_real.len()];
         pc.apply(&rhs_real, &mut out_real);
 
         let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();

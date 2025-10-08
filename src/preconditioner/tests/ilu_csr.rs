@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::poisson_2d;
 use crate::preconditioner::Preconditioner;
@@ -6,7 +7,7 @@ use crate::preconditioner::ilu_csr::{
     ReorderingKind, ReorderingOptions,
 };
 
-fn tridiag_csr(n: usize, a: f64, b: f64, c: f64) -> CsrMatrix<f64> {
+fn tridiag_csr(n: usize, a: R, b: R, c: R) -> CsrMatrix<R> {
     // main diag b, subdiag a, superdiag c
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::with_capacity(3 * n);
@@ -38,8 +39,8 @@ fn ilu0_single_rank_matches_serial_ref() {
     let cfg_serial = IluCsrConfig {
         kind: IluKind::Ilu0,
         pivot: PivotStrategy::DiagonalPerturbation,
-        pivot_threshold: 1e-12,
-        diag_perturb_factor: 1e-10,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
@@ -55,31 +56,38 @@ fn ilu0_single_rank_matches_serial_ref() {
 
     let mut rng = Rand64::new(123);
     for _ in 0..4 {
-        let b: Vec<f64> = (0..a.nrows()).map(|_| rng.rand_float() - 0.5).collect();
-        let mut y_ref = vec![0.0; b.len()];
-        let mut y_par = vec![0.0; b.len()];
+        let b: Vec<R> = (0..a.nrows())
+            .map(|_| R::from(rng.rand_float()) - R::from(0.5))
+            .collect();
+        let mut y_ref = vec![R::default(); b.len()];
+        let mut y_par = vec![R::default(); b.len()];
         ilu_ref.apply(PcSide::Left, &b, &mut y_ref).unwrap();
         ilu_par.apply(PcSide::Left, &b, &mut y_par).unwrap();
         let num = y_ref
             .iter()
             .zip(&y_par)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f64>()
+            .map(|(a, b)| (*a - *b) * (*a - *b))
+            .sum::<R>()
             .sqrt();
-        let den = y_ref.iter().map(|a| a * a).sum::<f64>().sqrt().max(1e-30);
-        assert!(num / den < 5e-14, "relative diff {}", num / den);
+        let den = y_ref
+            .iter()
+            .map(|a| *a * *a)
+            .sum::<R>()
+            .sqrt()
+            .max(R::from(1e-30));
+        assert!(num / den < R::from(5e-14), "relative diff {}", num / den);
     }
 }
 
 #[test]
 fn iluk_basic_pivots_nonzero() {
     let n = 8;
-    let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     let cfg = IluCsrConfig {
         kind: IluKind::Iluk { k: 1 },
         pivot: PivotStrategy::DiagonalPerturbation,
-        pivot_threshold: 1e-12,
-        diag_perturb_factor: 1e-10,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
         level_sched: cfg!(feature = "rayon"),
         numeric_update_fixed: true,
         logging: 0,
@@ -93,12 +101,12 @@ fn iluk_basic_pivots_nonzero() {
         let dix = pc.u_diag_ix()[i];
         let d = pc.u_val()[dix];
         assert!(d.is_finite());
-        assert_ne!(d, 0.0);
+        assert!(d.abs() > R::from(1e-30));
     }
 
     // Apply on a vector and ensure finite results
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
     pc.apply(crate::preconditioner::PcSide::Left, &x, &mut y)
         .unwrap();
     assert!(y.iter().all(|v| v.is_finite()));
@@ -107,23 +115,23 @@ fn iluk_basic_pivots_nonzero() {
 #[test]
 fn ilut_basic_and_numeric_update_keeps_pattern() {
     let n = 10;
-    let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     let params = IlutParams {
-        droptol_abs: 1e-6,
-        droptol_rel: 0.0,
+        droptol_abs: R::from(1e-6),
+        droptol_rel: R::default(),
         p_l: 2,
         p_u: 2,
         early_drop: true,
         pivot: PivotPolicy::DiagonalPerturbation,
-        pivot_tau: 1e-12,
+        pivot_tau: R::from(1e-12),
         reproducible_order: true,
         pivoting: Pivoting::None,
     };
     let cfg = IluCsrConfig {
         kind: IluKind::Ilut { params },
         pivot: PivotStrategy::DiagonalPerturbation,
-        pivot_threshold: 1e-12,
-        diag_perturb_factor: 1e-10,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
@@ -142,7 +150,7 @@ fn ilut_basic_and_numeric_update_keeps_pattern() {
     // Build a numerically changed matrix with identical structure: scale values
     let mut a2 = a.clone();
     for v in a2.values_mut() {
-        *v *= 2.0;
+        *v *= R::from(2.0);
     }
 
     // Update numeric only
@@ -156,8 +164,8 @@ fn ilut_basic_and_numeric_update_keeps_pattern() {
     assert_eq!(udiag0, pc.u_diag_ix());
 
     // Apply and ensure finite results
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
     pc.apply(crate::preconditioner::PcSide::Left, &x, &mut y)
         .unwrap();
     assert!(y.iter().all(|v| v.is_finite()));
@@ -171,11 +179,22 @@ fn milu0_preserves_row_sums() {
     let n = 4;
     let row_ptr = vec![0, 4, 6, 8, 10];
     let col_idx = vec![0, 1, 2, 3, 0, 1, 0, 2, 0, 3];
-    let vals = vec![2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0];
+    let vals = vec![
+        R::from(2.0),
+        R::from(1.0),
+        R::from(1.0),
+        R::from(1.0),
+        R::from(1.0),
+        R::from(2.0),
+        R::from(1.0),
+        R::from(2.0),
+        R::from(1.0),
+        R::from(2.0),
+    ];
     let a = CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals);
 
     // Row sums of original matrix
-    let mut a_row_sum = vec![0.0; n];
+    let mut a_row_sum = vec![R::default(); n];
     for i in 0..n {
         let rs = a.row_ptr()[i];
         let re = a.row_ptr()[i + 1];
@@ -188,8 +207,8 @@ fn milu0_preserves_row_sums() {
     let cfg = IluCsrConfig {
         kind: IluKind::Milu0,
         pivot: PivotStrategy::DiagonalPerturbation,
-        pivot_threshold: 1e-12,
-        diag_perturb_factor: 1e-10,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
@@ -199,9 +218,9 @@ fn milu0_preserves_row_sums() {
     pc.setup(&a).unwrap();
 
     // Compute M*1 where M = L*U
-    let ones = vec![1.0; n];
+    let ones = vec![R::from(1.0); n];
     // z = U * 1
-    let mut z = vec![0.0; n];
+    let mut z = vec![R::default(); n];
     for i in 0..n {
         for p in pc.u_row()[i]..pc.u_row()[i + 1] {
             let j = pc.u_col()[p];
@@ -219,19 +238,19 @@ fn milu0_preserves_row_sums() {
 
     for i in 0..n {
         let diff = (y[i] - a_row_sum[i]).abs();
-        assert!(diff < 1e-9, "row {} diff {}", i, diff);
+        assert!(diff < R::from(1e-9), "row {} diff {}", i, diff);
     }
 }
 
 #[test]
 fn ilu0_with_rcm_setup() {
     let n = 8;
-    let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     let cfg = IluCsrConfig {
         kind: IluKind::Ilu0,
         pivot: PivotStrategy::DiagonalPerturbation,
-        pivot_threshold: 1e-12,
-        diag_perturb_factor: 1e-10,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
@@ -243,8 +262,8 @@ fn ilu0_with_rcm_setup() {
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
     pc.apply(crate::preconditioner::PcSide::Left, &x, &mut y)
         .unwrap();
     assert!(y.iter().all(|v| v.is_finite()));
@@ -259,12 +278,12 @@ fn ilu_csr_apply_s_matches_real_path() {
     use crate::preconditioner::PcSide;
 
     let n = 5;
-    let a = tridiag_csr(n, -1.0, 4.0, -1.0);
+    let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     let cfg = IluCsrConfig {
         kind: IluKind::Ilu0,
         pivot: PivotStrategy::DiagonalPerturbation,
-        pivot_threshold: 1e-12,
-        diag_perturb_factor: 1e-10,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
         level_sched: false,
         numeric_update_fixed: true,
         logging: 0,
@@ -273,8 +292,8 @@ fn ilu_csr_apply_s_matches_real_path() {
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).expect("ilu setup");
 
-    let rhs_real: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
-    let mut out_real = vec![0.0; n];
+    let rhs_real: Vec<R> = (0..n).map(|i| R::from((i + 1) as f64)).collect();
+    let mut out_real = vec![R::default(); n];
     pc.apply(PcSide::Left, &rhs_real, &mut out_real)
         .expect("ilu apply real");
 
@@ -286,7 +305,7 @@ fn ilu_csr_apply_s_matches_real_path() {
 
     for (ys, yr) in out_s.iter().zip(out_real.iter()) {
         assert!(
-            (ys.real() - yr).abs() < 1e-12,
+            (ys.real() - yr).abs() < R::from(1e-12),
             "expected real match, got {} vs {}",
             ys,
             yr

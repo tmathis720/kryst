@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::prelude::*;
 
 /// Build a complex Givens rotation that zeroes the second entry of the vector [a; b].
@@ -6,17 +8,16 @@ use crate::algebra::prelude::*;
 pub fn build_complex_givens(a: S, b: S) -> (R, S) {
     let absa = a.abs();
     let absb = b.abs();
-    if absb == 0.0 {
+    if absb <= R::default() {
         return (1.0, S::zero());
     }
+    if absa <= R::default() {
+        return (0.0, b.conj() / S::from_real(absb));
+    }
+
     let r = absa.hypot(absb);
-    let c = if r == 0.0 { 0.0 } else { absa / r };
-    let s = if absa != 0.0 {
-        let scale = S::from_real(c / (absa * absa));
-        (a.conj() * b) * scale
-    } else {
-        b / S::from_real(absb)
-    };
+    let c = absa / r;
+    let s = (a * b.conj()) / S::from_real(r * absa);
     (c, s)
 }
 
@@ -85,5 +86,23 @@ mod tests {
         let scale = (a.abs() + b.abs()).max(1.0);
         assert!(h1.abs() <= 1e-12 * scale);
         assert!(c >= 0.0);
+    }
+
+    #[test]
+    fn givens_handles_zero_head_entry() {
+        let a = S::zero();
+        #[cfg(feature = "complex")]
+        let b: S = num_complex::Complex64::new(0.3, -0.4);
+        #[cfg(not(feature = "complex"))]
+        let b: S = S::from_real(-0.4);
+
+        let (c, s) = build_complex_givens(a, b);
+        let mut h0 = a;
+        let mut h1 = b;
+        apply_complex_givens(&mut h0, &mut h1, c, s);
+
+        assert!(c.abs() <= 1e-14);
+        assert!((h0.abs() - b.abs()).abs() <= 1e-12 * b.abs().max(1.0));
+        assert!(h1.abs() <= 1e-12 * b.abs().max(1.0));
     }
 }

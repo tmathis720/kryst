@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests_cg_side {
+    use crate::algebra::prelude::*;
     use crate::context::ksp_context::{KspContext, SolverType};
     use crate::context::pc_context::PcType;
     use crate::error::KError;
@@ -11,8 +12,12 @@ mod tests_cg_side {
     #[test]
     fn cg_rejects_right_side() {
         // SPD 2x2
-        let a = Mat::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 1.0 });
-        let b = [1.0, 0.0];
+        let a = Mat::<R>::from_fn(
+            2,
+            2,
+            |i, j| if i == j { R::from(2.0) } else { R::from(1.0) },
+        );
+        let b = [R::from(1.0), R::default()];
         let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -21,7 +26,7 @@ mod tests_cg_side {
         ksp.set_operators(amat.clone(), None);
         ksp.pc_side = PcSide::Right; // invalid for CG
 
-        let mut x = [0.0, 0.0];
+        let mut x = [R::default(); 2];
         let err = ksp.solve(&b, &mut x).unwrap_err();
 
         match err {

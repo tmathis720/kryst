@@ -1,4 +1,5 @@
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
@@ -8,14 +9,16 @@ use std::sync::{Arc, Mutex};
 #[test]
 fn pcg_reports_true_residual() {
     let comm = UniverseComm::NoComm(NoComm);
-    let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 1.0 });
-    let b = vec![1.0, 2.0];
-    let mut x = vec![0.0, 0.0];
+    let two = S::from_real(2.0).real();
+    let one = S::from_real(1.0).real();
+    let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { two } else { one });
+    let b = vec![one, two];
+    let mut x = vec![R::default(), R::default()];
     let mut solver = PcgSolver::new(1e-12, 1);
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
 
-    let log: Arc<Mutex<Vec<(usize, f64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let log: Arc<Mutex<Vec<(usize, R)>>> = Arc::new(Mutex::new(Vec::new()));
     let log_clone = log.clone();
     solver.set_true_residual_monitor(Some(Box::new(move |i, r| {
         log_clone.lock().unwrap().push((i, r));

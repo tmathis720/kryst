@@ -91,7 +91,7 @@ unsafe fn mpi_allreduce_sum_scalar_raw(world: &mpi::topology::SimpleCommunicator
             )
         };
         debug_assert_eq!(status, 0);
-        return S::from_real(recv[0]);
+        S::from_real(recv[0])
     }
 
     #[cfg(feature = "complex")]
@@ -111,7 +111,7 @@ unsafe fn mpi_allreduce_sum_scalar_raw(world: &mpi::topology::SimpleCommunicator
             )
         };
         debug_assert_eq!(status, 0);
-        return S::from_parts(recv[0], recv[1]);
+        S::from_parts(recv[0], recv[1])
     }
 }
 
@@ -127,14 +127,14 @@ pub(crate) fn allreduce_sum_scalar_repro_impl(comm: &UniverseComm, z: S, mode: R
             v: [z.real(), z.imag()],
         };
         let reduced = comm.allreduce_det(&packet, mode);
-        return S::from_parts(reduced.v[0], reduced.v[1]);
+        S::from_parts(reduced.v[0], reduced.v[1])
     }
 
     #[cfg(not(feature = "complex"))]
     {
         let packet = Packet::<1> { v: [z.real()] };
         let reduced = comm.allreduce_det(&packet, mode);
-        return S::from_real(reduced.v[0]);
+        S::from_real(reduced.v[0])
     }
 }
 

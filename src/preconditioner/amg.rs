@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
@@ -1037,41 +1037,41 @@ fn validate_truncation_and_caps(cfg: &AMGConfig) -> Result<(), KError> {
 
 #[derive(Debug)]
 struct AMGWorkspace {
-    temp: Vec<f64>,
-    work: Vec<f64>,
-    residual: Vec<f64>,
-    coarse_rhs: Vec<f64>,
-    fine_corr: Vec<f64>,
-    k_zeta: Vec<f64>,
-    k_p: Vec<f64>,
-    k_ap: Vec<f64>,
-    k_temp: Vec<f64>,
-    k_work: Vec<f64>,
-    k_residual: Vec<f64>,
+    temp: Vec<R>,
+    work: Vec<R>,
+    residual: Vec<R>,
+    coarse_rhs: Vec<R>,
+    fine_corr: Vec<R>,
+    k_zeta: Vec<R>,
+    k_p: Vec<R>,
+    k_ap: Vec<R>,
+    k_temp: Vec<R>,
+    k_work: Vec<R>,
+    k_residual: Vec<R>,
     mp: Option<MixedWs>,
 }
 
 impl AMGWorkspace {
     fn new(cap: usize) -> Self {
         Self {
-            temp: vec![0.0; cap],
-            work: vec![0.0; cap],
-            residual: vec![0.0; cap],
-            coarse_rhs: vec![0.0; cap],
-            fine_corr: vec![0.0; cap],
-            k_zeta: vec![0.0; cap],
-            k_p: vec![0.0; cap],
-            k_ap: vec![0.0; cap],
-            k_temp: vec![0.0; cap],
-            k_work: vec![0.0; cap],
-            k_residual: vec![0.0; cap],
+            temp: vec![R::zero(); cap],
+            work: vec![R::zero(); cap],
+            residual: vec![R::zero(); cap],
+            coarse_rhs: vec![R::zero(); cap],
+            fine_corr: vec![R::zero(); cap],
+            k_zeta: vec![R::zero(); cap],
+            k_p: vec![R::zero(); cap],
+            k_ap: vec![R::zero(); cap],
+            k_temp: vec![R::zero(); cap],
+            k_work: vec![R::zero(); cap],
+            k_residual: vec![R::zero(); cap],
             mp: None,
         }
     }
     fn ensure(&mut self, n: usize) {
-        let grow = |v: &mut Vec<f64>, n: usize| {
+        let grow = |v: &mut Vec<R>, n: usize| {
             if v.len() < n {
-                v.resize(n, 0.0)
+                v.resize(n, R::zero())
             }
         };
         grow(&mut self.temp, n);
@@ -1575,7 +1575,7 @@ fn local_qr(
             continue;
         }
         let m = rows.len();
-        let mut q = vec![vec![0.0f64; r]; m];
+        let mut q = vec![vec![R::default(); r]; m];
         for (ii, &i) in rows.iter().enumerate() {
             for alpha in 0..r {
                 let k = pos_alpha[i][alpha];
@@ -1586,7 +1586,7 @@ fn local_qr(
         }
         for alpha in 0..r {
             for beta in 0..alpha {
-                let mut dot = 0.0;
+                let mut dot = R::default();
                 for ii in 0..m {
                     dot += q[ii][alpha] * q[ii][beta];
                 }
@@ -1594,7 +1594,7 @@ fn local_qr(
                     q[ii][alpha] -= dot * q[ii][beta];
                 }
             }
-            let mut n2 = 0.0;
+            let mut n2 = R::default();
             for ii in 0..m {
                 n2 += q[ii][alpha] * q[ii][alpha];
             }
@@ -1713,8 +1713,8 @@ enum RankFixOutcome {
     Unfixed,
 }
 
-fn p_column_norms2(p: &CsrMatrix<f64>) -> Vec<f64> {
-    let mut n2 = vec![0.0; p.ncols()];
+fn p_column_norms2(p: &CsrMatrix<f64>) -> Vec<R> {
+    let mut n2 = vec![R::default(); p.ncols()];
     let rp = p.row_ptr();
     let cj = p.col_idx();
     let vv = p.values();
@@ -1895,7 +1895,7 @@ fn check_p_rank_fast(p: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<RankDiagnost
         }
     }
     diag.min_col_norm = if min_norm.is_finite() { min_norm } else { 0.0 };
-    let (ok, cond) = rank_condition_estimate(p, cfg.rank_sketch_cols, 0xC0FF_EE_u64)?;
+    let (ok, cond) = rank_condition_estimate(p, cfg.rank_sketch_cols, 0x00C0_FFEE_u64)?;
     diag.cond_estimate = cond;
     let cond_bad = !ok || !cond.is_finite() || cond > cfg.rank_cond_threshold;
     diag.suspect = !diag.degenerate_cols.is_empty() || cond_bad;
@@ -3317,7 +3317,7 @@ impl AMG {
         }
         match relax {
             RelaxType::Jacobi => {
-                z.fill(0.0);
+                z.fill(R::zero());
                 for _ in 0..sweeps {
                     lvl.a.spmv_scaled(1.0, &z[..n], 0.0, work)?;
                     for i in 0..n {
@@ -3336,7 +3336,7 @@ impl AMG {
                         "L1Jacobi cache has incorrect length".into(),
                     ));
                 }
-                z.fill(0.0);
+                z.fill(R::zero());
                 for _ in 0..sweeps {
                     lvl.a.spmv_scaled(1.0, &z[..n], 0.0, work)?;
                     for i in 0..n {
@@ -3346,7 +3346,7 @@ impl AMG {
                 Ok(())
             }
             RelaxType::SymmetricGaussSeidel => {
-                z.fill(0.0);
+                z.fill(R::zero());
                 Self::sym_gs(omega, &lvl.a, &lvl.diag_inv, r, z, sweeps)?;
                 Ok(())
             }
@@ -3355,7 +3355,7 @@ impl AMG {
                     .fsai
                     .as_ref()
                     .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
-                ws.fine_corr[..n].fill(0.0);
+                ws.fine_corr[..n].fill(R::zero());
                 for _ in 0..sweeps {
                     Self::fsai_smooth_core(
                         &data.g,
@@ -3447,11 +3447,15 @@ impl AMG {
             ws.coarse_rhs[..n].copy_from_slice(&ws.fine_corr[..n]);
             self.apply_smoother_as_pc(relax, lvl, pc_sweeps, omega, ws)?;
             let z = &ws.fine_corr[..n];
-            let mut rz_diff = 0.0f64;
+            let mut rz_diff = R::default();
             for i in 0..n {
                 rz_diff += ws.residual[i] * (z[i] - ws.coarse_rhs[i]);
             }
-            let beta = if rho.abs() > 0.0 { rz_diff / rho } else { 0.0 };
+            let beta = if rho.abs() > R::default() {
+                rz_diff / rho
+            } else {
+                R::default()
+            };
             for i in 0..n {
                 ws.temp[i] = z[i] + beta * ws.temp[i];
             }
@@ -3654,7 +3658,7 @@ impl AMG {
                 "krylov preconditioner: level size mismatch".into(),
             ));
         }
-        out.fill(0.0);
+        out.fill(R::default());
 
         match self.cfg.relax_type {
             RelaxType::Jacobi => {
@@ -3673,7 +3677,7 @@ impl AMG {
                     .l1_inv
                     .as_ref()
                     .ok_or_else(|| KError::InvalidInput("L1Jacobi cache missing".into()))?;
-                work.fill(0.0);
+                work.fill(R::default());
                 lvl.a.spmv_scaled(1.0, out, 0.0, work)?;
                 for i in 0..n {
                     out[i] += self.cfg.jacobi_omega * l1[i] * (r[i] - work[i]);
@@ -3706,9 +3710,9 @@ impl AMG {
                     .fsai
                     .as_ref()
                     .ok_or_else(|| KError::InvalidInput("FSAI cache missing".into()))?;
-                residual.fill(0.0);
-                work.fill(0.0);
-                temp.fill(0.0);
+                residual.fill(R::default());
+                work.fill(R::default());
+                temp.fill(R::default());
                 Self::fsai_smooth_core(
                     &data.g,
                     &data.gt,
@@ -4010,14 +4014,14 @@ impl AMG {
         let nc = h.levels[level + 1].a.nrows();
 
         let mut local_coarse = std::mem::take(&mut ws.coarse_rhs);
-        local_coarse.resize(nc, 0.0);
+        local_coarse.resize(nc, R::zero());
         with_timing(prof, &mut lv.restrict, || {
             Self::restrict_apply(&h.levels[level], &ws.residual[..n], &mut local_coarse[..nc])
         })?;
 
         let gamma = cycle_pol.gamma_visits(level).max(1);
         for t in 0..gamma {
-            let mut zc = vec![0.0; nc];
+            let mut zc = vec![R::zero(); nc];
             if level + 1 == lc {
                 with_timing(prof, &mut lv.coarse_solve, || {
                     let mut solver = CoarseDenseLu::new();
@@ -4034,7 +4038,7 @@ impl AMG {
                 )?;
             }
             with_timing(prof, &mut lv.prolong, || {
-                ws.fine_corr[..n].fill(0.0);
+                ws.fine_corr[..n].fill(R::zero());
                 p.spmv_scaled(1.0, &zc, 0.0, &mut ws.fine_corr[..n])
             })?;
             for i in 0..n {
@@ -4191,13 +4195,13 @@ impl AMG {
         if n == 0 {
             return Ok(());
         }
-        let mut x = vec![0.0; n];
-        let mut y = vec![0.0; n];
+        let mut x = vec![R::default(); n];
+        let mut y = vec![R::default(); n];
         for t in 0..3 {
             for i in 0..n {
                 x[i] = ((i + 7919 * t) % 127) as f64 - 63.0;
             }
-            y.fill(0.0);
+            y.fill(R::default());
             self.apply(PcSide::Left, &x, &mut y)?;
             let qf = x.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
             let x_norm2 = x.iter().map(|v| v * v).sum::<f64>();
@@ -4288,7 +4292,7 @@ impl Preconditioner for AMG {
             if do_prof {
                 let mut cyc = CycleTimings::default();
                 let t_all = tic();
-                z.fill(0.0);
+                z.fill(R::default());
                 self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
                 cyc.total_cycle = toc(t_all);
                 cyc.cycle_type = self.cfg.cycle_type;
@@ -4300,7 +4304,7 @@ impl Preconditioner for AMG {
                     print_cycle_table(&cyc);
                 }
             } else {
-                z.fill(0.0);
+                z.fill(R::default());
                 self.cycle(0, r, z, &mut ws)?;
             }
             Ok(())
@@ -6372,7 +6376,7 @@ fn smooth_interpolation(p: &mut Mat<f64>, a: &Mat<f64>, weight: f64) {
 fn minimize_energy(p: &mut Mat<f64>, _a: &Mat<f64>) {
     let (m, n) = (p.nrows(), p.ncols());
     for i in 0..m {
-        let mut norm2 = 0.0;
+        let mut norm2 = R::default();
         for j in 0..n {
             norm2 += p[(i, j)] * p[(i, j)];
         }
@@ -6396,11 +6400,11 @@ fn cg_sparse(
     if n == 0 {
         return Ok(());
     }
-    x.fill(0.0);
+    x.fill(R::default());
 
     let mut r = b.to_vec();
     let mut p = r.clone();
-    let mut ap = vec![0.0; n];
+    let mut ap = vec![R::default(); n];
 
     let mut rsold = dot(&r, &r);
     let atol = tol.max(1e-12) * rsold.sqrt().max(1e-30);
@@ -6472,12 +6476,12 @@ where
     if n == 0 {
         return Ok(());
     }
-    x.fill(0.0);
+    x.fill(R::default());
 
     let mut r = b.to_vec();
-    let mut z = vec![0.0; n];
-    let mut p = vec![0.0; n];
-    let mut ap = vec![0.0; n];
+    let mut z = vec![R::default(); n];
+    let mut p = vec![R::default(); n];
+    let mut ap = vec![R::default(); n];
 
     apply_prec(&r, &mut z)?;
     let mut rz_old = dot(&r, &z);
@@ -6513,8 +6517,8 @@ where
 }
 
 #[inline]
-fn dot(x: &[f64], y: &[f64]) -> f64 {
-    let mut s = 0.0;
+fn dot(x: &[R], y: &[R]) -> R {
+    let mut s = R::default();
     for i in 0..x.len() {
         s += x[i] * y[i];
     }

@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use kryst::LinOp;
+use kryst::algebra::prelude::*;
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -28,13 +29,13 @@ fn dist_csr_spmv_matches_serial() {
         let g = row_start + i;
         if g > 0 {
             col_idx.push(g - 1);
-            values.push(-1.0);
+            values.push(R::from(-1.0));
         }
         col_idx.push(g);
-        values.push(2.0);
+        values.push(R::from(2.0));
         if g + 1 < n_global {
             col_idx.push(g + 1);
-            values.push(-1.0);
+            values.push(R::from(-1.0));
         }
         row_ptr.push(col_idx.len());
     }
@@ -43,17 +44,17 @@ fn dist_csr_spmv_matches_serial() {
     let op = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
         .unwrap();
 
-    let x_global: Vec<f64> = (0..n_global).map(|i| i as f64).collect();
+    let x_global: Vec<R> = (0..n_global).map(|i| R::from(i as f64)).collect();
     let x_local = x_global[row_start..row_start + n_per].to_vec();
-    let mut y_local = vec![0.0; n_per];
+    let mut y_local = vec![R::default(); n_per];
     op.spmv_dist_impl(&x_local, &mut y_local).unwrap();
 
     let mut y_global = Vec::new();
     comm.gather(&y_local, &mut y_global, 0);
     if rank == 0 {
-        let mut y_ref = vec![0.0; n_global];
+        let mut y_ref = vec![R::default(); n_global];
         for i in 0..n_global {
-            let mut v = 2.0 * x_global[i];
+            let mut v = R::from(2.0) * x_global[i];
             if i > 0 {
                 v -= x_global[i - 1];
             }
@@ -70,11 +71,11 @@ fn dist_csr_spmv_matches_serial() {
 fn dist_csr_numeric_update_changes_values_id() {
     let comm = UniverseComm::NoComm(NoComm);
     let part_prefix = vec![0, 1];
-    let local = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![1.0]);
+    let local = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![R::from(1.0)]);
     let mut op = DistCsrOp::from_local_rows(1, 0, &local, &part_prefix, comm).unwrap();
     let sid = op.structure_id();
     let vid = op.values_id();
-    op.update_numeric(&[2.0], &[]);
+    op.update_numeric(&[R::from(2.0)], &[]);
     assert_eq!(op.structure_id(), sid);
     assert_ne!(op.values_id(), vid);
 }

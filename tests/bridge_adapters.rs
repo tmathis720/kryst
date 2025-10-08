@@ -1,5 +1,6 @@
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
+use kryst::assert_s_close;
 use kryst::error::KError;
 use kryst::matrix::op::LinOp;
 use kryst::matrix::op_bridge::matvec_s;
@@ -51,16 +52,16 @@ fn bridge_roundtrip() {
     let mut y = vec![S::zero(); n];
 
     matvec_s(&a, &x, &mut y, &mut scratch);
-    for (i, yi) in y.iter().enumerate() {
-        assert!((yi.real() - 2.0 * i as f64).abs() < 1e-12);
+    for (i, &yi) in y.iter().enumerate() {
+        assert_s_close!("bridge matvec", yi, S::from_real(2.0 * i as f64));
         #[cfg(feature = "complex")]
         {
-            assert_eq!(yi.conj(), *yi);
+            assert_eq!(yi.conj(), yi);
         }
     }
 
     apply_pc_s(&pc, PcSide::Left, &x, &mut y, &mut scratch).unwrap();
-    for (i, yi) in y.iter().enumerate() {
-        assert!((yi.real() - i as f64).abs() < 1e-12);
+    for (i, &yi) in y.iter().enumerate() {
+        assert_s_close!("bridge pc", yi, S::from_real(i as f64));
     }
 }

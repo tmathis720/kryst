@@ -13,7 +13,7 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
@@ -28,7 +28,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use std::cell::RefCell;
 
 thread_local! {
-    static TLS_BUF: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+    static TLS_BUF: RefCell<Vec<R>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A simple compositional preconditioner:
@@ -62,7 +62,7 @@ impl Preconditioner for PcChain {
         }
         // Best-effort pre-size TLS buffer for apply hot path
         let (n, _) = a.dims();
-        TLS_BUF.with(|b| b.borrow_mut().resize(n, 0.0));
+        TLS_BUF.with(|b| b.borrow_mut().resize(n, R::default()));
         Ok(())
     }
 
@@ -77,7 +77,7 @@ impl Preconditioner for PcChain {
         TLS_BUF.with(|b| -> Result<(), KError> {
             let mut tmp = b.borrow_mut();
             if tmp.len() < x.len() {
-                tmp.resize(x.len(), 0.0);
+                tmp.resize(x.len(), R::default());
             }
             tmp.copy_from_slice(x);
             for st in &self.stages {
@@ -99,7 +99,7 @@ impl Preconditioner for PcChain {
         TLS_BUF.with(|b| -> Result<(), KError> {
             let mut tmp = b.borrow_mut();
             if tmp.len() < x.len() {
-                tmp.resize(x.len(), 0.0);
+                tmp.resize(x.len(), R::default());
             }
             tmp.copy_from_slice(x);
             for st in self.stages.iter_mut() {

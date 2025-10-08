@@ -3,6 +3,8 @@
 // … (header doc unchanged) …
 
 #[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
@@ -150,7 +152,7 @@ impl MinresSolver {
             tmp2.copy_from_slice(tmp1);
         }
 
-        let mut batched_norms = [0.0; 2];
+        let mut batched_norms = [R::default(); 2];
         let tmp2_view: &[S] = &tmp2[..n];
         global_nrm2_many_into(comm, &[tmp2_view, b], &mut batched_norms);
         let mut res = batched_norms[0];
@@ -181,7 +183,7 @@ impl MinresSolver {
         let mut beta = res;
         let mut rho_bar = beta;
         let mut c_prev = 1.0;
-        let mut s_prev = 0.0;
+        let mut s_prev = R::default();
         let mut phi = beta;
         let mut final_reason = ConvergedReason::Continued;
         let mut iters = 0usize;
@@ -220,7 +222,7 @@ impl MinresSolver {
                 let prev_proj = if k > 1 {
                     dot_result_to_real(dot_results[1])
                 } else {
-                    0.0
+                    R::default()
                 };
                 let tmp2_norm_sq = dot_result_to_real(dot_results[used - 1]);
                 (alpha, prev_proj, tmp2_norm_sq)
@@ -237,11 +239,11 @@ impl MinresSolver {
                 beta_next_sq =
                     tmp2_norm_sq + beta * beta - alpha * alpha - 2.0 * beta * prev_projection;
             }
-            if beta_next_sq < 0.0 {
-                beta_next_sq = 0.0;
+            if beta_next_sq < R::default() {
+                beta_next_sq = R::default();
             }
             if comm.size() <= 1 {
-                let mut local_sq = 0.0;
+                let mut local_sq = R::default();
                 for &val in &v_next[..n] {
                     let mag = val.abs();
                     local_sq += mag * mag;
@@ -249,14 +251,14 @@ impl MinresSolver {
                 beta_next_sq = local_sq;
             }
             let mut beta_next = beta_next_sq.sqrt();
-            if beta_next <= 1e-30 {
-                beta_next = 0.0;
+            if beta_next <= R::from(1e-30) {
+                beta_next = R::default();
             }
-            if beta_next == 0.0 {
+            if beta_next == R::default() {
                 final_reason = ConvergedReason::ConvergedAtol;
                 break;
             }
-            if beta_next != 0.0 {
+            if beta_next > R::default() {
                 let beta_next_s = S::from_real(beta_next);
                 for val in &mut v_next[..n] {
                     *val /= beta_next_s;
@@ -264,8 +266,8 @@ impl MinresSolver {
             }
 
             let rho = (rho_bar * rho_bar + alpha * alpha).sqrt();
-            let (c, s_val) = if rho == 0.0 {
-                (1.0, 0.0)
+            let (c, s_val) = if rho <= R::default() {
+                (R::from(1.0), R::default())
             } else {
                 (rho_bar / rho, alpha / rho)
             };
@@ -273,7 +275,7 @@ impl MinresSolver {
             let phi_bar = -s_val * phi;
 
             let (delta, epsilon) = if k == 1 {
-                (0.0, 0.0)
+                (R::default(), R::default())
             } else {
                 (s_prev * beta, -c_prev * beta)
             };
@@ -453,6 +455,7 @@ impl LinearSolver for MinresSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algebra::prelude::*;
     use crate::{MatShell, parallel::UniverseComm};
 
     // Helper to make a MatShell from a closure
@@ -479,12 +482,12 @@ mod tests {
         });
 
         let x_true = vec![1.0, 2.0, 3.0];
-        let mut b = vec![0.0; n];
+        let mut b = vec![R::default(); n];
         crate::matrix::op::LinOp::matvec(&aop, &x_true, &mut b);
 
         let r0_norm = b.iter().map(|&v| v * v).sum::<f64>().sqrt();
 
-        let mut x = vec![0.0; n];
+        let mut x = vec![R::default(); n];
         let mut solver = MinresSolver::new(1e-6, 100);
         let stats = solver
             .solve(
@@ -499,7 +502,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut r_final = vec![0.0; n];
+        let mut r_final = vec![R::default(); n];
         crate::matrix::op::LinOp::matvec(&aop, &x, &mut r_final);
         for i in 0..n {
             r_final[i] = b[i] - r_final[i];
@@ -526,7 +529,7 @@ mod tests {
         });
 
         let b = vec![0.5, -1.2, 3.0, 4.4, -2.2];
-        let mut x = vec![0.0; n];
+        let mut x = vec![R::default(); n];
 
         let mut solver = MinresSolver::new(1e-14, 100);
         let stats = solver
@@ -575,10 +578,10 @@ mod tests {
         });
 
         let x_true = vec![1.0, 1.0];
-        let mut b = vec![0.0; 2];
+        let mut b = vec![R::default(); 2];
         crate::matrix::op::LinOp::matvec(&aop, &x_true, &mut b);
 
-        let mut x = vec![0.0; 2];
+        let mut x = vec![R::default(); 2];
         let mut solver = MinresSolver::new(1e-12, 100);
         let stats = solver
             .solve(
@@ -593,7 +596,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut r = vec![0.0; 2];
+        let mut r = vec![R::default(); 2];
         crate::matrix::op::LinOp::matvec(&aop, &x, &mut r);
         for i in 0..2 {
             r[i] = b[i] - r[i];
@@ -628,7 +631,7 @@ mod tests {
         });
 
         let b = vec![3.0, 3.0]; // solution x = [1,1]
-        let mut x = vec![0.0; 2];
+        let mut x = vec![R::default(); 2];
 
         let monitor_data = Arc::new(Mutex::new(Vec::<(usize, f64)>::new()));
         let monitor_data_clone = monitor_data.clone();

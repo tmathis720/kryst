@@ -1,6 +1,7 @@
 //! Tests for iteration monitoring and profiling functionality.
 
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
@@ -40,9 +41,9 @@ fn test_monitor_invocation() {
     });
 
     // Manually invoke monitors to test the mechanism
-    ksp.invoke_monitors(0, 1.0);
-    ksp.invoke_monitors(1, 0.5);
-    ksp.invoke_monitors(2, 0.1);
+    ksp.invoke_monitors(0, R::from(1.0));
+    ksp.invoke_monitors(1, R::from(0.5));
+    ksp.invoke_monitors(2, R::from(0.1));
 
     let final_count = *call_count.lock().unwrap();
     assert_eq!(final_count, 3);
@@ -52,9 +53,13 @@ fn test_monitor_invocation() {
 fn test_monitor_with_solver() -> Result<(), KError> {
     // Create a simple 2x2 SPD test matrix
     let n = 2;
-    let a = Mat::from_fn(n, n, |i, j| if i == j { 2.0 } else { -1.0 });
-    let b = vec![1.0, 1.0];
-    let mut x = vec![0.0; n];
+    let a = Mat::<R>::from_fn(
+        n,
+        n,
+        |i, j| if i == j { R::from(2.0) } else { R::from(-1.0) },
+    );
+    let b = vec![R::from(1.0); n];
+    let mut x = vec![R::default(); n];
 
     // Track residuals seen by monitor
     let residuals = Arc::new(Mutex::new(Vec::new()));
@@ -104,7 +109,7 @@ fn test_multiple_monitors() {
     });
 
     // Invoke monitors
-    ksp.invoke_monitors(0, 1.0);
+    ksp.invoke_monitors(0, R::from(1.0));
 
     assert_eq!(*count1.lock().unwrap(), 1);
     assert_eq!(*count2.lock().unwrap(), 2);

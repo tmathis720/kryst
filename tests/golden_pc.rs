@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use kryst::algebra::prelude::*;
+use kryst::assert_vec_close;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::op::CsrOp;
@@ -12,24 +14,25 @@ use fixtures::*;
 fn jacobi_golden_apply() {
     let a = csr_poisson_1d(4);
     // Expected Jacobi inverse of diag([2,2,2,2]) is 0.5 I
-    let x = vec![1.0, 2.0, 3.0, 4.0];
-    let mut y = vec![0.0; 4];
+    let x = vec![R::from(1.0), R::from(2.0), R::from(3.0), R::from(4.0)];
+    let mut y = vec![R::default(); 4];
 
     let mut jac = kryst::preconditioner::jacobi::Jacobi::new();
     jac.setup(&a).unwrap();
     jac.apply(PcSide::Left, &x, &mut y).unwrap();
 
-    for (yi, xi) in y.iter().zip(x.iter()) {
-        assert!((*yi - 0.5 * xi).abs() < 1e-12);
-    }
+    let expected: Vec<R> = x.iter().map(|xi| *xi * R::from(0.5)).collect();
+    let expected_s: Vec<S> = expected.iter().copied().map(S::from_real).collect();
+    let y_s: Vec<S> = y.iter().copied().map(S::from_real).collect();
+    assert_vec_close!("jacobi golden apply", &y_s, &expected_s);
 }
 
 #[test]
 fn cg_on_spd_converges_with_tight_tol() {
     let n = 32;
     let a = csr_poisson_1d(n);
-    let b = vec![1.0; n];
-    let mut x = vec![0.0; n];
+    let b = vec![R::from(1.0); n];
+    let mut x = vec![R::default(); n];
 
     let aop = CsrOp::new(Arc::new(a.clone()));
     let mut ksp = KspContext::new();

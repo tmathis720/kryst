@@ -1,8 +1,8 @@
 pub mod plan;
 pub mod scalar;
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 pub mod sellc;
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 pub mod simd_csr;
 
 pub use self::plan::{
@@ -10,10 +10,11 @@ pub use self::plan::{
 };
 pub use self::scalar::{spmv_csr_scalar, spmv_scaled_csr, spmv_t_scaled_csr};
 
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
-use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
-use faer::{MatMut, MatRef};
+use crate::matrix::{csc::CscMatrix, csr::CsrMatrix, sparse};
+use faer::{MatMut, MatRef, traits::ComplexField};
 
 #[inline]
 pub fn spmv_scaled_f32_on_pattern(
@@ -79,8 +80,74 @@ pub fn spmv_t_scaled_f32_on_pattern(
 }
 
 /// y = A * x using CSR; parallel when `rayon` is enabled.
+pub trait CsrAccess<S: KrystScalar> {
+    fn nrows(&self) -> usize;
+    fn ncols(&self) -> usize;
+    fn row_ptr(&self) -> &[usize];
+    fn col_idx(&self) -> &[usize];
+    fn values(&self) -> &[S];
+}
+
+impl<S: KrystScalar> CsrAccess<S> for CsrMatrix<S> {
+    #[inline]
+    fn nrows(&self) -> usize {
+        self.nrows()
+    }
+
+    #[inline]
+    fn ncols(&self) -> usize {
+        self.ncols()
+    }
+
+    #[inline]
+    fn row_ptr(&self) -> &[usize] {
+        self.row_ptr()
+    }
+
+    #[inline]
+    fn col_idx(&self) -> &[usize] {
+        self.col_idx()
+    }
+
+    #[inline]
+    fn values(&self) -> &[S] {
+        self.values()
+    }
+}
+
+impl CsrAccess<f64> for sparse::CsrMatrix<f64> {
+    #[inline]
+    fn nrows(&self) -> usize {
+        self.nrows()
+    }
+
+    #[inline]
+    fn ncols(&self) -> usize {
+        self.ncols()
+    }
+
+    #[inline]
+    fn row_ptr(&self) -> &[usize] {
+        self.row_ptr()
+    }
+
+    #[inline]
+    fn col_idx(&self) -> &[usize] {
+        self.col_idx()
+    }
+
+    #[inline]
+    fn values(&self) -> &[f64] {
+        self.values()
+    }
+}
+
 #[cfg(feature = "rayon")]
-pub fn spmv_csr_parallel(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+pub fn spmv_csr_parallel<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
     if x.len() != a.ncols() || y.len() != a.nrows() {
         return Err(KError::InvalidInput(
             "spmv_csr_parallel: dimension mismatch".into(),
@@ -93,13 +160,21 @@ pub fn spmv_csr_parallel(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result
     use rayon::prelude::*;
     y.par_chunks_mut(1).enumerate().for_each(|(i, yi)| {
         let (rs, re) = (rp[i], rp[i + 1]);
-        let sum = unsafe { lane_dot_gather_unchecked(&vv[rs..re], &cj[rs..re], x) };
-        yi[0] = sum;
+        let mut acc = <S as KrystScalar>::zero();
+        for p in rs..re {
+            let col = unsafe { *cj.get_unchecked(p) };
+            let val = unsafe { *vv.get_unchecked(p) };
+            acc = val.mul_add(x[col], acc);
+        }
+        yi[0] = acc;
     });
     Ok(())
 }
 
-pub fn spmm_csr_dense(a: &CsrMatrix<f64>, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError> {
+pub fn spmm_csr_dense<A>(a: &A, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError>
+where
+    A: CsrAccess<S>,
+{
     let (m, n) = (a.nrows(), a.ncols());
     if x.nrows() != n || y.nrows() != m || x.ncols() != y.ncols() {
         return Err(KError::InvalidInput(
@@ -115,7 +190,7 @@ pub fn spmm_csr_dense(a: &CsrMatrix<f64>, x: &BlockVec, y: &mut BlockVec) -> Res
     let yn = y.nrows();
     let x_data = x.as_slice();
     let y_data = y.as_mut_slice();
-    y_data.fill(0.0);
+    y_data.fill(S::zero());
 
     for i in 0..m {
         let row_start = rp[i];
@@ -136,53 +211,43 @@ pub fn spmm_csr_dense(a: &CsrMatrix<f64>, x: &BlockVec, y: &mut BlockVec) -> Res
 }
 
 #[cfg(not(feature = "rayon"))]
-pub fn spmv_csr_parallel(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-    a.spmv_scaled(1.0, x, 0.0, y)
-}
-
-#[cfg(feature = "rayon")]
-#[inline]
-unsafe fn fallback_lane_dot(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
-    debug_assert_eq!(vals.len(), cols.len());
-    let mut acc = 0.0;
-    for k in 0..vals.len() {
-        let v = unsafe { *vals.get_unchecked(k) };
-        let col = unsafe { *cols.get_unchecked(k) };
-        let xv = unsafe { *x.get_unchecked(col) };
-        acc += v * xv;
+pub fn spmv_csr_parallel<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
+    if x.len() != a.ncols() || y.len() != a.nrows() {
+        return Err(KError::InvalidInput(
+            "spmv_csr_parallel: dimension mismatch".into(),
+        ));
     }
-    acc
-}
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
 
-#[cfg(feature = "rayon")]
-#[cfg(not(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
-    target_feature = "avx2"
-)))]
-#[inline]
-unsafe fn lane_dot_gather_unchecked(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
-    unsafe { fallback_lane_dot(vals, cols, x) }
-}
-
-#[cfg(feature = "rayon")]
-#[cfg(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
-    target_feature = "avx2"
-))]
-#[inline]
-unsafe fn lane_dot_gather_unchecked(vals: &[f64], cols: &[usize], x: &[f64]) -> f64 {
-    // placeholder for AVX2 gather implementation
-    unsafe { fallback_lane_dot(vals, cols, x) }
+    for (row, yi) in y.iter_mut().enumerate().take(a.nrows()) {
+        let (rs, re) = (rp[row], rp[row + 1]);
+        let mut acc = S::zero();
+        for p in rs..re {
+            let col = cj[p];
+            acc = vv[p].mul_add(x[col], acc);
+        }
+        *yi = acc;
+    }
+    Ok(())
 }
 
 /// Backend selection for transpose SpMV.
-pub enum TBackend<'a> {
-    Csc(&'a CscMatrix<f64>),
+pub enum TBackend<'a, S: KrystScalar> {
+    Csc(&'a CscMatrix<S>),
     CsrGather,
 }
 
 #[cfg(feature = "rayon")]
-fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+fn t_spmv_csr_parallel_csc<S>(csc: &CscMatrix<S>, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar + ComplexField<Real = f64> + num_traits::Zero,
+{
     if x.len() != csc.nrows() || y.len() != csc.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -191,10 +256,12 @@ fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Re
     let ri = csc.row_idx();
     let vv = csc.values();
     y.par_iter_mut().enumerate().for_each(|(j, yj)| {
-        let mut sum = 0.0;
+        let mut sum = <S as KrystScalar>::zero();
         for p in cp[j]..cp[j + 1] {
             let row = ri[p];
-            sum += unsafe { *vv.get_unchecked(p) * *x.get_unchecked(row) };
+            let val = unsafe { *vv.get_unchecked(p) };
+            let xr = unsafe { *x.get_unchecked(row) };
+            sum = val.mul_add(xr, sum);
         }
         *yj = sum;
     });
@@ -202,7 +269,10 @@ fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Re
 }
 
 #[cfg(not(feature = "rayon"))]
-fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+fn t_spmv_csr_parallel_csc<S>(csc: &CscMatrix<S>, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar + ComplexField<Real = f64> + num_traits::Zero,
+{
     if x.len() != csc.nrows() || y.len() != csc.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -211,7 +281,11 @@ fn t_spmv_csr_parallel_csc(csc: &CscMatrix<f64>, x: &[f64], y: &mut [f64]) -> Re
 }
 
 #[cfg(feature = "rayon")]
-fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+fn t_spmv_csr_parallel_gather<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
     let (m, n) = (a.nrows(), a.ncols());
     if x.len() != m || y.len() != n {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
@@ -224,25 +298,28 @@ fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> R
     let out = (0..m)
         .into_par_iter()
         .fold(
-            || vec![0.0; n],
+            || vec![<S as KrystScalar>::zero(); n],
             |mut y_chunk, i| {
                 let xi = x[i];
-                if xi != 0.0 {
+                if xi != <S as KrystScalar>::zero() {
                     let (rs, re) = (rp[i], rp[i + 1]);
                     for p in rs..re {
                         let j = unsafe { *cj.get_unchecked(p) };
                         let aij = unsafe { *vv.get_unchecked(p) };
-                        unsafe { *y_chunk.get_unchecked_mut(j) += aij * xi };
+                        unsafe {
+                            let slot = y_chunk.get_unchecked_mut(j);
+                            *slot = aij.mul_add(xi, *slot);
+                        }
                     }
                 }
                 y_chunk
             },
         )
         .reduce(
-            || vec![0.0; n],
+            || vec![<S as KrystScalar>::zero(); n],
             |mut a, b| {
                 for j in 0..n {
-                    a[j] += b[j];
+                    a[j] = a[j] + b[j];
                 }
                 a
             },
@@ -253,19 +330,23 @@ fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> R
 }
 
 #[cfg(not(feature = "rayon"))]
-fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+fn t_spmv_csr_parallel_gather<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
     if x.len() != a.nrows() || y.len() != a.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
-    y.fill(0.0);
+    y.fill(<S as KrystScalar>::zero());
     let rp = a.row_ptr();
     let cj = a.col_idx();
     let vv = a.values();
     for i in 0..a.nrows() {
         let xi = x[i];
-        if xi != 0.0 {
+        if xi != <S as KrystScalar>::zero() {
             for p in rp[i]..rp[i + 1] {
-                y[cj[p]] += vv[p] * xi;
+                y[cj[p]] = y[cj[p]] + vv[p] * xi;
             }
         }
     }
@@ -273,12 +354,16 @@ fn t_spmv_csr_parallel_gather(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> R
 }
 
 /// y = A^T * x using CSR input and selectable backend.
-pub fn t_spmv_csr_parallel(
-    a: &CsrMatrix<f64>,
-    t_backend: TBackend<'_>,
-    x: &[f64],
-    y: &mut [f64],
-) -> Result<(), KError> {
+pub fn t_spmv_csr_parallel<S, A>(
+    a: &A,
+    t_backend: TBackend<'_, S>,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError>
+where
+    S: KrystScalar + ComplexField<Real = f64> + num_traits::Zero,
+    A: CsrAccess<S>,
+{
     match t_backend {
         TBackend::Csc(csc) => t_spmv_csr_parallel_csc(csc, x, y),
         TBackend::CsrGather => t_spmv_csr_parallel_gather(a, x, y),
@@ -286,12 +371,16 @@ pub fn t_spmv_csr_parallel(
 }
 
 /// Y(s) = A * X(s) with s right-hand sides stored column-major.
-pub fn spmm_csr_block(
-    a: &CsrMatrix<f64>,
+pub fn spmm_csr_block<S, A>(
+    a: &A,
     s: usize,
-    x_cols: &[&[f64]],
-    y_cols: &mut [&mut [f64]],
-) -> Result<(), KError> {
+    x_cols: &[&[S]],
+    y_cols: &mut [&mut [S]],
+) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
     let (m, n) = (a.nrows(), a.ncols());
     if x_cols.len() != s || y_cols.len() != s {
         return Err(KError::InvalidInput("spmm: bad s".into()));
@@ -300,22 +389,22 @@ pub fn spmm_csr_block(
         if x_cols[r].len() != n || y_cols[r].len() != m {
             return Err(KError::InvalidInput("spmm: dimension mismatch".into()));
         }
-        y_cols[r].fill(0.0);
+        y_cols[r].fill(<S as KrystScalar>::zero());
     }
 
     let rp = a.row_ptr();
     let cj = a.col_idx();
     let vv = a.values();
 
-    let mut acc = vec![0.0f64; s];
+    let mut acc = vec![<S as KrystScalar>::zero(); s];
     for i in 0..m {
-        acc.fill(0.0);
+        acc.fill(<S as KrystScalar>::zero());
         let (rs, re) = (rp[i], rp[i + 1]);
         for p in rs..re {
             let j = cj[p];
             let aij = vv[p];
             for r in 0..s {
-                acc[r] += aij * x_cols[r][j];
+                acc[r] = acc[r] + aij * x_cols[r][j];
             }
         }
         for r in 0..s {
@@ -330,11 +419,11 @@ pub fn spmm_csr_block(
 /// Computes `Y = A * X` where `A` is CSR and `X`, `Y` are column-major dense
 /// matrices provided as [`MatRef`] and [`MatMut`] respectively. The caller must
 /// zero `Y` prior to invocation if accumulation is not desired.
-pub fn csr_spmm_dense(
-    a: &CsrMatrix<f64>,
-    x: MatRef<'_, f64>,
-    mut y: MatMut<'_, f64>,
-) -> Result<(), KError> {
+pub fn csr_spmm_dense<S, A>(a: &A, x: MatRef<'_, S>, mut y: MatMut<'_, S>) -> Result<(), KError>
+where
+    S: KrystScalar + ComplexField<Real = f64>,
+    A: CsrAccess<S>,
+{
     let (m, n) = (a.nrows(), a.ncols());
     if x.nrows() != n {
         return Err(KError::InvalidInput(
@@ -360,13 +449,13 @@ pub fn csr_spmm_dense(
     for i in 0..m {
         // zero the output row explicitly to avoid accumulating stale data.
         for col in 0..k {
-            y[(i, col)] = 0.0;
+            y[(i, col)] = S::zero();
         }
         for p in rp[i]..rp[i + 1] {
             let col = cj[p];
             let val = vv[p];
             for rhs in 0..k {
-                y[(i, rhs)] += val * x[(col, rhs)];
+                y[(i, rhs)] = y[(i, rhs)] + val * x[(col, rhs)];
             }
         }
     }

@@ -4,6 +4,8 @@
 //! If [`PcSide`] is not `Left`, the solver returns `InvalidInput`.
 //! Residual norm is the preconditioned norm `||M^{-1} r||`; final stats include true `||r||`.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -25,15 +27,6 @@ use std::any::Any;
 use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
-
-fn norm2(x: &[S], comm: &UniverseComm) -> R {
-    global_nrm2(comm, x)
-}
-
-fn dot(u: &[S], v: &[S], comm: &UniverseComm) -> R {
-    let global = global_dot_conj(comm, u, v);
-    dot_result_to_real(global)
-}
 
 struct CgWorkspace<'a> {
     r: &'a mut [S],
@@ -197,7 +190,8 @@ impl CgSolver {
             scratch,
         } = &mut buffers;
 
-        let guess_nonzero = self.initial_guess_nonzero || x.iter().any(|&xi| xi != S::zero());
+        let guess_nonzero =
+            self.initial_guess_nonzero || x.iter().any(|&xi| xi.abs() > R::default());
         if guess_nonzero {
             a.matvec_s(x, &mut tmp[..], &mut *scratch);
             for i in 0..nrows {
@@ -253,7 +247,7 @@ impl CgSolver {
             return Err(KError::IndefinitePreconditioner);
         }
         let mut xnorm = if self.trust_region.is_some() {
-            norm2(x, comm)
+            global_nrm2(comm, x)
         } else {
             R::zero()
         };
@@ -271,7 +265,7 @@ impl CgSolver {
             }
         }
         if let Some(m) = &self.true_residual_monitor {
-            let true_res = norm2(r, comm);
+            let true_res = global_nrm2(comm, r);
             m(0, true_res);
         }
         #[cfg(feature = "logging")]
@@ -284,7 +278,7 @@ impl CgSolver {
         let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut s = s0;
-            s.final_residual = norm2(r, comm);
+            s.final_residual = global_nrm2(comm, r);
             return Ok(s);
         }
 
@@ -299,7 +293,7 @@ impl CgSolver {
 
             a.matvec_s(p, &mut ap[..], &mut *scratch);
 
-            let p_ap = dot(p, ap, comm);
+            let p_ap = dot_result_to_real(global_dot_conj(comm, p, ap));
             if p_ap <= 0.0 || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
@@ -308,7 +302,7 @@ impl CgSolver {
             let alpha_s = S::from_real(alpha);
 
             if let Some(rmax) = self.trust_region {
-                let pnorm = norm2(p, comm);
+                let pnorm = global_nrm2(comm, p);
                 if xnorm + alpha.abs() * pnorm > rmax {
                     let step = (rmax - xnorm) / (pnorm + 1e-300);
                     let step_s = S::from_real(step);
@@ -318,7 +312,7 @@ impl CgSolver {
                     }
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
-                    stats.final_residual = norm2(r, comm);
+                    stats.final_residual = global_nrm2(comm, r);
                     return Ok(stats);
                 }
             }
@@ -330,7 +324,7 @@ impl CgSolver {
                 r[i] -= alpha_s * ap[i];
             }
             if self.trust_region.is_some() {
-                xnorm = norm2(x, comm);
+                xnorm = global_nrm2(comm, x);
             }
 
             if let Some(pc) = pc {
@@ -392,13 +386,13 @@ impl CgSolver {
                 }
             }
             if let Some(m) = &self.true_residual_monitor {
-                let true_res = norm2(r, comm);
+                let true_res = global_nrm2(comm, r);
                 m(k, true_res);
             }
 
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                s.final_residual = norm2(r, comm);
+                s.final_residual = global_nrm2(comm, r);
                 return Ok(s);
             }
 
@@ -408,7 +402,7 @@ impl CgSolver {
             stats.final_residual = res_reported;
         }
 
-        let true_res = norm2(r, comm);
+        let true_res = global_nrm2(comm, r);
         Ok(SolveStats::new(
             self.conv.max_iters,
             true_res,

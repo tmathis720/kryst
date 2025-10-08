@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests_gmres_z_basis {
+    use crate::algebra::prelude::*;
     use crate::context::ksp_context::{KspContext, SolverType};
     use crate::error::KError;
     use crate::matrix::op::LinOp;
@@ -32,14 +33,14 @@ mod tests_gmres_z_basis {
         // A: simple nonsymmetric to avoid early convergence in one step
         let a = Mat::from_fn(4, 4, |i, j| {
             if i == j {
-                3.0
+                R::from(3.0)
             } else if j + 1 == i {
-                -1.0
+                R::from(-1.0)
             } else {
-                0.2
+                R::from(0.2)
             }
         });
-        let b = [1.0, 0.0, 0.0, 0.0];
+        let b = [R::from(1.0), R::default(), R::default(), R::default()];
         let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a);
 
         // Counting identity PC
@@ -55,7 +56,7 @@ mod tests_gmres_z_basis {
         ksp.rtol = 1e-12; // try to make it finish inside a couple cycles
         ksp.set_pc_box_for_tests(pc);
 
-        let mut x = [0.0; 4];
+        let mut x = [R::default(); 4];
         let stats = ksp.solve(&b, &mut x)?;
 
         let w = ksp.debug_workspace().expect("workspace present");

@@ -2,6 +2,7 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::preconditioner::PcSide;
+#[cfg(not(feature = "complex"))]
 use crate::preconditioner::Preconditioner as PreconditionerF64;
 
 /// Internal, scalar-generic preconditioner interface.

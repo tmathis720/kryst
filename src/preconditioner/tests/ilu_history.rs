@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::utils::monitor::{Event, Monitor};
 use std::sync::Mutex;
@@ -35,7 +36,7 @@ fn history_and_monitor_basic() {
     m.on_event(Event::IluSetupEnd {
         iters: 1,
         converged: true,
-        setup_time_s: 0.0,
+        setup_time_s: R::default(),
     });
     let events = m.0.lock().unwrap();
     assert_eq!(&events[..], ["begin", "iter", "end"]);

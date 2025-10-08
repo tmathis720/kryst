@@ -2,7 +2,7 @@ use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::core::block::BlockVec;
-use crate::solver::common::givens::{apply_complex_givens, build_complex_givens};
+use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
 use crate::solver::gmres::AugmentationPolicy;
 
 #[derive(Debug, Clone, Default)]
@@ -13,9 +13,9 @@ pub struct Workspace {
     pub q_s: Vec<Vec<S>>,
     pub z_s: Vec<Vec<S>>,
     pub h_s: Vec<Vec<S>>,
-    pub q: Vec<Vec<f64>>,
-    pub z: Vec<Vec<f64>>,
-    pub h: Vec<Vec<f64>>,
+    pub q: Vec<Vec<S>>,
+    pub z: Vec<Vec<S>>,
+    pub h: Vec<Vec<S>>,
     pub v_mem: Vec<S>,
     pub z_mem: Vec<S>,
     // Column-major Hessenberg storage for GMRES/FGMRES
@@ -24,13 +24,14 @@ pub struct Workspace {
     pub sn: Vec<S>,
     pub g: Vec<S>,
     pub blk_scratch: Vec<S>,
+    pub blk_payload: Vec<R>,
     pub bridge: BridgeScratch,
     pub bridge_tmp: Vec<S>,
     pub block_buf: Option<BlockVec>,
     pub tsqr: Option<TsqrWorkspace>,
     pub pipelined_w: Vec<S>,
     pub pipelined_wtmp: Vec<S>,
-    pub pipelined_payload: Vec<f64>,
+    pub pipelined_payload: Vec<S>,
     pub gmres_sstep: Option<GmresSStepWorkspace>,
     pub gmres_recycle: RecyclingSpace,
     pub reduction: crate::utils::reduction::ReductOptions,
@@ -45,8 +46,8 @@ pub struct Workspace {
 
 #[derive(Debug, Clone)]
 pub struct RecyclingSpace {
-    u: Vec<f64>,
-    au: Vec<f64>,
+    u: Vec<S>,
+    au: Vec<S>,
     n: usize,
     rmax: usize,
     cols: usize,
@@ -69,8 +70,8 @@ impl Default for RecyclingSpace {
 impl RecyclingSpace {
     pub fn configure(&mut self, n: usize, rmax: usize, policy: AugmentationPolicy) {
         if self.n != n || self.rmax != rmax {
-            self.u.resize(n.saturating_mul(rmax), 0.0);
-            self.au.resize(n.saturating_mul(rmax), 0.0);
+            self.u.resize(n.saturating_mul(rmax), S::zero());
+            self.au.resize(n.saturating_mul(rmax), S::zero());
             self.n = n;
             self.rmax = rmax;
             self.cols = 0;
@@ -97,27 +98,27 @@ impl RecyclingSpace {
         self.cols = 0;
     }
 
-    pub fn col(&self, j: usize) -> &[f64] {
+    pub fn col(&self, j: usize) -> &[S] {
         let n = self.n;
         &self.u[j * n..(j + 1) * n]
     }
 
-    pub fn col_mut(&mut self, j: usize) -> &mut [f64] {
+    pub fn col_mut(&mut self, j: usize) -> &mut [S] {
         let n = self.n;
         &mut self.u[j * n..(j + 1) * n]
     }
 
-    pub fn a_col(&self, j: usize) -> &[f64] {
+    pub fn a_col(&self, j: usize) -> &[S] {
         let n = self.n;
         &self.au[j * n..(j + 1) * n]
     }
 
-    pub fn a_col_mut(&mut self, j: usize) -> &mut [f64] {
+    pub fn a_col_mut(&mut self, j: usize) -> &mut [S] {
         let n = self.n;
         &mut self.au[j * n..(j + 1) * n]
     }
 
-    pub fn push_from(&mut self, u: &[f64], au: &[f64]) {
+    pub fn push_from(&mut self, u: &[S], au: &[S]) {
         if self.cols >= self.rmax {
             return;
         }
@@ -157,10 +158,10 @@ pub struct GmresSStepWorkspace {
     pub w: BlockVec,
     pub q: BlockVec,
     pub aq: BlockVec,
-    pub gram: Vec<f64>,
-    pub c_prev: Vec<f64>,
-    pub payload: Vec<f64>,
-    pub r: Vec<f64>,
+    pub gram: Vec<S>,
+    pub c_prev: Vec<R>,
+    pub payload: Vec<S>,
+    pub r: Vec<R>,
 }
 
 impl GmresSStepWorkspace {
@@ -169,10 +170,10 @@ impl GmresSStepWorkspace {
             w: BlockVec::new(n, s),
             q: BlockVec::new(n, s),
             aq: BlockVec::new(n, s),
-            gram: vec![0.0; s.saturating_mul(s)],
-            c_prev: vec![0.0; m.saturating_mul(s)],
-            payload: vec![0.0; s.saturating_mul(s + 1) / 2 + m.saturating_mul(s)],
-            r: vec![0.0; s.saturating_mul(s)],
+            gram: vec![S::zero(); s.saturating_mul(s)],
+            c_prev: vec![R::default(); m.saturating_mul(s)],
+            payload: vec![S::zero(); s.saturating_mul(s + 1) / 2 + m.saturating_mul(s)],
+            r: vec![R::default(); s.saturating_mul(s)],
         };
         ws.ensure(n, s, m);
         ws
@@ -193,16 +194,16 @@ impl GmresSStepWorkspace {
 /// Scratch buffers for TSQR factorizations.
 #[derive(Debug, Clone)]
 pub struct TsqrWorkspace {
-    pub taus: Vec<f64>,
-    pub rmat: Vec<f64>,
+    pub taus: Vec<S>,
+    pub rmat: Vec<S>,
     pub w_max: usize,
 }
 
 impl TsqrWorkspace {
     pub fn with_width(w_max: usize) -> Self {
         Self {
-            taus: vec![0.0; w_max],
-            rmat: vec![0.0; w_max.saturating_mul(w_max)],
+            taus: vec![S::zero(); w_max],
+            rmat: vec![S::zero(); w_max.saturating_mul(w_max)],
             w_max,
         }
     }
@@ -332,8 +333,11 @@ impl Workspace {
 
         if spec.block_s > 0 {
             ensure_len(&mut self.blk_scratch, n * spec.block_s);
+            let payload_cap = block_payload_capacity(spec.m.saturating_add(1), spec.block_s);
+            ensure_capacity(&mut self.blk_payload, payload_cap);
         } else {
             self.blk_scratch.clear();
+            self.blk_payload.clear();
         }
 
         self.ensure_sstep(n, spec.block_s, m);
@@ -484,41 +488,49 @@ impl Workspace {
 
     // --- Hessenberg helpers -----------------------------------------------------
     #[inline]
-    pub fn h2_mut(&mut self, i: usize, j: usize) -> (&mut S, &mut S) {
-        debug_assert!(i < self.m && j < self.m);
-        let ld = self.ld_h();
-        let base = j * ld + i;
-        let (left, right) = self.h_mem.split_at_mut(base + 1);
-        let hij = &mut left[base];
-        let hij1 = &mut right[0];
-        (hij, hij1)
-    }
-
-    #[inline]
     pub fn apply_prev_givens_to_col(&mut self, j: usize, upto: usize) {
-        for i in 0..upto {
-            let c = self.cs[i];
-            let s = self.sn[i];
-            let (hij, hij1) = self.h2_mut(i, j);
-            apply_complex_givens(hij, hij1, c, s);
+        use smallvec::SmallVec;
+
+        if upto == 0 {
+            return;
+        }
+
+        let ld = self.ld_h();
+        let base = j * ld;
+        let mut hcol: SmallVec<[S; 64]> = SmallVec::with_capacity(upto + 1);
+        for row in 0..=upto {
+            hcol.push(self.h_mem[base + row]);
+        }
+
+        apply_prev_givens_to_col(&mut hcol, upto, &self.cs, &self.sn);
+
+        for (row, val) in hcol.into_iter().enumerate() {
+            self.h_mem[base + row] = val;
         }
     }
 
     #[inline]
     pub fn apply_final_givens_and_update_g(&mut self, j: usize) {
+        use smallvec::SmallVec;
+
         let ld = self.ld_h();
-        let hkk = self.h_mem[j * ld + j];
-        let hk1k = self.h_mem[j * ld + j + 1];
-        let (c, s) = build_complex_givens(hkk, hk1k);
-        self.cs[j] = c;
-        self.sn[j] = s;
-        let (hjj, hj1j) = self.h2_mut(j, j);
-        apply_complex_givens(hjj, hj1j, c, s);
-        let gk = self.g[j];
-        let gk1 = self.g[j + 1];
-        let c_s = S::from_real(c);
-        self.g[j] = c_s * gk + s * gk1;
-        self.g[j + 1] = -s.conj() * gk + c_s * gk1;
+        let base = j * ld;
+        let mut hcol: SmallVec<[S; 64]> = SmallVec::with_capacity(j + 2);
+        for row in 0..=j + 1 {
+            hcol.push(self.h_mem[base + row]);
+        }
+
+        apply_new_givens_and_update_g(
+            &mut hcol,
+            j,
+            &mut self.cs[..],
+            &mut self.sn[..],
+            &mut self.g[..],
+        );
+
+        for (row, val) in hcol.into_iter().enumerate() {
+            self.h_mem[base + row] = val;
+        }
     }
 
     #[cfg(not(feature = "complex"))]
@@ -555,7 +567,7 @@ impl Workspace {
 
         self.pipelined_wtmp[..n].copy_from_slice(w);
 
-        let mut sum_h2 = 0.0;
+        let mut sum_h2 = R::zero();
         for i in 0..=k {
             let hij = glob[i];
             sum_h2 += hij * hij;
@@ -567,9 +579,9 @@ impl Workspace {
         }
 
         let total_norm_sq = glob[k + 1];
-        let mut hnext_sq = (total_norm_sq - sum_h2).max(0.0);
+        let mut hnext_sq = (total_norm_sq - sum_h2).max(R::zero());
         if !hnext_sq.is_finite() {
-            hnext_sq = 0.0;
+            hnext_sq = R::zero();
         }
 
         let tol = tol.max(0.0);
@@ -604,7 +616,7 @@ impl Workspace {
                     handle,
                 );
 
-            let mut delta_norm_sq = 0.0;
+            let mut delta_norm_sq = R::zero();
             for i in 0..=k {
                 let delta = corr[i];
                 delta_norm_sq += delta * delta;
@@ -616,16 +628,16 @@ impl Workspace {
                 *self.h_at_mut(i, k) = hij;
             }
 
-            sum_h2 = 0.0;
+            sum_h2 = R::zero();
             for i in 0..=k {
                 let hij = *self.h_at_mut(i, k);
                 sum_h2 += hij * hij;
             }
 
             let wtmp_norm_sq = corr[k + 1];
-            hnext_sq = (wtmp_norm_sq - delta_norm_sq).max(0.0);
+            hnext_sq = (wtmp_norm_sq - delta_norm_sq).max(R::zero());
             if !hnext_sq.is_finite() {
-                hnext_sq = 0.0;
+                hnext_sq = R::zero();
             }
         }
 
@@ -633,14 +645,14 @@ impl Workspace {
         *self.h_at_mut(k + 1, k) = hnext;
 
         let base = (k + 1) * n;
-        if hnext > 0.0 {
-            let inv = 1.0 / hnext;
+        if hnext > R::zero() {
+            let inv = S::from_real(hnext.recip());
             for idx in 0..n {
                 self.v_mem[base + idx] = self.pipelined_wtmp[idx] * inv;
             }
         } else {
             for idx in 0..n {
-                self.v_mem[base + idx] = 0.0;
+                self.v_mem[base + idx] = S::zero();
             }
         }
 
@@ -673,5 +685,28 @@ fn ensure_len<T: Copy>(v: &mut Vec<T>, need: usize) {
         unsafe {
             v.set_len(need);
         }
+    }
+}
+
+#[inline]
+fn ensure_capacity<T>(v: &mut Vec<T>, need: usize) {
+    if v.capacity() < need {
+        v.reserve_exact(need - v.capacity());
+    }
+}
+
+#[inline]
+fn block_payload_capacity(max_blocks: usize, block_size: usize) -> usize {
+    let scalars = max_blocks
+        .checked_mul(block_size)
+        .and_then(|v| v.checked_mul(block_size))
+        .unwrap_or(usize::MAX);
+    #[cfg(feature = "complex")]
+    {
+        scalars.checked_mul(2).unwrap_or(usize::MAX)
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        scalars
     }
 }

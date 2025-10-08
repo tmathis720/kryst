@@ -2,6 +2,8 @@
 //! mutable preconditioning support.
 
 #[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
@@ -146,12 +148,12 @@ impl FgmresSolver {
         let thr = self.atol.max(self.rtol * bnorm);
 
         ws.h_mem.fill(S::zero());
-        ws.cs.fill(0.0);
+        ws.cs.fill(R::default());
         ws.sn.fill(S::zero());
         ws.g.fill(S::zero());
         ws.g[0] = S::from_real(beta0);
 
-        if beta0 > 0.0 {
+        if beta0 > R::default() {
             let inv = S::from_real(1.0 / beta0);
             for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
                 *dst = src * inv;
@@ -276,7 +278,7 @@ impl FgmresSolver {
                         let hij1 = global_nrm2(comm, &ws.tmp2[..n]);
                         *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
 
-                        if hij1 > 0.0 {
+                        if hij1 > R::default() {
                             let inv = S::from_real(1.0 / hij1);
                             for val in &mut ws.tmp2[..n] {
                                 *val *= inv;
@@ -388,11 +390,11 @@ impl FgmresSolver {
             beta0 = global_nrm2(comm, &ws.tmp1[..n]);
 
             ws.h_mem.fill(S::zero());
-            ws.cs.fill(0.0);
+            ws.cs.fill(R::default());
             ws.sn.fill(S::zero());
             ws.g.fill(S::zero());
             ws.g[0] = S::from_real(beta0);
-            if beta0 > 0.0 {
+            if beta0 > R::default() {
                 let inv = S::from_real(1.0 / beta0);
                 for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
                     *dst = src * inv;

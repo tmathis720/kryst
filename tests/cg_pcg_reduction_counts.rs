@@ -1,5 +1,6 @@
 mod support;
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
@@ -11,10 +12,10 @@ use support::reduce_counter::CountingComm;
 fn build_spd(n: usize) -> Mat<f64> {
     let mut a = Mat::<f64>::zeros(n, n);
     for i in 0..n {
-        a[(i, i)] = 2.0;
+        a[(i, i)] = R::from(2.0);
         if i + 1 < n {
-            a[(i, i + 1)] = 1.0;
-            a[(i + 1, i)] = 1.0;
+            a[(i, i + 1)] = R::from(1.0);
+            a[(i + 1, i)] = R::from(1.0);
         }
     }
     a
@@ -24,8 +25,8 @@ fn build_spd(n: usize) -> Mat<f64> {
 fn pcg_reduction_counts() {
     let n = 5;
     let a = build_spd(n);
-    let b = vec![1.0; n];
-    let mut x = vec![0.0; n];
+    let b = vec![R::from(1.0); n];
+    let mut x = vec![R::default(); n];
 
     let base = UniverseComm::NoComm(NoComm);
     let comm = CountingComm::new(base.clone());

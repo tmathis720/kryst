@@ -1,21 +1,29 @@
 use std::sync::Arc;
 
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
-use kryst::matrix::op::LinOp;
-use kryst::matrix::sparse::CsrMatrix;
+use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+use kryst::matrix::op::{GenericCsrOp, LinOp};
+use kryst::matrix::spmv::plan::SpmvTuning;
 
 #[test]
 fn ksp_setup_accepts_csr_without_dense_downcast() {
     // Build a simple 3x3 tridiagonal matrix in CSR format
-    let csr = CsrMatrix::from_csr(
+    let csr = Arc::new(ScalarCsrMatrix::from_csr(
         3,
         3,
         vec![0, 2, 4, 5],
         vec![0, 1, 0, 2, 1],
-        vec![2.0, -1.0, -1.0, -1.0, 2.0],
-    );
-    let a: Arc<dyn LinOp<S = f64>> = Arc::new(csr);
+        vec![
+            R::from(2.0),
+            R::from(-1.0),
+            R::from(-1.0),
+            R::from(-1.0),
+            R::from(2.0),
+        ],
+    ));
+    let a: Arc<dyn LinOp<S = f64>> = Arc::new(GenericCsrOp::new(csr, &SpmvTuning::default()));
 
     // Configure KSP with a Jacobi preconditioner and GMRES solver
     let mut ksp = KspContext::new();

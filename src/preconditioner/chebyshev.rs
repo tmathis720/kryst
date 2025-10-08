@@ -28,7 +28,6 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
 use crate::algebra::prelude::*;
 use crate::core::traits::MatVec;
 use crate::error::KError;
@@ -444,9 +443,9 @@ fn chebyshev_t<T: num_traits::Float>(m: usize, x: T) -> T {
 
 #[derive(Default)]
 struct ChebScratch {
-    v0: Vec<f64>,
-    v1: Vec<f64>,
-    v2: Vec<f64>,
+    v0: Vec<R>,
+    v1: Vec<R>,
+    v2: Vec<R>,
 }
 
 /// Object-safe Chebyshev preconditioner
@@ -485,13 +484,13 @@ impl ObjPreconditioner for ChebyshevPc {
         // ensure scratch
         let mut s = self.scratch.lock().unwrap();
         if s.v0.len() != n {
-            s.v0.resize(n, 0.0);
+            s.v0.resize(n, R::default());
         }
         if s.v1.len() != n {
-            s.v1.resize(n, 0.0);
+            s.v1.resize(n, R::default());
         }
         if s.v2.len() != n {
-            s.v2.resize(n, 0.0);
+            s.v2.resize(n, R::default());
         }
         Ok(())
     }

@@ -9,10 +9,10 @@ use kryst::{assert_s_close, assert_vec_close};
 #[test]
 fn async_dot2_matches_blocking() {
     let comm = NoComm;
-    let x1 = [1.0, 2.0, 3.0];
-    let y1 = [4.0, 5.0, 6.0];
-    let x2 = [0.5, 1.5, -2.5];
-    let y2 = [2.0, -3.0, 4.0];
+    let x1 = [R::from(1.0), R::from(2.0), R::from(3.0)];
+    let y1 = [R::from(4.0), R::from(5.0), R::from(6.0)];
+    let x2 = [R::from(0.5), R::from(1.5), R::from(-2.5)];
+    let y2 = [R::from(2.0), R::from(-3.0), R::from(4.0)];
     let xs1: Vec<S> = x1.iter().copied().map(s).collect();
     let ys1: Vec<S> = y1.iter().copied().map(s).collect();
     let xs2: Vec<S> = x2.iter().copied().map(s).collect();
@@ -35,10 +35,10 @@ fn async_dot2_matches_blocking() {
 #[test]
 fn async_dotn_matches_blocking() {
     let comm = NoComm;
-    let v1 = [1.0, -1.0, 2.0];
-    let w1 = [3.0, 0.5, -4.0];
-    let v2 = [0.0, 2.0, 1.0];
-    let w2 = [1.0, 1.0, 1.0];
+    let v1 = [R::from(1.0), R::from(-1.0), R::from(2.0)];
+    let w1 = [R::from(3.0), R::from(0.5), R::from(-4.0)];
+    let v2 = [R::default(), R::from(2.0), R::from(1.0)];
+    let w2 = [R::from(1.0), R::from(1.0), R::from(1.0)];
     let v1s: Vec<S> = v1.iter().copied().map(s).collect();
     let w1s: Vec<S> = w1.iter().copied().map(s).collect();
     let v2s: Vec<S> = v2.iter().copied().map(s).collect();
@@ -61,7 +61,7 @@ fn async_dotn_matches_blocking() {
 #[test]
 fn async_norm_matches_blocking() {
     let comm = NoComm;
-    let x = [1.0, 2.0, 2.0];
+    let x = [R::from(1.0), R::from(2.0), R::from(2.0)];
     let xs: Vec<S> = x.iter().copied().map(s).collect();
     let opts = ReductOptions::default();
     let (handle, local) = nrm2_async(&comm, &x, &opts);

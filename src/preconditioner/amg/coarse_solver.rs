@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
+
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, IlutParams};

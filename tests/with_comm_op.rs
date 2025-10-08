@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::{LinOp, wrap_with_comm};
 use kryst::parallel::{NoComm, UniverseComm};
@@ -8,7 +9,13 @@ use kryst::parallel::{NoComm, UniverseComm};
 #[test]
 #[should_panic]
 fn mismatch_comm_panics() {
-    let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 1.0 } else { 0.0 });
+    let a = Mat::<f64>::from_fn(
+        4,
+        4,
+        |i, j| {
+            if i == j { R::from(1.0) } else { R::default() }
+        },
+    );
     let p = a.clone();
     let a_op: Arc<dyn LinOp<S = f64>> = wrap_with_comm(Arc::new(a), UniverseComm::NoComm(NoComm));
 
@@ -28,9 +35,15 @@ fn mismatch_comm_panics() {
 
 #[test]
 fn residual_uses_comm_serial() {
-    let a = Mat::<f64>::from_fn(3, 3, |i, j| if i == j { 2.0 } else { 0.0 });
-    let b = vec![1.0; 3];
-    let mut x = vec![0.0; 3];
+    let a = Mat::<f64>::from_fn(
+        3,
+        3,
+        |i, j| {
+            if i == j { R::from(2.0) } else { R::default() }
+        },
+    );
+    let b = vec![R::from(1.0); 3];
+    let mut x = vec![R::default(); 3];
 
     let a_op = wrap_with_comm(Arc::new(a), UniverseComm::NoComm(NoComm));
     let mut ksp = KspContext::new();

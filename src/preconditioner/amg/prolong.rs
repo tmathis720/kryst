@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
+
 use super::row_filter::{RowFilter, filter_row_by_truncation};
 use super::strength::Strength;
 use crate::error::KError;
@@ -251,9 +256,7 @@ pub fn adaptive_fit_values_only(
                     kkt[(m, row)] = 1.0;
                 }
                 let mut rhs = vec![0.0f64; m + 1];
-                for row in 0..m {
-                    rhs[row] = rhs_base[row];
-                }
+                rhs[..m].copy_from_slice(&rhs_base[..m]);
                 rhs[m] = 1.0;
                 let lu = FullPivLu::new(kkt.as_ref());
                 let rhs_mat = MatMut::from_column_major_slice_mut(&mut rhs, m + 1, 1);

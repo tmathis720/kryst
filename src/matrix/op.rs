@@ -129,6 +129,19 @@ impl<S: KrystScalar> GenericCsrOp<S> {
         Self::new(Arc::new(matrix), tuning)
     }
 
+    /// Lifts a real-valued CSR matrix into the active scalar domain.
+    ///
+    /// This clones the underlying structure and converts the numeric values
+    /// through [`KrystScalar::from_real`], enabling solvers in complex builds to
+    /// reuse pre-existing `f64` sparsity patterns without reassembly.
+    pub fn from_real_csr(real: &crate::matrix::sparse::CsrMatrix<f64>, tuning: &SpmvTuning) -> Self
+    where
+        S: KrystScalar<Real = f64>,
+    {
+        let owned = ScalarCsrMatrix::<S>::from_real_csr(real);
+        Self::from_matrix(owned, tuning)
+    }
+
     /// Returns the underlying CSR matrix.
     pub fn matrix(&self) -> &ScalarCsrMatrix<S> {
         self.matrix.as_ref()
@@ -811,6 +824,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "complex")]
     use crate::algebra::prelude::*;
+    use crate::matrix::sparse::CsrMatrix as RealCsrMatrix;
     use crate::matrix::spmv::scalar::spmv_csr_scalar;
 
     #[test]
@@ -835,6 +849,34 @@ mod tests {
 
         let mut y_ref = vec![0.0; m];
         spmv_csr_scalar(matrix.as_ref(), &x, &mut y_ref);
+
+        for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
+            assert!((lhs - rhs).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn generic_csr_op_from_real_csr_matches_matrix() {
+        let real = RealCsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 4, 5],
+            vec![0, 2, 1, 2, 0],
+            vec![1.0, -2.0, 3.5, 0.5, 4.0],
+        );
+        let tuning = SpmvTuning {
+            allow_simd: false,
+            ..Default::default()
+        };
+        let op = GenericCsrOp::<f64>::from_real_csr(&real, &tuning);
+
+        let x = vec![0.75, -1.25, 2.0];
+        let mut y = vec![0.0; real.nrows()];
+        LinOp::matvec(&op, &x, &mut y);
+
+        let mut y_ref = vec![0.0; real.nrows()];
+        real.spmv_scaled(1.0, &x, 0.0, &mut y_ref)
+            .expect("real CSR spmv");
 
         for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
             assert!((lhs - rhs).abs() < 1e-12);
@@ -870,6 +912,35 @@ mod tests {
 
         let mut y_ref = vec![S::zero(); m];
         spmv_csr_scalar(matrix.as_ref(), &x, &mut y_ref);
+
+        for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
+            assert!((lhs - rhs).abs() < 1e-12);
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn generic_csr_op_complex_from_real_csr_matches_scalar_kernel() {
+        use num_complex::Complex64;
+
+        let real =
+            RealCsrMatrix::from_csr(2, 3, vec![0, 2, 3], vec![0, 1, 2], vec![1.0, -0.5, 2.25]);
+        let tuning = SpmvTuning {
+            allow_simd: false,
+            ..Default::default()
+        };
+        let op = GenericCsrOp::<S>::from_real_csr(&real, &tuning);
+
+        let x: Vec<S> = vec![
+            S::from_real(1.0),
+            S::from_parts(-2.0, 0.25),
+            Complex64::new(0.5, 0.75),
+        ];
+        let mut y = vec![S::zero(); real.nrows()];
+        LinOp::matvec(&op, &x, &mut y);
+
+        let mut y_ref = vec![S::zero(); real.nrows()];
+        spmv_csr_scalar(op.matrix(), &x, &mut y_ref);
 
         for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
             assert!((lhs - rhs).abs() < 1e-12);

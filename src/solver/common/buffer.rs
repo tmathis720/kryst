@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::prelude::*;
 
 #[inline]

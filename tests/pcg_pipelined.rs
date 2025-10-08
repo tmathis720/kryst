@@ -1,5 +1,6 @@
 use faer::Mat;
 use fixtures::csr_poisson_1d;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
@@ -7,15 +8,15 @@ use kryst::solver::LinearSolver;
 use kryst::solver::pcg::{PcgSolver, PcgVariant};
 use kryst::utils::reduction::test_hooks;
 
-fn build_dense_poisson(n: usize) -> Mat<f64> {
-    let mut a = Mat::<f64>::zeros(n, n);
+fn build_dense_poisson(n: usize) -> Mat<R> {
+    let mut a = Mat::<R>::zeros(n, n);
     for i in 0..n {
-        a[(i, i)] = 2.0;
+        a[(i, i)] = R::from(2.0);
         if i > 0 {
-            a[(i, i - 1)] = -1.0;
+            a[(i, i - 1)] = R::from(-1.0);
         }
         if i + 1 < n {
-            a[(i, i + 1)] = -1.0;
+            a[(i, i + 1)] = R::from(-1.0);
         }
     }
     a
@@ -25,7 +26,7 @@ fn build_dense_poisson(n: usize) -> Mat<f64> {
 fn pipelined_matches_classic_solution() {
     let n = 32;
     let a = build_dense_poisson(n);
-    let b = vec![1.0; n];
+    let b: Vec<R> = vec![R::from(1.0); n];
 
     let comm = UniverseComm::NoComm(NoComm);
 
@@ -33,8 +34,8 @@ fn pipelined_matches_classic_solution() {
     let mut pipeline = PcgSolver::new(1e-10, 200);
     pipeline.set_variant(PcgVariant::Pipelined { replace_every: 0 });
 
-    let mut x_classic = vec![0.0; n];
-    let mut x_pipe = vec![0.0; n];
+    let mut x_classic: Vec<R> = vec![R::default(); n];
+    let mut x_pipe: Vec<R> = vec![R::default(); n];
 
     let mut wk_classic = Workspace::default();
     classic.setup_workspace(&mut wk_classic);
@@ -72,20 +73,20 @@ fn pipelined_matches_classic_solution() {
         stats_classic.iterations,
         stats_pipe.iterations
     );
-    let mut diff = 0.0_f64;
+    let mut diff = R::default();
     for (xc, xp) in x_classic.iter().zip(&x_pipe) {
         diff = diff.max((xc - xp).abs());
     }
-    assert!(diff < 1e-8);
-    let rel_res = stats_pipe.final_residual / stats_classic.final_residual.max(1e-30);
-    assert!(rel_res < 2.0);
+    assert!(diff < R::from(1e-8));
+    let rel_res = stats_pipe.final_residual / stats_classic.final_residual.max(R::from(1e-30));
+    assert!(rel_res < R::from(2.0));
 }
 
 #[test]
 fn pipelined_reports_reduction_counts() {
     let n = 32;
     let a = csr_poisson_1d(n);
-    let b = vec![1.0; n];
+    let b: Vec<R> = vec![R::from(1.0); n];
 
     let comm = UniverseComm::NoComm(NoComm);
     let mut solver = PcgSolver::new(1e-12, 100);
@@ -93,7 +94,7 @@ fn pipelined_reports_reduction_counts() {
 
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
-    let mut x = vec![0.0; n];
+    let mut x: Vec<R> = vec![R::default(); n];
 
     test_hooks::reset_wait_counters();
     let stats = solver
