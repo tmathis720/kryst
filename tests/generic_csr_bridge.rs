@@ -3,9 +3,11 @@ use std::sync::Arc;
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
 use kryst::matrix::convert::{dense_from_linop, to_csc_cached, to_csr_cached};
+use kryst::matrix::csc::CscMatrix as FaerCscMatrix;
 use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
 use kryst::matrix::format::AsFormat;
 use kryst::matrix::op::{GenericCsrOp, LinOp};
+use kryst::matrix::sparse::CsrMatrix as FaerCsrMatrix;
 use kryst::matrix::spmv::plan::SpmvTuning;
 
 fn make_generic_op() -> (Arc<GenericCsrOp<f64>>, Vec<usize>, Vec<usize>, Vec<R>) {
@@ -110,4 +112,48 @@ fn scalar_csr_spmv_matches_manual() {
     }
 
     assert_vec_close!("scalar csr spmv", &expected, &actual);
+}
+
+#[test]
+fn faer_csr_to_scalar_lifts_values() {
+    let rowptr = vec![0, 2, 3];
+    let colind = vec![0, 1, 1];
+    let values = vec![1.0, -2.5, 3.0];
+    let faer = FaerCsrMatrix::from_csr(2, 2, rowptr.clone(), colind.clone(), values.clone());
+
+    let scalar = faer.to_scalar_csr();
+    assert_eq!(scalar.rowptr(), rowptr);
+    assert_eq!(scalar.colind(), colind);
+    for (expected, actual) in values.iter().zip(scalar.values()) {
+        assert_eq!(actual.real(), *expected);
+        assert_eq!(actual.imag(), R::default());
+    }
+}
+
+#[test]
+fn faer_csc_t_matvec_matches_manual() {
+    let colptr = vec![0, 2, 3];
+    let rowidx = vec![0, 1, 1];
+    let values = vec![
+        S::from_real(1.0),
+        S::from_real(-2.5),
+        S::from_real(3.0),
+    ];
+    let csc = FaerCscMatrix::from_csc(2, 2, colptr.clone(), rowidx.clone(), values.clone());
+
+    let x = vec![S::from_real(0.5), S::from_real(-1.0)];
+    let mut actual = vec![S::zero(); 2];
+    csc.t_matvec(&x, &mut actual);
+
+    let mut expected = vec![S::zero(); 2];
+    for (j, yj) in expected.iter_mut().enumerate() {
+        let mut acc = S::zero();
+        for p in colptr[j]..colptr[j + 1] {
+            let row = rowidx[p];
+            acc = acc + values[p] * x[row];
+        }
+        *yj = acc;
+    }
+
+    assert_vec_close!("faer csc t_matvec", &expected, &actual);
 }

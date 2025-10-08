@@ -10,6 +10,7 @@ pub trait SparseMatrix<T> {
     fn spmv(&self, x: &[T], y: &mut [T]);
 }
 
+use crate::algebra::scalar::{KrystScalar, S};
 use faer::sparse::{
     SparseRowMat, // owning numeric CSR alias
     //CreationError,           // error type for builders
@@ -356,6 +357,23 @@ impl<
         #[cfg(feature = "simd")]
         self.invalidate_spmv_plan();
         self.inner.val_mut()
+    }
+}
+
+impl CsrMatrix<f64> {
+    /// Convert this faer-backed CSR matrix into the scalar-aware CSR wrapper.
+    ///
+    /// The sparsity pattern is preserved and numeric values are lifted into the
+    /// active scalar type `S` (complex when the `complex` feature is enabled).
+    pub fn to_scalar_csr(&self) -> crate::matrix::csr::CsrMatrix<S> {
+        let values = self.values().iter().copied().map(S::from_real).collect();
+        crate::matrix::csr::CsrMatrix::new(
+            self.nrows(),
+            self.ncols(),
+            self.row_ptr().to_vec(),
+            self.col_idx().to_vec(),
+            values,
+        )
     }
 }
 
