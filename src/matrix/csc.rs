@@ -96,6 +96,28 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
             }
         }
     }
+
+    /// Transpose sparse matrix-vector multiply: `y = A^T * x`.
+    ///
+    /// Sequential implementation mirroring [`spmv`]. The output slice is fully
+    /// overwritten, so callers do not need to zero-initialize it before calling
+    /// this routine.
+    pub fn t_matvec(&self, x: &[T], y: &mut [T]) {
+        assert_eq!(x.len(), self.nrows());
+        assert_eq!(y.len(), self.ncols());
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+
+        for (j, yj) in y.iter_mut().enumerate() {
+            let mut acc = T::zero();
+            for p in cp[j]..cp[j + 1] {
+                let row = ri[p];
+                acc = acc + vv[p] * x[row];
+            }
+            *yj = acc;
+        }
+    }
 }
 
 #[cfg(feature = "rayon")]

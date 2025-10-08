@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::algebra::scalar::{KrystScalar, S, copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::format::FormatHint;
@@ -151,19 +152,19 @@ pub struct IluCsr {
     // L strictly lower (unit diagonal implied)
     l_row: Vec<usize>,
     l_col: Vec<usize>,
-    l_val: Vec<f64>,
+    l_val: Vec<S>,
     // U upper including diagonal
     u_row: Vec<usize>,
     u_col: Vec<usize>,
-    u_val: Vec<f64>,
+    u_val: Vec<S>,
     u_diag_ix: Vec<usize>,
     // Optional per-entry levels for ILUK
     l_lev: Vec<usize>,
     u_lev: Vec<usize>,
 
     // cached transposes, built lazily
-    lt: OnceCell<(Vec<usize>, Vec<usize>, Vec<f64>)>,
-    ut: OnceCell<(Vec<usize>, Vec<usize>, Vec<f64>)>,
+    lt: OnceCell<(Vec<usize>, Vec<usize>, Vec<S>)>,
+    ut: OnceCell<(Vec<usize>, Vec<usize>, Vec<S>)>,
 
     // optional level scheduling
     levels_fwd: Vec<usize>,
@@ -172,7 +173,7 @@ pub struct IluCsr {
     buckets_bwd: Vec<Vec<usize>>,
 
     // scratch for apply
-    tmp: Vec<f64>,
+    tmp: Vec<S>,
     perm: Permutation,
 }
 
@@ -192,13 +193,13 @@ impl IluCsr {
             u_diag_ix: Vec::new(),
             l_lev: Vec::new(),
             u_lev: Vec::new(),
+            lt: OnceCell::new(),
+            ut: OnceCell::new(),
             levels_fwd: Vec::new(),
             levels_bwd: Vec::new(),
             buckets_fwd: Vec::new(),
             buckets_bwd: Vec::new(),
             tmp: Vec::new(),
-            lt: OnceCell::new(),
-            ut: OnceCell::new(),
             perm: Permutation::identity(0),
         }
     }
@@ -346,8 +347,8 @@ impl IluCsr {
         self.u_val.clear();
         self.l_lev.clear();
         self.u_lev.clear();
-        self.l_val.resize(self.l_col.len(), 0.0);
-        self.u_val.resize(self.u_col.len(), 0.0);
+        self.l_val.resize(self.l_col.len(), S::zero());
+        self.u_val.resize(self.u_col.len(), S::zero());
         // not used in ILU0
         self.l_lev.resize(self.l_col.len(), 0);
         self.u_lev.resize(self.u_col.len(), 0);
@@ -405,12 +406,12 @@ impl IluCsr {
                     // L part
                     let ls = self.l_row[i];
                     if let Ok(off) = self.l_col[ls..self.l_row[i + 1]].binary_search(&j) {
-                        self.l_val[ls + off] = val;
+                        self.l_val[ls + off] = S::from_real(val);
                     }
                 } else {
                     // U part (including diagonal)
                     if let Some(pos) = map.get(j) {
-                        self.u_val[pos] = val;
+                        self.u_val[pos] = S::from_real(val);
                     }
                 }
                 p += 1;
@@ -422,7 +423,7 @@ impl IluCsr {
             for pos in ls..le {
                 let k = self.l_col[pos];
                 let ukk = self.u_val[self.u_diag_ix[k]];
-                if ukk == 0.0 {
+                if ukk == S::zero() {
                     return Err(KError::FactorError(format!(
                         "zero U(j,j) encountered at row {k}"
                     )));
@@ -522,7 +523,7 @@ impl IluCsr {
                 } else {
                     wlev[pos] = 0;
                 }
-                w.val[pos] = vv[p];
+                w.val[pos] = S::from_real(vv[p]);
             }
 
             // Create sorted list of lower columns present
@@ -542,18 +543,18 @@ impl IluCsr {
                     continue;
                 }
                 let wij = w.val[pos];
-                if wij == 0.0 {
+                if wij == S::zero() {
                     continue;
                 }
                 let djj = {
                     let dix = self.u_diag_ix.get(j).copied().unwrap_or(0);
-                    if j < i && self.u_val.get(dix).copied().unwrap_or(0.0) == 0.0 {
+                    if j < i && self.u_val.get(dix).copied().unwrap_or(S::zero()) == S::zero() {
                         // Not yet built; for row 0 there is none — but we will handle when j<i holds
                     }
                     if j < i {
                         self.u_val[self.u_diag_ix[j]]
                     } else {
-                        1.0
+                        S::one()
                     }
                 };
                 let lij = wij / djj;
@@ -583,7 +584,7 @@ impl IluCsr {
 
             // Finalize L and U rows from work row with level <= k
             // Gather L (j<i)
-            let mut l_pairs: Vec<(usize, f64, usize)> = w
+            let mut l_pairs: Vec<(usize, S, usize)> = w
                 .idx
                 .iter()
                 .enumerate()
@@ -598,7 +599,7 @@ impl IluCsr {
             l_pairs.sort_by_key(|x| x.0);
 
             // Gather U (k>=i); ensure diagonal exists with some level (0)
-            let mut u_pairs: Vec<(usize, f64, usize)> = w
+            let mut u_pairs: Vec<(usize, S, usize)> = w
                 .idx
                 .iter()
                 .enumerate()
@@ -611,7 +612,7 @@ impl IluCsr {
                 })
                 .collect();
             if !u_pairs.iter().any(|(c, _, _)| *c == i) {
-                u_pairs.push((i, 0.0, 0));
+                u_pairs.push((i, S::zero(), 0));
             }
             u_pairs.sort_by_key(|x| x.0);
 
@@ -666,7 +667,7 @@ impl IluCsr {
             for p in rp[i]..rp[i + 1] {
                 let j = cj[p];
                 let pos = symbolic::find_or_insert(&mut w, j);
-                w.val[pos] = vv[p];
+                w.val[pos] = S::from_real(vv[p]);
             }
 
             // eliminate for j in L pattern (already filtered by <=k)
@@ -677,10 +678,14 @@ impl IluCsr {
                 let wij = if w.mark[j] >= 0 {
                     w.val[w.mark[j] as usize]
                 } else {
-                    0.0
+                    S::zero()
                 };
                 let djj = self.u_val[self.u_diag_ix[j]];
-                let lij = if djj != 0.0 { wij / djj } else { 0.0 };
+                let lij = if djj == S::zero() {
+                    S::zero()
+                } else {
+                    wij / djj
+                };
                 self.l_val[pos] = lij;
                 // AXPY into k>j but only if k exists in this row's U pattern
                 let urs = self.u_row[j];
@@ -700,13 +705,13 @@ impl IluCsr {
             // finalize U row values from work restricted to U pattern
             let us = self.u_row[i];
             let ue = self.u_row[i + 1];
-            let mut diag = 0.0;
+            let mut diag = S::zero();
             for q in us..ue {
                 let k = self.u_col[q];
                 let v = if w.mark.get(k).copied().unwrap_or(-1) >= 0 {
                     w.val[w.mark[k] as usize]
                 } else {
-                    0.0
+                    S::zero()
                 };
                 if k == i {
                     diag = v;
@@ -762,15 +767,15 @@ impl IluCsr {
         self.n = n;
 
         // Builders for L and U
-        let mut l_build = CsrBuilder::new(n);
-        let mut u_build = CsrBuilder::new(n);
-        let mut inv_diag_u = vec![0.0f64; n];
+        let mut l_build = CsrBuilder::<S>::new(n);
+        let mut u_build = CsrBuilder::<S>::new(n);
+        let mut inv_diag_u = vec![S::zero(); n];
 
         // Row workspace
-        let mut w = RowWork::<f64>::new();
+        let mut w = RowWork::<S>::new();
         w.ensure_size(n);
-        let mut l_tmp: Vec<(usize, f64)> = Vec::new();
-        let mut u_tmp: Vec<(usize, f64)> = Vec::new();
+        let mut l_tmp: Vec<(usize, S)> = Vec::new();
+        let mut u_tmp: Vec<(usize, S)> = Vec::new();
 
         let mut max_diag_abs = 0.0f64;
 
@@ -784,7 +789,7 @@ impl IluCsr {
             let mut row_inf: f64 = 0.0;
             for (&j, &v) in a_cols.iter().zip(a_vals.iter()) {
                 if v != 0.0 {
-                    w.set(j, v);
+                    w.set(j, S::from_real(v));
                     row_inf = row_inf.max(v.abs());
                 }
             }
@@ -795,25 +800,25 @@ impl IluCsr {
             lowers.sort_unstable();
             for &k in &lowers {
                 let wk = w.get(k);
-                if wk == 0.0 {
+                if wk == S::zero() {
                     continue;
                 }
                 let lik = wk * inv_diag_u[k];
                 if params.early_drop && lik.abs() < tau {
-                    w.set(k, 0.0);
+                    w.set(k, S::zero());
                     continue;
                 }
                 l_tmp.push((k, lik));
-                w.set(k, 0.0);
+                w.set(k, S::zero());
 
                 let (u_cols_k, u_vals_k) = u_build.row(k);
                 for (&j, &ukj) in u_cols_k.iter().zip(u_vals_k.iter()) {
                     if j <= k {
                         continue;
                     }
-                    let newv: f64 = w.get(j) - lik * ukj;
+                    let newv: S = w.get(j) - lik * ukj;
                     if params.early_drop && newv.abs() < tau {
-                        w.set(j, 0.0);
+                        w.set(j, S::zero());
                     } else {
                         w.set(j, newv);
                     }
@@ -827,7 +832,7 @@ impl IluCsr {
                 }
             }
             if !u_tmp.iter().any(|(j, _)| *j == i) {
-                u_tmp.push((i, 0.0));
+                u_tmp.push((i, S::zero()));
             }
 
             // Cap L entries
@@ -837,7 +842,7 @@ impl IluCsr {
             }
 
             // Cap U entries (excluding diagonal)
-            let mut diag = 0.0;
+            let mut diag = S::zero();
             if let Some(pos) = u_tmp.iter().position(|(j, _)| *j == i) {
                 diag = u_tmp[pos].1;
                 u_tmp.remove(pos);
@@ -861,31 +866,41 @@ impl IluCsr {
             let diag_pos = u_tmp.iter().position(|(j, _)| *j == i).unwrap();
             let mut uii = u_tmp[diag_pos].1;
             max_diag_abs = max_diag_abs.max(uii.abs());
+            let tau = params.pivot_tau;
             match params.pivot {
                 PivotPolicy::Strict => {
-                    if uii.abs() < params.pivot_tau {
+                    if uii.abs() < tau {
                         return Err(KError::ZeroPivot(i));
                     }
                 }
                 PivotPolicy::Threshold => {
-                    if uii.abs() < params.pivot_tau {
-                        uii = uii.signum() * params.pivot_tau;
+                    if uii.abs() < tau {
+                        if uii == S::zero() {
+                            uii = S::from_real(tau);
+                        } else {
+                            uii = uii * S::from_real(tau / uii.abs());
+                        }
                     }
                 }
                 PivotPolicy::DiagonalPerturbation => {
-                    if uii.abs() < params.pivot_tau {
-                        uii += params.pivot_tau;
+                    if uii.abs() < tau {
+                        let direction = if uii == S::zero() {
+                            S::one()
+                        } else {
+                            uii / S::from_real(uii.abs())
+                        };
+                        uii += direction * S::from_real(tau);
                     }
                 }
             }
             u_tmp[diag_pos].1 = uii;
-            inv_diag_u[i] = 1.0 / uii;
+            inv_diag_u[i] = uii.inv();
 
             // Store rows into builders
             for &(k, v) in &l_tmp {
                 l_build.push(i, k, v);
             }
-            l_build.push(i, i, 1.0);
+            l_build.push(i, i, S::one());
             for &(j, v) in &u_tmp {
                 u_build.push(i, j, v);
             }
@@ -914,7 +929,7 @@ impl IluCsr {
             }
         }
 
-        self.tmp.resize(n, 0.0);
+        self.tmp.resize(n, S::zero());
 
         // Optional numeric refine
         self.ilut_numeric_only(a, max_diag_abs)
@@ -938,7 +953,7 @@ impl IluCsr {
             for p in rp[i]..rp[i + 1] {
                 let j = cj[p];
                 let pos = symbolic::find_or_insert(&mut w, j);
-                w.val[pos] = vv[p];
+                w.val[pos] = S::from_real(vv[p]);
             }
             // eliminate across L pattern
             let ls = self.l_row[i];
@@ -948,10 +963,14 @@ impl IluCsr {
                 let wij = if w.mark[j] >= 0 {
                     w.val[w.mark[j] as usize]
                 } else {
-                    0.0
+                    S::zero()
                 };
                 let djj = self.u_val[self.u_diag_ix[j]];
-                let lij = if djj != 0.0 { wij / djj } else { 0.0 };
+                let lij = if djj == S::zero() {
+                    S::zero()
+                } else {
+                    wij / djj
+                };
                 self.l_val[pos] = lij;
                 let urs = self.u_row[j];
                 let ure = self.u_row[j + 1];
@@ -969,13 +988,13 @@ impl IluCsr {
             // finalize U row
             let us = self.u_row[i];
             let ue = self.u_row[i + 1];
-            let mut diag = 0.0;
+            let mut diag = S::zero();
             for q in us..ue {
                 let k = self.u_col[q];
                 let v = if w.mark.get(k).copied().unwrap_or(-1) >= 0 {
                     w.val[w.mark[k] as usize]
                 } else {
-                    0.0
+                    S::zero()
                 };
                 if k == i {
                     diag = v;
@@ -1047,7 +1066,7 @@ impl Preconditioner for IluCsr {
             self.build_levels_if_enabled();
             self.last_sid = Some(sid);
             self.last_vid = Some(vid);
-            self.tmp.resize(a_perm.nrows(), 0.0);
+            self.tmp.resize(a_perm.nrows(), S::zero());
             Ok(())
         } else if values_changed {
             let a_perm = permute_csr_symmetric(&a, &self.perm);
@@ -1065,7 +1084,12 @@ impl Preconditioner for IluCsr {
                 "IluCsr supports PcSide::Left only; Right/Symmetric not implemented".into(),
             ));
         }
-        self.apply_op(Op::NoTrans, x, y)
+        let mut x_s = vec![S::zero(); self.n];
+        let mut y_s = vec![S::zero(); self.n];
+        copy_real_to_scalar_in(x, &mut x_s);
+        let res = self.apply_op_scalar(Op::NoTrans, &x_s, &mut y_s);
+        copy_scalar_to_real_in(&y_s, y);
+        res
     }
 
     fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
@@ -1077,38 +1101,11 @@ impl Preconditioner for IluCsr {
                 y.len()
             )));
         }
-        let mut x_perm = vec![0.0; self.n];
-        let mut y_perm = vec![0.0; self.n];
-        self.perm.apply_vec(x, &mut x_perm);
-        let res = match op {
-            Op::NoTrans => {
-                if self.cfg.level_sched {
-                    tri_solve::tri_solve_level_scheduled(self, &x_perm, &mut y_perm)
-                } else {
-                    tri_solve::tri_solve_serial(self, &x_perm, &mut y_perm)
-                }
-            }
-            Op::Trans | Op::ConjTrans => {
-                let ut = self
-                    .ut
-                    .get_or_init(|| transpose_csr(self.n, &self.u_row, &self.u_col, &self.u_val));
-                let lt = self
-                    .lt
-                    .get_or_init(|| transpose_csr(self.n, &self.l_row, &self.l_col, &self.l_val));
-                tri_solve::tri_solve_transpose_serial(
-                    self,
-                    &ut.0,
-                    &ut.1,
-                    &ut.2,
-                    &lt.0,
-                    &lt.1,
-                    &lt.2,
-                    &x_perm,
-                    &mut y_perm,
-                )
-            }
-        };
-        self.perm.apply_vec_t(&y_perm, y);
+        let mut x_s = vec![S::zero(); self.n];
+        let mut y_s = vec![S::zero(); self.n];
+        copy_real_to_scalar_in(x, &mut x_s);
+        let res = self.apply_op_scalar(op, &x_s, &mut y_s);
+        copy_scalar_to_real_in(&y_s, y);
         res
     }
 
@@ -1201,7 +1198,7 @@ impl IluCsr {
         &self.l_col
     }
     #[inline]
-    pub(crate) fn l_val(&self) -> &[f64] {
+    pub(crate) fn l_val(&self) -> &[S] {
         &self.l_val
     }
     #[inline]
@@ -1213,7 +1210,7 @@ impl IluCsr {
         &self.u_col
     }
     #[inline]
-    pub(crate) fn u_val(&self) -> &[f64] {
+    pub(crate) fn u_val(&self) -> &[S] {
         &self.u_val
     }
     #[inline]
@@ -1222,12 +1219,12 @@ impl IluCsr {
     }
     #[allow(dead_code)]
     #[inline]
-    pub(crate) fn tmp(&self) -> &[f64] {
+    pub(crate) fn tmp(&self) -> &[S] {
         &self.tmp
     }
     #[allow(dead_code)]
     #[inline]
-    pub(crate) fn tmp_mut(&mut self) -> &mut [f64] {
+    pub(crate) fn tmp_mut(&mut self) -> &mut [S] {
         &mut self.tmp
     }
 
@@ -1239,14 +1236,58 @@ impl IluCsr {
     pub(crate) fn buckets_bwd(&self) -> &[Vec<usize>] {
         &self.buckets_bwd
     }
+
+    fn apply_op_scalar(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput(format!(
+                "IluCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+        let mut x_perm = vec![S::zero(); self.n];
+        let mut y_perm = vec![S::zero(); self.n];
+        self.perm.apply_vec(x, &mut x_perm);
+        let res = match op {
+            Op::NoTrans => {
+                if self.cfg.level_sched {
+                    tri_solve::tri_solve_level_scheduled(self, &x_perm, &mut y_perm)
+                } else {
+                    tri_solve::tri_solve_serial(self, &x_perm, &mut y_perm)
+                }
+            }
+            Op::Trans | Op::ConjTrans => {
+                let ut = self
+                    .ut
+                    .get_or_init(|| transpose_csr(self.n, &self.u_row, &self.u_col, &self.u_val));
+                let lt = self
+                    .lt
+                    .get_or_init(|| transpose_csr(self.n, &self.l_row, &self.l_col, &self.l_val));
+                tri_solve::tri_solve_transpose_serial(
+                    self,
+                    &ut.0,
+                    &ut.1,
+                    &ut.2,
+                    &lt.0,
+                    &lt.1,
+                    &lt.2,
+                    &x_perm,
+                    &mut y_perm,
+                )
+            }
+        }?;
+        self.perm.apply_vec_t(&y_perm, y);
+        Ok(res)
+    }
 }
 
 fn transpose_csr(
     n: usize,
     row: &[usize],
     col: &[usize],
-    val: &[f64],
-) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    val: &[S],
+) -> (Vec<usize>, Vec<usize>, Vec<S>) {
     let nnz = col.len();
     let mut t_row = vec![0usize; n + 1];
     for &j in col {
@@ -1256,7 +1297,7 @@ fn transpose_csr(
         t_row[i + 1] += t_row[i];
     }
     let mut t_col = vec![0usize; nnz];
-    let mut t_val = vec![0f64; nnz];
+    let mut t_val = vec![S::zero(); nnz];
     let mut offset = t_row.clone();
     for i in 0..n {
         for p in row[i]..row[i + 1] {

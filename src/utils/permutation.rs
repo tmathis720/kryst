@@ -41,7 +41,7 @@ impl Permutation {
 }
 
 /// Symmetric permutation of CSR matrix: A' = P A P^T
-pub fn permute_csr_symmetric(a: &CsrMatrix<f64>, perm: &Permutation) -> CsrMatrix<f64> {
+pub fn permute_csr_symmetric(a: &CsrMatrix<S>, perm: &Permutation) -> CsrMatrix<S> {
     let n = a.nrows();
     assert_eq!(n, a.ncols());
     let rp = a.row_ptr();
@@ -57,7 +57,7 @@ pub fn permute_csr_symmetric(a: &CsrMatrix<f64>, perm: &Permutation) -> CsrMatri
         let old_i = perm.p[new_i];
         let rs = rp[old_i];
         let re = rp[old_i + 1];
-        let mut entries: Vec<(usize, f64)> = Vec::with_capacity(re - rs);
+        let mut entries: Vec<(usize, S)> = Vec::with_capacity(re - rs);
         for k in rs..re {
             let old_j = cj[k];
             let new_j = perm.pinv[old_j];
@@ -75,7 +75,7 @@ pub fn permute_csr_symmetric(a: &CsrMatrix<f64>, perm: &Permutation) -> CsrMatri
 }
 
 /// Reverse Cuthill-McKee ordering for a symmetric graph given by CSR matrix.
-pub fn rcm_csr(a: &CsrMatrix<f64>) -> Permutation {
+pub fn rcm_csr(a: &CsrMatrix<S>) -> Permutation {
     let n = a.nrows();
     let rp = a.row_ptr();
     let cj = a.col_idx();
@@ -169,6 +169,45 @@ mod tests {
         for i in 0..3 {
             for j in 0..3 {
                 assert!((dense_ap[(i, j)] - ref_dense[(i, j)]).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn permute_csr_symmetric_complex_matches_dense() {
+        use num_complex::Complex64;
+
+        let row_ptr = vec![0, 2, 4, 6];
+        let col_idx = vec![0, 1, 1, 2, 0, 2];
+        let vals = vec![
+            Complex64::new(1.0, 0.5),
+            Complex64::new(2.0, -1.0),
+            Complex64::new(3.0, 0.25),
+            Complex64::new(4.0, -0.75),
+            Complex64::new(5.0, 1.5),
+            Complex64::new(6.0, -2.0),
+        ];
+        let a = CsrMatrix::new(3, 3, row_ptr, col_idx, vals);
+        let perm = Permutation {
+            p: vec![2, 0, 1],
+            pinv: vec![1, 2, 0],
+        };
+        let ap = permute_csr_symmetric(&a, &perm);
+        let dense_ap = ap.to_dense();
+        let dense_a = a.to_dense();
+        let mut ref_dense = faer::Mat::<Complex64>::zeros(3, 3);
+        for i in 0..3 {
+            for j in 0..3 {
+                let old_i = perm.p[i];
+                let old_j = perm.p[j];
+                ref_dense[(i, j)] = dense_a[(old_i, old_j)];
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                let diff = dense_ap[(i, j)] - ref_dense[(i, j)];
+                assert!(diff.norm() < 1e-12);
             }
         }
     }

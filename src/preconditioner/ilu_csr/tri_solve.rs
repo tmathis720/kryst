@@ -1,8 +1,9 @@
+use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
 
 use super::IluCsr;
 
-pub fn tri_solve_serial(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+pub fn tri_solve_serial(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<(), KError> {
     let n = pc.n();
     let lr = pc.l_row();
     let lc = pc.l_col();
@@ -42,7 +43,7 @@ pub fn tri_solve_serial(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Result<(), KEr
     Ok(())
 }
 
-pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<(), KError> {
     // Fallback to serial if no levels computed
     if pc.buckets_fwd().is_empty() || pc.buckets_bwd().is_empty() {
         return tri_solve_serial(pc, x, y);
@@ -62,7 +63,7 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Resul
     let di = pc.u_diag_ix();
 
     // Forward: L y = x (unit diagonal). Per-level parallel, disjoint writes.
-    y.fill(0.0);
+    y.fill(S::zero());
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
@@ -72,7 +73,7 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Resul
             bucket.par_iter().for_each_init(
                 move || y_addr,
                 |y_addr, &i| unsafe {
-                    let y_ptr = *y_addr as *mut f64;
+                    let y_ptr = *y_addr as *mut S;
                     let mut s = *x.get_unchecked(i);
                     let rs = *lr.get_unchecked(i);
                     let re = *lr.get_unchecked(i + 1);
@@ -112,7 +113,7 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[f64], y: &mut [f64]) -> Resul
             bucket.par_iter().for_each_init(
                 move || y_addr,
                 |y_addr, &i| unsafe {
-                    let y_ptr = *y_addr as *mut f64;
+                    let y_ptr = *y_addr as *mut S;
                     let mut s = *y_ptr.add(i);
                     let rs = *ur.get_unchecked(i);
                     let re = *ur.get_unchecked(i + 1);
@@ -156,12 +157,12 @@ pub fn tri_solve_transpose_serial(
     pc: &IluCsr,
     ut_row: &[usize],
     ut_col: &[usize],
-    ut_val: &[f64],
+    ut_val: &[S],
     lt_row: &[usize],
     lt_col: &[usize],
-    lt_val: &[f64],
-    x: &[f64],
-    y: &mut [f64],
+    lt_val: &[S],
+    x: &[S],
+    y: &mut [S],
 ) -> Result<(), KError> {
     let n = pc.n();
     if x.len() != n || y.len() != n {

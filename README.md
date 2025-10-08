@@ -51,6 +51,11 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Data Export**: CSV output for convergence analysis with `enable_csv_logging()`
 - **Performance Metrics**: Comprehensive timing and convergence rate analysis
 
+### Scalar Modes
+
+- **Real (default)**: Builds without extra features keep all public APIs monomorphic on `f64`.
+- **Complex (`--features complex`)**: Internals promote Kryst's scalar alias `S` to `num_complex::Complex64` while the Matrix Market tooling converts boundary data to and from complex storage.
+
 ### Latency-aware solver knobs
 
 The Krylov drivers expose command-line options to balance global reductions
@@ -99,6 +104,7 @@ mpi = ["dep:mpi"]              # Distributed-memory parallelism via MPI
 logging = ["dep:log"]          # Iteration monitoring and profiling
 simd = []                      # Auto-tuned std::simd sparse mat-vec kernels
 x86_intrinsics = []            # Optional x86_64 gather/prefetch micro-tuning
+complex = ["dep:num-complex"]  # Complex64 kernels and Matrix Market conversions
 ```
 
 Enabling the `simd` feature activates the runtime SpMV planner, which selects
