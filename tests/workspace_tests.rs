@@ -1,3 +1,4 @@
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{GmresSpec, Workspace};
 use kryst::matrix::op::LinOp;
 use kryst::parallel::UniverseComm;
@@ -25,11 +26,17 @@ fn gmres_workspace_allocation_stable_and_sized() {
     let h_cap = ws.h_mem.capacity();
 
     // Setup small identity system
-    let a = faer::Mat::<f64>::from_fn(n, n, |i, j| if i == j { 1.0 } else { 0.0 });
+    let a = faer::Mat::<f64>::from_fn(
+        n,
+        n,
+        |i, j| {
+            if i == j { R::from(1.0) } else { R::default() }
+        },
+    );
     let amat = &a as &dyn LinOp<S = f64>;
     let mut solver = GmresSolver::new(restart, 1e-6, 10);
-    let b: Vec<f64> = (0..n).map(|i| i as f64 + 1.0).collect();
-    let mut x = vec![0.0; n];
+    let b: Vec<R> = (0..n).map(|i| R::from((i + 1) as f64)).collect();
+    let mut x = vec![R::default(); n];
 
     solver
         .solve(

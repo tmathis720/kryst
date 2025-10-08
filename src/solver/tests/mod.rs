@@ -12,6 +12,7 @@ mod stability;
 mod sync_counts;
 
 pub mod util {
+    use crate::algebra::prelude::*;
     use crate::matrix::op::LinOp;
     use crate::matrix::sparse::CsrMatrix;
     use crate::matrix::utils::{self, poisson};
@@ -32,16 +33,19 @@ pub mod util {
         utils::convection_diffusion_2d(n, peclet)
     }
 
-    pub fn rhs_random(n: usize, seed: u64) -> Vec<f64> {
+    pub fn rhs_random(n: usize, seed: u64) -> Vec<R> {
         utils::random_rhs(n, seed)
+            .into_iter()
+            .map(R::from)
+            .collect()
     }
 
-    pub fn vec_norm(v: &[f64]) -> f64 {
-        v.iter().map(|x| x * x).sum::<f64>().sqrt()
+    pub fn vec_norm(v: &[R]) -> R {
+        v.iter().map(|&x| x * x).sum::<R>().sqrt()
     }
 
-    pub fn true_residual_norm(op: &dyn LinOp<S = f64>, x: &[f64], b: &[f64]) -> f64 {
-        let mut ax = vec![0.0; b.len()];
+    pub fn true_residual_norm(op: &dyn LinOp<S = f64>, x: &[R], b: &[R]) -> R {
+        let mut ax: Vec<R> = vec![R::default(); b.len()];
         op.matvec(x, &mut ax);
         for (ax_i, &b_i) in ax.iter_mut().zip(b) {
             *ax_i -= b_i;

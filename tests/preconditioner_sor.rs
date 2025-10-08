@@ -11,6 +11,7 @@
 
 use approx::assert_relative_eq;
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::preconditioner::{MatSorType, Sor};
 
@@ -21,8 +22,8 @@ use kryst::preconditioner::{MatSorType, Sor};
 /// * `a` - Value for subdiagonal entries
 /// * `b` - Value for diagonal entries
 /// * `c` - Value for superdiagonal entries
-fn make_tridiag(n: usize, a: f64, b: f64, c: f64) -> Mat<f64> {
-    let mut mat = Mat::<f64>::zeros(n, n);
+fn make_tridiag(n: usize, a: R, b: R, c: R) -> Mat<R> {
+    let mut mat = Mat::<R>::zeros(n, n);
     for i in 0..n {
         if i > 0 {
             mat[(i, i - 1)] = a;
@@ -36,10 +37,10 @@ fn make_tridiag(n: usize, a: f64, b: f64, c: f64) -> Mat<f64> {
 }
 
 /// Constructs an identity matrix of size `n`.
-fn make_eye(n: usize) -> Mat<f64> {
-    let mut mat = Mat::<f64>::zeros(n, n);
+fn make_eye(n: usize) -> Mat<R> {
+    let mut mat = Mat::<R>::zeros(n, n);
     for i in 0..n {
-        mat[(i, i)] = 1.0;
+        mat[(i, i)] = R::from(1.0);
     }
     mat
 }
@@ -50,10 +51,11 @@ fn test_sor_identity() {
     let n = 5;
     let a = make_eye(n);
     // SOR with omega=1.0, 1 sweep, forward (lower) application
-    let mut sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 1, MatSorType::APPLY_LOWER, 0.0);
+    let mut sor =
+        Sor::<Mat<R>, Vec<R>, R>::new(R::from(1.0), 1, 1, MatSorType::APPLY_LOWER, R::default());
     sor.setup(&a).unwrap();
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
     sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y)
         .unwrap();
     // Output should match input exactly
@@ -66,25 +68,26 @@ fn test_sor_identity() {
 #[test]
 fn test_sor_tridiag_forward() {
     let n = 5;
-    let a = make_tridiag(n, -1.0, 4.0, -1.0);
+    let a = make_tridiag(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     // SOR with omega=1.0, 1 sweep, forward (lower) application
-    let mut sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 1, MatSorType::APPLY_LOWER, 0.0);
+    let mut sor =
+        Sor::<Mat<R>, Vec<R>, R>::new(R::from(1.0), 1, 1, MatSorType::APPLY_LOWER, R::default());
     sor.setup(&a).unwrap();
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
     sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y)
         .unwrap();
     // Compute expected SOR sweep (forward, in-place)
-    let mut expected = vec![0.0; n];
+    let mut expected = vec![R::default(); n];
     for i in 0..n {
-        let left = if i > 0 { expected[i - 1] } else { 0.0 };
-        let right = if i + 1 < n { x[i + 1] } else { 0.0 };
-        expected[i] = (x[i] + left + right) / 4.0;
+        let left = if i > 0 { expected[i - 1] } else { R::default() };
+        let right = if i + 1 < n { x[i + 1] } else { R::default() };
+        expected[i] = (x[i] + left + right) / R::from(4.0);
     }
     // Compare each entry with a tight tolerance
     for i in 0..n {
         assert!(
-            (y[i] - expected[i]).abs() < 1e-12,
+            (y[i] - expected[i]).abs() < R::from(1e-12),
             "SOR mismatch at i={}: got {}, expected {}",
             i,
             y[i],
@@ -99,16 +102,22 @@ fn test_sor_tridiag_forward() {
 #[test]
 fn test_ssor_tridiag() {
     let n = 5;
-    let a = make_tridiag(n, -1.0, 4.0, -1.0);
+    let a = make_tridiag(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     // SSOR: symmetric sweep
-    let mut sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 1, MatSorType::SYMMETRIC_SWEEP, 0.0);
+    let mut sor = Sor::<Mat<R>, Vec<R>, R>::new(
+        R::from(1.0),
+        1,
+        1,
+        MatSorType::SYMMETRIC_SWEEP,
+        R::default(),
+    );
     sor.setup(&a).unwrap();
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
     sor.apply(kryst::preconditioner::PcSide::Left, &x, &mut y)
         .unwrap();
     // All output values should be finite
-    assert!(y.iter().all(|&v| (v as f64).is_finite()));
+    assert!(y.iter().all(|&v| v.is_finite()));
 }
 
 /// Test the Display implementation for SOR.
@@ -116,7 +125,8 @@ fn test_ssor_tridiag() {
 /// Checks that the formatted string contains the expected parameter values.
 #[test]
 fn test_sor_display() {
-    let sor = Sor::<Mat<f64>, Vec<f64>, f64>::new(1.5, 2, 1, MatSorType::APPLY_LOWER, 0.1);
+    let sor =
+        Sor::<Mat<R>, Vec<R>, R>::new(R::from(1.5), 2, 1, MatSorType::APPLY_LOWER, R::from(0.1));
     let s = format!("{}", sor);
     assert!(s.contains("SOR(omega=1.5"));
 }

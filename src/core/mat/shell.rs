@@ -184,16 +184,12 @@ mod tests {
             |x: &Vec<f64>, y: &mut Vec<f64>| {
                 let x_ref: &[f64] = x.as_ref();
                 let y_mut: &mut [f64] = y.as_mut();
-                for i in 0..x_ref.len() {
-                    y_mut[i] = x_ref[i];
-                }
+                y_mut[..x_ref.len()].copy_from_slice(x_ref);
             },
             |x: &Vec<f64>, y: &mut Vec<f64>| {
                 let x_ref: &[f64] = x.as_ref();
                 let y_mut: &mut [f64] = y.as_mut();
-                for i in 0..x_ref.len() {
-                    y_mut[i] = x_ref[i];
-                }
+                y_mut[..x_ref.len()].copy_from_slice(x_ref);
             },
         );
 

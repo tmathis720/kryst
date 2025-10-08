@@ -3,11 +3,11 @@
     any(feature = "dense-direct", feature = "superlu_dist")
 ))]
 use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::prelude::*;
 #[cfg(all(
     feature = "complex",
     any(feature = "dense-direct", feature = "superlu_dist")
 ))]
-use crate::algebra::prelude::*;
 #[cfg(any(feature = "dense-direct", feature = "superlu_dist"))]
 use crate::error::KError;
 use crate::matrix::op::CsrOp;
@@ -34,10 +34,13 @@ use std::sync::Arc;
 fn direct_pc_apply_is_not_identity() {
     // LU apply should return a clear Unsupported error (PREONLY-only)
     let mut pc = LuPc::new();
-    let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { 2.0 } else { 0.0 });
+    let two = S::from_real(2.0).real();
+    let zero = R::default();
+    let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { two } else { zero });
     pc.setup(&a as &dyn LinOp<S = f64>).unwrap();
-    let x = vec![1.0; 3];
-    let mut y = vec![0.0; 3];
+    let one = S::from_real(1.0).real();
+    let x = vec![one; 3];
+    let mut y = vec![zero; 3];
     let err = pc.apply(PcSide::Left, &x, &mut y).unwrap_err();
     match err {
         KError::Unsupported(msg) => assert!(msg.to_lowercase().contains("preonly")),
@@ -59,25 +62,32 @@ fn builders_sor_and_chebyshev_object_safe() {
     // Identity CSR as operator
     let csr = CsrMatrix::identity(5);
     let op = CsrOp::new(Arc::new(csr));
+    let one = R::from(1.0);
+    let zero = R::default();
 
     // SOR
     let mut sor = b::build_sor(
-        1.0,
+        one,
         1,
         crate::preconditioner::sor::MatSorType::APPLY_LOWER,
         false,
     )
     .expect("build_sor should succeed");
     sor.setup(&op as &dyn LinOp<S = f64>).unwrap();
-    let x = vec![1.0; 5];
-    let mut y = vec![0.0; 5];
+    let x = vec![one; 5];
+    let mut y = vec![zero; 5];
     sor.apply(PcSide::Left, &x, &mut y).unwrap();
-    assert_eq!(x, y);
+    let x_s: Vec<S> = x.iter().map(|&v| S::from_real(v)).collect();
+    let y_s: Vec<S> = y.iter().map(|&v| S::from_real(v)).collect();
+    crate::assert_vec_close!("sor apply matches identity", &x_s, &y_s);
 
     // Chebyshev
-    let mut cheb = b::build_chebyshev(2, 0.5, 1.5).expect("build_chebyshev should succeed");
+    let half = S::from_real(0.5).real();
+    let three_halves = S::from_real(1.5).real();
+    let mut cheb =
+        b::build_chebyshev(2, half, three_halves).expect("build_chebyshev should succeed");
     cheb.setup(&op as &dyn LinOp<S = f64>).unwrap();
-    let mut z = vec![0.0; 5];
+    let mut z = vec![zero; 5];
     cheb.apply(PcSide::Left, &x, &mut z).unwrap();
     assert!(z.iter().copied().all(|v| v.is_finite()));
 }
@@ -89,8 +99,10 @@ fn ilu_right_side_errors() {
     let op = CsrOp::new(Arc::new(csr));
     let mut pc = b::build_ilu0().expect("build_ilu0 should succeed");
     pc.setup(&op as &dyn LinOp<S = f64>).unwrap();
-    let x = vec![1.0; 3];
-    let mut y = vec![0.0; 3];
+    let one = S::from_real(1.0).real();
+    let zero = R::default();
+    let x = vec![one; 3];
+    let mut y = vec![zero; 3];
     let err = pc.apply(PcSide::Right, &x, &mut y).unwrap_err();
     match err {
         crate::error::KError::InvalidInput(msg) => {
@@ -105,7 +117,9 @@ fn ilu_right_side_errors() {
 fn direct_pc_apply_s_matches_real_error() {
     let mut lu = LuPc::new();
     let mut qr = QrPc::new();
-    let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { 2.0 } else { 0.0 });
+    let two = S::from_real(2.0).real();
+    let zero = R::default();
+    let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { two } else { zero });
 
     lu.setup(&a as &dyn LinOp<S = f64>).unwrap();
     qr.setup(&a as &dyn LinOp<S = f64>).unwrap();
@@ -144,8 +158,10 @@ fn superlu_dist_apply_s_matches_real_error() {
     pc.setup(&op as &dyn LinOp<S = f64>)
         .expect("setup should accept CSR input under superlu_dist");
 
-    let x_real = vec![1.0; 3];
-    let mut y_real = vec![0.0; 3];
+    let one = S::from_real(1.0).real();
+    let zero = R::default();
+    let x_real = vec![one; 3];
+    let mut y_real = vec![zero; 3];
     let err_real = pc
         .apply(PcSide::Left, &x_real, &mut y_real)
         .expect_err("SuperLuDistPc::apply should remain PREONLY-only");

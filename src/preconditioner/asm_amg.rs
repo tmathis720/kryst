@@ -1,6 +1,10 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::amg::{AMGConfig, CycleType};
@@ -9,8 +13,6 @@ use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
-use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::{apply_pc_mut_s, apply_pc_s};
 
@@ -86,9 +88,9 @@ pub struct AsmAmg {
     asm: Asm,
     amg: super::amg::AMG,
     cfg: TwoLevelConfig,
-    tmp_local: Mutex<Vec<f64>>,
-    tmp_residual: Mutex<Vec<f64>>,
-    tmp_coarse: Mutex<Vec<f64>>,
+    tmp_local: Mutex<Vec<R>>,
+    tmp_residual: Mutex<Vec<R>>,
+    tmp_coarse: Mutex<Vec<R>>,
     apply_count: AtomicUsize,
 }
 
@@ -116,19 +118,19 @@ impl AsmAmg {
         {
             let mut buf = self.tmp_local.lock().unwrap();
             if buf.len() != n {
-                buf.resize(n, 0.0);
+                buf.resize(n, R::zero());
             }
         }
         {
             let mut buf = self.tmp_residual.lock().unwrap();
             if buf.len() != n {
-                buf.resize(n, 0.0);
+                buf.resize(n, R::zero());
             }
         }
         {
             let mut buf = self.tmp_coarse.lock().unwrap();
             if buf.len() != n {
-                buf.resize(n, 0.0);
+                buf.resize(n, R::zero());
             }
         }
     }
@@ -176,7 +178,7 @@ impl Preconditioner for AsmAmg {
                 a.spmv_scaled(1.0, &q_local, 0.0, &mut residual)?;
                 for i in 0..n {
                     residual[i] = rhs[i] - residual[i];
-                    q_coarse[i] = 0.0;
+                    q_coarse[i] = R::zero();
                 }
                 self.amg.apply(side, &residual, &mut q_coarse)?;
                 for i in 0..n {
@@ -185,7 +187,7 @@ impl Preconditioner for AsmAmg {
             }
             TwoLevelMode::MultiplicativeCoarse => {
                 for qi in q_coarse.iter_mut() {
-                    *qi = 0.0;
+                    *qi = R::zero();
                 }
                 self.amg.apply(side, rhs, &mut q_coarse)?;
                 a.spmv_scaled(1.0, &q_coarse, 0.0, &mut residual)?;
@@ -229,7 +231,7 @@ impl crate::ops::kpc::KPreconditioner for AsmAmg {
         self.asm
             .dimension()
             .map(|n| (n, n))
-            .unwrap_or_else(|| self.amg.dims())
+            .unwrap_or_else(|| crate::ops::kpc::KPreconditioner::dims(&self.amg))
     }
 
     fn apply_s(

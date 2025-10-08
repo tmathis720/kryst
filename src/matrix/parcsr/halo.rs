@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::parallel::{Comm, UniverseComm};
 
 /// Communication plan for halo exchanges in distributed matrices.
@@ -35,9 +36,9 @@ impl HaloPlan {
     pub fn begin_exchange<'a>(
         &'a self,
         comm: &'a UniverseComm,
-        x_owned: &[f64],
-        send_buf: &'a mut [f64],
-        recv_buf: &'a mut [f64],
+        x_owned: &[R],
+        send_buf: &'a mut [R],
+        recv_buf: &'a mut [R],
     ) -> Vec<<UniverseComm as Comm>::Request<'a>> {
         assert_eq!(send_buf.len(), self.send_idx.len());
         assert_eq!(recv_buf.len(), self.recv_idx.len());
@@ -45,7 +46,7 @@ impl HaloPlan {
         let mut reqs: Vec<<UniverseComm as Comm>::Request<'a>> = Vec::new();
 
         // Post receives into disjoint slices of recv_buf
-        let mut tail: &mut [f64] = recv_buf;
+        let mut tail: &mut [R] = recv_buf;
         for (k, &nb) in self.neighbors.iter().enumerate() {
             let off = self.recv_ptr[k];
             let cnt = self.recv_ptr[k + 1] - off;
@@ -72,7 +73,7 @@ impl HaloPlan {
     }
 
     /// Scatter the received buffer into the ghost slice.
-    pub fn unpack(&self, recv_buf: &[f64], x_ghost: &mut [f64]) {
+    pub fn unpack(&self, recv_buf: &[R], x_ghost: &mut [R]) {
         assert_eq!(recv_buf.len(), self.recv_idx.len());
         for (p, &idx) in self.recv_idx.iter().enumerate() {
             x_ghost[idx as usize] = recv_buf[p];

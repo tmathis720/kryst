@@ -2,6 +2,8 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; monitors report the true `||r||`.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -99,7 +101,7 @@ impl QmrSolver {
             scratch,
         } = buffers;
 
-        if x.iter().any(|&xi| xi != S::zero()) {
+        if x.iter().any(|&xi| xi.abs() > R::default()) {
             a.matvec_s(x, r, scratch);
             for (ri, &bi) in r.iter_mut().zip(b.iter()) {
                 let ai = *ri;
@@ -128,7 +130,7 @@ impl QmrSolver {
         }
 
         let eps = 1e-300;
-        let mut rho = dot(r_tld, r, comm);
+        let mut rho = global_dot_conj(comm, r_tld, r);
         if rho.abs() <= eps {
             return Err(KError::IndefiniteMatrix);
         }
@@ -138,7 +140,7 @@ impl QmrSolver {
                 p.copy_from_slice(r);
                 p_tld.copy_from_slice(r_tld);
             } else {
-                let rho_new = dot(r_tld, r, comm);
+                let rho_new = global_dot_conj(comm, r_tld, r);
                 if rho_new.abs() <= eps {
                     return Err(KError::IndefiniteMatrix);
                 }
@@ -158,7 +160,7 @@ impl QmrSolver {
             a.matvec_s(p, v, scratch);
             a.t_matvec_s(p_tld, v_tld, scratch);
 
-            let sigma = dot(p_tld, v, comm);
+            let sigma = global_dot_conj(comm, p_tld, v);
             if sigma.abs() <= eps {
                 return Err(KError::IndefiniteMatrix);
             }
@@ -190,7 +192,7 @@ impl QmrSolver {
                 r_tld[i] = si - omega.conj() * ti;
             }
 
-            res = norm2(r, comm);
+            res = global_nrm2(comm, r);
             for m in monitors {
                 m(k + 1, res);
             }
@@ -318,14 +320,6 @@ impl LinearSolver for QmrSolver {
         let pc = pc.map(|m| m as &dyn PreconditionerF64);
         self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
     }
-}
-
-fn dot(x: &[S], y: &[S], comm: &UniverseComm) -> S {
-    global_dot_conj(comm, x, y)
-}
-
-fn norm2(x: &[S], comm: &UniverseComm) -> R {
-    global_nrm2(comm, x)
 }
 
 struct QmrWorkspace<'a> {

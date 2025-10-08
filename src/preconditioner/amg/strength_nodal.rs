@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 
 use super::strength::Strength;

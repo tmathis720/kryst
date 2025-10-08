@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::amg::coarsen::{
     AggAlgo, AggOpts, build_aggregates, lift_node_aggregates_to_dofs,
@@ -10,7 +11,8 @@ fn nodal_aggregates_group_dofs() {
     // 4 DOFs, block_size=2 -> 2 nodes
     let a = CsrMatrix::identity(4);
     let layout = DofLayout::new(4, 2);
-    let s = strength_nodal(&a, &layout, 0.0, true);
+    let zero = R::default();
+    let s = strength_nodal(&a, &layout, zero, true);
     let (agg_node, is_c_node) = build_aggregates(
         &s,
         AggAlgo::RSGreedy,

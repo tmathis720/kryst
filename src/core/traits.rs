@@ -13,6 +13,7 @@ pub trait MatTransVec<V> {
 }
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::block::BlockVec;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -53,8 +54,13 @@ pub trait BlockOp {
                 y.ncols()
             )));
         }
+        let mut x_real = vec![0.0; x.nrows()];
+        let mut y_real = vec![0.0; y.nrows()];
         for c in 0..x.ncols() {
-            self.apply(x.col(c), y.col_mut(c))?;
+            copy_scalar_to_real_in(x.col(c), &mut x_real);
+            copy_scalar_to_real_in(y.col(c), &mut y_real);
+            self.apply(&x_real, &mut y_real)?;
+            copy_real_to_scalar_in(&y_real, y.col_mut(c));
         }
         Ok(())
     }
@@ -235,12 +241,12 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
         }
 
         // Quick exits for alpha/beta
-        if alpha == 0.0 {
-            if beta == 0.0 {
+        if alpha.abs() <= f64::EPSILON {
+            if beta.abs() <= f64::EPSILON {
                 for v in y.iter_mut() {
                     *v = 0.0;
                 }
-            } else if beta != 1.0 {
+            } else if (beta - 1.0).abs() > f64::EPSILON {
                 for v in y.iter_mut() {
                     *v *= beta;
                 }
@@ -880,8 +886,7 @@ mod tests {
         let _ = dummy.dot(&v, &v, &comm);
         let _ = dummy.norm(&v, &comm);
 
-        // All method signatures should compile
-        assert!(true);
+        // All method signatures should compile without panicking.
     }
 
     #[test]
@@ -892,7 +897,10 @@ mod tests {
         let x = [10.0, 20.0, 30.0];
         let mut y = [0.0; 2];
         MatVecOp::mat_vec(&a, 1.0, &x, 0.0, &mut y).unwrap();
-        assert_eq!(y, [130.0, 100.0]);
+        let expected = [130.0, 100.0];
+        for (got, target) in y.iter().zip(expected.iter()) {
+            assert!((got - target).abs() < 1e-12);
+        }
         // with scaling
         let mut y2 = [1.0, 2.0];
         MatVecOp::mat_vec(&a, 2.0, &x, 3.0, &mut y2).unwrap();

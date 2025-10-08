@@ -1,4 +1,5 @@
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::PcSide;
@@ -8,10 +9,13 @@ use kryst::utils::convergence::ConvergedReason;
 #[test]
 fn cg_hits_trust_region() {
     let comm = UniverseComm::NoComm(kryst::parallel::NoComm);
-    let a = Mat::<f64>::from_fn(1, 1, |_i, _j| 2.0);
-    let b = vec![2.0];
-    let mut x = vec![0.0];
-    let mut solver = CgSolver::new(1e-8, 5).with_trust_region(0.5);
+    let two = S::from_real(2.0).real();
+    let zero = S::zero().real();
+    let a = Mat::<f64>::from_fn(1, 1, |_i, _j| two);
+    let b = vec![two];
+    let mut x = vec![zero];
+    let mut solver =
+        CgSolver::new(S::from_real(1e-8).real(), 5).with_trust_region(S::from_real(0.5).real());
     let mut ws = Workspace::new(1);
     solver.setup_workspace(&mut ws);
     let stats = solver

@@ -1,9 +1,10 @@
+use crate::algebra::prelude::*;
 use crate::error::KError;
 
 /// Column-major dense block vector storage used by block Krylov variants.
 #[derive(Debug, Clone)]
 pub struct BlockVec {
-    data: Vec<f64>,
+    data: Vec<S>,
     n: usize,
     p: usize,
 }
@@ -12,7 +13,7 @@ impl BlockVec {
     /// Create a new block vector with `n` rows and `p` columns.
     pub fn new(n: usize, p: usize) -> Self {
         Self {
-            data: vec![0.0; n.saturating_mul(p)],
+            data: vec![S::zero(); n.saturating_mul(p)],
             n,
             p,
         }
@@ -21,13 +22,13 @@ impl BlockVec {
     /// Resize the block vector to `n` rows and `p` columns, zero-filling new entries.
     pub fn resize(&mut self, n: usize, p: usize) {
         if self.n != n || self.p != p {
-            self.data.resize(n.saturating_mul(p), 0.0);
+            self.data.resize(n.saturating_mul(p), S::zero());
             self.n = n;
             self.p = p;
         } else {
             let needed = n.saturating_mul(p);
             if self.data.len() != needed {
-                self.data.resize(needed, 0.0);
+                self.data.resize(needed, S::zero());
             }
         }
     }
@@ -46,27 +47,27 @@ impl BlockVec {
 
     /// Immutable view into the `j`-th column.
     #[inline]
-    pub fn col(&self, j: usize) -> &[f64] {
+    pub fn col(&self, j: usize) -> &[S] {
         let offset = j * self.n;
         &self.data[offset..offset + self.n]
     }
 
     /// Mutable view into the `j`-th column.
     #[inline]
-    pub fn col_mut(&mut self, j: usize) -> &mut [f64] {
+    pub fn col_mut(&mut self, j: usize) -> &mut [S] {
         let offset = j * self.n;
         &mut self.data[offset..offset + self.n]
     }
 
     /// Immutable view into the raw column-major storage.
     #[inline]
-    pub fn as_slice(&self) -> &[f64] {
+    pub fn as_slice(&self) -> &[S] {
         &self.data
     }
 
     /// Mutable view into the raw column-major storage.
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [f64] {
+    pub fn as_mut_slice(&mut self) -> &mut [S] {
         &mut self.data
     }
 }
@@ -85,7 +86,7 @@ impl BlockVec {
     /// Fill the block vector with zeros.
     pub fn fill_zero(&mut self) {
         for v in &mut self.data {
-            *v = 0.0;
+            *v = S::zero();
         }
     }
 }

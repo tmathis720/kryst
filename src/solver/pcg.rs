@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -326,7 +328,8 @@ impl PcgSolver {
         } = &mut buffers;
         let (r, z, p, ap, scratch) = (&mut **r, &mut **z, &mut **p, &mut **ap, &mut **scratch);
 
-        let zero_guess = !self.initial_guess_nonzero && x.iter().all(|&xi| xi == S::zero());
+        let zero_guess =
+            !self.initial_guess_nonzero && x.iter().all(|&xi| xi.abs() <= R::default());
         if zero_guess {
             r.copy_from_slice(b);
         } else {
@@ -364,20 +367,34 @@ impl PcgSolver {
         let mut idx = 0;
         let mut rho = reductions[idx];
         idx += 1;
-        if rho <= 0.0 || !rho.is_finite() {
+        if rho <= R::default() || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
 
         let mut cached_r_norm = if need_r_norm_res || need_r_norm_monitor {
             let value = reductions[idx];
             idx += 1;
-            Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+            Some(
+                if value < R::default() {
+                    R::default()
+                } else {
+                    value
+                }
+                .sqrt(),
+            )
         } else {
             None
         };
         let cached_z_norm = if need_z_norm_res {
             let value = reductions[idx];
-            Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+            Some(
+                if value < R::default() {
+                    R::default()
+                } else {
+                    value
+                }
+                .sqrt(),
+            )
         } else {
             None
         };
@@ -421,7 +438,7 @@ impl PcgSolver {
 
             matvec_s(a, p, &mut ap[..], scratch);
             let p_ap = self.dot_scalar(p, ap, comm);
-            if !p_ap.is_finite() || p_ap <= 0.0 {
+            if !p_ap.is_finite() || p_ap <= R::default() {
                 return Err(KError::IndefiniteMatrix);
             }
 
@@ -454,29 +471,43 @@ impl PcgSolver {
                 dot_pairs.push((&z[..], &z[..]));
             }
             let mut dot_results: SmallVec<[R; 3]> = SmallVec::new();
-            dot_results.resize(dot_pairs.len(), R::zero());
+            dot_results.resize(dot_pairs.len(), R::default());
             self.dot_scalar_many(dot_pairs.as_slice(), comm, dot_results.as_mut_slice());
 
             let mut idx = 0;
             let mut rho_new = dot_results[idx];
             idx += 1;
-            if !rho_new.is_finite() || rho_new < 0.0 {
+            if !rho_new.is_finite() || rho_new < R::default() {
                 return Err(KError::IndefinitePreconditioner);
             }
             if rho_new < 1e-300 {
-                rho_new = 0.0;
+                rho_new = R::default();
             }
 
             let mut r_norm = if need_r_norm_res || need_r_norm_monitor {
                 let value = dot_results[idx];
                 idx += 1;
-                Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+                Some(
+                    if value < R::default() {
+                        R::default()
+                    } else {
+                        value
+                    }
+                    .sqrt(),
+                )
             } else {
                 None
             };
             let mut z_norm = if need_z_norm_res {
                 let value = dot_results[idx];
-                Some(if value < 0.0 { 0.0 } else { value }.sqrt())
+                Some(
+                    if value < R::default() {
+                        R::default()
+                    } else {
+                        value
+                    }
+                    .sqrt(),
+                )
             } else {
                 None
             };
@@ -563,7 +594,8 @@ impl PcgSolver {
             scratch,
         } = &mut buffers;
 
-        let zero_guess = !self.initial_guess_nonzero && x.iter().all(|&xi| xi == S::zero());
+        let zero_guess =
+            !self.initial_guess_nonzero && x.iter().all(|&xi| xi.abs() <= R::default());
         if zero_guess {
             r.copy_from_slice(b);
         } else {
@@ -591,7 +623,7 @@ impl PcgSolver {
             counters.num_global_reductions += 1;
             <C as AllreduceOps>::wait_pair(h_rho0).0
         };
-        if !rho0.is_finite() || rho0 < 0.0 {
+        if !rho0.is_finite() || rho0 < R::default() {
             return Err(KError::IndefinitePreconditioner);
         }
 
@@ -601,9 +633,10 @@ impl PcgSolver {
             <C as AllreduceOps>::wait_pair(h_rnorm0).0
         };
         let rnorm0 = rnorm0_sq.sqrt();
-        if rnorm0 == 0.0 {
+        if rnorm0 == R::default() {
             return Ok(
-                SolveStats::new(0, 0.0, ConvergedReason::ConvergedRtol).with_counters(counters)
+                SolveStats::new(0, R::default(), ConvergedReason::ConvergedRtol)
+                    .with_counters(counters),
             );
         }
 
@@ -641,7 +674,7 @@ impl PcgSolver {
 
         let mut rho_curr = rho0;
         let mut rho_prev = rho0;
-        let mut pending_rho: Option<AllreduceHandle<(f64, f64)>> = None;
+        let mut pending_rho: Option<AllreduceHandle<(R, R)>> = None;
         let mut iterations = 0usize;
         let mut residual_replacements = 0usize;
         let mut force_restart = false;
@@ -656,7 +689,7 @@ impl PcgSolver {
                         counters.num_global_reductions += 1;
                         <C as AllreduceOps>::wait_pair(handle).0
                     };
-                    if !rho_curr.is_finite() || rho_curr < 0.0 {
+                    if !rho_curr.is_finite() || rho_curr < R::default() {
                         return Err(KError::IndefinitePreconditioner);
                     }
 
@@ -700,11 +733,11 @@ impl PcgSolver {
                             }
                             residual_replacements += 1;
                             p.copy_from_slice(z);
-                            rho_prev = 0.0;
+                            rho_prev = R::default();
 
                             rho_curr = self.dot_scalar(r, z, comm);
                             counters.num_global_reductions += 1;
-                            if !rho_curr.is_finite() || rho_curr < 0.0 {
+                            if !rho_curr.is_finite() || rho_curr < R::default() {
                                 return Err(KError::IndefinitePreconditioner);
                             }
 
@@ -737,8 +770,8 @@ impl PcgSolver {
                 }
 
                 if iterations > 0 {
-                    let beta = if rho_prev == 0.0 {
-                        0.0
+                    let beta = if rho_prev == R::default() {
+                        R::default()
                     } else {
                         rho_curr / rho_prev
                     };
@@ -751,15 +784,15 @@ impl PcgSolver {
                 matvec_s(a, p, &mut ap[..], scratch);
 
                 #[cfg(not(feature = "complex"))]
-                let pp_ap_local: f64 = p
+                let pp_ap_local: R = p
                     .iter()
                     .zip(ap.iter())
-                    .fold(0.0, |acc, (&pi, &api)| acc + pi * api);
+                    .fold(R::default(), |acc, (&pi, &api)| acc + pi * api);
 
                 #[cfg(feature = "complex")]
-                let pp_ap_local: f64 = dot_conj(p, ap).real();
+                let pp_ap_local: R = dot_conj(p, ap).real();
 
-                let (h_ppap, _) = comm.allreduce2_async(pp_ap_local, 0.0, &opt)?;
+                let (h_ppap, _) = comm.allreduce2_async(pp_ap_local, R::default(), &opt)?;
                 let pp_ap = {
                     counters.num_global_reductions += 1;
                     <C as AllreduceOps>::wait_pair(h_ppap).0
@@ -811,7 +844,7 @@ impl PcgSolver {
                 pending_rho = Some(h_rho_next);
 
                 if force_restart {
-                    rho_prev = 0.0;
+                    rho_prev = R::default();
                     force_restart = false;
                 } else {
                     rho_prev = rho_curr;
@@ -822,7 +855,7 @@ impl PcgSolver {
             if let Some(handle) = pending_rho.take() {
                 counters.num_global_reductions += 1;
                 rho_curr = <C as AllreduceOps>::wait_pair(handle).0;
-                if !rho_curr.is_finite() || rho_curr < 0.0 {
+                if !rho_curr.is_finite() || rho_curr < R::default() {
                     return Err(KError::IndefinitePreconditioner);
                 }
 
@@ -871,11 +904,11 @@ impl PcgSolver {
                         }
                         residual_replacements += 1;
                         p.copy_from_slice(z);
-                        rho_prev = 0.0;
+                        rho_prev = R::default();
 
                         rho_curr = self.dot_scalar(r, z, comm);
                         counters.num_global_reductions += 1;
-                        if !rho_curr.is_finite() || rho_curr < 0.0 {
+                        if !rho_curr.is_finite() || rho_curr < R::default() {
                             return Err(KError::IndefinitePreconditioner);
                         }
 
@@ -993,7 +1026,7 @@ impl PcgSolver {
         let x_slice: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
 
         #[cfg(feature = "complex")]
-        let mut b_owned: Vec<S> = b.iter().copied().map(S::from_real).collect();
+        let b_owned: Vec<S> = b.iter().copied().map(S::from_real).collect();
         #[cfg(feature = "complex")]
         let mut x_owned: Vec<S> = x.iter().copied().map(S::from_real).collect();
         #[cfg(feature = "complex")]
@@ -1054,7 +1087,7 @@ impl PcgSolver {
         let x_slice: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
 
         #[cfg(feature = "complex")]
-        let mut b_owned: Vec<S> = b.iter().copied().map(S::from_real).collect();
+        let b_owned: Vec<S> = b.iter().copied().map(S::from_real).collect();
         #[cfg(feature = "complex")]
         let mut x_owned: Vec<S> = x.iter().copied().map(S::from_real).collect();
         #[cfg(feature = "complex")]

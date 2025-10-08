@@ -1,11 +1,13 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use kryst::algebra::prelude::*;
+use kryst::assert_vec_close;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::LinOp;
 
 struct DenseOp {
-    a: Vec<Vec<f64>>,
+    a: Vec<Vec<R>>,
 }
 
 impl LinOp for DenseOp {
@@ -20,7 +22,7 @@ impl LinOp for DenseOp {
         assert_eq!(x.len(), n);
         assert_eq!(y.len(), m);
         for i in 0..m {
-            let mut acc = 0.0;
+            let mut acc = R::default();
             for j in 0..n {
                 acc += self.a[i][j] * x[j];
             }
@@ -38,18 +40,54 @@ fn cgs_solves_dd_nonsymmetric() {
     // A 5x5 diagonally dominant non-symmetric matrix (well-conditioned)
     let a = DenseOp {
         a: vec![
-            vec![10.0, 2.0, 0.0, 0.0, 0.0],
-            vec![3.0, 15.0, 4.0, 0.0, 0.0],
-            vec![0.0, -2.0, 8.0, 1.0, 0.0],
-            vec![0.0, 0.0, 1.0, 7.0, 3.0],
-            vec![0.0, 0.0, 0.0, 2.0, 12.0],
+            vec![
+                S::from_real(10.0).real(),
+                S::from_real(2.0).real(),
+                R::default(),
+                R::default(),
+                R::default(),
+            ],
+            vec![
+                S::from_real(3.0).real(),
+                S::from_real(15.0).real(),
+                S::from_real(4.0).real(),
+                R::default(),
+                R::default(),
+            ],
+            vec![
+                R::default(),
+                S::from_real(-2.0).real(),
+                S::from_real(8.0).real(),
+                S::from_real(1.0).real(),
+                R::default(),
+            ],
+            vec![
+                R::default(),
+                R::default(),
+                S::from_real(1.0).real(),
+                S::from_real(7.0).real(),
+                S::from_real(3.0).real(),
+            ],
+            vec![
+                R::default(),
+                R::default(),
+                R::default(),
+                S::from_real(2.0).real(),
+                S::from_real(12.0).real(),
+            ],
         ],
     };
     let (m, n) = a.dims();
     assert_eq!(m, n);
-    let x_true = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let x_true = vec![
+        S::from_real(1.0).real(),
+        S::from_real(2.0).real(),
+        S::from_real(3.0).real(),
+        S::from_real(4.0).real(),
+        S::from_real(5.0).real(),
+    ];
 
-    let mut b = vec![0.0; n];
+    let mut b = vec![R::default(); n];
     a.matvec(&x_true, &mut b);
 
     let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a);
@@ -57,18 +95,10 @@ fn cgs_solves_dd_nonsymmetric() {
     ksp.set_type(SolverType::Cgs).unwrap();
     ksp.set_operators(amat.clone(), Some(amat));
 
-    let mut x = vec![0.0; n];
+    let mut x = vec![R::default(); n];
     let stats = ksp.solve(&b, &mut x).unwrap();
 
-    let tol = 1e-6;
-    for (xi, ei) in x.iter().zip(x_true.iter()) {
-        assert!(
-            (xi - ei).abs() <= tol,
-            "xi = {:.6}, expected = {:.6}",
-            xi,
-            ei
-        );
-    }
+    assert_vec_close!("cgs solution", &x, &x_true);
     assert!(matches!(
         stats.reason,
         kryst::utils::convergence::ConvergedReason::ConvergedRtol

@@ -1,4 +1,5 @@
 use super::*;
+use crate::algebra::prelude::*;
 use faer::Mat;
 
 struct Dummy;
@@ -18,8 +19,9 @@ impl Preconditioner for Dummy {
 fn default_direct_solve_errors() {
     let mut pc = Dummy;
     let a = Mat::<f64>::zeros(1, 1);
-    let mut x = [0.0];
-    let err = pc.direct_solve(&a, &[1.0], &mut x).unwrap_err();
+    let mut x = [R::default()];
+    let rhs = [S::from_real(1.0).real()];
+    let err = pc.direct_solve(&a, &rhs, &mut x).unwrap_err();
     match err {
         KError::SolveError(msg) => assert!(msg.contains("direct_solve not supported")),
         _ => panic!("unexpected error variant"),
@@ -44,8 +46,8 @@ fn default_apply_mut_forwards_to_apply() {
     let mut pc = CountPc {
         calls: AtomicUsize::new(0),
     };
-    let x = [0.0; 2];
-    let mut y = [0.0; 2];
+    let x = [R::default(); 2];
+    let mut y = [R::default(); 2];
     pc.apply_mut(PcSide::Left, &x, &mut y).unwrap();
     assert_eq!(pc.calls.load(Ordering::Relaxed), 1);
 }

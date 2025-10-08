@@ -9,6 +9,8 @@
 //!   Left  : r̃ = M^{-1} r,    p = r̃ + β (p − ω ṽ), ṽ = M^{-1} v = M^{-1} A p
 //!   Right : keep r (true),    use z = M^{-1} p in A·z, and x ← x + α z + ω z_s, etc.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -27,14 +29,6 @@ use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
-
-fn dot(x: &[S], y: &[S], comm: &UniverseComm) -> S {
-    global_dot_conj(comm, x, y)
-}
-
-fn norm2(x: &[S], comm: &UniverseComm) -> R {
-    global_nrm2(comm, x)
-}
 
 struct BiCgWorkspace<'a> {
     r: &'a mut [S],
@@ -177,7 +171,7 @@ impl BiCgStabSolver {
         let mut v_raw = v_raw;
         let scratch = scratch;
 
-        if x.iter().any(|&xi| xi != S::zero()) {
+        if x.iter().any(|&xi| xi.abs() > R::default()) {
             a.matvec_s(x, &mut v[..], &mut *scratch);
             for i in 0..n {
                 r[i] = b[i] - v[i];
@@ -196,19 +190,19 @@ impl BiCgStabSolver {
                 r_hat.copy_from_slice(zs);
                 s.copy_from_slice(zs);
                 p.copy_from_slice(zs);
-                norm2(s, comm)
+                global_nrm2(comm, s)
             } else {
                 r_hat.copy_from_slice(r);
                 p.copy_from_slice(r);
-                norm2(r, comm)
+                global_nrm2(comm, r)
             }
         } else {
             r_hat.copy_from_slice(r);
             p.copy_from_slice(r);
-            norm2(r, comm)
+            global_nrm2(comm, r)
         };
 
-        let bnorm = norm2(b, comm).max(1e-32);
+        let bnorm = global_nrm2(comm, b).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
         if !mons.is_empty() {
@@ -237,18 +231,18 @@ impl BiCgStabSolver {
 
         for k in 1..=self.maxits {
             let rho = if need_left {
-                dot(r_hat, s, comm)
+                global_dot_conj(comm, r_hat, s)
             } else {
-                dot(r_hat, r, comm)
+                global_dot_conj(comm, r_hat, r)
             };
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
                 stats.iterations = k - 1;
                 stats.final_residual = if need_left {
-                    norm2(s, comm)
+                    global_nrm2(comm, s)
                 } else {
-                    norm2(r, comm)
+                    global_nrm2(comm, r)
                 };
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
@@ -297,15 +291,15 @@ impl BiCgStabSolver {
                 }
             }
 
-            let alpha_den = dot(r_hat, v, comm);
+            let alpha_den = global_dot_conj(comm, r_hat, v);
             if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {k}");
                 stats.iterations = k - 1;
                 stats.final_residual = if need_left {
-                    norm2(s, comm)
+                    global_nrm2(comm, s)
                 } else {
-                    norm2(r, comm)
+                    global_nrm2(comm, r)
                 };
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
@@ -322,7 +316,7 @@ impl BiCgStabSolver {
                 }
             }
 
-            let s_norm = norm2(s, comm);
+            let s_norm = global_nrm2(comm, s);
             if !mons.is_empty() {
                 for m in mons {
                     m(k, s_norm);
@@ -392,7 +386,7 @@ impl BiCgStabSolver {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
-                stats.final_residual = norm2(s, comm);
+                stats.final_residual = global_nrm2(comm, s);
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
@@ -401,7 +395,7 @@ impl BiCgStabSolver {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
-                stats.final_residual = norm2(s, comm);
+                stats.final_residual = global_nrm2(comm, s);
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
@@ -466,9 +460,9 @@ impl BiCgStabSolver {
             }
 
             let r_norm = if need_left {
-                norm2(s, comm)
+                global_nrm2(comm, s)
             } else {
-                norm2(r, comm)
+                global_nrm2(comm, r)
             };
             if !mons.is_empty() {
                 for m in mons {
@@ -497,7 +491,7 @@ impl BiCgStabSolver {
             omega_prev = omega;
         }
 
-        let r_norm = norm2(r, comm);
+        let r_norm = global_nrm2(comm, r);
         Ok(SolveStats::new(
             self.maxits,
             r_norm,

@@ -1,6 +1,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
+use kryst::algebra::prelude::*;
+
 pub struct CountingAlloc;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -32,11 +34,11 @@ fn ilu_apply_has_no_allocations() {
     let n = 32;
     let a = faer::Mat::from_fn(n, n, |i, j| {
         if i == j {
-            4.0
+            R::from(4.0)
         } else if (i as i32 - j as i32).abs() == 1 {
-            -1.0
+            R::from(-1.0)
         } else {
-            0.0
+            R::default()
         }
     });
 
@@ -47,8 +49,8 @@ fn ilu_apply_has_no_allocations() {
         .unwrap();
     ilu.setup(&a).unwrap();
 
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![R::from(1.0); n];
+    let mut y = vec![R::default(); n];
 
     let before = allocs();
     ilu.apply(PcSide::Left, &x, &mut y).unwrap();

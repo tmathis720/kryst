@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests_gmres_workspace_reuse {
+    use crate::algebra::prelude::*;
     use crate::context::ksp_context::Workspace;
     use crate::error::KError;
     use crate::parallel::{NoComm, UniverseComm};
@@ -9,9 +10,15 @@ mod tests_gmres_workspace_reuse {
 
     #[test]
     fn workspace_buffers_reused_between_solves() -> Result<(), KError> {
-        let a = Mat::from_fn(2, 2, |i, j| if i == j { 4.0 } else { 1.0 });
-        let b = [1.0, 2.0];
-        let mut x = [0.0f64; 2];
+        let a = Mat::<R>::from_fn(
+            2,
+            2,
+            |i, j| {
+                if i == j { R::from(4.0) } else { R::from(1.0) }
+            },
+        );
+        let b = [R::from(1.0), R::from(2.0)];
+        let mut x = [R::default(); 2];
 
         let mut solver = GmresSolver::new(2, 1e-12, 10);
         let mut ws = Workspace::default();
@@ -34,7 +41,7 @@ mod tests_gmres_workspace_reuse {
         let h_cap = ws.h_mem.capacity();
 
         // Solve again and ensure buffers are reused
-        x = [0.0, 0.0];
+        x = [R::default(), R::default()];
         solver.solve_f64(
             &a,
             None,

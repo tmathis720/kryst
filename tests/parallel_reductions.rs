@@ -13,10 +13,15 @@ use kryst::parallel::{
     global_nrm2_repro,
 };
 use kryst::utils::reduction::{AllreduceOps, ReductMode, ReductOptions};
+use kryst::{assert_s_close, assert_vec_close, testkit};
 use std::sync::Arc;
 
 fn make_world() -> UniverseComm {
     UniverseComm::Mpi(Arc::new(MpiComm::new()))
+}
+
+fn scaled_tol(base: f64, factor: usize) -> R {
+    S::from_real(base).real() * (factor as R)
 }
 
 fn local_scalar(rank: usize) -> S {
@@ -50,16 +55,22 @@ fn allreduce_scalar_matches_closed_form() {
     let local = local_scalar(rank);
     let reduced = comm.allreduce_sum_scalar(local);
 
-    let mut expected_re = 0.0;
-    let mut expected_im = 0.0;
+    let mut expected_re = R::default();
+    let mut expected_im = R::default();
     for r in 0..size {
         let value = local_scalar(r);
         expected_re += value.real();
         expected_im += value.imag();
     }
 
-    assert!((reduced.real() - expected_re).abs() < 1e-12 * size as f64);
-    assert!((reduced.imag() - expected_im).abs() < 1e-12 * size as f64);
+    let tol = scaled_tol(1e-12, size);
+    testkit::assert_s_close(
+        "allreduce scalar matches closed form",
+        reduced,
+        S::from_parts(expected_re, expected_im),
+        tol,
+        testkit::RTOL,
+    );
 }
 
 #[test]
@@ -77,9 +88,8 @@ fn mpi_sys_scalar_matches_safe_path() {
     let safe = comm.allreduce_sum_scalar(local);
     let raw = allreduce_sum_scalar_mpi_sys(&comm, local);
 
-    assert!((safe.real() - raw.real()).abs() < 1e-12 * comm.size() as f64);
-    #[cfg(feature = "complex")]
-    assert!((safe.imag() - raw.imag()).abs() < 1e-12 * comm.size() as f64);
+    let tol = scaled_tol(1e-12, comm.size());
+    testkit::assert_s_close("mpi sys scalar", safe, raw, tol, testkit::RTOL);
 }
 
 #[test]
@@ -91,7 +101,11 @@ fn allreduce_scalar_accurate_matches_safe_path() {
     let fast = comm.allreduce_sum_scalar(local);
     let accurate = comm.allreduce_sum_scalar_accurate(local);
 
-    assert_eq!(fast, accurate);
+    assert_s_close!(
+        "allreduce scalar accurate matches safe path",
+        fast,
+        accurate
+    );
 }
 
 #[test]
@@ -109,8 +123,8 @@ fn global_dot_conj_matches_manual_sum() {
         expected = expected + dot_conj(&x, &y);
     }
 
-    assert!((dot.real() - expected.real()).abs() < 1e-12 * size as f64);
-    assert!((dot.imag() - expected.imag()).abs() < 1e-12 * size as f64);
+    let tol = scaled_tol(1e-12, size);
+    testkit::assert_s_close("global dot conj manual", dot, expected, tol, testkit::RTOL);
 }
 
 #[test]
@@ -128,8 +142,14 @@ fn global_dot_conj_accurate_matches_manual_sum() {
         expected = expected + dot_conj(&x, &y);
     }
 
-    assert!((dot.real() - expected.real()).abs() < 1e-12 * size as f64);
-    assert!((dot.imag() - expected.imag()).abs() < 1e-12 * size as f64);
+    let tol = scaled_tol(1e-12, size);
+    testkit::assert_s_close(
+        "global dot conj accurate manual",
+        dot,
+        expected,
+        tol,
+        testkit::RTOL,
+    );
 }
 
 #[test]
@@ -141,7 +161,7 @@ fn global_dot_conj_repro_matches_fast() {
     let fast = global_dot_conj(&comm, &x_local, &y_local);
     let repro = global_dot_conj_repro(&comm, &x_local, &y_local);
 
-    assert_eq!(fast, repro);
+    assert_s_close!("global dot conj repro", fast, repro);
 }
 
 #[test]
@@ -158,7 +178,7 @@ fn global_dot_conj_many_matches_individual_calls() {
     let repro = global_dot_conj_many_repro(&comm, &pairs);
 
     assert_eq!(bundled.len(), pairs.len());
-    assert_eq!(bundled, repro);
+    assert_vec_close!("global dot conj many repro", &bundled, &repro);
 
     let mut expected = Vec::with_capacity(2);
     let mut accum0 = S::zero();
@@ -173,9 +193,10 @@ fn global_dot_conj_many_matches_individual_calls() {
     expected.push(accum0);
     expected.push(accum1);
 
-    for (g, e) in bundled.iter().zip(expected.iter()) {
-        assert!((g.real() - e.real()).abs() < 1e-12 * size as f64);
-        assert!((g.imag() - e.imag()).abs() < 1e-12 * size as f64);
+    for (idx, (g, e)) in bundled.iter().zip(expected.iter()).enumerate() {
+        let tol = scaled_tol(1e-12, size);
+        let label = format!("global dot conj many pair {idx}");
+        testkit::assert_s_close(&label, *g, *e, tol, testkit::RTOL);
     }
 }
 
@@ -205,9 +226,10 @@ fn global_dot_conj_many_accurate_matches_individual_calls() {
     expected.push(accum0);
     expected.push(accum1);
 
-    for (g, e) in bundled.iter().zip(expected.iter()) {
-        assert!((g.real() - e.real()).abs() < 1e-12 * size as f64);
-        assert!((g.imag() - e.imag()).abs() < 1e-12 * size as f64);
+    for (idx, (g, e)) in bundled.iter().zip(expected.iter()).enumerate() {
+        let tol = scaled_tol(1e-12, size);
+        let label = format!("global dot conj many accurate pair {idx}");
+        testkit::assert_s_close(&label, *g, *e, tol, testkit::RTOL);
     }
 }
 
@@ -225,15 +247,15 @@ fn global_dot_conj_many_into_matches_owned_helpers() {
     global_dot_conj_many_into(&comm, &pairs, &mut into);
 
     let owned = global_dot_conj_many(&comm, &pairs);
-    assert_eq!(into, owned);
+    assert_vec_close!("global dot conj many into vs owned", &into, &owned);
 
     let mut accurate = vec![S::zero(); pairs.len()];
     global_dot_conj_many_into_accurate(&comm, &pairs, &mut accurate);
-    assert_eq!(into, accurate);
+    assert_vec_close!("global dot conj many into vs accurate", &into, &accurate);
 
     let mut repro = vec![S::zero(); pairs.len()];
     global_dot_conj_many_into_repro(&comm, &pairs, &mut repro);
-    assert_eq!(into, repro);
+    assert_vec_close!("global dot conj many into vs repro", &into, &repro);
 
     let mut manual = vec![S::zero(); pairs.len()];
     for r in 0..size {
@@ -244,9 +266,10 @@ fn global_dot_conj_many_into_matches_owned_helpers() {
         manual[1] = manual[1] + dot_conj(&sl[..2], &sl[..2]);
     }
 
-    for (result, expected) in into.iter().zip(manual.iter()) {
-        assert!((result.real() - expected.real()).abs() < 1e-12 * size as f64);
-        assert!((result.imag() - expected.imag()).abs() < 1e-12 * size as f64);
+    let tol = scaled_tol(1e-12, size);
+    for (idx, (result, expected)) in into.iter().zip(manual.iter()).enumerate() {
+        let label = format!("global dot conj many into manual {idx}");
+        testkit::assert_s_close(&label, *result, *expected, tol, testkit::RTOL);
     }
 }
 
@@ -265,14 +288,41 @@ fn global_nrm2_many_matches_individual_calls() {
     let single0 = global_nrm2(&comm, &x_local);
     let single1 = global_nrm2(&comm, &slice[..2]);
 
-    assert!((bundled[0] - single0).abs() < 1e-13);
-    assert!((bundled[1] - single1).abs() < 1e-13);
+    let tol = S::from_real(1e-13).real();
+    testkit::assert_s_close(
+        "global nrm2 many entry 0",
+        S::from_real(bundled[0]),
+        S::from_real(single0),
+        tol,
+        testkit::RTOL,
+    );
+    testkit::assert_s_close(
+        "global nrm2 many entry 1",
+        S::from_real(bundled[1]),
+        S::from_real(single1),
+        tol,
+        testkit::RTOL,
+    );
 
     let repro = global_nrm2_many_repro(&comm, &local_refs);
-    assert_eq!(bundled, repro);
-
     let accurate = global_nrm2_many_accurate(&comm, &local_refs);
-    assert_eq!(bundled, accurate);
+
+    for (label, other) in [
+        ("global nrm2 many repro", repro.as_slice()),
+        ("global nrm2 many accurate", accurate.as_slice()),
+    ] {
+        for (idx, (&lhs, &rhs)) in bundled.iter().zip(other.iter()).enumerate() {
+            let tol = S::from_real(1e-13).real();
+            let msg = format!("{label} mismatch at {idx}");
+            testkit::assert_s_close(
+                &msg,
+                S::from_real(lhs),
+                S::from_real(rhs),
+                tol,
+                testkit::RTOL,
+            );
+        }
+    }
 }
 
 #[test]
@@ -284,19 +334,49 @@ fn global_nrm2_many_into_matches_owned_helpers() {
     let slice = local_slice(rank);
     let local_refs = vec![&x_local[..], &slice[..2]];
 
-    let mut into = vec![0.0; local_refs.len()];
+    let mut into = vec![R::default(); local_refs.len()];
     global_nrm2_many_into(&comm, &local_refs, &mut into);
 
     let owned = global_nrm2_many(&comm, &local_refs);
-    assert_eq!(into, owned);
+    for (idx, (&lhs, &rhs)) in into.iter().zip(owned.iter()).enumerate() {
+        let tol = S::from_real(1e-13).real();
+        let msg = format!("global nrm2 many into vs owned mismatch at {idx}");
+        testkit::assert_s_close(
+            &msg,
+            S::from_real(lhs),
+            S::from_real(rhs),
+            tol,
+            testkit::RTOL,
+        );
+    }
 
-    let mut repro = vec![0.0; local_refs.len()];
+    let mut repro = vec![R::default(); local_refs.len()];
     global_nrm2_many_into_repro(&comm, &local_refs, &mut repro);
-    assert_eq!(into, repro);
+    for (idx, (&lhs, &rhs)) in into.iter().zip(repro.iter()).enumerate() {
+        let tol = S::from_real(1e-13).real();
+        let msg = format!("global nrm2 many into vs repro mismatch at {idx}");
+        testkit::assert_s_close(
+            &msg,
+            S::from_real(lhs),
+            S::from_real(rhs),
+            tol,
+            testkit::RTOL,
+        );
+    }
 
-    let mut accurate = vec![0.0; local_refs.len()];
+    let mut accurate = vec![R::default(); local_refs.len()];
     global_nrm2_many_into_accurate(&comm, &local_refs, &mut accurate);
-    assert_eq!(into, accurate);
+    for (idx, (&lhs, &rhs)) in into.iter().zip(accurate.iter()).enumerate() {
+        let tol = S::from_real(1e-13).real();
+        let msg = format!("global nrm2 many into vs accurate mismatch at {idx}");
+        testkit::assert_s_close(
+            &msg,
+            S::from_real(lhs),
+            S::from_real(rhs),
+            tol,
+            testkit::RTOL,
+        );
+    }
 }
 
 #[test]
@@ -308,16 +388,23 @@ fn global_nrm2_matches_manual_norm() {
     let values = local_slice(rank);
     let norm = global_nrm2(&comm, &values);
 
-    let mut total_sq = 0.0;
+    let mut total_sq = R::default();
     for r in 0..size {
         for value in local_slice(r) {
             let mag = value.abs();
             total_sq += mag * mag;
         }
     }
-    let expected = total_sq.max(0.0).sqrt();
+    let expected = total_sq.max(R::default()).sqrt();
 
-    assert!((norm - expected).abs() < 1e-12 * (size as f64).sqrt());
+    let tol = S::from_real(1e-12).real() * (size as R).sqrt();
+    testkit::assert_s_close(
+        "global nrm2 manual",
+        S::from_real(norm),
+        S::from_real(expected),
+        tol,
+        testkit::RTOL,
+    );
 }
 
 #[test]
@@ -329,7 +416,7 @@ fn global_nrm2_repro_matches_fast() {
     let fast = global_nrm2(&comm, &values);
     let repro = global_nrm2_repro(&comm, &values);
 
-    assert_eq!(fast, repro);
+    assert_s_close!("global nrm2 repro", S::from_real(fast), S::from_real(repro));
 }
 
 #[test]
@@ -341,7 +428,11 @@ fn global_nrm2_accurate_matches_fast() {
     let fast = global_nrm2(&comm, &values);
     let accurate = global_nrm2_accurate(&comm, &values);
 
-    assert_eq!(fast, accurate);
+    assert_s_close!(
+        "global nrm2 accurate",
+        S::from_real(fast),
+        S::from_real(accurate)
+    );
 }
 
 #[test]
@@ -360,9 +451,10 @@ fn allreduce_scalar_slice_in_place_matches_component_sums() {
         }
     }
 
-    for (result, target) in local.iter().zip(expected.iter()) {
-        assert!((result.real() - target.real()).abs() < 1e-12 * size as f64);
-        assert!((result.imag() - target.imag()).abs() < 1e-12 * size as f64);
+    let tol = scaled_tol(1e-12, size);
+    for (idx, (result, target)) in local.iter().zip(expected.iter()).enumerate() {
+        let label = format!("in-place scalar slice entry {idx}");
+        testkit::assert_s_close(&label, *result, *target, tol, testkit::RTOL);
     }
 }
 
@@ -383,9 +475,10 @@ fn owned_slice_reduction_matches_component_sums() {
     }
 
     assert_eq!(reduced.len(), expected.len());
-    for (result, target) in reduced.iter().zip(expected.iter()) {
-        assert!((result.real() - target.real()).abs() < 1e-12 * size as f64);
-        assert!((result.imag() - target.imag()).abs() < 1e-12 * size as f64);
+    let tol = scaled_tol(1e-12, size);
+    for (idx, (result, target)) in reduced.iter().zip(expected.iter()).enumerate() {
+        let label = format!("owned scalar slice entry {idx}");
+        testkit::assert_s_close(&label, *result, *target, tol, testkit::RTOL);
     }
 }
 
@@ -407,15 +500,28 @@ fn mpi_async_pair_supports_deterministic_mode() {
     let maybe = <UniverseComm as AllreduceOps>::test_pair(&mut handle)
         .expect("deterministic pair handle should be ready");
 
-    let mut expected_a = 0.0;
-    let mut expected_b = 0.0;
+    let mut expected_a = R::default();
+    let mut expected_b = R::default();
     for r in 0..comm.size() {
         expected_a += r as f64 + 0.5;
         expected_b += -0.75 * r as f64;
     }
 
-    assert!((maybe.0 - expected_a).abs() < 1e-12 * comm.size() as f64);
-    assert!((maybe.1 - expected_b).abs() < 1e-12 * comm.size() as f64);
+    let tol = scaled_tol(1e-12, comm.size());
+    testkit::assert_s_close(
+        "async pair deterministic real",
+        S::from_real(maybe.0),
+        S::from_real(expected_a),
+        tol,
+        testkit::RTOL,
+    );
+    testkit::assert_s_close(
+        "async pair deterministic imag",
+        S::from_real(maybe.1),
+        S::from_real(expected_b),
+        tol,
+        testkit::RTOL,
+    );
 }
 
 #[test]
@@ -428,26 +534,45 @@ fn mpi_async_vec_supports_deterministic_mode() {
 
     let rank = comm.rank();
     let local = local_slice(rank);
-    let expected_local: Vec<f64> = local.iter().map(|z| z.real()).collect();
+    let expected_local: Vec<R> = local.iter().map(|z| z.real()).collect();
+    let real_local: Vec<R> = local.clone().into_iter().map(|z| z.real()).collect();
     let (mut handle, original) = comm
-        .allreduce_n_async(local.clone().into_iter().map(|z| z.real()).collect(), &opt)
+        .allreduce_n_async(real_local, &opt)
         .expect("deterministic async vector reduction should succeed");
 
-    assert_eq!(original, expected_local);
+    for (idx, (&lhs, &rhs)) in original.iter().zip(expected_local.iter()).enumerate() {
+        let tol = S::from_real(1e-12).real();
+        let msg = format!("deterministic async vector original mismatch at {idx}");
+        testkit::assert_s_close(
+            &msg,
+            S::from_real(lhs),
+            S::from_real(rhs),
+            tol,
+            testkit::RTOL,
+        );
+    }
 
     // Expect the handle to be ready immediately.
     let reduced = <UniverseComm as AllreduceOps>::test_vec(&mut handle)
         .expect("deterministic vector handle should be ready");
 
-    let mut expected = vec![0.0f64; reduced.len()];
+    let mut expected = vec![R::default(); reduced.len()];
     for r in 0..comm.size() {
         for (idx, value) in local_slice(r).iter().enumerate() {
             expected[idx] += value.real();
         }
     }
 
-    for (got, want) in reduced.iter().zip(expected.iter()) {
-        assert!((*got - *want).abs() < 1e-12 * comm.size() as f64);
+    let tol = scaled_tol(1e-12, comm.size());
+    for (idx, (&got, &want)) in reduced.iter().zip(expected.iter()).enumerate() {
+        let label = format!("deterministic async vector reduced entry {idx}");
+        testkit::assert_s_close(
+            &label,
+            S::from_real(got),
+            S::from_real(want),
+            tol,
+            testkit::RTOL,
+        );
     }
 }
 
@@ -469,15 +594,28 @@ fn mpi_async_pair_supports_deterministic_accurate_mode() {
     let maybe = <UniverseComm as AllreduceOps>::test_pair(&mut handle)
         .expect("accurate pair handle should be ready");
 
-    let mut expected_a = 0.0;
-    let mut expected_b = 0.0;
+    let mut expected_a = R::default();
+    let mut expected_b = R::default();
     for r in 0..comm.size() {
         expected_a += r as f64 + 0.5;
         expected_b += -0.75 * r as f64;
     }
 
-    assert!((maybe.0 - expected_a).abs() < 1e-12 * comm.size() as f64);
-    assert!((maybe.1 - expected_b).abs() < 1e-12 * comm.size() as f64);
+    let tol = scaled_tol(1e-12, comm.size());
+    testkit::assert_s_close(
+        "async pair accurate real",
+        S::from_real(maybe.0),
+        S::from_real(expected_a),
+        tol,
+        testkit::RTOL,
+    );
+    testkit::assert_s_close(
+        "async pair accurate imag",
+        S::from_real(maybe.1),
+        S::from_real(expected_b),
+        tol,
+        testkit::RTOL,
+    );
 }
 
 #[test]
@@ -490,24 +628,43 @@ fn mpi_async_vec_supports_deterministic_accurate_mode() {
 
     let rank = comm.rank();
     let local = local_slice(rank);
-    let expected_local: Vec<f64> = local.iter().map(|z| z.real()).collect();
+    let expected_local: Vec<R> = local.iter().map(|z| z.real()).collect();
+    let real_local: Vec<R> = local.clone().into_iter().map(|z| z.real()).collect();
     let (mut handle, original) = comm
-        .allreduce_n_async(local.clone().into_iter().map(|z| z.real()).collect(), &opt)
+        .allreduce_n_async(real_local, &opt)
         .expect("accurate async vector reduction should succeed");
 
-    assert_eq!(original, expected_local);
+    for (idx, (&lhs, &rhs)) in original.iter().zip(expected_local.iter()).enumerate() {
+        let tol = S::from_real(1e-12).real();
+        let msg = format!("accurate async vector original mismatch at {idx}");
+        testkit::assert_s_close(
+            &msg,
+            S::from_real(lhs),
+            S::from_real(rhs),
+            tol,
+            testkit::RTOL,
+        );
+    }
 
     let reduced = <UniverseComm as AllreduceOps>::test_vec(&mut handle)
         .expect("accurate vector handle should be ready");
 
-    let mut expected = vec![0.0f64; reduced.len()];
+    let mut expected = vec![R::default(); reduced.len()];
     for r in 0..comm.size() {
         for (idx, value) in local_slice(r).iter().enumerate() {
             expected[idx] += value.real();
         }
     }
 
-    for (observed, target) in reduced.iter().zip(expected.iter()) {
-        assert!((observed - target).abs() < 1e-12 * comm.size() as f64);
+    let tol = scaled_tol(1e-12, comm.size());
+    for (idx, (&observed, &target)) in reduced.iter().zip(expected.iter()).enumerate() {
+        let label = format!("accurate async vector reduced entry {idx}");
+        testkit::assert_s_close(
+            &label,
+            S::from_real(observed),
+            S::from_real(target),
+            tol,
+            testkit::RTOL,
+        );
     }
 }

@@ -15,6 +15,8 @@
 //! in column-major form. The legacy `Workspace.z` (Vec<Vec<_>>) is not used by
 //! GMRES/FGMRES.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -220,7 +222,7 @@ impl GmresSolver {
         }
 
         ws.h_mem.fill(S::zero());
-        ws.cs.fill(0.0);
+        ws.cs.fill(R::default());
         ws.sn.fill(S::zero());
         ws.g.fill(S::zero());
 
@@ -236,7 +238,7 @@ impl GmresSolver {
                 let mut norms = [R::zero(); 2];
                 global_nrm2_many_into(comm, &[&ws.tmp2[..n], b], &mut norms);
                 let beta = norms[0];
-                if beta > 0.0 {
+                if beta > R::default() {
                     let inv = S::from_real(1.0 / beta);
                     for val in &mut ws.tmp2[..n] {
                         *val *= inv;
@@ -251,7 +253,7 @@ impl GmresSolver {
                 let mut norms = [R::zero(); 2];
                 global_nrm2_many_into(comm, &[&ws.tmp1[..n], b], &mut norms);
                 let beta = norms[0];
-                if beta > 0.0 {
+                if beta > R::default() {
                     let inv = S::from_real(1.0 / beta);
                     for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
                         *dst = src * inv;
@@ -345,7 +347,7 @@ impl GmresSolver {
                             }
                             let hnext = global_nrm2(comm, &ws.tmp2[..n]);
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
-                            if hnext > 0.0 {
+                            if hnext > R::default() {
                                 let inv = S::from_real(1.0 / hnext);
                                 for val in &mut ws.tmp2[..n] {
                                     *val *= inv;
@@ -398,7 +400,7 @@ impl GmresSolver {
                             }
                             let hnext = global_nrm2(comm, &ws.tmp1[..n]);
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
-                            if hnext > 0.0 {
+                            if hnext > R::default() {
                                 let inv = S::from_real(1.0 / hnext);
                                 for val in &mut ws.tmp1[..n] {
                                     *val *= inv;
@@ -532,7 +534,7 @@ impl GmresSolver {
             }
 
             ws.h_mem.fill(S::zero());
-            ws.cs.fill(0.0);
+            ws.cs.fill(R::default());
             ws.sn.fill(S::zero());
             ws.g.fill(S::zero());
 
@@ -545,7 +547,7 @@ impl GmresSolver {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
                     let beta = global_nrm2(comm, &ws.tmp2[..n]);
-                    if beta > 0.0 {
+                    if beta > R::default() {
                         let inv = S::from_real(1.0 / beta);
                         for val in &mut ws.tmp2[..n] {
                             *val *= inv;
@@ -558,7 +560,7 @@ impl GmresSolver {
                 }
                 PcSide::Right => {
                     let beta = global_nrm2(comm, &ws.tmp1[..n]);
-                    if beta > 0.0 {
+                    if beta > R::default() {
                         let inv = S::from_real(1.0 / beta);
                         for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
                             *dst = src * inv;
@@ -640,7 +642,7 @@ impl GmresSolver {
     }
 
     #[allow(dead_code)]
-    fn chol_upper(mat: &mut [f64], n: usize) -> Result<(), KError> {
+    fn chol_upper(mat: &mut [R], n: usize) -> Result<(), KError> {
         for j in 0..n {
             for i in 0..=j {
                 let mut sum = mat[Self::mat_idx(n, i, j)];
@@ -650,7 +652,7 @@ impl GmresSolver {
                     sum -= left * right;
                 }
                 if i == j {
-                    if sum <= 0.0 || !sum.is_finite() {
+                    if sum <= R::default() || !sum.is_finite() {
                         return Err(KError::FactorError(
                             "s-step GMRES: Cholesky factorization failed".into(),
                         ));
@@ -658,7 +660,7 @@ impl GmresSolver {
                     mat[Self::mat_idx(n, i, j)] = sum.sqrt();
                 } else {
                     let diag = mat[Self::mat_idx(n, i, i)];
-                    if diag == 0.0 {
+                    if diag.abs() <= R::default() {
                         return Err(KError::FactorError(
                             "s-step GMRES: zero diagonal during Cholesky".into(),
                         ));
@@ -667,47 +669,47 @@ impl GmresSolver {
                 }
             }
             for i in (j + 1)..n {
-                mat[Self::mat_idx(n, i, j)] = 0.0;
+                mat[Self::mat_idx(n, i, j)] = R::default();
             }
         }
         Ok(())
     }
 
     #[allow(dead_code)]
-    fn triangular_solve_right_upper(r: &[f64], block: usize, data: &mut [f64], nrows: usize) {
+    fn triangular_solve_right_upper(r: &[R], block: usize, data: &mut [R], nrows: usize) {
         // Solve X R = data in-place for X, where data holds W' (nrows x block)
         // stored column-major. After the solve, data contains Q.
         for col in 0..block {
-            let mut col_slice = vec![0.0; nrows];
+            let mut col_slice = vec![R::default(); nrows];
             // copy target column (W' column)
             for row in 0..nrows {
                 col_slice[row] = data[col * nrows + row];
             }
             for k in 0..col {
                 let r_kj = r[Self::mat_idx(block, k, col)];
-                if r_kj != 0.0 {
+                if r_kj.abs() > R::default() {
                     for row in 0..nrows {
                         col_slice[row] -= r_kj * data[k * nrows + row];
                     }
                 }
             }
             let diag = r[Self::mat_idx(block, col, col)];
-            if diag != 0.0 {
+            if diag.abs() > R::default() {
                 for row in 0..nrows {
                     data[col * nrows + row] = col_slice[row] / diag;
                 }
             } else {
                 for row in 0..nrows {
-                    data[col * nrows + row] = 0.0;
+                    data[col * nrows + row] = R::default();
                 }
             }
         }
     }
 
     #[allow(dead_code)]
-    fn estimate_triangular_condition(r: &[f64], block: usize) -> f64 {
-        let mut max_diag = 0.0;
-        let mut min_diag = f64::MAX;
+    fn estimate_triangular_condition(r: &[R], block: usize) -> R {
+        let mut max_diag = R::default();
+        let mut min_diag = R::MAX;
         for j in 0..block {
             let diag = r[Self::mat_idx(block, j, j)].abs();
             if diag > max_diag {
@@ -717,10 +719,10 @@ impl GmresSolver {
                 min_diag = diag;
             }
         }
-        if min_diag <= 0.0 {
-            f64::INFINITY
-        } else if max_diag == 0.0 {
-            0.0
+        if min_diag <= R::default() {
+            R::INFINITY
+        } else if max_diag == R::default() {
+            R::default()
         } else {
             max_diag / min_diag
         }

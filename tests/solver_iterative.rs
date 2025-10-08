@@ -8,6 +8,7 @@
 use approx::assert_abs_diff_eq;
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::preconditioner::PcSide;
 use kryst::solver::{CgSolver, GmresSolver, LinearSolver};
@@ -17,13 +18,13 @@ use rand::Rng;
 ///
 /// The SPD matrix is constructed as `A = Mᵀ M + I`, where `M` is a random matrix and `I` is the identity.
 /// This ensures that `A` is symmetric and positive definite, suitable for CG.
-fn random_spd(n: usize) -> (faer::Mat<f64>, Vec<f64>) {
+fn random_spd(n: usize) -> (faer::Mat<R>, Vec<R>) {
     let mut rng = rand::thread_rng();
-    let data: Vec<f64> = (0..n * n).map(|_| rng.r#gen()).collect();
+    let data: Vec<R> = (0..n * n).map(|_| rng.r#gen()).collect();
     let m = Mat::from_fn(n, n, |i, j| data[j * n + i]);
     let m_t = m.transpose();
-    let a = &m_t * &m + Mat::<f64>::identity(n, n);
-    let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
+    let a = &m_t * &m + Mat::<R>::identity(n, n);
+    let b: Vec<R> = (0..n).map(|_| rng.r#gen()).collect();
     (a, b)
 }
 
@@ -37,7 +38,7 @@ fn cg_vs_direct_on_spd() {
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let (a, b) = random_spd(n);
-    let mut x_cg = vec![0.0; n];
+    let mut x_cg = vec![R::default(); n];
     let mut solver = CgSolver::new(1e-8, 1000);
     let mut ws = Workspace::new(n);
     solver.setup_workspace(&mut ws);
@@ -79,10 +80,10 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     let mut rng = rand::thread_rng();
-    let data: Vec<f64> = (0..n * n).map(|_| rng.r#gen()).collect();
+    let data: Vec<R> = (0..n * n).map(|_| rng.r#gen()).collect();
     let a = Mat::from_fn(n, n, |i, j| data[j * n + i]);
-    let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
-    let mut x_gmres = vec![0.0; n];
+    let b: Vec<R> = (0..n).map(|_| rng.r#gen()).collect();
+    let mut x_gmres = vec![R::default(); n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
     let stats = solver
         .solve_f64(&a, None, &b, &mut x_gmres, PcSide::Left, &comm, None, None)

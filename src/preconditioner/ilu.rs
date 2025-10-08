@@ -88,7 +88,7 @@ use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
 use faer::traits::ComplexField;
 use num_traits::Float;
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 #[cfg(feature = "logging")]
 use log::{debug, info, trace, warn};
@@ -425,13 +425,13 @@ pub struct Ilu<T> {
 #[derive(Debug)]
 pub struct IluWorkspace<T> {
     /// Scratch buffer for triangular solves (sized once in setup)
-    solve_buf: RefCell<Vec<T>>,
+    solve_buf: Mutex<Vec<T>>,
     /// Secondary workspace for complex operations
-    temp2: RefCell<Vec<T>>,
+    temp2: Mutex<Vec<T>>,
     /// Workspace for level scheduling in parallel triangular solves
-    levels: RefCell<Vec<usize>>,
+    levels: Mutex<Vec<usize>>,
     /// Workspace for sparse pattern operations
-    pattern_work: RefCell<Vec<bool>>,
+    pattern_work: Mutex<Vec<bool>>,
     /// Current workspace size
     size: usize,
 }
@@ -443,10 +443,10 @@ impl<T: Clone> IluWorkspace<T> {
         T: num_traits::Zero,
     {
         Self {
-            solve_buf: RefCell::new(vec![T::zero(); size]),
-            temp2: RefCell::new(vec![T::zero(); size]),
-            levels: RefCell::new(vec![0; size]),
-            pattern_work: RefCell::new(vec![false; size]),
+            solve_buf: Mutex::new(vec![T::zero(); size]),
+            temp2: Mutex::new(vec![T::zero(); size]),
+            levels: Mutex::new(vec![0; size]),
+            pattern_work: Mutex::new(vec![false; size]),
             size,
         }
     }
@@ -457,10 +457,10 @@ impl<T: Clone> IluWorkspace<T> {
         T: num_traits::Zero + Clone,
     {
         if new_size > self.size {
-            self.solve_buf.borrow_mut().resize(new_size, T::zero());
-            self.temp2.borrow_mut().resize(new_size, T::zero());
-            self.levels.borrow_mut().resize(new_size, 0);
-            self.pattern_work.borrow_mut().resize(new_size, false);
+            self.solve_buf.lock().unwrap().resize(new_size, T::zero());
+            self.temp2.lock().unwrap().resize(new_size, T::zero());
+            self.levels.lock().unwrap().resize(new_size, 0);
+            self.pattern_work.lock().unwrap().resize(new_size, false);
             self.size = new_size;
         }
     }
@@ -470,28 +470,28 @@ impl<T: Clone> IluWorkspace<T> {
     where
         T: num_traits::Zero,
     {
-        for x in self.solve_buf.borrow_mut().iter_mut() {
+        for x in self.solve_buf.lock().unwrap().iter_mut() {
             *x = T::zero();
         }
-        for x in self.temp2.borrow_mut().iter_mut() {
+        for x in self.temp2.lock().unwrap().iter_mut() {
             *x = T::zero();
         }
-        for x in self.levels.borrow_mut().iter_mut() {
+        for x in self.levels.lock().unwrap().iter_mut() {
             *x = 0;
         }
-        for x in self.pattern_work.borrow_mut().iter_mut() {
+        for x in self.pattern_work.lock().unwrap().iter_mut() {
             *x = false;
         }
     }
 
     /// Borrow the solve buffer sized in `setup()`.
     #[inline]
-    pub fn borrow_solve_buf(&self, n: usize) -> std::cell::RefMut<'_, Vec<T>> {
+    pub fn borrow_solve_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<T>> {
         debug_assert!(
             self.size >= n,
             "workspace not sized; call ensure_size in setup()"
         );
-        self.solve_buf.borrow_mut()
+        self.solve_buf.lock().unwrap()
     }
 }
 
@@ -504,7 +504,6 @@ struct Levels {
     max_level: u32,
 }
 
-#[cfg(feature = "rayon")]
 #[cfg(feature = "rayon")]
 fn build_levels_lower<T>(l: &CsrMatrix<T>) -> Levels
 where

@@ -1,3 +1,4 @@
+use kryst::algebra::prelude::*;
 use kryst::solver::superlu_dist::{Panel, PivotingStrategy};
 
 #[test]
@@ -5,7 +6,7 @@ fn tiny_pivot_replacement() {
     let mut panel = Panel {
         width: 2,
         height: 2,
-        data: vec![1e-12, 1.0, 0.0, 1.0],
+        data: vec![R::from(1e-12), R::from(1.0), R::default(), R::from(1.0)],
         row_indices: vec![0, 1],
         col_start: 0,
     };

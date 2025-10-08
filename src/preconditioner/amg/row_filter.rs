@@ -1,24 +1,28 @@
 use std::cmp::Ordering;
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::{sparse::CsrMatrix, spmv::csr_spmm_dense};
 use faer::{MatMut, MatRef};
 
 #[derive(Clone, Copy)]
 pub struct RowFilter {
-    pub tau_abs: f64,             // absolute drop (>= 0)
-    pub tau_rel: f64,             // relative truncation in [0,1)
+    pub tau_abs: R,               // absolute drop (>= 0)
+    pub tau_rel: R,               // relative truncation in [0,1)
     pub k_max: usize,             // cap (0 => unlimited)
     pub must_keep: Option<usize>, // column index to force-keep
 }
 
 /// In-place filter of a single row according to absolute drop, relative truncation, and cap.
 /// `cols` and `vals` are parallel arrays. Upon return, they are sorted by column index.
-pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: RowFilter) {
+pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<R>, rf: RowFilter) {
     debug_assert_eq!(cols.len(), vals.len());
 
     // 1) Absolute drop
-    if rf.tau_abs > 0.0 {
+    if rf.tau_abs > R::zero() {
         let mut w = 0usize;
         for i in 0..cols.len() {
             let keep = vals[i].abs() >= rf.tau_abs || rf.must_keep.is_some_and(|c| c == cols[i]);
@@ -33,15 +37,15 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
     }
 
     // 2) Relative truncation
-    if rf.tau_rel > 0.0 && !vals.is_empty() {
+    if rf.tau_rel > R::zero() && !vals.is_empty() {
         // sort indices by ascending |v| with column tiebreaker for determinism
         let mut idx: Vec<usize> = (0..vals.len()).collect();
         idx.sort_unstable_by(|&i, &j| match vals[i].abs().total_cmp(&vals[j].abs()) {
             Ordering::Equal => cols[i].cmp(&cols[j]),
             o => o,
         });
-        let total: f64 = vals.iter().map(|v| v.abs()).sum();
-        let mut dropped_sum = 0.0;
+        let total: R = vals.iter().map(|v| v.abs()).sum();
+        let mut dropped_sum = R::zero();
         let mut drop_mask = vec![false; vals.len()];
 
         for &i in &idx {
@@ -110,7 +114,7 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<f64>, rf: 
     }
 
     // final sort by column index
-    let mut pairs: Vec<(usize, f64)> = cols.iter().cloned().zip(vals.iter().cloned()).collect();
+    let mut pairs: Vec<(usize, R)> = cols.iter().cloned().zip(vals.iter().cloned()).collect();
     pairs.sort_unstable_by_key(|(c, _)| *c);
     for (i, (c, v)) in pairs.into_iter().enumerate() {
         cols[i] = c;
@@ -123,7 +127,7 @@ pub fn apply_filter_to_csr_values_in_place(
     nrows: usize,
     row_ptr: &[usize],
     col_idx: &[usize],
-    vals: &mut [f64],
+    vals: &mut [R],
     mut rf_for_row: impl FnMut(usize) -> RowFilter,
 ) {
     for i in 0..nrows {
@@ -133,7 +137,7 @@ pub fn apply_filter_to_csr_values_in_place(
             continue;
         }
         let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
-        let mut vs: Vec<f64> = vals[rs..re].to_vec();
+        let mut vs: Vec<R> = vals[rs..re].to_vec();
         let rf = rf_for_row(i);
         filter_row_by_truncation(&mut cols, &mut vs, rf);
         let mut keep_pos = 0usize;
@@ -145,7 +149,7 @@ pub fn apply_filter_to_csr_values_in_place(
             if keep_pos < cols.len() && cols[keep_pos] == c {
                 vals[p] = vs[keep_pos];
             } else {
-                vals[p] = 0.0;
+                vals[p] = R::zero();
             }
         }
     }

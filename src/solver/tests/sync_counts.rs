@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
@@ -14,7 +15,7 @@ use super::util;
 fn pipelined_cg_uses_single_reduction_per_iteration() -> Result<(), KError> {
     crate::utils::reduction::install_test_counter(true);
     let a = util::spd_poisson2d(10);
-    let b = util::rhs_random(a.nrows(), 5);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 5);
     let mut solver = PcgSolver::new(1e-8, 5_000);
     solver.set_variant(PcgVariant::Pipelined { replace_every: 0 });
     let mut ws = Workspace::default();
@@ -22,7 +23,7 @@ fn pipelined_cg_uses_single_reduction_per_iteration() -> Result<(), KError> {
     let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
     pc.setup(op)?;
     let comm = UniverseComm::NoComm(NoComm);
-    let mut x = vec![0.0; a.nrows()];
+    let mut x: Vec<R> = vec![R::default(); a.nrows()];
     let stats = solver.solve(
         op,
         Some(&mut pc),
@@ -55,12 +56,12 @@ fn pipelined_cg_uses_single_reduction_per_iteration() -> Result<(), KError> {
 fn gmres_classic_reduction_count_within_expected_bounds() -> Result<(), KError> {
     crate::utils::reduction::install_test_counter(true);
     let a = util::nonsym_convdiff_2d(8, 4.0);
-    let b = util::rhs_random(a.nrows(), 17);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 17);
     let mut solver = GmresSolver::new(12, 1e-8, 500);
     solver.set_variant(GmresVariant::Classical);
     let mut ws = Workspace::default();
     let comm = UniverseComm::NoComm(NoComm);
-    let mut x = vec![0.0; a.nrows()];
+    let mut x: Vec<R> = vec![R::default(); a.nrows()];
     let stats = solver.solve_f64(
         &a,
         None,

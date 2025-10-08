@@ -1,4 +1,5 @@
 use super::halo::HaloPlan;
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm};
@@ -38,9 +39,9 @@ impl ParCsrMatrix {
             ));
         }
 
-        let mut x_ghost = vec![0.0; self.colmap_ghost.len()];
-        let mut recv_buf = vec![0.0; self.halo.recv_idx.len()];
-        let mut send_buf = vec![0.0; self.halo.send_idx.len()];
+        let mut x_ghost: Vec<R> = vec![R::default(); self.colmap_ghost.len()];
+        let mut recv_buf: Vec<R> = vec![R::default(); self.halo.recv_idx.len()];
+        let mut send_buf: Vec<R> = vec![R::default(); self.halo.send_idx.len()];
         let mut reqs = self
             .halo
             .begin_exchange(&self.comm, x_owned, &mut send_buf, &mut recv_buf);
@@ -63,6 +64,7 @@ impl ParCsrMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix;
     use crate::parallel::{NoComm, UniverseComm};
 
@@ -84,9 +86,9 @@ mod tests {
             colmap_ghost: Vec::new(),
             halo,
         };
-        let x = vec![1.0, 2.0];
-        let mut y = vec![0.0; 2];
+        let x = vec![R::from(1.0), R::from(2.0)];
+        let mut y = vec![R::default(); 2];
         par.spmv(&x, &mut y).unwrap();
-        assert_eq!(y, vec![2.0, 6.0]);
+        assert_eq!(y, vec![R::from(2.0), R::from(6.0)]);
     }
 }

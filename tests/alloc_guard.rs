@@ -1,6 +1,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
+use kryst::algebra::prelude::*;
+
 pub struct CountingAlloc;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -30,8 +32,8 @@ fn apply_has_no_allocations() {
     let a = crate::fixtures::csr_poisson_1d(n);
     let mut pc = kryst::preconditioner::jacobi::Jacobi::new();
     pc.setup(&a).unwrap();
-    let x = vec![1.0; n];
-    let mut y = vec![0.0; n];
+    let x = vec![S::one().real(); n];
+    let mut y = vec![R::default(); n];
     let before = allocs();
     pc.apply(PcSide::Left, &x, &mut y).unwrap();
     let after = allocs();

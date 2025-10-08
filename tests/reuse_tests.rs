@@ -1,4 +1,5 @@
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
@@ -58,7 +59,7 @@ struct PatternCheckPc {
 }
 impl Preconditioner for PatternCheckPc {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, 0.0)?;
+        let csr = csr_from_linop(a, R::default())?;
         self.row_ptr = csr.row_ptr().to_vec();
         self.col_idx = csr.col_idx().to_vec();
         Ok(())
@@ -71,7 +72,7 @@ impl Preconditioner for PatternCheckPc {
         true
     }
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, 0.0)?;
+        let csr = csr_from_linop(a, R::default())?;
         if self.row_ptr != csr.row_ptr() || self.col_idx != csr.col_idx() {
             return Err(KError::Unsupported("pattern changed; need update_symbolic"));
         }
@@ -89,7 +90,7 @@ fn pc_rebuilds_on_structure_change() {
         2,
         vec![0, 1, 2],
         vec![0, 1],
-        vec![1.0, 2.0],
+        vec![S::from_real(1.0).real(), S::from_real(2.0).real()],
     ));
     let op1 = Arc::new(CsrOp::new(a1));
     let a2 = Arc::new(CsrMatrix::from_csr(
@@ -97,7 +98,7 @@ fn pc_rebuilds_on_structure_change() {
         2,
         vec![0, 1, 2],
         vec![0, 1],
-        vec![3.0, 4.0],
+        vec![S::from_real(3.0).real(), S::from_real(4.0).real()],
     ));
     let op2 = Arc::new(CsrOp::new(a2));
 
@@ -122,7 +123,7 @@ fn jacobi_numeric_update_without_rebuild() {
         2,
         vec![0, 1, 2],
         vec![0, 1],
-        vec![1.0, 2.0],
+        vec![S::from_real(1.0).real(), S::from_real(2.0).real()],
     ));
     let op = Arc::new(CsrOp::new(a));
 
@@ -144,12 +145,18 @@ fn jacobi_numeric_update_without_rebuild() {
 
 #[test]
 fn denseop_cache_invalidation() {
-    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| {
+        if i == j {
+            S::one().real()
+        } else {
+            R::default()
+        }
+    }));
     let op = DenseOp::new(mat);
-    let csr1 = op.to_csr_cached(0.0);
+    let csr1 = op.to_csr_cached(R::default());
     let p1 = Arc::as_ptr(&csr1);
     op.mark_values_changed();
-    let csr2 = op.to_csr_cached(0.0);
+    let csr2 = op.to_csr_cached(R::default());
     let p2 = Arc::as_ptr(&csr2);
     assert_ne!(p1, p2);
 }
@@ -158,7 +165,13 @@ fn denseop_cache_invalidation() {
 #[test]
 fn unknown_vid_triggers_numeric_refresh() {
     let (pc, numeric, _) = CountPc::new();
-    let a = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let a = Arc::new(Mat::from_fn(2, 2, |i, j| {
+        if i == j {
+            S::one().real()
+        } else {
+            R::default()
+        }
+    }));
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Gmres).unwrap();
     ksp.set_pc_box_for_tests(Box::new(pc));
@@ -171,15 +184,21 @@ fn unknown_vid_triggers_numeric_refresh() {
 #[test]
 fn pattern_mismatch_in_numeric_update() {
     let mut pc = PatternCheckPc::default();
-    let a1 = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+    let a1 = Mat::from_fn(2, 2, |i, j| {
+        if i == j {
+            S::one().real()
+        } else {
+            R::default()
+        }
+    });
     pc.setup(&a1).unwrap();
     let a2 = Mat::from_fn(2, 2, |i, j| {
         if i == j {
-            1.0
+            S::one().real()
         } else if i == 0 && j == 1 {
-            0.5
+            S::from_real(0.5).real()
         } else {
-            0.0
+            R::default()
         }
     });
     let err = pc.update_numeric(&a2).unwrap_err();
@@ -192,7 +211,13 @@ fn pattern_mismatch_in_numeric_update() {
 #[test]
 fn values_id_known_triggers_single_numeric_update() {
     let (pc, numeric, _) = CountPc::new();
-    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| {
+        if i == j {
+            S::one().real()
+        } else {
+            R::default()
+        }
+    }));
     let op = Arc::new(DenseOp::new(mat.clone()));
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Gmres).unwrap();
@@ -209,7 +234,13 @@ fn values_id_known_triggers_single_numeric_update() {
 #[test]
 fn policy_never_forces_symbolic_update() {
     let (pc, numeric, symbolic) = CountPc::new();
-    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 }));
+    let mat = Arc::new(Mat::from_fn(2, 2, |i, j| {
+        if i == j {
+            S::one().real()
+        } else {
+            R::default()
+        }
+    }));
     let op = Arc::new(DenseOp::new(mat.clone()));
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Gmres).unwrap();

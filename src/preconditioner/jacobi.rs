@@ -1,5 +1,6 @@
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -12,7 +13,7 @@ use faer::Mat;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Jacobi {
-    pub(crate) diag_inv: Vec<f64>,
+    pub(crate) diag_inv: Vec<S>,
     n: usize,
     applies: AtomicU64,
 }
@@ -34,7 +35,7 @@ impl Jacobi {
     fn recompute(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
         if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
             let n = csr.nrows().min(csr.ncols());
-            self.diag_inv.resize(n, 0.0);
+            self.diag_inv.resize(n, S::zero());
             for i in 0..n {
                 let rs = csr.row_ptr()[i];
                 let re = csr.row_ptr()[i + 1];
@@ -45,17 +46,25 @@ impl Jacobi {
                         break;
                     }
                 }
-                self.diag_inv[i] = if aii.abs() > 1e-14 { 1.0 / aii } else { 0.0 };
+                self.diag_inv[i] = if aii.abs() > 1e-14 {
+                    S::from_real(1.0 / aii)
+                } else {
+                    S::zero()
+                };
             }
             self.n = n;
             return Ok(());
         }
         if let Some(d) = pmat.as_any().downcast_ref::<Mat<f64>>() {
             let n = d.nrows().min(d.ncols());
-            self.diag_inv.resize(n, 0.0);
+            self.diag_inv.resize(n, S::zero());
             for i in 0..n {
                 let aii = d[(i, i)];
-                self.diag_inv[i] = if aii.abs() > 1e-14 { 1.0 / aii } else { 0.0 };
+                self.diag_inv[i] = if aii.abs() > 1e-14 {
+                    S::from_real(1.0 / aii)
+                } else {
+                    S::zero()
+                };
             }
             self.n = n;
             return Ok(());
@@ -88,7 +97,8 @@ impl Preconditioner for Jacobi {
             )));
         }
         for i in 0..self.n {
-            z[i] = self.diag_inv[i] * r[i];
+            let inv = self.diag_inv[i].real();
+            z[i] = inv * r[i];
         }
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -121,7 +131,7 @@ impl KPreconditioner for Jacobi {
         }
 
         for i in 0..self.n {
-            y[i] = x[i] * S::from_real(self.diag_inv[i]);
+            y[i] = x[i] * self.diag_inv[i];
         }
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())

@@ -2,6 +2,8 @@
 //!
 //! Accepts [`PcSide::Left`] or [`PcSide::Right`]; residuals are reported as the true `||r||`.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -107,8 +109,8 @@ impl TfqmrSolver {
         global_dot_conj_many_into(comm, &initial_pairs, &mut reductions);
         let mut rho: S = reductions[0];
         let mut res_sq: R = dot_result_to_real(reductions[1]);
-        if res_sq < 0.0 {
-            res_sq = 0.0;
+        if res_sq < R::default() {
+            res_sq = R::default();
         }
         let res0: R = res_sq.sqrt();
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
@@ -131,7 +133,7 @@ impl TfqmrSolver {
         yv.copy_from_slice(r);
         wv.copy_from_slice(r);
         d.fill(S::zero());
-        let mut theta_prev: R = 0.0;
+        let mut theta_prev: R = R::default();
         let mut eta_prev: S = S::zero();
         let mut dpold: R = res0;
         let mut true_res: R = res0;
@@ -152,7 +154,7 @@ impl TfqmrSolver {
                 return Ok(stats);
             }
             let alpha = rho / sigma;
-            if !alpha.is_finite() || alpha == S::zero() {
+            if !alpha.is_finite() || alpha.abs() <= R::default() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
                 stats.reason = ConvergedReason::DivergedDtol;
@@ -268,8 +270,8 @@ impl TfqmrSolver {
             }
 
             let mut rr = dot_result_to_real(reductions[1]);
-            if rr < 0.0 {
-                rr = 0.0;
+            if rr < R::default() {
+                rr = R::default();
             }
             dpold = rr.sqrt();
 
@@ -465,27 +467,33 @@ impl<'a> TfqmrWorkspace<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::op::LinOpF64;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::prelude::*;
+    use crate::assert_vec_close;
+    use crate::ops::klinop::KLinOp;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::testkit::s;
+    use std::any::Any;
     use std::sync::{Arc, Mutex};
 
     struct Dense {
-        a: Vec<Vec<f64>>,
+        a: Vec<Vec<S>>,
     }
 
     impl LinOp for Dense {
-        type S = f64;
+        type S = S;
 
         fn dims(&self) -> (usize, usize) {
             (self.a.len(), self.a[0].len())
         }
 
-        fn matvec(&self, x: &[f64], y: &mut [f64]) {
-            for i in 0..self.a.len() {
-                let mut acc = 0.0;
-                for j in 0..self.a[0].len() {
-                    acc += self.a[i][j] * x[j];
+        fn matvec(&self, x: &[S], y: &mut [S]) {
+            for (row, yi) in self.a.iter().zip(y.iter_mut()) {
+                let mut acc = S::zero();
+                for (aij, &xj) in row.iter().zip(x.iter()) {
+                    acc = acc + *aij * xj;
                 }
-                y[i] = acc;
+                *yi = acc;
             }
         }
 
@@ -494,26 +502,34 @@ mod tests {
         }
     }
 
-    impl LinOpF64 for Dense {
-        #[inline]
+    impl KLinOp for Dense {
+        type Scalar = S;
+
         fn dims(&self) -> (usize, usize) {
             LinOp::dims(self)
         }
 
-        #[inline]
-        fn matvec(&self, x: &[f64], y: &mut [f64]) {
-            LinOp::matvec(self, x, y)
+        fn matvec_s(&self, x: &[S], y: &mut [S], _scratch: &mut BridgeScratch) {
+            LinOp::matvec(self, x, y);
         }
     }
 
     struct IdentityPc;
 
-    impl Preconditioner for IdentityPc {
-        fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-            Ok(())
+    impl KPreconditioner for IdentityPc {
+        type Scalar = S;
+
+        fn dims(&self) -> (usize, usize) {
+            (0, 0)
         }
 
-        fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        fn apply_s(
+            &self,
+            _side: PcSide,
+            x: &[S],
+            y: &mut [S],
+            _scratch: &mut BridgeScratch,
+        ) -> Result<(), KError> {
             y.copy_from_slice(x);
             Ok(())
         }
@@ -523,14 +539,14 @@ mod tests {
     #[ignore]
     fn tfqmr_solves_small_nonsym() {
         let a = Dense {
-            a: vec![vec![2.0, 1.0], vec![3.0, 4.0]],
+            a: vec![vec![s(2.0), s(1.0)], vec![s(3.0), s(4.0)]],
         };
-        let b = [4.0, 11.0];
-        let mut x = [0.0, 0.0];
+        let b = [s(4.0), s(11.0)];
+        let mut x = [S::zero(), S::zero()];
         let mut w = Workspace::new(2);
         let mut solver = TfqmrSolver::new(1e-12, 200);
         let stats = solver
-            .solve(
+            .solve_k(
                 &a,
                 None,
                 &b,
@@ -541,11 +557,8 @@ mod tests {
                 Some(&mut w),
             )
             .unwrap();
-        assert!(
-            (x[0] - 1.0).abs() < 1e-8 && (x[1] - 2.0).abs() < 1e-8,
-            "x={:?}",
-            x
-        );
+        let expected = [s(1.0), s(2.0)];
+        assert_vec_close!("tfqmr small nonsym", &x, &expected);
         assert!(stats.final_residual <= 1e-10);
     }
 
@@ -554,21 +567,21 @@ mod tests {
     fn tfqmr_solves_diag_dom() {
         let a = Dense {
             a: vec![
-                vec![5.0, 2.0, 0.0, 0.0, 0.0],
-                vec![1.0, 5.0, 2.0, 0.0, 0.0],
-                vec![0.0, 1.0, 5.0, 2.0, 0.0],
-                vec![0.0, 0.0, 1.0, 5.0, 2.0],
-                vec![0.0, 0.0, 0.0, 1.0, 5.0],
+                vec![s(5.0), s(2.0), S::zero(), S::zero(), S::zero()],
+                vec![s(1.0), s(5.0), s(2.0), S::zero(), S::zero()],
+                vec![S::zero(), s(1.0), s(5.0), s(2.0), S::zero()],
+                vec![S::zero(), S::zero(), s(1.0), s(5.0), s(2.0)],
+                vec![S::zero(), S::zero(), S::zero(), s(1.0), s(5.0)],
             ],
         };
-        let x_true = [1.0, 2.0, 3.0, 4.0, 5.0];
-        let mut b = [0.0; 5];
+        let x_true = [s(1.0), s(2.0), s(3.0), s(4.0), s(5.0)];
+        let mut b = [S::zero(); 5];
         crate::matrix::op::LinOp::matvec(&a, &x_true, &mut b);
-        let mut x = [0.0; 5];
+        let mut x = [S::zero(); 5];
         let mut w = Workspace::new(5);
         let mut solver = TfqmrSolver::new(1e-12, 500);
         let stats = solver
-            .solve(
+            .solve_k(
                 &a,
                 None,
                 &b,
@@ -579,29 +592,27 @@ mod tests {
                 Some(&mut w),
             )
             .unwrap();
-        for i in 0..5 {
-            assert!((x[i] - x_true[i]).abs() < 1e-8);
-        }
+        assert_vec_close!("tfqmr diag dom", &x, &x_true);
         assert!(stats.final_residual <= 1e-10);
     }
 
     #[test]
     fn tfqmr_monitors_and_pc() {
         let a = Dense {
-            a: vec![vec![2.0, 1.0], vec![3.0, 4.0]],
+            a: vec![vec![s(2.0), s(1.0)], vec![s(3.0), s(4.0)]],
         };
-        let b = [4.0, 11.0];
-        let mut x = [0.0, 0.0];
+        let b = [s(4.0), s(11.0)];
+        let mut x = [S::zero(), S::zero()];
         let mut w = Workspace::new(2);
         let mut solver = TfqmrSolver::new(1e-12, 200);
         let mut pc = IdentityPc;
-        let residuals: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let residuals: Arc<Mutex<Vec<R>>> = Arc::new(Mutex::new(Vec::new()));
         let res_clone = residuals.clone();
-        let monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>> = vec![Box::new(move |_, r| {
+        let monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>> = vec![Box::new(move |_, r| {
             res_clone.lock().unwrap().push(r);
         })];
         let _stats = solver
-            .solve(
+            .solve_k(
                 &a,
                 Some(&mut pc),
                 &b,

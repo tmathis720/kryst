@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
@@ -11,12 +12,12 @@ use super::util;
 
 fn solve_with_variant(
     a: &crate::matrix::sparse::CsrMatrix<f64>,
-    b: &[f64],
+    b: &[R],
     variant: PcgVariant,
-) -> Result<(Vec<f64>, usize, f64), KError> {
+) -> Result<(Vec<R>, usize, R), KError> {
     let mut solver = PcgSolver::new(1e-10, 5_000);
     solver.set_variant(variant);
-    let mut x = vec![0.0f64; b.len()];
+    let mut x: Vec<R> = vec![R::default(); b.len()];
     let mut ws = Workspace::default();
     let mut pc = Jacobi::new();
     let op: &dyn crate::matrix::op::LinOp<S = f64> = a;
@@ -42,7 +43,7 @@ fn pcg_pipelined_matches_classic_on_spd_gallery() -> Result<(), KError> {
     for &n in &sizes {
         let a = util::spd_poisson2d(n);
         let b = util::rhs_random(a.nrows(), 42);
-        let bnorm = util::vec_norm(&b).max(1e-32);
+        let bnorm = util::vec_norm(&b).max(R::from(1e-32));
 
         let (x_classic, it_classic, res_classic) = solve_with_variant(&a, &b, PcgVariant::Classic)?;
         let (_x_pipe, it_pipe, res_pipe) = solve_with_variant(
@@ -54,7 +55,7 @@ fn pcg_pipelined_matches_classic_on_spd_gallery() -> Result<(), KError> {
         )?;
 
         assert!(
-            res_classic <= 1e-10 * bnorm + 1e-12,
+            res_classic <= R::from(1e-10) * bnorm + R::from(1e-12),
             "classic residual {:.3e} exceeds tolerance with bnorm {:.3e}",
             res_classic,
             bnorm
@@ -64,7 +65,7 @@ fn pcg_pipelined_matches_classic_on_spd_gallery() -> Result<(), KError> {
         // solver reaches the tighter 1e-10 tolerance, so we only require
         // agreement to 1e-8 in these checks.
         assert!(
-            res_pipe <= 1e-8 * bnorm + 1e-10,
+            res_pipe <= R::from(1e-8) * bnorm + R::from(1e-10),
             "pipelined residual {:.3e} exceeds relaxed tolerance with bnorm {:.3e}; classic {:.3e}",
             res_pipe,
             bnorm,
@@ -80,7 +81,7 @@ fn pcg_pipelined_matches_classic_on_spd_gallery() -> Result<(), KError> {
         // Ensure the solutions are close in norm.
         let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
         let r_classic = util::true_residual_norm(op, &x_classic, &b);
-        assert!(r_classic <= 1e-10 * bnorm + 1e-12);
+        assert!(r_classic <= R::from(1e-10) * bnorm + R::from(1e-12));
     }
     Ok(())
 }

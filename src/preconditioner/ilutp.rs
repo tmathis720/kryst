@@ -9,7 +9,7 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
+#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};

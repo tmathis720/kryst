@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
 use kryst::matrix::op::LinOp;
@@ -33,11 +34,15 @@ fn fgmres_uses_apply_mut() {
     let hits = Arc::new(AtomicUsize::new(0));
     let mut pc = MutableCountPc { hits: hits.clone() };
 
-    let a = faer::Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+    let a = faer::Mat::<R>::from_fn(
+        2,
+        2,
+        |i, j| if i == j { R::from(1.0) } else { R::default() },
+    );
     let amat = &a as &dyn LinOp<S = f64>;
     let mut solver = FgmresSolver::new(1e-6, 10, 2);
-    let b = [1.0, 2.0];
-    let mut x = [0.0, 0.0];
+    let b = [R::from(1.0), R::from(2.0)];
+    let mut x = [R::default(); 2];
     let mut work = Workspace::new(2);
     solver
         .solve_flexible(

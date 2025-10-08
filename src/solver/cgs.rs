@@ -8,6 +8,8 @@
 //! - Monitors report the true residual `||r||_2`.
 //! - Parallel safety: all inner products/norms use `UniverseComm`.
 
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -145,7 +147,7 @@ impl CgsSolver {
 
         let mut r_tld = vec![S::zero(); n];
 
-        if x.iter().any(|&xi| xi != S::zero()) {
+        if x.iter().any(|&xi| xi.abs() > R::default()) {
             a.matvec_s(x, &mut *v, &mut *scratch);
             for i in 0..n {
                 r[i] = b[i] - v[i];

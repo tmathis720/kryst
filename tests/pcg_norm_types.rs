@@ -1,4 +1,6 @@
 use faer::Mat;
+use kryst::algebra::prelude::*;
+use kryst::assert_s_close;
 use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
 use kryst::parallel::{NoComm, UniverseComm};
@@ -20,13 +22,15 @@ impl Preconditioner for HalfPc {
     }
 }
 
-fn run(norm: CgNormType, expected: f64) {
-    let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
-    let b = vec![2.0];
-    let mut x = vec![0.0];
+fn run(norm: CgNormType, expected: R) {
+    let one = S::one().real();
+    let zero = S::zero().real();
+    let a = Mat::<R>::from_fn(1, 1, |_, _| one);
+    let b = vec![S::from_real(2.0).real()];
+    let mut x = vec![zero];
     let mut pc = HalfPc;
     let comm = UniverseComm::NoComm(NoComm);
-    let mut solver = PcgSolver::new(1e-20, 0).with_norm(norm);
+    let mut solver = PcgSolver::new(S::from_real(1e-20).real(), 0).with_norm(norm);
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
 
@@ -52,12 +56,16 @@ fn run(norm: CgNormType, expected: f64) {
             .unwrap();
     }
     let res0 = log.lock().unwrap()[0];
-    assert!((res0 - expected).abs() < 1e-12);
+    let expected_s = S::from_real(expected);
+    let res0_s = S::from_real(res0);
+    assert_s_close!("pcg norm initial residual", expected_s, res0_s);
 }
 
 #[test]
 fn pcg_norm_variants() {
-    run(CgNormType::Preconditioned, (2.0_f64).sqrt());
-    run(CgNormType::Unpreconditioned, 2.0);
-    run(CgNormType::Natural, 1.0);
+    let two = S::from_real(2.0).real();
+    let one = S::one().real();
+    run(CgNormType::Preconditioned, two.sqrt());
+    run(CgNormType::Unpreconditioned, two);
+    run(CgNormType::Natural, one);
 }

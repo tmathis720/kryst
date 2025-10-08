@@ -1,10 +1,11 @@
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::amg::{AMGBuilder, CoarseSolve, RelaxType};
 use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 
-fn poisson_1d(n: usize) -> CsrMatrix<f64> {
+fn poisson_1d(n: usize) -> CsrMatrix<R> {
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::new();
     let mut values = Vec::new();
@@ -12,13 +13,13 @@ fn poisson_1d(n: usize) -> CsrMatrix<f64> {
     for i in 0..n {
         if i > 0 {
             col_idx.push(i - 1);
-            values.push(-1.0);
+            values.push(R::from(-1.0));
         }
         col_idx.push(i);
-        values.push(2.0);
+        values.push(R::from(2.0));
         if i + 1 < n {
             col_idx.push(i + 1);
-            values.push(-1.0);
+            values.push(R::from(-1.0));
         }
         row_ptr.push(col_idx.len());
     }
@@ -32,7 +33,7 @@ fn spd_preconditioned_operator_positive() {
         .relaxation_type(RelaxType::Jacobi)
         .grid_relax_type_all(RelaxType::Jacobi)
         .require_spd(true)
-        .build(&Mat::<f64>::zeros(0, 0))
+        .build(&Mat::<R>::zeros(0, 0))
         .unwrap();
     amg.setup(&a).unwrap();
 
@@ -41,18 +42,23 @@ fn spd_preconditioned_operator_positive() {
     assert_eq!(caps.side_restriction, Some(PcSide::Left));
 
     let n = a.nrows();
-    let mut x = vec![0.0; n];
-    let mut ax = vec![0.0; n];
-    let mut y = vec![0.0; n];
+    let mut x = vec![R::default(); n];
+    let mut ax = vec![R::default(); n];
+    let mut y = vec![R::default(); n];
     for t in 0..5 {
         for i in 0..n {
-            x[i] = ((i + 17 * t) % 11) as f64 - 5.0;
+            x[i] = R::from(((i + 17 * t) % 11) as f64) - R::from(5.0);
         }
-        a.spmv_scaled(1.0, &x, 0.0, &mut ax).unwrap();
-        y.fill(0.0);
+        let alpha = S::from_real(1.0).real();
+        let beta = R::default();
+        a.spmv_scaled(alpha, &x, beta, &mut ax).unwrap();
+        y.fill(R::default());
         amg.apply(PcSide::Left, &ax, &mut y).unwrap();
-        let qf = x.iter().zip(&y).map(|(xi, yi)| xi * yi).sum::<f64>();
-        assert!(qf > 0.0, "quadratic form should be positive, got {qf}");
+        let qf = x.iter().zip(&y).map(|(xi, yi)| *xi * *yi).sum::<R>();
+        assert!(
+            qf > R::default(),
+            "quadratic form should be positive, got {qf}"
+        );
     }
 }
 
@@ -63,7 +69,7 @@ fn spd_enforces_r_equals_pt() {
         .relaxation_type(RelaxType::Jacobi)
         .grid_relax_type_all(RelaxType::Jacobi)
         .require_spd(true)
-        .build(&Mat::<f64>::zeros(0, 0))
+        .build(&Mat::<R>::zeros(0, 0))
         .unwrap();
     amg.setup(&a).unwrap();
     assert!(amg.debug_levels_r_equals_pt());
@@ -77,7 +83,7 @@ fn spd_rejects_ilu_coarse_solver() {
         .grid_relax_type_all(RelaxType::Jacobi)
         .coarse_solve(CoarseSolve::ILU)
         .require_spd(true)
-        .build(&Mat::<f64>::zeros(0, 0))
+        .build(&Mat::<R>::zeros(0, 0))
         .unwrap();
     let err = amg.setup(&a).unwrap_err();
     match err {
@@ -96,7 +102,7 @@ fn spd_requires_symmetric_sweeps() {
         .grid_relax_type_all(RelaxType::Jacobi)
         .smoothing_sweeps(2, 1)
         .require_spd(true)
-        .build(&Mat::<f64>::zeros(0, 0))
+        .build(&Mat::<R>::zeros(0, 0))
         .unwrap();
     let err = amg.setup(&a).unwrap_err();
     match err {
@@ -113,9 +119,9 @@ fn spd_rejects_non_galerkin_when_forbidden() {
     let mut amg = AMGBuilder::new()
         .relaxation_type(RelaxType::Jacobi)
         .grid_relax_type_all(RelaxType::Jacobi)
-        .non_galerkin(true, 1, 1e-3, 1e-2, 4)
+        .non_galerkin(true, 1, R::from(1e-3), R::from(1e-2), 4)
         .require_spd(true)
-        .build(&Mat::<f64>::zeros(0, 0))
+        .build(&Mat::<R>::zeros(0, 0))
         .unwrap();
     let err = amg.setup(&a).unwrap_err();
     match err {
@@ -133,11 +139,11 @@ fn spd_right_side_errors() {
         .relaxation_type(RelaxType::Jacobi)
         .grid_relax_type_all(RelaxType::Jacobi)
         .require_spd(true)
-        .build(&Mat::<f64>::zeros(0, 0))
+        .build(&Mat::<R>::zeros(0, 0))
         .unwrap();
     amg.setup(&a).unwrap();
-    let rhs = vec![1.0; a.nrows()];
-    let mut z = vec![0.0; a.nrows()];
+    let rhs = vec![R::from(1.0); a.nrows()];
+    let mut z = vec![R::default(); a.nrows()];
     let err = amg.apply(PcSide::Right, &rhs, &mut z).unwrap_err();
     match err {
         KError::InvalidInput(msg) => {

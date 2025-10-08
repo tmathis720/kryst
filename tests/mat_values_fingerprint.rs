@@ -1,16 +1,21 @@
 #![cfg(feature = "mat-values-fingerprint")]
 
 use faer::Mat;
+use kryst::algebra::prelude::*;
 use kryst::matrix::format::AsFormat;
 use std::sync::Arc;
 
 #[test]
 fn raw_mat_csc_cache_invalidation_with_fingerprint() {
-    let mut m = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-    let c1 = <Mat<f64> as AsFormat>::to_csc_cached(&m, 0.0);
+    let mut m = Mat::<R>::from_fn(
+        2,
+        2,
+        |i, j| if i == j { R::from(1.0) } else { R::default() },
+    );
+    let c1 = <Mat<R> as AsFormat>::to_csc_cached(&m, R::default());
     // mutate values in-place
-    m[(0, 0)] = 2.0;
-    let c2 = <Mat<f64> as AsFormat>::to_csc_cached(&m, 0.0);
+    m[(0, 0)] = R::from(2.0);
+    let c2 = <Mat<R> as AsFormat>::to_csc_cached(&m, R::default());
     let p1 = Arc::as_ptr(&c1) as usize;
     let p2 = Arc::as_ptr(&c2) as usize;
     assert_ne!(

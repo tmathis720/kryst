@@ -1,3 +1,7 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
+#[allow(unused_imports)]
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use num_traits::{Float, One, Zero};
 

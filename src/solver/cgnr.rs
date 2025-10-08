@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -33,14 +35,11 @@ impl CgnrSolver {
     }
 }
 
-fn dot(x: &[S], y: &[S], comm: &UniverseComm) -> S {
-    global_dot_conj(comm, x, y)
-}
-
 #[inline]
 fn norm_from_dot(result: S) -> R {
     let real = dot_result_to_real(result);
-    let clamped = if real >= R::zero() { real } else { R::zero() };
+    let zero = R::default();
+    let clamped = if real >= zero { real } else { zero };
     clamped.sqrt()
 }
 
@@ -125,7 +124,11 @@ impl CgnrSolver {
             KError::InvalidInput("CGNR requires a Workspace; use KSP or Workspace::new(n)".into())
         })?;
         if b.is_empty() {
-            return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
+            return Ok(SolveStats::new(
+                0,
+                R::default(),
+                ConvergedReason::ConvergedAtol,
+            ));
         }
 
         let buffers = CgnrWorkspace::acquire(work, m, ncols);
@@ -140,7 +143,7 @@ impl CgnrSolver {
         let monitors = monitors.unwrap_or(&[]);
         let mut r_tld = vec![S::zero(); m];
 
-        if x.iter().any(|&xi| xi != S::zero()) {
+        if x.iter().any(|&xi| xi.abs() > R::default()) {
             a.matvec_s(x, ap, scratch);
             for (ri, (&bi, &api)) in r.iter_mut().zip(b.iter().zip(ap.iter())) {
                 *ri = bi - api;
@@ -181,8 +184,8 @@ impl CgnrSolver {
             iters = k;
 
             a.matvec_s(p, ap, scratch);
-            let denom = dot_result_to_real(dot(ap, ap, comm));
-            if denom <= 0.0 || !denom.is_finite() {
+            let denom = dot_result_to_real(global_dot_conj(comm, ap, ap));
+            if denom <= R::default() || !denom.is_finite() {
                 let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
                 return Ok(SolveStats::new(
                     k - 1,

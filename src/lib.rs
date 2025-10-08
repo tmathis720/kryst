@@ -1,4 +1,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
+#![deny(unused_must_use)]
+#![warn(clippy::float_cmp)]
+#![deny(clippy::manual_memcpy)]
+#![cfg_attr(feature = "complex", allow(clippy::approx_constant))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! # kryst

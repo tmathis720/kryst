@@ -1,6 +1,7 @@
 use kryst::algebra::blas::nrm2;
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
+use kryst::assert_vec_close;
 use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
 use kryst::matrix::op::CsrOp;
@@ -86,6 +87,7 @@ impl KPreconditioner for NativeJacobiPc {
 }
 
 struct JacobiF64 {
+    // INTENTIONAL f64: exercises the legacy preconditioner API.
     inv_diag: Vec<f64>,
 }
 
@@ -115,9 +117,16 @@ impl Preconditioner for JacobiF64 {
     }
 }
 
-fn cg_reference_system() -> (Vec<f64>, Vec<f64>) {
-    let diag = vec![4.0, 5.0, 6.0];
-    let x_true = vec![1.0, -1.0, 2.0];
+fn cg_reference_system() -> (Vec<R>, Vec<R>) {
+    let four = S::from_real(4.0).real();
+    let five = S::from_real(5.0).real();
+    let six = S::from_real(6.0).real();
+    let diag = vec![four, five, six];
+    let x_true = vec![
+        S::from_real(1.0).real(),
+        S::from_real(-1.0).real(),
+        S::from_real(2.0).real(),
+    ];
     (diag, x_true)
 }
 
@@ -165,13 +174,14 @@ fn cg_runs_with_native_and_wrapped_backends() {
     }
     assert!(nrm2(&ax) < 1e-10);
 
-    let mat = Mat::<f64>::from_fn(n, n, |i, j| if i == j { diag[i] } else { 0.0 });
-    let b_f64: Vec<f64> = diag
+    let zero = S::zero().real();
+    let mat = Mat::<f64>::from_fn(n, n, |i, j| if i == j { diag[i] } else { zero });
+    let b_real: Vec<R> = diag
         .iter()
         .zip(x_true.iter())
         .map(|(&d, &x)| d * x)
         .collect();
-    let b_wrapped: Vec<S> = b_f64.iter().copied().map(S::from_real).collect();
+    let b_wrapped: Vec<S> = b_real.iter().copied().map(S::from_real).collect();
     let mut x_wrapped = vec![S::zero(); n];
     let mut solver_wrapped = CgSolver::new(1e-12, 32);
     let mut workspace_wrapped = Workspace::new(n);
@@ -202,7 +212,9 @@ fn cg_runs_with_native_and_wrapped_backends() {
     }
     assert!(nrm2(&ax_wrapped) < 1e-10);
 
-    let pc_f64 = JacobiF64::new(diag.iter().map(|&d| 1.0 / d).collect());
+    let one = S::from_real(1.0).real();
+    let inv_diag: Vec<f64> = diag.iter().map(|&d| one / d).collect();
+    let pc_f64 = JacobiF64::new(inv_diag);
     let pc_wrapped = as_s_pc(&pc_f64);
     let mut pc_out = vec![S::zero(); n];
     let mut pc_scratch = BridgeScratch::default();
@@ -217,8 +229,12 @@ fn cg_runs_with_native_and_wrapped_backends() {
 
 #[test]
 fn gmres_runs_with_native_s_backend() {
-    let diag = vec![4.0, 5.0, 6.0, 7.0];
-    let diag_s: Vec<S> = diag.iter().copied().map(S::from_real).collect();
+    let diag_s: Vec<S> = vec![
+        S::from_real(4.0),
+        S::from_real(5.0),
+        S::from_real(6.0),
+        S::from_real(7.0),
+    ];
     let x_true: Vec<S> = vec![
         S::from_real(1.0),
         S::from_real(-1.0),
@@ -230,11 +246,11 @@ fn gmres_runs_with_native_s_backend() {
         .zip(x_true.iter())
         .map(|(&d, &x)| d * x)
         .collect();
-    let mut x = vec![S::zero(); diag.len()];
+    let mut x = vec![S::zero(); diag_s.len()];
 
     let mut gmres = GmresSolver::new(8, 1e-12, 64);
     let comm = UniverseComm::NoComm(NoComm);
-    let mut workspace = Workspace::new(diag.len());
+    let mut workspace = Workspace::new(diag_s.len());
     gmres.setup_workspace(&mut workspace);
 
     let op = NativeDiagOp::new(diag_s.clone());
@@ -254,7 +270,7 @@ fn gmres_runs_with_native_s_backend() {
         .expect("native GMRES solve");
 
     let mut scratch = BridgeScratch::default();
-    let mut ax = vec![S::zero(); diag.len()];
+    let mut ax = vec![S::zero(); diag_s.len()];
     op.matvec_s(&x, &mut ax, &mut scratch);
     for (ai, bi) in ax.iter_mut().zip(b.iter()) {
         *ai -= *bi;
@@ -264,8 +280,16 @@ fn gmres_runs_with_native_s_backend() {
 
 #[test]
 fn gmres_runs_with_wrapped_f64_backends() {
-    let diag = vec![3.0, 4.0, 5.0];
-    let x_true = vec![1.0, -2.0, 0.5];
+    let diag = vec![
+        S::from_real(3.0).real(),
+        S::from_real(4.0).real(),
+        S::from_real(5.0).real(),
+    ];
+    let x_true = vec![
+        S::from_real(1.0).real(),
+        S::from_real(-2.0).real(),
+        S::from_real(0.5).real(),
+    ];
     let n = diag.len();
 
     let row_ptr: Vec<usize> = (0..=n).collect();
@@ -316,9 +340,14 @@ fn gmres_runs_with_wrapped_f64_backends() {
 
 #[test]
 fn jacobi_preconditioner_exposes_scalar_generic_bridge() {
-    let diag = vec![2.0, 3.0, 5.0];
+    let diag = vec![
+        S::from_real(2.0).real(),
+        S::from_real(3.0).real(),
+        S::from_real(5.0).real(),
+    ];
     let n = diag.len();
-    let mat = Mat::<f64>::from_fn(n, n, |i, j| if i == j { diag[i] } else { 0.0 });
+    let zero = S::zero().real();
+    let mat = Mat::<f64>::from_fn(n, n, |i, j| if i == j { diag[i] } else { zero });
 
     let mut jacobi = Jacobi::new();
     jacobi.setup(&mat).expect("jacobi setup");
@@ -330,15 +359,14 @@ fn jacobi_preconditioner_exposes_scalar_generic_bridge() {
     <Jacobi as KPreconditioner>::apply_s(&jacobi, PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
         .expect("jacobi apply_s");
 
-    let rhs_real: Vec<f64> = rhs_s.iter().map(|v| v.real()).collect();
-    let mut out_real = vec![0.0; n];
+    let rhs_real: Vec<R> = rhs_s.iter().map(|v| v.real()).collect();
+    let mut out_real: Vec<R> = vec![R::default(); n];
     jacobi
         .apply(PcSide::Left, &rhs_real, &mut out_real)
         .expect("jacobi apply reference");
 
-    for (ys, yr) in out_s.iter().zip(out_real.iter()) {
-        assert!((ys.real() - yr).abs() < 1e-12);
-    }
+    let expected: Vec<S> = out_real.iter().copied().map(S::from_real).collect();
+    assert_vec_close!("jacobi bridge compare", &out_s, &expected);
 }
 
 #[test]
@@ -346,7 +374,11 @@ fn ilucsr_exposes_kpreconditioner_interface() {
     let n = 3;
     let row_ptr = vec![0, 1, 2, 3];
     let col_idx = vec![0, 1, 2];
-    let values = vec![4.0, 5.0, 6.0];
+    let values = vec![
+        S::from_real(4.0).real(),
+        S::from_real(5.0).real(),
+        S::from_real(6.0).real(),
+    ];
     let csr = Arc::new(RealCsrMatrix::from_csr(n, n, row_ptr, col_idx, values));
     let op = CsrOp::new(csr.clone());
 
@@ -362,14 +394,13 @@ fn ilucsr_exposes_kpreconditioner_interface() {
     KPreconditioner::apply_s(&ilu, PcSide::Left, &rhs, &mut out, &mut scratch)
         .expect("IluCsr apply_s");
 
-    let rhs_r: Vec<f64> = rhs.iter().map(|v| v.real()).collect();
-    let mut out_r = vec![0.0; n];
+    let rhs_r: Vec<R> = rhs.iter().map(|v| v.real()).collect();
+    let mut out_r: Vec<R> = vec![R::default(); n];
     ilu.apply(PcSide::Left, &rhs_r, &mut out_r)
         .expect("IluCsr apply reference");
 
-    for (ys, yr) in out.iter().zip(out_r.iter()) {
-        assert!((ys.real() - yr).abs() < 1e-12);
-    }
+    let expected: Vec<S> = out_r.iter().copied().map(S::from_real).collect();
+    assert_vec_close!("ilu bridge compare", &out, &expected);
 }
 
 struct NativeMatrixOp {
@@ -404,15 +435,20 @@ impl KLinOp for NativeMatrixOp {
     }
 }
 
-fn bicg_reference_system() -> (Mat<f64>, Vec<f64>) {
+fn bicg_reference_system() -> (Mat<f64>, Vec<R>) {
+    let four = S::from_real(4.0).real();
+    let three = S::from_real(3.0).real();
+    let two = S::from_real(2.0).real();
+    let one = S::from_real(1.0).real();
+    let minus_two = S::from_real(-2.0).real();
     let a = Mat::<f64>::from_fn(2, 2, |i, j| match (i, j) {
-        (0, 0) => 4.0,
-        (0, 1) => 1.0,
-        (1, 0) => 2.0,
-        (1, 1) => 3.0,
+        (0, 0) => four,
+        (0, 1) => one,
+        (1, 0) => two,
+        (1, 1) => three,
         _ => unreachable!(),
     });
-    let x_true = vec![1.0, -2.0];
+    let x_true = vec![one, minus_two];
     (a, x_true)
 }
 
@@ -420,18 +456,21 @@ fn bicg_reference_system() -> (Mat<f64>, Vec<f64>) {
 fn bicgstab_runs_with_native_and_wrapped_backends() {
     let (a_f64, x_true) = bicg_reference_system();
     let n = x_true.len();
+    let four = S::from_real(4.0);
+    let three = S::from_real(3.0);
+    let two = S::from_real(2.0);
+    let one = S::from_real(1.0);
     let data_s: Vec<S> = (0..n * n)
         .map(|idx| {
             let i = idx / n;
             let j = idx % n;
-            let val = match (i, j) {
-                (0, 0) => 4.0,
-                (0, 1) => 1.0,
-                (1, 0) => 2.0,
-                (1, 1) => 3.0,
+            match (i, j) {
+                (0, 0) => four,
+                (0, 1) => one,
+                (1, 0) => two,
+                (1, 1) => three,
                 _ => unreachable!(),
-            };
-            S::from_real(val)
+            }
         })
         .collect();
     let x_true_s: Vec<S> = x_true.iter().copied().map(S::from_real).collect();
@@ -513,13 +552,16 @@ fn bicgstab_runs_with_native_and_wrapped_backends() {
 #[test]
 fn amg_exposes_kpreconditioner_interface() {
     let n = 6;
+    let two = S::from_real(2.0).real();
+    let minus_one = S::from_real(-1.0).real();
+    let zero = S::zero().real();
     let laplacian = Mat::<f64>::from_fn(n, n, |i, j| {
         if i == j {
-            2.0
+            two
         } else if (i as isize - j as isize).abs() == 1 {
-            -1.0
+            minus_one
         } else {
-            0.0
+            zero
         }
     });
 
@@ -533,20 +575,23 @@ fn amg_exposes_kpreconditioner_interface() {
     let dims = KPreconditioner::dims(&amg);
     assert_eq!(dims, (n, n));
 
+    let n_real = S::from_real(n as f64).real();
     let rhs: Vec<S> = (0..n)
-        .map(|i| S::from_real((i as f64 + 1.0) / (n as f64)))
+        .map(|i| {
+            let numerator = S::from_real(i as f64 + 1.0).real();
+            S::from_real(numerator / n_real)
+        })
         .collect();
     let mut out = vec![S::zero(); n];
     let mut scratch = BridgeScratch::default();
     KPreconditioner::apply_s(&amg, PcSide::Left, &rhs, &mut out, &mut scratch)
         .expect("AMG apply_s");
 
-    let rhs_r: Vec<f64> = rhs.iter().map(|z| z.real()).collect();
-    let mut out_r = vec![0.0; n];
+    let rhs_r: Vec<R> = rhs.iter().map(|z| z.real()).collect();
+    let mut out_r: Vec<R> = vec![R::default(); n];
     amg.apply(PcSide::Left, &rhs_r, &mut out_r)
         .expect("AMG apply");
 
-    for (ys, &yr) in out.iter().zip(out_r.iter()) {
-        assert!((ys.real() - yr).abs() <= 1e-12);
-    }
+    let expected: Vec<S> = out_r.iter().copied().map(S::from_real).collect();
+    assert_vec_close!("amg bridge compare", &out, &expected);
 }
