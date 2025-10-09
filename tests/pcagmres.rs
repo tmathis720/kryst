@@ -7,7 +7,7 @@ use kryst::error::KError;
 use kryst::matrix::op::LinOp;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::{PcSide, Preconditioner};
-use kryst::solver::{LinearSolver, PcaGmresSolver, PcaPcMode};
+use kryst::solver::{PcaGmresSolver, PcaPcMode};
 
 #[test]
 fn pcagmres_solves_dd_nonsym_right_pc() {
@@ -88,21 +88,15 @@ fn pcagmres_solves_dd_nonsym_right_pc() {
     };
 
     // x_true = [1,2,3,4,5], b = A * x_true
-    let x_true = [
-        R::from(1.0),
-        R::from(2.0),
-        R::from(3.0),
-        R::from(4.0),
-        R::from(5.0),
-    ];
-    let mut b = [R::default(); 5];
+    let x_true: Vec<f64> = (1..=5).map(|i| i as f64).collect();
+    let mut b = vec![0.0f64; 5];
     aop.matvec(&x_true, &mut b);
 
-    let mut x = [R::default(); 5];
+    let mut x = vec![0.0f64; 5];
     let mut solver = PcaGmresSolver::new(20, 1, 1, 1e-10, 200);
     solver.pc_mode = PcaPcMode::Right;
     let stats = solver
-        .solve(
+        .solve_f64(
             aop.as_ref(),
             Some(&mut pc),
             &b,
@@ -113,7 +107,9 @@ fn pcagmres_solves_dd_nonsym_right_pc() {
             None,
         )
         .unwrap();
-    let tol = R::from(1e-6);
+    let tol = 1e-6;
     assert!(stats.final_residual <= tol, "res={}", stats.final_residual);
-    assert_vec_close!("pcagmres solution", &x, &x_true);
+    let x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+    let x_true_s: Vec<S> = x_true.iter().copied().map(S::from_real).collect();
+    assert_vec_close!("pcagmres solution", &x_s, &x_true_s);
 }

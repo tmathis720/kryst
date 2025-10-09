@@ -1,4 +1,5 @@
 #![cfg(feature = "complex")]
+#![allow(dead_code)]
 
 use kryst::algebra::blas::nrm2;
 use kryst::algebra::bridge::BridgeScratch;

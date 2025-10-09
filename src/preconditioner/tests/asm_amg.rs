@@ -33,6 +33,10 @@ fn poisson_1d(n: usize) -> CsrMatrix<R> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
 }
 
+fn to_scalar_vec(values: &[R]) -> Vec<S> {
+    values.iter().copied().map(S::from_real).collect()
+}
+
 #[test]
 fn asm_identity_matches_input() {
     let a = Arc::new(identity(4));
@@ -48,7 +52,9 @@ fn asm_identity_matches_input() {
     let mut out: Vec<R> = vec![R::default(); rhs.len()];
     asm.apply(crate::preconditioner::PcSide::Left, &rhs, &mut out)
         .unwrap();
-    assert_vec_close!("asm identity", &rhs, &out);
+    let rhs_s = to_scalar_vec(&rhs);
+    let out_s = to_scalar_vec(&out);
+    assert_vec_close!("asm identity", &rhs_s, &out_s);
 }
 
 #[test]
@@ -75,7 +81,9 @@ fn asm_amg_skip_coarse_matches_asm() {
     hybrid
         .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_hybrid)
         .unwrap();
-    assert_vec_close!("asm vs asm+amg restricted", &y_asm, &y_hybrid);
+    let y_asm_s = to_scalar_vec(&y_asm);
+    let y_hybrid_s = to_scalar_vec(&y_hybrid);
+    assert_vec_close!("asm vs asm+amg restricted", &y_asm_s, &y_hybrid_s);
 }
 
 #[test]

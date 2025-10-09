@@ -2,13 +2,13 @@ use kryst::LinOp;
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
 #[cfg(feature = "rayon")]
-use kryst::matrix::{CsrMatrix, format::AsFormat, sparse::SparseMatrix, spmv};
+use kryst::matrix::{csc::CscMatrix, csr::CsrMatrix as ScalarCsrMatrix, spmv};
 
 #[cfg(feature = "rayon")]
 #[test]
 fn csr_spmv_parallel_matches_serial() {
     // 2x3 matrix [[1,2,0],[0,3,4]]
-    let csr = CsrMatrix::from_csr(
+    let csr = ScalarCsrMatrix::new(
         2,
         3,
         vec![0, 2, 4],
@@ -32,7 +32,7 @@ fn csr_spmv_parallel_matches_serial() {
 #[test]
 fn t_spmv_csr_parallel_matches_serial_csc_backend() {
     // 2x3 matrix [[1,2,0],[0,3,4]]
-    let csr = CsrMatrix::from_csr(
+    let csr = ScalarCsrMatrix::new(
         2,
         3,
         vec![0, 2, 4],
@@ -44,7 +44,18 @@ fn t_spmv_csr_parallel_matches_serial_csc_backend() {
             S::from_real(4.0),
         ],
     );
-    let csc = csr.to_csc_cached(R::default());
+    let csc = CscMatrix::from_csc(
+        2,
+        3,
+        vec![0, 1, 3, 4],
+        vec![0, 0, 1, 1],
+        vec![
+            S::from_real(1.0),
+            S::from_real(2.0),
+            S::from_real(3.0),
+            S::from_real(4.0),
+        ],
+    );
     let x = vec![S::from_real(5.0), S::from_real(6.0)];
     let mut y_serial = vec![S::zero(); 3];
     csc.t_matvec(&x, &mut y_serial);
@@ -61,7 +72,7 @@ fn t_spmv_csr_parallel_matches_serial_csc_backend() {
 #[test]
 fn t_spmv_csr_parallel_matches_serial_gather() {
     // 2x3 matrix [[1,2,0],[0,3,4]]
-    let csr = CsrMatrix::from_csr(
+    let csr = ScalarCsrMatrix::new(
         2,
         3,
         vec![0, 2, 4],
@@ -74,8 +85,19 @@ fn t_spmv_csr_parallel_matches_serial_gather() {
         ],
     );
     let x = vec![S::from_real(5.0), S::from_real(6.0)];
+    let csc = CscMatrix::from_csc(
+        2,
+        3,
+        vec![0, 1, 3, 4],
+        vec![0, 0, 1, 1],
+        vec![
+            S::from_real(1.0),
+            S::from_real(2.0),
+            S::from_real(3.0),
+            S::from_real(4.0),
+        ],
+    );
     let mut y_serial = vec![S::zero(); 3];
-    let csc = csr.to_csc_cached(R::default());
     csc.t_matvec(&x, &mut y_serial);
     let mut y_parallel = vec![S::zero(); 3];
     spmv::t_spmv_csr_parallel(&csr, spmv::TBackend::CsrGather, &x, &mut y_parallel).unwrap();

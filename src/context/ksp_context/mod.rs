@@ -796,10 +796,10 @@ impl KspContext {
             } else {
                 s.set_variant(PcgVariant::Classic);
             }
-        } else if matches!(s.variant(), PcgVariant::Pipelined { .. }) {
-            if let Some(replace_every) = pending.replace_every {
-                s.set_variant(PcgVariant::Pipelined { replace_every });
-            }
+        } else if matches!(s.variant(), PcgVariant::Pipelined { .. })
+            && let Some(replace_every) = pending.replace_every
+        {
+            s.set_variant(PcgVariant::Pipelined { replace_every });
         }
     }
 

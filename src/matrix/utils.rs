@@ -291,11 +291,11 @@ pub fn anisotropic_poisson_2d(n: usize, theta: f64, eps: f64) -> CsrMatrix<f64> 
             entries.sort_unstable_by_key(|&(j, _)| j);
             let mut deduped: Vec<(usize, f64)> = Vec::with_capacity(entries.len());
             for (j, v) in entries.into_iter() {
-                if let Some((last_j, last_v)) = deduped.last_mut() {
-                    if *last_j == j {
-                        *last_v += v;
-                        continue;
-                    }
+                if let Some((last_j, last_v)) = deduped.last_mut()
+                    && *last_j == j
+                {
+                    *last_v += v;
+                    continue;
                 }
                 deduped.push((j, v));
             }
@@ -353,11 +353,11 @@ pub fn convection_diffusion_2d(n: usize, peclet: f64) -> CsrMatrix<f64> {
             entries.sort_unstable_by_key(|&(j, _)| j);
             let mut deduped: Vec<(usize, f64)> = Vec::with_capacity(entries.len());
             for (j, v) in entries.into_iter() {
-                if let Some((last_j, last_v)) = deduped.last_mut() {
-                    if *last_j == j {
-                        *last_v += v;
-                        continue;
-                    }
+                if let Some((last_j, last_v)) = deduped.last_mut()
+                    && *last_j == j
+                {
+                    *last_v += v;
+                    continue;
                 }
                 deduped.push((j, v));
             }

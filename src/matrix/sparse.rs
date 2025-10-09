@@ -45,12 +45,7 @@ pub struct CsrMatrix<T> {
 }
 
 impl<
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + PartialOrd
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
+    T: ComplexField + Copy + num_traits::Zero + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
 > CsrMatrix<T>
 {
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
@@ -76,64 +71,6 @@ impl<
         };
         this.build_diag_pos();
         this
-    }
-
-    /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
-    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self
-    where
-        T: PartialOrd + std::ops::Neg<Output = T>,
-    {
-        let nrows = dense.nrows();
-        let ncols = dense.ncols();
-        let mut row_ptr = vec![0];
-        let mut col_idx = Vec::new();
-        let mut values = Vec::new();
-
-        for i in 0..nrows {
-            for j in 0..ncols {
-                let val = dense[(i, j)];
-                // Use comparison with tolerance
-                if val > drop_tol || val < -drop_tol {
-                    col_idx.push(j);
-                    values.push(val);
-                }
-            }
-            row_ptr.push(col_idx.len());
-        }
-
-        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
-    }
-
-    /// Convert from an owned dense `faer::Mat<T>` to sparse CSR format with
-    /// drop tolerance without cloning the matrix. This is useful when the
-    /// caller already owns the dense matrix and can move it into this call.
-    ///
-    /// This method mirrors `from_dense(&faer::Mat<T>, ...)` but takes the
-    /// dense matrix by value so callers avoid an extra clone.
-    pub fn from_dense_owned(dense: faer::Mat<T>, drop_tol: T) -> Self
-    where
-        T: PartialOrd + std::ops::Neg<Output = T>,
-    {
-        // Reuse the same implementation but work with the owned matrix.
-        let nrows = dense.nrows();
-        let ncols = dense.ncols();
-        let mut row_ptr = vec![0];
-        let mut col_idx = Vec::new();
-        let mut values = Vec::new();
-
-        for i in 0..nrows {
-            for j in 0..ncols {
-                let val = dense[(i, j)];
-                // Use comparison with tolerance
-                if val > drop_tol || val < -drop_tol {
-                    col_idx.push(j);
-                    values.push(val);
-                }
-            }
-            row_ptr.push(col_idx.len());
-        }
-
-        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
     }
 
     /// Create an identity matrix of size n x n
@@ -357,6 +294,61 @@ impl<
         #[cfg(feature = "simd")]
         self.invalidate_spmv_plan();
         self.inner.val_mut()
+    }
+}
+
+impl<
+    T: ComplexField
+        + Copy
+        + num_traits::Zero
+        + PartialOrd
+        + std::ops::Neg<Output = T>
+        + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+> CsrMatrix<T>
+{
+    /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
+    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self {
+        let nrows = dense.nrows();
+        let ncols = dense.ncols();
+        let mut row_ptr = vec![0];
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..nrows {
+            for j in 0..ncols {
+                let val = dense[(i, j)];
+                if val > drop_tol || val < -drop_tol {
+                    col_idx.push(j);
+                    values.push(val);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
+    }
+
+    /// Convert from an owned dense `faer::Mat<T>` to sparse CSR format with drop tolerance.
+    pub fn from_dense_owned(dense: faer::Mat<T>, drop_tol: T) -> Self {
+        let nrows = dense.nrows();
+        let ncols = dense.ncols();
+        let mut row_ptr = vec![0];
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..nrows {
+            for j in 0..ncols {
+                let val = dense[(i, j)];
+                if val > drop_tol || val < -drop_tol {
+                    col_idx.push(j);
+                    values.push(val);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
     }
 }
 

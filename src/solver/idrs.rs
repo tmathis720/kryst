@@ -52,16 +52,14 @@ impl Default for IdrsOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Omega {
+    #[default]
     MinResidual,
-    MinResidualClipped { cos_min: f64, kappa: f64 },
-}
-
-impl Default for Omega {
-    fn default() -> Self {
-        Omega::MinResidual
-    }
+    MinResidualClipped {
+        cos_min: f64,
+        kappa: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -100,16 +98,9 @@ pub struct IdrsStats {
     pub residual_replacements: usize,
 }
 
+#[derive(Default)]
 pub struct IdrsBuilder {
     opts: IdrsOptions,
-}
-
-impl Default for IdrsBuilder {
-    fn default() -> Self {
-        Self {
-            opts: IdrsOptions::default(),
-        }
-    }
 }
 
 impl IdrsBuilder {
@@ -336,6 +327,12 @@ pub struct IdrsSolver {
     opts: IdrsOptions,
     ws: IdrsWorkspace,
     random_bump: u64,
+}
+
+impl Default for IdrsSolver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IdrsSolver {
@@ -748,25 +745,24 @@ impl IdrsSolver {
                     let mut retried = false;
                     if let BreakdownRepair::RegenerateP { max_retries, seed } =
                         self.opts.breakdown_repair
+                        && attempts < max_retries
                     {
-                        if attempts < max_retries {
-                            attempts += 1;
-                            match &self.opts.p_policy {
-                                ShadowP::RandomOrthonormal { .. } => {
-                                    self.random_bump = self.random_bump.wrapping_add(1);
-                                    self.build_shadow_space(comm, &mut stats)?;
-                                    retried = true;
-                                }
-                                _ => {
-                                    let saved = self.opts.p_policy.clone();
-                                    self.opts.p_policy = ShadowP::RandomOrthonormal {
-                                        seed: seed.wrapping_add(attempts as u64),
-                                    };
-                                    self.random_bump = 0;
-                                    self.build_shadow_space(comm, &mut stats)?;
-                                    self.opts.p_policy = saved;
-                                    retried = true;
-                                }
+                        attempts += 1;
+                        match &self.opts.p_policy {
+                            ShadowP::RandomOrthonormal { .. } => {
+                                self.random_bump = self.random_bump.wrapping_add(1);
+                                self.build_shadow_space(comm, &mut stats)?;
+                                retried = true;
+                            }
+                            _ => {
+                                let saved = self.opts.p_policy.clone();
+                                self.opts.p_policy = ShadowP::RandomOrthonormal {
+                                    seed: seed.wrapping_add(attempts as u64),
+                                };
+                                self.random_bump = 0;
+                                self.build_shadow_space(comm, &mut stats)?;
+                                self.opts.p_policy = saved;
+                                retried = true;
                             }
                         }
                     }
@@ -861,25 +857,25 @@ impl IdrsSolver {
 
                 iteration += 1;
 
-                if let Some(freq) = self.opts.monitor_true_residual_every {
-                    if iteration % freq == 0 {
-                        a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
-                        stats.matvecs += 1;
-                        for i in 0..n {
-                            self.ws.r_true[i] = b[i] - self.ws.t_raw[i];
-                        }
-                        if let Some(pc_ref) = pc {
-                            pc_ref.apply_s(
-                                PcSide::Left,
-                                &self.ws.r_true[..n],
-                                &mut self.ws.r[..n],
-                                &mut self.ws.scratch,
-                            )?;
-                        } else {
-                            self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
-                        }
-                        stats.residual_replacements += 1;
+                if let Some(freq) = self.opts.monitor_true_residual_every
+                    && iteration % freq == 0
+                {
+                    a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
+                    stats.matvecs += 1;
+                    for i in 0..n {
+                        self.ws.r_true[i] = b[i] - self.ws.t_raw[i];
                     }
+                    if let Some(pc_ref) = pc {
+                        pc_ref.apply_s(
+                            PcSide::Left,
+                            &self.ws.r_true[..n],
+                            &mut self.ws.r[..n],
+                            &mut self.ws.scratch,
+                        )?;
+                    } else {
+                        self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
+                    }
+                    stats.residual_replacements += 1;
                 }
 
                 res_norm = global_nrm2(comm, &self.ws.r_true[..n]);

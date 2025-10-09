@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 #[test]
 fn cg_reports_true_residual() {
     let comm = UniverseComm::NoComm(NoComm);
-    let two = S::from_real(2.0).real();
-    let one = S::from_real(1.0).real();
-    let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { two } else { one });
+    let two = 2.0;
+    let one = 1.0;
+    let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { two } else { one });
     let b = vec![one, two];
-    let mut x = vec![R::default(), R::default()];
+    let mut x = vec![0.0f64, 0.0];
     let mut solver = CgSolver::new(1e-12, 1);
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
@@ -25,7 +25,7 @@ fn cg_reports_true_residual() {
     })));
 
     solver
-        .solve(
+        .solve_f64(
             &a,
             None,
             &b,

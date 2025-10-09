@@ -218,9 +218,9 @@ fn milu0_preserves_row_sums() {
     pc.setup(&a).unwrap();
 
     // Compute M*1 where M = L*U
-    let ones = vec![R::from(1.0); n];
+    let ones: Vec<S> = vec![S::from_real(1.0); n];
     // z = U * 1
-    let mut z = vec![R::default(); n];
+    let mut z = vec![S::zero(); n];
     for i in 0..n {
         for p in pc.u_row()[i]..pc.u_row()[i + 1] {
             let j = pc.u_col()[p];
@@ -237,8 +237,14 @@ fn milu0_preserves_row_sums() {
     }
 
     for i in 0..n {
-        let diff = (y[i] - a_row_sum[i]).abs();
+        let diff = (y[i].real() - a_row_sum[i]).abs();
         assert!(diff < R::from(1e-9), "row {} diff {}", i, diff);
+        assert!(
+            y[i].imag().abs() < R::from(1e-12),
+            "row {} imag {}",
+            i,
+            y[i].imag()
+        );
     }
 }
 

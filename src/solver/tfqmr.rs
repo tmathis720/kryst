@@ -468,7 +468,7 @@ impl<'a> TfqmrWorkspace<'a> {
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::algebra::prelude::*;
+
     use crate::assert_vec_close;
     use crate::ops::klinop::KLinOp;
     use crate::ops::kpc::KPreconditioner;

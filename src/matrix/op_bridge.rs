@@ -18,7 +18,6 @@ where
         let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
         let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
         a.matvec(x_r, y_r);
-        return;
     }
 
     #[cfg(feature = "complex")]

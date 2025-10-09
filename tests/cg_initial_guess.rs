@@ -1,5 +1,6 @@
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
+use kryst::ops::wrap::as_s_op;
 use kryst::matrix::op::{LinOp, LinOpF64};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
@@ -47,19 +48,19 @@ impl LinOpF64 for CountingOp {
 
 #[test]
 fn cg_respects_nonzero_guess_flag() {
-    let b = vec![R::from(1.0), R::from(2.0)];
+    let b = vec![S::from_real(1.0), S::from_real(2.0)];
     let comm = UniverseComm::NoComm(NoComm);
 
     // Default: zero initial guess skips first matvec
     let counter = Arc::new(AtomicUsize::new(0));
     let op = CountingOp::new(counter.clone());
-    let mut x = vec![R::default(); 2];
+    let mut x = vec![S::zero(); 2];
     let mut solver = CgSolver::new(1e-12, 1);
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
     solver
         .solve_with_comm(
-            &op,
+            &as_s_op(&op),
             None,
             &b,
             &mut x,
@@ -74,13 +75,13 @@ fn cg_respects_nonzero_guess_flag() {
     // Force nonzero guess: extra matvec to compute initial residual
     let counter2 = Arc::new(AtomicUsize::new(0));
     let op2 = CountingOp::new(counter2.clone());
-    let mut x2 = vec![R::default(); 2];
+    let mut x2 = vec![S::zero(); 2];
     let mut solver2 = CgSolver::new(1e-12, 1).with_nonzero_guess(true);
     let mut wk2 = Workspace::default();
     solver2.setup_workspace(&mut wk2);
     solver2
         .solve_with_comm(
-            &op2,
+            &as_s_op(&op2),
             None,
             &b,
             &mut x2,

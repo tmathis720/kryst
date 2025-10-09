@@ -628,7 +628,7 @@ impl PcaGmresSolver {
 mod tests {
     use super::*;
     use crate::algebra::blas::{dot_conj, nrm2};
-    use crate::algebra::prelude::*;
+
     use crate::context::ksp_context::Workspace;
     use crate::parallel::NoComm;
     use crate::testkit::ATOL;

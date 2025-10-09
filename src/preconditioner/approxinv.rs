@@ -590,8 +590,9 @@ mod tests {
             ],
         };
         let pattern = SparsityPattern::Manual(vec![vec![0], vec![1], vec![2]]);
-        let mut spai =
-            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
+        let mut spai = ApproxInv::<DenseMat<f64>, Vec<f64>, f64>::new(
+            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false,
+        );
         spai.setup(&a).unwrap();
         // Should recover the exact inverse
         let inv = &spai.inv_rows;
@@ -607,8 +608,9 @@ mod tests {
             data: vec![vec![4.0, 1.0], vec![2.0, 3.0]],
         };
         let pattern = SparsityPattern::Manual(vec![vec![0, 1], vec![0, 1]]);
-        let mut spai =
-            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
+        let mut spai = ApproxInv::<DenseMat<f64>, Vec<f64>, f64>::new(
+            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false,
+        );
         spai.setup(&a).unwrap();
         let x = vec![1.0, 2.0];
         let mut y = vec![0.0, 0.0];
@@ -633,8 +635,9 @@ mod tests {
         // Identity matrix
         let a = eye::<f64>(4);
         let pattern = SparsityPattern::Manual(vec![vec![0], vec![1], vec![2], vec![3]]);
-        let mut spai =
-            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
+        let mut spai = ApproxInv::<DenseMat<f64>, Vec<f64>, f64>::new(
+            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false,
+        );
         spai.setup(&a).unwrap();
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let mut y = vec![0.0; 4];
@@ -654,12 +657,13 @@ mod tests {
 
         let n = 3;
         let pattern = SparsityPattern::Manual((0..n).map(|i| vec![i]).collect());
-        let mut spai =
-            ApproxInv::<_, Vec<f64>, f64>::new(pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false);
+        let mut spai = ApproxInv::<CsrOp, Vec<f64>, f64>::new(
+            pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false,
+        );
 
         let csr = Arc::new(CsrMatrix::identity(n));
         let op = CsrOp::new(csr);
-        spai.setup(&op as &dyn crate::matrix::op::LinOp<S = f64>)
+        spai.setup(&op)
             .expect("setup should succeed for identity operator");
 
         let rhs_real = vec![1.0, 2.0, 3.0];

@@ -172,7 +172,7 @@ impl CgSolver {
             return Err(KError::InvalidInput("dimension mismatch x,b".into()));
         }
 
-        let mut work = work.ok_or_else(|| {
+        let work = work.ok_or_else(|| {
             KError::InvalidInput("CG requires a Workspace; use KSP or Workspace::new(n)".into())
         })?;
 
@@ -180,7 +180,7 @@ impl CgSolver {
             return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
         }
 
-        let mut buffers = CgWorkspace::acquire(nrows, &mut work);
+        let mut buffers = CgWorkspace::acquire(nrows, work);
         let CgWorkspace {
             r,
             z,
@@ -193,7 +193,7 @@ impl CgSolver {
         let guess_nonzero =
             self.initial_guess_nonzero || x.iter().any(|&xi| xi.abs() > R::default());
         if guess_nonzero {
-            a.matvec_s(x, &mut tmp[..], &mut *scratch);
+            a.matvec_s(x, &mut tmp[..], scratch);
             for i in 0..nrows {
                 r[i] = b[i] - tmp[i];
             }
@@ -202,7 +202,7 @@ impl CgSolver {
         }
 
         if let Some(pc) = pc {
-            pc.apply_s(PcSide::Left, r, &mut z[..], &mut *scratch)?;
+            pc.apply_s(PcSide::Left, r, &mut z[..], scratch)?;
         } else {
             z.copy_from_slice(r);
         }
@@ -291,7 +291,7 @@ impl CgSolver {
                 }
             }
 
-            a.matvec_s(p, &mut ap[..], &mut *scratch);
+            a.matvec_s(p, &mut ap[..], scratch);
 
             let p_ap = dot_result_to_real(global_dot_conj(comm, p, ap));
             if p_ap <= 0.0 || !p_ap.is_finite() {
@@ -328,7 +328,7 @@ impl CgSolver {
             }
 
             if let Some(pc) = pc {
-                pc.apply_s(PcSide::Left, r, &mut z[..], &mut *scratch)?;
+                pc.apply_s(PcSide::Left, r, &mut z[..], scratch)?;
             } else {
                 z.copy_from_slice(r);
             }

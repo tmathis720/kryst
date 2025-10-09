@@ -1,9 +1,8 @@
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{GmresSpec, Workspace};
-use kryst::matrix::op::LinOp;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::PcSide;
-use kryst::solver::{GmresSolver, LinearSolver};
+use kryst::solver::GmresSolver;
 
 #[test]
 fn gmres_workspace_allocation_stable_and_sized() {
@@ -33,14 +32,13 @@ fn gmres_workspace_allocation_stable_and_sized() {
             if i == j { R::from(1.0) } else { R::default() }
         },
     );
-    let amat = &a as &dyn LinOp<S = f64>;
     let mut solver = GmresSolver::new(restart, 1e-6, 10);
-    let b: Vec<R> = (0..n).map(|i| R::from((i + 1) as f64)).collect();
-    let mut x = vec![R::default(); n];
+    let b: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+    let mut x = vec![0.0f64; n];
 
     solver
-        .solve(
-            amat,
+        .solve_f64(
+            &a,
             None,
             &b,
             &mut x,

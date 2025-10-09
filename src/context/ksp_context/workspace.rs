@@ -131,17 +131,12 @@ impl RecyclingSpace {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ReorthPolicy {
     Never,
+    #[default]
     IfNeeded,
     Always,
-}
-
-impl Default for ReorthPolicy {
-    fn default() -> Self {
-        ReorthPolicy::IfNeeded
-    }
 }
 
 /// Specification for sizing GMRES/FGMRES workspaces.

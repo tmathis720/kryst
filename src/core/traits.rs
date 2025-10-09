@@ -70,7 +70,7 @@ pub trait BlockOp {
 
     /// Apply the transpose of the operator if available.
     fn apply_t(&self, _x: &[f64], _y: &mut [f64]) -> Result<(), KError> {
-        Err(KError::Unsupported("transpose not available".into()))
+        Err(KError::Unsupported("transpose not available"))
     }
 }
 
@@ -85,7 +85,7 @@ where
     fn apply_t(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         if !LinOp::supports_transpose(self) {
             return Err(KError::Unsupported(
-                "LinOp::t_matvec called but transpose not supported".into(),
+                "LinOp::t_matvec called but transpose not supported",
             ));
         }
         LinOp::t_matvec(self, x, y);

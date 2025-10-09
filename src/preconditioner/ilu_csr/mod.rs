@@ -12,8 +12,6 @@ use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
 #[cfg(feature = "complex")]
-use crate::algebra::prelude::*;
-#[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
@@ -439,11 +437,12 @@ impl IluCsr {
                     if j <= k {
                         continue;
                     }
+                    let val_q = self.u_val[q];
                     if let Some(pos_ij) = map.get(j) {
-                        self.u_val[pos_ij] -= mult * self.u_val[q];
+                        self.u_val[pos_ij] -= mult * val_q;
                     } else if milu {
                         let di_pos = self.u_diag_ix[i];
-                        self.u_val[di_pos] -= mult * self.u_val[q];
+                        self.u_val[di_pos] -= mult * val_q;
                     }
                 }
             }
@@ -1249,7 +1248,7 @@ impl IluCsr {
         let mut x_perm = vec![S::zero(); self.n];
         let mut y_perm = vec![S::zero(); self.n];
         self.perm.apply_vec(x, &mut x_perm);
-        let res = match op {
+        match op {
             Op::NoTrans => {
                 if self.cfg.level_sched {
                     tri_solve::tri_solve_level_scheduled(self, &x_perm, &mut y_perm)
@@ -1278,7 +1277,7 @@ impl IluCsr {
             }
         }?;
         self.perm.apply_vec_t(&y_perm, y);
-        Ok(res)
+        Ok(())
     }
 }
 

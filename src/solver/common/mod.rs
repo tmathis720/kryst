@@ -382,7 +382,7 @@ pub fn dot1_async_s<C: AsyncComm + ?Sized>(
     unsafe {
         let xr: &[f64] = &*(x as *const [S] as *const [f64]);
         let yr: &[f64] = &*(y as *const [S] as *const [f64]);
-        return dot1_async(comm, xr, yr, opt);
+        dot1_async(comm, xr, yr, opt)
     }
 
     #[cfg(feature = "complex")]
@@ -441,7 +441,7 @@ pub fn nrm2_async_s<C: AsyncComm + ?Sized>(
     #[cfg(not(feature = "complex"))]
     unsafe {
         let xr: &[f64] = &*(x as *const [S] as *const [f64]);
-        return nrm2_async(comm, xr, opt);
+        nrm2_async(comm, xr, opt)
     }
 
     #[cfg(feature = "complex")]

@@ -18,7 +18,9 @@ fn csc_identity_matvec() {
     let mut y = vec![R::default(); n];
     let x = vec![R::from(2.0), R::from(3.0), R::from(5.0), R::from(7.0)];
     csc.matvec(&x, &mut y);
-    assert_vec_close!("csc identity matvec", &y, &x);
+    let y_s: Vec<S> = y.iter().copied().map(S::from_real).collect();
+    let x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+    assert_vec_close!("csc identity matvec", &y_s, &x_s);
 }
 
 #[test]
@@ -62,9 +64,11 @@ fn csc_linop_t_matvec() {
     let x = vec![R::from(10.0), R::from(100.0)];
     let mut y = vec![R::default(); 3];
     csc.t_matvec(&x, &mut y);
-    assert_vec_close!(
-        "csc transpose matvec",
-        &y,
-        &[R::from(210.0), R::from(300.0), R::default()]
-    );
+    let y_s: Vec<S> = y.iter().copied().map(S::from_real).collect();
+    let expected = vec![
+        S::from_real(210.0),
+        S::from_real(300.0),
+        S::from_real(0.0),
+    ];
+    assert_vec_close!("csc transpose matvec", &y_s, &expected);
 }

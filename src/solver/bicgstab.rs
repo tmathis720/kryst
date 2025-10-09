@@ -602,7 +602,7 @@ mod tests {
         let mut ws = Workspace::new(3);
         solver.setup_workspace(&mut ws);
         let stats = solver
-            .solve(
+            .solve_f64(
                 &a,
                 None,
                 &b,

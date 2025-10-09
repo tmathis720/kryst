@@ -9,7 +9,7 @@ use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::MinresSolver;
 use kryst::utils::convergence::ConvergedReason;
-use support::complex_dense::{DenseOp, hermitian_pos_def_system};
+use support::complex_dense::hermitian_pos_def_system;
 
 const SEED: u64 = 0x51D3_DEAD_u64;
 const SHIFT: f64 = 1.5;
@@ -24,7 +24,7 @@ fn minres_solves_random_hpd_system() {
     let mut x = vec![S::zero(); n];
 
     let stats = solver
-        .solve(
+        .solve_k(
             &op,
             None,
             &b,

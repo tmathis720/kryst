@@ -2,7 +2,7 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 
 /// Column-major dense block vector storage used by block Krylov variants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BlockVec {
     data: Vec<S>,
     n: usize,
@@ -69,16 +69,6 @@ impl BlockVec {
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [S] {
         &mut self.data
-    }
-}
-
-impl Default for BlockVec {
-    fn default() -> Self {
-        Self {
-            data: Vec::new(),
-            n: 0,
-            p: 0,
-        }
     }
 }
 

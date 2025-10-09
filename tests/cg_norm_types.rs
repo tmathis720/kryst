@@ -3,6 +3,7 @@ use kryst::algebra::prelude::*;
 use kryst::assert_s_close;
 use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
+use kryst::ops::wrap::{as_s_op, as_s_pc_mut};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::solver::cg::CgNormType;
@@ -16,16 +17,16 @@ impl Preconditioner for HalfPc {
     }
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         for (yi, xi) in y.iter_mut().zip(x) {
-            *yi = R::from(0.5) * *xi;
+            *yi = 0.5 * *xi;
         }
         Ok(())
     }
 }
 
 fn run(norm: CgNormType, expected: R) {
-    let a = Mat::<R>::from_fn(1, 1, |_, _| R::from(1.0));
-    let b = vec![R::from(2.0)];
-    let mut x = vec![R::default()];
+    let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
+    let b = vec![2.0f64];
+    let mut x = vec![0.0f64];
     let mut pc = HalfPc;
     let comm = UniverseComm::NoComm(NoComm);
     let mut solver = CgSolver::new(1e-20, 0).with_norm(norm);
@@ -40,12 +41,16 @@ fn run(norm: CgNormType, expected: R) {
                 log_clone.lock().unwrap().push(r);
             }
         });
+        let op = as_s_op(&a);
+        let mut pc_bridge = as_s_pc_mut(&mut pc);
+        let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+        let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
         solver
             .solve_with_comm(
-                &a,
-                Some(&mut pc),
-                &b,
-                &mut x,
+                &op,
+                Some(&mut pc_bridge),
+                &b_s,
+                &mut x_s,
                 PcSide::Left,
                 &comm,
                 Some(&[monitor]),

@@ -64,7 +64,7 @@ impl ParCsrMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::prelude::*;
+
     use crate::matrix::sparse::CsrMatrix;
     use crate::parallel::{NoComm, UniverseComm};
 

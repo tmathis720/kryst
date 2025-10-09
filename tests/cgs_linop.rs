@@ -98,7 +98,9 @@ fn cgs_solves_dd_nonsymmetric() {
     let mut x = vec![R::default(); n];
     let stats = ksp.solve(&b, &mut x).unwrap();
 
-    assert_vec_close!("cgs solution", &x, &x_true);
+    let x_s: Vec<S> = x.iter().map(|&v| S::from_real(v)).collect();
+    let x_true_s: Vec<S> = x_true.iter().map(|&v| S::from_real(v)).collect();
+    assert_vec_close!("cgs solution", &x_s, &x_true_s);
     assert!(matches!(
         stats.reason,
         kryst::utils::convergence::ConvergedReason::ConvergedRtol

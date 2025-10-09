@@ -66,7 +66,7 @@ impl<'a> CgnrWorkspace<'a> {
         for buf in &mut work.q_s[..2] {
             take_or_resize(buf, n);
         }
-        if work.z_s.len() < 1 {
+        if work.z_s.is_empty() {
             work.z_s.push(Vec::new());
         }
         take_or_resize(&mut work.z_s[0], m);
@@ -331,7 +331,7 @@ impl LinearSolver for CgnrSolver {
         if work.q_s.len() < 2 {
             work.q_s.resize(2, Vec::new());
         }
-        if work.z_s.len() < 1 {
+        if work.z_s.is_empty() {
             work.z_s.resize(1, Vec::new());
         }
     }

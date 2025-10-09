@@ -24,7 +24,7 @@ where
         // SAFETY: when the complex feature is disabled we have S == f64.
         let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
         let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
-        return pc.apply(side, x_r, y_r);
+        pc.apply(side, x_r, y_r)
     }
 
     #[cfg(feature = "complex")]
@@ -57,7 +57,7 @@ where
         // SAFETY: when the complex feature is disabled we have S == f64.
         let x_r: &[f64] = unsafe { &*(x as *const [S] as *const [f64]) };
         let y_r: &mut [f64] = unsafe { &mut *(y as *mut [S] as *mut [f64]) };
-        return pc.apply_mut(side, x_r, y_r);
+        pc.apply_mut(side, x_r, y_r)
     }
 
     #[cfg(feature = "complex")]

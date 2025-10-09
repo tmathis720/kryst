@@ -10,8 +10,8 @@
 use faer::mat;
 use kryst::core::traits::MatVec;
 use kryst::parallel::UniverseComm;
-use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
-use kryst::solver::{GmresSolver, LinearSolver};
+use kryst::preconditioner::{Jacobi, PcSide};
+use kryst::solver::GmresSolver;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a well-conditioned non-symmetric system
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Basic GMRES solve
     let mut solver = GmresSolver::new(30, 1e-10, 100);
     let mut x = vec![0.0; 4];
-    let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, None)?;
+    let stats = solver.solve_f64(&a, None, &b, &mut x, PcSide::Left, &comm, None, None)?;
     println!(
         "Basic GMRES: iterations = {}, residual = {:.2e}",
         stats.iterations, stats.final_residual
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pc = Jacobi::new();
     pc.setup(&a)?;
     let mut x_pc = vec![0.0; 4];
-    let stats_pc = solver.solve(
+    let stats_pc = solver.solve_f64(
         &a,
         Some(&mut pc),
         &b,
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demonstrate IEEE safety check with NaN in rhs
     let bad_b = vec![1.0, 2.0, f64::NAN, 4.0];
     let mut x_bad = vec![0.0; 4];
-    match solver.solve(
+    match solver.solve_f64(
         &a,
         None,
         &bad_b,

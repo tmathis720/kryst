@@ -215,12 +215,12 @@ impl MatrixMarketData {
             ));
         }
 
-        if let Some(imag) = &self.imag_values {
-            if imag.len() != self.values.len() {
-                return Err(KError::SolveError(
-                    "Inconsistent imaginary component length".to_string(),
-                ));
-            }
+        if let Some(imag) = &self.imag_values
+            && imag.len() != self.values.len()
+        {
+            return Err(KError::SolveError(
+                "Inconsistent imaginary component length".to_string(),
+            ));
         }
 
         let values = self.values_as_scalars()?;
@@ -513,9 +513,9 @@ fn validate_array_symmetry(
             {
                 let _ = values;
                 let _ = TOL;
-                return Err(KError::SolveError(
+                Err(KError::SolveError(
                     "Writing Hermitian matrices requires the `complex` feature".to_string(),
-                ));
+                ))
             }
 
             #[cfg(feature = "complex")]
@@ -932,7 +932,7 @@ pub fn write_matrix_market<P: AsRef<Path>>(
         match dense_im {
             Some(imag) => {
                 for (re, im) in dense_re.iter().zip(imag.iter()) {
-                    writeln!(file, "{} {}", re, im)
+                    writeln!(file, "{re} {im}")
                         .map_err(|e| KError::SolveError(format!("Failed to write value: {e}")))?;
                 }
             }

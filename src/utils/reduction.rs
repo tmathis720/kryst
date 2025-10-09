@@ -430,7 +430,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
             )
         };
         if rc != 0 {
-            return Err(KError::SolveError(format!("MPI_Iallreduce failed: {}", rc)));
+            return Err(KError::SolveError(format!("MPI_Iallreduce failed: {rc}")));
         }
         Ok((
             AllreduceHandle::Mpi {
@@ -468,7 +468,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
             )
         };
         if rc != 0 {
-            return Err(KError::SolveError(format!("MPI_Iallreduce failed: {}", rc)));
+            return Err(KError::SolveError(format!("MPI_Iallreduce failed: {rc}")));
         }
         Ok((
             AllreduceHandle::Mpi {

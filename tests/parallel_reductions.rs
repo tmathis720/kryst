@@ -3,7 +3,7 @@
 use kryst::algebra::blas::dot_conj;
 use kryst::algebra::prelude::*;
 use kryst::parallel::{
-    MpiComm, UniverseComm, allreduce_sum_scalar_mpi_sys, allreduce_sum_scalar_slice_in_place,
+    Comm, MpiComm, UniverseComm, allreduce_sum_scalar_mpi_sys, allreduce_sum_scalar_slice_in_place,
     allreduce_sum_scalar_slice_owned, global_dot_conj, global_dot_conj_accurate,
     global_dot_conj_many, global_dot_conj_many_accurate, global_dot_conj_many_into,
     global_dot_conj_many_into_accurate, global_dot_conj_many_into_repro,

@@ -455,7 +455,7 @@ impl LinearSolver for MinresSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::prelude::*;
+
     use crate::{MatShell, parallel::UniverseComm};
 
     // Helper to make a MatShell from a closure

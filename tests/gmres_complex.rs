@@ -9,7 +9,7 @@ use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::{FgmresSolver, GmresSolver};
 use kryst::utils::convergence::ConvergedReason;
-use support::complex_dense::{DenseOp, diagonally_dominant_system};
+use support::complex_dense::diagonally_dominant_system;
 
 const SEED: u64 = 0xDEC0DED5EED;
 const ROW_SCALE: f64 = 0.15;
@@ -25,7 +25,7 @@ fn gmres_solves_random_complex_system() {
     let mut x = vec![S::zero(); n];
 
     let stats = solver
-        .solve(
+        .solve_k(
             &op,
             None,
             &b,

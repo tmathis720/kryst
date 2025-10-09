@@ -47,7 +47,7 @@ impl<T> CsrBuilder<T> {
 
 impl<T> CsrBuilder<T>
 where
-    T: Zero + Copy + std::ops::AddAssign + PartialOrd,
+    T: Zero + Copy + std::ops::AddAssign,
 {
     pub fn finalize_sorted_unique(self, reproducible: bool) -> (Vec<usize>, Vec<usize>, Vec<T>) {
         let mut row_ptr = Vec::with_capacity(self.nrows + 1);

@@ -6,7 +6,7 @@ use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
 use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
-use crate::parallel::{NoComm, UniverseComm};
+use crate::parallel::{Comm, NoComm, UniverseComm};
 use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
