@@ -115,7 +115,10 @@ impl<S: KrystScalar> CsrAccess<S> for CsrMatrix<S> {
     }
 }
 
-impl CsrAccess<f64> for sparse::CsrMatrix<f64> {
+impl<S> CsrAccess<S> for sparse::CsrMatrix<S>
+where
+    S: KrystScalar + ComplexField + num_traits::Zero,
+{
     #[inline]
     fn nrows(&self) -> usize {
         self.nrows()
@@ -137,7 +140,7 @@ impl CsrAccess<f64> for sparse::CsrMatrix<f64> {
     }
 
     #[inline]
-    fn values(&self) -> &[f64] {
+    fn values(&self) -> &[S] {
         self.values()
     }
 }

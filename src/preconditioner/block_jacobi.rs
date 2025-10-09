@@ -283,8 +283,6 @@ mod tests {
     use super::*;
     #[cfg(feature = "complex")]
     use crate::algebra::bridge::BridgeScratch;
-    #[cfg(feature = "complex")]
-    use crate::algebra::prelude::*;
     use crate::core::traits::{MatrixGet, RowPattern};
     use crate::error::KError;
     #[cfg(feature = "complex")]

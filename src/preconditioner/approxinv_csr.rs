@@ -799,7 +799,6 @@ impl SpaiCsr {
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::algebra::prelude::*;
     use crate::ops::kpc::KPreconditioner;
 
     fn poisson_1d_matrix() -> CsrMatrix<f64> {

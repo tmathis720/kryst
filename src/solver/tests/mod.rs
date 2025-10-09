@@ -21,6 +21,7 @@ pub mod util {
         poisson::poisson_5pt_2d(n)
     }
 
+    #[allow(dead_code)]
     pub fn spd_poisson3d(n: usize) -> CsrMatrix<f64> {
         poisson::poisson_7pt_3d(n)
     }

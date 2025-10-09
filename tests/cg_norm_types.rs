@@ -26,7 +26,7 @@ impl Preconditioner for HalfPc {
 fn run(norm: CgNormType, expected: R) {
     let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
     let b = vec![2.0f64];
-    let mut x = vec![0.0f64];
+    let x = vec![0.0f64];
     let mut pc = HalfPc;
     let comm = UniverseComm::NoComm(NoComm);
     let mut solver = CgSolver::new(1e-20, 0).with_norm(norm);

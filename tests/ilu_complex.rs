@@ -1,4 +1,4 @@
-#![cfg(feature = "complex")]
+#![cfg(all(feature = "complex", feature = "complex_ilu"))]
 
 use faer::Mat;
 use kryst::algebra::prelude::*;

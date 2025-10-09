@@ -7678,7 +7678,6 @@ mod tests {
     mod bridge {
         use super::*;
         use crate::algebra::bridge::BridgeScratch;
-        use crate::algebra::prelude::*;
         use crate::ops::kpc::KPreconditioner;
         use crate::preconditioner::PcSide;
 

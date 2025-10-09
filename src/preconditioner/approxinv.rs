@@ -520,8 +520,6 @@ mod tests {
     use super::*;
     #[cfg(feature = "complex")]
     use crate::algebra::bridge::BridgeScratch;
-    #[cfg(feature = "complex")]
-    use crate::algebra::prelude::*;
     use crate::core::traits::MatVec;
     #[cfg(feature = "complex")]
     use crate::ops::kpc::KPreconditioner;

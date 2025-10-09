@@ -7,7 +7,7 @@ use kryst::parallel::{NoComm, UniverseComm};
 #[should_panic]
 fn dist_matvec_panics_on_bad_dims() {
     // Minimal 1x1 operator with serial communicator
-    let local = CsrMatrix::<f64>::new(1, 1, vec![0, 1], vec![0], vec![1.0]);
+    let local = CsrMatrix::<f64>::from_csr(1, 1, vec![0, 1], vec![0], vec![1.0]);
     let part = vec![0, 1]; // single-rank partition
     let comm = UniverseComm::NoComm(NoComm);
     let op = DistCsrOp::from_local_rows(1, 0, &local, &part, comm).unwrap();
@@ -20,7 +20,7 @@ fn dist_matvec_panics_on_bad_dims() {
 
 #[test]
 fn dist_try_matvec_returns_error_on_bad_dims() {
-    let local = CsrMatrix::<f64>::new(1, 1, vec![0, 1], vec![0], vec![1.0]);
+    let local = CsrMatrix::<f64>::from_csr(1, 1, vec![0, 1], vec![0], vec![1.0]);
     let part = vec![0, 1];
     let comm = UniverseComm::NoComm(NoComm);
     let op = DistCsrOp::from_local_rows(1, 0, &local, &part, comm).unwrap();

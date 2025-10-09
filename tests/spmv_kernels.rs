@@ -1,8 +1,12 @@
-use kryst::LinOp;
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
 #[cfg(feature = "rayon")]
-use kryst::matrix::{csc::CscMatrix, csr::CsrMatrix as ScalarCsrMatrix, spmv};
+use kryst::matrix::{
+    csc::CscMatrix,
+    csr::CsrMatrix as ScalarCsrMatrix,
+    sparse::{CsrMatrix, SparseMatrix},
+    spmv,
+};
 
 #[cfg(feature = "rayon")]
 #[test]

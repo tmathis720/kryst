@@ -80,6 +80,7 @@ mat-values-fingerprint = []
 # Optional, OFF by default, so new PCs must target the modern trait.
 legacy-pc-bridge = []
 complex = ["dep:num-complex"]
+complex_ilu = []
 
 [[example]]
 name = "mpi_amg_gmres_demo"

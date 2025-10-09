@@ -446,7 +446,6 @@ impl KPreconditioner for SorPc {
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::algebra::prelude::*;
     use crate::matrix::op::CsrOp;
     use crate::matrix::sparse::CsrMatrix;
     use crate::ops::kpc::KPreconditioner;

@@ -25,7 +25,7 @@ fn gmres_solves_random_complex_system() {
     let mut x = vec![S::zero(); n];
 
     let stats = solver
-        .solve_k(
+        .solve(
             &op,
             None,
             &b,

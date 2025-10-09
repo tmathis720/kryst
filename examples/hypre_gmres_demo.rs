@@ -10,7 +10,7 @@
 use faer::mat;
 use kryst::core::traits::MatVec;
 use kryst::parallel::UniverseComm;
-use kryst::preconditioner::{Jacobi, PcSide};
+use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
 use kryst::solver::GmresSolver;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
