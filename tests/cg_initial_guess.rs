@@ -1,7 +1,7 @@
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
-use kryst::ops::wrap::as_s_op;
 use kryst::matrix::op::{LinOp, LinOpF64};
+use kryst::ops::wrap::as_s_op;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::{CgSolver, LinearSolver};

@@ -65,10 +65,6 @@ fn csc_linop_t_matvec() {
     let mut y = vec![R::default(); 3];
     csc.t_matvec(&x, &mut y);
     let y_s: Vec<S> = y.iter().copied().map(S::from_real).collect();
-    let expected = vec![
-        S::from_real(210.0),
-        S::from_real(300.0),
-        S::from_real(0.0),
-    ];
+    let expected = vec![S::from_real(210.0), S::from_real(300.0), S::from_real(0.0)];
     assert_vec_close!("csc transpose matvec", &y_s, &expected);
 }

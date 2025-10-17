@@ -27,7 +27,7 @@ fn gmres_solves_random_complex_system() {
     let stats = solver
         .solve(
             &op,
-            None,
+            None::<&dyn kryst::ops::kpc::KPreconditioner<Scalar = S>>,
             &b,
             &mut x,
             PcSide::Left,
@@ -63,7 +63,7 @@ fn fgmres_solves_random_complex_system() {
     let stats = solver
         .solve_k(
             &op,
-            None,
+            None::<&mut dyn kryst::ops::kpc::KPreconditioner<Scalar = S>>,
             &b,
             &mut x,
             PcSide::Left,

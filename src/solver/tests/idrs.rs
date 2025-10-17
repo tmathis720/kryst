@@ -2,6 +2,7 @@ use crate::algebra::prelude::*;
 use crate::matrix::op::DenseOp;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
+use crate::solver::idrs::ShadowP;
 use crate::solver::tests::util;
 use crate::solver::{IdrsBuilder, IdrsSolver, LinearSolver};
 use faer::Mat;
@@ -23,7 +24,15 @@ fn idrs_solves_nonsymmetric_system() {
     let b: Vec<R> = vec![R::from(3.0), R::from(7.0), R::from(4.0)];
     let mut x: Vec<R> = vec![R::default(); 3];
 
-    let mut solver: IdrsSolver = IdrsBuilder::new().s(2).tol(1e-10).maxit(200).build();
+    let mut p = Mat::zeros(3, 2);
+    p[(0, 0)] = 1.0;
+    p[(1, 1)] = 1.0;
+    let mut solver: IdrsSolver = IdrsBuilder::new()
+        .s(2)
+        .tol(1e-10)
+        .maxit(200)
+        .shadow_policy(ShadowP::FromVectors { p })
+        .build();
 
     let comm = UniverseComm::NoComm(NoComm);
     let stats = solver

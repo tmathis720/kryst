@@ -12,13 +12,8 @@ use kryst::matrix::spmv::plan::SpmvTuning;
 
 fn make_generic_op() -> (Arc<GenericCsrOp<f64>>, Vec<usize>, Vec<usize>, Vec<f64>) {
     let values: Vec<f64> = vec![1.0, -2.0, 3.5, 4.0, -1.5];
-    let matrix = ScalarCsrMatrix::<f64>::new(
-        3,
-        3,
-        vec![0, 2, 4, 5],
-        vec![0, 2, 1, 2, 0],
-        values.clone(),
-    );
+    let matrix =
+        ScalarCsrMatrix::<f64>::new(3, 3, vec![0, 2, 4, 5], vec![0, 2, 1, 2, 0], values.clone());
     let rowptr = matrix.rowptr.clone();
     let colind = matrix.colind.clone();
     let tuning = SpmvTuning {
@@ -75,7 +70,13 @@ fn generic_csr_dense_conversion_matches_reference() {
 fn scalar_csr_spmv_matches_manual() {
     let rowptr = vec![0, 2, 4, 5];
     let colind = vec![0, 2, 1, 2, 0];
-    let values_real: Vec<R> = vec![R::from(1.0), R::from(-2.0), R::from(3.5), R::from(4.0), R::from(-1.5)];
+    let values_real: Vec<R> = vec![
+        R::from(1.0),
+        R::from(-2.0),
+        R::from(3.5),
+        R::from(4.0),
+        R::from(-1.5),
+    ];
     let values = values_real
         .iter()
         .copied()

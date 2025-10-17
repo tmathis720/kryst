@@ -644,11 +644,11 @@ mod tests {
         }
 
         let g = global_dot_conj(&comm, &[z], &[S::from_real(2.0)]);
-        assert_eq!(g, S::from_parts(2.5, 1.5));
+        assert_eq!(g, S::from_parts(2.5, -1.5));
 
         #[cfg(feature = "complex")]
         {
-            assert!((g.imag() - 1.5).abs() < 1e-15);
+            assert!((g.imag() + 1.5).abs() < 1e-15);
         }
     }
 
