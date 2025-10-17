@@ -1155,7 +1155,6 @@ pub fn write_vector_market_scalar<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     const MATRIX_FILE: &str = "examples/e05r0000/e05r0000.mtx";
     const RHS_FILE: &str = "examples/e05r0000/e05r0000_rhs1.mtx";
@@ -1171,6 +1170,12 @@ mod tests {
     const OUTPUT_FILE_ARRAY_SCALAR_REAL: &str = "test_output_array_scalar_real.mtx";
     #[cfg(feature = "complex")]
     const OUTPUT_FILE_ARRAY_SCALAR_COMPLEX: &str = "test_output_array_scalar_complex.mtx";
+
+    fn temp_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp directory");
+        let path = dir.path().join(name);
+        (dir, path)
+    }
 
     #[test]
     fn test_read_sparse_matrix_market() {
@@ -1317,15 +1322,16 @@ mod tests {
             "Test data should be in coordinate format"
         );
 
-        write_matrix_market(OUTPUT_FILE_COORD, &original_data).expect("Failed to write matrix");
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_COORD);
+        write_matrix_market(&path, &original_data).expect("Failed to write matrix");
 
         // Verify the file was actually created
         assert!(
-            std::path::Path::new(OUTPUT_FILE_COORD).exists(),
+            path.exists(),
             "Output file was not created"
         );
 
-        let read_data = read_matrix_market(OUTPUT_FILE_COORD).expect("Failed to re-read matrix");
+        let read_data = read_matrix_market(&path).expect("Failed to re-read matrix");
 
         // Validate dimensions
         assert_eq!(original_data.rows, read_data.rows);
@@ -1336,8 +1342,7 @@ mod tests {
         assert_eq!(original_data.is_coordinate, read_data.is_coordinate);
         assert_eq!(original_data.symmetry, read_data.symmetry);
 
-        // Clean up
-        let _ = fs::remove_file(OUTPUT_FILE_COORD);
+        // temp_dir cleanup handled automatically
     }
 
     #[test]
@@ -1369,15 +1374,16 @@ mod tests {
             "Test data should be in array format"
         );
 
-        write_matrix_market(OUTPUT_FILE_ARRAY, &original_data).expect("Failed to write RHS");
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY);
+        write_matrix_market(&path, &original_data).expect("Failed to write RHS");
 
         // Verify the file was actually created
         assert!(
-            std::path::Path::new(OUTPUT_FILE_ARRAY).exists(),
+            path.exists(),
             "Output file was not created"
         );
 
-        let read_data = read_matrix_market(OUTPUT_FILE_ARRAY).expect("Failed to re-read RHS");
+        let read_data = read_matrix_market(&path).expect("Failed to re-read RHS");
 
         // Validate dimensions
         assert_eq!(original_data.rows, read_data.rows);
@@ -1388,17 +1394,17 @@ mod tests {
         assert_eq!(original_data.is_coordinate, read_data.is_coordinate);
         assert_eq!(original_data.symmetry, read_data.symmetry);
 
-        // Clean up
-        let _ = fs::remove_file(OUTPUT_FILE_ARRAY);
+        // temp_dir cleanup handled automatically
     }
 
     #[test]
     fn test_write_vector_market() {
         let vector = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        write_vector_market(OUTPUT_FILE_VECTOR, &vector).expect("Failed to write vector");
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_VECTOR);
+        write_vector_market(&path, &vector).expect("Failed to write vector");
 
-        let data = read_matrix_market(OUTPUT_FILE_VECTOR).expect("Failed to read vector file");
+        let data = read_matrix_market(&path).expect("Failed to read vector file");
 
         assert_eq!(data.rows, 5);
         assert_eq!(data.cols, 1);
@@ -1409,19 +1415,18 @@ mod tests {
 
         assert_eq!(vector, read_vector);
 
-        // Clean up
-        let _ = fs::remove_file(OUTPUT_FILE_VECTOR);
+        // temp_dir cleanup handled automatically
     }
 
     #[test]
     fn test_write_vector_market_scalar_real() {
         let vector: Vec<S> = (1..=4).map(|i| S::from_real(i as f64)).collect();
 
-        write_vector_market_scalar(OUTPUT_FILE_VECTOR_SCALAR_REAL, &vector)
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_VECTOR_SCALAR_REAL);
+        write_vector_market_scalar(&path, &vector)
             .expect("Failed to write scalar vector");
 
-        let data =
-            read_matrix_market(OUTPUT_FILE_VECTOR_SCALAR_REAL).expect("Failed to read vector");
+        let data = read_matrix_market(&path).expect("Failed to read vector");
 
         assert_eq!(data.rows, vector.len());
         assert_eq!(data.cols, 1);
@@ -1433,7 +1438,7 @@ mod tests {
             .expect("Failed to reconstruct scalar vector");
         assert_eq!(read_back, vector);
 
-        let _ = fs::remove_file(OUTPUT_FILE_VECTOR_SCALAR_REAL);
+        // temp_dir cleanup handled automatically
     }
 
     #[cfg(feature = "complex")]
@@ -1445,11 +1450,11 @@ mod tests {
             S::from_parts(-2.0, -1.25),
         ];
 
-        write_vector_market_scalar(OUTPUT_FILE_VECTOR_SCALAR_COMPLEX, &vector)
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_VECTOR_SCALAR_COMPLEX);
+        write_vector_market_scalar(&path, &vector)
             .expect("Failed to write complex scalar vector");
 
-        let data = read_matrix_market(OUTPUT_FILE_VECTOR_SCALAR_COMPLEX)
-            .expect("Failed to read complex vector");
+        let data = read_matrix_market(&path).expect("Failed to read complex vector");
 
         assert_eq!(data.field_type, MatrixMarketField::Complex);
         let imag = data
@@ -1463,7 +1468,7 @@ mod tests {
             .expect("Failed to reconstruct complex vector");
         assert_eq!(round_trip, vector);
 
-        let _ = fs::remove_file(OUTPUT_FILE_VECTOR_SCALAR_COMPLEX);
+        // temp_dir cleanup handled automatically
     }
 
     #[test]
@@ -1474,8 +1479,9 @@ mod tests {
         let col_indices = vec![0, 1, 2];
         let values: Vec<S> = vec![S::from_real(1.0), S::from_real(-2.5), S::from_real(4.25)];
 
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_COORD_SCALAR_REAL);
         write_matrix_market_coordinate_scalar(
-            OUTPUT_FILE_COORD_SCALAR_REAL,
+            &path,
             rows,
             cols,
             &row_indices,
@@ -1485,8 +1491,8 @@ mod tests {
         )
         .expect("Failed to write scalar coordinate matrix");
 
-        let data = read_matrix_market(OUTPUT_FILE_COORD_SCALAR_REAL)
-            .expect("Failed to read scalar coordinate matrix");
+        let data =
+            read_matrix_market(&path).expect("Failed to read scalar coordinate matrix");
 
         assert_eq!(data.rows, rows);
         assert_eq!(data.cols, cols);
@@ -1498,7 +1504,7 @@ mod tests {
             .expect("Failed to rebuild CSR from scalar matrix");
         assert_eq!(csr.values(), values.as_slice());
 
-        let _ = fs::remove_file(OUTPUT_FILE_COORD_SCALAR_REAL);
+        // temp_dir cleanup handled automatically
     }
 
     #[cfg(feature = "complex")]
@@ -1514,8 +1520,9 @@ mod tests {
             S::from_parts(-1.0, 2.0),
         ];
 
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_COORD_SCALAR_COMPLEX);
         write_matrix_market_coordinate_scalar(
-            OUTPUT_FILE_COORD_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &row_indices,
@@ -1525,8 +1532,7 @@ mod tests {
         )
         .expect("Failed to write complex scalar coordinate matrix");
 
-        let data = read_matrix_market(OUTPUT_FILE_COORD_SCALAR_COMPLEX)
-            .expect("Failed to read complex scalar matrix");
+        let data = read_matrix_market(&path).expect("Failed to read complex scalar matrix");
 
         assert_eq!(data.field_type, MatrixMarketField::Complex);
         let imag = data
@@ -1540,7 +1546,7 @@ mod tests {
             .expect("Failed to rebuild complex CSR");
         assert_eq!(csr.values(), values.as_slice());
 
-        let _ = fs::remove_file(OUTPUT_FILE_COORD_SCALAR_COMPLEX);
+        // temp_dir cleanup handled automatically
     }
 
     #[cfg(feature = "complex")]
@@ -1552,8 +1558,9 @@ mod tests {
         let col_indices = vec![0, 1];
         let invalid_diag = vec![S::from_parts(1.0, 0.5), S::from_parts(2.0, 0.0)];
 
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_COORD_SCALAR_COMPLEX);
         let err = write_matrix_market_coordinate_scalar(
-            OUTPUT_FILE_COORD_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &row_indices,
@@ -1576,7 +1583,7 @@ mod tests {
         let col_indices = vec![0, 1, 1];
 
         write_matrix_market_coordinate_scalar(
-            OUTPUT_FILE_COORD_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &row_indices,
@@ -1586,8 +1593,8 @@ mod tests {
         )
         .expect("Hermitian matrix with real diagonal should succeed");
 
-        let data = read_matrix_market(OUTPUT_FILE_COORD_SCALAR_COMPLEX)
-            .expect("Failed to read hermitian scalar matrix");
+        let data =
+            read_matrix_market(&path).expect("Failed to read hermitian scalar matrix");
         assert_eq!(data.symmetry, MatrixMarketSymmetry::Hermitian);
         assert_eq!(data.field_type, MatrixMarketField::Complex);
 
@@ -1596,7 +1603,7 @@ mod tests {
             .expect("Failed to rebuild hermitian CSR");
         assert_eq!(csr.nrows(), rows);
 
-        let _ = fs::remove_file(OUTPUT_FILE_COORD_SCALAR_COMPLEX);
+        // temp_dir cleanup handled automatically
     }
 
     #[test]
@@ -1612,8 +1619,9 @@ mod tests {
             S::from_real(6.0),
         ];
 
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_REAL);
         write_matrix_market_array_scalar(
-            OUTPUT_FILE_ARRAY_SCALAR_REAL,
+            &path,
             rows,
             cols,
             &values,
@@ -1621,8 +1629,8 @@ mod tests {
         )
         .expect("Failed to write scalar array matrix");
 
-        let data = read_matrix_market(OUTPUT_FILE_ARRAY_SCALAR_REAL)
-            .expect("Failed to read scalar array matrix");
+        let data =
+            read_matrix_market(&path).expect("Failed to read scalar array matrix");
 
         assert_eq!(data.rows, rows);
         assert_eq!(data.cols, cols);
@@ -1644,7 +1652,7 @@ mod tests {
 
         assert_eq!(round_trip, values);
 
-        let _ = fs::remove_file(OUTPUT_FILE_ARRAY_SCALAR_REAL);
+        // temp_dir cleanup handled automatically
     }
 
     #[cfg(feature = "complex")]
@@ -1659,8 +1667,9 @@ mod tests {
             S::from_parts(0.5, 0.0),
         ];
 
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX);
         write_matrix_market_array_scalar(
-            OUTPUT_FILE_ARRAY_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &values,
@@ -1668,8 +1677,7 @@ mod tests {
         )
         .expect("Failed to write complex scalar array matrix");
 
-        let data = read_matrix_market(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX)
-            .expect("Failed to read complex scalar array matrix");
+        let data = read_matrix_market(&path).expect("Failed to read complex scalar array matrix");
 
         assert_eq!(data.field_type, MatrixMarketField::Complex);
         let imag = data
@@ -1687,7 +1695,7 @@ mod tests {
 
         assert_eq!(round_trip, values);
 
-        let _ = fs::remove_file(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX);
+        // temp_dir cleanup handled automatically
     }
 
     #[cfg(feature = "complex")]
@@ -1703,8 +1711,9 @@ mod tests {
             S::from_parts(2.0, 0.0),
         ];
 
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX);
         let err = write_matrix_market_array_scalar(
-            OUTPUT_FILE_ARRAY_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &invalid_diag,
@@ -1724,7 +1733,7 @@ mod tests {
         ];
 
         let err = write_matrix_market_array_scalar(
-            OUTPUT_FILE_ARRAY_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &invalid_offdiag,
@@ -1744,7 +1753,7 @@ mod tests {
         ];
 
         write_matrix_market_array_scalar(
-            OUTPUT_FILE_ARRAY_SCALAR_COMPLEX,
+            &path,
             rows,
             cols,
             &valid,
@@ -1752,12 +1761,12 @@ mod tests {
         )
         .expect("Valid Hermitian matrix should succeed");
 
-        let data = read_matrix_market(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX)
-            .expect("Failed to read Hermitian scalar array matrix");
+        let data =
+            read_matrix_market(&path).expect("Failed to read Hermitian scalar array matrix");
         assert_eq!(data.symmetry, MatrixMarketSymmetry::Hermitian);
         assert_eq!(data.field_type, MatrixMarketField::Complex);
 
-        let _ = fs::remove_file(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX);
+        // temp_dir cleanup handled automatically
     }
 
     #[cfg(feature = "complex")]

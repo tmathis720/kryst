@@ -2,6 +2,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use faer::Mat;
 use faer::linalg::solvers::SolveCore;
 use kryst::preconditioner::PcSide;
+#[cfg(feature = "dense-direct")]
 use kryst::solver::LuSolver;
 use kryst::solver::legacy::LinearSolver;
 
@@ -13,7 +14,14 @@ fn bench_lu_vs_faer(c: &mut Criterion) {
     let b: Vec<f64> = (0..n).map(|i| (i as f64).cos()).collect();
     let mut x = vec![0.0; n];
 
+    #[cfg(not(feature = "dense-direct"))]
+    {
+        println!("Skipping LU benchmark: 'dense-direct' feature not enabled.");
+        return;
+    }
+    #[cfg(feature = "dense-direct")]
     c.bench_function("kryst LU", |ben| {
+        
         let mut solver = LuSolver::new();
         ben.iter(|| {
             let _stats = solver
@@ -31,6 +39,7 @@ fn bench_lu_vs_faer(c: &mut Criterion) {
         })
     });
 
+    #[cfg(feature = "dense-direct")]
     c.bench_function("faer raw LU", |ben| {
         ben.iter(|| {
             let factor = faer::linalg::solvers::FullPivLu::new(a.as_ref());
