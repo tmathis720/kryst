@@ -34,6 +34,18 @@ use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
 
+#[inline]
+fn has_nontrivial_guess(x: &[S]) -> bool {
+    let mut max_abs: R = R::zero();
+    for &xi in x {
+        let v = xi.abs();
+        if v > max_abs {
+            max_abs = v;
+        }
+    }
+    max_abs > 64.0 * f64::EPSILON
+}
+
 struct CgWorkspace<'a> {
     r: &'a mut [S],
     z: &'a mut [S],
@@ -183,7 +195,7 @@ impl CgSolver {
         })?;
 
         if b.is_empty() {
-            return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
+            return Ok(SolveStats::new(0, R::zero(), ConvergedReason::ConvergedAtol));
         }
 
         let mut buffers = CgWorkspace::acquire(nrows, work);
@@ -196,8 +208,7 @@ impl CgSolver {
             scratch,
         } = &mut buffers;
 
-        let guess_nonzero =
-            self.initial_guess_nonzero || x.iter().any(|&xi| xi.abs() > R::default());
+        let guess_nonzero = self.initial_guess_nonzero || has_nontrivial_guess(x);
         if guess_nonzero {
             a.matvec_s(x, &mut tmp[..], scratch);
             for i in 0..nrows {
@@ -249,7 +260,7 @@ impl CgSolver {
             (rho, rsq, znorm)
         };
         let mut rho_prev = rho;
-        if rho <= 0.0 || !rho.is_finite() {
+        if rho <= R::zero() || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
         let mut xnorm = if self.trust_region.is_some() {
@@ -262,7 +273,7 @@ impl CgSolver {
             CgNormType::Preconditioned => rho.abs().sqrt(),
             CgNormType::Unpreconditioned => rsq.unwrap().abs().sqrt(),
             CgNormType::Natural => znorm.unwrap().abs().sqrt(),
-            CgNormType::None => 0.0,
+            CgNormType::None => R::zero(),
         };
 
         if let Some(ms) = monitors {
@@ -290,8 +301,8 @@ impl CgSolver {
 
         for k in 1..=self.conv.max_iters {
             if k > 1 {
-                let beta = rho / rho_prev;
-                let beta_s = S::from_real(beta);
+                let beta: R = rho / rho_prev;
+                let beta_s: S = S::from_real(beta);
                 for i in 0..nrows {
                     p[i] = z[i] + beta_s * p[i];
                 }
@@ -300,21 +311,23 @@ impl CgSolver {
             a.matvec_s(p, &mut ap[..], scratch);
 
             let p_ap = dot_result_to_real(global_dot_conj(comm, p, ap));
-            if p_ap <= 0.0 || !p_ap.is_finite() {
+            if p_ap <= R::zero() || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
 
-            let alpha = rho / p_ap;
-            let alpha_s = S::from_real(alpha);
+            let alpha: R = rho / p_ap;
+            let alpha_s: S = S::from_real(alpha);
 
             if let Some(rmax) = self.trust_region {
                 let pnorm = global_nrm2(comm, p);
                 if xnorm + alpha.abs() * pnorm > rmax {
-                    let step = (rmax - xnorm) / (pnorm + 1e-300);
-                    let step_s = S::from_real(step);
+                    let step: R = (rmax - xnorm) / (pnorm + 1e-300);
+                    let step_s: S = S::from_real(step);
                     for i in 0..nrows {
-                        x[i] += step_s * p[i];
-                        r[i] -= step_s * ap[i];
+                        let pi = p[i];
+                        let api = ap[i];
+                        x[i] += step_s * pi;
+                        r[i] -= step_s * api;
                     }
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
@@ -324,10 +337,10 @@ impl CgSolver {
             }
 
             for i in 0..nrows {
-                x[i] += alpha_s * p[i];
-            }
-            for i in 0..nrows {
-                r[i] -= alpha_s * ap[i];
+                let pi = p[i];
+                let api = ap[i];
+                x[i] += alpha_s * pi;
+                r[i] -= alpha_s * api;
             }
             if self.trust_region.is_some() {
                 xnorm = global_nrm2(comm, x);
@@ -359,7 +372,7 @@ impl CgSolver {
                 let mut result_idx = 0;
                 let rho_new = dot_result_to_real(dot_results[result_idx]);
                 result_idx += 1;
-                if rho_new <= 0.0 || !rho_new.is_finite() {
+                if rho_new <= R::zero() || !rho_new.is_finite() {
                     return Err(KError::IndefinitePreconditioner);
                 }
 
@@ -383,7 +396,7 @@ impl CgSolver {
                 CgNormType::Preconditioned => rho_new.abs().sqrt(),
                 CgNormType::Unpreconditioned => rsq_new.unwrap().abs().sqrt(),
                 CgNormType::Natural => znorm_new.unwrap().abs().sqrt(),
-                CgNormType::None => 0.0,
+                CgNormType::None => R::zero(),
             };
 
             if let Some(ms) = monitors {
