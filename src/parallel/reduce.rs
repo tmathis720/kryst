@@ -206,6 +206,18 @@ pub fn allreduce_sum_scalar_with_mode(comm: &UniverseComm, z: S, mode: ReproMode
     }
 }
 
+#[inline]
+pub fn allreduce_sum_real_with_mode(comm: &UniverseComm, v: R, mode: ReproMode) -> R {
+    match mode {
+        ReproMode::Fast => comm.allreduce_sum_real(v),
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
+            let packet = Packet::<1> { v: [v] };
+            let reduced = comm.allreduce_det(&packet, mode);
+            reduced.v[0]
+        }
+    }
+}
+
 /// Global conjugated dot product across all ranks using the requested mode.
 #[inline]
 pub fn global_dot_conj_with_mode(comm: &UniverseComm, x: &[S], y: &[S], mode: ReproMode) -> S {
@@ -270,14 +282,24 @@ pub fn global_dot_conj_many_into_with_mode(
         *slot = dot_conj(x, y);
     }
 
-    allreduce_sum_scalar_slice_with_mode(comm, out, mode);
+    match mode {
+        ReproMode::Fast => comm.allreduce_sum_scalars(out),
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
+            allreduce_sum_scalar_slice_with_mode(comm, out, mode)
+        }
+    }
 }
 
 /// Global Euclidean norm of a vector across all ranks using the requested mode.
 #[inline]
 pub fn global_nrm2_with_mode(comm: &UniverseComm, x: &[S], mode: ReproMode) -> R {
-    let squared = global_dot_conj_with_mode(comm, x, x, mode).real();
-    let clamped = if squared >= 0.0 { squared } else { 0.0 };
+    let mut ssq = R::zero();
+    for &xi in x {
+        let a = xi.abs();
+        ssq = ssq + a * a;
+    }
+    let global = allreduce_sum_real_with_mode(comm, ssq, mode);
+    let clamped = if global >= 0.0 { global } else { 0.0 };
     clamped.sqrt()
 }
 
@@ -316,15 +338,19 @@ pub fn global_nrm2_many_with_mode(comm: &UniverseComm, vecs: &[&[S]], mode: Repr
         return Vec::new();
     }
 
-    let mut pairs: SmallVec<[(&[S], &[S]); 8]> = SmallVec::with_capacity(vecs.len());
-    for &vec in vecs.iter() {
-        pairs.push((vec, vec));
+    let mut sums: Vec<R> = vec![R::zero(); vecs.len()];
+    for (slot, &vec) in sums.iter_mut().zip(vecs.iter()) {
+        let mut ssq = R::zero();
+        for &xi in vec.iter() {
+            let a = xi.abs();
+            ssq = ssq + a * a;
+        }
+        *slot = ssq;
     }
 
-    let dots = global_dot_conj_many_with_mode(comm, pairs.as_slice(), mode);
-    let mut norms: Vec<R> = dots.into_iter().map(|dot| dot.real()).collect();
-    clamp_and_sqrt(norms.as_mut_slice());
-    norms
+    allreduce_sum_real_slice_with_mode(comm, sums.as_mut_slice(), mode);
+    clamp_and_sqrt(sums.as_mut_slice());
+    sums
 }
 
 /// Compute multiple global Euclidean norms into an output slice using the requested mode.
@@ -347,18 +373,16 @@ pub fn global_nrm2_many_into_with_mode(
         return;
     }
 
-    let mut pairs: SmallVec<[(&[S], &[S]); 8]> = SmallVec::with_capacity(vecs.len());
-    for &vec in vecs.iter() {
-        pairs.push((vec, vec));
+    for (slot, &vec) in out.iter_mut().zip(vecs.iter()) {
+        let mut ssq = R::zero();
+        for &xi in vec.iter() {
+            let a = xi.abs();
+            ssq = ssq + a * a;
+        }
+        *slot = ssq;
     }
 
-    let mut dots: SmallVec<[S; 8]> = SmallVec::with_capacity(vecs.len());
-    dots.resize(vecs.len(), S::zero());
-    global_dot_conj_many_into_with_mode(comm, pairs.as_slice(), dots.as_mut_slice(), mode);
-
-    for (slot, dot) in out.iter_mut().zip(dots.iter()) {
-        *slot = dot.real();
-    }
+    allreduce_sum_real_slice_with_mode(comm, out, mode);
     clamp_and_sqrt(out);
 }
 
@@ -490,6 +514,49 @@ fn allreduce_sum_scalar_slice_fast(comm: &UniverseComm, data: &mut [S]) {
         #[cfg(not(any(feature = "mpi", feature = "rayon")))]
         UniverseComm::Serial => {}
     }
+}
+
+fn allreduce_sum_real_slice_fast(comm: &UniverseComm, data: &mut [R]) {
+    if data.is_empty() || comm.size() <= 1 {
+        return;
+    }
+
+    match comm {
+        UniverseComm::NoComm(_) => {}
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(inner) => {
+            use mpi::collective::SystemOperation;
+            let mut recv = vec![0.0f64; data.len()];
+            inner
+                .world
+                .all_reduce_into(&data[..], &mut recv[..], SystemOperation::sum());
+            data.copy_from_slice(&recv);
+        }
+        #[cfg(feature = "rayon")]
+        UniverseComm::Rayon(_) => {}
+        #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+        UniverseComm::Serial => {}
+    }
+}
+
+#[inline]
+pub fn allreduce_sum_real_slice_with_mode(comm: &UniverseComm, data: &mut [R], mode: ReproMode) {
+    match mode {
+        ReproMode::Fast => allreduce_sum_real_slice_fast(comm, data),
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
+            reduce_real_slice_deterministic(comm, data, mode);
+        }
+    }
+}
+
+fn reduce_real_slice_deterministic(comm: &UniverseComm, data: &mut [R], mode: ReproMode) {
+    if data.is_empty() || comm.size() <= 1 {
+        return;
+    }
+
+    let mut scratch: Vec<f64> = data.to_vec();
+    reduce_buffer_in_packets(comm, scratch.as_mut_slice(), mode);
+    data.copy_from_slice(&scratch);
 }
 
 /// Reduce a slice of scalars using the requested reproducibility mode.

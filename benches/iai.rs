@@ -45,4 +45,3 @@ fn cg_jacobi_1d400() {
 }
 
 main!(library_benchmark("cg_jacobi_1d400", cg_jacobi_1d400),);
-

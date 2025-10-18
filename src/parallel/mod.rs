@@ -192,6 +192,21 @@ impl Comm for NoComm {
     fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
 }
 
+impl NoComm {
+    #[inline]
+    pub fn allreduce_sum_scalar(&self, v: S) -> S {
+        v
+    }
+
+    #[inline]
+    pub fn allreduce_sum_scalars(&self, _buf: &mut [S]) {}
+
+    #[inline]
+    pub fn allreduce_sum_real(&self, v: R) -> R {
+        v
+    }
+}
+
 #[cfg(feature = "mpi")]
 pub mod mpi_comm;
 #[cfg(feature = "mpi")]
@@ -274,6 +289,34 @@ impl UniverseComm {
     #[inline]
     pub fn allreduce_sum_scalar(&self, z: S) -> S {
         reduce::allreduce_sum_scalar_impl(self, z)
+    }
+
+    /// Sum an array of scalars in place across all ranks (fast path).
+    #[inline]
+    pub fn allreduce_sum_scalars(&self, buf: &mut [S]) {
+        match self {
+            UniverseComm::NoComm(comm) => comm.allreduce_sum_scalars(buf),
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => comm.allreduce_sum_scalars(buf),
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_) => {}
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => {}
+        }
+    }
+
+    /// Sum a single real value across all ranks (fast path).
+    #[inline]
+    pub fn allreduce_sum_real(&self, v: R) -> R {
+        match self {
+            UniverseComm::NoComm(comm) => comm.allreduce_sum_real(v),
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => comm.allreduce_sum_real(v),
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(comm) => comm.all_reduce_f64(v),
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => v,
+        }
     }
 
     /// Deterministic scalar sum across all ranks.

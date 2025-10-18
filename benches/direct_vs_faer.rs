@@ -21,7 +21,6 @@ fn bench_lu_vs_faer(c: &mut Criterion) {
     }
     #[cfg(feature = "dense-direct")]
     c.bench_function("kryst LU", |ben| {
-        
         let mut solver = LuSolver::new();
         ben.iter(|| {
             let _stats = solver

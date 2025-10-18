@@ -1326,10 +1326,7 @@ mod tests {
         write_matrix_market(&path, &original_data).expect("Failed to write matrix");
 
         // Verify the file was actually created
-        assert!(
-            path.exists(),
-            "Output file was not created"
-        );
+        assert!(path.exists(), "Output file was not created");
 
         let read_data = read_matrix_market(&path).expect("Failed to re-read matrix");
 
@@ -1378,10 +1375,7 @@ mod tests {
         write_matrix_market(&path, &original_data).expect("Failed to write RHS");
 
         // Verify the file was actually created
-        assert!(
-            path.exists(),
-            "Output file was not created"
-        );
+        assert!(path.exists(), "Output file was not created");
 
         let read_data = read_matrix_market(&path).expect("Failed to re-read RHS");
 
@@ -1423,8 +1417,7 @@ mod tests {
         let vector: Vec<S> = (1..=4).map(|i| S::from_real(i as f64)).collect();
 
         let (_tmp_dir, path) = temp_path(OUTPUT_FILE_VECTOR_SCALAR_REAL);
-        write_vector_market_scalar(&path, &vector)
-            .expect("Failed to write scalar vector");
+        write_vector_market_scalar(&path, &vector).expect("Failed to write scalar vector");
 
         let data = read_matrix_market(&path).expect("Failed to read vector");
 
@@ -1451,8 +1444,7 @@ mod tests {
         ];
 
         let (_tmp_dir, path) = temp_path(OUTPUT_FILE_VECTOR_SCALAR_COMPLEX);
-        write_vector_market_scalar(&path, &vector)
-            .expect("Failed to write complex scalar vector");
+        write_vector_market_scalar(&path, &vector).expect("Failed to write complex scalar vector");
 
         let data = read_matrix_market(&path).expect("Failed to read complex vector");
 
@@ -1491,8 +1483,7 @@ mod tests {
         )
         .expect("Failed to write scalar coordinate matrix");
 
-        let data =
-            read_matrix_market(&path).expect("Failed to read scalar coordinate matrix");
+        let data = read_matrix_market(&path).expect("Failed to read scalar coordinate matrix");
 
         assert_eq!(data.rows, rows);
         assert_eq!(data.cols, cols);
@@ -1593,8 +1584,7 @@ mod tests {
         )
         .expect("Hermitian matrix with real diagonal should succeed");
 
-        let data =
-            read_matrix_market(&path).expect("Failed to read hermitian scalar matrix");
+        let data = read_matrix_market(&path).expect("Failed to read hermitian scalar matrix");
         assert_eq!(data.symmetry, MatrixMarketSymmetry::Hermitian);
         assert_eq!(data.field_type, MatrixMarketField::Complex);
 
@@ -1620,17 +1610,10 @@ mod tests {
         ];
 
         let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_REAL);
-        write_matrix_market_array_scalar(
-            &path,
-            rows,
-            cols,
-            &values,
-            MatrixMarketSymmetry::General,
-        )
-        .expect("Failed to write scalar array matrix");
+        write_matrix_market_array_scalar(&path, rows, cols, &values, MatrixMarketSymmetry::General)
+            .expect("Failed to write scalar array matrix");
 
-        let data =
-            read_matrix_market(&path).expect("Failed to read scalar array matrix");
+        let data = read_matrix_market(&path).expect("Failed to read scalar array matrix");
 
         assert_eq!(data.rows, rows);
         assert_eq!(data.cols, cols);
@@ -1668,14 +1651,8 @@ mod tests {
         ];
 
         let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_COMPLEX);
-        write_matrix_market_array_scalar(
-            &path,
-            rows,
-            cols,
-            &values,
-            MatrixMarketSymmetry::General,
-        )
-        .expect("Failed to write complex scalar array matrix");
+        write_matrix_market_array_scalar(&path, rows, cols, &values, MatrixMarketSymmetry::General)
+            .expect("Failed to write complex scalar array matrix");
 
         let data = read_matrix_market(&path).expect("Failed to read complex scalar array matrix");
 
@@ -1761,8 +1738,7 @@ mod tests {
         )
         .expect("Valid Hermitian matrix should succeed");
 
-        let data =
-            read_matrix_market(&path).expect("Failed to read Hermitian scalar array matrix");
+        let data = read_matrix_market(&path).expect("Failed to read Hermitian scalar array matrix");
         assert_eq!(data.symmetry, MatrixMarketSymmetry::Hermitian);
         assert_eq!(data.field_type, MatrixMarketField::Complex);
 

@@ -44,7 +44,7 @@ impl BridgeScratch {
 }
 
 #[inline]
-pub fn copy_scalar_to_real_in<T: KrystScalar>(x: &[T], xr: &mut [f64]) {
+pub fn copy_scalar_to_real_in<T: KrystScalar<Real = f64>>(x: &[T], xr: &mut [f64]) {
     debug_assert_eq!(x.len(), xr.len());
     for (dst, &src) in xr.iter_mut().zip(x.iter()) {
         *dst = src.real();
@@ -52,7 +52,7 @@ pub fn copy_scalar_to_real_in<T: KrystScalar>(x: &[T], xr: &mut [f64]) {
 }
 
 #[inline]
-pub fn copy_real_into_scalar<T: KrystScalar>(yr: &[f64], y: &mut [T]) {
+pub fn copy_real_into_scalar<T: KrystScalar<Real = f64>>(yr: &[f64], y: &mut [T]) {
     debug_assert_eq!(yr.len(), y.len());
     for (dst, &src) in y.iter_mut().zip(yr.iter()) {
         *dst = T::from_real(src);
