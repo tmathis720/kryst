@@ -29,6 +29,80 @@ use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use smallvec::SmallVec;
 use std::any::Any;
 
+pub mod debug {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct IterEvent {
+        pub iteration: usize,
+        pub alpha: R,
+        pub beta: Option<R>,
+        pub rho: R,
+        pub rho_prev: Option<R>,
+        pub rho_new: R,
+        pub p_ap: R,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DotKind {
+        InitialRho,
+        PAp,
+        Rho,
+        RNorm,
+        ZNorm,
+    }
+
+    type IterHook = dyn Fn(IterEvent) + Send + Sync + 'static;
+
+    static ITER_HOOK: Mutex<Option<Box<IterHook>>> = Mutex::new(None);
+    static ITER_HOOK_SET: AtomicBool = AtomicBool::new(false);
+    static LARGE_IMAG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline]
+    pub(crate) fn emit_iter(event: IterEvent) {
+        if ITER_HOOK_SET.load(Ordering::Relaxed) {
+            if let Some(hook) = ITER_HOOK.lock().unwrap().as_ref() {
+                hook(event);
+            }
+        }
+    }
+
+    pub fn set_iter_hook(hook: Option<Box<IterHook>>) {
+        let mut guard = ITER_HOOK.lock().unwrap();
+        *guard = hook;
+        ITER_HOOK_SET.store(guard.is_some(), Ordering::Release);
+    }
+
+    pub fn clear_iter_hook() {
+        set_iter_hook(None);
+    }
+
+    #[inline]
+    pub(crate) fn record_dot(kind: DotKind, _iteration: usize, value: S) {
+        #[cfg(feature = "complex")]
+        {
+            let imag = value.imag().abs();
+            let scale = 1.0 + value.abs();
+            if imag > 128.0 * f64::EPSILON * scale {
+                LARGE_IMAG_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        #[cfg(not(feature = "complex"))]
+        let _ = value;
+        let _ = kind;
+    }
+
+    pub fn reset_counters() {
+        LARGE_IMAG_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    pub fn large_imag_count() -> usize {
+        LARGE_IMAG_COUNT.load(Ordering::Relaxed)
+    }
+}
+
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
@@ -195,7 +269,11 @@ impl CgSolver {
         })?;
 
         if b.is_empty() {
-            return Ok(SolveStats::new(0, R::zero(), ConvergedReason::ConvergedAtol));
+            return Ok(SolveStats::new(
+                0,
+                R::zero(),
+                ConvergedReason::ConvergedAtol,
+            ));
         }
 
         let mut buffers = CgWorkspace::acquire(nrows, work);
@@ -241,11 +319,15 @@ impl CgSolver {
             dot_results.resize(dot_pairs.len(), S::zero());
             global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
 
-            let mut result_idx = 0;
-            let rho = dot_result_to_real(dot_results[result_idx]);
+            let mut result_idx = 0usize;
+            let rho_scalar = dot_results[result_idx];
+            debug::record_dot(debug::DotKind::InitialRho, 0, rho_scalar);
+            let rho: R = dot_result_to_real(rho_scalar);
             result_idx += 1;
+
             let rsq = if want_unpre {
                 let value = dot_results[result_idx];
+                debug::record_dot(debug::DotKind::RNorm, 0, value);
                 result_idx += 1;
                 Some(dot_result_to_real(value))
             } else {
@@ -253,13 +335,14 @@ impl CgSolver {
             };
             let znorm = if want_natural {
                 let value = dot_results[result_idx];
+                debug::record_dot(debug::DotKind::ZNorm, 0, value);
                 Some(dot_result_to_real(value))
             } else {
                 None
             };
             (rho, rsq, znorm)
         };
-        let mut rho_prev = rho;
+        let mut rho_prev: R = rho;
         if rho <= R::zero() || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
@@ -269,7 +352,7 @@ impl CgSolver {
             R::zero()
         };
 
-        let res0_reported = match self.norm_type {
+        let res0_reported: R = match self.norm_type {
             CgNormType::Preconditioned => rho.abs().sqrt(),
             CgNormType::Unpreconditioned => rsq.unwrap().abs().sqrt(),
             CgNormType::Natural => znorm.unwrap().abs().sqrt(),
@@ -300,8 +383,9 @@ impl CgSolver {
         }
 
         for k in 1..=self.conv.max_iters {
-            if k > 1 {
-                let beta: R = rho / rho_prev;
+            let beta_value = if k > 1 { Some(rho / rho_prev) } else { None };
+
+            if let Some(beta) = beta_value {
                 let beta_s: S = S::from_real(beta);
                 for i in 0..nrows {
                     p[i] = z[i] + beta_s * p[i];
@@ -310,7 +394,9 @@ impl CgSolver {
 
             a.matvec_s(p, &mut ap[..], scratch);
 
-            let p_ap = dot_result_to_real(global_dot_conj(comm, p, ap));
+            let p_ap_scalar = global_dot_conj(comm, p, ap);
+            debug::record_dot(debug::DotKind::PAp, k, p_ap_scalar);
+            let p_ap: R = dot_result_to_real(p_ap_scalar);
             if p_ap <= R::zero() || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
@@ -369,8 +455,10 @@ impl CgSolver {
                 dot_results.resize(dot_pairs.len(), S::zero());
                 global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
 
-                let mut result_idx = 0;
-                let rho_new = dot_result_to_real(dot_results[result_idx]);
+                let mut result_idx = 0usize;
+                let rho_scalar = dot_results[result_idx];
+                debug::record_dot(debug::DotKind::Rho, k, rho_scalar);
+                let rho_new: R = dot_result_to_real(rho_scalar);
                 result_idx += 1;
                 if rho_new <= R::zero() || !rho_new.is_finite() {
                     return Err(KError::IndefinitePreconditioner);
@@ -378,6 +466,7 @@ impl CgSolver {
 
                 let rsq_new = if want_unpre {
                     let value = dot_results[result_idx];
+                    debug::record_dot(debug::DotKind::RNorm, k, value);
                     result_idx += 1;
                     Some(dot_result_to_real(value))
                 } else {
@@ -385,6 +474,7 @@ impl CgSolver {
                 };
                 let znorm_new = if want_natural {
                     let value = dot_results[result_idx];
+                    debug::record_dot(debug::DotKind::ZNorm, k, value);
                     Some(dot_result_to_real(value))
                 } else {
                     None
@@ -392,7 +482,17 @@ impl CgSolver {
                 (rho_new, rsq_new, znorm_new)
             };
 
-            let res_reported = match self.norm_type {
+            debug::emit_iter(debug::IterEvent {
+                iteration: k,
+                alpha,
+                beta: beta_value,
+                rho,
+                rho_prev: if k > 1 { Some(rho_prev) } else { None },
+                rho_new,
+                p_ap,
+            });
+
+            let res_reported: R = match self.norm_type {
                 CgNormType::Preconditioned => rho_new.abs().sqrt(),
                 CgNormType::Unpreconditioned => rsq_new.unwrap().abs().sqrt(),
                 CgNormType::Natural => znorm_new.unwrap().abs().sqrt(),
