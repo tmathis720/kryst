@@ -14,6 +14,7 @@ use crate::parallel::{
 };
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
+use crate::solver::common::dot_result_to_real;
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -21,7 +22,11 @@ use rand_distr::{Distribution, StandardNormal};
 use std::cmp::min;
 
 fn reduce_real(comm: &UniverseComm, value: R) -> R {
-    allreduce_sum_scalar_with_mode(comm, S::from_real(value), global_reduction_mode()).real()
+    dot_result_to_real(allreduce_sum_scalar_with_mode(
+        comm,
+        S::from_real(value),
+        global_reduction_mode(),
+    ))
 }
 
 #[derive(Clone, Debug)]
