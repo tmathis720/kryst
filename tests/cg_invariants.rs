@@ -6,7 +6,9 @@ mod support;
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
+use kryst::error::KError;
 use kryst::ops::klinop::KLinOp;
+use kryst::ops::kpc::KPreconditioner;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::CgSolver;
@@ -282,7 +284,77 @@ fn cg_rejects_right_preconditioning_side() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, kryst::error::KError::InvalidInput(_)));
+    match err {
+        kryst::error::KError::InvalidInput(msg) => {
+            let msg = msg.to_lowercase();
+            assert!(msg.contains("left"));
+            assert!(msg.contains("pcg"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+struct NegatingPc {
+    n: usize,
+}
+
+impl NegatingPc {
+    fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
+
+impl KPreconditioner for NegatingPc {
+    type Scalar = S;
+
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_s(
+        &self,
+        _side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        assert_eq!(x.len(), self.n);
+        assert_eq!(y.len(), self.n);
+        for (yi, &xi) in y.iter_mut().zip(x.iter()) {
+            *yi = -xi;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn cg_detects_indefinite_preconditioner() {
+    let diag = vec![S::from_real(2.0), S::from_real(3.0)];
+    let op = DiagonalOp { diag };
+    let b = vec![S::from_real(1.0), S::from_real(1.0)];
+    let mut x = vec![S::zero(); 2];
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut solver = CgSolver::new(1e-8, 4);
+    let mut work = Workspace::new(2);
+    let pc = NegatingPc::new(2);
+
+    let err = solver
+        .solve(
+            &op,
+            Some(&pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut work),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        kryst::error::KError::IndefinitePreconditioner
+    ));
 }
 
 #[test]
