@@ -3,41 +3,58 @@ use crate::algebra::prelude::*;
 /// Temporary buffers reused by solver bridges when converting between `S` and `f64`.
 #[derive(Default, Clone, Debug)]
 pub struct BridgeScratch {
-    xr: Vec<f64>,
-    yr: Vec<f64>,
-    xs: Vec<S>,
-    ys: Vec<S>,
+    buf: Vec<f64>,
 }
 
 impl BridgeScratch {
-    fn ensure(&mut self, n: usize) {
-        if self.xr.len() != n {
-            self.xr.resize(n, 0.0);
-        }
-        if self.yr.len() != n {
-            self.yr.resize(n, 0.0);
-        }
-        if self.xs.len() != n {
-            self.xs.resize(n, S::zero());
-        }
-        if self.ys.len() != n {
-            self.ys.resize(n, S::zero());
-        }
+    /// Create an empty scratch buffer.
+    #[inline]
+    pub fn new() -> Self {
+        Self { buf: Vec::new() }
     }
 
     #[inline]
-    pub fn real_pair(&mut self, n: usize) -> (&mut [f64], &mut [f64]) {
-        self.ensure(n);
-        let xr = self.xr.as_mut_slice();
-        let yr = self.yr.as_mut_slice();
-        (&mut xr[..n], &mut yr[..n])
+    fn ensure(&mut self, want: usize) {
+        if self.buf.len() < want {
+            self.buf.resize(want, 0.0);
+        }
     }
 
+    /// Loan two disjoint real buffers of length `n` at once.
     #[inline]
-    pub fn scalar_pair(&mut self, n: usize) -> (&mut [S], &mut [S]) {
+    pub fn with_pair<F, Rv>(&mut self, n: usize, f: F) -> Rv
+    where
+        F: FnOnce(&mut [f64], &mut [f64]) -> Rv,
+    {
+        self.ensure(2 * n);
+        let (xr, rest) = self.buf.split_at_mut(n);
+        let (yr, _) = rest.split_at_mut(n);
+        f(xr, yr)
+    }
+
+    /// Loan a single temporary buffer of length `n`.
+    #[inline]
+    pub fn with_one<F, Rv>(&mut self, n: usize, f: F) -> Rv
+    where
+        F: FnOnce(&mut [f64]) -> Rv,
+    {
         self.ensure(n);
-        let xs = self.xs.as_mut_slice();
-        let ys = self.ys.as_mut_slice();
-        (&mut xs[..n], &mut ys[..n])
+        f(&mut self.buf[..n])
+    }
+}
+
+#[inline]
+pub fn copy_scalar_to_real_in<T: KrystScalar>(x: &[T], xr: &mut [f64]) {
+    debug_assert_eq!(x.len(), xr.len());
+    for (dst, &src) in xr.iter_mut().zip(x.iter()) {
+        *dst = src.real();
+    }
+}
+
+#[inline]
+pub fn copy_real_into_scalar<T: KrystScalar>(yr: &[f64], y: &mut [T]) {
+    debug_assert_eq!(yr.len(), y.len());
+    for (dst, &src) in y.iter_mut().zip(yr.iter()) {
+        *dst = T::from_real(src);
     }
 }

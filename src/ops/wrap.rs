@@ -1,7 +1,7 @@
 use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in};
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, LinOpF64};
 use crate::matrix::op_bridge::matvec_s as bridge_matvec_s;
@@ -70,10 +70,11 @@ where
         #[cfg(feature = "complex")]
         {
             let need = x.len().max(y.len());
-            let (xr, yr) = scratch.real_pair(need);
-            copy_scalar_to_real_in(x, &mut xr[..x.len()]);
-            <A as LinOp>::t_matvec(self.inner, &xr[..x.len()], &mut yr[..y.len()]);
-            copy_real_to_scalar_in(&yr[..y.len()], y);
+            scratch.with_pair(need, |xr, yr| {
+                copy_scalar_to_real_in(x, &mut xr[..x.len()]);
+                <A as LinOp>::t_matvec(self.inner, &xr[..x.len()], &mut yr[..y.len()]);
+                copy_real_into_scalar(&yr[..y.len()], y);
+            });
         }
     }
 }

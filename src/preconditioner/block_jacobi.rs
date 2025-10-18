@@ -13,11 +13,9 @@
 // 3. Use `apply` to apply the preconditioner to a vector.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-#[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::traits::{MatrixGet, RowPattern};
 #[cfg(feature = "complex")]
 use crate::error::KError;
@@ -270,11 +268,12 @@ impl KPreconditioner for BlockJacobi<f64> {
         }
 
         let n = x.len();
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        self.apply(xr, yr);
-        copy_real_to_scalar_in(yr, y);
-        Ok(())
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            self.apply(xr, yr);
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
     }
 }
 

@@ -20,11 +20,9 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 #[cfg(feature = "complex")]
 use crate::algebra::prelude::*;
-#[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::traits::MatShape;
 use crate::error::KError;
 #[cfg(feature = "complex")]
@@ -231,11 +229,12 @@ impl KPreconditioner for Ilup<f64> {
         }
 
         let n = x.len();
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        self.apply_slice(side, xr, yr)?;
-        copy_real_to_scalar_in(yr, y);
-        Ok(())
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            self.apply_slice(side, xr, yr)?;
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
     }
 }
 
