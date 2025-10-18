@@ -577,7 +577,7 @@ impl PcgSolver {
     ) -> Result<SolveStats<f64>, KError> {
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
-                "pipelined PCG requires left preconditioning with SPD M".into(),
+                "Pipelined PCG requires left preconditioning with HPD M; choose PcSide::Left or use MINRES (Hermitian) / GMRES (general) instead".into(),
             ));
         }
 
@@ -1002,7 +1002,7 @@ impl PcgSolver {
         let pc_ref = pc.as_deref();
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
-                "CG requires left preconditioning with SPD M; use MINRES or GMRES otherwise".into(),
+                "CG/PCG requires left preconditioning with HPD M; choose PcSide::Left or use MINRES (Hermitian) / GMRES (general) instead".into(),
             ));
         }
 
@@ -1063,7 +1063,7 @@ impl PcgSolver {
         let pc_ref = pc.as_deref();
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
-                "pipelined PCG requires left preconditioning with SPD M".into(),
+                "Pipelined PCG requires left preconditioning with HPD M; choose PcSide::Left or use MINRES (Hermitian) / GMRES (general) instead".into(),
             ));
         }
 

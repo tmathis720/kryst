@@ -20,6 +20,17 @@
 //! ## Side policy
 //! [`pc_side`](struct.KspContext.html#structfield.pc_side) is passed to solvers; PCs **do not** decide left vs right placement.
 //!
+//! ### Solver vs preconditioning side
+//!
+//! | Solver            | Allowed sides   | Notes                                                   |
+//! |-------------------|-----------------|---------------------------------------------------------|
+//! | `CG`, `PCG`       | Left only       | Requires HPD `A` and HPD left preconditioner `M`.       |
+//! | `FGMRES`          | Right only      | Flexible right-only pipeline.                           |
+//! | `PCA-GMRES`       | Left or Right   | Mapped to [`PcaPcMode`] during setup.                   |
+//! | All other solvers | Left or Right   | `Symmetric` is normalized to `Left` before dispatch.    |
+//!
+//! Incompatible combinations return [`KError::InvalidInput`] during configuration.
+//!
 //! ## Deferred PCs / Chaining
 //! [`PcFactory::create_deferred_pc`] stores type+options without a matrix.
 //! [`PcFactory::construct_deferred_preconditioner`] materializes it once `P` is known.
@@ -71,6 +82,17 @@ pub enum SolverType {
     Qmr,
     Tfqmr,
     Preonly,
+}
+
+impl SolverType {
+    /// Return the preconditioning side required by this solver, if any.
+    #[inline]
+    pub fn required_pc_side(self) -> Option<PcSide> {
+        match self {
+            SolverType::Cg | SolverType::Pcg => Some(PcSide::Left),
+            _ => None,
+        }
+    }
 }
 
 impl FromStr for SolverType {
@@ -213,25 +235,19 @@ impl KspContext {
     /// Validate that `side` is compatible with `solver_type` (if set).
     /// Mirrors `configure_pc_side()` logic but used at set-time to fail fast.
     fn check_pc_side_now(&self, side: PcSide) -> Result<(), KError> {
-        let side = Self::normalize_side(side);
+        let normalized = Self::normalize_side(side);
         if let Some(st) = self.solver_type {
-            match st {
-                SolverType::Fgmres => {
-                    if side != PcSide::Right {
-                        return Err(KError::InvalidInput(
-                            "FGMRES only supports right preconditioning".into(),
-                        ));
-                    }
+            if let Some(required) = st.required_pc_side() {
+                if normalized != required {
+                    return Err(KError::InvalidInput(format!(
+                        "{st:?} requires left preconditioning; got {side:?}"
+                    )));
                 }
-                SolverType::BiCgStab | SolverType::Gmres | SolverType::PcaGmres => {
-                    // both left and right are fine for these
-                }
-                _ => {
-                    if side == PcSide::Right {
-                        return Err(KError::InvalidInput(
-                            "Selected solver only supports left preconditioning".into(),
-                        ));
-                    }
+            } else if matches!(st, SolverType::Fgmres) {
+                if normalized != PcSide::Right {
+                    return Err(KError::InvalidInput(
+                        "FGMRES only supports right preconditioning".into(),
+                    ));
                 }
             }
         }
@@ -267,6 +283,20 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
+        if let Some(required) = solver_type.required_pc_side() {
+            let normalized = Self::normalize_side(self.pc_side);
+            if self.pc_side_explicit {
+                if normalized != required {
+                    return Err(KError::InvalidInput(format!(
+                        "{solver_type:?} requires left preconditioning; got {:?}",
+                        self.pc_side
+                    )));
+                }
+            } else {
+                self.pc_side = required;
+            }
+        }
+
         self.solver_type = Some(solver_type);
         let solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>> = match solver_type {
             SolverType::Cg => Some(Box::new(
@@ -1168,32 +1198,31 @@ impl KspContext {
             s => s,
         };
 
-        match self.solver_type {
-            Some(SolverType::PcaGmres) => {
-                if let Some(s) = self
-                    .solver
-                    .as_mut()
-                    .and_then(|s| s.as_any_mut().downcast_mut::<PcaGmresSolver>())
-                {
-                    s.pc_mode = match side {
-                        PcSide::Left => PcaPcMode::Left,
-                        PcSide::Right => PcaPcMode::Right,
-                        PcSide::Symmetric => unreachable!(),
-                    };
-                }
+        if let Some(SolverType::PcaGmres) = self.solver_type {
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|s| s.as_any_mut().downcast_mut::<PcaGmresSolver>())
+            {
+                s.pc_mode = match side {
+                    PcSide::Left => PcaPcMode::Left,
+                    PcSide::Right => PcaPcMode::Right,
+                    PcSide::Symmetric => unreachable!(),
+                };
             }
-            Some(SolverType::Fgmres) => {
+        }
+
+        if let Some(st) = self.solver_type {
+            if let Some(required) = st.required_pc_side() {
+                if side != required {
+                    return Err(KError::InvalidInput(format!(
+                        "{st:?} requires left preconditioning; got {side:?}"
+                    )));
+                }
+            } else if matches!(st, SolverType::Fgmres) {
                 if side != PcSide::Right {
-                    return Err(KError::SolveError(
+                    return Err(KError::InvalidInput(
                         "FGMRES only supports right preconditioning".into(),
-                    ));
-                }
-            }
-            Some(SolverType::Gmres) => {}
-            _ => {
-                if side == PcSide::Right {
-                    return Err(KError::SolveError(
-                        "Selected solver only supports left preconditioning".into(),
                     ));
                 }
             }
@@ -1338,14 +1367,18 @@ mod tests {
         let mut ksp = KspContext::new();
         // Start with a right side (illegal for most solvers)
         ksp.set_pc_side(PcSide::Right); // allowed until a solver constrains it
-        // Now pick a left-only solver; we expect an unwrap panic due to Err
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ksp.set_type(SolverType::Cg).unwrap();
-        }));
-        assert!(
-            res.is_err(),
-            "expected panic due to incompatible side for CG"
-        );
+        // Now pick a left-only solver; we expect an error
+        let err = match ksp.set_type(SolverType::Cg) {
+            Ok(_) => panic!("expected CG to reject right preconditioning"),
+            Err(e) => e,
+        };
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.to_lowercase().contains("cg"));
+                assert!(msg.to_lowercase().contains("left"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -1356,6 +1389,40 @@ mod tests {
         ksp.try_set_pc_side(PcSide::Right).unwrap();
         // Symmetric is normalized to Left; should pass
         ksp.try_set_pc_side(PcSide::Symmetric).unwrap();
+    }
+
+    #[test]
+    fn cg_requires_left_side_in_context() {
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Cg).unwrap();
+        let err = match ksp.try_set_pc_side(PcSide::Right) {
+            Ok(_) => panic!("expected CG to reject right preconditioning"),
+            Err(e) => e,
+        };
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.to_lowercase().contains("cg"));
+                assert!(msg.to_lowercase().contains("left"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pcg_requires_left_side_in_context() {
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Pcg).unwrap();
+        let err = match ksp.try_set_pc_side(PcSide::Right) {
+            Ok(_) => panic!("expected PCG to reject right preconditioning"),
+            Err(e) => e,
+        };
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.to_lowercase().contains("pcg"));
+                assert!(msg.to_lowercase().contains("left"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

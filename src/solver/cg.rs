@@ -1,14 +1,18 @@
 //! # CG side semantics
 //!
-//! CG requires **Left preconditioning** with SPD `M`.
-//! If [`PcSide`] is not `Left`, the solver returns `InvalidInput`.
-//! Residual norm is the preconditioned norm `||M^{-1} r||`; final stats include true `||r||`.
-//!
-//! In complex builds both `A` and the (optional) preconditioner must be Hermitian
-//! positive definite.  Inner products are computed with conjugation on the
-//! first argument, and any tiny imaginary drift introduced by global
-//! reductions is discarded via [`dot_result_to_real`], which validates the
-//! invariant in debug builds.
+//! * CG/PCG requires **Left** preconditioning with **HPD** `M`.
+//! * `PcSide::Left` is enforced even if callers attempt right preconditioning; the solver
+//!   returns [`KError::InvalidInput`] otherwise.
+//! * In complex builds both `A` and the (optional) preconditioner must be Hermitian
+//!   positive definite.
+//! * Inner products use conjugation on the first argument. Tiny imaginary drift introduced by
+//!   floating-point or MPI reductions is discarded via [`dot_result_to_real`] after a scaled check.
+//! * The reported residual norm defaults to the preconditioned norm `sqrt(⟨r,z⟩)`; final stats
+//!   include the true `||r||`.
+//! * Violations fail fast with structured errors:
+//!   - [`KError::InvalidInput`] for wrong `PcSide`,
+//!   - [`KError::IndefinitePreconditioner`] if `⟨r,z⟩ ≤ 0`,
+//!   - [`KError::IndefiniteMatrix`] if `⟨p,Ap⟩ ≤ 0`.
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
@@ -255,7 +259,7 @@ impl CgSolver {
 
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
-                "CG requires left preconditioning with SPD M; use MINRES or GMRES otherwise".into(),
+                "CG/PCG requires left preconditioning with HPD M; choose PcSide::Left or use MINRES (Hermitian) / GMRES (general) instead".into(),
             ));
         }
 
