@@ -67,7 +67,7 @@ mod complex_demo {
             println!();
         }
 
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/complex");
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/mtx");
         let cases = [
             ("qc324.mtx", "qc324 (complex, general)"),
             ("dwg961a.mtx", "dwg961a (complex, general)"),
