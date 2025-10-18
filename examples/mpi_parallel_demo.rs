@@ -5,7 +5,7 @@ use kryst::*; // Import the trait
 ///
 /// This example shows how to use the enhanced Comm trait with MPI-parallel reductions
 /// and communicator splitting functionality.
-/// 
+///
 /// to run:
 /// cargo mpirun -n 4 --example mpi_parallel_demo
 fn main() -> Result<(), Box<dyn std::error::Error>> {

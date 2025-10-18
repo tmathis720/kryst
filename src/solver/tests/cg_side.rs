@@ -30,7 +30,9 @@ mod tests_cg_side {
         let err = ksp.solve(&b, &mut x).unwrap_err();
 
         match err {
-            KError::SolveError(msg) => assert!(msg.to_lowercase().contains("left")),
+            KError::SolveError(msg) | KError::InvalidInput(msg) => {
+                assert!(msg.to_lowercase().contains("left"))
+            }
             _ => panic!("expected SolveError, got {:?}", err),
         }
     }

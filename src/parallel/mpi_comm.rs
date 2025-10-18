@@ -12,6 +12,7 @@
 //! comm.barrier();
 //! ```
 
+use crate::algebra::prelude::*;
 use mpi::raw::AsRaw;
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
@@ -65,6 +66,71 @@ impl MpiComm {
     /// Best-effort constructor that returns `None` if initialization fails.
     pub fn try_new() -> Option<Self> {
         std::panic::catch_unwind(Self::new).ok()
+    }
+
+    #[inline]
+    pub fn allreduce_sum_real(&self, v: R) -> R {
+        use mpi::collective::SystemOperation;
+        let mut acc = v;
+        self.world
+            .all_reduce_into(&v, &mut acc, SystemOperation::sum());
+        acc
+    }
+
+    #[inline]
+    pub fn allreduce_sum_scalar(&self, v: S) -> S {
+        #[cfg(feature = "complex")]
+        {
+            let re = self.allreduce_sum_real(v.real());
+            let im = self.allreduce_sum_real(v.imag());
+            S::from_parts(re, im)
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            S::from_real(self.allreduce_sum_real(v.real()))
+        }
+    }
+
+    pub fn allreduce_sum_scalars(&self, buf: &mut [S]) {
+        if buf.is_empty() {
+            return;
+        }
+
+        use mpi::collective::SystemOperation;
+
+        #[cfg(feature = "complex")]
+        {
+            let n = buf.len();
+            let mut re = vec![0.0f64; n];
+            let mut im = vec![0.0f64; n];
+            for (i, &z) in buf.iter().enumerate() {
+                re[i] = z.real();
+                im[i] = z.imag();
+            }
+            let mut re_sum = vec![0.0f64; n];
+            let mut im_sum = vec![0.0f64; n];
+            self.world
+                .all_reduce_into(&re[..], &mut re_sum[..], SystemOperation::sum());
+            self.world
+                .all_reduce_into(&im[..], &mut im_sum[..], SystemOperation::sum());
+            for (slot, (&r, &i)) in buf.iter_mut().zip(re_sum.iter().zip(im_sum.iter())) {
+                *slot = S::from_parts(r, i);
+            }
+        }
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let mut tmp = vec![0.0f64; buf.len()];
+            for (dst, &z) in tmp.iter_mut().zip(buf.iter()) {
+                *dst = z.real();
+            }
+            let mut sum = vec![0.0f64; tmp.len()];
+            self.world
+                .all_reduce_into(&tmp[..], &mut sum[..], SystemOperation::sum());
+            for (slot, &value) in buf.iter_mut().zip(sum.iter()) {
+                *slot = S::from_real(value);
+            }
+        }
     }
 }
 
