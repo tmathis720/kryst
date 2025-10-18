@@ -1,11 +1,16 @@
-use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
+
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::algebra::prelude::*;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::apply_pc_s;
 
 pub struct QrPc;
 
@@ -48,6 +53,7 @@ impl Preconditioner for QrPc {
     }
 }
 
+#[cfg(feature = "complex")]
 impl KPreconditioner for QrPc {
     type Scalar = S;
 
