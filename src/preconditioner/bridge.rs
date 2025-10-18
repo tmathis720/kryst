@@ -1,7 +1,7 @@
 use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in};
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::preconditioner::{PcSide, Preconditioner};
 
@@ -30,11 +30,12 @@ where
     #[cfg(feature = "complex")]
     {
         let n = x.len();
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        pc.apply(side, xr, yr)?;
-        copy_real_to_scalar_in(yr, y);
-        Ok(())
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            pc.apply(side, xr, yr)?;
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
     }
 }
 
@@ -63,10 +64,11 @@ where
     #[cfg(feature = "complex")]
     {
         let n = x.len();
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        pc.apply_mut(side, xr, yr)?;
-        copy_real_to_scalar_in(yr, y);
-        Ok(())
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            pc.apply_mut(side, xr, yr)?;
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
     }
 }

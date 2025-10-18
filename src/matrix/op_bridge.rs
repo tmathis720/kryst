@@ -1,7 +1,7 @@
 use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in};
+use crate::algebra::prelude::*;
 use crate::matrix::op::LinOp;
 
 #[inline]
@@ -23,9 +23,10 @@ where
     #[cfg(feature = "complex")]
     {
         let n = x.len();
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        a.matvec(xr, yr);
-        copy_real_to_scalar_in(yr, y);
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            a.matvec(xr, yr);
+            copy_real_into_scalar(yr, y);
+        });
     }
 }

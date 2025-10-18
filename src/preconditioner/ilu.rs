@@ -71,11 +71,9 @@
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 #[cfg(feature = "complex")]
 use crate::algebra::prelude::*;
-#[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
@@ -1586,11 +1584,12 @@ impl KPreconditioner for Ilu<f64> {
             )));
         }
 
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        self.apply_slice(side, xr, yr)?;
-        copy_real_to_scalar_in(yr, y);
-        Ok(())
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            self.apply_slice(side, xr, yr)?;
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
     }
 }
 

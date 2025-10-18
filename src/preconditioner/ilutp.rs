@@ -8,11 +8,9 @@
 //! Sparse Linear Systems" with modifications for numerical stability.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-#[cfg(feature = "complex")]
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
@@ -300,11 +298,12 @@ impl KPreconditioner for Ilutp {
         }
 
         let n = x.len();
-        let (xr, yr) = scratch.real_pair(n);
-        copy_scalar_to_real_in(x, xr);
-        self.apply_slice(xr, yr)?;
-        copy_real_to_scalar_in(yr, y);
-        Ok(())
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            self.apply_slice(xr, yr)?;
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
     }
 }
 
