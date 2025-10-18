@@ -18,25 +18,28 @@ pub use buffer::take_or_resize;
 
 /// Convert a conjugated dot-product result into its real scalar component.
 ///
-/// In complex builds we sanity-check that the imaginary component is within a
-/// small tolerance of zero so solvers can surface unexpected non-Hermitian
-/// reductions during debug runs.
-#[inline]
+/// Complex builds tolerate tiny imaginary drift introduced by roundoff during
+/// distributed reductions.  The imaginary component is checked against a
+/// scaled tolerance in debug builds to surface violations of Hermitian
+/// invariants without paying a runtime cost in release builds.
+#[inline(always)]
 pub fn dot_result_to_real(global: S) -> R {
+    let real_part = global.real();
     #[cfg(feature = "complex")]
     {
-        debug_assert!(
-            global.imag().abs() <= 1e-12 * global.real().abs().max(1.0) + 1e-30,
-            "non-real inner product detected: {} + {}i",
-            global.real(),
-            global.imag()
-        );
-        global.real()
+        let imag_part = global.imag();
+        let magnitude = global.abs();
+        let eps = 128.0 * f64::EPSILON;
+        let scale = 1.0 + magnitude;
+        if imag_part.abs() > eps * scale {
+            debug_assert!(
+                false,
+                "dot_result_to_real: non-negligible imaginary part: im={:.3e}, |s|={:.3e}",
+                imag_part, magnitude
+            );
+        }
     }
-    #[cfg(not(feature = "complex"))]
-    {
-        global.real()
-    }
+    real_part
 }
 
 /// Recompute the true residual norm ||r||_2 where r = b - A x.
@@ -62,7 +65,7 @@ pub fn recompute_true_residual_norm<C: Comm + CommDeterministic>(
         local
     } else {
         match mode {
-            ReproMode::Fast => comm.allreduce_sum_scalar(S::from_real(local)).real(),
+            ReproMode::Fast => dot_result_to_real(comm.allreduce_sum_scalar(S::from_real(local))),
             _ => {
                 let packet = Packet::<1> { v: [local] };
                 comm.allreduce_det(&packet, mode).v[0]

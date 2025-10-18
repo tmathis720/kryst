@@ -14,6 +14,8 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use crate::reduction::Packet;
 use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
+#[cfg(feature = "complex")]
+use crate::solver::common::dot_result_to_real;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
 use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductMode, ReductOptions};
@@ -229,7 +231,7 @@ impl PcgSolver {
         {
             let local = crate::algebra::blas::dot_conj(u, v);
             if matches!(self.reduction.mode, ReproMode::Fast) {
-                return comm.allreduce_sum_scalar(local).real();
+                return dot_result_to_real(comm.allreduce_sum_scalar(local));
             }
 
             let packet = Packet::<2> {
@@ -272,7 +274,7 @@ impl PcgSolver {
             for ((u, v), slot) in pairs.iter().zip(out.iter_mut()) {
                 let local = crate::algebra::blas::dot_conj(u, v);
                 if matches!(self.reduction.mode, ReproMode::Fast) {
-                    *slot = comm.allreduce_sum_scalar(local).real();
+                    *slot = dot_result_to_real(comm.allreduce_sum_scalar(local));
                 } else {
                     let packet = Packet::<2> {
                         v: [local.real(), local.imag()],
@@ -790,7 +792,7 @@ impl PcgSolver {
                     .fold(R::default(), |acc, (&pi, &api)| acc + pi * api);
 
                 #[cfg(feature = "complex")]
-                let pp_ap_local: R = dot_conj(p, ap).real();
+                let pp_ap_local: R = dot_result_to_real(dot_conj(p, ap));
 
                 let (h_ppap, _) = comm.allreduce2_async(pp_ap_local, R::default(), &opt)?;
                 let pp_ap = {

@@ -3,6 +3,12 @@
 //! CG requires **Left preconditioning** with SPD `M`.
 //! If [`PcSide`] is not `Left`, the solver returns `InvalidInput`.
 //! Residual norm is the preconditioned norm `||M^{-1} r||`; final stats include true `||r||`.
+//!
+//! In complex builds both `A` and the (optional) preconditioner must be Hermitian
+//! positive definite.  Inner products are computed with conjugation on the
+//! first argument, and any tiny imaginary drift introduced by global
+//! reductions is discarded via [`dot_result_to_real`], which validates the
+//! invariant in debug builds.
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
