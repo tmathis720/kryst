@@ -13,10 +13,28 @@
 //! ```
 
 use crate::algebra::prelude::*;
+use mpi::collective::SystemOperation;
 use mpi::raw::AsRaw;
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
+use std::ffi::c_void;
+use std::mem::MaybeUninit;
 use std::sync::{Arc, OnceLock};
+
+pub struct OwnedMpiRequest {
+    pub(crate) handle: mpi::ffi::MPI_Request,
+}
+
+impl OwnedMpiRequest {
+    pub(crate) fn new(handle: mpi::ffi::MPI_Request) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn wait(&mut self) {
+        let rc = unsafe { mpi::ffi::MPI_Wait(&mut self.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+        debug_assert_eq!(rc, 0);
+    }
+}
 
 /// MPI communicator wrapper for distributed parallelism.
 ///
@@ -131,6 +149,42 @@ impl MpiComm {
                 *slot = S::from_real(value);
             }
         }
+    }
+
+    pub(crate) fn blocking_allreduce_sum_in_place(&self, buf: &mut [R]) {
+        if buf.is_empty() {
+            return;
+        }
+
+        let mut recv = vec![0.0f64; buf.len()];
+        self.world
+            .all_reduce_into(buf, &mut recv[..], SystemOperation::sum());
+        buf.copy_from_slice(&recv);
+    }
+
+    pub(crate) fn immediate_allreduce_sum(&self, send: &[R], recv: &mut [R]) -> OwnedMpiRequest {
+        if send.is_empty() {
+            let handle = unsafe { mpi::ffi::RSMPI_REQUEST_NULL };
+            return OwnedMpiRequest::new(handle);
+        }
+
+        debug_assert_eq!(send.len(), recv.len());
+
+        let mut handle = MaybeUninit::<mpi::ffi::MPI_Request>::uninit();
+        let rc = unsafe {
+            mpi::ffi::MPI_Iallreduce(
+                send.as_ptr() as *const c_void,
+                recv.as_mut_ptr() as *mut c_void,
+                send.len() as i32,
+                mpi::ffi::RSMPI_DOUBLE,
+                mpi::ffi::RSMPI_SUM,
+                self.world.as_raw(),
+                handle.as_mut_ptr(),
+            )
+        };
+        debug_assert_eq!(rc, 0);
+        let handle = unsafe { handle.assume_init() };
+        OwnedMpiRequest::new(handle)
     }
 }
 
