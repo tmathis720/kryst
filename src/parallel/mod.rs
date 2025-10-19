@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 mod reduce;
+mod reduce_async;
 #[cfg(feature = "mpi")]
 pub use reduce::allreduce_sum_scalar_mpi_sys;
 pub use reduce::{
@@ -22,8 +23,10 @@ pub use reduce::{
     global_nrm2_accurate, global_nrm2_many, global_nrm2_many_accurate, global_nrm2_many_into,
     global_nrm2_many_into_accurate, global_nrm2_many_into_repro, global_nrm2_many_into_with_mode,
     global_nrm2_many_repro, global_nrm2_many_with_mode, global_nrm2_repro, global_nrm2_with_mode,
-    global_reduction_mode, set_global_reduction_mode, set_global_reduction_mode_scoped,
+    global_reduce_tuple2, global_reduction_mode, set_global_reduction_mode,
+    set_global_reduction_mode_scoped,
 };
+pub use reduce_async::{ReduceReqReal, ReduceReqScalar, ReduceReqScalars, ReduceReqTuple2};
 
 // Opaque request that can represent multiple backends. Use a `PhantomData`
 // to tie the lifetime when MPI support is disabled.
@@ -291,6 +294,11 @@ impl UniverseComm {
         reduce::allreduce_sum_scalar_impl(self, z)
     }
 
+    #[inline]
+    pub fn iallreduce_sum_scalar<'a>(&self, local: S, out: &'a mut S) -> ReduceReqScalar<'a> {
+        reduce_async::iallreduce_sum_scalar(self, local, out)
+    }
+
     /// Sum an array of scalars in place across all ranks (fast path).
     #[inline]
     pub fn allreduce_sum_scalars(&self, buf: &mut [S]) {
@@ -305,6 +313,11 @@ impl UniverseComm {
         }
     }
 
+    #[inline]
+    pub fn iallreduce_sum_scalars<'a>(&self, buf: &'a mut [S]) -> ReduceReqScalars<'a> {
+        reduce_async::iallreduce_sum_scalars(self, buf)
+    }
+
     /// Sum a single real value across all ranks (fast path).
     #[inline]
     pub fn allreduce_sum_real(&self, v: R) -> R {
@@ -317,6 +330,11 @@ impl UniverseComm {
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             UniverseComm::Serial => v,
         }
+    }
+
+    #[inline]
+    pub fn iallreduce_sum_real<'a>(&self, local: R, out: &'a mut R) -> ReduceReqReal<'a> {
+        reduce_async::iallreduce_sum_real(self, local, out)
     }
 
     /// Deterministic scalar sum across all ranks.
@@ -365,6 +383,17 @@ impl UniverseComm {
         mode: ReproMode,
     ) -> Vec<S> {
         reduce::allreduce_sum_scalar_slice_owned_with_mode(self, data, mode)
+    }
+
+    #[inline]
+    pub fn iallreduce_tuple2<'a>(
+        &self,
+        a_local: S,
+        b_local: R,
+        out_a: &'a mut S,
+        out_b: &'a mut R,
+    ) -> ReduceReqTuple2<'a> {
+        reduce_async::iallreduce_tuple2(self, a_local, b_local, out_a, out_b)
     }
 }
 

@@ -1,4 +1,3 @@
-use crate::algebra::blas::dot_conj;
 use crate::algebra::prelude::*;
 use crate::parallel::{Comm, UniverseComm};
 use crate::reduction::{CommDeterministic, Packet, ReproMode};
@@ -14,6 +13,66 @@ use mpi::traits::CommunicatorCollectives;
 #[cfg(feature = "mpi")]
 use mpi::{ffi, raw::AsRaw};
 
+const LOCAL_BLOCK: usize = 1 << 14;
+
+#[inline]
+pub(crate) fn local_dot_conj_pairwise(x: &[S], y: &[S]) -> S {
+    debug_assert_eq!(x.len(), y.len());
+    let mut acc = S::zero();
+    let mut i = 0;
+    while i < x.len() {
+        let end = (i + LOCAL_BLOCK).min(x.len());
+        let mut blk = S::zero();
+        for j in i..end {
+            blk = x[j].conj().mul_add(y[j], blk);
+        }
+        acc = acc + blk;
+        i = end;
+    }
+    acc
+}
+
+#[inline]
+pub(crate) fn local_sum_abs2_pairwise(x: &[S]) -> R {
+    let mut acc = R::zero();
+    let mut i = 0;
+    while i < x.len() {
+        let end = (i + LOCAL_BLOCK).min(x.len());
+        let mut blk = R::zero();
+        for j in i..end {
+            let a = x[j].abs();
+            blk = blk + a * a;
+        }
+        acc = acc + blk;
+        i = end;
+    }
+    acc
+}
+
+#[cfg(feature = "complex")]
+#[inline]
+pub(crate) fn pack_scalar_s_to_rr(v: S) -> [R; 2] {
+    [v.real(), v.imag()]
+}
+
+#[cfg(feature = "complex")]
+#[inline]
+pub(crate) fn unpack_rr_to_scalar_s(rr: [R; 2]) -> S {
+    S::from_parts(rr[0], rr[1])
+}
+
+#[cfg(not(feature = "complex"))]
+#[inline]
+pub(crate) fn pack_scalar_s_to_rr(v: S) -> [R; 1] {
+    [v.real()]
+}
+
+#[cfg(not(feature = "complex"))]
+#[inline]
+pub(crate) fn unpack_rr_to_scalar_s(rr: [R; 1]) -> S {
+    S::from_real(rr[0])
+}
+
 #[cfg(feature = "complex")]
 #[inline]
 fn pack_scalar(z: S) -> [f64; 2] {
@@ -24,6 +83,59 @@ fn pack_scalar(z: S) -> [f64; 2] {
 #[inline]
 fn unpack_scalar(parts: [f64; 2]) -> S {
     S::from_parts(parts[0], parts[1])
+}
+
+pub(crate) fn allreduce_rr_in_place(comm: &UniverseComm, rr: &mut [R]) {
+    if rr.is_empty() || comm.size() <= 1 {
+        return;
+    }
+
+    match comm {
+        UniverseComm::NoComm(_) => {}
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(inner) => inner.blocking_allreduce_sum_in_place(rr),
+        #[cfg(feature = "rayon")]
+        UniverseComm::Rayon(_) => {}
+        #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+        UniverseComm::Serial => {}
+    }
+}
+
+pub(crate) fn allreduce_vec_s_in_place(comm: &UniverseComm, s: &mut [S]) {
+    if s.is_empty() || comm.size() <= 1 {
+        return;
+    }
+
+    match comm {
+        UniverseComm::NoComm(_) => {}
+        #[cfg(feature = "mpi")]
+        UniverseComm::Mpi(_) => {
+            #[cfg(feature = "complex")]
+            {
+                let mut tmp: Vec<R> = Vec::with_capacity(s.len() * 2);
+                for &value in s.iter() {
+                    tmp.extend_from_slice(&pack_scalar_s_to_rr(value));
+                }
+                allreduce_rr_in_place(comm, tmp.as_mut_slice());
+                for (slot, chunk) in s.iter_mut().zip(tmp.chunks_exact(2)) {
+                    *slot = unpack_rr_to_scalar_s([chunk[0], chunk[1]]);
+                }
+            }
+
+            #[cfg(not(feature = "complex"))]
+            {
+                let mut tmp: Vec<R> = s.iter().map(|&value| value.real()).collect();
+                allreduce_rr_in_place(comm, tmp.as_mut_slice());
+                for (slot, &value) in s.iter_mut().zip(tmp.iter()) {
+                    *slot = S::from_real(value);
+                }
+            }
+        }
+        #[cfg(feature = "rayon")]
+        UniverseComm::Rayon(_) => {}
+        #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+        UniverseComm::Serial => {}
+    }
 }
 
 #[inline]
@@ -228,7 +340,7 @@ pub fn global_dot_conj_with_mode(comm: &UniverseComm, x: &[S], y: &[S], mode: Re
         x.len(),
         y.len()
     );
-    let local = dot_conj(x, y);
+    let local = local_dot_conj_pairwise(x, y);
     allreduce_sum_scalar_with_mode(comm, local, mode)
 }
 
@@ -279,11 +391,11 @@ pub fn global_dot_conj_many_into_with_mode(
             x.len(),
             y.len()
         );
-        *slot = dot_conj(x, y);
+        *slot = local_dot_conj_pairwise(x, y);
     }
 
     match mode {
-        ReproMode::Fast => comm.allreduce_sum_scalars(out),
+        ReproMode::Fast => allreduce_vec_s_in_place(comm, out),
         ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
             allreduce_sum_scalar_slice_with_mode(comm, out, mode)
         }
@@ -293,11 +405,7 @@ pub fn global_dot_conj_many_into_with_mode(
 /// Global Euclidean norm of a vector across all ranks using the requested mode.
 #[inline]
 pub fn global_nrm2_with_mode(comm: &UniverseComm, x: &[S], mode: ReproMode) -> R {
-    let mut ssq = R::zero();
-    for &xi in x {
-        let a = xi.abs();
-        ssq = ssq + a * a;
-    }
+    let ssq = local_sum_abs2_pairwise(x);
     let global = allreduce_sum_real_with_mode(comm, ssq, mode);
     let clamped = if global >= 0.0 { global } else { 0.0 };
     clamped.sqrt()
@@ -307,6 +415,26 @@ pub fn global_nrm2_with_mode(comm: &UniverseComm, x: &[S], mode: ReproMode) -> R
 #[inline]
 pub fn global_nrm2(comm: &UniverseComm, x: &[S]) -> R {
     global_nrm2_with_mode(comm, x, global_reduction_mode())
+}
+
+/// Reduce a scalar and a real value together using a single collective.
+#[inline]
+pub fn global_reduce_tuple2(comm: &UniverseComm, a: S, b: R) -> (S, R) {
+    #[cfg(feature = "complex")]
+    let mut packed = [a.real(), a.imag(), b];
+    #[cfg(not(feature = "complex"))]
+    let mut packed = [a.real(), b];
+    allreduce_rr_in_place(comm, packed.as_mut_slice());
+
+    #[cfg(feature = "complex")]
+    {
+        (S::from_parts(packed[0], packed[1]), packed[2])
+    }
+
+    #[cfg(not(feature = "complex"))]
+    {
+        (S::from_real(packed[0]), packed[1])
+    }
 }
 
 /// Accurate global Euclidean norm of a vector across all ranks.
@@ -340,12 +468,7 @@ pub fn global_nrm2_many_with_mode(comm: &UniverseComm, vecs: &[&[S]], mode: Repr
 
     let mut sums: Vec<R> = vec![R::zero(); vecs.len()];
     for (slot, &vec) in sums.iter_mut().zip(vecs.iter()) {
-        let mut ssq = R::zero();
-        for &xi in vec.iter() {
-            let a = xi.abs();
-            ssq = ssq + a * a;
-        }
-        *slot = ssq;
+        *slot = local_sum_abs2_pairwise(vec);
     }
 
     allreduce_sum_real_slice_with_mode(comm, sums.as_mut_slice(), mode);
@@ -374,12 +497,7 @@ pub fn global_nrm2_many_into_with_mode(
     }
 
     for (slot, &vec) in out.iter_mut().zip(vecs.iter()) {
-        let mut ssq = R::zero();
-        for &xi in vec.iter() {
-            let a = xi.abs();
-            ssq = ssq + a * a;
-        }
-        *slot = ssq;
+        *slot = local_sum_abs2_pairwise(vec);
     }
 
     allreduce_sum_real_slice_with_mode(comm, out, mode);
@@ -696,6 +814,7 @@ pub fn allreduce_sum_scalar_slice_in_place(comm: &UniverseComm, data: &mut [S]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algebra::blas::dot_conj;
     use crate::parallel::NoComm;
 
     #[test]
