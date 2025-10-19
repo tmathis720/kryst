@@ -75,6 +75,8 @@ pub struct KspOptions {
     pub cg_replace_every: Option<usize>,
     pub cg_single_reduction: Option<bool>,
     pub trust_region: Option<f64>,
+    pub cg_use_async: Option<bool>,
+    pub cg_async_min_n: Option<usize>,
 }
 
 /// KSP type tag for option resolution helpers.
@@ -269,6 +271,7 @@ impl Sink for KspOptions {
             "ksp_skip_real_r_check" => set_opt!(&mut self.skip_real_r_check, v),
             "ksp_cg_pipelined" => set_opt!(&mut self.cg_pipelined, v),
             "ksp_cg_single_reduction" => set_opt!(&mut self.cg_single_reduction, v),
+            "ksp_cg_use_async" => set_opt!(&mut self.cg_use_async, v),
             "ksp_gmres_reorthog" => set_opt!(&mut self.gmres_reorthog, v),
             "ksp_gmres_happy_breakdown" => set_opt!(&mut self.gmres_happy_breakdown, v),
             "ksp_fgmres_reorthog" => set_opt!(&mut self.fgmres_reorthog, v),
@@ -329,6 +332,9 @@ impl Sink for KspOptions {
             "ksp_cg_norm" => set_opt!(&mut self.cg_norm, v.to_string()),
             "ksp_cg_replace_every" => {
                 set_opt!(&mut self.cg_replace_every, parse_as::<usize>(v, spec)?)
+            }
+            "ksp_cg_async_min_n" => {
+                set_opt!(&mut self.cg_async_min_n, parse_as::<usize>(v, spec)?)
             }
             "ksp_trust_region" => set_opt!(&mut self.trust_region, parse_as::<f64>(v, spec)?),
             "options_file" => Ok(()), // consumed earlier by expansion
@@ -724,6 +730,15 @@ impl KspOptions {
             let l = v.to_lowercase();
             me.cg_single_reduction = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
         }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_USE_ASYNC") {
+            let l = v.to_lowercase();
+            me.cg_use_async = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_ASYNC_MIN_N") {
+            me.cg_async_min_n = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_CG_ASYNC_MIN_N: {v}"))
+            })?);
+        }
         if let Ok(v) = std::env::var("KRYST_KSP_TRUST_REGION") {
             me.trust_region =
                 Some(v.parse().map_err(|_| {
@@ -1014,6 +1029,8 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         cg_pipelined,
         cg_replace_every,
         cg_single_reduction,
+        cg_use_async,
+        cg_async_min_n,
         trust_region,
     );
     overlay!(
@@ -1127,6 +1144,14 @@ mod tests {
         let args = vec!["-ksp_cg_pipelined", "false"];
         let opts = KspOptions::from_args(&args).unwrap();
         assert_eq!(opts.cg_pipelined, Some(false));
+
+        let args = vec!["-ksp_cg_use_async"];
+        let opts = KspOptions::from_args(&args).unwrap();
+        assert_eq!(opts.cg_use_async, Some(true));
+
+        let args = vec!["-ksp_cg_use_async", "false"];
+        let opts = KspOptions::from_args(&args).unwrap();
+        assert_eq!(opts.cg_use_async, Some(false));
     }
 
     #[test]
@@ -1231,6 +1256,12 @@ mod tests {
 
         let k = parse_with_layers("-ksp_cg_pipelined true\n", &["-ksp_cg_pipelined", "false"]);
         assert_eq!(k.cg_pipelined, Some(false));
+
+        let k = parse_with_layers(
+            "-ksp_cg_async_min_n 5000\n",
+            &["-ksp_cg_async_min_n", "2000"],
+        );
+        assert_eq!(k.cg_async_min_n, Some(2000));
 
         let k = parse_with_layers(
             "-ksp_cg_replace_every 20\n",

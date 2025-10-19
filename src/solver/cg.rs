@@ -17,7 +17,9 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::parallel::{par_axpby, par_axpy, par_copy};
+use crate::algebra::parallel::{
+    par_axpby, par_axpy, par_copy, par_dot_conj_local, par_sum_abs2_local,
+};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
@@ -26,7 +28,11 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2};
+use crate::parallel::{
+    ReduceReqScalar, ReduceReqScalars, ReduceReqTuple2, UniverseComm, global_dot_conj,
+    global_dot_conj_many_into, global_nrm2,
+};
+use crate::parallel::Comm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
 use crate::solver::common::dot_result_to_real;
@@ -185,6 +191,8 @@ pub struct CgSolver {
     /// vector, the solver skips the initial matvec and assumes `x = 0`.
     /// This mirrors PETSc's `KSPSetInitialGuessNonzero` semantics.
     initial_guess_nonzero: bool,
+    async_enabled: bool,
+    async_min_n: usize,
 }
 
 impl CgSolver {
@@ -201,6 +209,8 @@ impl CgSolver {
             trust_region: None,
             true_residual_monitor: None,
             initial_guess_nonzero: false,
+            async_enabled: true,
+            async_min_n: 10_000,
         }
     }
 
@@ -232,12 +242,23 @@ impl CgSolver {
     pub fn set_trust_region(&mut self, r: R) {
         self.trust_region = Some(r);
     }
+    pub fn set_async_enabled(&mut self, enabled: bool) {
+        self.async_enabled = enabled;
+    }
+    pub fn set_async_min_n(&mut self, n: usize) {
+        self.async_min_n = n;
+    }
     /// Set the nonzero initial guess flag after construction.
     pub fn set_nonzero_guess(&mut self, f: bool) {
         self.initial_guess_nonzero = f;
     }
     pub fn set_true_residual_monitor(&mut self, m: Option<Box<dyn Fn(usize, R) + Send + Sync>>) {
         self.true_residual_monitor = m;
+    }
+
+    #[inline]
+    fn should_use_async(&self, comm: &UniverseComm, n: usize) -> bool {
+        self.async_enabled && comm.size() > 1 && n >= self.async_min_n
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -257,6 +278,22 @@ impl CgSolver {
     {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CG");
+
+        #[inline(always)]
+        fn prefetch_like<T>(slice: &[T]) {
+            let _ = core::hint::black_box(slice.as_ptr());
+        }
+
+        enum PapRequest<'a> {
+            None { p_ap: S, pnorm_sq: Option<R> },
+            Scalar(ReduceReqScalar<'a>),
+            Tuple(ReduceReqTuple2<'a>),
+        }
+
+        enum RhoRequest<'a> {
+            None,
+            Scalars(ReduceReqScalars<'a>),
+        }
 
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
@@ -393,22 +430,76 @@ impl CgSolver {
             if let Some(beta) = beta_value {
                 let beta_s: S = S::from_real(beta);
                 par_axpby(z, S::one(), p, beta_s);
+            } else {
+                par_copy(z, p);
             }
 
             a.matvec_s(p, &mut ap[..], scratch);
 
-            let p_ap_scalar = global_dot_conj(comm, p, ap);
+            let async_ok = self.should_use_async(comm, nrows);
+            let need_pnorm = self.trust_region.is_some();
+            let local_pap = par_dot_conj_local(p, ap);
+            let local_pnorm_sq = if need_pnorm {
+                par_sum_abs2_local(p)
+            } else {
+                R::zero()
+            };
+
+            let mut pap_out = S::zero();
+            let mut pnorm_sq_out = R::zero();
+
+            let pap_req = if async_ok {
+                if need_pnorm {
+                    PapRequest::Tuple(comm.iallreduce_tuple2(
+                        local_pap,
+                        local_pnorm_sq,
+                        &mut pap_out,
+                        &mut pnorm_sq_out,
+                    ))
+                } else {
+                    PapRequest::Scalar(comm.iallreduce_sum_scalar(local_pap, &mut pap_out))
+                }
+            } else {
+                let p_ap = global_dot_conj(comm, p, ap);
+                let pnorm_sq = if need_pnorm {
+                    Some(comm.allreduce_sum_real(local_pnorm_sq))
+                } else {
+                    None
+                };
+                PapRequest::None { p_ap, pnorm_sq }
+            };
+
+            prefetch_like(&z[..]);
+            prefetch_like(&r[..]);
+
+            let (p_ap_scalar, pnorm_sq_opt) = match pap_req {
+                PapRequest::None { p_ap, pnorm_sq } => (p_ap, pnorm_sq),
+                PapRequest::Scalar(req) => {
+                    req.wait();
+                    (pap_out, None)
+                }
+                PapRequest::Tuple(req) => {
+                    req.wait();
+                    (pap_out, Some(pnorm_sq_out))
+                }
+            };
+
             debug::record_dot(debug::DotKind::PAp, k, p_ap_scalar);
             let p_ap: R = dot_result_to_real(p_ap_scalar);
             if p_ap <= R::zero() || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
             }
 
+            let pnorm_opt = pnorm_sq_opt.map(|v| v.max(R::zero()).sqrt());
             let alpha: R = rho / p_ap;
             let alpha_s: S = S::from_real(alpha);
 
             if let Some(rmax) = self.trust_region {
-                let pnorm = global_nrm2(comm, p);
+                let pnorm = pnorm_opt.unwrap_or_else(|| {
+                    comm.allreduce_sum_real(local_pnorm_sq)
+                        .max(R::zero())
+                        .sqrt()
+                });
                 if xnorm + alpha.abs() * pnorm > rmax {
                     let step: R = (rmax - xnorm) / (pnorm + 1e-300);
                     let step_s: S = S::from_real(step);
@@ -433,10 +524,29 @@ impl CgSolver {
                 par_copy(r, z);
             }
 
-            let (rho_new, rsq_new, znorm_new) = {
-                let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
-                let want_natural = matches!(self.norm_type, CgNormType::Natural);
+            let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
+            let want_natural = matches!(self.norm_type, CgNormType::Natural);
+            let local_rz = par_dot_conj_local(r, z);
 
+            let mut dot_results: SmallVec<[S; 3]> = SmallVec::new();
+            dot_results.push(local_rz);
+            let rho_idx = 0usize;
+            let rsq_idx = if want_unpre {
+                dot_results.push(par_dot_conj_local(r, r));
+                Some(dot_results.len() - 1)
+            } else {
+                None
+            };
+            let znorm_idx = if want_natural {
+                dot_results.push(par_dot_conj_local(z, z));
+                Some(dot_results.len() - 1)
+            } else {
+                None
+            };
+
+            let rho_req = if async_ok {
+                RhoRequest::Scalars(comm.iallreduce_sum_scalars(dot_results.as_mut_slice()))
+            } else if want_unpre || want_natural {
                 let mut dot_pairs: SmallVec<[(&[S], &[S]); 3]> = SmallVec::new();
                 dot_pairs.push((&r[..], &z[..]));
                 if want_unpre {
@@ -445,36 +555,40 @@ impl CgSolver {
                 if want_natural {
                     dot_pairs.push((&z[..], &z[..]));
                 }
-
-                let mut dot_results: SmallVec<[S; 3]> = SmallVec::new();
-                dot_results.resize(dot_pairs.len(), S::zero());
                 global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
+                RhoRequest::None
+            } else {
+                dot_results[rho_idx] = global_dot_conj(comm, r, z);
+                RhoRequest::None
+            };
 
-                let mut result_idx = 0usize;
-                let rho_scalar = dot_results[result_idx];
-                debug::record_dot(debug::DotKind::Rho, k, rho_scalar);
-                let rho_new: R = dot_result_to_real(rho_scalar);
-                result_idx += 1;
-                if rho_new <= R::zero() || !rho_new.is_finite() {
-                    return Err(KError::IndefinitePreconditioner);
-                }
+            prefetch_like(&p[..]);
+            prefetch_like(&x[..]);
 
-                let rsq_new = if want_unpre {
-                    let value = dot_results[result_idx];
-                    debug::record_dot(debug::DotKind::RNorm, k, value);
-                    result_idx += 1;
-                    Some(dot_result_to_real(value))
-                } else {
-                    None
-                };
-                let znorm_new = if want_natural {
-                    let value = dot_results[result_idx];
-                    debug::record_dot(debug::DotKind::ZNorm, k, value);
-                    Some(dot_result_to_real(value))
-                } else {
-                    None
-                };
-                (rho_new, rsq_new, znorm_new)
+            if let RhoRequest::Scalars(req) = rho_req {
+                req.wait();
+            }
+
+            let rho_scalar = dot_results[rho_idx];
+            debug::record_dot(debug::DotKind::Rho, k, rho_scalar);
+            let rho_new: R = dot_result_to_real(rho_scalar);
+            if rho_new <= R::zero() || !rho_new.is_finite() {
+                return Err(KError::IndefinitePreconditioner);
+            }
+
+            let rsq_new = if let Some(idx) = rsq_idx {
+                let value = dot_results[idx];
+                debug::record_dot(debug::DotKind::RNorm, k, value);
+                Some(dot_result_to_real(value))
+            } else {
+                None
+            };
+            let znorm_new = if let Some(idx) = znorm_idx {
+                let value = dot_results[idx];
+                debug::record_dot(debug::DotKind::ZNorm, k, value);
+                Some(dot_result_to_real(value))
+            } else {
+                None
             };
 
             debug::emit_iter(debug::IterEvent {

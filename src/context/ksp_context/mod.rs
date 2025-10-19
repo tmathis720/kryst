@@ -699,6 +699,12 @@ impl KspContext {
             if let Some(r) = opts.trust_region {
                 s.set_trust_region(r);
             }
+            if let Some(flag) = opts.cg_use_async {
+                s.set_async_enabled(flag);
+            }
+            if let Some(min_n) = opts.cg_async_min_n {
+                s.set_async_min_n(min_n);
+            }
         }
         let mut pcg_pending_updated = false;
         if let Some(flag) = opts.cg_pipelined {
