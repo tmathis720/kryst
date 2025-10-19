@@ -232,6 +232,20 @@ pub static SPECS: &[Spec] = &[
         doc: "toggle pipelined PCG",
     },
     Spec {
+        flag: "-ksp_cg_use_async",
+        key: "ksp_cg_use_async",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "toggle asynchronous CG reductions",
+    },
+    Spec {
+        flag: "-ksp_cg_async_min_n",
+        key: "ksp_cg_async_min_n",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "minimum vector length for async CG",
+    },
+    Spec {
         flag: "-ksp_cg_replace_every",
         key: "ksp_cg_replace_every",
         arity: Arity::One,
