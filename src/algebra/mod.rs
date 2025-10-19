@@ -2,6 +2,7 @@
 
 pub mod blas;
 pub mod bridge;
+pub mod parallel;
 pub mod prelude;
 pub mod scalar;
 

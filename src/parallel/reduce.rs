@@ -1,3 +1,4 @@
+use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
 use crate::algebra::prelude::*;
 use crate::parallel::{Comm, UniverseComm};
 use crate::reduction::{CommDeterministic, Packet, ReproMode};
@@ -12,42 +13,6 @@ use mpi::collective::SystemOperation;
 use mpi::traits::CommunicatorCollectives;
 #[cfg(feature = "mpi")]
 use mpi::{ffi, raw::AsRaw};
-
-const LOCAL_BLOCK: usize = 1 << 14;
-
-#[inline]
-pub(crate) fn local_dot_conj_pairwise(x: &[S], y: &[S]) -> S {
-    debug_assert_eq!(x.len(), y.len());
-    let mut acc = S::zero();
-    let mut i = 0;
-    while i < x.len() {
-        let end = (i + LOCAL_BLOCK).min(x.len());
-        let mut blk = S::zero();
-        for j in i..end {
-            blk = x[j].conj().mul_add(y[j], blk);
-        }
-        acc = acc + blk;
-        i = end;
-    }
-    acc
-}
-
-#[inline]
-pub(crate) fn local_sum_abs2_pairwise(x: &[S]) -> R {
-    let mut acc = R::zero();
-    let mut i = 0;
-    while i < x.len() {
-        let end = (i + LOCAL_BLOCK).min(x.len());
-        let mut blk = R::zero();
-        for j in i..end {
-            let a = x[j].abs();
-            blk = blk + a * a;
-        }
-        acc = acc + blk;
-        i = end;
-    }
-    acc
-}
 
 #[cfg(feature = "complex")]
 #[inline]
@@ -340,7 +305,7 @@ pub fn global_dot_conj_with_mode(comm: &UniverseComm, x: &[S], y: &[S], mode: Re
         x.len(),
         y.len()
     );
-    let local = local_dot_conj_pairwise(x, y);
+    let local = par_dot_conj_local(x, y);
     allreduce_sum_scalar_with_mode(comm, local, mode)
 }
 
@@ -391,7 +356,7 @@ pub fn global_dot_conj_many_into_with_mode(
             x.len(),
             y.len()
         );
-        *slot = local_dot_conj_pairwise(x, y);
+        *slot = par_dot_conj_local(x, y);
     }
 
     match mode {
@@ -405,7 +370,7 @@ pub fn global_dot_conj_many_into_with_mode(
 /// Global Euclidean norm of a vector across all ranks using the requested mode.
 #[inline]
 pub fn global_nrm2_with_mode(comm: &UniverseComm, x: &[S], mode: ReproMode) -> R {
-    let ssq = local_sum_abs2_pairwise(x);
+    let ssq = par_sum_abs2_local(x);
     let global = allreduce_sum_real_with_mode(comm, ssq, mode);
     let clamped = if global >= 0.0 { global } else { 0.0 };
     clamped.sqrt()
@@ -468,7 +433,7 @@ pub fn global_nrm2_many_with_mode(comm: &UniverseComm, vecs: &[&[S]], mode: Repr
 
     let mut sums: Vec<R> = vec![R::zero(); vecs.len()];
     for (slot, &vec) in sums.iter_mut().zip(vecs.iter()) {
-        *slot = local_sum_abs2_pairwise(vec);
+        *slot = par_sum_abs2_local(vec);
     }
 
     allreduce_sum_real_slice_with_mode(comm, sums.as_mut_slice(), mode);
@@ -497,7 +462,7 @@ pub fn global_nrm2_many_into_with_mode(
     }
 
     for (slot, &vec) in out.iter_mut().zip(vecs.iter()) {
-        *slot = local_sum_abs2_pairwise(vec);
+        *slot = par_sum_abs2_local(vec);
     }
 
     allreduce_sum_real_slice_with_mode(comm, out, mode);
