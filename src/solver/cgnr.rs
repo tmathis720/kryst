@@ -57,8 +57,8 @@ impl<'a> CgnrWorkspace<'a> {
     fn acquire(work: &'a mut Workspace, m: usize, n: usize) -> Self {
         take_or_resize(&mut work.tmp1, m);
         take_or_resize(&mut work.tmp2, n);
-        if work.bridge_tmp.len() != n {
-            work.bridge_tmp.resize(n, S::zero());
+        if work.bridge_tmp.len() != m {
+            work.bridge_tmp.resize(m, S::zero());
         }
         while work.q_s.len() < 2 {
             work.q_s.push(Vec::new());
@@ -78,7 +78,7 @@ impl<'a> CgnrWorkspace<'a> {
             p: &mut p_slice[0][..n],
             zhat: &mut zhat_slice[0][..n],
             ap: &mut work.z_s[0][..m],
-            tmp_true: &mut work.bridge_tmp[..n],
+            tmp_true: &mut work.bridge_tmp[..m],
             scratch: &mut work.bridge,
         }
     }

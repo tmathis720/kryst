@@ -582,6 +582,9 @@ impl GmresSolver {
             }
         }
 
+        let (reason, _) = self.conv.check(res, bnorm, total_iters);
+        stats.reason = reason;
+
         let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
         stats.final_residual = true_res;
 
