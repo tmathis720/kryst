@@ -1,0 +1,305 @@
+//! Thread-parallel vector kernels with scalar fallback.
+//!
+//! - Works with or without `feature="rayon"`.
+//! - Uses stable chunking (configurable) to keep reductions numerically steady.
+//! - Provides scalar fallbacks for small problems or builds without Rayon.
+//!
+//! The kernels assume crate-level aliases/traits brought in via
+//! [`crate::algebra::prelude`].
+
+#![allow(clippy::needless_borrow)]
+
+use crate::algebra::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(feature = "rayon")]
+use rayon::ThreadPoolBuilder;
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
+/// Minimum slice length to consider the parallel route. Smaller workloads use the
+/// scalar fallbacks to avoid threading overhead.
+static MIN_PAR_LEN: AtomicUsize = AtomicUsize::new(1 << 15);
+/// Chunk size for `par_chunks`; a stable chunking policy improves determinism
+/// across runs with the same thread configuration.
+static PAR_CHUNK: AtomicUsize = AtomicUsize::new(1 << 14);
+
+/// Control parallel thresholds at runtime.
+///
+/// Passing `0` for either parameter keeps the previous value. Calls racing with
+/// in-flight kernels are benign; thresholds update with relaxed ordering.
+pub fn set_parallel_thresholds(min_len: usize, chunk: usize) {
+    if min_len > 0 {
+        MIN_PAR_LEN.store(min_len, Ordering::Relaxed);
+    }
+    if chunk > 0 {
+        PAR_CHUNK.store(chunk, Ordering::Relaxed);
+    }
+}
+
+/// Configure the Rayon thread pool. Safe to call multiple times; failures are ignored
+/// when the global pool has already been built.
+#[cfg(feature = "rayon")]
+pub fn set_rayon_threads(n: usize) {
+    let _ = ThreadPoolBuilder::new().num_threads(n).build_global();
+}
+
+// -------------------- scalar fallbacks --------------------
+
+#[inline]
+fn s_copy(src: &[S], dst: &mut [S]) {
+    debug_assert_eq!(src.len(), dst.len());
+    dst.copy_from_slice(src);
+}
+
+#[inline]
+fn s_fill_zero(dst: &mut [S]) {
+    for value in dst {
+        *value = S::zero();
+    }
+}
+
+#[inline]
+fn s_scale(alpha: S, y: &mut [S]) {
+    if alpha == S::from_real(1.0) {
+        return;
+    }
+    if alpha == S::zero() {
+        s_fill_zero(y);
+        return;
+    }
+    for yi in y {
+        *yi = alpha * *yi;
+    }
+}
+
+#[inline]
+fn s_axpy(x: &[S], alpha: S, y: &mut [S]) {
+    debug_assert_eq!(x.len(), y.len());
+    if alpha == S::zero() {
+        return;
+    }
+    for (yi, &xi) in y.iter_mut().zip(x) {
+        *yi = *yi + alpha * xi;
+    }
+}
+
+#[inline]
+fn s_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
+    debug_assert_eq!(x.len(), y.len());
+    if beta == S::zero() {
+        for (yi, &xi) in y.iter_mut().zip(x) {
+            *yi = alpha * xi;
+        }
+    } else if beta == S::from_real(1.0) {
+        s_axpy(x, alpha, y);
+    } else {
+        for (yi, &xi) in y.iter_mut().zip(x) {
+            *yi = alpha * xi + beta * *yi;
+        }
+    }
+}
+
+#[inline]
+fn s_dot_conj_local(x: &[S], y: &[S]) -> S {
+    debug_assert_eq!(x.len(), y.len());
+    let mut acc = S::zero();
+    const BLK: usize = 1 << 14;
+    let mut i = 0;
+    while i < x.len() {
+        let end = (i + BLK).min(x.len());
+        let mut blk = S::zero();
+        for j in i..end {
+            blk = blk + x[j].conj() * y[j];
+        }
+        acc = acc + blk;
+        i = end;
+    }
+    acc
+}
+
+#[inline]
+fn s_sum_abs2_local(x: &[S]) -> R {
+    let mut acc = R::default();
+    const BLK: usize = 1 << 14;
+    let mut i = 0;
+    while i < x.len() {
+        let end = (i + BLK).min(x.len());
+        let mut blk = R::default();
+        for j in i..end {
+            let a = x[j].abs();
+            blk = blk + a * a;
+        }
+        acc = acc + blk;
+        i = end;
+    }
+    acc
+}
+
+// -------------------- public API (dual-path) --------------------
+
+#[inline]
+pub fn par_copy(src: &[S], dst: &mut [S]) {
+    debug_assert_eq!(src.len(), dst.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = src.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        if n >= min_len {
+            src.par_chunks(chunk)
+                .zip(dst.par_chunks_mut(chunk))
+                .for_each(|(s, d)| d.copy_from_slice(s));
+            return;
+        }
+    }
+    s_copy(src, dst);
+}
+
+#[inline]
+pub fn par_fill_zero(dst: &mut [S]) {
+    #[cfg(feature = "rayon")]
+    {
+        let n = dst.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        if n >= min_len {
+            dst.par_chunks_mut(chunk)
+                .for_each(|chunk| s_fill_zero(chunk));
+            return;
+        }
+    }
+    s_fill_zero(dst);
+}
+
+#[inline]
+pub fn par_scale(alpha: S, y: &mut [S]) {
+    #[cfg(feature = "rayon")]
+    {
+        let n = y.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        if n >= min_len {
+            if alpha == S::from_real(1.0) {
+                return;
+            }
+            if alpha == S::zero() {
+                par_fill_zero(y);
+                return;
+            }
+            y.par_chunks_mut(chunk).for_each(|yc| {
+                for yi in yc {
+                    *yi = alpha * *yi;
+                }
+            });
+            return;
+        }
+    }
+    s_scale(alpha, y);
+}
+
+#[inline]
+pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
+    debug_assert_eq!(x.len(), y.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = x.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        if n >= min_len {
+            if alpha == S::zero() {
+                return;
+            }
+            y.par_iter_mut()
+                .zip(x.par_iter().copied())
+                .for_each(|(yi, xi)| {
+                    *yi = *yi + alpha * xi;
+                });
+            return;
+        }
+    }
+    s_axpy(x, alpha, y);
+}
+
+#[inline]
+pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
+    debug_assert_eq!(x.len(), y.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = x.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        if n >= min_len {
+            if beta == S::zero() {
+                y.par_iter_mut()
+                    .zip(x.par_iter().copied())
+                    .for_each(|(yi, xi)| {
+                        *yi = alpha * xi;
+                    });
+            } else if beta == S::from_real(1.0) {
+                par_axpy(x, alpha, y);
+            } else {
+                y.par_iter_mut()
+                    .zip(x.par_iter().copied())
+                    .for_each(|(yi, xi)| {
+                        *yi = alpha * xi + beta * *yi;
+                    });
+            }
+            return;
+        }
+    }
+    s_axpby(x, alpha, y, beta);
+}
+
+/// Compute `y = x + alpha * y`.
+#[inline]
+pub fn par_xpay(x: &[S], alpha: S, y: &mut [S]) {
+    par_axpby(x, S::one(), y, alpha);
+}
+
+#[inline]
+pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
+    debug_assert_eq!(x.len(), y.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = x.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        if n >= min_len {
+            return x
+                .par_chunks(chunk)
+                .zip(y.par_chunks(chunk))
+                .map(|(xc, yc)| {
+                    let mut acc = S::zero();
+                    for (&xi, &yi) in xc.iter().zip(yc) {
+                        acc = acc + xi.conj() * yi;
+                    }
+                    acc
+                })
+                .reduce(S::zero, |a, b| a + b);
+        }
+    }
+    s_dot_conj_local(x, y)
+}
+
+#[inline]
+pub fn par_sum_abs2_local(x: &[S]) -> R {
+    #[cfg(feature = "rayon")]
+    {
+        let n = x.len();
+        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        if n >= min_len {
+            return x
+                .par_chunks(chunk)
+                .map(|xc| {
+                    let mut ssq = R::default();
+                    for &value in xc {
+                        let a = value.abs();
+                        ssq = ssq + a * a;
+                    }
+                    ssq
+                })
+                .reduce(R::default, |a, b| a + b);
+        }
+    }
+    s_sum_abs2_local(x)
+}

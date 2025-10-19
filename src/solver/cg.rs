@@ -17,6 +17,7 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::parallel::{par_axpby, par_axpy, par_copy};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
@@ -297,13 +298,13 @@ impl CgSolver {
                 r[i] = b[i] - tmp[i];
             }
         } else {
-            r.copy_from_slice(b);
+            par_copy(b, r);
         }
 
         if let Some(pc) = pc {
             pc.apply_s(PcSide::Left, r, &mut z[..], scratch)?;
         } else {
-            z.copy_from_slice(r);
+            par_copy(r, z);
         }
 
         let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
@@ -375,7 +376,7 @@ impl CgSolver {
         #[cfg(feature = "logging")]
         trace!("CG initial residual: {res0_reported:.3e}");
 
-        p.copy_from_slice(z);
+        par_copy(z, p);
 
         let mut stats = SolveStats::new(0, res0_reported, ConvergedReason::Continued);
 
@@ -391,9 +392,7 @@ impl CgSolver {
 
             if let Some(beta) = beta_value {
                 let beta_s: S = S::from_real(beta);
-                for i in 0..nrows {
-                    p[i] = z[i] + beta_s * p[i];
-                }
+                par_axpby(z, S::one(), p, beta_s);
             }
 
             a.matvec_s(p, &mut ap[..], scratch);
@@ -413,12 +412,8 @@ impl CgSolver {
                 if xnorm + alpha.abs() * pnorm > rmax {
                     let step: R = (rmax - xnorm) / (pnorm + 1e-300);
                     let step_s: S = S::from_real(step);
-                    for i in 0..nrows {
-                        let pi = p[i];
-                        let api = ap[i];
-                        x[i] += step_s * pi;
-                        r[i] -= step_s * api;
-                    }
+                    par_axpy(p, step_s, x);
+                    par_axpy(ap, -step_s, r);
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
                     stats.final_residual = global_nrm2(comm, r);
@@ -426,12 +421,8 @@ impl CgSolver {
                 }
             }
 
-            for i in 0..nrows {
-                let pi = p[i];
-                let api = ap[i];
-                x[i] += alpha_s * pi;
-                r[i] -= alpha_s * api;
-            }
+            par_axpy(p, alpha_s, x);
+            par_axpy(ap, -alpha_s, r);
             if self.trust_region.is_some() {
                 xnorm = global_nrm2(comm, x);
             }
@@ -439,7 +430,7 @@ impl CgSolver {
             if let Some(pc) = pc {
                 pc.apply_s(PcSide::Left, r, &mut z[..], scratch)?;
             } else {
-                z.copy_from_slice(r);
+                par_copy(r, z);
             }
 
             let (rho_new, rsq_new, znorm_new) = {
