@@ -9,7 +9,11 @@ pub fn matvec_s<A>(a: &A, x: &[S], y: &mut [S], scratch: &mut BridgeScratch)
 where
     A: LinOp<S = f64> + ?Sized,
 {
-    debug_assert_eq!(x.len(), y.len());
+    let (rows, cols) = a.dims();
+    if rows != 0 || cols != 0 {
+        debug_assert_eq!(x.len(), cols);
+        debug_assert_eq!(y.len(), rows);
+    }
 
     #[cfg(not(feature = "complex"))]
     {

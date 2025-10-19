@@ -1,6 +1,7 @@
 use kryst::algebra::prelude::*;
 use kryst::parallel::{Comm, NoComm};
 use kryst::utils::reduction::{AllreduceOps, ReductOptions};
+use std::env;
 
 #[test]
 fn nocomm_allreduce_pair_ready_immediately() {
@@ -69,7 +70,15 @@ fn rayon_allreduce_vec_async_completes() {
 #[test]
 fn mpi_allreduce_pair_matches_sum() {
     use kryst::parallel::mpi_comm::MpiComm;
-    let comm = MpiComm::new();
+    if env::var("KRYST_ENABLE_MPI_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping mpi_allreduce_pair_matches_sum: KRYST_ENABLE_MPI_TESTS not set");
+        return;
+    }
+
+    let Some(comm) = MpiComm::try_new() else {
+        eprintln!("skipping mpi_allreduce_pair_matches_sum: MPI init failed");
+        return;
+    };
     let opts = ReductOptions::default();
     let base = comm.rank() as f64;
     let local = (

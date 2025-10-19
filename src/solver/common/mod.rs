@@ -280,8 +280,15 @@ pub fn recompute_true_residual_norm_s<A>(
 where
     A: KLinOp<Scalar = S> + ?Sized,
 {
-    debug_assert_eq!(b.len(), x.len());
-    debug_assert_eq!(tmp.len(), x.len());
+    debug_assert_eq!(b.len(), tmp.len());
+
+    let (rows, cols) = a.dims();
+    if rows != 0 {
+        debug_assert_eq!(b.len(), rows);
+    }
+    if cols != 0 {
+        debug_assert_eq!(x.len(), cols);
+    }
 
     a.matvec_s(x, tmp, scratch);
     for i in 0..tmp.len() {

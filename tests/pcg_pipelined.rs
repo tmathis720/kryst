@@ -112,9 +112,17 @@ fn pipelined_reports_reduction_counts() {
 
     let (pair_count, vec_count) = test_hooks::wait_counters();
     assert_eq!(vec_count, 0);
-    assert_eq!(stats.counters.num_global_reductions, pair_count);
-    let expected = 2 + 2 * stats.iterations;
-    assert_eq!(stats.counters.num_global_reductions, expected);
+
+    // Two asynchronous reductions (ρ_k and pᵀAp) per iteration plus the initial
+    // setup reductions.
+    let expected_async = 2 + 2 * stats.iterations;
+    assert_eq!(pair_count, expected_async);
+
+    // The solver also performs a synchronous true-residual recomputation on the
+    // initial guess and once per iteration, which is reflected in the reported
+    // counter.
+    let expected_total = expected_async + stats.iterations + 1;
+    assert_eq!(stats.counters.num_global_reductions, expected_total);
 }
 
 mod fixtures;
