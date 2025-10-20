@@ -266,6 +266,34 @@ pub static SPECS: &[Spec] = &[
         kind: ValueKind::Float,
         doc: "trust region radius",
     },
+    Spec {
+        flag: "-ksp_threads",
+        key: "ksp_threads",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "set Rayon threads",
+    },
+    Spec {
+        flag: "-ksp_min_len_vec",
+        key: "ksp_min_len_vec",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "vector length cutoff for threaded kernels",
+    },
+    Spec {
+        flag: "-ksp_min_rows_spmv",
+        key: "ksp_min_rows_spmv",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "row cutoff for threaded CSR SpMV",
+    },
+    Spec {
+        flag: "-ksp_chunk_rows_spmv",
+        key: "ksp_chunk_rows_spmv",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "target rows per chunk for threaded CSR SpMV",
+    },
     // --------- PC (subset shown; we include all below)
     Spec {
         flag: "-pc_type",

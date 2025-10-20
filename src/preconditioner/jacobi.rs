@@ -1,7 +1,7 @@
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
-use crate::algebra::prelude::*;
+use crate::algebra::{parallel_cfg::parallel_tune, prelude::*};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
@@ -11,6 +11,9 @@ use crate::preconditioner::stats::{PcIntrospect, PcStats};
 use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 
 pub struct Jacobi {
     pub(crate) diag_inv: Vec<S>,
@@ -96,9 +99,23 @@ impl Preconditioner for Jacobi {
                 z.len()
             )));
         }
-        for i in 0..self.n {
-            let inv = self.diag_inv[i].real();
-            z[i] = inv * r[i];
+        let mut used_parallel = false;
+        #[cfg(feature = "rayon")]
+        {
+            if r.len() >= parallel_tune().min_len_vec {
+                z.par_iter_mut()
+                    .zip(r.par_iter().copied())
+                    .zip(self.diag_inv.par_iter().copied())
+                    .for_each(|((zi, ri), di)| {
+                        *zi = di.real() * ri;
+                    });
+                used_parallel = true;
+            }
+        }
+        if !used_parallel {
+            for (zi, (&ri, &di)) in z.iter_mut().zip(r.iter().zip(self.diag_inv.iter())) {
+                *zi = di.real() * ri;
+            }
         }
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -130,8 +147,23 @@ impl KPreconditioner for Jacobi {
             )));
         }
 
-        for i in 0..self.n {
-            y[i] = x[i] * self.diag_inv[i];
+        let mut used_parallel = false;
+        #[cfg(feature = "rayon")]
+        {
+            if x.len() >= parallel_tune().min_len_vec {
+                y.par_iter_mut()
+                    .zip(x.par_iter().copied())
+                    .zip(self.diag_inv.par_iter().copied())
+                    .for_each(|((yi, xi), di)| {
+                        *yi = di * xi;
+                    });
+                used_parallel = true;
+            }
+        }
+        if !used_parallel {
+            for (yi, (&xi, &di)) in y.iter_mut().zip(x.iter().zip(self.diag_inv.iter())) {
+                *yi = di * xi;
+            }
         }
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
