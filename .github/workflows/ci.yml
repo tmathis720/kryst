@@ -4,198 +4,136 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  # IMPORTANT: Do NOT make warnings fatal globally.
-  # RUSTFLAGS: -D warnings        # ← removed
-  # If your crate gates `log` behind the "logging" feature (as your check-cfg hints),
-  # enable it for the non-MPI path so `log::…` resolves:
-  NON_MPI_FEATURES: "logging"
 
 jobs:
-  build-and-unit-tests:
+  build-test:
+    name: ${{ matrix.feature_set.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, nightly]
-
+        feature_set:
+          - name: serial-real
+            features: ""
+            threads: 1
+            mpi: false
+          - name: serial-complex
+            features: "complex"
+            threads: 1
+            mpi: false
+          - name: serial-rayon1
+            features: "rayon"
+            threads: 1
+            mpi: false
+          - name: serial-rayon4
+            features: "rayon"
+            threads: 4
+            mpi: false
+          - name: mpi-real
+            features: "mpi"
+            threads: 1
+            mpi: true
+          - name: mpi-complex
+            features: "mpi complex"
+            threads: 1
+            mpi: true
+          - name: mpi-rayon
+            features: "mpi rayon"
+            threads: 2
+            mpi: true
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -Dwarnings
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install build deps (no MPI)
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install MPI toolchain
+        if: contains(matrix.feature_set.features, 'mpi')
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config curl clang \
-            libopenblas-dev liblapack-dev
-          sudo rm -rf /var/lib/apt/lists/*
+            libopenmpi-dev openmpi-bin
 
-      - name: Set up Rust ${{ matrix.rust }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
-          components: clippy,rustfmt
-
-      - name: Rust cache
+      - name: Cargo cache
         uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
 
-      - name: Build (NO MPI features)
-        shell: bash
-        # ensure no leftover RUSTFLAGS make warnings fatal
-        env:
-          RUSTFLAGS: ""
+      - name: Build
         run: |
           set -euo pipefail
-          FEAT_ARGS=()
-          if [[ -n "${NON_MPI_FEATURES}" ]]; then
-            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          FEATURES="${{ matrix.feature_set.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo build --all-targets --no-default-features --features "$FEATURES"
+          else
+            cargo build --all-targets --no-default-features
           fi
-          echo "Using feature args: ${FEAT_ARGS[*]:-<none>} (with --no-default-features)"
-          cargo build --locked --verbose --no-default-features "${FEAT_ARGS[@]}"
 
-      - name: Lint error path usage
-        shell: bash
+      - name: Clippy
         run: |
           set -euo pipefail
-          if rg -n 'crate::KError\b' src; then
-            echo "Use crate::error::KError everywhere (Option A)." >&2
-            exit 1
+          FEATURES="${{ matrix.feature_set.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo clippy --all-targets --no-default-features --features "$FEATURES"
+          else
+            cargo clippy --all-targets --no-default-features
           fi
 
-      - name: Run unit tests (NO MPI)
-        shell: bash
-        env:
-          RUSTFLAGS: ""
-        run: |
-          set -euo pipefail
-          FEAT_ARGS=()
-          if [[ -n "${NON_MPI_FEATURES}" ]]; then
-            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
-          fi
-          cargo test --locked --verbose --no-default-features "${FEAT_ARGS[@]}" -- --nocapture --skip mpi
-
-      - name: Clippy (stable only, NO MPI)
-        if: matrix.rust == 'stable'
-        shell: bash
-        env:
-          RUSTFLAGS: ""   # let clippy control severity explicitly below
-        run: |
-          set -euo pipefail
-          FEAT_ARGS=()
-          if [[ -n "${NON_MPI_FEATURES}" ]]; then
-            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
-          fi
-          # Be less strict: show warnings but only fail on correctness/suspicious issues.
-          cargo clippy --all-targets --no-default-features "${FEAT_ARGS[@]}" -- \
-            -D clippy::correctness -D clippy::suspicious -W warnings
-
-      - name: rustfmt check (stable only)
-        if: matrix.rust == 'stable'
+      - name: rustfmt
+        if: matrix.feature_set.name == 'serial-real'
         run: cargo fmt --all -- --check
 
-      - name: Doc tests (stable only, NO MPI)
-        if: matrix.rust == 'stable'
-        shell: bash
+      - name: Unit tests (serial)
+        if: ${{ !matrix.feature_set.mpi }}
         env:
-          RUSTFLAGS: ""
+          RAYON_NUM_THREADS: ${{ matrix.feature_set.threads }}
         run: |
           set -euo pipefail
-          FEAT_ARGS=()
-          if [[ -n "${NON_MPI_FEATURES}" ]]; then
-            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          FEATURES="${{ matrix.feature_set.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo test --no-default-features --features "$FEATURES"
+          else
+            cargo test --no-default-features
           fi
-          cargo test --doc --locked --no-default-features "${FEAT_ARGS[@]}"
 
-      - name: Build docs (stable only; docs.rs config; NO MPI)
-        if: matrix.rust == 'stable'
-        env:
-          RUSTDOCFLAGS: --cfg docsrs
-          RUSTFLAGS: ""
-        shell: bash
+      - name: Unit tests (MPI)
+        if: ${{ matrix.feature_set.mpi }}
         run: |
           set -euo pipefail
-          FEAT_ARGS=()
-          if [[ -n "${NON_MPI_FEATURES}" ]]; then
-            FEAT_ARGS=(--features "${NON_MPI_FEATURES}")
+          FEATURES="${{ matrix.feature_set.features }}"
+          export OMPI_MCA_btl=self,tcp
+          export RAYON_NUM_THREADS=${{ matrix.feature_set.threads }}
+          if [ -n "$FEATURES" ]; then
+            mpirun -n 2 cargo test --no-default-features --features "$FEATURES"
+          else
+            mpirun -n 2 cargo test --no-default-features
           fi
-          cargo doc --no-deps --locked --no-default-features "${FEAT_ARGS[@]}"
 
-  mpi-tests:
-    runs-on: ubuntu-latest
-    needs: build-and-unit-tests
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install MPI deps
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config curl clang gfortran \
-            libclang-dev llvm-dev \
-            libopenmpi-dev openmpi-bin openmpi-common \
-            libopenblas-dev liblapack-dev
-          sudo rm -rf /var/lib/apt/lists/*
-
-      - name: Verify MPI toolchain (debugging aid)
-        run: |
-          set -x
-          which mpicc || true
-          mpicc -show || true
-          dpkg -L libopenmpi-dev | grep '\.pc$' || true
-          pkg-config --variable pc_path pkg-config || true
-
-      - name: Set up Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy,rustfmt
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build (MPI features ON)
+      - name: CG reproducibility (serial)
+        if: ${{ !matrix.feature_set.mpi }}
         env:
-          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/openmpi/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig
-          MPICC: mpicc
-          MPI_PKG_CONFIG: ompi
+          RAYON_NUM_THREADS: ${{ matrix.feature_set.threads }}
         run: |
-          cargo build --all-features --locked --verbose || \
-          cargo build --locked --verbose --features mpi
+          set -euo pipefail
+          FEATURES="${{ matrix.feature_set.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo test --no-default-features --features "$FEATURES" --test cg_repro
+          else
+            cargo test --no-default-features --test cg_repro
+          fi
 
-      - name: Run MPI tests (4 processes)
-        env:
-          OMPI_MCA_rmaps_base_oversubscribe: "1"
-          OMPI_MCA_btl: self,tcp
-          OMPI_MCA_plm: rsh
+      - name: CG reproducibility (MPI)
+        if: ${{ matrix.feature_set.mpi }}
         run: |
-          echo "[CI] Running MPI-enabled tests with 4 processes..."
-          mpirun --oversubscribe -np 4 \
-            cargo test --locked --verbose --features mpi -- --nocapture --ignored
-
-  bench-smoke:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref_name, 'release/')
-    needs: build-and-unit-tests
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Criterion smoke test
-        run: cargo bench -- spmv_vs_spmm -- --sample-size 10
+          set -euo pipefail
+          FEATURES="${{ matrix.feature_set.features }}"
+          export OMPI_MCA_btl=self,tcp
+          export RAYON_NUM_THREADS=${{ matrix.feature_set.threads }}
+          if [ -n "$FEATURES" ]; then
+            mpirun -n 2 cargo test --no-default-features --features "$FEATURES" --test cg_repro
+          else
+            mpirun -n 2 cargo test --no-default-features --test cg_repro
+          fi

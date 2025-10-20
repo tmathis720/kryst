@@ -49,7 +49,7 @@
 #[cfg(feature = "rayon")]
 use crate::algebra::parallel::set_rayon_threads;
 use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, set_rayon_threads_for_repro};
-use crate::config::options::{KspOptions, KspType, PcOptions};
+use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::convert::materialize_linop_with_hint;
@@ -431,6 +431,11 @@ impl KspContext {
             set_rayon_threads(n);
         }
 
+        #[cfg(all(not(feature = "rayon"), feature = "logging"))]
+        if opts.threads.is_some() {
+            log::warn!("Ignoring ksp_threads: build without feature=\"rayon\"");
+        }
+
         if opts.min_len_vec.is_some()
             || opts.min_rows_spmv.is_some()
             || opts.chunk_rows_spmv.is_some()
@@ -485,6 +490,16 @@ impl KspContext {
                 set_rayon_threads_for_repro(true);
             }
         }
+
+        let requested_cg_variant = opts.cg_variant.or_else(|| {
+            opts.cg_pipelined.map(|flag| {
+                if flag {
+                    CgVariant::Pipelined
+                } else {
+                    CgVariant::Classic
+                }
+            })
+        });
 
         // --- GMRES options ---
         if let Some(s) = self
@@ -716,6 +731,9 @@ impl KspContext {
             .as_mut()
             .and_then(|b| b.as_any_mut().downcast_mut::<CgSolver>())
         {
+            if let Some(variant) = requested_cg_variant {
+                s.set_variant(variant);
+            }
             if let Some(ref norm) = opts.cg_norm {
                 let n = match norm.as_str() {
                     "precond" => crate::solver::cg::CgNormType::Preconditioned,
@@ -741,13 +759,15 @@ impl KspContext {
             }
         }
         let mut pcg_pending_updated = false;
-        if let Some(flag) = opts.cg_pipelined {
-            if flag && Self::normalize_side(self.pc_side) != PcSide::Left {
+        if let Some(variant) = requested_cg_variant {
+            if matches!(variant, CgVariant::Pipelined)
+                && Self::normalize_side(self.pc_side) != PcSide::Left
+            {
                 return Err(KError::InvalidInput(
                     "Pipelined PCG requires left preconditioning".into(),
                 ));
             }
-            self.pending_pcg.pipelined = Some(flag);
+            self.pending_pcg.pipelined = Some(matches!(variant, CgVariant::Pipelined));
             pcg_pending_updated = true;
         }
         if let Some(repl) = opts.cg_replace_every {

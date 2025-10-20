@@ -19,8 +19,11 @@ use rayon::prelude::*;
 const VEC_CHUNK: usize = 1 << 14;
 const REPRO_CHUNK: usize = 1 << 14;
 
-/// Configure the Rayon thread pool. Safe to call multiple times; failures are ignored
-/// when the global pool has already been built.
+/// Configure the global Rayon thread pool used by Kryst's parallel kernels.
+///
+/// This is a thin wrapper around [`rayon::ThreadPoolBuilder::build_global`]; it is
+/// safe to call multiple times, but only the first successful invocation takes
+/// effect. Subsequent calls are ignored once the global pool has been initialised.
 #[cfg(feature = "rayon")]
 pub fn set_rayon_threads(n: usize) {
     let _ = ThreadPoolBuilder::new().num_threads(n).build_global();

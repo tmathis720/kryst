@@ -22,6 +22,7 @@ use crate::algebra::parallel::{
 };
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::config::options::CgVariant;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, LinOpF64};
@@ -240,6 +241,7 @@ pub struct CgSolver {
     initial_guess_nonzero: bool,
     async_enabled: bool,
     async_min_n: usize,
+    variant: CgVariant,
 }
 
 impl CgSolver {
@@ -258,6 +260,7 @@ impl CgSolver {
             initial_guess_nonzero: false,
             async_enabled: true,
             async_min_n: 10_000,
+            variant: CgVariant::Classic,
         }
     }
 
@@ -288,6 +291,14 @@ impl CgSolver {
     }
     pub fn set_trust_region(&mut self, r: R) {
         self.trust_region = Some(r);
+    }
+    /// Select the CG algorithm variant.
+    pub fn set_variant(&mut self, variant: CgVariant) {
+        self.variant = variant;
+    }
+    /// Return the active CG variant.
+    pub fn variant(&self) -> CgVariant {
+        self.variant
     }
     pub fn set_async_enabled(&mut self, enabled: bool) {
         self.async_enabled = enabled;
@@ -360,6 +371,13 @@ impl CgSolver {
         if pc_side != PcSide::Left {
             return Err(KError::InvalidInput(
                 "CG/PCG requires left preconditioning with HPD M; choose PcSide::Left or use MINRES (Hermitian) / GMRES (general) instead".into(),
+            ));
+        }
+
+        if matches!(self.variant, CgVariant::Pipelined) {
+            return Err(KError::NotImplemented(
+                "CG pipelined variant requires additional implementation; use classic CG for now"
+                    .into(),
             ));
         }
 

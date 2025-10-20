@@ -17,6 +17,33 @@ use crate::preconditioner::ilu_options::{
     IluKind, IluOptions, IterativeSetupType, Overlay, PivotPolicy, ReorderingType, TriSolveType,
 };
 
+/// Supported CG algorithm variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CgVariant {
+    /// Classic Hestenes-Stiefel CG.
+    Classic,
+    /// Pipelined CG that trades local work for fewer global reductions.
+    Pipelined,
+}
+
+impl Default for CgVariant {
+    fn default() -> Self {
+        CgVariant::Classic
+    }
+}
+
+impl FromStr for CgVariant {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "classic" => Ok(CgVariant::Classic),
+            "pipelined" | "p-cg" | "pcg" => Ok(CgVariant::Pipelined),
+            _ => Err("valid values: classic | pipelined"),
+        }
+    }
+}
+
 /// KSP (Krylov Solver) options.
 #[derive(Debug, Default, Clone)]
 pub struct KspOptions {
@@ -33,6 +60,8 @@ pub struct KspOptions {
     /// kernels; combine with `threads = Some(1)` (or `-ksp_threads 1`) for
     /// bit-for-bit equality across runs.
     pub reproducible: Option<bool>,
+    /// Select the CG algorithm variant. Defaults to [`CgVariant::Classic`].
+    pub cg_variant: Option<CgVariant>,
     // GMRES/FGMRES-specific (backward-compatible; all optional)
     /// Override restart for GMRES; falls back to `restart` if unset
     pub gmres_restart: Option<usize>,
@@ -82,6 +111,7 @@ pub struct KspOptions {
     pub trust_region: Option<f64>,
     pub cg_use_async: Option<bool>,
     pub cg_async_min_n: Option<usize>,
+    /// Number of Rayon worker threads (requires the `rayon` feature). Ignored otherwise.
     pub threads: Option<usize>,
     pub min_len_vec: Option<usize>,
     pub min_rows_spmv: Option<usize>,
@@ -278,7 +308,15 @@ impl Sink for KspOptions {
     fn set_bool(&mut self, key: &str, v: bool) -> Result<(), KError> {
         match key {
             "ksp_skip_real_r_check" => set_opt!(&mut self.skip_real_r_check, v),
-            "ksp_cg_pipelined" => set_opt!(&mut self.cg_pipelined, v),
+            "ksp_cg_pipelined" => {
+                self.cg_pipelined = Some(v);
+                self.cg_variant = Some(if v {
+                    CgVariant::Pipelined
+                } else {
+                    CgVariant::Classic
+                });
+                Ok(())
+            }
             "ksp_cg_single_reduction" => set_opt!(&mut self.cg_single_reduction, v),
             "ksp_cg_use_async" => set_opt!(&mut self.cg_use_async, v),
             "ksp_gmres_reorthog" => set_opt!(&mut self.gmres_reorthog, v),
@@ -338,6 +376,14 @@ impl Sink for KspOptions {
             "ksp_epsmac" => set_opt!(&mut self.epsmac, parse_as::<f64>(v, spec)?),
             "ksp_guard_zero_residual" => {
                 set_opt!(&mut self.guard_zero_residual, parse_as::<f64>(v, spec)?)
+            }
+            "ksp_cg_variant" => {
+                let variant = CgVariant::from_str(v).map_err(|msg| {
+                    KError::SolveError(format!("Unrecognized ksp_cg_variant: {v} ({msg})"))
+                })?;
+                self.cg_variant = Some(variant);
+                self.cg_pipelined = Some(matches!(variant, CgVariant::Pipelined));
+                Ok(())
             }
             "ksp_cg_norm" => set_opt!(&mut self.cg_norm, v.to_string()),
             "ksp_cg_replace_every" => {
@@ -745,7 +791,20 @@ impl KspOptions {
         }
         if let Ok(v) = std::env::var("KRYST_KSP_CG_PIPELINED") {
             let l = v.to_lowercase();
-            me.cg_pipelined = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
+            let pipelined = matches!(l.as_str(), "true" | "1" | "yes" | "on");
+            me.cg_pipelined = Some(pipelined);
+            me.cg_variant = Some(if pipelined {
+                CgVariant::Pipelined
+            } else {
+                CgVariant::Classic
+            });
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CG_VARIANT") {
+            let variant = CgVariant::from_str(&v).map_err(|msg| {
+                KError::SolveError(format!("Invalid KRYST_KSP_CG_VARIANT: {v} ({msg})"))
+            })?;
+            me.cg_variant = Some(variant);
+            me.cg_pipelined = Some(matches!(variant, CgVariant::Pipelined));
         }
         if let Ok(v) = std::env::var("KRYST_KSP_CG_REPLACE_EVERY") {
             me.cg_replace_every = Some(v.parse().map_err(|_| {
@@ -796,6 +855,31 @@ impl KspOptions {
             me.chunk_rows_spmv = Some(ensure_ge_1("KRYST_KSP_CHUNK_ROWS_SPMV", n)?);
         }
         Ok(me)
+    }
+
+    /// Configure the Rayon worker pool. Requires `feature="rayon"` to take effect.
+    pub fn with_threads(mut self, n: usize) -> Self {
+        self.threads = Some(n);
+        self
+    }
+
+    /// Toggle reproducible reductions for CG/PCG drivers.
+    pub fn with_repro(mut self, reproducible: bool) -> Self {
+        self.reproducible = Some(reproducible);
+        self
+    }
+
+    /// Select the CG algorithm variant.
+    pub fn with_cg_variant(mut self, variant: CgVariant) -> Self {
+        self.cg_variant = Some(variant);
+        self.cg_pipelined = Some(matches!(variant, CgVariant::Pipelined));
+        self
+    }
+
+    /// Set the trust-region radius for CG solvers.
+    pub fn with_trust_region(mut self, radius: f64) -> Self {
+        self.trust_region = Some(radius);
+        self
     }
 }
 
@@ -1190,10 +1274,12 @@ mod tests {
         let args = vec!["-ksp_cg_pipelined"];
         let opts = KspOptions::from_args(&args).unwrap();
         assert_eq!(opts.cg_pipelined, Some(true));
+        assert_eq!(opts.cg_variant, Some(CgVariant::Pipelined));
 
         let args = vec!["-ksp_cg_pipelined", "false"];
         let opts = KspOptions::from_args(&args).unwrap();
         assert_eq!(opts.cg_pipelined, Some(false));
+        assert_eq!(opts.cg_variant, Some(CgVariant::Classic));
 
         let args = vec!["-ksp_cg_use_async"];
         let opts = KspOptions::from_args(&args).unwrap();
@@ -1306,6 +1392,7 @@ mod tests {
 
         let k = parse_with_layers("-ksp_cg_pipelined true\n", &["-ksp_cg_pipelined", "false"]);
         assert_eq!(k.cg_pipelined, Some(false));
+        assert_eq!(k.cg_variant, Some(CgVariant::Classic));
 
         let k = parse_with_layers(
             "-ksp_cg_async_min_n 5000\n",
