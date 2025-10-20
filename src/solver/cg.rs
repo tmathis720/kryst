@@ -28,11 +28,11 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
+use crate::parallel::Comm;
 use crate::parallel::{
     ReduceReqScalar, ReduceReqScalars, ReduceReqTuple2, UniverseComm, global_dot_conj,
     global_dot_conj_many_into, global_nrm2,
 };
-use crate::parallel::Comm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
 use crate::solver::common::dot_result_to_real;

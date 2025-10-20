@@ -9,33 +9,14 @@
 
 #![allow(clippy::needless_borrow)]
 
-use crate::algebra::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::algebra::{parallel_cfg::parallel_tune, prelude::*};
 
 #[cfg(feature = "rayon")]
 use rayon::ThreadPoolBuilder;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-/// Minimum slice length to consider the parallel route. Smaller workloads use the
-/// scalar fallbacks to avoid threading overhead.
-static MIN_PAR_LEN: AtomicUsize = AtomicUsize::new(1 << 15);
-/// Chunk size for `par_chunks`; a stable chunking policy improves determinism
-/// across runs with the same thread configuration.
-static PAR_CHUNK: AtomicUsize = AtomicUsize::new(1 << 14);
-
-/// Control parallel thresholds at runtime.
-///
-/// Passing `0` for either parameter keeps the previous value. Calls racing with
-/// in-flight kernels are benign; thresholds update with relaxed ordering.
-pub fn set_parallel_thresholds(min_len: usize, chunk: usize) {
-    if min_len > 0 {
-        MIN_PAR_LEN.store(min_len, Ordering::Relaxed);
-    }
-    if chunk > 0 {
-        PAR_CHUNK.store(chunk, Ordering::Relaxed);
-    }
-}
+const VEC_CHUNK: usize = 1 << 14;
 
 /// Configure the Rayon thread pool. Safe to call multiple times; failures are ignored
 /// when the global pool has already been built.
@@ -144,8 +125,8 @@ pub fn par_copy(src: &[S], dst: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = src.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
-        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
+        let chunk = VEC_CHUNK;
         if n >= min_len {
             src.par_chunks(chunk)
                 .zip(dst.par_chunks_mut(chunk))
@@ -161,8 +142,8 @@ pub fn par_fill_zero(dst: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = dst.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
-        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
+        let chunk = VEC_CHUNK;
         if n >= min_len {
             dst.par_chunks_mut(chunk)
                 .for_each(|chunk| s_fill_zero(chunk));
@@ -177,8 +158,8 @@ pub fn par_scale(alpha: S, y: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = y.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
-        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
+        let chunk = VEC_CHUNK;
         if n >= min_len {
             if alpha == S::from_real(1.0) {
                 return;
@@ -204,7 +185,7 @@ pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
         if n >= min_len {
             if alpha == S::zero() {
                 return;
@@ -226,7 +207,7 @@ pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
         if n >= min_len {
             if beta == S::zero() {
                 y.par_iter_mut()
@@ -261,8 +242,8 @@ pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
-        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
+        let chunk = VEC_CHUNK;
         if n >= min_len {
             return x
                 .par_chunks(chunk)
@@ -285,8 +266,8 @@ pub fn par_sum_abs2_local(x: &[S]) -> R {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = MIN_PAR_LEN.load(Ordering::Relaxed);
-        let chunk = PAR_CHUNK.load(Ordering::Relaxed);
+        let min_len = parallel_tune().min_len_vec;
+        let chunk = VEC_CHUNK;
         if n >= min_len {
             return x
                 .par_chunks(chunk)

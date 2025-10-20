@@ -77,6 +77,10 @@ pub struct KspOptions {
     pub trust_region: Option<f64>,
     pub cg_use_async: Option<bool>,
     pub cg_async_min_n: Option<usize>,
+    pub threads: Option<usize>,
+    pub min_len_vec: Option<usize>,
+    pub min_rows_spmv: Option<usize>,
+    pub chunk_rows_spmv: Option<usize>,
 }
 
 /// KSP type tag for option resolution helpers.
@@ -337,6 +341,22 @@ impl Sink for KspOptions {
                 set_opt!(&mut self.cg_async_min_n, parse_as::<usize>(v, spec)?)
             }
             "ksp_trust_region" => set_opt!(&mut self.trust_region, parse_as::<f64>(v, spec)?),
+            "ksp_threads" => set_opt!(
+                &mut self.threads,
+                ensure_ge_1("ksp_threads", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_min_len_vec" => set_opt!(
+                &mut self.min_len_vec,
+                ensure_ge_1("ksp_min_len_vec", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_min_rows_spmv" => set_opt!(
+                &mut self.min_rows_spmv,
+                ensure_ge_1("ksp_min_rows_spmv", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_chunk_rows_spmv" => set_opt!(
+                &mut self.chunk_rows_spmv,
+                ensure_ge_1("ksp_chunk_rows_spmv", parse_as::<usize>(v, spec)?)?
+            ),
             "options_file" => Ok(()), // consumed earlier by expansion
             _ => Err(KError::SolveError(format!("Unknown KSP key: {}", spec.key))),
         }
@@ -744,6 +764,30 @@ impl KspOptions {
                 Some(v.parse().map_err(|_| {
                     KError::SolveError(format!("Invalid KRYST_KSP_TRUST_REGION: {v}"))
                 })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_THREADS") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_THREADS: {v}")))?;
+            me.threads = Some(ensure_ge_1("KRYST_KSP_THREADS", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_MIN_LEN_VEC") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MIN_LEN_VEC: {v}")))?;
+            me.min_len_vec = Some(ensure_ge_1("KRYST_KSP_MIN_LEN_VEC", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_MIN_ROWS_SPMV") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_MIN_ROWS_SPMV: {v}")))?;
+            me.min_rows_spmv = Some(ensure_ge_1("KRYST_KSP_MIN_ROWS_SPMV", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CHUNK_ROWS_SPMV") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_CHUNK_ROWS_SPMV: {v}"))
+            })?;
+            me.chunk_rows_spmv = Some(ensure_ge_1("KRYST_KSP_CHUNK_ROWS_SPMV", n)?);
         }
         Ok(me)
     }

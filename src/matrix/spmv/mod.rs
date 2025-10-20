@@ -10,7 +10,7 @@ pub use self::plan::{
 };
 pub use self::scalar::{spmv_csr_scalar, spmv_scaled_csr, spmv_t_scaled_csr};
 
-use crate::algebra::prelude::*;
+use crate::algebra::{parallel_cfg::parallel_tune, prelude::*};
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, csr::CsrMatrix, sparse};
@@ -145,6 +145,42 @@ where
     }
 }
 
+#[inline(always)]
+fn csr_row_dot<S: KrystScalar>(
+    row: usize,
+    row_ptr: &[usize],
+    col_idx: &[usize],
+    vals: &[S],
+    x: &[S],
+) -> S {
+    let start = row_ptr[row];
+    let end = row_ptr[row + 1];
+    let mut acc = S::zero();
+    for idx in start..end {
+        acc = acc + vals[idx] * x[col_idx[idx]];
+    }
+    acc
+}
+
+pub fn spmv_csr_serial<S: KrystScalar, A: CsrAccess<S>>(
+    a: &A,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError> {
+    if x.len() != a.ncols() || y.len() != a.nrows() {
+        return Err(KError::InvalidInput(
+            "spmv_csr_serial: dimension mismatch".into(),
+        ));
+    }
+    let row_ptr = a.row_ptr();
+    let col_idx = a.col_idx();
+    let vals = a.values();
+    for row in 0..a.nrows() {
+        y[row] = csr_row_dot(row, row_ptr, col_idx, vals, x);
+    }
+    Ok(())
+}
+
 #[cfg(feature = "rayon")]
 pub fn spmv_csr_parallel<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
 where
@@ -156,21 +192,29 @@ where
             "spmv_csr_parallel: dimension mismatch".into(),
         ));
     }
-    let rp = a.row_ptr();
-    let cj = a.col_idx();
-    let vv = a.values();
+    let nrows = a.nrows();
+    let row_ptr = a.row_ptr();
+    let col_idx = a.col_idx();
+    let vals = a.values();
+    let tune = parallel_tune();
+    if nrows < tune.min_rows_spmv {
+        return spmv_csr_serial(a, x, y);
+    }
 
     use rayon::prelude::*;
-    y.par_chunks_mut(1).enumerate().for_each(|(i, yi)| {
-        let (rs, re) = (rp[i], rp[i + 1]);
-        let mut acc = <S as KrystScalar>::zero();
-        for p in rs..re {
-            let col = unsafe { *cj.get_unchecked(p) };
-            let val = unsafe { *vv.get_unchecked(p) };
-            acc = val.mul_add(x[col], acc);
-        }
-        yi[0] = acc;
-    });
+    let chunk = std::cmp::max(64, tune.chunk_rows_spmv);
+    y.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_id, y_chunk)| {
+            let row_start = chunk_id * chunk;
+            for (offset, yi) in y_chunk.iter_mut().enumerate() {
+                let row = row_start + offset;
+                if row >= nrows {
+                    break;
+                }
+                *yi = csr_row_dot(row, row_ptr, col_idx, vals, x);
+            }
+        });
     Ok(())
 }
 
@@ -219,25 +263,7 @@ where
     S: KrystScalar,
     A: CsrAccess<S>,
 {
-    if x.len() != a.ncols() || y.len() != a.nrows() {
-        return Err(KError::InvalidInput(
-            "spmv_csr_parallel: dimension mismatch".into(),
-        ));
-    }
-    let rp = a.row_ptr();
-    let cj = a.col_idx();
-    let vv = a.values();
-
-    for (row, yi) in y.iter_mut().enumerate().take(a.nrows()) {
-        let (rs, re) = (rp[row], rp[row + 1]);
-        let mut acc = S::zero();
-        for p in rs..re {
-            let col = cj[p];
-            acc = vv[p].mul_add(x[col], acc);
-        }
-        *yi = acc;
-    }
-    Ok(())
+    spmv_csr_serial(a, x, y)
 }
 
 /// Backend selection for transpose SpMV.

@@ -400,9 +400,9 @@ impl LinOp for DenseOp {
 /// ```
 ///
 /// ## Notes
-/// - If you run under MPI and the communicator has size > 1, the parallel
-///   path is disabled in [`CsrOp::matvec`] (it’s intended for shared-memory).
-/// - See [`crate::parallel::threads`] for details on pool sizing and MPI.
+/// - Threaded SpMV honours [`ParallelTune`](crate::algebra::parallel_cfg::ParallelTune)
+///   thresholds and falls back to the serial kernel for small systems.
+/// - See [`crate::parallel::threads`] for details on Rayon pool sizing.
 pub struct CsrOp {
     csr: Arc<CsrMatrix<f64>>,
     ids: ChangeIds,
@@ -444,39 +444,11 @@ impl LinOp for CsrOp {
         (self.csr.nrows(), self.csr.ncols())
     }
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        #[cfg(feature = "rayon")]
-        {
-            let local_only = self.comm.size() == 1;
-            let threads = crate::parallel::threads::current_rayon_threads();
-            let cutoff = crate::parallel::threads::env_usize(
-                "KRYST_PAR_CUTOFF",
-                crate::parallel::threads::DEFAULT_PAR_CUTOFF,
-            );
-            let big_enough = self.csr.nrows() >= cutoff;
-
-            if local_only && threads > 1 && big_enough {
-                #[cfg(feature = "logging")]
-                log::trace!(
-                    "CsrOp::matvec using Rayon (rows={}, threads={}, cutoff={})",
-                    self.csr.nrows(),
-                    threads,
-                    cutoff,
-                );
-                let _ = crate::matrix::spmv::spmv_csr_parallel(self.csr.as_ref(), x, y);
-                return;
-            } else {
-                #[cfg(feature = "logging")]
-                log::trace!(
-                    "CsrOp::matvec serial path (local_only={}, threads={}, rows={}, cutoff={})",
-                    local_only,
-                    threads,
-                    self.csr.nrows(),
-                    cutoff,
-                );
-            }
+        if let Err(err) = crate::matrix::spmv::spmv_csr_parallel(self.csr.as_ref(), x, y) {
+            #[cfg(feature = "logging")]
+            log::trace!("CsrOp::matvec fallback to serial SpMV: {err}");
+            self.csr.spmv(x, y);
         }
-
-        self.csr.spmv(x, y);
     }
     fn supports_transpose(&self) -> bool {
         true

@@ -46,6 +46,9 @@
 //! selected preconditioner using the preconditioner operator (`P`, or `A` when `P` is `None`).
 //! Use it with direct PCs such as `LU`, `QR`, or `SuperLU_DIST`.
 
+#[cfg(feature = "rayon")]
+use crate::algebra::parallel::set_rayon_threads;
+use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
 use crate::config::options::{KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
@@ -421,6 +424,28 @@ impl KspContext {
 
     /// Configure the KSP context using parsed KSP options.
     pub fn set_from_options(&mut self, opts: &KspOptions) -> Result<&mut Self, KError> {
+        #[cfg(feature = "rayon")]
+        if let Some(n) = opts.threads {
+            set_rayon_threads(n);
+        }
+
+        if opts.min_len_vec.is_some()
+            || opts.min_rows_spmv.is_some()
+            || opts.chunk_rows_spmv.is_some()
+        {
+            let mut tune = parallel_tune();
+            if let Some(v) = opts.min_len_vec {
+                tune.min_len_vec = v;
+            }
+            if let Some(v) = opts.min_rows_spmv {
+                tune.min_rows_spmv = v;
+            }
+            if let Some(v) = opts.chunk_rows_spmv {
+                tune.chunk_rows_spmv = v;
+            }
+            set_parallel_tune(tune);
+        }
+
         if let Some(ref t) = opts.ksp_type {
             let st = SolverType::from_str(t)?;
             self.set_type(st)?;
