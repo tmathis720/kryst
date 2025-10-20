@@ -72,7 +72,7 @@ reproducible CI runs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-ksp_cg_variant classic|pipelined` | `classic` | Select the CG algorithm. `pipelined` is accepted ahead of the implementation and currently returns `NotImplemented`. |
+| `-ksp_cg_variant classic|pipelined` | `classic` | Select the CG algorithm. `pipelined` enables a single-reduction Chronopoulos–Gear variant with asynchronous collectives. |
 | `-ksp_reproducible` | `false` | Enable deterministic reductions (rank-ordered MPI sums and fixed-order local kernels). |
 | `-ksp_threads <N>` | unset | Request `N` Rayon workers (requires `--features rayon`). Ignored in builds without Rayon. |
 | `-ksp_gmres_variant classical|pipelined|sstep[:s]` | `classical` | Select the GMRES variant. `sstep` accepts an optional block size `s` (currently parsed but reported as not yet implemented). |
