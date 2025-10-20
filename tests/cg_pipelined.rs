@@ -3,20 +3,21 @@ use fixtures::csr_poisson_1d;
 use kryst::algebra::prelude::*;
 use kryst::config::options::CgVariant;
 use kryst::context::ksp_context::Workspace;
+use kryst::ops::wrap::as_s_op;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::LinearSolver;
 use kryst::solver::cg::{self, CgSolver};
 
-fn build_dense_poisson(n: usize) -> Mat<S> {
-    let mut a = Mat::<S>::zeros(n, n);
+fn build_dense_poisson(n: usize) -> Mat<f64> {
+    let mut a = Mat::<f64>::zeros(n, n);
     for i in 0..n {
-        a[(i, i)] = S::from_real(2.0);
+        a[(i, i)] = 2.0;
         if i > 0 {
-            a[(i, i - 1)] = S::from_real(-1.0);
+            a[(i, i - 1)] = -1.0;
         }
         if i + 1 < n {
-            a[(i, i + 1)] = S::from_real(-1.0);
+            a[(i, i + 1)] = -1.0;
         }
     }
     a
@@ -38,9 +39,10 @@ fn pipelined_matches_classic_solution() {
 
     let mut wk_classic = Workspace::default();
     classic.setup_workspace(&mut wk_classic);
+    let op = as_s_op(&a);
     let stats_classic = classic
         .solve_with_comm(
-            &a,
+            &op,
             None,
             &b,
             &mut x_classic,
@@ -53,9 +55,10 @@ fn pipelined_matches_classic_solution() {
 
     let mut wk_pipe = Workspace::default();
     pipelined.setup_workspace(&mut wk_pipe);
+    let op_pipe = as_s_op(&a);
     let stats_pipe = pipelined
         .solve_with_comm(
-            &a,
+            &op_pipe,
             None,
             &b,
             &mut x_pipe,
@@ -96,10 +99,11 @@ fn pipelined_handles_complex_drift() {
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
     let mut x = vec![S::zero(); n];
+    let op = as_s_op(&a);
 
     let stats = solver
         .solve_with_comm(
-            &a,
+            &op,
             None,
             &b,
             &mut x,

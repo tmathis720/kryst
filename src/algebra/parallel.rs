@@ -129,7 +129,7 @@ pub fn par_copy(src: &[S], dst: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = src.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len {
             src.par_chunks(chunk)
@@ -146,7 +146,7 @@ pub fn par_fill_zero(dst: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = dst.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len {
             dst.par_chunks_mut(chunk)
@@ -162,7 +162,7 @@ pub fn par_scale(alpha: S, y: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = y.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len {
             if alpha == S::from_real(1.0) {
@@ -189,7 +189,7 @@ pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         if n >= min_len {
             if alpha == S::zero() {
                 return;
@@ -211,7 +211,7 @@ pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         if n >= min_len {
             if beta == S::zero() {
                 y.par_iter_mut()
@@ -246,7 +246,7 @@ pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len {
             return x
@@ -270,7 +270,7 @@ pub fn par_sum_abs2_local(x: &[S]) -> R {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
-        let min_len = parallel_tune().min_len_vec;
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len {
             return x

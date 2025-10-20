@@ -1,7 +1,6 @@
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[allow(unused_imports)]
-use crate::algebra::{parallel_cfg::parallel_tune, prelude::*};
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
@@ -99,10 +98,11 @@ impl Preconditioner for Jacobi {
                 z.len()
             )));
         }
-        let used_parallel = false;
+        #[cfg_attr(not(feature = "rayon"), allow(unused_mut))]
+        let mut used_parallel = false;
         #[cfg(feature = "rayon")]
         {
-            if r.len() >= parallel_tune().min_len_vec {
+            if r.len() >= crate::parallel_cfg::parallel_tune().min_len_vec {
                 z.par_iter_mut()
                     .zip(r.par_iter().copied())
                     .zip(self.diag_inv.par_iter().copied())
@@ -150,7 +150,7 @@ impl KPreconditioner for Jacobi {
         let mut used_parallel = false;
         #[cfg(feature = "rayon")]
         {
-            if x.len() >= parallel_tune().min_len_vec {
+            if x.len() >= crate::parallel_cfg::parallel_tune().min_len_vec {
                 y.par_iter_mut()
                     .zip(x.par_iter().copied())
                     .zip(self.diag_inv.par_iter().copied())

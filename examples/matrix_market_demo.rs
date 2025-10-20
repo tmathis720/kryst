@@ -1,43 +1,55 @@
-//! Unified Matrix Market demo covering serial and MPI runs with multiple solver/preconditioner
-//! combinations. The example keeps the solver boundary matrix-free and reports iteration metrics
-//! that are relevant for driven-cavity style matrices.
-//!
-//! to run:
-//! cargo mpirun -n 2 --features=mpi --example matrix_market_demo
-//! or for serial:
-//! cargo run --example matrix_market_demo
-//! (ensure the example is built with the "mpi" feature for MPI runs)
+#![cfg_attr(feature = "complex", allow(dead_code))]
 
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!(
+        "matrix_market_demo is only available for real-valued builds.\n\
+         Re-run without the `complex` feature (try `--no-default-features`)."
+    );
+}
 
-use faer::Mat;
+#[cfg(not(feature = "complex"))]
+mod real_demo {
+    //! Unified Matrix Market demo covering serial and MPI runs with multiple solver/preconditioner
+    //! combinations. The example keeps the solver boundary matrix-free and reports iteration metrics
+    //! that are relevant for driven-cavity style matrices.
+    //!
+    //! to run:
+    //! cargo mpirun -n 2 --features=mpi --example matrix_market_demo
+    //! or for serial:
+    //! cargo run --example matrix_market_demo
+    //! (ensure the example is built with the "mpi" feature for MPI runs)
 
-use kryst::config::options::{KspOptions, PcOptions};
-use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::context::pc_context::PcType;
-use kryst::error::KError;
-use kryst::matrix::DistCsrOp;
-use kryst::matrix::op::{CsrOp, LinOp};
-use kryst::matrix::parcsr::builder::partition_rows;
-use kryst::matrix::sparse::CsrMatrix;
-#[cfg(not(feature = "mpi"))]
-use kryst::parallel::NoComm;
-use kryst::parallel::{Comm, UniverseComm};
-use kryst::preconditioner::amg::{AMG, CoarsenType, InterpType, RelaxType};
-use kryst::preconditioner::{PcSide, Preconditioner};
-use kryst::utils::convergence::ConvergedReason;
-use kryst::utils::matrix_market::read_matrix_market;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Instant;
 
-#[cfg(feature = "mpi")]
-use kryst::parallel::MpiComm;
+    use faer::Mat;
 
-type PcBuilder = Arc<dyn Fn() -> Result<Box<dyn Preconditioner>, KError> + Send + Sync>;
-type SolverConfigurator = Arc<dyn Fn(&mut KspContext) -> Result<(), KError> + Send + Sync>;
+    use kryst::config::options::{KspOptions, PcOptions};
+    use kryst::context::ksp_context::{KspContext, SolverType};
+    use kryst::context::pc_context::PcType;
+    use kryst::error::KError;
+    use kryst::matrix::DistCsrOp;
+    use kryst::matrix::op::{CsrOp, LinOp};
+    use kryst::matrix::parcsr::builder::partition_rows;
+    use kryst::matrix::sparse::CsrMatrix;
+    #[cfg(not(feature = "mpi"))]
+    use kryst::parallel::NoComm;
+    use kryst::parallel::{Comm, UniverseComm};
+    use kryst::preconditioner::amg::{AMG, CoarsenType, InterpType, RelaxType};
+    use kryst::preconditioner::{PcSide, Preconditioner};
+    use kryst::utils::convergence::ConvergedReason;
+    use kryst::utils::matrix_market::read_matrix_market;
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Analysis {
+    #[cfg(feature = "mpi")]
+    use kryst::parallel::MpiComm;
+
+    type PcBuilder = Arc<dyn Fn() -> Result<Box<dyn Preconditioner>, KError> + Send + Sync>;
+    type SolverConfigurator = Arc<dyn Fn(&mut KspContext) -> Result<(), KError> + Send + Sync>;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Analysis {
     nnz: usize,
     density: f64,
     approx_symmetric: bool,
@@ -85,7 +97,7 @@ struct MenuPlan {
     notes: Vec<&'static str>,
 }
 
-fn main() -> Result<(), KError> {
+    pub fn run() -> Result<(), KError> {
     #[cfg(feature = "logging")]
     let _ = env_logger::try_init();
 
@@ -787,4 +799,11 @@ fn broadcast_vec_f64(world: &mpi::topology::SimpleCommunicator, data: &mut Vec<f
     if len > 0 {
         process.broadcast_into(data);
     }
+}
+
+}
+
+#[cfg(not(feature = "complex"))]
+fn main() -> Result<(), kryst::error::KError> {
+    real_demo::run()
 }

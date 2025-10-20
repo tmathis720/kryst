@@ -2,13 +2,12 @@ use crate::algebra::prelude::*;
 use crate::parallel::UniverseComm;
 use std::marker::PhantomData;
 
-
 #[cfg(feature = "mpi")]
 use crate::parallel::mpi_comm::OwnedMpiRequest;
 
-#[cfg(feature = "complex")]
+#[cfg(all(feature = "mpi", feature = "complex"))]
 type SmallFixed = [R; 2];
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 type SmallFixed = [R; 1];
 
 pub struct ReduceReqScalar<'a> {
@@ -145,6 +144,7 @@ pub struct ReduceReqReal<'a> {
     inner: ReduceReqRealInner<'a>,
 }
 
+#[cfg(feature = "mpi")]
 type RealFixed = [R; 1];
 
 enum ReduceReqRealInner<'a> {
@@ -279,7 +279,7 @@ pub(crate) fn iallreduce_sum_scalar<'a>(
         }
         #[cfg(feature = "mpi")]
         UniverseComm::Mpi(inner) => {
-            let send = pack_scalar_s_to_rr(local);
+            let send = crate::parallel::reduce::pack_scalar_s_to_rr(local);
             let mut recv = send;
             let req = inner.immediate_allreduce_sum(&send[..], &mut recv[..]);
             ReduceReqScalar::new_mpi(send, recv, out, req)
@@ -314,13 +314,13 @@ pub(crate) fn iallreduce_sum_scalars<'a>(
             #[cfg(feature = "complex")]
             {
                 for &value in buf.iter() {
-                    recv.extend_from_slice(&pack_scalar_s_to_rr(value));
+                    recv.extend_from_slice(&crate::parallel::reduce::pack_scalar_s_to_rr(value));
                 }
             }
             #[cfg(not(feature = "complex"))]
             {
                 for &value in buf.iter() {
-                    recv.extend_from_slice(&pack_scalar_s_to_rr(value));
+                    recv.extend_from_slice(&crate::parallel::reduce::pack_scalar_s_to_rr(value));
                 }
             }
             let send = recv.clone();
@@ -380,7 +380,7 @@ pub(crate) fn iallreduce_tuple2<'a>(
         #[cfg(feature = "mpi")]
         UniverseComm::Mpi(inner) => {
             let mut recv = Vec::<R>::with_capacity(3);
-            recv.extend_from_slice(&pack_scalar_s_to_rr(a_local));
+            recv.extend_from_slice(&crate::parallel::reduce::pack_scalar_s_to_rr(a_local));
             recv.push(b_local);
             let send = recv.clone();
             let req = inner.immediate_allreduce_sum(&send[..], recv.as_mut_slice());

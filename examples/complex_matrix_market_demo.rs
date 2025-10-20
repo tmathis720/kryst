@@ -51,7 +51,10 @@ mod complex_demo {
 
         let rank = comm.rank();
         let size = comm.size();
+        #[cfg(feature = "mpi")]
         let is_parallel = matches!(comm, UniverseComm::Mpi(_)) && size > 1;
+        #[cfg(not(feature = "mpi"))]
+        let is_parallel = false;
 
         if rank == 0 {
             println!("Complex Matrix Market demo (FGMRES)");

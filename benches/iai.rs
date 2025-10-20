@@ -1,11 +1,19 @@
-#![cfg(feature = "iai")]
+#![cfg_attr(feature = "complex", allow(dead_code))]
+
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 use iai_callgrind::{black_box, library_benchmark, main};
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 use kryst::matrix::op::CsrOp;
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 use std::sync::Arc;
 
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 fn csr_poisson_1d(n: usize) -> CsrMatrix<f64> {
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::new();
@@ -27,6 +35,7 @@ fn csr_poisson_1d(n: usize) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
 
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 fn cg_jacobi_1d400() {
     let n = 400;
     let a = csr_poisson_1d(n);
@@ -44,4 +53,12 @@ fn cg_jacobi_1d400() {
     let _ = ksp.solve(black_box(&b), black_box(&mut x)).unwrap();
 }
 
+#[cfg(all(feature = "iai", not(feature = "complex")))]
 main!(library_benchmark("cg_jacobi_1d400", cg_jacobi_1d400),);
+
+#[cfg(any(not(feature = "iai"), feature = "complex"))]
+fn main() {
+    eprintln!(
+        "iai benchmarks require enabling the `iai` feature and real-valued scalars."
+    );
+}
