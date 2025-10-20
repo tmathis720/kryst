@@ -241,15 +241,16 @@ pub fn materialize_linop_with_hint(
     if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
         return Ok(match hint {
             FormatHint::Csr => {
-                let csr = std::sync::Arc::new(dist.a_on.clone());
+                let csr = std::sync::Arc::new(dist.local_matrix());
                 wrap_with_comm(csr, comm)
             }
             FormatHint::Csc => {
-                let csc = AsFormat::to_csc_cached(&dist.a_on, drop_tol);
+                let csr_local = dist.local_matrix();
+                let csc = AsFormat::to_csc_cached(&csr_local, drop_tol);
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
-                let dense = dist.a_on.to_dense();
+                let dense = dist.local_matrix().to_dense();
                 wrap_with_comm(std::sync::Arc::new(dense), comm)
             }
         });

@@ -5,6 +5,7 @@ pub use dense::DenseMatrix;
 pub mod convert;
 pub mod csc;
 pub mod csr;
+pub mod dist;
 pub mod dist_csr;
 pub mod format;
 mod format_impls;
