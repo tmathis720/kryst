@@ -66,9 +66,20 @@ reproducible CI runs.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-ksp_cg_pipelined <bool>` | `false` | Enable the pipelined PCG algorithm (≈1 allreduce / iteration). |
+| `-ksp_reproducible` | `false` | Enable deterministic reductions (rank-ordered MPI sums and fixed-order local kernels). |
 | `-ksp_gmres_variant classical|pipelined|sstep[:s]` | `classical` | Select the GMRES variant. `sstep` accepts an optional block size `s` (currently parsed but reported as not yet implemented). |
 | `-ksp_residual_replacement <iters>` | `50` | Force periodic residual recomputation in pipelined CG to control drift (`0` disables). |
 | `-ksp_reorthog never|ifneeded|always` | `ifneeded` | Control Gram-Schmidt reorthogonalisation in GMRES and FGMRES. |
+
+#### Reproducible reductions
+
+When `-ksp_reproducible` is enabled the solver switches to rank-ordered MPI
+reductions and fixed-order local kernels. This guarantees bit-for-bit equality
+between runs that use the same communicator size and Rayon thread count. For
+strict reproducibility we recommend pinning Rayon to a single thread via
+`-ksp_threads 1` (or the `RAYON_NUM_THREADS` environment variable); otherwise,
+results remain deterministic for the configured thread count but may differ
+between thread-count configurations.
 
 Each solver also records the number of global reductions performed in
 `SolveStats::counters.num_global_reductions`, making it easy to assert expected
@@ -273,6 +284,7 @@ Run your program with PETSc-style options:
 - `-ksp_max_it <int>` - Maximum number of iterations (default: 10000)
 - `-ksp_gmres_restart <int>` - GMRES restart parameter (default: 50)
 - `-ksp_pc_side <side>` - Preconditioning side: `left`, `right`, `symmetric`
+- `-ksp_reproducible` - Enable deterministic reductions; forces rank-ordered MPI sums and stable intra-rank chunking.
 
 ### PC (Preconditioner) Options
 

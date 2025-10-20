@@ -17,6 +17,7 @@ use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 const VEC_CHUNK: usize = 1 << 14;
+const REPRO_CHUNK: usize = 1 << 14;
 
 /// Configure the Rayon thread pool. Safe to call multiple times; failures are ignored
 /// when the global pool has already been built.
@@ -283,4 +284,93 @@ pub fn par_sum_abs2_local(x: &[S]) -> R {
         }
     }
     s_sum_abs2_local(x)
+}
+
+/// Deterministic conjugated dot product using fixed chunking.
+pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
+    debug_assert_eq!(x.len(), y.len());
+    if x.is_empty() {
+        return S::zero();
+    }
+
+    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let mut parts = vec![S::zero(); nchunks];
+
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
+            let start = cid * REPRO_CHUNK;
+            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+            let mut acc = S::zero();
+            for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                acc = acc + xi.conj() * yi;
+            }
+            *slot = acc;
+        });
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        for cid in 0..nchunks {
+            let start = cid * REPRO_CHUNK;
+            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+            let mut acc = S::zero();
+            for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                acc = acc + xi.conj() * yi;
+            }
+            parts[cid] = acc;
+        }
+    }
+
+    let mut total = S::zero();
+    for part in parts {
+        total = total + part;
+    }
+    total
+}
+
+/// Deterministic sum of squared magnitudes using fixed chunking.
+pub fn sum_abs2_local_repro(x: &[S]) -> R {
+    if x.is_empty() {
+        return R::zero();
+    }
+
+    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let mut parts = vec![R::zero(); nchunks];
+
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
+            let start = cid * REPRO_CHUNK;
+            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+            let mut acc = R::zero();
+            for &value in &x[start..end] {
+                let a = value.abs();
+                acc = acc + a * a;
+            }
+            *slot = acc;
+        });
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        for cid in 0..nchunks {
+            let start = cid * REPRO_CHUNK;
+            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+            let mut acc = R::zero();
+            for &value in &x[start..end] {
+                let a = value.abs();
+                acc = acc + a * a;
+            }
+            parts[cid] = acc;
+        }
+    }
+
+    let mut total = R::zero();
+    for part in parts {
+        total = total + part;
+    }
+    total
 }

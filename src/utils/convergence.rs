@@ -60,6 +60,12 @@ pub struct SolveStats<R> {
     pub reason: ConvergedReason,
     /// Additional counters collected during the solve.
     pub counters: SolverCounters,
+    /// Total number of complex drift events observed during reductions.
+    pub complex_drift_events: usize,
+    /// Per-kind complex drift counts captured by the solver.
+    pub complex_drift_counts: [usize; 6],
+    /// Maximum relative imaginary magnitude observed.
+    pub complex_drift_max_rel: R,
 }
 
 impl<R> SolveStats<R> {
@@ -70,6 +76,9 @@ impl<R> SolveStats<R> {
             final_residual,
             reason,
             counters: SolverCounters::default(),
+            complex_drift_events: 0,
+            complex_drift_counts: [0; 6],
+            complex_drift_max_rel: R::default(),
         }
     }
 

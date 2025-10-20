@@ -1,6 +1,9 @@
 use once_cell::sync::OnceCell;
 use std::sync::RwLock;
 
+#[cfg(feature = "rayon")]
+use rayon::ThreadPoolBuilder;
+
 #[derive(Clone, Copy, Debug)]
 pub struct ParallelTune {
     /// Minimum vector length to enable Rayon in elementwise kernels.
@@ -38,4 +41,17 @@ pub fn parallel_tune() -> ParallelTune {
         .read()
         .map(|g| *g)
         .unwrap_or_else(|_| ParallelTune::default())
+}
+
+/// Configure Rayon for reproducible runs by constraining the global pool.
+pub fn set_rayon_threads_for_repro(enable: bool) {
+    #[cfg(feature = "rayon")]
+    {
+        if enable {
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build_global();
+        }
+    }
+    let _ = enable;
 }

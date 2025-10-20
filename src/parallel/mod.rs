@@ -1,5 +1,6 @@
 use crate::algebra::prelude::*;
 use crate::reduction::ReproMode;
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "mpi")]
 use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
@@ -10,6 +11,7 @@ use std::sync::Arc;
 
 mod reduce;
 mod reduce_async;
+mod repro;
 #[cfg(feature = "mpi")]
 pub use reduce::allreduce_sum_scalar_mpi_sys;
 pub use reduce::{
@@ -27,6 +29,8 @@ pub use reduce::{
     set_global_reduction_mode_scoped,
 };
 pub use reduce_async::{ReduceReqReal, ReduceReqScalar, ReduceReqScalars, ReduceReqTuple2};
+
+static GLOBAL_REPRO_FLAG: AtomicBool = AtomicBool::new(false);
 
 // Opaque request that can represent multiple backends. Use a `PhantomData`
 // to tie the lifetime when MPI support is disabled.
@@ -268,6 +272,72 @@ impl PartialEq for UniverseComm {
 impl Eq for UniverseComm {}
 
 impl UniverseComm {
+    /// Request deterministic reductions on this communicator.
+    pub fn set_reproducible(&self, on: bool) {
+        GLOBAL_REPRO_FLAG.store(on, Ordering::Relaxed);
+        match self {
+            UniverseComm::NoComm(_) => {}
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => {
+                comm.reproducible.store(on, Ordering::Relaxed);
+            }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_) => {}
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => {}
+        }
+    }
+
+    /// Return whether deterministic reductions are currently requested.
+    pub fn is_reproducible(&self) -> bool {
+        match self {
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => comm.reproducible.load(Ordering::Relaxed),
+            _ => GLOBAL_REPRO_FLAG.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Deterministic sum of a single real value across all ranks.
+    pub fn reduce_sum_real_repro(&self, local: R) -> R {
+        match self {
+            UniverseComm::NoComm(_) => local,
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => repro::reduce_sum_real_rank_ordered(comm.as_ref(), local),
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_) => local,
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => local,
+        }
+    }
+
+    /// Deterministic sum of a single scalar across all ranks.
+    pub fn reduce_sum_scalar_s_repro(&self, local: S) -> S {
+        match self {
+            UniverseComm::NoComm(_) => local,
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => repro::reduce_sum_scalar_rank_ordered(comm.as_ref(), local),
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_) => local,
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => local,
+        }
+    }
+
+    /// Deterministic sum of multiple scalars across all ranks.
+    pub fn reduce_sum_scalars_s_repro(&self, locals: &mut [S]) {
+        match self {
+            UniverseComm::NoComm(_) => {}
+            #[cfg(feature = "mpi")]
+            UniverseComm::Mpi(comm) => {
+                repro::reduce_sum_scalars_rank_ordered(comm.as_ref(), locals);
+            }
+            #[cfg(feature = "rayon")]
+            UniverseComm::Rayon(_) => {}
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            UniverseComm::Serial => {}
+        }
+    }
+
     #[cfg(feature = "mpi")]
     pub(crate) fn as_mpi(&self) -> Option<&mpi::topology::SimpleCommunicator> {
         match self {
