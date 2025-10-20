@@ -1,3 +1,6 @@
+//! to run:
+//! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples
+
 #![cfg_attr(not(feature = "complex"), allow(dead_code))]
 
 #[cfg(not(feature = "complex"))]
