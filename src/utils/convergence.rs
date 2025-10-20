@@ -68,7 +68,7 @@ pub struct SolveStats<R> {
     pub complex_drift_max_rel: R,
 }
 
-impl<R> SolveStats<R> {
+impl<R: Default> SolveStats<R> {
     /// Construct a new statistics record with zeroed counters.
     pub fn new(iterations: usize, final_residual: R, reason: ConvergedReason) -> Self {
         Self {

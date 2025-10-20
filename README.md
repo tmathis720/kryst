@@ -56,6 +56,13 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Real (default)**: Builds without extra features keep all public APIs monomorphic on `f64`.
 - **Complex (`--features complex`)**: Internals promote Kryst's scalar alias `S` to `num_complex::Complex64` while the Matrix Market tooling converts boundary data to and from complex storage.
 
+### Cargo feature summary
+
+- `mpi` — enable distributed-memory execution via the `mpi` crate. Optional and independent from Rayon.
+- `rayon` — turn on shared-memory parallel kernels. Combine with `-ksp_threads` to size the worker pool.
+- `complex` — lift internal kernels to `Complex64` while keeping the public API monomorphic on `f64` inputs.
+- `logging` — route internal tracing to the `log` facade for integration with env_logger or similar backends.
+
 ### Latency-aware solver knobs
 
 The Krylov drivers expose command-line options to balance global reductions
@@ -65,11 +72,19 @@ reproducible CI runs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-ksp_cg_pipelined <bool>` | `false` | Enable the pipelined PCG algorithm (≈1 allreduce / iteration). |
+| `-ksp_cg_variant classic|pipelined` | `classic` | Select the CG algorithm. `pipelined` is accepted ahead of the implementation and currently returns `NotImplemented`. |
 | `-ksp_reproducible` | `false` | Enable deterministic reductions (rank-ordered MPI sums and fixed-order local kernels). |
+| `-ksp_threads <N>` | unset | Request `N` Rayon workers (requires `--features rayon`). Ignored in builds without Rayon. |
 | `-ksp_gmres_variant classical|pipelined|sstep[:s]` | `classical` | Select the GMRES variant. `sstep` accepts an optional block size `s` (currently parsed but reported as not yet implemented). |
 | `-ksp_residual_replacement <iters>` | `50` | Force periodic residual recomputation in pipelined CG to control drift (`0` disables). |
+| `-ksp_trust_region <radius>` | unset | Enable CG trust-region safeguarding with the provided radius. |
 | `-ksp_reorthog never|ifneeded|always` | `ifneeded` | Control Gram-Schmidt reorthogonalisation in GMRES and FGMRES. |
+
+Legacy `-ksp_cg_pipelined` remains available as an alias for
+`-ksp_cg_variant pipelined`. For bit-for-bit reproducibility, combine
+`-ksp_reproducible` with `-ksp_threads 1`. When Rayon is enabled with more
+than one worker, runs remain deterministic for a fixed thread count but may
+differ across thread-count configurations.
 
 #### Reproducible reductions
 
@@ -109,13 +124,13 @@ kryst = "1.0"
 
 ```toml
 [features]
-default = ["rayon", "logging"]  # Shared-memory parallelism + monitoring
-rayon = ["dep:rayon"]           # Rayon-based parallel execution
-mpi = ["dep:mpi"]              # Distributed-memory parallelism via MPI
-logging = ["dep:log"]          # Iteration monitoring and profiling
-simd = []                      # Auto-tuned std::simd sparse mat-vec kernels
-x86_intrinsics = []            # Optional x86_64 gather/prefetch micro-tuning
-complex = ["dep:num-complex"]  # Complex64 kernels and Matrix Market conversions
+default = []                  # Opt in to exactly the features you need
+rayon = ["dep:rayon", "dep:num_cpus"]
+mpi = ["dep:mpi"]
+logging = ["dep:log"]
+complex = ["dep:num-complex"]
+simd = []                     # Auto-tuned std::simd sparse mat-vec kernels
+x86_intrinsics = []           # Optional x86_64 gather/prefetch micro-tuning
 ```
 
 Enabling the `simd` feature activates the runtime SpMV planner, which selects
