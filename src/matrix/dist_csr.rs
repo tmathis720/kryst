@@ -1,50 +1,31 @@
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
-use crate::matrix::{
-    op::{ChangeIds, LinOp, StructureId, ValuesId},
-    sparse::CsrMatrix,
-};
+use crate::matrix::dist::halo::HaloPlan;
+use crate::matrix::dist::spmv_dist::RowRanges;
+use crate::matrix::op::{ChangeIds, LinOp, StructureId, ValuesId};
+use crate::matrix::sparse::CsrMatrix;
+use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm};
 
-/// Distributed CSR operator with halo exchange
-pub struct DistCsrOp {
-    pub n_global: usize,
-    pub row_start: usize,
-    pub row_end: usize,
-    pub a_on: CsrMatrix<f64>,
-    pub a_off: CsrMatrix<f64>,
-    pub n_local: usize,
-    pub n_halo: usize,
-    pub g2l: HashMap<usize, usize>,
-    pub neighbors: Vec<i32>,
-    pub recv_idx: Vec<usize>,
-    pub recv_disp: Vec<usize>,
-    pub send_idx: Vec<usize>,
-    pub send_disp: Vec<usize>,
-    pub x_halo: Mutex<Vec<f64>>,
-    pub send_buf: Mutex<Vec<f64>>,
-    pub recv_buf: Mutex<Vec<f64>>,
-    ids: ChangeIds,
-    comm: UniverseComm,
-}
-
-fn owner_of_row(i: usize, part_prefix: &[usize]) -> usize {
+fn owner_of(j: usize, row_part: &[usize]) -> usize {
+    // Locate the owner rank such that row_part[r] <= j < row_part[r + 1].
     let mut lo = 0usize;
-    let mut hi = part_prefix.len() - 2; // last interval index
+    let mut hi = row_part.len() - 2;
     while lo <= hi {
         let mid = (lo + hi) / 2;
-        if i < part_prefix[mid + 1] {
-            if i >= part_prefix[mid] {
+        if j < row_part[mid + 1] {
+            if j >= row_part[mid] {
                 return mid;
             }
             if mid == 0 {
                 break;
-            } else {
-                hi = mid - 1;
             }
+            hi = mid - 1;
         } else {
             lo = mid + 1;
         }
@@ -52,292 +33,283 @@ fn owner_of_row(i: usize, part_prefix: &[usize]) -> usize {
     lo
 }
 
+fn self_idx(halo: &HaloPlan, gcol: usize) -> usize {
+    halo.n_local
+        + *halo
+            .ghost_index_of
+            .get(&gcol)
+            .expect("ghost column missing from halo plan")
+}
+
+pub struct DistCsrOp {
+    pub n_global: usize,
+    pub row_start: usize,
+    pub row_end: usize,
+    pub n_local: usize,
+    row_ptr: Vec<usize>,
+    col_idx: Vec<usize>,
+    vals: Vec<S>,
+    row_is_local: Vec<bool>,
+    #[cfg_attr(feature = "rayon", allow(dead_code))]
+    local_only: RowRanges,
+    border: RowRanges,
+    border_row_ranges: Vec<Option<std::ops::Range<usize>>>,
+    border_col_unified: Vec<usize>,
+    border_vals: Vec<S>,
+    halo: HaloPlan,
+    ids: ChangeIds,
+}
+
 impl DistCsrOp {
-    /// Build from local row block of the global matrix
     pub fn from_local_rows(
         n_global: usize,
         row_start: usize,
-        local_rows: &CsrMatrix<f64>,
+        local_rows: &CsrMatrix<S>,
         part_prefix: &[usize],
         comm: UniverseComm,
     ) -> Result<Self, KError> {
+        if part_prefix.len() != comm.size() + 1 {
+            return Err(KError::InvalidInput(
+                "partition vector length must be size + 1".into(),
+            ));
+        }
         let row_end = row_start + local_rows.nrows();
         let n_local = local_rows.nrows();
-        let my_rank = comm.rank();
-        let size = comm.size();
+        let rank = comm.rank();
 
-        let rp = local_rows.row_ptr();
-        let ci = local_rows.col_idx();
-        let vv = local_rows.values();
+        let row_ptr = local_rows.row_ptr().to_vec();
+        let col_idx = local_rows.col_idx().to_vec();
+        let vals = local_rows.values().to_vec();
 
-        // First pass: classify entries and record needed remote columns
-        let mut local_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_local];
-        let mut remote_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_local];
-        let mut need_from: Vec<Vec<usize>> = vec![Vec::new(); size];
+        let mut recv_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut row_is_local = vec![true; n_local];
         for i in 0..n_local {
-            for idx in rp[i]..rp[i + 1] {
-                let gcol = ci[idx];
-                let owner = owner_of_row(gcol, part_prefix);
-                let val = vv[idx];
-                if owner == my_rank {
-                    local_entries[i].push((gcol, val));
-                } else {
-                    remote_entries[i].push((gcol, val));
-                    need_from[owner].push(gcol);
+            for idx in row_ptr[i]..row_ptr[i + 1] {
+                let gcol = col_idx[idx];
+                let owner = owner_of(gcol, part_prefix);
+                if owner != rank {
+                    row_is_local[i] = false;
+                    recv_map.entry(owner).or_default().push(gcol);
                 }
-            }
-        }
-        // deduplicate recv lists
-        for cols in need_from.iter_mut() {
-            cols.sort_unstable();
-            cols.dedup();
-        }
-        // ---- Phase A: counts exchange with all ranks ----
-        let mut counts_out: Vec<u64> = vec![0; size];
-        for r in 0..size {
-            if r != my_rank {
-                counts_out[r] = need_from[r].len() as u64;
-            }
-        }
-        let mut counts_in: Vec<u64> = vec![0; size];
-        let peers: Vec<usize> = (0..size).filter(|&r| r != my_rank).collect();
-        {
-            let mut reqs_counts: Vec<<UniverseComm as Comm>::Request<'_>> = Vec::new();
-            let mut counts_in_buf: Vec<u64> = vec![0; peers.len()];
-            // Post receives into disjoint 1-word slices using split_at_mut
-            {
-                let mut tail: &mut [u64] = counts_in_buf.as_mut_slice();
-                for &r in &peers {
-                    let (chunk, rest) = tail.split_at_mut(1);
-                    reqs_counts.push(comm.irecv_from_u64(chunk, r as i32));
-                    tail = rest;
-                }
-            }
-            // Send our counts to peers
-            for &r in &peers {
-                reqs_counts.push(comm.isend_to_u64(std::slice::from_ref(&counts_out[r]), r as i32));
-            }
-            comm.wait_all(&mut reqs_counts);
-            for (i, &r) in peers.iter().enumerate() {
-                counts_in[r] = counts_in_buf[i];
             }
         }
 
-        // Union neighbors: ranks we need from OR ranks that need from us
-        let mut neighbors: Vec<i32> = Vec::new();
-        for r in 0..size {
-            if r == my_rank {
+        let halo = HaloPlan::new(
+            comm.clone(),
+            Arc::new(part_prefix.to_vec()),
+            row_start,
+            row_end,
+            recv_map,
+        )?;
+
+        let local_only = RowRanges::from_mask(&row_is_local, true);
+        let border = RowRanges::from_mask(&row_is_local, false);
+
+        let mut border_row_ranges = vec![None; n_local];
+        let mut border_col_unified = Vec::new();
+        let mut border_vals = Vec::new();
+        for i in 0..n_local {
+            if row_is_local[i] {
                 continue;
             }
-            if counts_out[r] > 0 || counts_in[r] > 0 {
-                neighbors.push(r as i32);
+            let start = border_col_unified.len();
+            for idx in row_ptr[i]..row_ptr[i + 1] {
+                let gcol = col_idx[idx];
+                let owner = owner_of(gcol, halo.row_part.as_ref());
+                let unified = if owner == rank {
+                    gcol - row_start
+                } else {
+                    self_idx(&halo, gcol)
+                };
+                border_col_unified.push(unified);
+                border_vals.push(vals[idx]);
             }
+            let end = border_col_unified.len();
+            border_row_ranges[i] = Some(start..end);
         }
-        // assign halo indices and build g2l mapping
-        let mut g2l: HashMap<usize, usize> = HashMap::new();
-        for j in row_start..row_end {
-            g2l.insert(j, j - row_start);
-        }
-        let mut recv_idx = Vec::new();
-        let mut recv_disp = Vec::with_capacity(neighbors.len() + 1);
-        recv_disp.push(0);
-        let mut halo = n_local;
-        for &nb in &neighbors {
-            let cols = &need_from[nb as usize];
-            for &gcol in cols {
-                g2l.insert(gcol, halo);
-                halo += 1;
-                recv_idx.push(gcol);
-            }
-            recv_disp.push(recv_idx.len());
-        }
-        let n_halo = halo - n_local;
-
-        // ---- Phase B: exchange the actual index vectors with neighbors ----
-        // Receive lists of columns that neighbors need from us
-        let sizes: Vec<usize> = neighbors
-            .iter()
-            .map(|&nb| counts_in[nb as usize] as usize)
-            .collect();
-        let mut recv_their_needs: Vec<Vec<u64>> = sizes.iter().map(|&n| vec![0u64; n]).collect();
-        let mut reqs: Vec<<UniverseComm as Comm>::Request<'_>> = Vec::new();
-        for (buf, &nb) in recv_their_needs.iter_mut().zip(neighbors.iter()) {
-            if !buf.is_empty() {
-                reqs.push(comm.irecv_from_u64(buf.as_mut_slice(), nb));
-            }
-        }
-        // Send our needs to neighbors; keep buffers alive until completion
-        let mut tmp_sends: Vec<Vec<u64>> = Vec::with_capacity(neighbors.len());
-        for &nb in &neighbors {
-            let cols = &need_from[nb as usize];
-            if cols.is_empty() {
-                tmp_sends.push(Vec::new());
-            } else {
-                tmp_sends.push(cols.iter().map(|&c| c as u64).collect());
-            }
-        }
-        for (k, &nb) in neighbors.iter().enumerate() {
-            let t = &tmp_sends[k];
-            if !t.is_empty() {
-                reqs.push(comm.isend_to_u64(t.as_slice(), nb));
-            }
-        }
-        comm.wait_all(&mut reqs);
-        reqs.clear();
-
-        // Build send_idx/send_disp from the indices neighbors requested from us
-        let mut send_idx: Vec<usize> = Vec::new();
-        let mut send_disp: Vec<usize> = Vec::with_capacity(neighbors.len() + 1);
-        send_disp.push(0);
-        for (k, &nb) in neighbors.iter().enumerate() {
-            let mut v = std::mem::take(&mut recv_their_needs[k]);
-            v.sort_unstable();
-            v.dedup();
-            for g in &v {
-                debug_assert!(
-                    (*g as usize) >= row_start && (*g as usize) < row_end,
-                    "Neighbor {nb} requested column {g} not owned by rank {my_rank} [{row_start}, {row_end})"
-                );
-            }
-            send_idx.extend(v.into_iter().map(|z| z as usize));
-            send_disp.push(send_idx.len());
-        }
-
-        // Minimal runtime checks
-        for &g in &send_idx {
-            debug_assert!(
-                g >= row_start && g < row_end,
-                "send_idx contains nonlocal col {g}"
-            );
-        }
-        for &g in &recv_idx {
-            debug_assert!(
-                owner_of_row(g, part_prefix) != my_rank,
-                "recv_idx contains local col {g}"
-            );
-        }
-
-        // Build CSR blocks
-        let mut row_ptr_on = Vec::with_capacity(n_local + 1);
-        row_ptr_on.push(0);
-        let mut col_idx_on = Vec::new();
-        let mut val_on = Vec::new();
-        let mut row_ptr_off = Vec::with_capacity(n_local + 1);
-        row_ptr_off.push(0);
-        let mut col_idx_off = Vec::new();
-        let mut val_off = Vec::new();
-        for i in 0..n_local {
-            for &(gcol, val) in &local_entries[i] {
-                let j = g2l[&gcol];
-                col_idx_on.push(j);
-                val_on.push(val);
-            }
-            row_ptr_on.push(col_idx_on.len());
-            for &(gcol, val) in &remote_entries[i] {
-                let j = g2l[&gcol] - n_local;
-                col_idx_off.push(j);
-                val_off.push(val);
-            }
-            row_ptr_off.push(col_idx_off.len());
-        }
-        let a_on = CsrMatrix::from_csr(n_local, n_local, row_ptr_on, col_idx_on, val_on);
-        let a_off = CsrMatrix::from_csr(n_local, n_halo, row_ptr_off, col_idx_off, val_off);
 
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
-        let x_halo = vec![0.0; n_halo];
-        let recv_buf = vec![0.0; n_halo];
+
         Ok(Self {
             n_global,
             row_start,
             row_end,
-            a_on,
-            a_off,
             n_local,
-            n_halo,
-            g2l,
-            neighbors,
-            recv_idx,
-            recv_disp,
-            send_idx,
-            send_disp,
-            x_halo: Mutex::new(x_halo),
-            send_buf: Mutex::new(Vec::new()),
-            recv_buf: Mutex::new(recv_buf),
+            row_ptr,
+            col_idx,
+            vals,
+            row_is_local,
+            local_only,
+            border,
+            border_row_ranges,
+            border_col_unified,
+            border_vals,
+            halo,
             ids,
-            comm,
         })
     }
 
-    pub fn update_numeric(&mut self, a_on_vals: &[f64], a_off_vals: &[f64]) {
-        self.a_on.values_mut().copy_from_slice(a_on_vals);
-        self.a_off.values_mut().copy_from_slice(a_off_vals);
+    pub fn update_numeric(&mut self, new_vals: &[S]) -> Result<(), KError> {
+        if new_vals.len() != self.vals.len() {
+            return Err(KError::InvalidInput(
+                "value array has incorrect length".into(),
+            ));
+        }
+        self.vals.copy_from_slice(new_vals);
+        for row in 0..self.n_local {
+            if let Some(range) = &self.border_row_ranges[row] {
+                let mut idx = self.row_ptr[row];
+                for slot in range.clone() {
+                    self.border_vals[slot] = self.vals[idx];
+                    idx += 1;
+                }
+            }
+        }
         self.ids.bump_values();
+        Ok(())
     }
 
-    pub fn spmv_dist_impl(&self, x_local: &[f64], y_local: &mut [f64]) -> Result<(), KError> {
-        if x_local.len() != self.n_local || y_local.len() != self.n_local {
-            return Err(KError::InvalidInput("dimension mismatch".into()));
+    pub fn local_matrix(&self) -> CsrMatrix<S> {
+        CsrMatrix::from_csr(
+            self.n_local,
+            self.n_global,
+            self.row_ptr.clone(),
+            self.col_idx.clone(),
+            self.vals.clone(),
+        )
+    }
+
+    fn spmv_local_only(&self, x: &[S], y: &mut [S]) {
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            y.par_iter_mut()
+                .enumerate()
+                .filter(|(row, _)| self.row_is_local[*row])
+                .for_each(|(row, slot)| {
+                    let mut acc = S::zero();
+                    for idx in self.row_ptr[row]..self.row_ptr[row + 1] {
+                        let col = self.col_idx[idx] - self.row_start;
+                        acc = acc + self.vals[idx] * x[col];
+                    }
+                    *slot = acc;
+                });
         }
-        let mut recv_buf = self.recv_buf.lock().unwrap();
-        let mut send_buf = self.send_buf.lock().unwrap();
-        let mut x_halo = self.x_halo.lock().unwrap();
-        let mut reqs: Vec<<UniverseComm as Comm>::Request<'_>> = Vec::new();
-        let comm = &self.comm;
-        // Post nonblocking receives into disjoint, increasing slices using split_at_mut
-        let mut tail: &mut [f64] = &mut recv_buf[..];
-        let mut running_off = 0usize;
-        for (k, &nb) in self.neighbors.iter().enumerate() {
-            let off = self.recv_disp[k];
-            let cnt = self.recv_disp[k + 1] - off;
-            if cnt > 0 {
-                debug_assert_eq!(off, running_off);
-                let (chunk, rest) = tail.split_at_mut(cnt);
-                reqs.push(comm.irecv_from(chunk, nb));
-                tail = rest;
-                running_off += cnt;
+        #[cfg(not(feature = "rayon"))]
+        {
+            for span in &self.local_only.spans {
+                for row in span.clone() {
+                    let mut acc = S::zero();
+                    for idx in self.row_ptr[row]..self.row_ptr[row + 1] {
+                        let col = self.col_idx[idx] - self.row_start;
+                        acc = acc + self.vals[idx] * x[col];
+                    }
+                    y[row] = acc;
+                }
             }
         }
-        send_buf.resize(self.send_idx.len(), 0.0);
-        for (p, &gcol) in self.send_idx.iter().enumerate() {
-            let j = gcol - self.row_start;
-            send_buf[p] = x_local[j];
+    }
+
+    fn spmv_border(&self, x: &[S], y: &mut [S], ghost: &[S]) {
+        if self.border.is_empty() {
+            return;
         }
-        for (k, &nb) in self.neighbors.iter().enumerate() {
-            let off = self.send_disp[k];
-            let cnt = self.send_disp[k + 1] - off;
-            if cnt > 0 {
-                reqs.push(comm.isend_to(&send_buf[off..off + cnt], nb));
+        let n_local = self.n_local;
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            y.par_iter_mut()
+                .enumerate()
+                .filter(|(row, _)| !self.row_is_local[*row])
+                .for_each(|(row, slot)| {
+                    if let Some(range) = &self.border_row_ranges[row] {
+                        let mut acc = S::zero();
+                        for k in range.clone() {
+                            let col = self.border_col_unified[k];
+                            let val = self.border_vals[k];
+                            if col < n_local {
+                                acc = acc + val * x[col];
+                            } else {
+                                acc = acc + val * ghost[col - n_local];
+                            }
+                        }
+                        *slot = acc;
+                    }
+                });
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            for span in &self.border.spans {
+                for row in span.clone() {
+                    if let Some(range) = &self.border_row_ranges[row] {
+                        let mut acc = S::zero();
+                        for k in range.clone() {
+                            let col = self.border_col_unified[k];
+                            let val = self.border_vals[k];
+                            if col < n_local {
+                                acc = acc + val * x[col];
+                            } else {
+                                acc = acc + val * ghost[col - n_local];
+                            }
+                        }
+                        y[row] = acc;
+                    }
+                }
             }
         }
-        y_local.fill(0.0);
-        self.a_on.spmv_scaled(1.0, x_local, 1.0, y_local)?;
-        comm.wait_all(&mut reqs);
-        // Drop requests to release borrows before reading recv_buf
-        drop(reqs);
-        x_halo.copy_from_slice(&recv_buf[..self.n_halo]);
-        self.a_off.spmv_scaled(1.0, &x_halo, 1.0, y_local)?;
-        Ok(())
+    }
+}
+
+impl KLinOp for DistCsrOp {
+    type Scalar = S;
+
+    fn dims(&self) -> (usize, usize) {
+        (self.n_local, self.n_local)
+    }
+
+    fn matvec_s(&self, x: &[S], y: &mut [S], _scratch: &mut BridgeScratch) {
+        assert_eq!(x.len(), self.n_local);
+        assert_eq!(y.len(), self.n_local);
+        for v in y.iter_mut() {
+            *v = S::zero();
+        }
+        let halo_req = if self.halo.n_ghost > 0 || !self.halo.send_local_idx.is_empty() {
+            Some(self.halo.post_halo(x))
+        } else {
+            None
+        };
+
+        self.spmv_local_only(x, y);
+
+        if let Some(req) = halo_req {
+            self.halo.complete_halo(req);
+        }
+
+        let ghost_guard = self.halo.ghost_slice_ref();
+        self.spmv_border(x, y, &ghost_guard[..]);
     }
 }
 
 impl LinOp for DistCsrOp {
-    type S = f64;
+    type S = S;
 
     fn dims(&self) -> (usize, usize) {
-        // Expose local rows so Krylov solvers operate on rank-local vectors.
         (self.n_local, self.n_local)
     }
 
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        if let Err(e) = self.spmv_dist_impl(x, y) {
-            panic!("DistCsrOp::matvec: {e}");
-        }
+    fn matvec(&self, x: &[S], y: &mut [S]) {
+        let mut scratch = BridgeScratch::default();
+        self.matvec_s(x, y, &mut scratch);
     }
 
-    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), crate::error::KError> {
-        self.spmv_dist_impl(x, y)
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != self.n_local || y.len() != self.n_local {
+            return Err(KError::InvalidInput("dimension mismatch".into()));
+        }
+        self.matvec(x, y);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -347,11 +319,12 @@ impl LinOp for DistCsrOp {
     fn structure_id(&self) -> StructureId {
         self.ids.structure_id()
     }
+
     fn values_id(&self) -> ValuesId {
         self.ids.values_id()
     }
 
     fn comm(&self) -> UniverseComm {
-        self.comm.clone()
+        self.halo.comm.clone()
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use kryst::LinOp;
 use kryst::algebra::prelude::*;
+use kryst::algebra::scalar::S;
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -44,22 +45,22 @@ fn dist_csr_spmv_matches_serial() {
     let op = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
         .unwrap();
 
-    let x_global: Vec<R> = (0..n_global).map(|i| R::from(i as f64)).collect();
+    let x_global: Vec<S> = (0..n_global).map(|i| S::from_real(i as f64)).collect();
     let x_local = x_global[row_start..row_start + n_per].to_vec();
-    let mut y_local = vec![R::default(); n_per];
-    op.spmv_dist_impl(&x_local, &mut y_local).unwrap();
+    let mut y_local = vec![S::zero(); n_per];
+    op.matvec(&x_local, &mut y_local);
 
     let mut y_global = Vec::new();
     comm.gather(&y_local, &mut y_global, 0);
     if rank == 0 {
-        let mut y_ref = vec![R::default(); n_global];
+        let mut y_ref = vec![S::zero(); n_global];
         for i in 0..n_global {
-            let mut v = R::from(2.0) * x_global[i];
+            let mut v = S::from_real(2.0) * x_global[i];
             if i > 0 {
-                v -= x_global[i - 1];
+                v = v - x_global[i - 1];
             }
             if i + 1 < n_global {
-                v -= x_global[i + 1];
+                v = v - x_global[i + 1];
             }
             y_ref[i] = v;
         }
@@ -75,7 +76,7 @@ fn dist_csr_numeric_update_changes_values_id() {
     let mut op = DistCsrOp::from_local_rows(1, 0, &local, &part_prefix, comm).unwrap();
     let sid = op.structure_id();
     let vid = op.values_id();
-    op.update_numeric(&[R::from(2.0)], &[]);
+    op.update_numeric(&[S::from_real(2.0)]).unwrap();
     assert_eq!(op.structure_id(), sid);
     assert_ne!(op.values_id(), vid);
 }
