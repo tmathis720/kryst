@@ -99,7 +99,7 @@ impl Preconditioner for Jacobi {
                 z.len()
             )));
         }
-        let mut used_parallel = false;
+        let used_parallel = false;
         #[cfg(feature = "rayon")]
         {
             if r.len() >= parallel_tune().min_len_vec {

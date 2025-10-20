@@ -19,7 +19,7 @@ use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub struct OwnedMpiRequest {
@@ -298,10 +298,12 @@ impl super::Comm for MpiComm {
             .expect("MPI split failed");
         let rank = sub.rank() as usize;
         let size = sub.size() as usize;
+        let repro = self.reproducible.load(Ordering::Relaxed);
         super::UniverseComm::Mpi(Arc::new(MpiComm {
             world: sub,
             rank,
             size,
+            reproducible: AtomicBool::new(repro),
         }))
     }
 

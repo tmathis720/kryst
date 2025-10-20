@@ -437,9 +437,7 @@ impl CgSolver {
         }
 
         if matches!(self.variant, CgVariant::Pipelined) {
-            return self.solve_pipelined_with_comm(
-                a, pc, b, x, comm, monitors, work, nrows,
-            );
+            return self.solve_pipelined_with_comm(a, pc, b, x, comm, monitors, work, nrows);
         }
 
         let mut buffers = CgWorkspace::acquire(nrows, work);
@@ -953,7 +951,7 @@ impl CgSolver {
             };
 
             let async_ok = self.should_use_async(comm, nrows);
-            let mut reduce_req = if async_ok {
+            let reduce_req = if async_ok {
                 Some(comm.iallreduce_sum_scalars(tuple.as_mut_slice()))
             } else {
                 None

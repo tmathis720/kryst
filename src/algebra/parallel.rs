@@ -9,7 +9,7 @@
 
 #![allow(clippy::needless_borrow)]
 
-use crate::algebra::{parallel_cfg::parallel_tune, prelude::*};
+use crate::algebra::prelude::*;
 
 #[cfg(feature = "rayon")]
 use rayon::ThreadPoolBuilder;

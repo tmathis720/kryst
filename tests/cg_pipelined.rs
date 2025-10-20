@@ -5,8 +5,8 @@ use kryst::config::options::CgVariant;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::cg::{self, CgSolver};
 use kryst::solver::LinearSolver;
+use kryst::solver::cg::{self, CgSolver};
 
 fn build_dense_poisson(n: usize) -> Mat<S> {
     let mut a = Mat::<S>::zeros(n, n);
@@ -79,8 +79,7 @@ fn pipelined_matches_classic_solution() {
     }
     assert!(max_diff < R::from(1e-8));
 
-    let rel_res = stats_pipe.final_residual
-        / stats_classic.final_residual.max(R::from(1e-30));
+    let rel_res = stats_pipe.final_residual / stats_classic.final_residual.max(R::from(1e-30));
     assert!(rel_res < R::from(2.0));
 }
 

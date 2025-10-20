@@ -10,7 +10,7 @@ pub use self::plan::{
 };
 pub use self::scalar::{spmv_csr_scalar, spmv_scaled_csr, spmv_t_scaled_csr};
 
-use crate::algebra::{parallel_cfg::parallel_tune, prelude::*};
+use crate::algebra::prelude::*;
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, csr::CsrMatrix, sparse};

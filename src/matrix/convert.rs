@@ -2,22 +2,22 @@ use std::sync::Arc;
 
 use faer::Mat;
 
-use crate::{
-    error::KError,
-    matrix::{
-        DistCsrOp,
-        csc::CscMatrix,
-        csr::CsrMatrix as ScalarCsrMatrix,
-        format::{AsFormat, FormatHint},
-        op::{DenseOp, GenericCsrOp, LinOp, wrap_with_comm},
-        sparse::CsrMatrix,
-    },
+use crate::error::KError;
+use crate::matrix::{csc::CscMatrix, format::FormatHint, op::LinOp, sparse::CsrMatrix};
+
+#[cfg(not(feature = "complex"))]
+use crate::matrix::{
+    DistCsrOp,
+    csr::CsrMatrix as ScalarCsrMatrix,
+    format::AsFormat,
+    op::{DenseOp, GenericCsrOp, wrap_with_comm},
 };
 
 /// Build a helpful error for unsupported operator conversions.
 ///
 /// `where_` is the function name (e.g., "to_csr_cached") and `target` is the
 /// desired target format ("CSR", "CSC", "dense").
+#[cfg(not(feature = "complex"))]
 fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) -> KError {
     let sid = op.structure_id().0;
     let vid = op.values_id().0;
@@ -53,6 +53,7 @@ fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) ->
     KError::InvalidInput(help)
 }
 
+#[cfg(not(feature = "complex"))]
 fn scalar_csr_to_sparse(matrix: &ScalarCsrMatrix<f64>) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(
         matrix.nrows,
@@ -64,8 +65,14 @@ fn scalar_csr_to_sparse(matrix: &ScalarCsrMatrix<f64>) -> CsrMatrix<f64> {
 }
 
 /// Try to borrow a CSR matrix if the operator is already CSR.
+#[cfg(not(feature = "complex"))]
 pub fn try_as_csr(pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
     pmat.as_any().downcast_ref::<CsrMatrix<f64>>()
+}
+
+#[cfg(feature = "complex")]
+pub fn try_as_csr(_pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
+    None
 }
 
 /// Convert a matrix to CSR, caching dense conversions.
@@ -74,6 +81,7 @@ pub fn try_as_csr(pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
 /// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
 /// an unsupported `LinOp` type. See message for how to wrap with
 /// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
+#[cfg(not(feature = "complex"))]
 pub fn to_csr_cached(
     pmat: &dyn LinOp<S = f64>,
     drop_tol: f64,
@@ -91,8 +99,27 @@ pub fn to_csr_cached(
     Err(unsupported_linop_err(pmat, "to_csr_cached", "CSR"))
 }
 
+#[cfg(feature = "complex")]
+pub fn to_csr_cached(
+    _pmat: &dyn LinOp<S = f64>,
+    _drop_tol: f64,
+) -> Result<Arc<CsrMatrix<f64>>, KError> {
+    Err(KError::InvalidInput(
+        "to_csr_cached is not available with the `complex` feature enabled".into(),
+    ))
+}
+
 /// Obtain a CSR matrix from a [`LinOp`], converting and caching if necessary.
 #[inline]
+#[cfg(not(feature = "complex"))]
+pub fn csr_from_linop(
+    op: &dyn LinOp<S = f64>,
+    drop_tol: f64,
+) -> Result<Arc<CsrMatrix<f64>>, KError> {
+    to_csr_cached(op, drop_tol)
+}
+
+#[cfg(feature = "complex")]
 pub fn csr_from_linop(
     op: &dyn LinOp<S = f64>,
     drop_tol: f64,
@@ -101,8 +128,14 @@ pub fn csr_from_linop(
 }
 
 /// Try to borrow a CSC matrix if the operator is already CSC.
+#[cfg(not(feature = "complex"))]
 pub fn try_as_csc(pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
     pmat.as_any().downcast_ref::<CscMatrix<f64>>()
+}
+
+#[cfg(feature = "complex")]
+pub fn try_as_csc(_pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
+    None
 }
 
 /// Convert a matrix to CSC, caching dense/CSR conversions.
@@ -111,6 +144,7 @@ pub fn try_as_csc(pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
 /// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
 /// an unsupported `LinOp` type. See message for how to wrap with
 /// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
+#[cfg(not(feature = "complex"))]
 pub fn to_csc_cached(
     pmat: &dyn LinOp<S = f64>,
     drop_tol: f64,
@@ -131,8 +165,27 @@ pub fn to_csc_cached(
     Err(unsupported_linop_err(pmat, "to_csc_cached", "CSC"))
 }
 
+#[cfg(feature = "complex")]
+pub fn to_csc_cached(
+    _pmat: &dyn LinOp<S = f64>,
+    _drop_tol: f64,
+) -> Result<Arc<CscMatrix<f64>>, KError> {
+    Err(KError::InvalidInput(
+        "to_csc_cached is not available with the `complex` feature enabled".into(),
+    ))
+}
+
 /// Obtain a CSC matrix from a [`LinOp`], converting and caching if necessary.
 #[inline]
+#[cfg(not(feature = "complex"))]
+pub fn csc_from_linop(
+    op: &dyn LinOp<S = f64>,
+    drop_tol: f64,
+) -> Result<Arc<CscMatrix<f64>>, KError> {
+    to_csc_cached(op, drop_tol)
+}
+
+#[cfg(feature = "complex")]
 pub fn csc_from_linop(
     op: &dyn LinOp<S = f64>,
     drop_tol: f64,
@@ -146,6 +199,7 @@ pub fn csc_from_linop(
 /// Returns a recoverable `KError::InvalidInput` with guidance when `op` is
 /// an unsupported `LinOp` type. See message for how to wrap with `DenseOp` to
 /// enable cached conversions.
+#[cfg(not(feature = "complex"))]
 pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
     if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.clone());
@@ -160,6 +214,13 @@ pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
     Err(unsupported_linop_err(op, "dense_from_linop", "dense"))
 }
 
+#[cfg(feature = "complex")]
+pub fn dense_from_linop(_op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
+    Err(KError::InvalidInput(
+        "dense_from_linop is not available with the `complex` feature enabled".into(),
+    ))
+}
+
 /// Ensure we have an owned `Mat<f64>` regardless of storage (view vs owned).
 /// This clones data when necessary and returns an owned matrix.
 pub fn owned_from_mat(mat: &Mat<f64>) -> Mat<f64> {
@@ -168,6 +229,7 @@ pub fn owned_from_mat(mat: &Mat<f64>) -> Mat<f64> {
 
 /// Convert `op` to a LinOp view with the requested `hint`, preserving communicator.
 /// For Dense, returns an owned `faer::Mat<f64>` so preconditioners can safely factorize.
+#[cfg(not(feature = "complex"))]
 pub fn materialize_linop_with_hint(
     op: &dyn LinOp<S = f64>,
     hint: FormatHint,
@@ -288,7 +350,18 @@ pub fn materialize_linop_with_hint(
     ))
 }
 
-#[cfg(test)]
+#[cfg(feature = "complex")]
+pub fn materialize_linop_with_hint(
+    _op: &dyn LinOp<S = f64>,
+    _hint: FormatHint,
+    _drop_tol: f64,
+) -> Result<Arc<dyn LinOp<S = f64>>, KError> {
+    Err(KError::InvalidInput(
+        "materialize_linop_with_hint is not available with the `complex` feature enabled".into(),
+    ))
+}
+
+#[cfg(all(test, not(feature = "complex")))]
 mod tests {
     use super::*;
     use crate::matrix::{DistCsrOp, op_shell::MatShell, sparse::CsrMatrix};

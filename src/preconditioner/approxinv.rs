@@ -521,8 +521,6 @@ mod tests {
     #[cfg(feature = "complex")]
     use crate::algebra::bridge::BridgeScratch;
     use crate::core::traits::MatVec;
-    #[cfg(feature = "complex")]
-    use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::legacy::Preconditioner;
     use approx::assert_relative_eq;
     #[cfg(feature = "complex")]

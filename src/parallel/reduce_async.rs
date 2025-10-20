@@ -2,7 +2,6 @@ use crate::algebra::prelude::*;
 use crate::parallel::UniverseComm;
 use std::marker::PhantomData;
 
-use super::reduce::pack_scalar_s_to_rr;
 
 #[cfg(feature = "mpi")]
 use crate::parallel::mpi_comm::OwnedMpiRequest;

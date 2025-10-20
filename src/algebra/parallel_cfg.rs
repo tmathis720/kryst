@@ -1,9 +1,6 @@
 use once_cell::sync::OnceCell;
 use std::sync::RwLock;
 
-#[cfg(feature = "rayon")]
-use rayon::ThreadPoolBuilder;
-
 #[derive(Clone, Copy, Debug)]
 pub struct ParallelTune {
     /// Minimum vector length to enable Rayon in elementwise kernels.
