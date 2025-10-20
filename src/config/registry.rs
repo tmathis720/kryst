@@ -260,6 +260,13 @@ pub static SPECS: &[Spec] = &[
         doc: "single reduction",
     },
     Spec {
+        flag: "-ksp_reproducible",
+        key: "ksp_reproducible",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "enable deterministic global reductions",
+    },
+    Spec {
         flag: "-ksp_trust_region",
         key: "ksp_trust_region",
         arity: Arity::One,

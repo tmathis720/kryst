@@ -48,7 +48,7 @@
 
 #[cfg(feature = "rayon")]
 use crate::algebra::parallel::set_rayon_threads;
-use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
+use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, set_rayon_threads_for_repro};
 use crate::config::options::{KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
@@ -143,6 +143,7 @@ pub struct KspContext {
     last_pc_sid: Option<StructureId>,
     last_pc_vid: Option<ValuesId>,
     reduction_opts: ReductOptions,
+    reproducible: bool,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
@@ -279,6 +280,7 @@ impl KspContext {
             last_pc_sid: None,
             last_pc_vid: None,
             reduction_opts: ReductOptions::default(),
+            reproducible: false,
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
@@ -475,6 +477,13 @@ impl KspContext {
                 w.set_reduction_mode(parsed);
             }
             self.apply_global_reduction_mode();
+        }
+
+        if let Some(flag) = opts.reproducible {
+            self.reproducible = flag;
+            if flag && opts.threads.is_none() {
+                set_rayon_threads_for_repro(true);
+            }
         }
 
         // --- GMRES options ---
@@ -1144,6 +1153,7 @@ impl KspContext {
             Some(self.monitors.as_slice())
         };
         let comm = amat.comm();
+        comm.set_reproducible(self.reproducible);
         let pc = self
             .pc
             .as_mut()

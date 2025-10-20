@@ -43,7 +43,7 @@ use std::any::Any;
 pub mod debug {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct IterEvent {
@@ -63,13 +63,31 @@ pub mod debug {
         Rho,
         RNorm,
         ZNorm,
+        Other,
+    }
+
+    impl DotKind {
+        pub const COUNT: usize = 6;
+
+        #[inline]
+        pub fn index(self) -> usize {
+            self as usize
+        }
     }
 
     type IterHook = dyn Fn(IterEvent) + Send + Sync + 'static;
 
     static ITER_HOOK: Mutex<Option<Box<IterHook>>> = Mutex::new(None);
     static ITER_HOOK_SET: AtomicBool = AtomicBool::new(false);
-    static LARGE_IMAG_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static COUNTS: [AtomicUsize; DotKind::COUNT] = [
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ];
+    static MAX_RATIO_X32: AtomicU64 = AtomicU64::new(0);
 
     #[inline]
     pub(crate) fn emit_iter(event: IterEvent) {
@@ -91,33 +109,62 @@ pub mod debug {
     }
 
     #[inline]
-    pub(crate) fn record_dot(kind: DotKind, _iteration: usize, value: S) {
+    pub(crate) fn record_dot(kind: DotKind, value: S) {
         #[cfg(feature = "complex")]
         {
             let imag = value.imag().abs();
             let scale = 1.0 + value.abs();
-            if imag > 128.0 * f64::EPSILON * scale {
-                LARGE_IMAG_COUNT.fetch_add(1, Ordering::Relaxed);
+            let ratio = if scale > 0.0 { imag / scale } else { 0.0 };
+            if ratio > 128.0 * f64::EPSILON {
+                COUNTS[kind.index()].fetch_add(1, Ordering::Relaxed);
+            }
+            let scaled = (ratio * (u32::MAX as f64)) as u64;
+            loop {
+                let current = MAX_RATIO_X32.load(Ordering::Relaxed);
+                if scaled <= current {
+                    break;
+                }
+                if MAX_RATIO_X32
+                    .compare_exchange(current, scaled, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
             }
         }
         #[cfg(not(feature = "complex"))]
-        let _ = value;
-        let _ = kind;
+        {
+            let _ = value;
+            let _ = kind;
+        }
     }
 
     pub fn reset_counters() {
-        LARGE_IMAG_COUNT.store(0, Ordering::Relaxed);
+        for counter in &COUNTS {
+            counter.store(0, Ordering::Relaxed);
+        }
+        MAX_RATIO_X32.store(0, Ordering::Relaxed);
     }
 
     pub fn large_imag_count() -> usize {
-        LARGE_IMAG_COUNT.load(Ordering::Relaxed)
+        COUNTS.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
+
+    pub fn snapshot() -> (usize, [usize; DotKind::COUNT], f64) {
+        let mut per_kind = [0usize; DotKind::COUNT];
+        for (idx, slot) in per_kind.iter_mut().enumerate() {
+            *slot = COUNTS[idx].load(Ordering::Relaxed);
+        }
+        let total = per_kind.iter().copied().sum();
+        let max_ratio = (MAX_RATIO_X32.load(Ordering::Relaxed) as f64) / (u32::MAX as f64);
+        (total, per_kind, max_ratio)
     }
 }
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
-use log::trace;
+use log::{trace, warn};
 
 #[inline]
 fn has_nontrivial_guess(x: &[S]) -> bool {
@@ -279,6 +326,21 @@ impl CgSolver {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CG");
 
+        fn attach_drift_stats(mut stats: SolveStats<R>) -> SolveStats<R> {
+            let (total, per_kind, max_ratio) = debug::snapshot();
+            stats.complex_drift_events = total;
+            stats.complex_drift_counts = per_kind;
+            stats.complex_drift_max_rel = max_ratio;
+            #[cfg(feature = "logging")]
+            if total > 0 {
+                warn!(
+                    "CG: complex drift observed: total={}, per_kind={:?}, max_rel_imag={:.3e}",
+                    total, per_kind, max_ratio
+                );
+            }
+            stats
+        }
+
         #[inline(always)]
         fn prefetch_like<T>(slice: &[T]) {
             let _ = core::hint::black_box(slice.as_ptr());
@@ -311,11 +373,11 @@ impl CgSolver {
         })?;
 
         if b.is_empty() {
-            return Ok(SolveStats::new(
+            return Ok(attach_drift_stats(SolveStats::new(
                 0,
                 R::zero(),
                 ConvergedReason::ConvergedAtol,
-            ));
+            )));
         }
 
         let mut buffers = CgWorkspace::acquire(nrows, work);
@@ -363,13 +425,13 @@ impl CgSolver {
 
             let mut result_idx = 0usize;
             let rho_scalar = dot_results[result_idx];
-            debug::record_dot(debug::DotKind::InitialRho, 0, rho_scalar);
+            debug::record_dot(debug::DotKind::InitialRho, rho_scalar);
             let rho: R = dot_result_to_real(rho_scalar);
             result_idx += 1;
 
             let rsq = if want_unpre {
                 let value = dot_results[result_idx];
-                debug::record_dot(debug::DotKind::RNorm, 0, value);
+                debug::record_dot(debug::DotKind::RNorm, value);
                 result_idx += 1;
                 Some(dot_result_to_real(value))
             } else {
@@ -377,7 +439,7 @@ impl CgSolver {
             };
             let znorm = if want_natural {
                 let value = dot_results[result_idx];
-                debug::record_dot(debug::DotKind::ZNorm, 0, value);
+                debug::record_dot(debug::DotKind::ZNorm, value);
                 Some(dot_result_to_real(value))
             } else {
                 None
@@ -421,7 +483,7 @@ impl CgSolver {
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut s = s0;
             s.final_residual = global_nrm2(comm, r);
-            return Ok(s);
+            return Ok(attach_drift_stats(s));
         }
 
         for k in 1..=self.conv.max_iters {
@@ -484,7 +546,7 @@ impl CgSolver {
                 }
             };
 
-            debug::record_dot(debug::DotKind::PAp, k, p_ap_scalar);
+            debug::record_dot(debug::DotKind::PAp, p_ap_scalar);
             let p_ap: R = dot_result_to_real(p_ap_scalar);
             if p_ap <= R::zero() || !p_ap.is_finite() {
                 return Err(KError::IndefiniteMatrix);
@@ -508,7 +570,7 @@ impl CgSolver {
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
                     stats.final_residual = global_nrm2(comm, r);
-                    return Ok(stats);
+                    return Ok(attach_drift_stats(stats));
                 }
             }
 
@@ -570,7 +632,7 @@ impl CgSolver {
             }
 
             let rho_scalar = dot_results[rho_idx];
-            debug::record_dot(debug::DotKind::Rho, k, rho_scalar);
+            debug::record_dot(debug::DotKind::Rho, rho_scalar);
             let rho_new: R = dot_result_to_real(rho_scalar);
             if rho_new <= R::zero() || !rho_new.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
@@ -578,14 +640,14 @@ impl CgSolver {
 
             let rsq_new = if let Some(idx) = rsq_idx {
                 let value = dot_results[idx];
-                debug::record_dot(debug::DotKind::RNorm, k, value);
+                debug::record_dot(debug::DotKind::RNorm, value);
                 Some(dot_result_to_real(value))
             } else {
                 None
             };
             let znorm_new = if let Some(idx) = znorm_idx {
                 let value = dot_results[idx];
-                debug::record_dot(debug::DotKind::ZNorm, k, value);
+                debug::record_dot(debug::DotKind::ZNorm, value);
                 Some(dot_result_to_real(value))
             } else {
                 None
@@ -621,7 +683,7 @@ impl CgSolver {
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 s.final_residual = global_nrm2(comm, r);
-                return Ok(s);
+                return Ok(attach_drift_stats(s));
             }
 
             rho_prev = rho;
@@ -631,11 +693,11 @@ impl CgSolver {
         }
 
         let true_res = global_nrm2(comm, r);
-        Ok(SolveStats::new(
+        Ok(attach_drift_stats(SolveStats::new(
             self.conv.max_iters,
             true_res,
             ConvergedReason::DivergedMaxIts,
-        ))
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]

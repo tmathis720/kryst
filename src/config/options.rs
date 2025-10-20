@@ -28,6 +28,11 @@ pub struct KspOptions {
     pub restart: Option<usize>,
     /// Reduction mode for global dot products: "fast" | "deterministic" | "deterministic-accurate"
     pub reduction: Option<String>,
+    /// Enable reproducible reductions regardless of the global mode. When true,
+    /// the solver selects deterministic MPI reductions and fixed-order local
+    /// kernels; combine with `threads = Some(1)` (or `-ksp_threads 1`) for
+    /// bit-for-bit equality across runs.
+    pub reproducible: Option<bool>,
     // GMRES/FGMRES-specific (backward-compatible; all optional)
     /// Override restart for GMRES; falls back to `restart` if unset
     pub gmres_restart: Option<usize>,
@@ -280,6 +285,7 @@ impl Sink for KspOptions {
             "ksp_gmres_happy_breakdown" => set_opt!(&mut self.gmres_happy_breakdown, v),
             "ksp_fgmres_reorthog" => set_opt!(&mut self.fgmres_reorthog, v),
             "ksp_fgmres_happy_breakdown" => set_opt!(&mut self.fgmres_happy_breakdown, v),
+            "ksp_reproducible" => set_opt!(&mut self.reproducible, v),
             _ => Err(KError::SolveError(format!("Unknown KSP bool key: {key}"))),
         }
     }

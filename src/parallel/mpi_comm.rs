@@ -19,6 +19,7 @@ use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 pub struct OwnedMpiRequest {
@@ -48,6 +49,8 @@ pub struct MpiComm {
     pub rank: usize,
     /// The total number of processes in the communicator.
     pub size: usize,
+    /// Flag indicating whether deterministic reductions are requested.
+    pub reproducible: AtomicBool,
 }
 
 unsafe impl Send for MpiComm {}
@@ -78,7 +81,12 @@ impl MpiComm {
             crate::parallel::threads::init_global_rayon_pool(size);
         }
 
-        MpiComm { world, rank, size }
+        MpiComm {
+            world,
+            rank,
+            size,
+            reproducible: AtomicBool::new(false),
+        }
     }
 
     /// Best-effort constructor that returns `None` if initialization fails.

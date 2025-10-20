@@ -1,4 +1,6 @@
-use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
+use crate::algebra::parallel::{
+    dot_conj_local_repro, par_dot_conj_local, par_sum_abs2_local, sum_abs2_local_repro,
+};
 use crate::algebra::prelude::*;
 use crate::parallel::{Comm, UniverseComm};
 use crate::reduction::{CommDeterministic, Packet, ReproMode};
@@ -198,20 +200,12 @@ pub(crate) fn allreduce_sum_scalar_repro_impl(comm: &UniverseComm, z: S, mode: R
         return z;
     }
 
-    #[cfg(feature = "complex")]
-    {
-        let packet = Packet::<2> {
-            v: [z.real(), z.imag()],
-        };
-        let reduced = comm.allreduce_det(&packet, mode);
-        S::from_parts(reduced.v[0], reduced.v[1])
-    }
-
-    #[cfg(not(feature = "complex"))]
-    {
-        let packet = Packet::<1> { v: [z.real()] };
-        let reduced = comm.allreduce_det(&packet, mode);
-        S::from_real(reduced.v[0])
+    let mode = effective_mode(comm, mode);
+    match mode {
+        ReproMode::Fast => comm.allreduce_sum_scalar(z),
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
+            comm.reduce_sum_scalar_s_repro(z)
+        }
     }
 }
 
@@ -272,9 +266,19 @@ pub fn set_global_reduction_mode_scoped(mode: ReproMode) -> GlobalReductionModeG
     GlobalReductionModeGuard { previous: prev }
 }
 
+#[inline]
+fn effective_mode(comm: &UniverseComm, mode: ReproMode) -> ReproMode {
+    if comm.is_reproducible() && matches!(mode, ReproMode::Fast) {
+        ReproMode::Deterministic
+    } else {
+        mode
+    }
+}
+
 /// Sum a single scalar across all ranks using the requested reproducibility mode.
 #[inline]
 pub fn allreduce_sum_scalar_with_mode(comm: &UniverseComm, z: S, mode: ReproMode) -> S {
+    let mode = effective_mode(comm, mode);
     match mode {
         ReproMode::Fast => comm.allreduce_sum_scalar(z),
         ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
@@ -285,12 +289,11 @@ pub fn allreduce_sum_scalar_with_mode(comm: &UniverseComm, z: S, mode: ReproMode
 
 #[inline]
 pub fn allreduce_sum_real_with_mode(comm: &UniverseComm, v: R, mode: ReproMode) -> R {
+    let mode = effective_mode(comm, mode);
     match mode {
         ReproMode::Fast => comm.allreduce_sum_real(v),
         ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
-            let packet = Packet::<1> { v: [v] };
-            let reduced = comm.allreduce_det(&packet, mode);
-            reduced.v[0]
+            comm.reduce_sum_real_repro(v)
         }
     }
 }
@@ -305,7 +308,12 @@ pub fn global_dot_conj_with_mode(comm: &UniverseComm, x: &[S], y: &[S], mode: Re
         x.len(),
         y.len()
     );
-    let local = par_dot_conj_local(x, y);
+    let mode = effective_mode(comm, mode);
+    let local = if matches!(mode, ReproMode::Fast) {
+        par_dot_conj_local(x, y)
+    } else {
+        dot_conj_local_repro(x, y)
+    };
     allreduce_sum_scalar_with_mode(comm, local, mode)
 }
 
@@ -347,6 +355,8 @@ pub fn global_dot_conj_many_into_with_mode(
         return;
     }
 
+    let mode = effective_mode(comm, mode);
+
     for (idx, ((x, y), slot)) in pairs.iter().zip(out.iter_mut()).enumerate() {
         assert_eq!(
             x.len(),
@@ -356,7 +366,11 @@ pub fn global_dot_conj_many_into_with_mode(
             x.len(),
             y.len()
         );
-        *slot = par_dot_conj_local(x, y);
+        *slot = if matches!(mode, ReproMode::Fast) {
+            par_dot_conj_local(x, y)
+        } else {
+            dot_conj_local_repro(x, y)
+        };
     }
 
     match mode {
@@ -370,7 +384,12 @@ pub fn global_dot_conj_many_into_with_mode(
 /// Global Euclidean norm of a vector across all ranks using the requested mode.
 #[inline]
 pub fn global_nrm2_with_mode(comm: &UniverseComm, x: &[S], mode: ReproMode) -> R {
-    let ssq = par_sum_abs2_local(x);
+    let mode = effective_mode(comm, mode);
+    let ssq = if matches!(mode, ReproMode::Fast) {
+        par_sum_abs2_local(x)
+    } else {
+        sum_abs2_local_repro(x)
+    };
     let global = allreduce_sum_real_with_mode(comm, ssq, mode);
     let clamped = if global >= 0.0 { global } else { 0.0 };
     clamped.sqrt()
@@ -431,9 +450,14 @@ pub fn global_nrm2_many_with_mode(comm: &UniverseComm, vecs: &[&[S]], mode: Repr
         return Vec::new();
     }
 
+    let mode = effective_mode(comm, mode);
     let mut sums: Vec<R> = vec![R::zero(); vecs.len()];
     for (slot, &vec) in sums.iter_mut().zip(vecs.iter()) {
-        *slot = par_sum_abs2_local(vec);
+        *slot = if matches!(mode, ReproMode::Fast) {
+            par_sum_abs2_local(vec)
+        } else {
+            sum_abs2_local_repro(vec)
+        };
     }
 
     allreduce_sum_real_slice_with_mode(comm, sums.as_mut_slice(), mode);
@@ -461,8 +485,13 @@ pub fn global_nrm2_many_into_with_mode(
         return;
     }
 
+    let mode = effective_mode(comm, mode);
     for (slot, &vec) in out.iter_mut().zip(vecs.iter()) {
-        *slot = par_sum_abs2_local(vec);
+        *slot = if matches!(mode, ReproMode::Fast) {
+            par_sum_abs2_local(vec)
+        } else {
+            sum_abs2_local_repro(vec)
+        };
     }
 
     allreduce_sum_real_slice_with_mode(comm, out, mode);
@@ -624,6 +653,7 @@ fn allreduce_sum_real_slice_fast(comm: &UniverseComm, data: &mut [R]) {
 
 #[inline]
 pub fn allreduce_sum_real_slice_with_mode(comm: &UniverseComm, data: &mut [R], mode: ReproMode) {
+    let mode = effective_mode(comm, mode);
     match mode {
         ReproMode::Fast => allreduce_sum_real_slice_fast(comm, data),
         ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
@@ -645,6 +675,7 @@ fn reduce_real_slice_deterministic(comm: &UniverseComm, data: &mut [R], mode: Re
 /// Reduce a slice of scalars using the requested reproducibility mode.
 #[inline]
 pub fn allreduce_sum_scalar_slice_with_mode(comm: &UniverseComm, data: &mut [S], mode: ReproMode) {
+    let mode = effective_mode(comm, mode);
     match mode {
         ReproMode::Fast => allreduce_sum_scalar_slice_fast(comm, data),
         ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
@@ -677,56 +708,11 @@ fn reduce_scalar_slice_deterministic(comm: &UniverseComm, data: &mut [S], mode: 
     if data.is_empty() || comm.size() <= 1 {
         return;
     }
-
-    #[cfg(not(feature = "complex"))]
-    {
-        reduce_packets_in_place::<1, _, _>(
-            comm,
-            data,
-            mode,
-            |value| [value.real()],
-            |parts| S::from_real(parts[0]),
-        );
-    }
-
-    #[cfg(feature = "complex")]
-    {
-        reduce_packets_in_place::<2, _, _>(
-            comm,
-            data,
-            mode,
-            |value| pack_scalar(value),
-            |parts| S::from_parts(parts[0], parts[1]),
-        );
-    }
-}
-
-fn reduce_packets_in_place<const WIDTH: usize, F, G>(
-    comm: &UniverseComm,
-    data: &mut [S],
-    mode: ReproMode,
-    mut pack: F,
-    mut unpack: G,
-) where
-    F: FnMut(S) -> [f64; WIDTH],
-    G: FnMut([f64; WIDTH]) -> S,
-{
-    debug_assert!(WIDTH >= 1);
-
-    let mut scratch: SmallVec<[f64; 16]> = SmallVec::with_capacity(data.len() * WIDTH);
-    scratch.resize(data.len() * WIDTH, 0.0);
-
-    for (idx, &value) in data.iter().enumerate() {
-        let parts = pack(value);
-        scratch[idx * WIDTH..(idx + 1) * WIDTH].copy_from_slice(&parts);
-    }
-
-    reduce_buffer_in_packets(comm, scratch.as_mut_slice(), mode);
-
-    for (idx, slot) in data.iter_mut().enumerate() {
-        let mut parts = [0.0f64; WIDTH];
-        parts.copy_from_slice(&scratch[idx * WIDTH..(idx + 1) * WIDTH]);
-        *slot = unpack(parts);
+    match mode {
+        ReproMode::Fast => {}
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate => {
+            comm.reduce_sum_scalars_s_repro(data);
+        }
     }
 }
 
