@@ -1,3 +1,4 @@
+use crate::algebra::parallel::par_sum_abs2_local;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 
@@ -13,5 +14,6 @@ pub fn dot_conj(x: &[S], y: &[S]) -> S {
 
 #[inline]
 pub fn nrm2(x: &[S]) -> R {
-    dot_conj(x, x).abs().sqrt()
+    // Cheaper for complex scalars: avoids a complex multiply per element.
+    par_sum_abs2_local(x).sqrt()
 }

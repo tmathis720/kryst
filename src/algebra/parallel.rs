@@ -10,6 +10,7 @@
 #![allow(clippy::needless_borrow)]
 
 use crate::algebra::prelude::*;
+use crate::utils::reduction::repro_mode_is_strict;
 
 #[cfg(feature = "rayon")]
 use rayon::ThreadPoolBuilder;
@@ -243,6 +244,9 @@ pub fn par_xpay(x: &[S], alpha: S, y: &mut [S]) {
 #[inline]
 pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
     debug_assert_eq!(x.len(), y.len());
+    if repro_mode_is_strict() {
+        return dot_conj_local_repro(x, y);
+    }
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
@@ -267,6 +271,9 @@ pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
 
 #[inline]
 pub fn par_sum_abs2_local(x: &[S]) -> R {
+    if repro_mode_is_strict() {
+        return sum_abs2_local_repro(x);
+    }
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
