@@ -672,14 +672,11 @@ impl Workspace {
 
 /// Grow vector to `need` length without zeroing. Never shrinks silently.
 #[inline]
-fn ensure_len<T: Copy>(v: &mut Vec<T>, need: usize) {
-    if v.len() != need {
-        if v.capacity() < need {
-            v.reserve_exact(need - v.capacity());
-        }
-        unsafe {
-            v.set_len(need);
-        }
+fn ensure_len<T: Copy + Default>(v: &mut Vec<T>, need: usize) {
+    if v.len() < need {
+        v.resize(need, T::default());
+    } else if v.len() > need {
+        v.truncate(need);
     }
 }
 

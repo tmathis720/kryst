@@ -1153,7 +1153,25 @@ impl KspContext {
                 );
             }
             pc.direct_solve(pmat.as_ref(), b, x)?;
-            return Ok(SolveStats::new(1, 0.0, ConvergedReason::ConvergedAtol));
+            let mat_for_residual = self
+                .amat
+                .as_ref()
+                .map(|a| a.as_ref())
+                .unwrap_or_else(|| pmat.as_ref());
+            let mut residual = vec![0.0f64; b.len()];
+            if let Err(e) = mat_for_residual.try_matvec(x, &mut residual) {
+                return Err(KError::SolveError(format!("residual matvec failed: {e}")));
+            }
+            for (ri, &bi) in residual.iter_mut().zip(b.iter()) {
+                *ri = bi - *ri;
+            }
+            let comm = mat_for_residual.comm();
+            let res_sq = comm.dot(&residual, &residual);
+            return Ok(SolveStats::new(
+                0,
+                res_sq.sqrt(),
+                ConvergedReason::ConvergedAtol,
+            ));
         }
 
         // Ensure the configured reduction mode is active while solving and configure
