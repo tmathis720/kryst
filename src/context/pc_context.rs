@@ -5,6 +5,24 @@ use crate::preconditioner::approxinv_csr::ApproxInvKind;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static CHAIN_STRICT_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct ChainStrictGuard(Option<bool>);
+
+#[cfg(test)]
+impl Drop for ChainStrictGuard {
+    fn drop(&mut self) {
+        CHAIN_STRICT_OVERRIDE.with(|cell| cell.set(self.0));
+    }
+}
+
 /// Supported preconditioner types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcType {
@@ -24,6 +42,7 @@ pub enum PcType {
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
+    #[cfg(feature = "superlu_dist")]
     SuperLuDist,
 }
 
@@ -47,7 +66,18 @@ impl FromStr for PcType {
             "approxinv" | "approxinverse" => Ok(PcType::ApproxInverse),
             "lu" => Ok(PcType::Lu),
             "qr" => Ok(PcType::Qr),
-            "superludist" => Ok(PcType::SuperLuDist),
+            "superludist" => {
+                #[cfg(feature = "superlu_dist")]
+                {
+                    Ok(PcType::SuperLuDist)
+                }
+                #[cfg(not(feature = "superlu_dist"))]
+                {
+                    Err(KError::Unsupported(
+                        "build without feature=\"superlu_dist\"".into(),
+                    ))
+                }
+            }
             other => Err(KError::UnrecognizedPcType(other.to_string())),
         }
     }
@@ -129,6 +159,7 @@ pub enum PcConfig {
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
+    #[cfg(feature = "superlu_dist")]
     SuperLuDist,
 }
 
@@ -273,6 +304,7 @@ impl PcConfig {
 
             Lu => PcConfig::Lu,
             Qr => PcConfig::Qr,
+            #[cfg(feature = "superlu_dist")]
             SuperLuDist => PcConfig::SuperLuDist,
             BlockJacobi => unreachable!(),
         })
@@ -285,7 +317,7 @@ impl PcConfig {
 ///
 /// - `PcOptions` → typed `PcConfig` → concrete builder
 /// - Feature gates:
-///   - `superlu_dist`: enables [`PcType::SuperLuDist`]
+///   - `superlu_dist`: enables the SuperLU_DIST preconditioner
 ///   - `legacy-pc-bridge`: enables adapters for legacy implementations (no per-apply allocs)
 ///
 /// ## Chains
@@ -297,16 +329,33 @@ pub struct PcFactory;
 impl PcFactory {
     #[inline]
     fn is_direct(pc: PcType) -> bool {
-        matches!(pc, PcType::Lu | PcType::Qr | PcType::SuperLuDist)
+        match pc {
+            PcType::Lu | PcType::Qr => true,
+            #[cfg(feature = "superlu_dist")]
+            PcType::SuperLuDist => true,
+            _ => false,
+        }
     }
 
     #[inline]
     fn chain_strict() -> bool {
+        #[cfg(test)]
+        if let Some(val) = CHAIN_STRICT_OVERRIDE.with(|cell| cell.get()) {
+            return val;
+        }
         // Opt-in strict mode via env var.
         // KRYST_PC_CHAIN_STRICT=1|true enforces selected warnings as errors.
         std::env::var("KRYST_PC_CHAIN_STRICT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn override_chain_strict(value: Option<bool>) -> ChainStrictGuard {
+        CHAIN_STRICT_OVERRIDE.with(|cell| {
+            let prev = cell.replace(value);
+            ChainStrictGuard(prev)
+        })
     }
 
     /// Validate high-level invariants for a PC chain.
@@ -461,6 +510,7 @@ impl PcFactory {
 
             PcConfig::Lu => b::build_lu(),
             PcConfig::Qr => b::build_qr(),
+            #[cfg(feature = "superlu_dist")]
             PcConfig::SuperLuDist => b::build_superlu_dist(),
         }
     }
@@ -498,6 +548,9 @@ impl PcFactory {
         }
     }
 
+    /// Parse a string chain and clone the same [`PcOptions`] for every stage.
+    ///
+    /// To tune stages individually, populate [`PcOptions::chain`].
     pub fn create_pc_chain_from_str(
         chain: &str,
         opts: Option<&PcOptions>,
@@ -664,14 +717,13 @@ mod tests {
 
     #[test]
     fn chain_direct_not_last_is_error_in_strict_mode() {
-        // flip strict mode via env var for this test
-        unsafe { std::env::set_var("KRYST_PC_CHAIN_STRICT", "1") };
+        // flip strict mode via override for this test
+        let _guard = PcFactory::override_chain_strict(Some(true));
         let opts = crate::config::options::PcOptions::default();
 
         // "lu->jacobi" => direct not last
         let specs = PcFactory::create_pc_chain_from_str("lu->jacobi", Some(&opts));
         assert!(specs.is_err(), "expected validation error in strict mode");
-        unsafe { std::env::remove_var("KRYST_PC_CHAIN_STRICT") };
     }
 
     #[test]
