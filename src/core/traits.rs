@@ -13,28 +13,49 @@ pub trait MatTransVec<V> {
 }
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
+use crate::algebra::scalar::{KrystScalar, S, copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::block::BlockVec;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use faer::traits::ComplexField;
 
-impl<T, L> MatVec<Vec<T>> for L
+impl<L> MatVec<Vec<S>> for L
 where
-    L: LinOp<S = T> + ?Sized,
-    T: ComplexField,
+    L: LinOp<S = S> + ?Sized,
 {
-    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+    fn matvec(&self, x: &Vec<S>, y: &mut Vec<S>) {
         LinOp::matvec(self, &x[..], &mut y[..]);
     }
 }
 
-impl<T, L> MatTransVec<Vec<T>> for L
+impl<L> MatTransVec<Vec<S>> for L
 where
-    L: LinOp<S = T> + ?Sized,
-    T: ComplexField,
+    L: LinOp<S = S> + ?Sized,
 {
-    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+    fn mattransvec(&self, x: &Vec<S>, y: &mut Vec<S>) {
+        if !LinOp::supports_transpose(self) {
+            panic!("t_matvec not supported");
+        }
+        LinOp::t_matvec(self, &x[..], &mut y[..]);
+    }
+}
+
+#[cfg(feature = "complex")]
+impl<L> MatVec<Vec<f64>> for L
+where
+    L: LinOp<S = f64> + ?Sized,
+{
+    fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
+        LinOp::matvec(self, &x[..], &mut y[..]);
+    }
+}
+
+#[cfg(feature = "complex")]
+impl<L> MatTransVec<Vec<f64>> for L
+where
+    L: LinOp<S = f64> + ?Sized,
+{
+    fn mattransvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
         if !LinOp::supports_transpose(self) {
             panic!("t_matvec not supported");
         }
@@ -165,62 +186,6 @@ pub trait DotOp<T> {
 
     /// Compute the 2-norm of a vector
     fn norm2(&self, x: &[T]) -> T;
-}
-
-/// Implementation for dense matrices (faer Mat)
-impl MatVecOp<f64> for faer::Mat<f64> {
-    fn mat_vec(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        if x.len() != self.ncols() || y.len() != self.nrows() {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        for i in 0..self.nrows() {
-            let mut sum = 0.0;
-            for j in 0..self.ncols() {
-                sum += self[(i, j)] * x[j];
-            }
-            y[i] = alpha * sum + beta * y[i];
-        }
-        Ok(())
-    }
-
-    fn mat_vec_trans(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        if x.len() != self.nrows() || y.len() != self.ncols() {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        for j in 0..self.ncols() {
-            let mut sum = 0.0;
-            for i in 0..self.nrows() {
-                sum += self[(i, j)] * x[i];
-            }
-            y[j] = alpha * sum + beta * y[j];
-        }
-        Ok(())
-    }
-
-    fn nrows(&self) -> usize {
-        faer::Mat::nrows(self)
-    }
-    fn ncols(&self) -> usize {
-        faer::Mat::ncols(self)
-    }
 }
 
 /// Implementation for sparse matrices (CsrMatrix)
@@ -394,6 +359,17 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
 /// Standard dot product implementation
 pub struct StandardDotOp;
 
+impl DotOp<S> for StandardDotOp {
+    fn dot(&self, x: &[S], y: &[S]) -> S {
+        par_dot_conj_local(x, y)
+    }
+
+    fn norm2(&self, x: &[S]) -> S {
+        S::from_real(par_sum_abs2_local(x).sqrt())
+    }
+}
+
+#[cfg(feature = "complex")]
 impl DotOp<f64> for StandardDotOp {
     fn dot(&self, x: &[f64], y: &[f64]) -> f64 {
         x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
@@ -529,13 +505,13 @@ impl KernelOp<f64> for DistributedKernel {
         comm.allreduce_sum_slice(&mut local);
         if beta == 0.0 {
             y.copy_from_slice(&local);
+        } else if beta == 1.0 {
+            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
+                *out = *out + accum;
+            }
         } else {
-            let original: Vec<f64> = y.to_vec();
-            for (out, (accum, orig)) in y
-                .iter_mut()
-                .zip(local.into_iter().zip(original.into_iter()))
-            {
-                *out = accum + beta * orig;
+            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
+                *out = beta.mul_add(*out, accum);
             }
         }
         Ok(())
@@ -556,13 +532,13 @@ impl KernelOp<f64> for DistributedKernel {
         comm.allreduce_sum_slice(&mut local);
         if beta == 0.0 {
             y.copy_from_slice(&local);
+        } else if beta == 1.0 {
+            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
+                *out = *out + accum;
+            }
         } else {
-            let original: Vec<f64> = y.to_vec();
-            for (out, (accum, orig)) in y
-                .iter_mut()
-                .zip(local.into_iter().zip(original.into_iter()))
-            {
-                *out = accum + beta * orig;
+            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
+                *out = beta.mul_add(*out, accum);
             }
         }
         Ok(())
@@ -724,13 +700,13 @@ impl AmgKernel for DistributedAmgKernel {
         comm.allreduce_sum_slice(&mut local);
         if beta == 0.0 {
             y.copy_from_slice(&local);
+        } else if beta == 1.0 {
+            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
+                *out = *out + accum;
+            }
         } else {
-            let original: Vec<f64> = y.to_vec();
-            for (out, (accum, orig)) in y
-                .iter_mut()
-                .zip(local.into_iter().zip(original.into_iter()))
-            {
-                *out = accum + beta * orig;
+            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
+                *out = beta.mul_add(*out, accum);
             }
         }
         Ok(())

@@ -1,4 +1,4 @@
-//! Wrappers for faer dense matrix types and vector operations.
+//! Wrappers for dense matrix types and vector operations.
 //!
 //! This module provides implementations of core linear algebra traits for `faer::Mat`, `faer::MatRef`, and `Vec<T>`,
 //! enabling their use in generic iterative solvers and preconditioners. It also provides parallel and distributed
@@ -18,10 +18,12 @@
 //! - [num-traits crate documentation](https://docs.rs/num-traits)
 
 use crate::core::traits::{Indexing, InnerProduct, MatTransVec, MatVec};
+#[cfg(feature = "backend-faer")]
 use faer::{Mat, MatRef};
 use num_traits::Float;
 
 /// Implements matrix-vector multiplication for a matrix reference (`faer::MatRef`).
+#[cfg(feature = "backend-faer")]
 impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
     fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
         assert_eq!(
@@ -40,6 +42,7 @@ impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
 }
 
 /// Implements matrix-transpose-vector multiplication for a matrix reference (`faer::MatRef`).
+#[cfg(feature = "backend-faer")]
 impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
     fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
         assert_eq!(
@@ -151,6 +154,7 @@ impl<T> Indexing for Vec<T> {
 }
 
 /// Implements the `Indexing` trait for `faer::Mat`, returning the number of rows.
+#[cfg(feature = "backend-faer")]
 impl<T> Indexing for Mat<T> {
     fn nrows(&self) -> usize {
         self.nrows()

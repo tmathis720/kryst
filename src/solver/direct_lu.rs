@@ -65,7 +65,8 @@ where
         + Send
         + Sync
         + std::fmt::Debug
-        + std::fmt::LowerExp,
+        + std::fmt::LowerExp
+        + Default,
 {
     type Error = KError;
     type Scalar = T;
@@ -157,8 +158,8 @@ impl QrSolver {
     }
 }
 
-impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64>> LinearSolver<Mat<T>, Vec<T>>
-    for QrSolver
+impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64> + Default>
+    LinearSolver<Mat<T>, Vec<T>> for QrSolver
 {
     type Error = KError;
     type Scalar = T;

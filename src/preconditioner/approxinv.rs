@@ -40,8 +40,7 @@ use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
-use faer::linalg::solvers::SolveCore;
-use faer::prelude::SolveLstsq;
+use faer::linalg::solvers::{SolveCore, SolveLstsq};
 use num_traits::Float;
 use std::any::TypeId;
 use std::marker::PhantomData;
