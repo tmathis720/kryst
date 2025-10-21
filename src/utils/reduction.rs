@@ -8,10 +8,14 @@ use crate::reduction::{CommDeterministic, Packet, ReproMode};
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 static WAIT_PAIR_COUNT: AtomicUsize = AtomicUsize::new(0);
 static WAIT_VEC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// Compact encoding of the active reproducibility mode for cross-module queries.
+// 0 = Fast, 1 = Deterministic, 2 = DeterministicAccurate
+static CURRENT_REPRO: AtomicU8 = AtomicU8::new(0);
 
 /// Test-only counters that track how many global reductions were launched.
 #[derive(Clone, Debug, Default)]
@@ -47,6 +51,33 @@ pub fn install_test_counter(enable: bool) {
 pub fn take_test_counter() -> ReductionCounters {
     let mut guard = TEST_COUNTERS.lock().unwrap();
     std::mem::take(&mut *guard)
+}
+
+#[inline]
+pub fn set_current_repro_mode(mode: ReproMode) {
+    let code = match mode {
+        ReproMode::Fast => 0,
+        ReproMode::Deterministic => 1,
+        ReproMode::DeterministicAccurate => 2,
+    };
+    CURRENT_REPRO.store(code, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn current_repro_mode() -> ReproMode {
+    match CURRENT_REPRO.load(Ordering::Relaxed) {
+        1 => ReproMode::Deterministic,
+        2 => ReproMode::DeterministicAccurate,
+        _ => ReproMode::Fast,
+    }
+}
+
+#[inline]
+pub fn repro_mode_is_strict() -> bool {
+    matches!(
+        current_repro_mode(),
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate
+    )
 }
 
 #[inline]

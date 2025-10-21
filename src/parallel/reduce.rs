@@ -4,6 +4,7 @@ use crate::algebra::parallel::{
 use crate::algebra::prelude::*;
 use crate::parallel::{Comm, UniverseComm};
 use crate::reduction::{CommDeterministic, Packet, ReproMode};
+use crate::utils::reduction::set_current_repro_mode;
 use core::sync::atomic::{AtomicU8, Ordering};
 use smallvec::SmallVec;
 
@@ -249,6 +250,7 @@ fn decode_mode(tag: u8) -> ReproMode {
 #[inline]
 pub fn set_global_reduction_mode(mode: ReproMode) {
     GLOBAL_REDUCTION_MODE.store(encode_mode(mode), Ordering::Relaxed);
+    set_current_repro_mode(mode);
 }
 
 /// Current process-wide reduction mode.
