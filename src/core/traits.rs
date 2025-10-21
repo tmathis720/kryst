@@ -14,7 +14,7 @@ pub trait MatTransVec<V> {
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
 use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
-use crate::algebra::scalar::{KrystScalar, S, copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::scalar::{S, copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::block::BlockVec;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -507,7 +507,7 @@ impl KernelOp<f64> for DistributedKernel {
             y.copy_from_slice(&local);
         } else if beta == 1.0 {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = *out + accum;
+                *out += accum;
             }
         } else {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
@@ -534,7 +534,7 @@ impl KernelOp<f64> for DistributedKernel {
             y.copy_from_slice(&local);
         } else if beta == 1.0 {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = *out + accum;
+                *out += accum;
             }
         } else {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
@@ -702,7 +702,7 @@ impl AmgKernel for DistributedAmgKernel {
             y.copy_from_slice(&local);
         } else if beta == 1.0 {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = *out + accum;
+                *out += accum;
             }
         } else {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
