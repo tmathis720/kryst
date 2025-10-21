@@ -21,16 +21,12 @@ impl BlockVec {
 
     /// Resize the block vector to `n` rows and `p` columns, zero-filling new entries.
     pub fn resize(&mut self, n: usize, p: usize) {
-        if self.n != n || self.p != p {
-            self.data.resize(n.saturating_mul(p), S::zero());
-            self.n = n;
-            self.p = p;
-        } else {
-            let needed = n.saturating_mul(p);
-            if self.data.len() != needed {
-                self.data.resize(needed, S::zero());
-            }
+        let need = n.saturating_mul(p);
+        if self.data.len() != need {
+            self.data.resize(need, S::zero());
         }
+        self.n = n;
+        self.p = p;
     }
 
     /// Number of rows in the block vector.
@@ -48,6 +44,12 @@ impl BlockVec {
     /// Immutable view into the `j`-th column.
     #[inline]
     pub fn col(&self, j: usize) -> &[S] {
+        debug_assert!(
+            j < self.p,
+            "BlockVec::col: column {} out of range {}",
+            j,
+            self.p
+        );
         let offset = j * self.n;
         &self.data[offset..offset + self.n]
     }
@@ -55,6 +57,12 @@ impl BlockVec {
     /// Mutable view into the `j`-th column.
     #[inline]
     pub fn col_mut(&mut self, j: usize) -> &mut [S] {
+        debug_assert!(
+            j < self.p,
+            "BlockVec::col_mut: column {} out of range {}",
+            j,
+            self.p
+        );
         let offset = j * self.n;
         &mut self.data[offset..offset + self.n]
     }

@@ -219,12 +219,14 @@ pub use minres::MinresSolver;
 pub mod dense_lu;
 #[cfg(feature = "dense-direct")]
 pub mod dense_qr;
-#[cfg(feature = "dense-direct")]
+#[cfg(feature = "backend-faer")]
 pub mod direct_lu;
 
-#[cfg(feature = "dense-direct")]
+#[cfg(feature = "backend-faer")]
 pub use direct_lu::{LuSolver, QrSolver};
+#[cfg(feature = "superlu_dist")]
 pub mod superlu_dist;
+#[cfg(feature = "superlu_dist")]
 pub use superlu_dist::SuperLuDistSolver;
 
 pub mod qmr;

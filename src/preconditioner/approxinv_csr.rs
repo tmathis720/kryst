@@ -21,7 +21,7 @@ use crate::preconditioner::bridge::{
 use crate::preconditioner::{PcSide, Preconditioner};
 
 use faer::Mat;
-use faer::prelude::SolveLstsq;
+use faer::linalg::solvers::SolveLstsq;
 
 /// Which approximate inverse to build.
 #[derive(Clone, Copy, Debug)]
