@@ -1,8 +1,10 @@
+#[cfg(feature = "superlu_dist")]
 use kryst::solver::superlu_dist::{Panel, PivotingStrategy};
 use std::time::Instant;
 
 #[test]
 #[ignore]
+#[cfg(feature = "superlu_dist")]
 fn faer_trsm_gemm_microbench() {
     let m = 256usize;
     let n = 64usize;

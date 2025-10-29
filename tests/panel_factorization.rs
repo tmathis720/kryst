@@ -1,7 +1,9 @@
 use kryst::algebra::prelude::*;
+#[cfg(feature = "superlu_dist")]
 use kryst::solver::superlu_dist::{Panel, PivotingStrategy};
 
 #[test]
+#[cfg(feature = "superlu_dist")]
 fn tiny_pivot_replacement() {
     let mut panel = Panel {
         width: 2,

@@ -26,8 +26,10 @@
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::preconditioner::PcSide;
+#[cfg(feature = "superlu_dist")]
 use kryst::solver::SuperLuDistSolver;
 use kryst::solver::legacy::LinearSolver;
+#[cfg(feature = "superlu_dist")]
 use kryst::solver::superlu_dist::{
     ColumnPermutation, IterativeRefinement, RefinementConfig, ResidualMethod, RowPermutation,
     SuperLuDistBuilder,
@@ -41,7 +43,6 @@ use std::time::Instant;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
@@ -82,18 +83,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Example 1: Load real Matrix Market data
+    #[cfg(feature = "superlu_dist")]
     example_matrix_market_solve(&comm, &matrix_name)?;
 
     // Example 2: Builder pattern demonstration with Phase 7 API
+    #[cfg(feature = "superlu_dist")]
     example_builder_pattern(&comm, &matrix_name)?;
 
     // Example 3: Performance analysis with different configurations
     if enable_analysis {
+        #[cfg(feature = "superlu_dist")]
         example_performance_analysis(&comm, &matrix_name)?;
     }
 
     // Example 4: Iterative refinement analysis
     if enable_refinement {
+        #[cfg(feature = "superlu_dist")]
         example_refinement_analysis(&comm, &matrix_name)?;
     }
 
@@ -165,6 +170,7 @@ fn get_available_matrices() -> Vec<MatrixInfo> {
 }
 
 /// Load and solve a real Matrix Market problem
+#[cfg(feature = "superlu_dist")]
 fn example_matrix_market_solve(
     comm: &UniverseComm,
     matrix_name: &str,
@@ -273,7 +279,8 @@ fn example_matrix_market_solve(
     Ok(())
 }
 
-/// Demonstrate Phase 7 builder pattern and fluent configuration
+/// Demonstrate Phase 7 builder pattern and fluent
+#[cfg(feature = "superlu_dist")]
 fn example_builder_pattern(
     comm: &UniverseComm,
     _matrix_name: &str,
@@ -402,6 +409,7 @@ fn example_builder_pattern(
 }
 
 /// Demonstrate performance analysis with different configurations
+#[cfg(feature = "superlu_dist")]
 fn example_performance_analysis(
     comm: &UniverseComm,
     matrix_name: &str,
@@ -541,6 +549,7 @@ fn example_performance_analysis(
 }
 
 /// Demonstrate iterative refinement analysis
+#[cfg(feature = "superlu_dist")]
 fn example_refinement_analysis(
     comm: &UniverseComm,
     matrix_name: &str,
