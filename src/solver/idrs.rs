@@ -429,6 +429,34 @@ impl IdrsSolver {
         Ok(())
     }
 
+    fn attempt_breakdown_repair(
+        &mut self,
+        attempts: &mut usize,
+        comm: &UniverseComm,
+        stats: &mut IdrsStats,
+    ) -> Result<bool, KError> {
+        if let BreakdownRepair::RegenerateP { max_retries, seed } = self.opts.breakdown_repair {
+            if *attempts >= max_retries {
+                return Ok(false);
+            }
+            *attempts += 1;
+            if matches!(self.opts.p_policy, ShadowP::RandomOrthonormal { .. }) {
+                self.random_bump = self.random_bump.wrapping_add(1);
+                self.build_shadow_space(comm, stats)?;
+            } else {
+                let saved = self.opts.p_policy.clone();
+                self.opts.p_policy = ShadowP::RandomOrthonormal {
+                    seed: seed.wrapping_add(*attempts as u64),
+                };
+                self.random_bump = 0;
+                self.build_shadow_space(comm, stats)?;
+                self.opts.p_policy = saved;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn compute_ph_r(&mut self, comm: &UniverseComm, stats: &mut IdrsStats) {
         let n = self.ws.n;
         let s = self.ws.s;
@@ -631,6 +659,7 @@ impl IdrsSolver {
         let monitors = monitors.unwrap_or(&[]);
 
         self.random_bump = 0;
+        let mut breakdown_attempts = 0usize;
 
         if x.iter().all(|&xi| xi.abs() <= R::default()) {
             self.ws.r_true[..n].copy_from_slice(b);
@@ -684,28 +713,44 @@ impl IdrsSolver {
         }
 
         for step in 0..min(self.opts.s, self.opts.maxit) {
-            Self::apply_matvec(
-                a,
-                pc,
-                &self.ws.r[..n],
-                &mut self.ws.t_raw[..n],
-                &mut self.ws.v[..n],
-                &mut self.ws.scratch,
-                &mut stats,
-            )?;
-            let mut reductions = [S::zero(); 2];
-            let dot_pairs = [
-                (&self.ws.v[..n], &self.ws.r[..n]),
-                (&self.ws.v[..n], &self.ws.v[..n]),
-            ];
-            global_dot_conj_many_into(comm, &dot_pairs, &mut reductions);
-            stats.dots += reductions.len();
-            let vr = reductions[0];
-            let vv = reductions[1];
-            if vv.abs() <= f64::EPSILON {
-                return Err(KError::BreakdownOrIndefinite);
-            }
-            let omega = vr / vv;
+            let omega = loop {
+                Self::apply_matvec(
+                    a,
+                    pc,
+                    &self.ws.r[..n],
+                    &mut self.ws.t_raw[..n],
+                    &mut self.ws.v[..n],
+                    &mut self.ws.scratch,
+                    &mut stats,
+                )?;
+                let mut reductions = [S::zero(); 2];
+                let dot_pairs = [
+                    (&self.ws.v[..n], &self.ws.r[..n]),
+                    (&self.ws.v[..n], &self.ws.v[..n]),
+                ];
+                global_dot_conj_many_into(comm, &dot_pairs, &mut reductions);
+                stats.dots += reductions.len();
+                let vr = reductions[0];
+                let vv = reductions[1];
+                if vv.abs() <= f64::EPSILON {
+                    if self
+                        .attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)?
+                    {
+                        continue;
+                    }
+                    return Err(KError::BreakdownOrIndefinite);
+                }
+                let omega = vr / vv;
+                if omega.abs() <= f64::EPSILON {
+                    if self
+                        .attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)?
+                    {
+                        continue;
+                    }
+                    return Err(KError::BreakdownOrIndefinite);
+                }
+                break omega;
+            };
 
             self.ws.d_r.rotate_right(1);
             self.ws.d_r_raw.rotate_right(1);
@@ -739,163 +784,164 @@ impl IdrsSolver {
             }
         }
 
-        let mut attempts = 0usize;
+        let mut attempts = breakdown_attempts;
         let mut iteration = min(self.opts.s, self.opts.maxit);
         let mut omega_block = S::zero();
         while iteration < self.opts.maxit {
-            for inner in 0..=self.opts.s {
-                self.compute_ph_r(comm, &mut stats);
-                self.compute_ph_drn(comm, &mut stats);
-                if self.solve_small_system().is_err() {
-                    let mut retried = false;
-                    if let BreakdownRepair::RegenerateP { max_retries, seed } =
-                        self.opts.breakdown_repair
-                        && attempts < max_retries
-                    {
-                        attempts += 1;
-                        match &self.opts.p_policy {
-                            ShadowP::RandomOrthonormal { .. } => {
-                                self.random_bump = self.random_bump.wrapping_add(1);
-                                self.build_shadow_space(comm, &mut stats)?;
-                                retried = true;
-                            }
-                            _ => {
-                                let saved = self.opts.p_policy.clone();
-                                self.opts.p_policy = ShadowP::RandomOrthonormal {
-                                    seed: seed.wrapping_add(attempts as u64),
-                                };
-                                self.random_bump = 0;
-                                self.build_shadow_space(comm, &mut stats)?;
-                                self.opts.p_policy = saved;
-                                retried = true;
-                            }
+            'block: for inner in 0..=self.opts.s {
+                loop {
+                    self.compute_ph_r(comm, &mut stats);
+                    self.compute_ph_drn(comm, &mut stats);
+                    if self.solve_small_system().is_err() {
+                        if self
+                            .attempt_breakdown_repair(&mut attempts, comm, &mut stats)?
+                        {
+                            continue 'block;
                         }
-                    }
-                    if retried {
-                        continue;
-                    }
-                    return Err(KError::BreakdownOrIndefinite);
-                }
-
-                let src_r = &self.ws.g_hist[..self.opts.s];
-                Self::combine_delta(&mut self.ws.v[..n], &self.ws.c, src_r, -S::one());
-                for i in 0..n {
-                    self.ws.v[i] += self.ws.r[i];
-                }
-
-                if inner == 0 {
-                    Self::apply_matvec(
-                        a,
-                        pc,
-                        &self.ws.v[..n],
-                        &mut self.ws.t_raw[..n],
-                        &mut self.ws.t[..n],
-                        &mut self.ws.scratch,
-                        &mut stats,
-                    )?;
-                    omega_block =
-                        self.omega_value(comm, &mut stats, &self.ws.t[..n], &self.ws.v[..n]);
-                    if omega_block.abs() <= f64::EPSILON {
                         return Err(KError::BreakdownOrIndefinite);
                     }
 
-                    self.ws.d_r.rotate_right(1);
-                    self.ws.d_r_raw.rotate_right(1);
-                    self.ws.d_x.rotate_right(1);
-                    let (newest_x, _rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
-                    let (newest_r, _rest_r) = self.ws.d_r.split_first_mut().expect("nonempty");
-                    let (newest_r_raw, _rest_rr) =
-                        self.ws.d_r_raw.split_first_mut().expect("nonempty");
-                    let src_x = &self.ws.g_hist_x[..self.opts.s];
-                    Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
-                    for i in 0..n {
-                        newest_x[i] += omega_block * self.ws.v[i];
-                    }
                     let src_r = &self.ws.g_hist[..self.opts.s];
-                    Self::combine_delta(newest_r, &self.ws.c, src_r, -S::one());
+                    Self::combine_delta(&mut self.ws.v[..n], &self.ws.c, src_r, -S::one());
                     for i in 0..n {
-                        newest_r[i] -= omega_block * self.ws.t[i];
+                        self.ws.v[i] += self.ws.r[i];
                     }
-                    let src_rr = &self.ws.g_hist_raw[..self.opts.s];
-                    Self::combine_delta(newest_r_raw, &self.ws.c, src_rr, -S::one());
-                    for i in 0..n {
-                        newest_r_raw[i] -= omega_block * self.ws.t_raw[i];
-                    }
-                } else {
-                    self.ws.d_x.rotate_right(1);
-                    self.ws.d_r.rotate_right(1);
-                    self.ws.d_r_raw.rotate_right(1);
-                    let (newest_x, _rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
-                    let (newest_r, _rest_r) = self.ws.d_r.split_first_mut().expect("nonempty");
-                    let (newest_r_raw, _rest_rr) =
-                        self.ws.d_r_raw.split_first_mut().expect("nonempty");
-                    let src_x = &self.ws.g_hist_x[..self.opts.s];
-                    Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
-                    for i in 0..n {
-                        newest_x[i] += omega_block * self.ws.v[i];
-                    }
-                    Self::apply_matvec(
-                        a,
-                        pc,
-                        &*newest_x,
-                        &mut self.ws.t_raw[..n],
-                        &mut self.ws.t[..n],
-                        &mut self.ws.scratch,
-                        &mut stats,
-                    )?;
-                    for i in 0..n {
-                        newest_r[i] = -self.ws.t[i];
-                        newest_r_raw[i] = -self.ws.t_raw[i];
-                    }
-                }
 
-                let newest_x = &self.ws.d_x[0];
-                let newest_r = &self.ws.d_r[0];
-                let newest_r_raw = &self.ws.d_r_raw[0];
-                for i in 0..n {
-                    x[i] += newest_x[i];
-                    self.ws.r[i] += newest_r[i];
-                    self.ws.r_true[i] += newest_r_raw[i];
-                }
+                    if inner == 0 {
+                        loop {
+                            Self::apply_matvec(
+                                a,
+                                pc,
+                                &self.ws.v[..n],
+                                &mut self.ws.t_raw[..n],
+                                &mut self.ws.t[..n],
+                                &mut self.ws.scratch,
+                                &mut stats,
+                            )?;
+                            omega_block = self.omega_value(
+                                comm,
+                                &mut stats,
+                                &self.ws.t[..n],
+                                &self.ws.v[..n],
+                            );
+                            if omega_block.abs() <= f64::EPSILON {
+                                if self
+                                    .attempt_breakdown_repair(&mut attempts, comm, &mut stats)?
+                                {
+                                    continue 'block;
+                                }
+                                return Err(KError::BreakdownOrIndefinite);
+                            }
 
-                self.ws.push_history_from_buffers();
-
-                iteration += 1;
-
-                if let Some(freq) = self.opts.monitor_true_residual_every
-                    && iteration % freq == 0
-                {
-                    a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
-                    stats.matvecs += 1;
-                    for i in 0..n {
-                        self.ws.r_true[i] = b[i] - self.ws.t_raw[i];
-                    }
-                    if let Some(pc_ref) = pc {
-                        pc_ref.apply_s(
-                            PcSide::Left,
-                            &self.ws.r_true[..n],
-                            &mut self.ws.r[..n],
-                            &mut self.ws.scratch,
-                        )?;
+                            self.ws.d_r.rotate_right(1);
+                            self.ws.d_r_raw.rotate_right(1);
+                            self.ws.d_x.rotate_right(1);
+                            let (newest_x, _rest_x) =
+                                self.ws.d_x.split_first_mut().expect("nonempty");
+                            let (newest_r, _rest_r) =
+                                self.ws.d_r.split_first_mut().expect("nonempty");
+                            let (newest_r_raw, _rest_rr) =
+                                self.ws.d_r_raw.split_first_mut().expect("nonempty");
+                            let src_x = &self.ws.g_hist_x[..self.opts.s];
+                            Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
+                            for i in 0..n {
+                                newest_x[i] += omega_block * self.ws.v[i];
+                            }
+                            let src_r = &self.ws.g_hist[..self.opts.s];
+                            Self::combine_delta(newest_r, &self.ws.c, src_r, -S::one());
+                            for i in 0..n {
+                                newest_r[i] -= omega_block * self.ws.t[i];
+                            }
+                            let src_rr = &self.ws.g_hist_raw[..self.opts.s];
+                            Self::combine_delta(newest_r_raw, &self.ws.c, src_rr, -S::one());
+                            for i in 0..n {
+                                newest_r_raw[i] -= omega_block * self.ws.t_raw[i];
+                            }
+                            break;
+                        }
                     } else {
-                        self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
+                        self.ws.d_x.rotate_right(1);
+                        self.ws.d_r.rotate_right(1);
+                        self.ws.d_r_raw.rotate_right(1);
+                        let (newest_x, _rest_x) =
+                            self.ws.d_x.split_first_mut().expect("nonempty");
+                        let (newest_r, _rest_r) =
+                            self.ws.d_r.split_first_mut().expect("nonempty");
+                        let (newest_r_raw, _rest_rr) =
+                            self.ws.d_r_raw.split_first_mut().expect("nonempty");
+                        let src_x = &self.ws.g_hist_x[..self.opts.s];
+                        Self::combine_delta(newest_x, &self.ws.c, src_x, -S::one());
+                        for i in 0..n {
+                            newest_x[i] += omega_block * self.ws.v[i];
+                        }
+                        Self::apply_matvec(
+                            a,
+                            pc,
+                            &*newest_x,
+                            &mut self.ws.t_raw[..n],
+                            &mut self.ws.t[..n],
+                            &mut self.ws.scratch,
+                            &mut stats,
+                        )?;
+                        for i in 0..n {
+                            newest_r[i] = -self.ws.t[i];
+                            newest_r_raw[i] = -self.ws.t_raw[i];
+                        }
                     }
-                    stats.residual_replacements += 1;
-                }
 
-                res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
-                stats.dots += 1;
-                self.monitor(monitors, iteration, res_norm);
-                if res_norm <= self.opts.tol * norm_scale {
-                    let mut out =
-                        SolveStats::new(iteration, res_norm, ConvergedReason::ConvergedRtol);
-                    out.counters = SolverCounters {
-                        num_global_reductions: stats.dots,
-                        residual_replacements: stats.residual_replacements,
-                    };
-                    return Ok(out);
-                }
+                    let newest_x = &self.ws.d_x[0];
+                    let newest_r = &self.ws.d_r[0];
+                    let newest_r_raw = &self.ws.d_r_raw[0];
+                    for i in 0..n {
+                        x[i] += newest_x[i];
+                        self.ws.r[i] += newest_r[i];
+                        self.ws.r_true[i] += newest_r_raw[i];
+                    }
 
+                    self.ws.push_history_from_buffers();
+
+                    iteration += 1;
+
+                    if let Some(freq) = self.opts.monitor_true_residual_every
+                        && iteration % freq == 0
+                    {
+                        a.matvec_s(x, &mut self.ws.t_raw[..n], &mut self.ws.scratch);
+                        stats.matvecs += 1;
+                        for i in 0..n {
+                            self.ws.r_true[i] = b[i] - self.ws.t_raw[i];
+                        }
+                        if let Some(pc_ref) = pc {
+                            pc_ref.apply_s(
+                                PcSide::Left,
+                                &self.ws.r_true[..n],
+                                &mut self.ws.r[..n],
+                                &mut self.ws.scratch,
+                            )?;
+                        } else {
+                            self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
+                        }
+                        stats.residual_replacements += 1;
+                    }
+
+                    res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
+                    stats.dots += 1;
+                    self.monitor(monitors, iteration, res_norm);
+                    if res_norm <= self.opts.tol * norm_scale {
+                        let mut out =
+                            SolveStats::new(iteration, res_norm, ConvergedReason::ConvergedRtol);
+                        out.counters = SolverCounters {
+                            num_global_reductions: stats.dots,
+                            residual_replacements: stats.residual_replacements,
+                        };
+                        return Ok(out);
+                    }
+
+                    if iteration >= self.opts.maxit {
+                        break 'block;
+                    }
+
+                    break;
+                }
                 if iteration >= self.opts.maxit {
                     break;
                 }

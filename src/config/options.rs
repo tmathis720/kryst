@@ -1161,6 +1161,7 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         guard_zero_residual,
         cg_norm,
         cg_pipelined,
+        cg_variant,
         cg_replace_every,
         cg_single_reduction,
         cg_use_async,

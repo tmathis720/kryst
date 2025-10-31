@@ -226,6 +226,8 @@ impl GmresSolver {
         ws.sn.fill(S::zero());
         ws.g.fill(S::zero());
 
+        let mut reduction_count = 0usize;
+
         let mut res: R;
         let (beta, mut bnorm) = match pc_side {
             PcSide::Left => {
@@ -237,6 +239,7 @@ impl GmresSolver {
                 }
                 let mut norms = [R::zero(); 2];
                 global_nrm2_many_into(comm, &[&ws.tmp2[..n], b], &mut norms);
+                reduction_count += 1;
                 let beta = norms[0];
                 if beta > R::default() {
                     let inv = S::from_real(1.0 / beta);
@@ -252,6 +255,7 @@ impl GmresSolver {
             PcSide::Right => {
                 let mut norms = [R::zero(); 2];
                 global_nrm2_many_into(comm, &[&ws.tmp1[..n], b], &mut norms);
+                reduction_count += 1;
                 let beta = norms[0];
                 if beta > R::default() {
                     let inv = S::from_real(1.0 / beta);
@@ -295,7 +299,9 @@ impl GmresSolver {
             let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-            let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let async_reductions =
+                end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let reductions = reduction_count + async_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
                 residual_replacements: 0,
@@ -332,6 +338,7 @@ impl GmresSolver {
                                     pairs.as_slice(),
                                     hvals.as_mut_slice(),
                                 );
+                                reduction_count += 1;
                             }
                             {
                                 let tmp2 = &mut ws.tmp2[..n];
@@ -346,6 +353,7 @@ impl GmresSolver {
                                 *ws.h_at_mut(i, k) = hvals[i];
                             }
                             let hnext = global_nrm2(comm, &ws.tmp2[..n]);
+                            reduction_count += 1;
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
                             if hnext > R::default() {
                                 let inv = S::from_real(1.0 / hnext);
@@ -385,6 +393,7 @@ impl GmresSolver {
                                     pairs.as_slice(),
                                     hvals.as_mut_slice(),
                                 );
+                                reduction_count += 1;
                             }
                             {
                                 let tmp1 = &mut ws.tmp1[..n];
@@ -399,6 +408,7 @@ impl GmresSolver {
                                 *ws.h_at_mut(i, k) = hvals[i];
                             }
                             let hnext = global_nrm2(comm, &ws.tmp1[..n]);
+                            reduction_count += 1;
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
                             if hnext > R::default() {
                                 let inv = S::from_real(1.0 / hnext);
@@ -520,9 +530,15 @@ impl GmresSolver {
                     } else {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
-                    global_nrm2(comm, &ws.tmp2[..n])
+                    let res = global_nrm2(comm, &ws.tmp2[..n]);
+                    reduction_count += 1;
+                    res
                 }
-                PcSide::Right => global_nrm2(comm, &ws.tmp1[..n]),
+                PcSide::Right => {
+                    let res = global_nrm2(comm, &ws.tmp1[..n]);
+                    reduction_count += 1;
+                    res
+                }
                 PcSide::Symmetric => unreachable!(),
             };
 
@@ -547,6 +563,7 @@ impl GmresSolver {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
                     let beta = global_nrm2(comm, &ws.tmp2[..n]);
+                    reduction_count += 1;
                     if beta > R::default() {
                         let inv = S::from_real(1.0 / beta);
                         for val in &mut ws.tmp2[..n] {
@@ -560,6 +577,7 @@ impl GmresSolver {
                 }
                 PcSide::Right => {
                     let beta = global_nrm2(comm, &ws.tmp1[..n]);
+                    reduction_count += 1;
                     if beta > R::default() {
                         let inv = S::from_real(1.0 / beta);
                         for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
@@ -589,7 +607,8 @@ impl GmresSolver {
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-        let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+        let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+        let reductions = reduction_count + async_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
             residual_replacements: 0,
