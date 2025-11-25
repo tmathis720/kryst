@@ -84,7 +84,7 @@ use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
 use faer::traits::ComplexField;
-use num_traits::Float;
+use num_traits::{Float, Zero};
 use std::sync::Mutex;
 
 #[cfg(feature = "logging")]
@@ -371,7 +371,10 @@ impl Default for IluBuilder {
 }
 
 /// HYPRE-inspired comprehensive ILU preconditioner with sparse storage
-pub struct Ilu<T> {
+pub struct Ilu<T>
+where
+    T: ComplexField,
+{
     /// Configuration parameters
     config: IluConfig,
     /// Lower triangular factor in CSR format (unit diagonal)
@@ -402,13 +405,13 @@ pub struct Ilu<T> {
     /// Pivot handling statistics
     pivot_stats: PivotStats,
     /// Global scaling from A's diagonal
-    max_diag_a: T,
+    max_diag_a: T::Real,
     /// Row-wise infinity norm of A
-    row_inf_a: Vec<T>,
+    row_inf_a: Vec<T::Real>,
     /// Row-wise Gershgorin estimate of A
-    row_gersh_a: Vec<T>,
+    row_gersh_a: Vec<T::Real>,
     /// Running maximum of |U_kk|
-    running_max_u: T,
+    running_max_u: T::Real,
     /// Performance timing
     setup_time: f64,
     solve_ctrs: Counters,
@@ -610,10 +613,10 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             nnz_u: 0,
             num_zero_pivots: 0,
             pivot_stats: PivotStats::default(),
-            max_diag_a: T::zero(),
+            max_diag_a: T::Real::zero(),
             row_inf_a: Vec::new(),
             row_gersh_a: Vec::new(),
-            running_max_u: T::zero(),
+            running_max_u: T::Real::zero(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
             history: None,
@@ -777,7 +780,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format for L and U factors
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
@@ -840,7 +843,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
@@ -961,7 +964,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
@@ -978,7 +981,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
-        let drop_tol = T::from(self.config.drop_tolerance).unwrap();
+        let drop_tol = T::Real::from(self.config.drop_tolerance).unwrap_or_else(T::Real::zero);
 
         // Initialize with matrix values above drop tolerance
         for i in 0..n {
@@ -1036,7 +1039,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
@@ -1389,11 +1392,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         print_ilu_banner(&self.config);
 
         // Precompute scaling terms for pivoting
-        let mut max_diag = T::zero();
-        self.row_inf_a.resize(n, T::zero());
-        self.row_gersh_a.resize(n, T::zero());
+        let mut max_diag = T::Real::zero();
+        self.row_inf_a.resize(n, T::Real::zero());
+        self.row_gersh_a.resize(n, T::Real::zero());
         for i in 0..n {
-            let mut row_inf = T::zero();
+            let mut row_inf = T::Real::zero();
             let mut row_gersh = matrix[(i, i)].abs();
             for j in 0..n {
                 let val_abs = matrix[(i, j)].abs();
@@ -1409,7 +1412,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             max_diag = max_diag.max(matrix[(i, i)].abs());
         }
         self.max_diag_a = max_diag;
-        self.running_max_u = T::zero();
+        self.running_max_u = T::Real::zero();
         self.pivot_stats = PivotStats::default();
 
         #[cfg(feature = "logging")]

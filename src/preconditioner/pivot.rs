@@ -127,19 +127,19 @@ where
                 return Ok(());
             }
             // Determine target magnitude
-            let new_sign = match sign_policy {
+            let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
                     if u_ii.real() >= 0.0 {
                         T::one()
                     } else {
-                        -T::one()
+                        cf_from_real(&floor)
                     }
                 }
-                PivotSignPolicy::Positive => T::one(),
+                PivotSignPolicy::Positive => cf_from_real(&floor),
             };
             let target = new_sign * T::from_real(floor);
             let old = *u_ii;
-            *u_ii = target;
+            *u_ii = new_value;
             record_pivot_shift(stats, old, *u_ii);
         }
         PivotMode::PivotingAllowed => {

@@ -1,5 +1,6 @@
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 use faer::traits::ComplexField;
+use num_traits::Float;
 
 /// CSC matrix wrapper for Faer sparse matrices.
 /// Stores owning symbolic and numeric data via `SparseColMat`.
@@ -23,9 +24,9 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
     }
 
     /// Convert from dense `faer::Mat` to CSC format with drop tolerance.
-    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self
+    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T::Real) -> Self
     where
-        T: PartialOrd + std::ops::Neg<Output = T>,
+        T::Real: Float,
     {
         let m = dense.nrows();
         let n = dense.ncols();
@@ -36,7 +37,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
         for j in 0..n {
             for i in 0..m {
                 let v = dense[(i, j)];
-                if v > drop_tol || v < -drop_tol {
+                if v.abs() >= drop_tol {
                     row_idx.push(i);
                     values.push(v);
                 }
