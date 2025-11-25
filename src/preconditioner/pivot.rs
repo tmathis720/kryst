@@ -3,7 +3,8 @@ use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use num_traits::{Float, One, Zero};
+use faer::traits::{from_real as cf_from_real, mul_real as cf_mul_real, ComplexField};
+use num_traits::{Float, Zero};
 
 /// How to fix "too-small" pivots during ILU numerics.
 #[derive(Clone, Debug)]
@@ -86,7 +87,11 @@ impl Default for PivotStats {
     }
 }
 
-fn record_pivot_shift<T: Float>(stats: &mut PivotStats, old: T, new: T) {
+fn record_pivot_shift<T>(stats: &mut PivotStats, old: T, new: T)
+where
+    T: ComplexField,
+    T::Real: Float,
+{
     let sh = (new - old).abs().to_f64().unwrap_or(0.0);
     stats.num_floors += 1;
     if sh > stats.max_abs_shift {
@@ -97,15 +102,19 @@ fn record_pivot_shift<T: Float>(stats: &mut PivotStats, old: T, new: T) {
 }
 
 /// Apply minimal additive shift to stabilize pivot.
-pub fn stabilize_pivot_in_place<T: Float + Zero + One + Copy>(
+pub fn stabilize_pivot_in_place<T>(
     u_ii: &mut T,
-    s_i: T,
-    tau: T,
+    s_i: T::Real,
+    tau: T::Real,
     sign_policy: PivotSignPolicy,
     mode: PivotMode,
     stats: &mut PivotStats,
     row: usize,
-) -> Result<(), KError> {
+) -> Result<(), KError>
+where
+    T: ComplexField + Copy,
+    T::Real: Float,
+{
     let floor = tau * s_i;
     let abs = u_ii.abs();
 
@@ -122,19 +131,19 @@ pub fn stabilize_pivot_in_place<T: Float + Zero + One + Copy>(
                 return Ok(());
             }
             // Determine target magnitude
-            let new_sign = match sign_policy {
+            let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
-                    if *u_ii >= T::zero() {
-                        T::one()
+                    if abs > T::Real::zero() {
+                        let scale = floor / abs;
+                        cf_mul_real(u_ii, &scale)
                     } else {
-                        -T::one()
+                        cf_from_real(&floor)
                     }
                 }
-                PivotSignPolicy::Positive => T::one(),
+                PivotSignPolicy::Positive => cf_from_real(&floor),
             };
-            let target = new_sign * floor;
             let old = *u_ii;
-            *u_ii = target;
+            *u_ii = new_value;
             record_pivot_shift(stats, old, *u_ii);
         }
         PivotMode::PivotingAllowed => {

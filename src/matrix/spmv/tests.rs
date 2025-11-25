@@ -1,5 +1,5 @@
 use crate::matrix::spmv::SpmvTuning;
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 use crate::matrix::spmv::{sellc, simd_csr};
 use crate::matrix::{
     csc::CscMatrix,
@@ -226,7 +226,7 @@ fn spmm_block_s_two_rhs() {
     assert_eq!(y1, r1);
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 #[test]
 fn simd_gather_matches_scalar_kernel() {
     let a = CsrMatrix::from_csr(
@@ -267,7 +267,7 @@ fn simd_gather_matches_scalar_kernel() {
     }
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 #[test]
 fn sellc_kernel_matches_scalar() {
     let a = CsrMatrix::from_csr(
@@ -307,7 +307,7 @@ fn sellc_kernel_matches_scalar() {
     }
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", not(feature = "complex")))]
 #[test]
 fn plan_apply_matches_scalar_results() {
     let mut a = CsrMatrix::from_csr(

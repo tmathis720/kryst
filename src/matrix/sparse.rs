@@ -17,6 +17,7 @@ use faer::sparse::{
     SymbolicSparseRowMat, // owning symbolic CSR alias
 };
 use faer::traits::ComplexField;
+use num_traits::Float;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
 #[cfg(feature = "simd")]
@@ -301,14 +302,15 @@ impl<
     T: ComplexField
         + Copy
         + num_traits::Zero
-        + PartialOrd
-        + std::ops::Neg<Output = T>
         + std::ops::Add<Output = T>
         + std::ops::Mul<Output = T>,
 > CsrMatrix<T>
 {
     /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
-    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T) -> Self {
+    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T::Real) -> Self
+    where
+        T::Real: Float,
+    {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
@@ -318,7 +320,7 @@ impl<
         for i in 0..nrows {
             for j in 0..ncols {
                 let val = dense[(i, j)];
-                if val > drop_tol || val < -drop_tol {
+                if val.abs() >= drop_tol {
                     col_idx.push(j);
                     values.push(val);
                 }
@@ -330,7 +332,10 @@ impl<
     }
 
     /// Convert from an owned dense `faer::Mat<T>` to sparse CSR format with drop tolerance.
-    pub fn from_dense_owned(dense: faer::Mat<T>, drop_tol: T) -> Self {
+    pub fn from_dense_owned(dense: faer::Mat<T>, drop_tol: T::Real) -> Self
+    where
+        T::Real: Float,
+    {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
@@ -340,7 +345,7 @@ impl<
         for i in 0..nrows {
             for j in 0..ncols {
                 let val = dense[(i, j)];
-                if val > drop_tol || val < -drop_tol {
+                if val.abs() >= drop_tol {
                     col_idx.push(j);
                     values.push(val);
                 }

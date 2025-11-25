@@ -282,7 +282,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "complex")]
     use crate::algebra::bridge::BridgeScratch;
-    use crate::core::traits::{MatrixGet, RowPattern};
+    use crate::core::traits::{Indexing, MatVec, MatrixGet, RowPattern};
     use crate::error::KError;
     #[cfg(feature = "complex")]
     use crate::ops::kpc::KPreconditioner;
@@ -308,7 +308,51 @@ mod tests {
 
     impl MatrixGet<f64> for TestDiagMatrix {
         fn get(&self, i: usize, j: usize) -> f64 {
-            if i == j { self.diag[i] } else { 0.0 }
+            if i == j {
+                self.diag[i]
+            } else {
+                0.0
+            }
+        }
+    }
+
+    impl Indexing for TestDiagMatrix {
+        fn nrows(&self) -> usize {
+            self.diag.len()
+        }
+    }
+
+    impl MatVec<Vec<f64>> for TestDiagMatrix {
+        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
+            assert_eq!(
+                x.len(),
+                self.diag.len(),
+                "TestDiagMatrix::matvec input length mismatch"
+            );
+            if y.len() != self.diag.len() {
+                y.resize(self.diag.len(), 0.0);
+            }
+            for (i, diag) in self.diag.iter().enumerate() {
+                y[i] = diag * x[i];
+            }
+        }
+    }
+
+    impl crate::matrix::dense::DenseMatrix<f64> for TestDiagMatrix {
+        fn from_raw(nrows: usize, ncols: usize, data: Vec<f64>) -> Self {
+            assert_eq!(
+                nrows, ncols,
+                "TestDiagMatrix::from_raw expects a square matrix"
+            );
+            assert_eq!(
+                data.len(),
+                nrows * ncols,
+                "TestDiagMatrix::from_raw received inconsistent storage"
+            );
+            let diag = (0..nrows)
+                .map(|i| data[i + i * nrows])
+                .collect::<Vec<_>>();
+            TestDiagMatrix::new(diag)
         }
     }
 

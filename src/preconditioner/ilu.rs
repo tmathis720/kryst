@@ -85,7 +85,7 @@ use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
 use faer::traits::ComplexField;
-use num_traits::Float;
+use num_traits::{Float, Zero};
 use std::sync::Mutex;
 
 #[cfg(feature = "logging")]
@@ -358,9 +358,11 @@ impl IluBuilder {
     }
 
     /// Build ILU preconditioner with configuration
-    pub fn build<T: Float + Send + Sync + ComplexField + std::fmt::Display>(
-        self,
-    ) -> Result<Ilu<T>, KError> {
+    pub fn build<T>(self) -> Result<Ilu<T>, KError>
+    where
+        T: ComplexField + Copy + Send + Sync + std::fmt::Display,
+        T::Real: Float + Send + Sync,
+    {
         Ilu::new_with_config(self.config)
     }
 }
@@ -372,7 +374,10 @@ impl Default for IluBuilder {
 }
 
 /// HYPRE-inspired comprehensive ILU preconditioner with sparse storage
-pub struct Ilu<T> {
+pub struct Ilu<T>
+where
+    T: ComplexField,
+{
     /// Configuration parameters
     config: IluConfig,
     /// Lower triangular factor in CSR format (unit diagonal)
@@ -403,13 +408,13 @@ pub struct Ilu<T> {
     /// Pivot handling statistics
     pivot_stats: PivotStats,
     /// Global scaling from A's diagonal
-    max_diag_a: T,
+    max_diag_a: T::Real,
     /// Row-wise infinity norm of A
-    row_inf_a: Vec<T>,
+    row_inf_a: Vec<T::Real>,
     /// Row-wise Gershgorin estimate of A
-    row_gersh_a: Vec<T>,
+    row_gersh_a: Vec<T::Real>,
     /// Running maximum of |U_kk|
-    running_max_u: T,
+    running_max_u: T::Real,
     /// Performance timing
     setup_time: f64,
     solve_ctrs: Counters,
@@ -572,7 +577,11 @@ where
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
+impl<T> Ilu<T>
+where
+    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
+    T::Real: Float + Send + Sync,
+{
     /// Create new ILU with HYPRE defaults
     pub fn new() -> Self {
         Self::new_with_config(IluConfig::default()).unwrap()
@@ -611,10 +620,10 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             nnz_u: 0,
             num_zero_pivots: 0,
             pivot_stats: PivotStats::default(),
-            max_diag_a: T::zero(),
+            max_diag_a: T::Real::zero(),
             row_inf_a: Vec::new(),
             row_gersh_a: Vec::new(),
-            running_max_u: T::zero(),
+            running_max_u: T::Real::zero(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
             history: None,
@@ -720,7 +729,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
             PivotScale::RunningMaxU => self.running_max_u,
         };
 
-        let tau = T::from(policy.tau).unwrap();
+        let tau = T::Real::from(policy.tau).unwrap_or_else(T::Real::zero);
         if let Err(e) = stabilize_pivot_in_place(
             pivot,
             s_i,
@@ -778,7 +787,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format for L and U factors
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
@@ -841,7 +850,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
@@ -962,7 +971,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
@@ -979,7 +988,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
-        let drop_tol = T::from(self.config.drop_tolerance).unwrap();
+        let drop_tol = T::Real::from(self.config.drop_tolerance).unwrap_or_else(T::Real::zero);
 
         // Initialize with matrix values above drop tolerance
         for i in 0..n {
@@ -1037,7 +1046,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol = T::from(1e-15).unwrap_or(T::zero());
+        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
@@ -1354,14 +1363,20 @@ pub struct IluStats {
     pub solve_count: usize,
 }
 
-impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Default for Ilu<T> {
+impl<T> Default for Ilu<T>
+where
+    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
+    T::Real: Float + Send + Sync,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<Mat<T>, Vec<T>>
-    for Ilu<T>
+impl<T> Preconditioner<Mat<T>, Vec<T>> for Ilu<T>
+where
+    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
+    T::Real: Float + Send + Sync,
 {
     /// HYPRE-inspired setup with comprehensive safety checks and monitoring
     fn setup(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
@@ -1390,11 +1405,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
         print_ilu_banner(&self.config);
 
         // Precompute scaling terms for pivoting
-        let mut max_diag = T::zero();
-        self.row_inf_a.resize(n, T::zero());
-        self.row_gersh_a.resize(n, T::zero());
+        let mut max_diag = T::Real::zero();
+        self.row_inf_a.resize(n, T::Real::zero());
+        self.row_gersh_a.resize(n, T::Real::zero());
         for i in 0..n {
-            let mut row_inf = T::zero();
+            let mut row_inf = T::Real::zero();
             let mut row_gersh = matrix[(i, i)].abs();
             for j in 0..n {
                 let val_abs = matrix[(i, j)].abs();
@@ -1410,7 +1425,7 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
             max_diag = max_diag.max(matrix[(i, i)].abs());
         }
         self.max_diag_a = max_diag;
-        self.running_max_u = T::zero();
+        self.running_max_u = T::Real::zero();
         self.pivot_stats = PivotStats::default();
 
         #[cfg(feature = "logging")]
@@ -1499,7 +1514,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Preconditioner<M
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
+impl<T> Ilu<T>
+where
+    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
+    T::Real: Float + Send + Sync,
+{
     fn apply_slice(&self, _side: PcSide, x: &[T], y: &mut [T]) -> Result<(), KError> {
         let n = self.l.nrows();
         if x.len() != n || y.len() != n {
@@ -1545,7 +1564,11 @@ impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + std::fmt::Display> Ilu<T> {
+impl<T> Ilu<T>
+where
+    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
+    T::Real: Float + Send + Sync,
+{
     pub fn parilu_history(&self) -> Option<&[ParIluIterSample]> {
         self.history.as_ref().map(|h| h.as_slice())
     }
