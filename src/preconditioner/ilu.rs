@@ -71,8 +71,7 @@
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
-#[cfg(feature = "complex")]
+use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in, BridgeScratch};
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
@@ -358,11 +357,9 @@ impl IluBuilder {
     }
 
     /// Build ILU preconditioner with configuration
-    pub fn build<T>(self) -> Result<Ilu<T>, KError>
-    where
-        T: ComplexField + Copy + Send + Sync + std::fmt::Display,
-        T::Real: Float + Send + Sync,
-    {
+    pub fn build<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display>(
+        self,
+    ) -> Result<Ilu<T>, KError> {
         Ilu::new_with_config(self.config)
     }
 }
@@ -577,11 +574,7 @@ where
     }
 }
 
-impl<T> Ilu<T>
-where
-    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
-    T::Real: Float + Send + Sync,
-{
+impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Ilu<T> {
     /// Create new ILU with HYPRE defaults
     pub fn new() -> Self {
         Self::new_with_config(IluConfig::default()).unwrap()
@@ -729,7 +722,7 @@ where
             PivotScale::RunningMaxU => self.running_max_u,
         };
 
-        let tau = T::Real::from(policy.tau).unwrap_or_else(T::Real::zero);
+        let tau = policy.tau;
         if let Err(e) = stabilize_pivot_in_place(
             pivot,
             s_i,
@@ -1363,20 +1356,14 @@ pub struct IluStats {
     pub solve_count: usize,
 }
 
-impl<T> Default for Ilu<T>
-where
-    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
-    T::Real: Float + Send + Sync,
-{
+impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Default for Ilu<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Preconditioner<Mat<T>, Vec<T>> for Ilu<T>
-where
-    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
-    T::Real: Float + Send + Sync,
+impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Preconditioner<Mat<T>, Vec<T>>
+    for Ilu<T>
 {
     /// HYPRE-inspired setup with comprehensive safety checks and monitoring
     fn setup(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
@@ -1514,11 +1501,7 @@ where
     }
 }
 
-impl<T> Ilu<T>
-where
-    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
-    T::Real: Float + Send + Sync,
-{
+impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Ilu<T> {
     fn apply_slice(&self, _side: PcSide, x: &[T], y: &mut [T]) -> Result<(), KError> {
         let n = self.l.nrows();
         if x.len() != n || y.len() != n {
@@ -1564,11 +1547,7 @@ where
     }
 }
 
-impl<T> Ilu<T>
-where
-    T: ComplexField + Copy + Send + Sync + std::fmt::Display,
-    T::Real: Float + Send + Sync,
-{
+impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Ilu<T> {
     pub fn parilu_history(&self) -> Option<&[ParIluIterSample]> {
         self.history.as_ref().map(|h| h.as_slice())
     }

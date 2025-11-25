@@ -3,8 +3,6 @@ use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use faer::traits::{from_real as cf_from_real, mul_real as cf_mul_real, ComplexField};
-use num_traits::{Float, Zero};
 
 /// How to fix "too-small" pivots during ILU numerics.
 #[derive(Clone, Debug)]
@@ -89,40 +87,38 @@ impl Default for PivotStats {
 
 fn record_pivot_shift<T>(stats: &mut PivotStats, old: T, new: T)
 where
-    T: ComplexField,
-    T::Real: Float,
+    T: KrystScalar<Real = f64>,
 {
-    let sh = (new - old).abs().to_f64().unwrap_or(0.0);
+    let sh: f64 = (new - old).abs();
     stats.num_floors += 1;
     if sh > stats.max_abs_shift {
         stats.max_abs_shift = sh;
     }
     stats.sum_abs_shift += sh;
-    stats.last_floor_value = new.abs().to_f64().unwrap_or(0.0);
+    stats.last_floor_value = new.abs();
 }
 
 /// Apply minimal additive shift to stabilize pivot.
 pub fn stabilize_pivot_in_place<T>(
     u_ii: &mut T,
-    s_i: T::Real,
-    tau: T::Real,
+    s_i: T,
+    tau: f64,
     sign_policy: PivotSignPolicy,
     mode: PivotMode,
     stats: &mut PivotStats,
     row: usize,
 ) -> Result<(), KError>
 where
-    T: ComplexField + Copy,
-    T::Real: Float,
+    T: KrystScalar<Real = f64>,
 {
-    let floor = tau * s_i;
+    let floor = tau * s_i.real();
     let abs = u_ii.abs();
 
     match mode {
         PivotMode::Strict => {
             if !(abs >= floor) {
                 stats.num_strict_fail += 1;
-                stats.last_floor_value = floor.to_f64().unwrap_or(0.0);
+                stats.last_floor_value = floor;
                 return Err(KError::ZeroPivot(row));
             }
         }
@@ -133,15 +129,15 @@ where
             // Determine target magnitude
             let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
-                    if abs > T::Real::zero() {
-                        let scale = floor / abs;
-                        cf_mul_real(u_ii, &scale)
+                    if u_ii.real() >= 0.0 {
+                        T::one()
                     } else {
                         cf_from_real(&floor)
                     }
                 }
                 PivotSignPolicy::Positive => cf_from_real(&floor),
             };
+            let target = new_sign * T::from_real(floor);
             let old = *u_ii;
             *u_ii = new_value;
             record_pivot_shift(stats, old, *u_ii);
