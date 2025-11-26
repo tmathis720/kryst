@@ -58,7 +58,5 @@ main!(library_benchmark("cg_jacobi_1d400", cg_jacobi_1d400),);
 
 #[cfg(any(not(feature = "iai"), feature = "complex"))]
 fn main() {
-    eprintln!(
-        "iai benchmarks require enabling the `iai` feature and real-valued scalars."
-    );
+    eprintln!("iai benchmarks require enabling the `iai` feature and real-valued scalars.");
 }

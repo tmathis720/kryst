@@ -10,14 +10,12 @@ pub trait SparseMatrix<T> {
     fn spmv(&self, x: &[T], y: &mut [T]);
 }
 
-use crate::algebra::scalar::{KrystScalar, S};
+use crate::algebra::prelude::*;
 use faer::sparse::{
     SparseRowMat, // owning numeric CSR alias
     //CreationError,           // error type for builders
     SymbolicSparseRowMat, // owning symbolic CSR alias
 };
-use faer::traits::ComplexField;
-use num_traits::Float;
 //use faer::sparse::linalg::matmul::sparse_dense_matmul;
 
 #[cfg(feature = "simd")]
@@ -45,10 +43,7 @@ pub struct CsrMatrix<T> {
     spmv_plan: Option<SpmvPlan<f64>>,
 }
 
-impl<
-    T: ComplexField + Copy + num_traits::Zero + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
-> CsrMatrix<T>
-{
+impl<T> CsrMatrix<T> {
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
     pub fn from_csr(
         nrows: usize,
@@ -74,23 +69,6 @@ impl<
         this
     }
 
-    /// Create an identity matrix of size n x n
-    pub fn identity(n: usize) -> Self
-    where
-        T: num_traits::One,
-    {
-        let row_ptr: Vec<usize> = (0..=n).collect();
-        let col_idx: Vec<usize> = (0..n).collect();
-        let values: Vec<T> = vec![T::one(); n];
-
-        Self::from_csr(n, n, row_ptr, col_idx, values)
-    }
-
-    /// Convert to dense faer::Mat for use with dense solvers.
-    pub fn to_dense(&self) -> faer::Mat<T> {
-        self.inner.to_dense()
-    }
-
     /// Get matrix dimensions
     pub fn nrows(&self) -> usize {
         self.inner.nrows()
@@ -100,115 +78,9 @@ impl<
         self.inner.ncols()
     }
 
-    /// Get number of nonzeros  
+    /// Get number of nonzeros
     pub fn nnz(&self) -> usize {
         self.inner.compute_nnz()
-    }
-
-    /// Extract diagonal as a vector
-    pub fn diagonal(&self) -> Vec<T> {
-        let n = self.nrows().min(self.ncols());
-        let mut diag = vec![T::zero(); n];
-
-        for i in 0..n {
-            let row_start = self.inner.row_ptr()[i];
-            let row_end = self.inner.row_ptr()[i + 1];
-
-            for idx in row_start..row_end {
-                if self.inner.col_idx()[idx] == i {
-                    diag[i] = self.inner.val()[idx];
-                    break;
-                }
-            }
-        }
-
-        diag
-    }
-
-    /// Sparse matrix-vector product: y = alpha * A * x + beta * y
-    pub fn spmv_scaled(
-        &self,
-        alpha: T,
-        x: &[T],
-        beta: T,
-        y: &mut [T],
-    ) -> Result<(), crate::error::KError> {
-        if x.len() != self.ncols() || y.len() != self.nrows() {
-            return Err(crate::error::KError::InvalidInput(format!(
-                "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len()={}",
-                self.nrows(),
-                self.ncols(),
-                x.len(),
-                y.len()
-            )));
-        }
-
-        #[cfg(feature = "simd")]
-        if let Some(plan) = self.spmv_plan.as_ref() {
-            unsafe {
-                let alpha = *(&alpha as *const T as *const f64);
-                let beta = *(&beta as *const T as *const f64);
-                let x = std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len());
-                let y_slice = std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len());
-                plan.apply_scaled(alpha, x, beta, y_slice);
-            }
-            return Ok(());
-        }
-
-        for i in 0..self.nrows() {
-            let row_start = self.inner.row_ptr()[i];
-            let row_end = self.inner.row_ptr()[i + 1];
-
-            let mut sum = T::zero();
-            for idx in row_start..row_end {
-                let j = self.inner.col_idx()[idx];
-                sum = sum + self.inner.val()[idx] * x[j];
-            }
-
-            y[i] = alpha * sum + beta * y[i];
-        }
-
-        Ok(())
-    }
-
-    /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y
-    pub fn spmv_transpose_scaled(
-        &self,
-        alpha: T,
-        x: &[T],
-        beta: T,
-        y: &mut [T],
-    ) -> Result<(), crate::error::KError> {
-        if x.len() != self.nrows() || y.len() != self.ncols() {
-            return Err(crate::error::KError::InvalidInput(format!(
-                "Dimension mismatch in spmv^T: A={}x{}, x.len()={}, y.len()={}",
-                self.nrows(),
-                self.ncols(),
-                x.len(),
-                y.len()
-            )));
-        }
-
-        // y = beta * y
-        for yi in y.iter_mut() {
-            *yi = *yi * beta;
-        }
-
-        let rp = self.inner.row_ptr();
-        let cj = self.inner.col_idx();
-        let vv = self.inner.val();
-
-        for i in 0..self.nrows() {
-            let xi = x[i];
-            let row_start = rp[i];
-            let row_end = rp[i + 1];
-            for idx in row_start..row_end {
-                let j = cj[idx];
-                y[j] = y[j] + alpha * vv[idx] * xi;
-            }
-        }
-
-        Ok(())
     }
 
     /// Borrow the CSR row pointer array (length = nrows + 1).
@@ -298,19 +170,129 @@ impl<
     }
 }
 
-impl<
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-> CsrMatrix<T>
-{
+impl CsrMatrix<S> {
+    /// Convert to dense faer::Mat for use with dense solvers.
+    pub fn to_dense(&self) -> faer::Mat<S> {
+        self.inner.to_dense()
+    }
+
+    /// Create an identity matrix of size n x n
+    pub fn identity(n: usize) -> Self {
+        let row_ptr: Vec<usize> = (0..=n).collect();
+        let col_idx: Vec<usize> = (0..n).collect();
+        let values: Vec<S> = vec![S::one(); n];
+
+        Self::from_csr(n, n, row_ptr, col_idx, values)
+    }
+
+    /// Extract diagonal as a vector
+    pub fn diagonal(&self) -> Vec<S> {
+        let n = self.nrows().min(self.ncols());
+        let mut diag = vec![S::zero(); n];
+
+        for i in 0..n {
+            let row_start = self.inner.row_ptr()[i];
+            let row_end = self.inner.row_ptr()[i + 1];
+
+            for idx in row_start..row_end {
+                if self.inner.col_idx()[idx] == i {
+                    diag[i] = self.inner.val()[idx];
+                    break;
+                }
+            }
+        }
+
+        diag
+    }
+
+    /// Sparse matrix-vector product: y = alpha * A * x + beta * y
+    pub fn spmv_scaled(
+        &self,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
+    ) -> Result<(), crate::error::KError> {
+        if x.len() != self.ncols() || y.len() != self.nrows() {
+            return Err(crate::error::KError::InvalidInput(format!(
+                "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len={}",
+                self.nrows(),
+                self.ncols(),
+                x.len(),
+                y.len()
+            )));
+        }
+
+        #[cfg(feature = "simd")]
+        if let Some(plan) = self.spmv_plan.as_ref() {
+            unsafe {
+                let alpha = *(&alpha as *const S as *const f64);
+                let beta = *(&beta as *const S as *const f64);
+                let x = std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len());
+                let y_slice = std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len());
+                plan.apply_scaled(alpha, x, beta, y_slice);
+            }
+            return Ok(());
+        }
+
+        for i in 0..self.nrows() {
+            let row_start = self.inner.row_ptr()[i];
+            let row_end = self.inner.row_ptr()[i + 1];
+
+            let mut sum = S::zero();
+            for idx in row_start..row_end {
+                let j = self.inner.col_idx()[idx];
+                sum = sum + self.inner.val()[idx] * x[j];
+            }
+
+            y[i] = alpha * sum + beta * y[i];
+        }
+
+        Ok(())
+    }
+
+    /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y
+    pub fn spmv_transpose_scaled(
+        &self,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
+    ) -> Result<(), crate::error::KError> {
+        if x.len() != self.nrows() || y.len() != self.ncols() {
+            return Err(crate::error::KError::InvalidInput(format!(
+                "Dimension mismatch in spmv^T: A={}x{}, x.len()={}, y.len()={}",
+                self.nrows(),
+                self.ncols(),
+                x.len(),
+                y.len()
+            )));
+        }
+
+        // y = beta * y
+        for yi in y.iter_mut() {
+            *yi = *yi * beta;
+        }
+
+        let rp = self.inner.row_ptr();
+        let cj = self.inner.col_idx();
+        let vv = self.inner.val();
+
+        for i in 0..self.nrows() {
+            let xi = x[i];
+            let row_start = rp[i];
+            let row_end = rp[i + 1];
+            for idx in row_start..row_end {
+                let j = cj[idx];
+                y[j] = y[j] + alpha * vv[idx] * xi;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
-    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T::Real) -> Self
-    where
-        T::Real: Float,
-    {
+    pub fn from_dense(dense: &faer::Mat<S>, drop_tol: R) -> Self {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
@@ -331,11 +313,8 @@ impl<
         Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
     }
 
-    /// Convert from an owned dense `faer::Mat<T>` to sparse CSR format with drop tolerance.
-    pub fn from_dense_owned(dense: faer::Mat<T>, drop_tol: T::Real) -> Self
-    where
-        T::Real: Float,
-    {
+    /// Convert from an owned dense `faer::Mat<S>` to sparse CSR format with drop tolerance.
+    pub fn from_dense_owned(dense: faer::Mat<S>, drop_tol: R) -> Self {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
@@ -403,18 +382,18 @@ impl CsrMatrix<f64> {
     }
 }
 
-impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SparseMatrix<T> for CsrMatrix<T> {
+impl SparseMatrix<S> for CsrMatrix<S> {
     fn nrows(&self) -> usize {
         self.inner.nrows()
     }
     fn ncols(&self) -> usize {
         self.inner.ncols()
     }
-    fn spmv(&self, x: &[T], y: &mut [T]) {
+    fn spmv(&self, x: &[S], y: &mut [S]) {
         // Simple implementation using direct sparse matrix-vector product
         // Reset y to zero
-        for i in 0..y.len() {
-            y[i] = T::zero();
+        for yi in y.iter_mut() {
+            *yi = S::zero();
         }
 
         // Sparse matrix-vector multiplication
@@ -433,7 +412,7 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> SparseMatrix<T
 use crate::core::traits::Indexing;
 
 // Implement Indexing trait for CsrMatrix to work with preconditioners
-impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> Indexing for CsrMatrix<T> {
+impl Indexing for CsrMatrix<S> {
     fn nrows(&self) -> usize {
         SparseMatrix::nrows(self)
     }
@@ -442,9 +421,7 @@ impl<T: ComplexField + Copy + num_traits::One + num_traits::Zero> Indexing for C
 use crate::core::traits::SubmatrixExtract;
 use std::collections::HashMap;
 
-impl<T: ComplexField + Copy + num_traits::Zero + num_traits::One + PartialEq + PartialOrd>
-    SubmatrixExtract for CsrMatrix<T>
-{
+impl SubmatrixExtract for CsrMatrix<S> {
     fn submatrix(&self, indices: &[usize]) -> Self {
         // Efficient CSR-based submatrix extraction that selects rows and
         // columns corresponding to `indices`, returning an n x n CSR whose
@@ -488,17 +465,13 @@ use rayon::prelude::*;
 #[cfg(feature = "rayon")]
 impl<T> CsrMatrix<T>
 where
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + PartialOrd
-        + Send
-        + Sync
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
+    T: Copy + Send + Sync + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
 {
     /// Parallel SpMV using CSR structure directly.
-    pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
+    pub fn spmv_parallel(&self, x: &[T], y: &mut [T])
+    where
+        T: KrystScalar,
+    {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
         let rp = self.row_ptr();

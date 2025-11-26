@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "complex", allow(dead_code))]
 
 #[cfg(not(feature = "complex"))]
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 #[cfg(not(feature = "complex"))]
 use kryst::matrix::sparse::CsrMatrix;
 #[cfg(not(feature = "complex"))]
@@ -58,7 +58,5 @@ criterion_main!(benches);
 
 #[cfg(feature = "complex")]
 fn main() {
-    eprintln!(
-        "spmv_vs_spmm benchmark is disabled when building with the `complex` feature."
-    );
+    eprintln!("spmv_vs_spmm benchmark is disabled when building with the `complex` feature.");
 }

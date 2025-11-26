@@ -1,6 +1,5 @@
+use crate::algebra::prelude::*;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
-use faer::traits::ComplexField;
-use num_traits::Float;
 
 /// CSC matrix wrapper for Faer sparse matrices.
 /// Stores owning symbolic and numeric data via `SparseColMat`.
@@ -9,7 +8,7 @@ pub struct CscMatrix<T> {
     inner: SparseColMat<usize, T>,
 }
 
-impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscMatrix<T> {
+impl<T> CscMatrix<T> {
     /// Build a CSC from raw col-pointer, row-index, and values.
     pub fn from_csc(
         nrows: usize,
@@ -22,12 +21,56 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
         let inner = SparseColMat::new(symbolic, values);
         Self { inner }
     }
+}
+
+impl<T> CscMatrix<T> {
+    pub fn nrows(&self) -> usize {
+        self.inner.nrows()
+    }
+    pub fn ncols(&self) -> usize {
+        self.inner.ncols()
+    }
+    pub fn nnz(&self) -> usize {
+        self.inner.compute_nnz()
+    }
+
+    #[inline]
+    pub fn col_ptr(&self) -> &[usize] {
+        self.inner.col_ptr()
+    }
+    #[inline]
+    pub fn row_idx(&self) -> &[usize] {
+        self.inner.row_idx()
+    }
+    #[inline]
+    pub fn values(&self) -> &[T] {
+        self.inner.val()
+    }
+    #[inline]
+    pub fn values_mut(&mut self) -> &mut [T] {
+        self.inner.val_mut()
+    }
+}
+
+impl CscMatrix<S> {
+    pub fn to_dense(&self) -> faer::Mat<S> {
+        let m = self.nrows();
+        let n = self.ncols();
+        let mut dense = faer::Mat::from_fn(m, n, |_, _| S::zero());
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+        for j in 0..n {
+            for p in cp[j]..cp[j + 1] {
+                let row = ri[p];
+                dense[(row, j)] = vv[p];
+            }
+        }
+        dense
+    }
 
     /// Convert from dense `faer::Mat` to CSC format with drop tolerance.
-    pub fn from_dense(dense: &faer::Mat<T>, drop_tol: T::Real) -> Self
-    where
-        T::Real: Float,
-    {
+    pub fn from_dense(dense: &faer::Mat<S>, drop_tol: R) -> Self {
         let m = dense.nrows();
         let n = dense.ncols();
         let mut col_ptr = Vec::with_capacity(n + 1);
@@ -47,45 +90,14 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
         Self::from_csc(m, n, col_ptr, row_idx, values)
     }
 
-    pub fn nrows(&self) -> usize {
-        self.inner.nrows()
-    }
-    pub fn ncols(&self) -> usize {
-        self.inner.ncols()
-    }
-    pub fn nnz(&self) -> usize {
-        self.inner.compute_nnz()
-    }
-
-    pub fn to_dense(&self) -> faer::Mat<T> {
-        self.inner.to_dense()
-    }
-
-    #[inline]
-    pub fn col_ptr(&self) -> &[usize] {
-        self.inner.col_ptr()
-    }
-    #[inline]
-    pub fn row_idx(&self) -> &[usize] {
-        self.inner.row_idx()
-    }
-    #[inline]
-    pub fn values(&self) -> &[T] {
-        self.inner.val()
-    }
-    #[inline]
-    pub fn values_mut(&mut self) -> &mut [T] {
-        self.inner.val_mut()
-    }
-
     /// Sparse matrix-vector multiply: `y = A * x`.
     ///
     /// Sequential implementation that updates `y` in place.
     /// Requires `x.len() == ncols` and `y.len() == nrows`.
-    pub fn spmv(&self, x: &[T], y: &mut [T]) {
+    pub fn spmv(&self, x: &[S], y: &mut [S]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
-        y.fill(T::zero());
+        y.fill(S::zero());
         let cp = self.col_ptr();
         let ri = self.row_idx();
         let vv = self.values();
@@ -103,7 +115,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
     /// Sequential implementation mirroring [`spmv`]. The output slice is fully
     /// overwritten, so callers do not need to zero-initialize it before calling
     /// this routine.
-    pub fn t_matvec(&self, x: &[T], y: &mut [T]) {
+    pub fn t_matvec(&self, x: &[S], y: &mut [S]) {
         assert_eq!(x.len(), self.nrows());
         assert_eq!(y.len(), self.ncols());
         let cp = self.col_ptr();
@@ -111,7 +123,7 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
         let vv = self.values();
 
         for (j, yj) in y.iter_mut().enumerate() {
-            let mut acc = T::zero();
+            let mut acc = S::zero();
             for p in cp[j]..cp[j + 1] {
                 let row = ri[p];
                 acc = acc + vv[p] * x[row];
@@ -122,21 +134,12 @@ impl<T: ComplexField + Copy + num_traits::Zero + std::ops::Mul<Output = T>> CscM
 }
 
 #[cfg(feature = "rayon")]
-impl<T> CscMatrix<T>
-where
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + Send
-        + Sync
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-{
+impl CscMatrix<S> {
     /// Parallel sparse matrix-vector multiply: `y = A * x`.
     ///
     /// Each thread accumulates into a private buffer to avoid write conflicts
     /// on the output vector.
-    pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
+    pub fn spmv_parallel(&self, x: &[S], y: &mut [S]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
         use rayon::prelude::*;
@@ -149,7 +152,7 @@ where
         let result = (0..self.ncols())
             .into_par_iter()
             .fold(
-                || vec![T::zero(); m],
+                || vec![S::zero(); m],
                 |mut accum, j| {
                     let xj = x[j];
                     for p in cp[j]..cp[j + 1] {
@@ -160,7 +163,7 @@ where
                 },
             )
             .reduce(
-                || vec![T::zero(); m],
+                || vec![S::zero(); m],
                 |mut a, b| {
                     for i in 0..m {
                         a[i] = a[i] + b[i];

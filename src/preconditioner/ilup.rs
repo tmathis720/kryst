@@ -20,8 +20,7 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
-#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::core::traits::MatShape;
 use crate::error::KError;
@@ -33,13 +32,13 @@ use crate::preconditioner::legacy::Preconditioner;
 ///
 /// Each row stores the column indices and values of nonzero entries.
 #[derive(Clone)]
-pub struct SparseRow<T> {
+pub struct SparseRow {
     /// Column indices of nonzero entries
     pub cols: Vec<usize>,
     /// Values of nonzero entries
-    pub vals: Vec<T>,
+    pub vals: Vec<S>,
 }
-impl<T> SparseRow<T> {
+impl SparseRow {
     /// Create an empty sparse row
     pub fn new() -> Self {
         Self {
@@ -48,7 +47,7 @@ impl<T> SparseRow<T> {
         }
     }
 }
-impl<T> Default for SparseRow<T> {
+impl Default for SparseRow {
     fn default() -> Self {
         Self::new()
     }
@@ -60,14 +59,14 @@ impl<T> Default for SparseRow<T> {
 /// - `l`: Lower triangular factor (sparse row format)
 /// - `u`: Upper triangular factor (sparse row format)
 /// - `n`: Matrix size
-pub struct Ilup<T> {
+pub struct Ilup {
     pub fill: usize,
-    pub l: Vec<SparseRow<T>>,
-    pub u: Vec<SparseRow<T>>,
+    pub l: Vec<SparseRow>,
+    pub u: Vec<SparseRow>,
     pub n: usize,
 }
 
-impl<T: num_traits::Float + Clone + std::fmt::Debug> Ilup<T> {
+impl Ilup {
     /// Create a new ILU(p) preconditioner with given fill level.
     pub fn new(fill: usize) -> Self {
         Self {
@@ -79,15 +78,12 @@ impl<T: num_traits::Float + Clone + std::fmt::Debug> Ilup<T> {
     }
 }
 
-impl<T> Ilup<T>
-where
-    T: num_traits::Float + Clone + std::fmt::Debug + PartialOrd,
-{
+impl Ilup {
     fn apply_slice(
         &self,
         _side: crate::preconditioner::PcSide,
-        r: &[T],
-        z: &mut [T],
+        r: &[S],
+        z: &mut [S],
     ) -> Result<(), KError> {
         let n = self.n;
         if r.len() != n || z.len() != n {
@@ -99,7 +95,7 @@ where
             )));
         }
 
-        let mut y = vec![T::zero(); n];
+        let mut y = vec![S::zero(); n];
         for i in 0..n {
             let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
@@ -126,11 +122,10 @@ where
     }
 }
 
-impl<M, V, T> Preconditioner<M, V> for Ilup<T>
+impl<M, V> Preconditioner<M, V> for Ilup
 where
-    T: num_traits::Float + Clone + std::fmt::Debug + PartialOrd,
-    M: crate::core::traits::MatVec<V> + MatShape + std::ops::Index<(usize, usize), Output = T>,
-    V: AsRef<[T]> + AsMut<[T]>,
+    M: crate::core::traits::MatVec<V> + MatShape + std::ops::Index<(usize, usize), Output = S>,
+    V: AsRef<[S]> + AsMut<[S]>,
 {
     /// Setup ILU(p) factors from matrix `a`.
     ///
@@ -145,13 +140,13 @@ where
         let mut level = vec![vec![usize::MAX; n]; n];
         for i in 0..n {
             for j in 0..n {
-                if !a[(i, j)].is_zero() {
+                if a[(i, j)] != S::zero() {
                     level[i][j] = 0;
                 }
             }
         }
         // Copy matrix to working array
-        let mut a_work = vec![vec![T::zero(); n]; n];
+        let mut a_work = vec![vec![S::zero(); n]; n];
         for i in 0..n {
             for j in 0..n {
                 a_work[i][j] = a[(i, j)];
@@ -161,10 +156,10 @@ where
         for i in 0..n {
             // Compute L(i,j) for j < i
             for j in 0..i {
-                if !a_work[i][j].is_zero() && level[i][j] <= self.fill {
+                if a_work[i][j] != S::zero() && level[i][j] <= self.fill {
                     // Find U[j,j]
                     let u_jj = a_work[j][j];
-                    if u_jj.is_zero() {
+                    if u_jj == S::zero() {
                         return Err(KError::SolveError(format!(
                             "ILUP: zero diagonal in U at row {j}"
                         )));
@@ -174,7 +169,7 @@ where
                     self.l[i].vals.push(lij);
                     // Update fill levels and values for row i
                     for k in (j + 1)..n {
-                        if !a_work[j][k].is_zero() {
+                        if a_work[j][k] != S::zero() {
                             let new_level =
                                 level[i][j].saturating_add(level[j][k]).saturating_add(1);
                             if new_level <= self.fill {
@@ -188,7 +183,7 @@ where
             }
             // Store U(i,*) for k >= i, with level <= fill
             for k in i..n {
-                if !a_work[i][k].is_zero() && level[i][k] <= self.fill {
+                if a_work[i][k] != S::zero() && level[i][k] <= self.fill {
                     self.u[i].cols.push(k);
                     self.u[i].vals.push(a_work[i][k]);
                 }
@@ -205,7 +200,7 @@ where
 }
 
 #[cfg(feature = "complex")]
-impl KPreconditioner for Ilup<f64> {
+impl KPreconditioner for Ilup {
     type Scalar = S;
 
     #[inline]
@@ -218,23 +213,9 @@ impl KPreconditioner for Ilup<f64> {
         side: crate::preconditioner::PcSide,
         x: &[S],
         y: &mut [S],
-        scratch: &mut BridgeScratch,
+        _scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        if x.len() != y.len() {
-            return Err(KError::InvalidInput(format!(
-                "Ilup::apply_s dimension mismatch: x.len()={}, y.len()={}",
-                x.len(),
-                y.len()
-            )));
-        }
-
-        let n = x.len();
-        scratch.with_pair(n, |xr, yr| {
-            copy_scalar_to_real_in(x, xr);
-            self.apply_slice(side, xr, yr)?;
-            copy_real_into_scalar(yr, y);
-            Ok(())
-        })
+        self.apply_slice(side, x, y)
     }
 }
 
@@ -243,15 +224,15 @@ mod tests {
     use super::*;
     use crate::core::traits::MatShape;
 
-    struct DenseMat<T> {
-        data: Vec<Vec<T>>,
+    struct DenseMat {
+        data: Vec<Vec<S>>,
     }
-    impl<T: Copy> DenseMat<T> {
-        fn new(data: Vec<Vec<T>>) -> Self {
+    impl DenseMat {
+        fn new(data: Vec<Vec<S>>) -> Self {
             Self { data }
         }
     }
-    impl<T: Copy> MatShape for DenseMat<T> {
+    impl MatShape for DenseMat {
         fn nrows(&self) -> usize {
             self.data.len()
         }
@@ -259,62 +240,51 @@ mod tests {
             self.data[0].len()
         }
     }
-    impl<T: Copy> std::ops::Index<(usize, usize)> for DenseMat<T> {
-        type Output = T;
+    impl std::ops::Index<(usize, usize)> for DenseMat {
+        type Output = S;
         fn index(&self, idx: (usize, usize)) -> &Self::Output {
             &self.data[idx.0][idx.1]
         }
     }
-    impl<T> crate::core::traits::MatVec<Vec<T>> for DenseMat<T>
-    where
-        T: Copy + std::ops::Mul<Output = T> + num_traits::Zero + std::ops::Add<Output = T>,
-    {
-        fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
+    impl crate::core::traits::MatVec<Vec<S>> for DenseMat {
+        fn matvec(&self, x: &Vec<S>, y: &mut Vec<S>) {
             for i in 0..self.nrows() {
                 y[i] = (0..self.ncols())
                     .map(|j| self[(i, j)] * x[j])
-                    .fold(T::zero(), |a, b| a + b);
+                    .fold(S::zero(), |a, b| a + b);
             }
         }
     }
 
     #[test]
     fn ilup_identity() {
-        type Mat = DenseMat<f64>;
-        let a = Mat::new(vec![vec![1.0f64, 0.0], vec![0.0, 1.0]]);
-        let mut pc: Ilup<f64> = Ilup::new(0);
+        type Mat = DenseMat;
+        let a = Mat::new(vec![vec![S::one(), S::zero()], vec![S::zero(), S::one()]]);
+        let mut pc = Ilup::new(0);
         pc.setup(&a).unwrap();
-        let r = vec![2.0f64, 3.0];
-        let mut z = vec![0.0; 2];
-        Preconditioner::<Mat, Vec<f64>>::apply(
-            &pc,
-            crate::preconditioner::PcSide::Left,
-            &r,
-            &mut z,
-        )
-        .unwrap();
-        assert!((z[0] - 2.0).abs() < 1e-12 && (z[1] - 3.0).abs() < 1e-12);
+        let r = vec![S::from_real(2.0), S::from_real(3.0)];
+        let mut z = vec![S::zero(); 2];
+        Preconditioner::<Mat, Vec<S>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z)
+            .unwrap();
+        assert!(
+            (z[0] - S::from_real(2.0)).abs() < 1e-12 && (z[1] - S::from_real(3.0)).abs() < 1e-12
+        );
     }
 
     #[test]
     fn ilup_tridiag() {
-        type Mat = DenseMat<f64>;
+        type Mat = DenseMat;
         let a = Mat::new(vec![
-            vec![2.0f64, -1.0, 0.0],
-            vec![-1.0, 2.0, -1.0],
-            vec![0.0, -1.0, 2.0],
+            vec![S::from_real(2.0), S::from_real(-1.0), S::zero()],
+            vec![S::from_real(-1.0), S::from_real(2.0), S::from_real(-1.0)],
+            vec![S::zero(), S::from_real(-1.0), S::from_real(2.0)],
         ]);
-        let mut pc: Ilup<f64> = Ilup::new(0);
+        let mut pc = Ilup::new(0);
         pc.setup(&a).unwrap();
-        let r = vec![1.0f64, 2.0, 3.0];
-        let mut z = vec![0.0; 3];
-        Preconditioner::<Mat, Vec<f64>>::apply(
-            &pc,
-            crate::preconditioner::PcSide::Left,
-            &r,
-            &mut z,
-        )
-        .unwrap();
+        let r = vec![S::from_real(1.0), S::from_real(2.0), S::from_real(3.0)];
+        let mut z = vec![S::zero(); 3];
+        Preconditioner::<Mat, Vec<S>>::apply(&pc, crate::preconditioner::PcSide::Left, &r, &mut z)
+            .unwrap();
         assert!(z.iter().all(|&zi| zi.is_finite()));
     }
 
@@ -325,14 +295,17 @@ mod tests {
         use crate::algebra::prelude::*;
         use crate::ops::kpc::KPreconditioner;
 
-        type Mat = DenseMat<f64>;
-        let a = Mat::new(vec![vec![4.0f64, 1.0], vec![1.5, 3.5]]);
-        let mut pc: Ilup<f64> = Ilup::new(1);
+        type Mat = DenseMat;
+        let a = Mat::new(vec![
+            vec![S::from_real(4.0), S::from_real(1.0)],
+            vec![S::from_real(1.5), S::from_real(3.5)],
+        ]);
+        let mut pc = Ilup::new(1);
         pc.setup(&a).unwrap();
 
-        let rhs_real = vec![6.0f64, 4.0];
-        let mut out_real = vec![0.0; rhs_real.len()];
-        Preconditioner::<Mat, Vec<f64>>::apply(
+        let rhs_real = vec![S::from_real(6.0), S::from_real(4.0)];
+        let mut out_real = vec![S::zero(); rhs_real.len()];
+        Preconditioner::<Mat, Vec<S>>::apply(
             &pc,
             crate::preconditioner::PcSide::Left,
             &rhs_real,
@@ -340,7 +313,7 @@ mod tests {
         )
         .expect("ilup real apply");
 
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let rhs_s: Vec<S> = rhs_real.clone();
         let mut out_s = vec![S::zero(); rhs_s.len()];
         let mut scratch = BridgeScratch::default();
         pc.apply_s(

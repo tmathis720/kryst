@@ -14,8 +14,8 @@ pub trait MatTransVec<V> {
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
 use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
-use crate::algebra::scalar::{S, copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::algebra::scalar::KrystScalar;
+use crate::algebra::scalar::{S, copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::block::BlockVec;
 use crate::error::KError;
 use crate::matrix::op::LinOp;

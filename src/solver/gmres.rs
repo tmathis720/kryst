@@ -299,8 +299,7 @@ impl GmresSolver {
             let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-            let async_reductions =
-                end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
             let reductions = reduction_count + async_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,

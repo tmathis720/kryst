@@ -161,13 +161,13 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for ChebyshevPre {
 /// Legacy Chebyshev struct for backward compatibility
 ///
 /// Stores the polynomial degree and optional spectrum bounds.
-pub struct Chebyshev<T> {
+pub struct Chebyshev {
     /// Degree of the Chebyshev polynomial
     pub degree: usize,
     /// Lower bound of the spectrum (smallest eigenvalue)
-    pub lambda_min: Option<T>,
+    pub lambda_min: Option<R>,
     /// Upper bound of the spectrum (largest eigenvalue)
-    pub lambda_max: Option<T>,
+    pub lambda_max: Option<R>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -308,14 +308,14 @@ pub fn chebyshev_smooth_csr(
     Ok(())
 }
 
-impl<T> Chebyshev<T> {
+impl Chebyshev {
     /// Create a new Chebyshev preconditioner
     ///
     /// # Arguments
     /// * `degree` - Degree of the Chebyshev polynomial
     /// * `lambda_min` - Optional lower bound of the spectrum
     /// * `lambda_max` - Optional upper bound of the spectrum
-    pub fn new(degree: usize, lambda_min: Option<T>, lambda_max: Option<T>) -> Self {
+    pub fn new(degree: usize, lambda_min: Option<R>, lambda_max: Option<R>) -> Self {
         Self {
             degree,
             lambda_min,
@@ -324,11 +324,10 @@ impl<T> Chebyshev<T> {
     }
 }
 
-impl<M, V, T> Preconditioner<M, V> for Chebyshev<T>
+impl<M, V> Preconditioner<M, V> for Chebyshev
 where
-    T: num_traits::Float + Clone + std::fmt::Debug,
-    M: MatVec<Vec<T>>,
-    V: AsRef<[T]> + AsMut<[T]> + Clone,
+    M: MatVec<Vec<S>>,
+    V: AsRef<[S]> + AsMut<[S]> + Clone,
 {
     /// Setup the Chebyshev preconditioner (no-op; spectrum estimation could be added here)
     fn setup(&mut self, _a: &M) -> Result<(), KError> {
@@ -359,12 +358,11 @@ where
 /// * `beta` - Upper bound of the spectrum
 /// * `m` - Degree of the Chebyshev polynomial
 #[allow(clippy::ptr_arg)]
-pub fn apply_chebyshev<M, T>(a: &M, r: &Vec<T>, z: &mut [T], alpha: T, beta: T, m: usize)
+pub fn apply_chebyshev<M>(a: &M, r: &Vec<S>, z: &mut [S], alpha: R, beta: R, m: usize)
 where
-    T: num_traits::Float + Clone + Send + Sync,
-    M: MatVec<Vec<T>>,
+    M: MatVec<Vec<S>>,
 {
-    if (beta - alpha).abs() < T::epsilon() {
+    if (beta - alpha).abs() < R::EPSILON {
         // Degenerate interval: just copy r to z
         z.copy_from_slice(r);
         return;
@@ -372,17 +370,19 @@ where
     let n = r.len();
     // v0, v1, v2 are the three-term recurrence vectors
     let mut v0 = r.to_vec();
-    let mut v1 = vec![T::zero(); n];
-    let mut v2 = vec![T::zero(); n];
+    let mut v1 = vec![S::zero(); n];
+    let mut v2 = vec![S::zero(); n];
     // c and d are the scaling and shifting parameters for the spectrum
-    let c = (beta + alpha) / T::from(2.0).unwrap();
-    let d = (beta - alpha) / T::from(2.0).unwrap();
+    let c: R = (beta + alpha) / 2.0;
+    let d: R = (beta - alpha) / 2.0;
+    let c_s = S::from_real(c);
+    let d_s = S::from_real(d);
     // tau is a normalization factor to ensure p_m(0) = 1
-    let tau = T::one() / chebyshev_t(m, (T::zero() - c) / d);
+    let tau = S::one() / S::from_real(chebyshev_t(m, (0.0 - c) / d));
     // First step: v1 = (A v0 - c v0) / d
     a.matvec(&v0, &mut v1);
     for i in 0..n {
-        v1[i] = (v1[i] - c * v0[i]) / d;
+        v1[i] = (v1[i] - c_s * v0[i]) / d_s;
     }
     if m == 0 {
         // Degree 0: just copy input
@@ -397,7 +397,7 @@ where
     for _k in 2..=m {
         a.matvec(&v1, &mut v2);
         for i in 0..n {
-            v2[i] = (T::from(2.0).unwrap() * (v2[i] - c * v1[i]) / d) - v0[i];
+            v2[i] = (S::from_real(2.0) * (v2[i] - c_s * v1[i]) / d_s) - v0[i];
         }
         std::mem::swap(&mut v0, &mut v1);
         std::mem::swap(&mut v1, &mut v2);
@@ -419,17 +419,17 @@ where
 }
 
 /// Compute the Chebyshev polynomial of the first kind T_m(x) using recurrence
-fn chebyshev_t<T: num_traits::Float>(m: usize, x: T) -> T {
+fn chebyshev_t(m: usize, x: R) -> R {
     if m == 0 {
-        T::one()
+        1.0
     } else if m == 1 {
         x
     } else {
-        let mut t0 = T::one();
+        let mut t0 = 1.0;
         let mut t1 = x;
         let mut t2;
         for _ in 2..=m {
-            t2 = T::from(2.0).unwrap() * x * t1 - t0;
+            t2 = 2.0 * x * t1 - t0;
             t0 = t1;
             t1 = t2;
         }

@@ -118,7 +118,7 @@ impl<M, V, T> AdditiveSchwarz<M, V, T>
 where
     M: MatVec<V> + Clone + Send + Sync + crate::core::traits::SubmatrixExtract,
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
-    T: 'static + num_traits::Float + From<f64> + Send + Sync,
+    T: 'static + KrystScalar<Real = R> + From<f64> + PartialOrd + Send + Sync,
 {
     /// Create a new ASM with given overlap and user-defined subdomain partitions.
     /// If `subdomains` is empty, will later partition rows uniformly.
@@ -199,7 +199,7 @@ impl<M, V, T> LegacyPreconditioner<M, V> for AdditiveSchwarz<M, V, T>
 where
     M: MatVec<V> + Clone + Send + Sync,
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
-    T: 'static + num_traits::Float + From<f64> + Send + Sync,
+    T: 'static + KrystScalar<Real = R> + From<f64> + PartialOrd + Send + Sync,
 {
     /// Setup method required by Preconditioner trait
     fn setup(&mut self, _a: &M) -> Result<(), KError> {

@@ -71,7 +71,7 @@
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in, BridgeScratch};
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
@@ -83,8 +83,6 @@ use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
-use faer::traits::ComplexField;
-use num_traits::{Float, Zero};
 use std::sync::Mutex;
 
 #[cfg(feature = "logging")]
@@ -357,9 +355,7 @@ impl IluBuilder {
     }
 
     /// Build ILU preconditioner with configuration
-    pub fn build<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display>(
-        self,
-    ) -> Result<Ilu<T>, KError> {
+    pub fn build(self) -> Result<Ilu, KError> {
         Ilu::new_with_config(self.config)
     }
 }
@@ -371,25 +367,22 @@ impl Default for IluBuilder {
 }
 
 /// HYPRE-inspired comprehensive ILU preconditioner with sparse storage
-pub struct Ilu<T>
-where
-    T: ComplexField,
-{
+pub struct Ilu {
     /// Configuration parameters
     config: IluConfig,
     /// Lower triangular factor in CSR format (unit diagonal)
-    l: CsrMatrix<T>,
+    l: CsrMatrix<S>,
     /// Upper triangular factor in CSR format
-    u: CsrMatrix<T>,
+    u: CsrMatrix<S>,
     /// Cached inverse of U's diagonal entries for fast solves
-    inv_diag_u: Vec<T>,
+    inv_diag_u: Vec<S>,
     /// Permutation arrays (HYPRE: perm, qperm)
     #[allow(dead_code)]
     row_perm: Vec<usize>,
     #[allow(dead_code)]
     col_perm: Vec<usize>,
     /// Consolidated preallocated workspace vectors for all operations
-    workspace: IluWorkspace<T>,
+    workspace: IluWorkspace,
     #[cfg(feature = "rayon")]
     /// Level scheduling for lower triangular solves
     levels_l: Levels,
@@ -405,13 +398,13 @@ where
     /// Pivot handling statistics
     pivot_stats: PivotStats,
     /// Global scaling from A's diagonal
-    max_diag_a: T::Real,
+    max_diag_a: R,
     /// Row-wise infinity norm of A
-    row_inf_a: Vec<T::Real>,
+    row_inf_a: Vec<R>,
     /// Row-wise Gershgorin estimate of A
-    row_gersh_a: Vec<T::Real>,
+    row_gersh_a: Vec<R>,
     /// Running maximum of |U_kk|
-    running_max_u: T::Real,
+    running_max_u: R,
     /// Performance timing
     setup_time: f64,
     solve_ctrs: Counters,
@@ -423,11 +416,11 @@ where
 
 /// Consolidated workspace for all ILU operations to minimize allocations
 #[derive(Debug)]
-pub struct IluWorkspace<T> {
+pub struct IluWorkspace {
     /// Scratch buffer for triangular solves (sized once in setup)
-    solve_buf: Mutex<Vec<T>>,
+    solve_buf: Mutex<Vec<S>>,
     /// Secondary workspace for complex operations
-    temp2: Mutex<Vec<T>>,
+    temp2: Mutex<Vec<S>>,
     /// Workspace for level scheduling in parallel triangular solves
     levels: Mutex<Vec<usize>>,
     /// Workspace for sparse pattern operations
@@ -436,15 +429,12 @@ pub struct IluWorkspace<T> {
     size: usize,
 }
 
-impl<T: Clone> IluWorkspace<T> {
+impl IluWorkspace {
     /// Create new workspace with given size
-    pub fn new(size: usize) -> Self
-    where
-        T: num_traits::Zero,
-    {
+    pub fn new(size: usize) -> Self {
         Self {
-            solve_buf: Mutex::new(vec![T::zero(); size]),
-            temp2: Mutex::new(vec![T::zero(); size]),
+            solve_buf: Mutex::new(vec![S::zero(); size]),
+            temp2: Mutex::new(vec![S::zero(); size]),
             levels: Mutex::new(vec![0; size]),
             pattern_work: Mutex::new(vec![false; size]),
             size,
@@ -452,13 +442,10 @@ impl<T: Clone> IluWorkspace<T> {
     }
 
     /// Resize workspace if needed (avoids reallocation when possible)
-    pub fn ensure_size(&mut self, new_size: usize)
-    where
-        T: num_traits::Zero + Clone,
-    {
+    pub fn ensure_size(&mut self, new_size: usize) {
         if new_size > self.size {
-            self.solve_buf.lock().unwrap().resize(new_size, T::zero());
-            self.temp2.lock().unwrap().resize(new_size, T::zero());
+            self.solve_buf.lock().unwrap().resize(new_size, S::zero());
+            self.temp2.lock().unwrap().resize(new_size, S::zero());
             self.levels.lock().unwrap().resize(new_size, 0);
             self.pattern_work.lock().unwrap().resize(new_size, false);
             self.size = new_size;
@@ -466,15 +453,12 @@ impl<T: Clone> IluWorkspace<T> {
     }
 
     /// Clear workspace (without deallocation)
-    pub fn clear(&self)
-    where
-        T: num_traits::Zero,
-    {
+    pub fn clear(&self) {
         for x in self.solve_buf.lock().unwrap().iter_mut() {
-            *x = T::zero();
+            *x = S::zero();
         }
         for x in self.temp2.lock().unwrap().iter_mut() {
-            *x = T::zero();
+            *x = S::zero();
         }
         for x in self.levels.lock().unwrap().iter_mut() {
             *x = 0;
@@ -486,7 +470,7 @@ impl<T: Clone> IluWorkspace<T> {
 
     /// Borrow the solve buffer sized in `setup()`.
     #[inline]
-    pub fn borrow_solve_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<T>> {
+    pub fn borrow_solve_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<S>> {
         debug_assert!(
             self.size >= n,
             "workspace not sized; call ensure_size in setup()"
@@ -505,15 +489,7 @@ struct Levels {
 }
 
 #[cfg(feature = "rayon")]
-fn build_levels_lower<T>(l: &CsrMatrix<T>) -> Levels
-where
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + PartialOrd
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-{
+fn build_levels_lower(l: &CsrMatrix<S>) -> Levels {
     let n = l.nrows();
     let mut lev = vec![0u32; n];
     let mut maxl = 0u32;
@@ -540,15 +516,7 @@ where
 }
 
 #[cfg(feature = "rayon")]
-fn build_levels_upper<T>(u: &CsrMatrix<T>) -> Levels
-where
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + PartialOrd
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-{
+fn build_levels_upper(u: &CsrMatrix<S>) -> Levels {
     let n = u.nrows();
     let mut lev = vec![0u32; n];
     let mut maxl = 0u32;
@@ -574,7 +542,7 @@ where
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Ilu<T> {
+impl Ilu {
     /// Create new ILU with HYPRE defaults
     pub fn new() -> Self {
         Self::new_with_config(IluConfig::default()).unwrap()
@@ -613,10 +581,10 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             nnz_u: 0,
             num_zero_pivots: 0,
             pivot_stats: PivotStats::default(),
-            max_diag_a: T::Real::zero(),
+            max_diag_a: R::default(),
             row_inf_a: Vec::new(),
             row_gersh_a: Vec::new(),
-            running_max_u: T::Real::zero(),
+            running_max_u: R::default(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
             history: None,
@@ -640,7 +608,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// HYPRE-inspired IEEE safety checks
-    fn check_ieee_values(matrix: &Mat<T>) -> Result<(), KError> {
+    fn check_ieee_values(matrix: &Mat<S>) -> Result<(), KError> {
         for i in 0..matrix.nrows() {
             for j in 0..matrix.ncols() {
                 let val = matrix[(i, j)];
@@ -660,7 +628,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// HYPRE-inspired matrix validation with enhanced analysis
-    fn validate_matrix(matrix: &Mat<T>) -> Result<(), KError> {
+    fn validate_matrix(matrix: &Mat<S>) -> Result<(), KError> {
         if matrix.nrows() == 0 || matrix.ncols() == 0 {
             return Err(KError::InvalidInput("Matrix cannot be empty".to_string()));
         }
@@ -697,11 +665,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Count nonzeros in matrix
-    fn count_nnz(matrix: &Mat<T>) -> usize {
+    fn count_nnz(matrix: &Mat<S>) -> usize {
         let mut nnz = 0;
         for i in 0..matrix.nrows() {
             for j in 0..matrix.ncols() {
-                if matrix[(i, j)] != T::zero() {
+                if matrix[(i, j)] != S::zero() {
                     nnz += 1;
                 }
             }
@@ -710,7 +678,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Pivot stabilization using configurable policy
-    fn handle_pivot(&mut self, pivot: &mut T, row: usize, matrix: &Mat<T>) -> Result<(), KError> {
+    fn handle_pivot(&mut self, pivot: &mut S, row: usize, matrix: &Mat<S>) -> Result<(), KError> {
         let policy = &self.config.pivot_policy;
 
         // determine scaling value
@@ -745,11 +713,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Helper: Get element from sparse matrix (returns zero if not present)
-    fn sparse_get(&self, matrix: &CsrMatrix<T>, i: usize, j: usize) -> T {
+    fn sparse_get(&self, matrix: &CsrMatrix<S>, i: usize, j: usize) -> S {
         let (cols, vals) = matrix.row(i);
         match cols.binary_search(&j) {
             Ok(pos) => vals[pos],
-            Err(_) => T::zero(),
+            Err(_) => S::zero(),
         }
     }
 
@@ -757,7 +725,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     ///
     /// This routine assumes the sparsity pattern already contains the
     /// entry `(i, j)`.  If the entry is absent, the call is a no-op.
-    fn sparse_set(&mut self, matrix: &mut CsrMatrix<T>, i: usize, j: usize, value: T) {
+    fn sparse_set(&mut self, matrix: &mut CsrMatrix<S>, i: usize, j: usize, value: S) {
         let start = matrix.row_ptr()[i];
         let end = matrix.row_ptr()[i + 1];
         // Determine position of column j within the row while holding only
@@ -776,11 +744,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Compute ILU(0) factorization with enhanced pivot handling and sparse storage
-    fn compute_ilu0(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
+    fn compute_ilu0(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format for L and U factors
-        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
+        let drop_tol: R = 1e-15;
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
@@ -789,13 +757,13 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             for j in 0..n {
                 if i > j {
                     // L gets lower triangular part
-                    self.sparse_set(&mut u, i, j, T::zero());
+                    self.sparse_set(&mut u, i, j, S::zero());
                 } else if i < j {
                     // U gets upper triangular part
-                    self.sparse_set(&mut l, i, j, T::zero());
+                    self.sparse_set(&mut l, i, j, S::zero());
                 } else {
                     // L has unit diagonal
-                    self.sparse_set(&mut l, i, i, T::one());
+                    self.sparse_set(&mut l, i, i, S::one());
                 }
             }
         }
@@ -809,13 +777,13 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
-                if l_ik != T::zero() {
+                if l_ik != S::zero() {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
 
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
-                        if u_kj != T::zero() && matrix[(i, j)] != T::zero() {
+                        if u_kj != S::zero() && matrix[(i, j)] != S::zero() {
                             let u_ij = self.sparse_get(&u, i, j);
                             let new_val = u_ij - multiplier * u_kj;
                             self.sparse_set(&mut u, i, j, new_val);
@@ -830,7 +798,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         self.nnz_u = u.nnz();
 
         // Cache inverse diagonal of U for fast solves
-        self.inv_diag_u = u.diagonal().into_iter().map(|v| T::one() / v).collect();
+        self.inv_diag_u = u.diagonal().into_iter().map(|v| S::one() / v).collect();
 
         self.l = l;
         self.u = u;
@@ -839,16 +807,16 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Compute Modified ILU(0) with row-sum correction and sparse storage
-    fn compute_milu0(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
+    fn compute_milu0(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format
-        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
+        let drop_tol: R = 1e-15;
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
         // Store original row sums for diagonal correction
-        let mut original_row_sums = vec![T::zero(); n];
+        let mut original_row_sums = vec![S::zero(); n];
         for i in 0..n {
             for j in 0..n {
                 original_row_sums[i] = original_row_sums[i] + matrix[(i, j)];
@@ -859,11 +827,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         for i in 0..n {
             for j in 0..n {
                 if i > j {
-                    self.sparse_set(&mut u, i, j, T::zero());
+                    self.sparse_set(&mut u, i, j, S::zero());
                 } else if i < j {
-                    self.sparse_set(&mut l, i, j, T::zero());
+                    self.sparse_set(&mut l, i, j, S::zero());
                 } else {
-                    self.sparse_set(&mut l, i, i, T::one());
+                    self.sparse_set(&mut l, i, i, S::one());
                 }
             }
         }
@@ -876,16 +844,16 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
-                if l_ik != T::zero() {
+                if l_ik != S::zero() {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
 
-                    let mut dropped_sum = T::zero();
+                    let mut dropped_sum = S::zero();
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
-                        if u_kj != T::zero() {
+                        if u_kj != S::zero() {
                             let update = multiplier * u_kj;
-                            if matrix[(i, j)] != T::zero() {
+                            if matrix[(i, j)] != S::zero() {
                                 let u_ij = self.sparse_get(&u, i, j);
                                 self.sparse_set(&mut u, i, j, u_ij - update);
                             } else {
@@ -903,7 +871,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
 
-        self.inv_diag_u = u.diagonal().into_iter().map(|v| T::one() / v).collect();
+        self.inv_diag_u = u.diagonal().into_iter().map(|v| S::one() / v).collect();
 
         self.l = l;
         self.u = u;
@@ -912,7 +880,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Compute ILU(k) factorization with level-of-fill control
-    fn compute_iluk(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
+    fn compute_iluk(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
@@ -923,7 +891,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         // Initialize levels for original nonzeros
         for i in 0..n {
             for j in 0..n {
-                if matrix[(i, j)] != T::zero() {
+                if matrix[(i, j)] != S::zero() {
                     level[i][j] = 0;
                     if i <= j {
                         u[(i, j)] = matrix[(i, j)];
@@ -932,7 +900,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
                     }
                 }
             }
-            l[(i, i)] = T::one(); // Unit diagonal for L
+            l[(i, i)] = S::one(); // Unit diagonal for L
         }
 
         // ILU(k) factorization with fill-level control
@@ -958,17 +926,17 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
                         }
                     }
                 } else {
-                    l[(i, k)] = T::zero(); // Drop high-level fill
+                    l[(i, k)] = S::zero(); // Drop high-level fill
                 }
             }
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
+        let drop_tol: R = 1e-15;
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
-        self.inv_diag_u = (0..n).map(|i| T::one() / u[(i, i)]).collect();
+        self.inv_diag_u = (0..n).map(|i| S::one() / u[(i, i)]).collect();
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
@@ -977,11 +945,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Compute ILUT factorization with threshold-based dropping
-    fn compute_ilut(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
+    fn compute_ilut(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
-        let drop_tol = T::Real::from(self.config.drop_tolerance).unwrap_or_else(T::Real::zero);
+        let drop_tol: R = self.config.drop_tolerance;
 
         // Initialize with matrix values above drop tolerance
         for i in 0..n {
@@ -995,7 +963,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
                     }
                 }
             }
-            l[(i, i)] = T::one(); // Unit diagonal for L
+            l[(i, i)] = S::one(); // Unit diagonal for L
         }
 
         // ILUT factorization with threshold dropping and fill control
@@ -1026,7 +994,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
                 if new_val.abs() >= drop_tol {
                     u[(i, j)] = new_val;
                 } else {
-                    u[(i, j)] = T::zero(); // Drop small entries
+                    u[(i, j)] = S::zero(); // Drop small entries
                 }
             }
 
@@ -1039,11 +1007,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol = T::Real::from(1e-15).unwrap_or_else(T::Real::zero);
+        let drop_tol: R = 1e-15;
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
-        self.inv_diag_u = (0..n).map(|i| T::one() / u[(i, i)]).collect();
+        self.inv_diag_u = (0..n).map(|i| S::one() / u[(i, i)]).collect();
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
@@ -1052,16 +1020,16 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Apply fill-in control to a single row, keeping only the largest entries
-    fn apply_fill_control_to_row(&self, matrix: &mut Mat<T>, row: usize, start_col: usize) {
+    fn apply_fill_control_to_row(&self, matrix: &mut Mat<S>, row: usize, start_col: usize) {
         if self.config.max_fill_per_row == 0 {
             return;
         }
 
         // Collect (magnitude, column, value) for this row
-        let mut entries: Vec<(T, usize, T)> = Vec::new();
+        let mut entries: Vec<(R, usize, S)> = Vec::new();
         for j in start_col..matrix.ncols() {
             let val = matrix[(row, j)];
-            if val != T::zero() {
+            if val != S::zero() {
                 entries.push((val.abs(), j, val));
             }
         }
@@ -1072,7 +1040,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 
             // Zero out all entries first
             for j in start_col..matrix.ncols() {
-                matrix[(row, j)] = T::zero();
+                matrix[(row, j)] = S::zero();
             }
 
             // Keep only the largest entries
@@ -1100,7 +1068,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// Exact sparse triangular solve operating in-place on the provided buffer.
-    fn solve_triangular_exact(&self, lower: bool, x: &mut [T]) {
+    fn solve_triangular_exact(&self, lower: bool, x: &mut [S]) {
         #[cfg(feature = "rayon")]
         if self.config.enable_parallel_triangular_solve {
             if lower {
@@ -1141,7 +1109,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 
     #[cfg(feature = "rayon")]
     /// Level-scheduled forward substitution (currently executes sequentially).
-    fn solve_triangular_parallel_forward(&self, x: &mut [T]) {
+    fn solve_triangular_parallel_forward(&self, x: &mut [S]) {
         let levels = &self.levels_l;
         for rows in &levels.buckets {
             for &i in rows {
@@ -1160,7 +1128,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 
     #[cfg(feature = "rayon")]
     /// Level-scheduled backward substitution (currently executes sequentially).
-    fn solve_triangular_parallel_backward(&self, x: &mut [T]) {
+    fn solve_triangular_parallel_backward(&self, x: &mut [S]) {
         let levels = &self.levels_u;
         for ell in (0..=levels.max_level).rev() {
             let rows = &levels.buckets[ell as usize];
@@ -1179,7 +1147,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// HYPRE-style iterative triangular solve with Jacobi and sparse access
-    fn solve_triangular_jacobi(&self, lower: bool, b: &[T], x: &mut [T]) {
+    fn solve_triangular_jacobi(&self, lower: bool, b: &[S], x: &mut [S]) {
         let n = b.len();
         let num_iters = if lower {
             self.config.lower_jacobi_iters
@@ -1194,7 +1162,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             if lower {
                 // Jacobi iteration for L * x = b
                 for i in 0..n {
-                    let mut sum = T::zero();
+                    let mut sum = S::zero();
                     let (cols, vals) = self.l.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j < i {
@@ -1206,7 +1174,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             } else {
                 // Jacobi iteration for U * x = b
                 for i in (0..n).rev() {
-                    let mut sum = T::zero();
+                    let mut sum = S::zero();
                     let (cols, vals) = self.u.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j > i {
@@ -1220,7 +1188,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// HYPRE-style iterative triangular solve with Gauss-Seidel and sparse access
-    fn solve_triangular_gauss_seidel(&self, lower: bool, b: &[T], x: &mut [T]) {
+    fn solve_triangular_gauss_seidel(&self, lower: bool, b: &[S], x: &mut [S]) {
         let n = b.len();
         let num_iters = if lower {
             self.config.lower_jacobi_iters
@@ -1235,7 +1203,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             if lower {
                 // Gauss-Seidel for L * x = b (forward sweep using updated values)
                 for i in 0..n {
-                    let mut sum = T::zero();
+                    let mut sum = S::zero();
                     let (cols, vals) = self.l.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j < i {
@@ -1247,7 +1215,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             } else {
                 // Gauss-Seidel for U * x = b (backward sweep using updated values)
                 for i in (0..n).rev() {
-                    let mut sum = T::zero();
+                    let mut sum = S::zero();
                     let (cols, vals) = self.u.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j > i {
@@ -1285,12 +1253,13 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 }
 
-impl Ilu<f64> {
+#[cfg(not(feature = "complex"))]
+impl Ilu {
     /// Create specialized ILU preconditioners that leverage existing implementations
     /// This provides a unified interface while potentially using optimized separate implementations
     pub fn create_specialized(
         config: IluConfig,
-    ) -> Result<Box<dyn Preconditioner<Mat<f64>, Vec<f64>>>, KError> {
+    ) -> Result<Box<dyn Preconditioner<Mat<S>, Vec<S>>>, KError> {
         match config.ilu_type {
             IluType::ILUK => {
                 // Use the dedicated ILUP implementation for better performance
@@ -1311,7 +1280,7 @@ impl Ilu<f64> {
             }
             _ => {
                 // Use the unified implementation for other types
-                let ilu = Ilu::<f64>::new_with_config(config)?;
+                let ilu = Ilu::new_with_config(config)?;
                 Ok(Box::new(ilu))
             }
         }
@@ -1356,17 +1325,15 @@ pub struct IluStats {
     pub solve_count: usize,
 }
 
-impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Default for Ilu<T> {
+impl Default for Ilu {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Preconditioner<Mat<T>, Vec<T>>
-    for Ilu<T>
-{
+impl Preconditioner<Mat<S>, Vec<S>> for Ilu {
     /// HYPRE-inspired setup with comprehensive safety checks and monitoring
-    fn setup(&mut self, matrix: &Mat<T>) -> Result<(), KError> {
+    fn setup(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
         let setup_start = std::time::Instant::now();
 
         if let Some(m) = &self.monitor {
@@ -1392,11 +1359,11 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
         print_ilu_banner(&self.config);
 
         // Precompute scaling terms for pivoting
-        let mut max_diag = T::Real::zero();
-        self.row_inf_a.resize(n, T::Real::zero());
-        self.row_gersh_a.resize(n, T::Real::zero());
+        let mut max_diag: R = 0.0;
+        self.row_inf_a.resize(n, 0.0);
+        self.row_gersh_a.resize(n, 0.0);
         for i in 0..n {
-            let mut row_inf = T::Real::zero();
+            let mut row_inf: R = 0.0;
             let mut row_gersh = matrix[(i, i)].abs();
             for j in 0..n {
                 let val_abs = matrix[(i, j)].abs();
@@ -1412,7 +1379,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             max_diag = max_diag.max(matrix[(i, i)].abs());
         }
         self.max_diag_a = max_diag;
-        self.running_max_u = T::Real::zero();
+        self.running_max_u = 0.0;
         self.pivot_stats = PivotStats::default();
 
         #[cfg(feature = "logging")]
@@ -1496,13 +1463,13 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 
     /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
-    fn apply(&self, side: PcSide, x: &Vec<T>, y: &mut Vec<T>) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &Vec<S>, y: &mut Vec<S>) -> Result<(), KError> {
         self.apply_slice(side, x.as_slice(), y.as_mut_slice())
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Ilu<T> {
-    fn apply_slice(&self, _side: PcSide, x: &[T], y: &mut [T]) -> Result<(), KError> {
+impl Ilu {
+    fn apply_slice(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         let n = self.l.nrows();
         if x.len() != n || y.len() != n {
             return Err(KError::InvalidInput(format!(
@@ -1513,7 +1480,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
             )));
         }
 
-        let timer = SolveTimer::start(&self.solve_ctrs);
+        let _timer = SolveTimer::start(&self.solve_ctrs);
 
         match self.config.triangular_solve {
             TriSolveType::Exact => {
@@ -1536,7 +1503,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 2 {
-            let _solve_time = timer.elapsed().as_secs_f64();
+            let _solve_time = _timer.elapsed().as_secs_f64();
             trace!(
                 "ILU Apply: solve_time={:.6}s, workspace_size={}",
                 _solve_time, self.workspace.size
@@ -1547,7 +1514,7 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
     }
 }
 
-impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt::Display> Ilu<T> {
+impl Ilu {
     pub fn parilu_history(&self) -> Option<&[ParIluIterSample]> {
         self.history.as_ref().map(|h| h.as_slice())
     }
@@ -1558,10 +1525,10 @@ impl<T: Float + Send + Sync + ComplexField + KrystScalar<Real = f64> + std::fmt:
 }
 
 /// Legacy ILU(0) type alias for backward compatibility
-pub type Ilu0<T> = Ilu<T>;
+pub type Ilu0 = Ilu;
 
 #[cfg(feature = "complex")]
-impl KPreconditioner for Ilu<f64> {
+impl KPreconditioner for Ilu {
     type Scalar = S;
 
     #[inline]
@@ -1601,7 +1568,7 @@ mod tests {
 
     #[test]
     fn test_ilu_default_creation() {
-        let ilu: Ilu<f64> = Ilu::new();
+        let ilu = Ilu::new();
         assert_eq!(ilu.config.ilu_type, IluType::ILU0);
     }
 
@@ -1611,7 +1578,7 @@ mod tests {
             .ilu_type(IluType::ILUT)
             .drop_tolerance(1e-6)
             .enable_logging()
-            .build::<f64>()
+            .build()
             .unwrap();
 
         assert_eq!(ilu.config.ilu_type, IluType::ILUT);
@@ -1624,7 +1591,7 @@ mod tests {
         let mut config = IluConfig::default();
         config.drop_tolerance = -1.0;
 
-        let result = Ilu::<f64>::new_with_config(config);
+        let result = Ilu::new_with_config(config);
         assert!(result.is_err());
     }
 
@@ -1664,7 +1631,7 @@ mod tests {
 
         // Test pivot policy with default settings
         let config = IluConfig::default();
-        let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
+        let mut ilu = Ilu::new_with_config(config).unwrap();
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
@@ -1684,12 +1651,12 @@ mod tests {
         });
 
         // Test ILU(k)
-        let ilu_k = Ilu::<f64>::create_quick(IluType::ILUK, 1.0).unwrap();
+        let ilu_k = Ilu::create_quick(IluType::ILUK, 1.0).unwrap();
         assert_eq!(ilu_k.config.ilu_type, IluType::ILUK);
         assert_eq!(ilu_k.config.level_of_fill, 1);
 
         // Test ILUT
-        let ilu_t = Ilu::<f64>::create_quick(IluType::ILUT, 1e-6).unwrap();
+        let ilu_t = Ilu::create_quick(IluType::ILUT, 1e-6).unwrap();
         assert_eq!(ilu_t.config.ilu_type, IluType::ILUT);
         assert_eq!(ilu_t.config.drop_tolerance, 1e-6);
     }
@@ -1704,7 +1671,7 @@ mod tests {
         config.lower_jacobi_iters = 2;
         config.upper_jacobi_iters = 2;
 
-        let mut ilu = Ilu::<f64>::new_with_config(config).unwrap();
+        let mut ilu = Ilu::new_with_config(config).unwrap();
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
@@ -1718,7 +1685,7 @@ mod tests {
             ..Default::default()
         };
 
-        let ilu_box = Ilu::<f64>::create_specialized(config);
+        let ilu_box = Ilu::create_specialized(config);
         assert!(ilu_box.is_ok());
     }
 
@@ -1727,7 +1694,7 @@ mod tests {
         let ilu = IluBuilder::new()
             .enable_parallel()
             .parallel_chunk_size(128)
-            .build::<f64>()
+            .build()
             .unwrap();
 
         assert!(ilu.config.enable_parallel_factorization);
@@ -1747,10 +1714,7 @@ mod tests {
             }
         });
 
-        let mut ilu = IluBuilder::new()
-            .ilu_type(IluType::ILU0)
-            .build::<f64>()
-            .unwrap();
+        let mut ilu = IluBuilder::new().ilu_type(IluType::ILU0).build().unwrap();
 
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
@@ -1819,16 +1783,13 @@ mod tests {
             }
         });
 
-        let mut ilu_serial = IluBuilder::new()
-            .ilu_type(IluType::ILU0)
-            .build::<f64>()
-            .unwrap();
+        let mut ilu_serial = IluBuilder::new().ilu_type(IluType::ILU0).build().unwrap();
 
         let mut ilu_parallel = IluBuilder::new()
             .ilu_type(IluType::ILU0)
             .enable_parallel_factorization()
             .parallel_chunk_size(2) // Small chunk size to force parallel execution
-            .build::<f64>()
+            .build()
             .unwrap();
 
         use crate::preconditioner::legacy::Preconditioner;
@@ -1849,10 +1810,7 @@ mod tests {
 
     #[test]
     fn test_distributed_configuration() {
-        let ilu = IluBuilder::new()
-            .enable_distributed()
-            .build::<f64>()
-            .unwrap();
+        let ilu = IluBuilder::new().enable_distributed().build().unwrap();
 
         assert!(ilu.config.enable_distributed);
     }
@@ -1885,7 +1843,7 @@ pub mod benchmarks {
         let mut ilu = IluBuilder::new()
             .ilu_type(IluType::ILU0)
             .enable_parallel_factorization()
-            .build::<f64>()
+            .build()
             .unwrap();
 
         // Setup phase (should have minimal allocations after workspace is set up)
@@ -1911,10 +1869,7 @@ pub mod benchmarks {
     ) -> (f64, AllocationStats) {
         let matrix = create_sparse_test_matrix(matrix_size, 3);
 
-        let mut ilu = IluBuilder::new()
-            .ilu_type(IluType::ILU0)
-            .build::<f64>()
-            .unwrap();
+        let mut ilu = IluBuilder::new().ilu_type(IluType::ILU0).build().unwrap();
 
         ilu.setup(&matrix).unwrap();
 
@@ -1972,10 +1927,7 @@ pub mod benchmarks {
 
         // Dense storage benchmark
         let start = Instant::now();
-        let mut ilu_dense = IluBuilder::new()
-            .ilu_type(IluType::ILU0)
-            .build::<f64>()
-            .unwrap();
+        let mut ilu_dense = IluBuilder::new().ilu_type(IluType::ILU0).build().unwrap();
         ilu_dense.setup(&matrix).unwrap();
         let dense_time = start.elapsed().as_secs_f64();
 
