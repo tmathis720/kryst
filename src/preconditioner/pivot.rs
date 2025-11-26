@@ -74,10 +74,10 @@ impl Default for PivotStats {
     fn default() -> Self {
         Self {
             num_floors: 0,
-            max_abs_shift: 0.0,
-            sum_abs_shift: 0.0,
+            max_abs_shift: R::default(),
+            sum_abs_shift: R::default(),
             num_strict_fail: 0,
-            last_floor_value: 0.0,
+            last_floor_value: R::default(),
         }
     }
 }
@@ -121,7 +121,7 @@ pub fn stabilize_pivot_in_place(
             let magnitude = floor;
             let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
-                    let sign = if (*u_ii).real() >= 0.0 { 1.0 } else { -1.0 };
+                    let sign: R = if (*u_ii).real() >= R::default() { 1.0 } else { -1.0 };
                     S::from_real(sign * magnitude)
                 }
                 PivotSignPolicy::Positive => S::from_real(magnitude),
