@@ -1580,6 +1580,36 @@ impl KPreconditioner for Ilu {
 #[cfg(test)]
 mod tests {
     use super::{Ilu, IluBuilder, IluConfig, IluType, TriSolveType};
+    use crate::algebra::parallel::par_sum_abs2_local;
+    use crate::algebra::prelude::*;
+    use crate::preconditioner::PcSide;
+    use crate::preconditioner::legacy::Preconditioner;
+
+    fn make_spd_3x3() -> faer::Mat<S> {
+        // A = [[4, 1, 0],
+        //      [1, 3, 1],
+        //      [0, 1, 2]]
+        faer::Mat::from_fn(3, 3, |i, j| match (i, j) {
+            (0, 0) => S::from_real(4.0),
+            (0, 1) | (1, 0) => S::from_real(1.0),
+            (1, 1) => S::from_real(3.0),
+            (1, 2) | (2, 1) => S::from_real(1.0),
+            (2, 2) => S::from_real(2.0),
+            _ => S::zero(),
+        })
+    }
+
+    fn mat_vec_mul(a: &faer::Mat<S>, x: &[S]) -> Vec<S> {
+        let mut out = vec![S::zero(); a.nrows()];
+        for i in 0..a.nrows() {
+            let mut acc = S::zero();
+            for j in 0..a.ncols() {
+                acc = acc + a[(i, j)] * x[j];
+            }
+            out[i] = acc;
+        }
+        out
+    }
 
     #[test]
     fn test_ilu_default_creation() {
@@ -1828,6 +1858,66 @@ mod tests {
         let ilu = IluBuilder::new().enable_distributed().build().unwrap();
 
         assert!(ilu.config.enable_distributed);
+    }
+
+    #[test]
+    fn ilu0_real_factorization_solves_spd() {
+        let matrix = make_spd_3x3();
+        let x_true = vec![S::from_real(1.0), S::from_real(2.0), S::from_real(-1.0)];
+        let b = mat_vec_mul(&matrix, &x_true);
+
+        let mut ilu = Ilu::new();
+        ilu.setup(&matrix).expect("ILU(0) setup");
+
+        let mut x = vec![S::zero(); b.len()];
+        ilu.apply(PcSide::Left, &b, &mut x).expect("ILU(0) apply");
+
+        let r: Vec<S> = mat_vec_mul(&matrix, &x)
+            .into_iter()
+            .zip(b.iter())
+            .map(|(ax, &bi)| ax - bi)
+            .collect();
+        let res_norm = par_sum_abs2_local(&r).sqrt();
+        assert!(
+            res_norm.real() < 1e-10,
+            "residual too large: {:?}",
+            res_norm
+        );
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn ilu0_complex_factorization_handles_hermitian() {
+        let matrix = faer::Mat::from_fn(2, 2, |i, j| match (i, j) {
+            (0, 0) => S::from_real(4.0),
+            (1, 1) => S::from_real(3.0),
+            (0, 1) => S::from_parts(1.0, -1.0),
+            (1, 0) => S::from_parts(1.0, 1.0),
+            _ => S::zero(),
+        });
+
+        let x_true = vec![S::from_parts(1.0, 0.5), S::from_parts(-0.5, 1.0)];
+        let b = mat_vec_mul(&matrix, &x_true);
+
+        let mut ilu = Ilu::new();
+        ilu.setup(&matrix)
+            .expect("complex ILU(0) setup on Hermitian matrix");
+
+        let mut x = vec![S::zero(); b.len()];
+        ilu.apply(PcSide::Left, &b, &mut x)
+            .expect("complex ILU(0) apply");
+
+        let r: Vec<S> = mat_vec_mul(&matrix, &x)
+            .into_iter()
+            .zip(b.iter())
+            .map(|(ax, &bi)| ax - bi)
+            .collect();
+        let res_norm = par_sum_abs2_local(&r);
+        assert!(
+            res_norm < R::from(1e-10),
+            "residual too large: {:?}",
+            res_norm
+        );
     }
 }
 
