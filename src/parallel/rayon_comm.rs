@@ -107,6 +107,7 @@ impl super::Comm for RayonComm {
     /// * `a` - Matrix (faer::Mat<f64>).
     /// * `x` - Input vector.
     /// * `y` - Output vector (will be overwritten).
+    #[cfg(feature = "backend-faer")]
     fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
         assert_eq!(
             a.ncols(),

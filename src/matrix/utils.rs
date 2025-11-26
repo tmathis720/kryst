@@ -7,6 +7,7 @@ use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "simd")]
 use crate::matrix::spmv::SpmvTuning;
+#[cfg(feature = "backend-faer")]
 use faer::Mat;
 use oorandom::Rand64;
 
@@ -16,6 +17,7 @@ use rayon::prelude::*;
 /// Matrix analysis helper function that computes basic properties
 ///
 /// Returns (nnz, diagonal_dominance, diagonal_sum)
+#[cfg(feature = "backend-faer")]
 pub fn analyze_matrix_properties(matrix: &Mat<f64>) -> (usize, f64, f64) {
     let mut nnz = 0;
     let mut diagonal_sum = 0.0;
@@ -45,6 +47,7 @@ pub fn analyze_matrix_properties(matrix: &Mat<f64>) -> (usize, f64, f64) {
 }
 
 /// Check for numerical issues in the matrix (NaN, Inf, very large condition numbers)
+#[cfg(feature = "backend-faer")]
 pub fn has_numerical_issues(matrix: &Mat<f64>) -> bool {
     for i in 0..matrix.nrows() {
         for j in 0..matrix.ncols() {
@@ -58,6 +61,7 @@ pub fn has_numerical_issues(matrix: &Mat<f64>) -> bool {
 }
 
 /// IEEE safety check for matrix values
+#[cfg(feature = "backend-faer")]
 pub fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
     for i in 0..matrix.nrows() {
         for j in 0..matrix.ncols() {
@@ -78,6 +82,7 @@ pub fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
 }
 
 /// Extract the inverse of the diagonal of a matrix, with zero for near-singular entries.
+#[cfg(feature = "backend-faer")]
 pub fn extract_diagonal_inverse(m: &Mat<f64>) -> Vec<f64> {
     let n = m.nrows();
     let mut diag_inv = vec![0.0; n];
@@ -92,6 +97,7 @@ pub fn extract_diagonal_inverse(m: &Mat<f64>) -> Vec<f64> {
 
 /// Convert dense matrix to sparse format with drop tolerance
 /// This is the foundation for sparse Galerkin products
+#[cfg(feature = "backend-faer")]
 pub fn to_sparse_with_tolerance(matrix: &Mat<f64>, drop_tol: f64) -> CsrMatrix<f64> {
     CsrMatrix::from_dense(matrix, drop_tol)
 }
@@ -485,6 +491,7 @@ pub fn rap_opt(
 ///
 /// This function performs row-wise truncation of the interpolation operator,
 /// keeping only the strongest connections to improve operator complexity.
+#[cfg(feature = "backend-faer")]
 pub fn apply_truncation(interpolation: &mut Mat<f64>, truncation_factor: f64) {
     if truncation_factor <= 0.0 || truncation_factor >= 1.0 {
         return; // Invalid truncation factor
@@ -531,6 +538,7 @@ pub fn apply_truncation(interpolation: &mut Mat<f64>, truncation_factor: f64) {
 
 /// Parallel matrix-vector operation for dense matrices
 /// Returns Result for consistency with sparse operations
+#[cfg(feature = "backend-faer")]
 pub fn parallel_mat_vec(a: &Mat<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
     if x.len() != a.ncols() || y.len() != a.nrows() {
         return Err(KError::InvalidInput(format!(
@@ -568,6 +576,7 @@ pub fn parallel_mat_vec_sparse(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> 
 }
 
 /// Count non-zeros in a dense matrix
+#[cfg(feature = "backend-faer")]
 pub fn count_nnz(matrix: &Mat<f64>) -> usize {
     let mut nnz = 0;
     for i in 0..matrix.nrows() {
@@ -582,6 +591,7 @@ pub fn count_nnz(matrix: &Mat<f64>) -> usize {
 
 /// Compute anisotropy for each row of the matrix.
 /// Anisotropy is defined as the ratio max_off_diag/diag.
+#[cfg(feature = "backend-faer")]
 pub fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
     let n = a.nrows();
     let mut anisotropy = vec![1.0; n];
@@ -609,6 +619,7 @@ pub fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
 /// Compute an adaptive threshold based on global anisotropy indicators.
 ///
 /// The threshold is scaled by the average anisotropy to improve coarsening for highly anisotropic problems.
+#[cfg(feature = "backend-faer")]
 pub fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
     let anisotropy = compute_anisotropy(a);
     let avg_anisotropy = anisotropy.iter().sum::<f64>() / anisotropy.len() as f64;

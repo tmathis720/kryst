@@ -16,6 +16,8 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::dot_result_to_real;
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
+#[cfg(feature = "backend-faer")]
+use faer::Mat;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
@@ -71,7 +73,8 @@ pub enum Omega {
 pub enum ShadowP {
     RandomOrthonormal { seed: u64 },
     BlockDeflation { partition: Vec<usize> },
-    FromVectors { p: faer::Mat<f64> },
+    #[cfg(feature = "backend-faer")]
+    FromVectors { p: Mat<f64> },
 }
 
 impl Default for ShadowP {
@@ -408,6 +411,7 @@ impl IdrsSolver {
                     self.ws.normalize_column(col_idx, comm, stats)?;
                 }
             }
+            #[cfg(feature = "backend-faer")]
             ShadowP::FromVectors { p } => {
                 if p.nrows() != self.ws.n || p.ncols() != self.ws.s {
                     return Err(KError::InvalidInput(

@@ -1,36 +1,37 @@
 // SparseMatrix trait and implementations (CSR, CSC)
 
-/// A read‐only sparse matrix supporting y = A * x.
-pub trait SparseMatrix<T> {
+use crate::algebra::prelude::*;
+use crate::core::traits::{Indexing, SubmatrixExtract};
+
+#[cfg(all(feature = "backend-faer", feature = "simd"))]
+use crate::matrix::spmv::{SpmvPlan, SpmvTuning, build_plan_owned as build_spmv_plan};
+use std::collections::HashMap;
+
+/// A read‐only sparse matrix supporting CSR access.
+pub trait SparseMatrix {
+    /// Stored scalar type.
+    type Scalar;
+
     /// Number of rows.
     fn nrows(&self) -> usize;
     /// Number of columns.
     fn ncols(&self) -> usize;
-    /// Compute y = A * x.  `x.len() == ncols()`, `y.len() == nrows()`.
-    fn spmv(&self, x: &[T], y: &mut [T]);
+    /// Borrow the CSR row pointer array (length = nrows + 1).
+    fn row_ptr(&self) -> &[usize];
+    /// Borrow the CSR column index array (length = nnz).
+    fn col_idx(&self) -> &[usize];
+    /// Borrow the CSR value array (length = nnz).
+    fn values(&self) -> &[Self::Scalar];
 }
 
-use crate::algebra::prelude::*;
-use faer::sparse::{
-    SparseRowMat, // owning numeric CSR alias
-    //CreationError,           // error type for builders
-    SymbolicSparseRowMat, // owning symbolic CSR alias
-};
-//use faer::sparse::linalg::matmul::sparse_dense_matmul;
-
-#[cfg(feature = "simd")]
-use crate::matrix::spmv::{SpmvPlan, SpmvTuning, build_plan_owned as build_spmv_plan};
-
-/// CSR matrix wrapper for Faer sparse matrices.
-///
-/// Use [`row_ptr`], [`col_idx`], and [`values`] to access the raw CSR
-/// structure without incurring dense conversions. Sparse matrix products are
-/// available through [`crate::matrix::utils::spgemm`] and
-/// [`crate::matrix::utils::spgemm_with_drop_tol`]; the Galerkin triple product
-/// composes these CSR kernels directly.
+/// CSR matrix with structural access available for any scalar type.
 #[derive(Clone)]
 pub struct CsrMatrix<T> {
-    inner: SparseRowMat<usize, T>,
+    nrows: usize,
+    ncols: usize,
+    row_ptr: Vec<usize>,
+    col_idx: Vec<usize>,
+    values: Vec<T>,
     /// Cached position of the diagonal entry in each row.
     ///
     /// `diag_pos[i]` stores `Some(k)` if column `i` appears in row `i` and
@@ -39,7 +40,7 @@ pub struct CsrMatrix<T> {
     /// factorization and triangular solve kernels without converting to a
     /// dense representation.
     diag_pos: Vec<Option<usize>>,
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "backend-faer", feature = "simd"))]
     spmv_plan: Option<SpmvPlan<f64>>,
 }
 
@@ -52,64 +53,66 @@ impl<T> CsrMatrix<T> {
         col_idx: Vec<usize>,
         values: Vec<T>,
     ) -> Self {
-        // Build symbolic structure; second argument `None` means "no separate row_nnz":
-        let symbolic = SymbolicSparseRowMat::new_checked(
-            nrows, ncols, row_ptr, None, // optional row_nnz: Option<Vec<usize>>
-            col_idx,
-        );
-        // Attach the numerical values:
-        let inner = SparseRowMat::new(symbolic, values);
         let mut this = Self {
-            inner,
+            nrows,
+            ncols,
+            row_ptr,
+            col_idx,
+            values,
             diag_pos: Vec::new(),
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "backend-faer", feature = "simd"))]
             spmv_plan: None,
         };
         this.build_diag_pos();
         this
     }
 
-    /// Get matrix dimensions
+    /// Get matrix dimensions.
     pub fn nrows(&self) -> usize {
-        self.inner.nrows()
+        self.nrows
     }
 
     pub fn ncols(&self) -> usize {
-        self.inner.ncols()
+        self.ncols
     }
 
-    /// Get number of nonzeros
+    /// Get number of nonzeros.
     pub fn nnz(&self) -> usize {
-        self.inner.compute_nnz()
+        self.values.len()
     }
 
     /// Borrow the CSR row pointer array (length = nrows + 1).
     #[inline]
     pub fn row_ptr(&self) -> &[usize] {
-        self.inner.row_ptr()
+        &self.row_ptr
     }
 
     /// Borrow the CSR column index array (length = nnz).
     #[inline]
     pub fn col_idx(&self) -> &[usize] {
-        self.inner.col_idx()
+        &self.col_idx
     }
 
     /// Borrow the CSR value array (length = nnz).
     #[inline]
     pub fn values(&self) -> &[T] {
-        self.inner.val()
+        &self.values
+    }
+
+    /// Mutably borrow the CSR value array (length = nnz).
+    #[inline]
+    pub fn values_mut(&mut self) -> &mut [T] {
+        #[cfg(all(feature = "backend-faer", feature = "simd"))]
+        self.invalidate_spmv_plan();
+        &mut self.values
     }
 
     /// Borrow a row of the matrix as CSR slices `(col_idx, values)`.
     #[inline]
     pub fn row(&self, i: usize) -> (&[usize], &[T]) {
-        let start = self.inner.row_ptr()[i];
-        let end = self.inner.row_ptr()[i + 1];
-        (
-            &self.inner.col_idx()[start..end],
-            &self.inner.val()[start..end],
-        )
+        let start = self.row_ptr[i];
+        let end = self.row_ptr[i + 1];
+        (&self.col_idx[start..end], &self.values[start..end])
     }
 
     /// Mutable borrow of the values of row `i`.
@@ -119,11 +122,11 @@ impl<T> CsrMatrix<T> {
     /// ILU factorizations where the sparsity pattern does not change.
     #[inline]
     pub fn row_values_mut(&mut self, i: usize) -> &mut [T] {
-        #[cfg(feature = "simd")]
+        #[cfg(all(feature = "backend-faer", feature = "simd"))]
         self.invalidate_spmv_plan();
-        let start = self.inner.row_ptr()[i];
-        let end = self.inner.row_ptr()[i + 1];
-        &mut self.inner.val_mut()[start..end]
+        let start = self.row_ptr[i];
+        let end = self.row_ptr[i + 1];
+        &mut self.values[start..end]
     }
 
     /// Immutable access to the diagonal entry of row `i` if present.
@@ -143,40 +146,61 @@ impl<T> CsrMatrix<T> {
     }
 
     /// Rebuild the cached diagonal positions.  Call after any operation that
-    /// may have modified the sparsity structure (in this module we construct
-    /// CSR matrices with sorted, unique rows, so this function is typically
-    /// only required once at creation).
+    /// may have modified the sparsity structure.
     pub fn build_diag_pos(&mut self) {
         let n = self.nrows();
         self.diag_pos.resize(n, None);
         for i in 0..n {
-            let start = self.inner.row_ptr()[i];
-            let end = self.inner.row_ptr()[i + 1];
-            // Binary search for column i within row i.
-            if let Ok(off) = self.inner.col_idx()[start..end].binary_search(&i) {
+            let start = self.row_ptr[i];
+            let end = self.row_ptr[i + 1];
+            if let Ok(off) = self.col_idx[start..end].binary_search(&i) {
                 self.diag_pos[i] = Some(start + off);
             } else {
                 self.diag_pos[i] = None;
             }
         }
     }
+}
 
-    /// Mutably borrow the CSR value array (length = nnz).
-    #[inline]
-    pub fn values_mut(&mut self) -> &mut [T] {
-        #[cfg(feature = "simd")]
-        self.invalidate_spmv_plan();
-        self.inner.val_mut()
+impl<T> SparseMatrix for CsrMatrix<T> {
+    type Scalar = T;
+
+    fn nrows(&self) -> usize {
+        self.nrows()
+    }
+
+    fn ncols(&self) -> usize {
+        self.ncols()
+    }
+
+    fn row_ptr(&self) -> &[usize] {
+        self.row_ptr()
+    }
+
+    fn col_idx(&self) -> &[usize] {
+        self.col_idx()
+    }
+
+    fn values(&self) -> &[Self::Scalar] {
+        self.values()
     }
 }
 
 impl CsrMatrix<S> {
     /// Convert to dense faer::Mat for use with dense solvers.
+    #[cfg(feature = "backend-faer")]
     pub fn to_dense(&self) -> faer::Mat<S> {
-        self.inner.to_dense()
+        let mut dense = faer::Mat::zeros(self.nrows, self.ncols);
+        for i in 0..self.nrows {
+            let (cols, vals) = self.row(i);
+            for (&j, &v) in cols.iter().zip(vals.iter()) {
+                dense[(i, j)] = v;
+            }
+        }
+        dense
     }
 
-    /// Create an identity matrix of size n x n
+    /// Create an identity matrix of size n x n.
     pub fn identity(n: usize) -> Self {
         let row_ptr: Vec<usize> = (0..=n).collect();
         let col_idx: Vec<usize> = (0..n).collect();
@@ -185,27 +209,33 @@ impl CsrMatrix<S> {
         Self::from_csr(n, n, row_ptr, col_idx, values)
     }
 
-    /// Extract diagonal as a vector
+    /// Extract diagonal as a vector.
     pub fn diagonal(&self) -> Vec<S> {
         let n = self.nrows().min(self.ncols());
         let mut diag = vec![S::zero(); n];
 
         for i in 0..n {
-            let row_start = self.inner.row_ptr()[i];
-            let row_end = self.inner.row_ptr()[i + 1];
-
-            for idx in row_start..row_end {
-                if self.inner.col_idx()[idx] == i {
-                    diag[i] = self.inner.val()[idx];
-                    break;
-                }
+            let (cols, vals) = self.row(i);
+            if let Some((_, &val)) = cols
+                .iter()
+                .copied()
+                .zip(vals.iter())
+                .find(|(col, _)| *col == i)
+            {
+                diag[i] = val;
             }
         }
 
         diag
     }
 
-    /// Sparse matrix-vector product: y = alpha * A * x + beta * y
+    /// Sparse matrix-vector product with default scaling: y = A * x.
+    pub fn spmv(&self, x: &[S], y: &mut [S]) {
+        self.spmv_scaled(S::one(), x, S::zero(), y)
+            .expect("spmv dimension mismatch");
+    }
+
+    /// Sparse matrix-vector product: y = alpha * A * x + beta * y.
     pub fn spmv_scaled(
         &self,
         alpha: S,
@@ -223,7 +253,7 @@ impl CsrMatrix<S> {
             )));
         }
 
-        #[cfg(feature = "simd")]
+        #[cfg(all(feature = "backend-faer", feature = "simd"))]
         if let Some(plan) = self.spmv_plan.as_ref() {
             unsafe {
                 let alpha = *(&alpha as *const S as *const f64);
@@ -236,13 +266,13 @@ impl CsrMatrix<S> {
         }
 
         for i in 0..self.nrows() {
-            let row_start = self.inner.row_ptr()[i];
-            let row_end = self.inner.row_ptr()[i + 1];
+            let row_start = self.row_ptr[i];
+            let row_end = self.row_ptr[i + 1];
 
             let mut sum = S::zero();
             for idx in row_start..row_end {
-                let j = self.inner.col_idx()[idx];
-                sum = sum + self.inner.val()[idx] * x[j];
+                let j = self.col_idx[idx];
+                sum = sum + self.values[idx] * x[j];
             }
 
             y[i] = alpha * sum + beta * y[i];
@@ -251,7 +281,7 @@ impl CsrMatrix<S> {
         Ok(())
     }
 
-    /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y
+    /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y.
     pub fn spmv_transpose_scaled(
         &self,
         alpha: S,
@@ -274,9 +304,9 @@ impl CsrMatrix<S> {
             *yi = *yi * beta;
         }
 
-        let rp = self.inner.row_ptr();
-        let cj = self.inner.col_idx();
-        let vv = self.inner.val();
+        let rp = &self.row_ptr;
+        let cj = &self.col_idx;
+        let vv = &self.values;
 
         for i in 0..self.nrows() {
             let xi = x[i];
@@ -291,7 +321,8 @@ impl CsrMatrix<S> {
         Ok(())
     }
 
-    /// Convert from dense faer::Mat to sparse CSR format with drop tolerance
+    /// Convert from dense faer::Mat to sparse CSR format with drop tolerance.
+    #[cfg(feature = "backend-faer")]
     pub fn from_dense(dense: &faer::Mat<S>, drop_tol: R) -> Self {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
@@ -314,33 +345,14 @@ impl CsrMatrix<S> {
     }
 
     /// Convert from an owned dense `faer::Mat<S>` to sparse CSR format with drop tolerance.
+    #[cfg(feature = "backend-faer")]
     pub fn from_dense_owned(dense: faer::Mat<S>, drop_tol: R) -> Self {
-        let nrows = dense.nrows();
-        let ncols = dense.ncols();
-        let mut row_ptr = vec![0];
-        let mut col_idx = Vec::new();
-        let mut values = Vec::new();
-
-        for i in 0..nrows {
-            for j in 0..ncols {
-                let val = dense[(i, j)];
-                if val.abs() >= drop_tol {
-                    col_idx.push(j);
-                    values.push(val);
-                }
-            }
-            row_ptr.push(col_idx.len());
-        }
-
-        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
+        Self::from_dense(&dense, drop_tol)
     }
 }
 
 impl CsrMatrix<f64> {
-    /// Convert this faer-backed CSR matrix into the scalar-aware CSR wrapper.
-    ///
-    /// The sparsity pattern is preserved and numeric values are lifted into the
-    /// active scalar type `S` (complex when the `complex` feature is enabled).
+    /// Convert this CSR matrix into the scalar-aware CSR wrapper.
     pub fn to_scalar_csr(&self) -> crate::matrix::csr::CsrMatrix<S> {
         let values = self.values().iter().copied().map(S::from_real).collect();
         crate::matrix::csr::CsrMatrix::new(
@@ -353,7 +365,43 @@ impl CsrMatrix<f64> {
     }
 }
 
-#[cfg(feature = "simd")]
+impl<T> Indexing for CsrMatrix<T> {
+    fn nrows(&self) -> usize {
+        self.nrows()
+    }
+}
+
+impl<T: Clone> SubmatrixExtract for CsrMatrix<T> {
+    fn submatrix(&self, indices: &[usize]) -> Self {
+        let n = indices.len();
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        row_ptr.push(0);
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+
+        let mut g2l: HashMap<usize, usize> = HashMap::with_capacity(n);
+        for (l, &g) in indices.iter().enumerate() {
+            g2l.insert(g, l);
+        }
+
+        for &g_row in indices {
+            let rs = self.row_ptr[g_row];
+            let re = self.row_ptr[g_row + 1];
+            for p in rs..re {
+                let gcol = self.col_idx[p];
+                if let Some(&lcol) = g2l.get(&gcol) {
+                    col_idx.push(lcol);
+                    values.push(self.values[p].clone());
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
+    }
+}
+
+#[cfg(all(feature = "backend-faer", feature = "simd"))]
 impl<T> CsrMatrix<T> {
     #[inline]
     fn invalidate_spmv_plan(&mut self) {
@@ -361,7 +409,7 @@ impl<T> CsrMatrix<T> {
     }
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "backend-faer", feature = "simd"))]
 impl CsrMatrix<f64> {
     /// Builds (or rebuilds) the SIMD-aware SpMV plan using the provided tuning.
     pub fn build_spmv_plan(&mut self, tuning: &SpmvTuning) {
@@ -379,83 +427,6 @@ impl CsrMatrix<f64> {
     /// application until [`build_spmv_plan`] is invoked again.
     pub fn clear_spmv_plan(&mut self) {
         self.spmv_plan = None;
-    }
-}
-
-impl SparseMatrix<S> for CsrMatrix<S> {
-    fn nrows(&self) -> usize {
-        self.inner.nrows()
-    }
-    fn ncols(&self) -> usize {
-        self.inner.ncols()
-    }
-    fn spmv(&self, x: &[S], y: &mut [S]) {
-        // Simple implementation using direct sparse matrix-vector product
-        // Reset y to zero
-        for yi in y.iter_mut() {
-            *yi = S::zero();
-        }
-
-        // Sparse matrix-vector multiplication
-        for i in 0..self.inner.nrows() {
-            let row_start = self.inner.row_ptr()[i];
-            let row_end = self.inner.row_ptr()[i + 1];
-            for idx in row_start..row_end {
-                let j = self.inner.col_idx()[idx];
-                y[i] = y[i] + self.inner.val()[idx] * x[j];
-            }
-        }
-    }
-}
-
-// Implement MatVec trait for CsrMatrix to work with Kryst solvers
-use crate::core::traits::Indexing;
-
-// Implement Indexing trait for CsrMatrix to work with preconditioners
-impl Indexing for CsrMatrix<S> {
-    fn nrows(&self) -> usize {
-        SparseMatrix::nrows(self)
-    }
-}
-
-use crate::core::traits::SubmatrixExtract;
-use std::collections::HashMap;
-
-impl SubmatrixExtract for CsrMatrix<S> {
-    fn submatrix(&self, indices: &[usize]) -> Self {
-        // Efficient CSR-based submatrix extraction that selects rows and
-        // columns corresponding to `indices`, returning an n x n CSR whose
-        // local column indices are remapped to 0..n-1.
-        let n = indices.len();
-        let mut row_ptr = Vec::with_capacity(n + 1);
-        row_ptr.push(0);
-        let mut col_idx = Vec::new();
-        let mut values = Vec::new();
-
-        // Build a map from global column -> local column index
-        let mut g2l: HashMap<usize, usize> = HashMap::with_capacity(n);
-        for (l, &g) in indices.iter().enumerate() {
-            g2l.insert(g, l);
-        }
-
-        let rp = self.inner.row_ptr();
-        let cj = self.inner.col_idx();
-        let vv = self.inner.val();
-
-        for &g_row in indices {
-            let rs = rp[g_row];
-            let re = rp[g_row + 1];
-            for p in rs..re {
-                let gcol = cj[p];
-                if let Some(&lcol) = g2l.get(&gcol) {
-                    col_idx.push(lcol);
-                    values.push(vv[p]);
-                }
-            }
-            row_ptr.push(col_idx.len());
-        }
-
-        CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
     }
 }
 
@@ -497,10 +468,16 @@ mod tests {
     #[test]
     fn identity_spmv() {
         // 3×3 identity in CSR: row_ptr=[0,1,2,3], col_idx=[0,1,2], vals=[1,1,1]
-        let m = CsrMatrix::from_csr(3, 3, vec![0, 1, 2, 3], vec![0, 1, 2], vec![1.0, 1.0, 1.0]);
-        let x = vec![2.0, 3.0, 5.0];
-        let mut y = vec![0.0; 3];
-        m.spmv_scaled(1.0, &x, 0.0, &mut y).unwrap();
+        let m = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 1, 2, 3],
+            vec![0, 1, 2],
+            vec![S::from_real(1.0), S::from_real(1.0), S::from_real(1.0)],
+        );
+        let x = vec![S::from_real(2.0), S::from_real(3.0), S::from_real(5.0)];
+        let mut y = vec![S::zero(); 3];
+        m.spmv_scaled(S::one(), &x, S::zero(), &mut y).unwrap();
         assert_eq!(y, x);
     }
 
@@ -512,12 +489,17 @@ mod tests {
             3,
             vec![0, 2, 4],
             vec![0, 1, 1, 2],
-            vec![1.0, 2.0, 3.0, 4.0],
+            vec![
+                S::from_real(1.0),
+                S::from_real(2.0),
+                S::from_real(3.0),
+                S::from_real(4.0),
+            ],
         );
-        let x = vec![1.0, 1.0, 1.0];
-        let mut y = vec![0.0; 2];
-        m.spmv_scaled(1.0, &x, 0.0, &mut y).unwrap();
-        assert_eq!(y, vec![3.0, 7.0]);
+        let x = vec![S::one(), S::one(), S::one()];
+        let mut y = vec![S::zero(); 2];
+        m.spmv_scaled(S::one(), &x, S::zero(), &mut y).unwrap();
+        assert_eq!(y, vec![S::from_real(3.0), S::from_real(7.0)]);
     }
 
     #[test]
@@ -528,11 +510,20 @@ mod tests {
             3,
             vec![0, 2, 4],
             vec![0, 1, 1, 2],
-            vec![1.0, 2.0, 3.0, 4.0],
+            vec![
+                S::from_real(1.0),
+                S::from_real(2.0),
+                S::from_real(3.0),
+                S::from_real(4.0),
+            ],
         );
-        let x = vec![1.0, 2.0];
-        let mut y = vec![0.0; 3];
-        m.spmv_transpose_scaled(1.0, &x, 0.0, &mut y).unwrap();
-        assert_eq!(y, vec![1.0, 8.0, 8.0]);
+        let x = vec![S::from_real(1.0), S::from_real(2.0)];
+        let mut y = vec![S::zero(); 3];
+        m.spmv_transpose_scaled(S::one(), &x, S::zero(), &mut y)
+            .unwrap();
+        assert_eq!(
+            y,
+            vec![S::from_real(1.0), S::from_real(8.0), S::from_real(8.0)]
+        );
     }
 }

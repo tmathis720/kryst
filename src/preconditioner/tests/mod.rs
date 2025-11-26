@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use super::*;
 use crate::algebra::prelude::*;
 use faer::Mat;

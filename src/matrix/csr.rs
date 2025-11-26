@@ -1,7 +1,5 @@
 use crate::algebra::prelude::*;
 
-use crate::matrix::spmv::scalar::{spmv_scaled_csr, spmv_t_scaled_csr};
-
 /// Compressed Sparse Row matrix with scalar entries of type `S`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CsrMatrix<S: KrystScalar> {
@@ -124,16 +122,28 @@ impl<S: KrystScalar> CsrMatrix<S> {
     /// Computes `y = alpha * A * x + beta * y` using the scalar CSR kernel.
     #[inline]
     pub fn spmv_scaled(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
-        spmv_scaled_csr(
-            self.nrows,
-            &self.rowptr,
-            &self.colind,
-            &self.values,
-            alpha,
-            x,
-            beta,
-            y,
-        );
+        assert_eq!(x.len(), self.ncols);
+        assert_eq!(y.len(), self.nrows);
+
+        if beta == S::zero() {
+            y.fill(S::zero());
+        } else if beta != S::one() {
+            for v in y.iter_mut() {
+                *v = *v * beta;
+            }
+        }
+
+        if alpha == S::zero() {
+            return;
+        }
+
+        for i in 0..self.nrows {
+            let mut acc = S::zero();
+            for idx in self.rowptr[i]..self.rowptr[i + 1] {
+                acc = self.values[idx].mul_add(x[self.colind[idx]], acc);
+            }
+            y[i] = y[i] + alpha * acc;
+        }
     }
 
     /// Computes `y = A^T * x` using the scalar CSR transpose kernel.
@@ -145,16 +155,30 @@ impl<S: KrystScalar> CsrMatrix<S> {
     /// Computes `y = alpha * A^T * x + beta * y` using the scalar CSR transpose kernel.
     #[inline]
     pub fn spmv_t_scaled(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
-        spmv_t_scaled_csr(
-            self.nrows,
-            &self.rowptr,
-            &self.colind,
-            &self.values,
-            alpha,
-            x,
-            beta,
-            y,
-        );
+        assert_eq!(x.len(), self.nrows);
+        assert_eq!(y.len(), self.ncols);
+
+        if beta == S::zero() {
+            y.fill(S::zero());
+        } else if beta != S::one() {
+            for v in y.iter_mut() {
+                *v = *v * beta;
+            }
+        }
+
+        if alpha == S::zero() {
+            return;
+        }
+
+        for i in 0..self.nrows {
+            let xi = x[i];
+            if xi == S::zero() {
+                continue;
+            }
+            for idx in self.rowptr[i]..self.rowptr[i + 1] {
+                y[self.colind[idx]] = y[self.colind[idx]] + alpha * self.values[idx] * xi;
+            }
+        }
     }
 }
 

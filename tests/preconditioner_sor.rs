@@ -52,7 +52,7 @@ fn test_sor_identity() {
     let a = make_eye(n);
     // SOR with omega=1.0, 1 sweep, forward (lower) application
     let mut sor =
-        Sor::<Mat<R>, Vec<R>, R>::new(R::from(1.0), 1, 1, MatSorType::APPLY_LOWER, R::default());
+        Sor::<Mat<R>, Vec<R>>::new(R::from(1.0), 1, 1, MatSorType::APPLY_LOWER, R::default());
     sor.setup(&a).unwrap();
     let x = vec![R::from(1.0); n];
     let mut y = vec![R::default(); n];
@@ -71,7 +71,7 @@ fn test_sor_tridiag_forward() {
     let a = make_tridiag(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     // SOR with omega=1.0, 1 sweep, forward (lower) application
     let mut sor =
-        Sor::<Mat<R>, Vec<R>, R>::new(R::from(1.0), 1, 1, MatSorType::APPLY_LOWER, R::default());
+        Sor::<Mat<R>, Vec<R>>::new(R::from(1.0), 1, 1, MatSorType::APPLY_LOWER, R::default());
     sor.setup(&a).unwrap();
     let x = vec![R::from(1.0); n];
     let mut y = vec![R::default(); n];
@@ -104,7 +104,7 @@ fn test_ssor_tridiag() {
     let n = 5;
     let a = make_tridiag(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
     // SSOR: symmetric sweep
-    let mut sor = Sor::<Mat<R>, Vec<R>, R>::new(
+    let mut sor = Sor::<Mat<R>, Vec<R>>::new(
         R::from(1.0),
         1,
         1,
@@ -125,8 +125,7 @@ fn test_ssor_tridiag() {
 /// Checks that the formatted string contains the expected parameter values.
 #[test]
 fn test_sor_display() {
-    let sor =
-        Sor::<Mat<R>, Vec<R>, R>::new(R::from(1.5), 2, 1, MatSorType::APPLY_LOWER, R::from(0.1));
+    let sor = Sor::<Mat<R>, Vec<R>>::new(R::from(1.5), 2, 1, MatSorType::APPLY_LOWER, R::from(0.1));
     let s = format!("{}", sor);
     assert!(s.contains("SOR(omega=1.5"));
 }

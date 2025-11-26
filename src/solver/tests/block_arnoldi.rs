@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use crate::algebra::blas::dot_conj;
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;

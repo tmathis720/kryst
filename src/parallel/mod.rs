@@ -123,6 +123,7 @@ pub trait Comm: Send + Sync + 'static {
         self.all_reduce_f64(local)
     }
     // Parallel/distributed matrix-vector product
+    #[cfg(feature = "backend-faer")]
     fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
         // Default: serial mat-vec
         assert_eq!(a.ncols(), x.len());

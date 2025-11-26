@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use super::*;
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;

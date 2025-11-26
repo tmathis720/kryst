@@ -14,8 +14,8 @@ pub trait MatTransVec<V> {
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
 use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
-use crate::algebra::scalar::KrystScalar;
-use crate::algebra::scalar::{S, copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::prelude::*;
+use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::block::BlockVec;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -189,158 +189,131 @@ pub trait DotOp<T> {
     fn norm2(&self, x: &[T]) -> T;
 }
 
-/// Implementation for sparse matrices (CsrMatrix)
-impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
-    fn mat_vec(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        use crate::matrix::sparse::SparseMatrix;
-        // Dimension checks
-        if x.len() != SparseMatrix::ncols(self) || y.len() != SparseMatrix::nrows(self) {
+/// Implementation for sparse CSR matrices over the crate scalar.
+impl MatVecOp<S> for crate::matrix::sparse::CsrMatrix<S> {
+    fn mat_vec(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) -> Result<(), crate::error::KError> {
+        if x.len() != self.ncols() || y.len() != self.nrows() {
             return Err(crate::error::KError::InvalidInput(
                 "Matrix-vector dimension mismatch".to_string(),
             ));
         }
 
-        // Quick exits for alpha/beta
-        if alpha.abs() <= f64::EPSILON {
-            if beta.abs() <= f64::EPSILON {
-                for v in y.iter_mut() {
-                    *v = 0.0;
-                }
-            } else if (beta - 1.0).abs() > f64::EPSILON {
-                for v in y.iter_mut() {
-                    *v *= beta;
-                }
-            }
-            return Ok(());
-        }
-
-        // Canonical CSR access (no allocations)
         let rp = self.row_ptr();
         let cj = self.col_idx();
         let vv = self.values();
 
         #[cfg(debug_assertions)]
         {
-            // Basic CSR integrity checks
-            assert_eq!(rp.len(), self.nrows() + 1, "row_ptr length must be nrows+1");
-            assert!(
-                rp.windows(2).all(|w| w[0] <= w[1]),
-                "row_ptr must be non-decreasing"
-            );
+            assert_eq!(rp.len(), self.nrows() + 1);
+            assert!(rp.windows(2).all(|w| w[0] <= w[1]));
             let nnz = *rp.last().unwrap();
-            assert_eq!(cj.len(), nnz, "col_idx length must equal nnz");
-            assert_eq!(vv.len(), nnz, "values length must equal nnz");
+            assert_eq!(cj.len(), nnz);
+            assert_eq!(vv.len(), nnz);
         }
 
-        let m = self.nrows();
-        if beta == 0.0 {
-            // y[i] = alpha * sum_j a[i,j] x[j]
-            for i in 0..m {
-                let rs = rp[i];
-                let re = rp[i + 1];
-                let mut acc = 0.0;
-                for p in rs..re {
-                    let j = cj[p];
-                    acc = f64::mul_add(vv[p], x[j], acc);
-                }
-                y[i] = alpha * acc;
-            }
-        } else if beta == 1.0 {
-            // y[i] += alpha * A x
-            for i in 0..m {
-                let rs = rp[i];
-                let re = rp[i + 1];
-                let mut acc = 0.0;
-                for p in rs..re {
-                    let j = cj[p];
-                    acc = f64::mul_add(vv[p], x[j], acc);
-                }
-                y[i] += alpha * acc;
-            }
-        } else {
-            // y[i] = alpha * (A x)_i + beta * y[i]
-            for i in 0..m {
-                let rs = rp[i];
-                let re = rp[i + 1];
-                let mut acc = 0.0;
-                for p in rs..re {
-                    let j = cj[p];
-                    acc = f64::mul_add(vv[p], x[j], acc);
-                }
-                y[i] = alpha * acc + beta * y[i];
-            }
-        }
-        Ok(())
-    }
-
-    fn mat_vec_trans(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        use crate::matrix::sparse::SparseMatrix;
-
-        // Dimension checks: x is in R^{m}, y in R^{n} for A^T (A is m×n)
-        if x.len() != SparseMatrix::nrows(self) || y.len() != SparseMatrix::ncols(self) {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        // Quick exits
-        if alpha == 0.0 {
-            // y = beta * y
-            if beta == 0.0 {
+        if alpha == S::zero() {
+            if beta == S::zero() {
                 for v in y.iter_mut() {
-                    *v = 0.0;
+                    *v = S::zero();
                 }
-            } else {
+            } else if beta != S::one() {
                 for v in y.iter_mut() {
-                    *v *= beta;
+                    *v = beta * *v;
                 }
             }
             return Ok(());
         }
 
-        // Scale y by beta (or zero) up front
-        if beta == 0.0 {
-            for v in y.iter_mut() {
-                *v = 0.0;
+        let m = self.nrows();
+        if beta == S::zero() {
+            for i in 0..m {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut acc = S::zero();
+                for p in rs..re {
+                    let j = cj[p];
+                    acc = vv[p].mul_add(x[j], acc);
+                }
+                y[i] = alpha * acc;
             }
-        } else if beta != 1.0 {
-            for v in y.iter_mut() {
-                *v *= beta;
+        } else if beta == S::one() {
+            for i in 0..m {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut acc = S::zero();
+                for p in rs..re {
+                    let j = cj[p];
+                    acc = vv[p].mul_add(x[j], acc);
+                }
+                y[i] = y[i] + alpha * acc;
+            }
+        } else {
+            for i in 0..m {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut acc = S::zero();
+                for p in rs..re {
+                    let j = cj[p];
+                    acc = vv[p].mul_add(x[j], acc);
+                }
+                y[i] = alpha * acc + beta * y[i];
             }
         }
-        // If beta == 1.0, leave y as-is and accumulate into it.
 
-        // Access CSR structure. These accessor names assume your CSR exposes them.
-        // If your type uses different getters, adjust accordingly.
-        let row_ptr = self.row_ptr(); // &[usize] of length m+1
-        let col_idx = self.col_idx(); // &[usize] of length nnz
-        let values = self.values(); // &[f64]   of length nnz
+        Ok(())
+    }
 
-        // y_j += alpha * a_ij * x_i  for all nonzeros a_ij
-        let m = SparseMatrix::nrows(self);
+    fn mat_vec_trans(
+        &self,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
+    ) -> Result<(), crate::error::KError> {
+        if x.len() != self.nrows() || y.len() != self.ncols() {
+            return Err(crate::error::KError::InvalidInput(
+                "Matrix-vector dimension mismatch".to_string(),
+            ));
+        }
+
+        let rp = self.row_ptr();
+        let cj = self.col_idx();
+        let vv = self.values();
+
+        if alpha == S::zero() {
+            if beta == S::zero() {
+                for v in y.iter_mut() {
+                    *v = S::zero();
+                }
+            } else {
+                for v in y.iter_mut() {
+                    *v = beta * *v;
+                }
+            }
+            return Ok(());
+        }
+
+        if beta == S::zero() {
+            for v in y.iter_mut() {
+                *v = S::zero();
+            }
+        } else if beta != S::one() {
+            for v in y.iter_mut() {
+                *v = beta * *v;
+            }
+        }
+
+        let m = self.nrows();
         for i in 0..m {
             let xi = x[i];
-            if xi == 0.0 {
+            if xi == S::zero() {
                 continue;
             }
-            let start = row_ptr[i];
-            let end = row_ptr[i + 1];
-            // SAFETY: bounds guaranteed by CSR invariants
+            let start = rp[i];
+            let end = rp[i + 1];
             for k in start..end {
-                let j = col_idx[k];
-                y[j] += alpha * values[k] * xi;
+                let j = cj[k];
+                y[j] = y[j] + alpha * vv[k] * xi;
             }
         }
 
@@ -348,12 +321,85 @@ impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
     }
 
     fn nrows(&self) -> usize {
-        use crate::matrix::sparse::SparseMatrix;
-        SparseMatrix::nrows(self)
+        self.nrows()
     }
     fn ncols(&self) -> usize {
-        use crate::matrix::sparse::SparseMatrix;
-        SparseMatrix::ncols(self)
+        self.ncols()
+    }
+}
+
+#[cfg(feature = "backend-faer")]
+impl MatVecOp<S> for faer::Mat<S> {
+    fn mat_vec(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) -> Result<(), crate::error::KError> {
+        if x.len() != self.ncols() || y.len() != self.nrows() {
+            return Err(crate::error::KError::InvalidInput(
+                "Matrix-vector dimension mismatch".into(),
+            ));
+        }
+
+        if beta == S::zero() {
+            for value in y.iter_mut() {
+                *value = S::zero();
+            }
+        } else if beta != S::one() {
+            for value in y.iter_mut() {
+                *value *= beta;
+            }
+        }
+
+        let m = self.nrows();
+        let n = self.ncols();
+        for i in 0..m {
+            let mut acc = S::zero();
+            for j in 0..n {
+                acc = self[(i, j)].mul_add(x[j], acc);
+            }
+            y[i] += alpha * acc;
+        }
+        Ok(())
+    }
+
+    fn mat_vec_trans(
+        &self,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
+    ) -> Result<(), crate::error::KError> {
+        if x.len() != self.nrows() || y.len() != self.ncols() {
+            return Err(crate::error::KError::InvalidInput(
+                "Matrix-vector dimension mismatch".into(),
+            ));
+        }
+
+        if beta == S::zero() {
+            for value in y.iter_mut() {
+                *value = S::zero();
+            }
+        } else if beta != S::one() {
+            for value in y.iter_mut() {
+                *value *= beta;
+            }
+        }
+
+        let m = self.nrows();
+        let n = self.ncols();
+        for j in 0..n {
+            let mut acc = S::zero();
+            for i in 0..m {
+                acc = self[(i, j)].mul_add(x[i], acc);
+            }
+            y[j] += alpha * acc;
+        }
+        Ok(())
+    }
+
+    fn nrows(&self) -> usize {
+        self.nrows()
+    }
+
+    fn ncols(&self) -> usize {
+        self.ncols()
     }
 }
 
@@ -429,16 +475,16 @@ pub trait KernelOp<T> {
 /// Local (single-process) kernel implementation
 pub struct LocalKernel;
 
-impl KernelOp<f64> for LocalKernel {
+impl KernelOp<S> for LocalKernel {
     type Comm = crate::parallel::NoComm;
 
     fn kernel_mat_vec(
         &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        matrix: &dyn MatVecOp<S>,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         _comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
         // For local operations, no communication needed
@@ -447,37 +493,37 @@ impl KernelOp<f64> for LocalKernel {
 
     fn kernel_mat_vec_trans(
         &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        matrix: &dyn MatVecOp<S>,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         _comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
         matrix.mat_vec_trans(alpha, x, beta, y)
     }
 
-    fn kernel_dot(&self, x: &[f64], y: &[f64], _comm: &Self::Comm) -> f64 {
+    fn kernel_dot(&self, x: &[S], y: &[S], _comm: &Self::Comm) -> S {
         let dot_op = StandardDotOp;
         dot_op.dot(x, y)
     }
 
-    fn kernel_norm2(&self, x: &[f64], _comm: &Self::Comm) -> f64 {
+    fn kernel_norm2(&self, x: &[S], _comm: &Self::Comm) -> S {
         let dot_op = StandardDotOp;
         dot_op.norm2(x)
     }
 
-    fn kernel_axpby(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
+    fn kernel_axpby(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
         for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
             *y_val = alpha * x_val + beta * (*y_val);
         }
     }
 
-    fn kernel_copy(&self, x: &[f64], y: &mut [f64]) {
+    fn kernel_copy(&self, x: &[S], y: &mut [S]) {
         y.copy_from_slice(x);
     }
 
-    fn kernel_scale(&self, alpha: f64, x: &mut [f64]) {
+    fn kernel_scale(&self, alpha: S, x: &mut [S]) {
         for val in x.iter_mut() {
             *val *= alpha;
         }
@@ -488,27 +534,28 @@ impl KernelOp<f64> for LocalKernel {
 /// Currently a placeholder that delegates to local operations
 pub struct DistributedKernel;
 
-impl KernelOp<f64> for DistributedKernel {
+#[cfg(not(feature = "complex"))]
+impl KernelOp<S> for DistributedKernel {
     type Comm = crate::parallel::UniverseComm;
 
     fn kernel_mat_vec(
         &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        matrix: &dyn MatVecOp<S>,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
         let mut local = vec![0.0f64; y.len()];
-        matrix.mat_vec(alpha, x, 0.0, &mut local)?;
+        matrix.mat_vec(alpha, x, S::zero(), &mut local)?;
         use crate::parallel::Comm as _;
         comm.allreduce_sum_slice(&mut local);
-        if beta == 0.0 {
+        if beta == S::zero() {
             y.copy_from_slice(&local);
-        } else if beta == 1.0 {
+        } else if beta == S::one() {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out += accum;
+                *out = *out + accum;
             }
         } else {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
@@ -520,22 +567,22 @@ impl KernelOp<f64> for DistributedKernel {
 
     fn kernel_mat_vec_trans(
         &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        matrix: &dyn MatVecOp<S>,
+        alpha: S,
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
         let mut local = vec![0.0f64; y.len()];
-        matrix.mat_vec_trans(alpha, x, 0.0, &mut local)?;
+        matrix.mat_vec_trans(alpha, x, S::zero(), &mut local)?;
         use crate::parallel::Comm as _;
         comm.allreduce_sum_slice(&mut local);
-        if beta == 0.0 {
+        if beta == S::zero() {
             y.copy_from_slice(&local);
-        } else if beta == 1.0 {
+        } else if beta == S::one() {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out += accum;
+                *out = *out + accum;
             }
         } else {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
@@ -545,30 +592,31 @@ impl KernelOp<f64> for DistributedKernel {
         Ok(())
     }
 
-    fn kernel_dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64 {
+    fn kernel_dot(&self, x: &[S], y: &[S], comm: &Self::Comm) -> S {
         use crate::parallel::Comm;
         // Compute local dot product
         let local_dot: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
         // Reduce across all processes
-        comm.all_reduce_f64(local_dot)
+        S::from_real(comm.all_reduce_f64(local_dot))
     }
 
-    fn kernel_norm2(&self, x: &[f64], comm: &Self::Comm) -> f64 {
-        self.kernel_dot(x, x, comm).sqrt()
+    fn kernel_norm2(&self, x: &[S], comm: &Self::Comm) -> S {
+        let norm_sq = self.kernel_dot(x, x, comm).abs();
+        S::from_real(norm_sq.sqrt())
     }
 
-    fn kernel_axpby(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
+    fn kernel_axpby(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
         // Vector operations are local in distributed setting
         for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
             *y_val = alpha * x_val + beta * (*y_val);
         }
     }
 
-    fn kernel_copy(&self, x: &[f64], y: &mut [f64]) {
+    fn kernel_copy(&self, x: &[S], y: &mut [S]) {
         y.copy_from_slice(x);
     }
 
-    fn kernel_scale(&self, alpha: f64, x: &mut [f64]) {
+    fn kernel_scale(&self, alpha: S, x: &mut [S]) {
         for val in x.iter_mut() {
             *val *= alpha;
         }
@@ -577,38 +625,38 @@ impl KernelOp<f64> for DistributedKernel {
 
 /// Unified AMG kernel trait to eliminate code duplication between local and MPI variants
 pub trait AmgKernel {
-    /// Associated communicator type  
+    /// Associated communicator type
     type Comm: crate::parallel::Comm;
 
     /// Matrix-vector multiplication with alpha/beta scaling
     fn matvec<M>(
         &self,
-        alpha: f64,
+        alpha: S,
         a: &M,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>
     where
-        M: MatVecOp<f64>;
+        M: MatVecOp<S>;
 
     /// Global dot product with communicator reduction
-    fn dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64;
+    fn dot(&self, x: &[S], y: &[S], comm: &Self::Comm) -> S;
 
-    /// Global norm with communicator reduction  
-    fn norm(&self, x: &[f64], comm: &Self::Comm) -> f64 {
-        self.dot(x, x, comm).sqrt()
+    /// Global norm with communicator reduction
+    fn norm(&self, x: &[S], comm: &Self::Comm) -> S {
+        S::from_real(self.dot(x, x, comm).abs().sqrt())
     }
 
     /// Vector scaling: x = alpha * x
-    fn scale(&self, alpha: f64, x: &mut [f64]);
+    fn scale(&self, alpha: S, x: &mut [S]);
 
     /// Vector copy: y = x
-    fn copy(&self, x: &[f64], y: &mut [f64]);
+    fn copy(&self, x: &[S], y: &mut [S]);
 
     /// AXPY operation: y = alpha * x + y
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]);
+    fn axpy(&self, alpha: S, x: &[S], y: &mut [S]);
 }
 
 /// Local (single-process) AMG kernel implementation
@@ -631,34 +679,35 @@ impl AmgKernel for LocalAmgKernel {
 
     fn matvec<M>(
         &self,
-        alpha: f64,
+        alpha: S,
         a: &M,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         _comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>
     where
-        M: MatVecOp<f64>,
+        M: MatVecOp<S>,
     {
         a.mat_vec(alpha, x, beta, y)
     }
 
-    fn dot(&self, x: &[f64], y: &[f64], _comm: &Self::Comm) -> f64 {
-        x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
+    fn dot(&self, x: &[S], y: &[S], _comm: &Self::Comm) -> S {
+        let dot_op = StandardDotOp;
+        dot_op.dot(x, y)
     }
 
-    fn scale(&self, alpha: f64, x: &mut [f64]) {
+    fn scale(&self, alpha: S, x: &mut [S]) {
         for val in x.iter_mut() {
             *val *= alpha;
         }
     }
 
-    fn copy(&self, x: &[f64], y: &mut [f64]) {
+    fn copy(&self, x: &[S], y: &mut [S]) {
         y.copy_from_slice(x);
     }
 
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
+    fn axpy(&self, alpha: S, x: &[S], y: &mut [S]) {
         for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
             *y_val += alpha * x_val;
         }
@@ -680,30 +729,31 @@ impl Default for DistributedAmgKernel {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl AmgKernel for DistributedAmgKernel {
     type Comm = crate::parallel::UniverseComm;
 
     fn matvec<M>(
         &self,
-        alpha: f64,
+        alpha: S,
         a: &M,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
+        x: &[S],
+        beta: S,
+        y: &mut [S],
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>
     where
-        M: MatVecOp<f64>,
+        M: MatVecOp<S>,
     {
         let mut local = vec![0.0f64; y.len()];
-        a.mat_vec(alpha, x, 0.0, &mut local)?;
+        a.mat_vec(alpha, x, S::zero(), &mut local)?;
         use crate::parallel::Comm as _;
         comm.allreduce_sum_slice(&mut local);
-        if beta == 0.0 {
+        if beta == S::zero() {
             y.copy_from_slice(&local);
-        } else if beta == 1.0 {
+        } else if beta == S::one() {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out += accum;
+                *out = *out + accum;
             }
         } else {
             for (out, accum) in y.iter_mut().zip(local.into_iter()) {
@@ -713,25 +763,25 @@ impl AmgKernel for DistributedAmgKernel {
         Ok(())
     }
 
-    fn dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64 {
+    fn dot(&self, x: &[S], y: &[S], comm: &Self::Comm) -> S {
         use crate::parallel::Comm;
         // Compute local dot product, then reduce across processes
         let local_dot: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
-        comm.all_reduce_f64(local_dot)
+        S::from_real(comm.all_reduce_f64(local_dot))
     }
 
-    fn scale(&self, alpha: f64, x: &mut [f64]) {
+    fn scale(&self, alpha: S, x: &mut [S]) {
         // Vector operations are local even in distributed setting
         for val in x.iter_mut() {
             *val *= alpha;
         }
     }
 
-    fn copy(&self, x: &[f64], y: &mut [f64]) {
+    fn copy(&self, x: &[S], y: &mut [S]) {
         y.copy_from_slice(x);
     }
 
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
+    fn axpy(&self, alpha: S, x: &[S], y: &mut [S]) {
         for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
             *y_val += alpha * x_val;
         }
@@ -800,8 +850,8 @@ mod tests {
         // Test that the associated Scalar type has the required bounds
         fn _check_scalar_bounds<T: Copy + PartialOrd + From<f64> + Into<f64>>() {}
 
-        // f64 should satisfy the bounds
-        _check_scalar_bounds::<f64>();
+        // Use the real partner of S for bound checking
+        _check_scalar_bounds::<R>();
 
         assert!(true);
     }
@@ -818,50 +868,44 @@ mod tests {
         }
 
         trait TestInnerProduct<V> {
-            type Scalar: Copy + PartialOrd + From<f64> + Into<f64>;
-            fn dot(&self, x: &V, y: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar;
-            fn norm(&self, x: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar {
-                let local_sq = self.dot(x, x, comm);
-                let global_sq = comm.all_reduce_f64(local_sq.into());
-                (global_sq.sqrt()).into()
-            }
+            type Scalar: Copy;
+            fn dot(&self, x: &V, y: &V, _comm: &impl crate::parallel::Comm) -> Self::Scalar;
         }
         struct Dummy;
 
-        impl TestMatVec<Vec<f64>> for Dummy {
-            fn matvec(&self, _x: &Vec<f64>, _y: &mut Vec<f64>) {}
+        impl TestMatVec<Vec<S>> for Dummy {
+            fn matvec(&self, _x: &Vec<S>, _y: &mut Vec<S>) {}
         }
 
-        impl TestMatTransVec<Vec<f64>> for Dummy {
-            fn mattransvec(&self, _x: &Vec<f64>, _y: &mut Vec<f64>) {}
+        impl TestMatTransVec<Vec<S>> for Dummy {
+            fn mattransvec(&self, _x: &Vec<S>, _y: &mut Vec<S>) {}
         }
 
-        impl TestInnerProduct<Vec<f64>> for Dummy {
-            type Scalar = f64;
+        impl TestInnerProduct<Vec<S>> for Dummy {
+            type Scalar = S;
             fn dot(
                 &self,
-                _x: &Vec<f64>,
-                _y: &Vec<f64>,
+                _x: &Vec<S>,
+                _y: &Vec<S>,
                 _comm: &impl crate::parallel::Comm,
             ) -> Self::Scalar {
-                0.0
+                S::zero()
             }
         }
 
         fn _use_traits<
-            T: TestMatVec<Vec<f64>> + TestMatTransVec<Vec<f64>> + TestInnerProduct<Vec<f64>>,
+            T: TestMatVec<Vec<S>> + TestMatTransVec<Vec<S>> + TestInnerProduct<Vec<S>>,
         >() {
         }
         _use_traits::<Dummy>();
 
         let dummy = Dummy;
         let comm = crate::parallel::NoComm;
-        let v = vec![0.0; 1];
-        let mut y = vec![0.0; 1];
+        let v = vec![S::zero(); 1];
+        let mut y = vec![S::zero(); 1];
         dummy.matvec(&v, &mut y);
         dummy.mattransvec(&v, &mut y);
         let _ = dummy.dot(&v, &v, &comm);
-        let _ = dummy.norm(&v, &comm);
 
         // All method signatures should compile without panicking.
     }
@@ -870,19 +914,27 @@ mod tests {
     fn csr_matvec_happy_path() {
         // 2x3 CSR: row_ptr=[0,2,3], col_idx=[0,2,1], val=[1,4,5]
         // A = [1 0 4; 0 5 0]
-        let a = CsrMatrix::from_csr(2, 3, vec![0, 2, 3], vec![0, 2, 1], vec![1.0, 4.0, 5.0]);
-        let x = [10.0, 20.0, 30.0];
-        let mut y = [0.0; 2];
-        MatVecOp::mat_vec(&a, 1.0, &x, 0.0, &mut y).unwrap();
-        let expected = [130.0, 100.0];
+        let a = CsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 2, 3],
+            vec![0, 2, 1],
+            vec![S::from_real(1.0), S::from_real(4.0), S::from_real(5.0)],
+        );
+        let x = [S::from_real(10.0), S::from_real(20.0), S::from_real(30.0)];
+        let mut y = [S::zero(); 2];
+        MatVecOp::mat_vec(&a, S::one(), &x, S::zero(), &mut y).unwrap();
+        let expected = [S::from_real(130.0), S::from_real(100.0)];
         for (got, target) in y.iter().zip(expected.iter()) {
-            assert!((got - target).abs() < 1e-12);
+            assert!(((*got) - *target).abs() < 1e-12);
         }
         // with scaling
-        let mut y2 = [1.0, 2.0];
-        MatVecOp::mat_vec(&a, 2.0, &x, 3.0, &mut y2).unwrap();
+        let mut y2 = [S::from_real(1.0), S::from_real(2.0)];
+        MatVecOp::mat_vec(&a, S::from_real(2.0), &x, S::from_real(3.0), &mut y2).unwrap();
         // 2*A*x + 3*y0
-        assert!((y2[0] - (2.0 * 130.0 + 3.0 * 1.0)).abs() < 1e-12);
-        assert!((y2[1] - (2.0 * 100.0 + 3.0 * 2.0)).abs() < 1e-12);
+        let expect0 = S::from_real(2.0 * 130.0 + 3.0 * 1.0);
+        let expect1 = S::from_real(2.0 * 100.0 + 3.0 * 2.0);
+        assert!((y2[0] - expect0).abs() < 1e-12);
+        assert!((y2[1] - expect1).abs() < 1e-12);
     }
 }

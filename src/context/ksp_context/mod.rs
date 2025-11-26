@@ -52,6 +52,7 @@ use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, set_rayon_t
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
+#[cfg(feature = "backend-faer")]
 use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 use crate::parallel::{Comm, set_global_reduction_mode, set_global_reduction_mode_scoped};
@@ -1048,6 +1049,7 @@ impl KspContext {
             self.last_pc_vid = None;
         }
 
+        #[cfg(feature = "backend-faer")]
         if let Some(pc) = self.pc.as_mut() {
             // Pre-convert once to the PC's requested format, preserving communicator.
             let hint = pc.required_format();
@@ -1109,6 +1111,13 @@ impl KspContext {
                     }
                 }
             }
+        }
+
+        #[cfg(not(feature = "backend-faer"))]
+        if let Some(_pc) = self.pc.as_mut() {
+            return Err(KError::Unsupported(
+                "preconditioner materialization requires the backend-faer feature".into(),
+            ));
         }
 
         let (m, _) = amat.dims();

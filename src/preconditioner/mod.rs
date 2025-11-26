@@ -38,7 +38,7 @@
 //! let _stats = ksp.solve(&b, &mut x).unwrap();
 //! ```
 
-#[cfg(feature = "legacy-pc-bridge")]
+#[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::format::FormatHint;
@@ -46,7 +46,7 @@ use crate::matrix::op::LinOp;
 
 pub mod bridge;
 pub mod pc_bridge;
-#[cfg(feature = "legacy-pc-bridge")]
+#[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use faer::Mat;
 use std::str::FromStr;
 
@@ -398,20 +398,20 @@ impl crate::ops::kpc::KPreconditioner for LegacyOpPreconditioner {
     }
 }
 
-#[cfg(not(feature = "legacy-pc-bridge"))]
+#[cfg(all(not(feature = "legacy-pc-bridge"), feature = "backend-faer"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "legacy-pc-bridge")))]
 pub struct LegacyOpPreconditioner {
     _private: (),
 }
 
-#[cfg(not(feature = "legacy-pc-bridge"))]
+#[cfg(all(not(feature = "legacy-pc-bridge"), feature = "backend-faer"))]
 impl LegacyOpPreconditioner {
     pub fn new(_: Box<dyn legacy::Preconditioner<faer::Mat<f64>, Vec<f64>> + Send + Sync>) -> Self {
         panic!("legacy-pc-bridge feature is disabled")
     }
 }
 
-#[cfg(not(feature = "legacy-pc-bridge"))]
+#[cfg(all(not(feature = "legacy-pc-bridge"), feature = "backend-faer"))]
 impl Preconditioner for LegacyOpPreconditioner {
     fn setup(&mut self, _: &dyn LinOp<S = f64>) -> Result<(), KError> {
         Err(KError::Unsupported("legacy-pc-bridge feature is disabled"))
@@ -421,46 +421,101 @@ impl Preconditioner for LegacyOpPreconditioner {
     }
 }
 
+#[cfg(not(feature = "backend-faer"))]
+pub struct LegacyOpPreconditioner {
+    _private: (),
+}
+
+#[cfg(not(feature = "backend-faer"))]
+impl LegacyOpPreconditioner {
+    pub fn new<T>(_: T) -> Self {
+        panic!("backend-faer feature is disabled")
+    }
+}
+
+#[cfg(not(feature = "backend-faer"))]
+impl Preconditioner for LegacyOpPreconditioner {
+    fn setup(&mut self, _: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        Err(KError::Unsupported("backend-faer feature is disabled"))
+    }
+    fn apply(&self, _: PcSide, _: &[f64], _: &mut [f64]) -> Result<(), KError> {
+        Err(KError::Unsupported("backend-faer feature is disabled"))
+    }
+}
+
 // Submodules for various preconditioners
+#[cfg(feature = "backend-faer")]
 pub mod amg;
+#[cfg(feature = "backend-faer")]
 pub mod approxinv;
+#[cfg(feature = "backend-faer")]
 pub mod approxinv_csr;
+#[cfg(feature = "backend-faer")]
 pub mod asm;
+#[cfg(feature = "backend-faer")]
 pub mod asm_amg;
+#[cfg(feature = "backend-faer")]
 pub mod block_jacobi;
+#[cfg(feature = "backend-faer")]
 pub mod builders;
+#[cfg(feature = "backend-faer")]
+#[cfg(feature = "backend-faer")]
 pub mod chain;
+#[cfg(feature = "backend-faer")]
 pub mod chebyshev;
+#[cfg(feature = "backend-faer")]
 pub mod deflation;
+#[cfg(feature = "backend-faer")]
 pub mod direct;
+#[cfg(feature = "backend-faer")]
 pub mod ilu;
+#[cfg(feature = "backend-faer")]
 pub mod ilu_csr;
 pub mod ilu_options;
+#[cfg(feature = "backend-faer")]
 pub mod ilup;
+#[cfg(feature = "backend-faer")]
 pub mod ilut;
+#[cfg(feature = "backend-faer")]
 pub mod ilutp;
 pub mod jacobi;
 pub mod pivot;
+#[cfg(feature = "backend-faer")]
 pub mod sor;
 
 // Re-exports for convenience
+#[cfg(feature = "backend-faer")]
 pub use self::sor::MatSorType;
+#[cfg(feature = "backend-faer")]
 pub use amg::AMG;
+#[cfg(feature = "backend-faer")]
 pub use approxinv::ApproxInv;
+#[cfg(feature = "backend-faer")]
 pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCsr, SpaiCsr};
+#[cfg(feature = "backend-faer")]
 pub use asm::{AdditiveSchwarz, Asm, AsmBuilder, AsmCombine, AsmConfig, AsmLocalSolver};
+#[cfg(feature = "backend-faer")]
 pub use asm_amg::{AsmAmg, AsmAmgBuilder, TwoLevelConfig, TwoLevelMode};
+#[cfg(feature = "backend-faer")]
 pub use chain::PcChain;
+#[cfg(feature = "backend-faer")]
 pub use chebyshev::{Chebyshev, ChebyshevPre};
+#[cfg(feature = "backend-faer")]
 pub use deflation::{AmgCoarseSpace, DeflationOptions, DeflationPC, ZSource, with_amg_deflation};
+#[cfg(feature = "backend-faer")]
 pub use direct::SuperLuDistPc;
-#[cfg(feature = "dense-direct")]
+#[cfg(all(feature = "dense-direct", feature = "backend-faer"))]
 pub use direct::{LuPc, QrPc};
+#[cfg(feature = "backend-faer")]
 pub use ilu::Ilu0;
+#[cfg(feature = "backend-faer")]
 pub use ilup::Ilup;
+#[cfg(feature = "backend-faer")]
 pub use ilut::Ilut;
+#[cfg(feature = "backend-faer")]
 pub use ilutp::Ilutp;
 pub use jacobi::Jacobi;
+#[cfg(feature = "backend-faer")]
 pub use sor::Sor;
 
 /// Unified preconditioner enum for all supported types.

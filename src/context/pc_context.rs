@@ -1,9 +1,29 @@
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::approxinv_csr::ApproxInvKind;
 use crate::preconditioner::{PcSide, Preconditioner};
+#[cfg(feature = "backend-faer")]
+use crate::preconditioner::chain::PcChain;
 use std::str::FromStr;
+
+#[cfg(feature = "backend-faer")]
+type MatSorSide = crate::preconditioner::sor::MatSorType;
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatSorSide {
+    APPLY_LOWER,
+    APPLY_UPPER,
+    SYMMETRIC_SWEEP,
+}
+
+#[cfg(feature = "backend-faer")]
+type ApproxInvKindAlias = crate::preconditioner::approxinv_csr::ApproxInvKind;
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApproxInvKindAlias {
+    FSAI,
+    SPAI,
+}
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -128,7 +148,7 @@ pub enum PcConfig {
     Sor {
         omega: f64,
         sweeps: usize,
-        mat_side: crate::preconditioner::sor::MatSorType,
+        mat_side: MatSorSide,
         symmetric: bool,
     },
     Chebyshev {
@@ -148,7 +168,7 @@ pub enum PcConfig {
         smoother: Option<String>,
     },
     ApproxInv {
-        kind: ApproxInvKind,
+        kind: ApproxInvKindAlias,
         levels: usize,
         max_per_col: usize,
         drop_tol: f64,
@@ -221,11 +241,10 @@ impl PcConfig {
             },
 
             Sor => {
-                use crate::preconditioner::sor::MatSorType;
                 let mat_side = match o.sor_mat_side.as_deref() {
-                    Some("lower") | Option::None => MatSorType::APPLY_LOWER,
-                    Some("upper") => MatSorType::APPLY_UPPER,
-                    Some("symmetric") => MatSorType::SYMMETRIC_SWEEP,
+                    Some("lower") | Option::None => MatSorSide::APPLY_LOWER,
+                    Some("upper") => MatSorSide::APPLY_UPPER,
+                    Some("symmetric") => MatSorSide::SYMMETRIC_SWEEP,
                     Some(s) => {
                         return Err(KError::InvalidInput(format!("unknown sor_mat_side: {s}")));
                     }
@@ -277,8 +296,8 @@ impl PcConfig {
                     .to_lowercase()
                     .as_str()
                 {
-                    "fsai" => ApproxInvKind::FSAI,
-                    "spai" => ApproxInvKind::SPAI,
+                    "fsai" => ApproxInvKindAlias::FSAI,
+                    "spai" => ApproxInvKindAlias::SPAI,
                     other => {
                         return Err(KError::InvalidInput(format!(
                             "unknown pc_approxinv_kind: {other}"
@@ -435,6 +454,7 @@ impl PcFactory {
 
         Ok(())
     }
+    #[cfg(feature = "backend-faer")]
     pub fn create_preconditioner(
         pc_type: PcType,
         options: Option<&PcOptions>,
@@ -503,8 +523,8 @@ impl PcFactory {
                     parallel,
                 };
                 match kind {
-                    ApproxInvKind::FSAI => Ok(Box::new(FsaiCsr::new_with_params(params))),
-                    ApproxInvKind::SPAI => Ok(Box::new(SpaiCsr::new_with_params(params))),
+                    ApproxInvKindAlias::FSAI => Ok(Box::new(FsaiCsr::new_with_params(params))),
+                    ApproxInvKindAlias::SPAI => Ok(Box::new(SpaiCsr::new_with_params(params))),
                 }
             }
 
@@ -513,6 +533,16 @@ impl PcFactory {
             #[cfg(feature = "superlu_dist")]
             PcConfig::SuperLuDist => b::build_superlu_dist(),
         }
+    }
+
+    #[cfg(not(feature = "backend-faer"))]
+    pub fn create_preconditioner(
+        _pc_type: PcType,
+        _options: Option<&PcOptions>,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        Err(KError::Unsupported(
+            "backend-faer feature is required to build preconditioners".into(),
+        ))
     }
 
     /// Convenience: build directly from options (when `pc_type` lives inside options)
@@ -576,6 +606,7 @@ impl PcFactory {
         Ok(specs)
     }
 
+    #[cfg(feature = "backend-faer")]
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
         op: &dyn LinOp<S = f64>,
@@ -590,6 +621,16 @@ impl PcFactory {
             stages.push(stage);
         }
         Ok(Box::new(PcChain::new(stages)))
+    }
+
+    #[cfg(not(feature = "backend-faer"))]
+    pub fn construct_deferred_pc_chain(
+        _specs: Vec<DeferredPcInfo>,
+        _op: &dyn LinOp<S = f64>,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        Err(KError::Unsupported(
+            "backend-faer feature is required to build chained preconditioners".into(),
+        ))
     }
 
     pub fn create_pc_chain(
