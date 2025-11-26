@@ -1361,11 +1361,11 @@ impl Preconditioner<Mat<S>, Vec<S>> for Ilu {
         print_ilu_banner(&self.config);
 
         // Precompute scaling terms for pivoting
-        let mut max_diag: R = 0.0;
-        self.row_inf_a.resize(n, 0.0);
-        self.row_gersh_a.resize(n, 0.0);
+        let mut max_diag: R = R::default();
+        self.row_inf_a.resize(n, R::default());
+        self.row_gersh_a.resize(n, R::default());
         for i in 0..n {
-            let mut row_inf: R = 0.0;
+            let mut row_inf: R = R::default();
             let mut row_gersh = matrix[(i, i)].abs();
             for j in 0..n {
                 let val_abs = matrix[(i, j)].abs();
@@ -1381,7 +1381,7 @@ impl Preconditioner<Mat<S>, Vec<S>> for Ilu {
             max_diag = max_diag.max(matrix[(i, i)].abs());
         }
         self.max_diag_a = max_diag;
-        self.running_max_u = 0.0;
+        self.running_max_u = R::default();
         self.pivot_stats = PivotStats::default();
 
         #[cfg(feature = "logging")]

@@ -45,7 +45,7 @@ fn ilu_apply_has_no_allocations() {
     let mut ilu = IluBuilder::new()
         .ilu_type(IluType::ILU0)
         .triangular_solve(TriSolveType::Exact)
-        .build::<f64>()
+        .build()
         .unwrap();
     ilu.setup(&a).unwrap();
 
