@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 //! NOTE on caching and invalidation:
 //! - Dense `faer::Mat<f64>` does not track `ValuesId` (returns 0). Conversions from raw Mat
 //!   will not auto-invalidate on numeric changes.

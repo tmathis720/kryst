@@ -2,7 +2,9 @@
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::error::KError;
+#[cfg(feature = "backend-faer")]
 use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+#[cfg(feature = "backend-faer")]
 use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
@@ -99,6 +101,7 @@ impl ChangeIds {
 /// into the [`LinOp`] trait by constructing an [`SpmvPlan`](ScalarSpmvPlan) at
 /// creation time. Real builds continue to select SIMD kernels when available
 /// while complex builds transparently fall back to the portable scalar path.
+#[cfg(feature = "backend-faer")]
 pub struct GenericCsrOp<S: KrystScalar> {
     matrix: Arc<ScalarCsrMatrix<S>>,
     plan: ScalarSpmvPlan<S>,
@@ -106,6 +109,7 @@ pub struct GenericCsrOp<S: KrystScalar> {
     comm: UniverseComm,
 }
 
+#[cfg(feature = "backend-faer")]
 impl<S: KrystScalar> GenericCsrOp<S> {
     /// Wraps an [`Arc`] around the provided matrix and builds an SpMV plan
     /// using the supplied tuning parameters.
@@ -174,6 +178,7 @@ impl<S: KrystScalar> GenericCsrOp<S> {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 impl<S: KrystScalar> LinOp for GenericCsrOp<S> {
     type S = S;
 
@@ -226,6 +231,7 @@ pub trait LinOpF64 {
     fn matvec(&self, x: &[f64], y: &mut [f64]);
 }
 
+#[cfg(feature = "backend-faer")]
 impl LinOpF64 for GenericCsrOp<f64> {
     #[inline]
     fn dims(&self) -> (usize, usize) {
@@ -239,6 +245,7 @@ impl LinOpF64 for GenericCsrOp<f64> {
 }
 
 #[cfg(feature = "complex")]
+#[cfg(all(feature = "backend-faer", feature = "complex"))]
 impl KLinOp for GenericCsrOp<num_complex::Complex64> {
     type Scalar = num_complex::Complex64;
 
@@ -274,16 +281,21 @@ impl KLinOp for GenericCsrOp<num_complex::Complex64> {
 }
 
 // --- Optional wrappers for dense and CSR matrices -------------------------
-use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
+#[cfg(feature = "backend-faer")]
+use crate::matrix::csc::CscMatrix;
+use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "backend-faer")]
 use faer::Mat;
 
 /// Wrap your concrete dense matrix with `DenseOp` to provide stable
 /// `StructureId`/`ValuesId` so conversions and preconditioner reuse can be cached.
+#[cfg(feature = "backend-faer")]
 pub struct DenseOp {
     mat: Arc<Mat<f64>>,
     ids: ChangeIds,
     comm: UniverseComm,
 }
+#[cfg(feature = "backend-faer")]
 impl DenseOp {
     /// Wrap a dense matrix so changes can be tracked via [`mark_structure_changed`] and
     /// [`mark_values_changed`]. This enables correct caching and preconditioner reuse across
@@ -313,6 +325,7 @@ impl DenseOp {
         &self.mat
     }
 }
+#[cfg(feature = "backend-faer")]
 impl LinOp for DenseOp {
     type S = f64;
     fn dims(&self) -> (usize, usize) {
@@ -399,6 +412,7 @@ impl LinOp for DenseOp {
 /// - Threaded SpMV honours [`ParallelTune`](crate::algebra::parallel_cfg::ParallelTune)
 ///   thresholds and falls back to the serial kernel for small systems.
 /// - See [`crate::parallel::threads`] for details on Rayon pool sizing.
+#[cfg(feature = "backend-faer")]
 pub struct CsrOp {
     csr: Arc<CsrMatrix<f64>>,
     ids: ChangeIds,
@@ -406,6 +420,7 @@ pub struct CsrOp {
     #[cfg(feature = "transpose-cache")]
     t_cache: parking_lot::RwLock<Option<(ValuesId, Arc<CscMatrix<f64>>)>>,
 }
+#[cfg(feature = "backend-faer")]
 impl CsrOp {
     pub fn new(csr: Arc<CsrMatrix<f64>>) -> Self {
         let ids = ChangeIds::default();
@@ -434,6 +449,7 @@ impl CsrOp {
         self
     }
 }
+#[cfg(feature = "backend-faer")]
 impl LinOp for CsrOp {
     type S = f64;
     fn dims(&self) -> (usize, usize) {
@@ -483,6 +499,7 @@ impl LinOp for CsrOp {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 impl LinOpF64 for CsrOp {
     #[inline]
     fn dims(&self) -> (usize, usize) {
@@ -537,6 +554,7 @@ impl CsrOp {
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+#[cfg(feature = "backend-faer")]
 impl LinOp for Mat<f64> {
     type S = f64;
     fn dims(&self) -> (usize, usize) {
@@ -600,6 +618,7 @@ impl LinOp for Mat<f64> {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 impl LinOpF64 for Mat<f64> {
     #[inline]
     fn dims(&self) -> (usize, usize) {
@@ -664,6 +683,7 @@ impl LinOpF64 for CsrMatrix<f64> {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 impl LinOp for CscMatrix<f64> {
     type S = f64;
 
@@ -787,7 +807,7 @@ where
     Arc::new(WithCommOp::new(op, comm)) as Arc<dyn LinOp<S = T::S>>
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
     #[cfg(feature = "complex")]

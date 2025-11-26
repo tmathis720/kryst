@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 //! Incomplete LU factorization with threshold and pivoting (ILUTP).
 //!
 //! This module implements the ILUTP algorithm which combines threshold-based dropping

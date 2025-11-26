@@ -5,7 +5,9 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use crate::matrix::{csc::CscMatrix, sparse::CsrMatrix};
+#[cfg(feature = "backend-faer")]
+use crate::matrix::csc::CscMatrix;
+use crate::matrix::sparse::CsrMatrix;
 
 /// High-level format hints that preconditioners can request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,11 +28,13 @@ pub trait AsFormat {
     fn to_csr_cached(&self, drop_tol: f64) -> Arc<CsrMatrix<f64>>;
 
     /// Borrow as CSC if already in that format.
+    #[cfg(feature = "backend-faer")]
     fn as_csc(&self) -> Option<&CscMatrix<f64>> {
         None
     }
 
     /// Convert to CSC and cache the result.
+    #[cfg(feature = "backend-faer")]
     fn to_csc_cached(&self, drop_tol: f64) -> Arc<CscMatrix<f64>>;
 }
 
@@ -73,6 +77,7 @@ pub(crate) fn key_from_ptr(ptr: usize, structure_id: u64, values_id: u64, drop_t
     }
 }
 
+#[cfg(feature = "backend-faer")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CscKey {
     pub base_ptr: usize,
@@ -81,6 +86,7 @@ pub(crate) struct CscKey {
     pub drop_tol_bits: u64,
 }
 
+#[cfg(feature = "backend-faer")]
 impl PartialEq for CscKey {
     fn eq(&self, other: &Self) -> bool {
         self.base_ptr == other.base_ptr
@@ -89,7 +95,9 @@ impl PartialEq for CscKey {
             && self.drop_tol_bits == other.drop_tol_bits
     }
 }
+#[cfg(feature = "backend-faer")]
 impl Eq for CscKey {}
+#[cfg(feature = "backend-faer")]
 impl Hash for CscKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.base_ptr.hash(state);
@@ -100,9 +108,11 @@ impl Hash for CscKey {
 }
 
 /// Global cache of dense->CSC conversions.
+#[cfg(feature = "backend-faer")]
 pub(crate) static CSC_CACHE: Lazy<Mutex<HashMap<CscKey, Weak<CscMatrix<f64>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(feature = "backend-faer")]
 pub(crate) fn csc_key_from_ptr(
     ptr: usize,
     structure_id: u64,

@@ -23,24 +23,21 @@ mod tests_sor_symmetric {
         let x = [1.0, -2.0, 3.0];
 
         // Lower-only
-        let sor_lower =
-            Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::APPLY_LOWER, 0.0);
+        let sor_lower = Sor::<Mat<f64>, Vec<f64>>::new(1.0, 1, 0, MatSorType::APPLY_LOWER, 0.0);
         let mut pc_lower = LegacyOpPreconditioner::new(Box::new(sor_lower));
         pc_lower.setup(&a)?;
         let mut y_fwd = [0.0; 3];
         pc_lower.apply(PcSide::Left, &x, &mut y_fwd)?;
 
         // Upper-only
-        let sor_upper =
-            Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::APPLY_UPPER, 0.0);
+        let sor_upper = Sor::<Mat<f64>, Vec<f64>>::new(1.0, 1, 0, MatSorType::APPLY_UPPER, 0.0);
         let mut pc_upper = LegacyOpPreconditioner::new(Box::new(sor_upper));
         pc_upper.setup(&a)?;
         let mut y_bwd = [0.0; 3];
         pc_upper.apply(PcSide::Left, &y_fwd, &mut y_bwd)?;
 
         // Symmetric
-        let sor_sym =
-            Sor::<Mat<f64>, Vec<f64>, f64>::new(1.0, 1, 0, MatSorType::SYMMETRIC_SWEEP, 0.0);
+        let sor_sym = Sor::<Mat<f64>, Vec<f64>>::new(1.0, 1, 0, MatSorType::SYMMETRIC_SWEEP, 0.0);
         let mut pc_sym = LegacyOpPreconditioner::new(Box::new(sor_sym));
         pc_sym.setup(&a)?;
         let mut y_sym = [0.0; 3];

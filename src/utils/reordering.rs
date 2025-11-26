@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 //! Matrix reordering and scaling for numerical robustness.
 //!
 //! This module implements various matrix preprocessing techniques to improve

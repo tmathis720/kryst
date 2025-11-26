@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 //! HYPRE-Inspired ILU Factorization Implementation
 //!
 //! This module provides a comprehensive, production-grade implementation of Incomplete LU (ILU)

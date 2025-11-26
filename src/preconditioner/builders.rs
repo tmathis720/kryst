@@ -176,6 +176,7 @@ pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
 
 // ---- ASM / AMG stubs -----------------------------------------------------
 
+#[cfg(feature = "backend-faer")]
 pub fn build_asm(
     overlap: usize,
     _hint: Option<usize>,
@@ -236,6 +237,19 @@ pub fn build_asm(
     }
 
     Ok(Box::new(asm))
+}
+
+#[cfg(not(feature = "backend-faer"))]
+pub fn build_asm(
+    _overlap: usize,
+    _hint: Option<usize>,
+    _block_solver: Option<String>,
+    _mode: Option<String>,
+    _weighting: Option<String>,
+) -> Result<Box<dyn Preconditioner>, KError> {
+    Err(KError::Unsupported(
+        "ASM builder requires the backend-faer feature".to_string(),
+    ))
 }
 
 pub fn build_amg(

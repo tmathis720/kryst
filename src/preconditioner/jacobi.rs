@@ -8,6 +8,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
 use crate::preconditioner::{PcSide, Preconditioner};
+#[cfg(feature = "backend-faer")]
 use faer::Mat;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -57,6 +58,7 @@ impl Jacobi {
             self.n = n;
             return Ok(());
         }
+        #[cfg(feature = "backend-faer")]
         if let Some(d) = pmat.as_any().downcast_ref::<Mat<f64>>() {
             let n = d.nrows().min(d.ncols());
             self.diag_inv.resize(n, S::zero());
@@ -170,6 +172,7 @@ impl KPreconditioner for Jacobi {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacobi {
     fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
         self.recompute(a)

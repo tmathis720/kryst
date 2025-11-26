@@ -6,12 +6,15 @@ use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::ReorthPolicy;
 
+#[cfg(feature = "backend-faer")]
 pub mod arnoldi;
 pub mod bicgstab;
 pub mod block_vec;
 pub mod gmres;
+#[cfg(feature = "backend-faer")]
 pub mod kernels;
 
+#[cfg(feature = "backend-faer")]
 pub use arnoldi::{ArnoldiOutput, block_arnoldi_step};
 
 /// Configuration options shared across block Krylov solvers.

@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 //! Matrix Market file format I/O utilities for Kryst.
 //!
 //! This module provides functions to read and write matrices and vectors in the

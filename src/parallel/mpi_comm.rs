@@ -307,6 +307,7 @@ impl super::Comm for MpiComm {
         }))
     }
 
+    #[cfg(feature = "backend-faer")]
     fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
         assert_eq!(a.ncols(), x.len());
         assert_eq!(a.nrows(), y.len());
