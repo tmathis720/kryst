@@ -121,7 +121,11 @@ pub fn stabilize_pivot_in_place(
             let magnitude = floor;
             let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
-                    let sign: R = if (*u_ii).real() >= R::default() { 1.0 } else { -1.0 };
+                    let sign: R = if (*u_ii).real() >= R::default() {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     S::from_real(sign * magnitude)
                 }
                 PivotSignPolicy::Positive => S::from_real(magnitude),

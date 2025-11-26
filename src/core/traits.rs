@@ -13,12 +13,13 @@ pub trait MatTransVec<V> {
 }
 
 // Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
-use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
+use crate::algebra::parallel::{self, par_dot_conj_local, par_sum_abs2_local};
 use crate::algebra::prelude::*;
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::scalar::{KrystScalar, copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::core::block::BlockVec;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::preconditioner::LocalPreconditioner;
 
 impl<L> MatVec<Vec<S>> for L
 where
@@ -430,7 +431,7 @@ impl DotOp<f64> for StandardDotOp {
 /// Unified kernel trait for local vs distributed operations
 /// Provides a consistent interface for AMG operations that can work
 /// both in single-process (local) and multi-process (MPI) scenarios
-pub trait KernelOp<T> {
+pub trait KernelOp<T: KrystScalar> {
     /// The communicator type for this kernel (e.g., UniverseComm for MPI, () for local)
     type Comm: crate::parallel::Comm;
 
@@ -470,6 +471,29 @@ pub trait KernelOp<T> {
 
     /// Scale operation: x = alpha * x
     fn kernel_scale(&self, alpha: T, x: &mut [T]);
+
+    /// Apply a local preconditioner: y = M^{-1} x.
+    fn kernel_apply_preconditioner<P>(
+        &self,
+        preconditioner: &P,
+        x: &[T],
+        y: &mut [T],
+        _comm: &Self::Comm,
+    ) -> Result<(), crate::error::KError>
+    where
+        P: LocalPreconditioner<T>,
+    {
+        let (m, n) = preconditioner.dims();
+        if (m != 0 && x.len() != m) || (n != 0 && y.len() != n) {
+            return Err(crate::error::KError::InvalidInput(format!(
+                "Preconditioner dimension mismatch: dims=({m}, {n}), x.len()={}, y.len()={}",
+                x.len(),
+                y.len()
+            )));
+        }
+
+        preconditioner.apply_local(x, y)
+    }
 }
 
 /// Local (single-process) kernel implementation
@@ -504,37 +528,33 @@ impl KernelOp<S> for LocalKernel {
     }
 
     fn kernel_dot(&self, x: &[S], y: &[S], _comm: &Self::Comm) -> S {
-        let dot_op = StandardDotOp;
-        dot_op.dot(x, y)
+        par_dot_conj_local(x, y)
     }
 
     fn kernel_norm2(&self, x: &[S], _comm: &Self::Comm) -> S {
-        let dot_op = StandardDotOp;
-        dot_op.norm2(x)
+        let norm_sq = par_sum_abs2_local(x);
+        S::from_real(norm_sq.sqrt())
     }
 
     fn kernel_axpby(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val = alpha * x_val + beta * (*y_val);
-        }
+        parallel::par_axpby(x, alpha, y, beta);
     }
 
     fn kernel_copy(&self, x: &[S], y: &mut [S]) {
-        y.copy_from_slice(x);
+        parallel::par_copy(x, y);
     }
 
     fn kernel_scale(&self, alpha: S, x: &mut [S]) {
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
+        parallel::par_scale(alpha, x);
     }
 }
 
 /// Distributed (MPI) kernel implementation for future use
 /// Currently a placeholder that delegates to local operations
+#[cfg(feature = "mpi")]
 pub struct DistributedKernel;
 
-#[cfg(not(feature = "complex"))]
+#[cfg(feature = "mpi")]
 impl KernelOp<S> for DistributedKernel {
     type Comm = crate::parallel::UniverseComm;
 
@@ -547,21 +567,16 @@ impl KernelOp<S> for DistributedKernel {
         y: &mut [S],
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
-        let mut local = vec![0.0f64; y.len()];
+        let mut local = vec![S::zero(); y.len()];
         matrix.mat_vec(alpha, x, S::zero(), &mut local)?;
-        use crate::parallel::Comm as _;
-        comm.allreduce_sum_slice(&mut local);
+        comm.allreduce_sum_scalars(&mut local);
+
         if beta == S::zero() {
-            y.copy_from_slice(&local);
-        } else if beta == S::one() {
-            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = *out + accum;
-            }
+            parallel::par_copy(&local, y);
         } else {
-            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = beta.mul_add(*out, accum);
-            }
+            parallel::par_axpby(&local, S::one(), y, beta);
         }
+
         Ok(())
     }
 
@@ -574,52 +589,40 @@ impl KernelOp<S> for DistributedKernel {
         y: &mut [S],
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError> {
-        let mut local = vec![0.0f64; y.len()];
+        let mut local = vec![S::zero(); y.len()];
         matrix.mat_vec_trans(alpha, x, S::zero(), &mut local)?;
-        use crate::parallel::Comm as _;
-        comm.allreduce_sum_slice(&mut local);
+        comm.allreduce_sum_scalars(&mut local);
+
         if beta == S::zero() {
-            y.copy_from_slice(&local);
-        } else if beta == S::one() {
-            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = *out + accum;
-            }
+            parallel::par_copy(&local, y);
         } else {
-            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = beta.mul_add(*out, accum);
-            }
+            parallel::par_axpby(&local, S::one(), y, beta);
         }
+
         Ok(())
     }
 
     fn kernel_dot(&self, x: &[S], y: &[S], comm: &Self::Comm) -> S {
-        use crate::parallel::Comm;
-        // Compute local dot product
-        let local_dot: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
-        // Reduce across all processes
-        S::from_real(comm.all_reduce_f64(local_dot))
+        let local_dot = par_dot_conj_local(x, y);
+        comm.allreduce_sum_scalar(local_dot)
     }
 
     fn kernel_norm2(&self, x: &[S], comm: &Self::Comm) -> S {
-        let norm_sq = self.kernel_dot(x, x, comm).abs();
-        S::from_real(norm_sq.sqrt())
+        let local_sq = par_sum_abs2_local(x);
+        let global_sq = comm.allreduce_sum_real(local_sq);
+        S::from_real(global_sq.sqrt())
     }
 
     fn kernel_axpby(&self, alpha: S, x: &[S], beta: S, y: &mut [S]) {
-        // Vector operations are local in distributed setting
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val = alpha * x_val + beta * (*y_val);
-        }
+        parallel::par_axpby(x, alpha, y, beta);
     }
 
     fn kernel_copy(&self, x: &[S], y: &mut [S]) {
-        y.copy_from_slice(x);
+        parallel::par_copy(x, y);
     }
 
     fn kernel_scale(&self, alpha: S, x: &mut [S]) {
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
+        parallel::par_scale(alpha, x);
     }
 }
 
@@ -657,6 +660,29 @@ pub trait AmgKernel {
 
     /// AXPY operation: y = alpha * x + y
     fn axpy(&self, alpha: S, x: &[S], y: &mut [S]);
+
+    /// Apply a local preconditioner: y = M^{-1} x.
+    fn apply_preconditioner<P>(
+        &self,
+        preconditioner: &P,
+        x: &[S],
+        y: &mut [S],
+        _comm: &Self::Comm,
+    ) -> Result<(), crate::error::KError>
+    where
+        P: LocalPreconditioner<S>,
+    {
+        let (m, n) = preconditioner.dims();
+        if (m != 0 && x.len() != m) || (n != 0 && y.len() != n) {
+            return Err(crate::error::KError::InvalidInput(format!(
+                "Preconditioner dimension mismatch: dims=({m}, {n}), x.len()={}, y.len()={}",
+                x.len(),
+                y.len()
+            )));
+        }
+
+        preconditioner.apply_local(x, y)
+    }
 }
 
 /// Local (single-process) AMG kernel implementation
@@ -693,43 +719,41 @@ impl AmgKernel for LocalAmgKernel {
     }
 
     fn dot(&self, x: &[S], y: &[S], _comm: &Self::Comm) -> S {
-        let dot_op = StandardDotOp;
-        dot_op.dot(x, y)
+        par_dot_conj_local(x, y)
     }
 
     fn scale(&self, alpha: S, x: &mut [S]) {
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
+        parallel::par_scale(alpha, x);
     }
 
     fn copy(&self, x: &[S], y: &mut [S]) {
-        y.copy_from_slice(x);
+        parallel::par_copy(x, y);
     }
 
     fn axpy(&self, alpha: S, x: &[S], y: &mut [S]) {
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val += alpha * x_val;
-        }
+        parallel::par_axpy(x, alpha, y);
     }
 }
 
+#[cfg(feature = "mpi")]
 /// Distributed (MPI) AMG kernel implementation
 pub struct DistributedAmgKernel;
 
+#[cfg(feature = "mpi")]
 impl DistributedAmgKernel {
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(feature = "mpi")]
 impl Default for DistributedAmgKernel {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(feature = "mpi")]
 impl AmgKernel for DistributedAmgKernel {
     type Comm = crate::parallel::UniverseComm;
 
@@ -745,46 +769,34 @@ impl AmgKernel for DistributedAmgKernel {
     where
         M: MatVecOp<S>,
     {
-        let mut local = vec![0.0f64; y.len()];
+        let mut local = vec![S::zero(); y.len()];
         a.mat_vec(alpha, x, S::zero(), &mut local)?;
-        use crate::parallel::Comm as _;
-        comm.allreduce_sum_slice(&mut local);
+        comm.allreduce_sum_scalars(&mut local);
+
         if beta == S::zero() {
-            y.copy_from_slice(&local);
-        } else if beta == S::one() {
-            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = *out + accum;
-            }
+            parallel::par_copy(&local, y);
         } else {
-            for (out, accum) in y.iter_mut().zip(local.into_iter()) {
-                *out = beta.mul_add(*out, accum);
-            }
+            parallel::par_axpby(&local, S::one(), y, beta);
         }
+
         Ok(())
     }
 
     fn dot(&self, x: &[S], y: &[S], comm: &Self::Comm) -> S {
-        use crate::parallel::Comm;
-        // Compute local dot product, then reduce across processes
-        let local_dot: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
-        S::from_real(comm.all_reduce_f64(local_dot))
+        let local_dot = par_dot_conj_local(x, y);
+        comm.allreduce_sum_scalar(local_dot)
     }
 
     fn scale(&self, alpha: S, x: &mut [S]) {
-        // Vector operations are local even in distributed setting
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
+        parallel::par_scale(alpha, x);
     }
 
     fn copy(&self, x: &[S], y: &mut [S]) {
-        y.copy_from_slice(x);
+        parallel::par_copy(x, y);
     }
 
     fn axpy(&self, alpha: S, x: &[S], y: &mut [S]) {
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val += alpha * x_val;
-        }
+        parallel::par_axpy(x, alpha, y);
     }
 }
 
@@ -792,6 +804,7 @@ impl AmgKernel for DistributedAmgKernel {
 mod tests {
     use super::*;
     use crate::matrix::sparse::CsrMatrix;
+    use crate::parallel::NoComm;
 
     // Simple test to verify traits can be imported and used
     #[test]
@@ -936,5 +949,34 @@ mod tests {
         let expect1 = S::from_real(2.0 * 100.0 + 3.0 * 2.0);
         assert!((y2[0] - expect0).abs() < 1e-12);
         assert!((y2[1] - expect1).abs() < 1e-12);
+    }
+
+    struct DummyPc;
+
+    impl LocalPreconditioner for DummyPc {
+        fn dims(&self) -> (usize, usize) {
+            (2, 2)
+        }
+
+        fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+            y.copy_from_slice(x);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn kernel_apply_preconditioner_respects_dims() {
+        let pc = DummyPc;
+        let kernel = LocalKernel;
+        let comm = NoComm;
+
+        let mut y = vec![S::zero(); 2];
+        kernel
+            .kernel_apply_preconditioner(&pc, &[S::one(), S::from_real(2.0)], &mut y, &comm)
+            .unwrap();
+        assert_eq!(y, vec![S::one(), S::from_real(2.0)]);
+
+        let err = kernel.kernel_apply_preconditioner(&pc, &[S::one()], &mut y, &comm);
+        assert!(matches!(err, Err(KError::InvalidInput(_))));
     }
 }

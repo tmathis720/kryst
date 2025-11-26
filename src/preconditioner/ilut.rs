@@ -26,7 +26,7 @@ use crate::core::traits::MatShape;
 use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::legacy::Preconditioner;
+use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
 
 /// Sparse row structure for storing L/U factors.
 ///
@@ -201,6 +201,16 @@ impl KPreconditioner for Ilut {
         _scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
         self.apply_slice(side, x, y)
+    }
+}
+
+impl LocalPreconditioner for Ilut {
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        self.apply_slice(crate::preconditioner::PcSide::Left, x, y)
     }
 }
 

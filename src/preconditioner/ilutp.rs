@@ -16,7 +16,7 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::legacy::Preconditioner;
+use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
 use faer::Mat;
 use std::cmp::Ordering;
 
@@ -271,6 +271,17 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
         output: &mut Vec<f64>,
     ) -> Result<(), KError> {
         self.apply_slice(input, output)
+    }
+}
+
+impl LocalPreconditioner<f64> for Ilutp {
+    fn dims(&self) -> (usize, usize) {
+        let n = self.l_factor.nrows();
+        (n, n)
+    }
+
+    fn apply_local(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        self.apply_slice(x, y)
     }
 }
 

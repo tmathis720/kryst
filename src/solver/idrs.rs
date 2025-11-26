@@ -71,10 +71,16 @@ pub enum Omega {
 
 #[derive(Clone, Debug)]
 pub enum ShadowP {
-    RandomOrthonormal { seed: u64 },
-    BlockDeflation { partition: Vec<usize> },
+    RandomOrthonormal {
+        seed: u64,
+    },
+    BlockDeflation {
+        partition: Vec<usize>,
+    },
     #[cfg(feature = "backend-faer")]
-    FromVectors { p: Mat<f64> },
+    FromVectors {
+        p: Mat<f64>,
+    },
 }
 
 impl Default for ShadowP {
