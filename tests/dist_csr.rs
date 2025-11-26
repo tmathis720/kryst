@@ -74,13 +74,7 @@ fn dist_csr_spmv_matches_serial() {
 fn dist_csr_numeric_update_changes_values_id() {
     let comm = UniverseComm::NoComm(NoComm);
     let part_prefix = vec![0, 1];
-    let local = CsrMatrix::from_csr(
-        1,
-        1,
-        vec![0, 1],
-        vec![0],
-        vec![S::from_real(1.0)],
-    );
+    let local = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![S::from_real(1.0)]);
     let mut op = DistCsrOp::from_local_rows(1, 0, &local, &part_prefix, comm).unwrap();
     let sid = op.structure_id();
     let vid = op.values_id();

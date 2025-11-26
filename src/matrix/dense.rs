@@ -3,35 +3,36 @@
 //! This module provides the `DenseMatrix` trait and its implementation for the `faer::Mat<T>` type,
 //! enabling construction from raw column-major storage.
 
+use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, MatShape, MatVec, SubmatrixExtract};
 use faer::Mat;
 
-impl<T: Copy + num_traits::Float> crate::core::traits::MatrixGet<T> for Mat<T> {
-    fn get(&self, i: usize, j: usize) -> T {
+impl crate::core::traits::MatrixGet<S> for Mat<S> {
+    fn get(&self, i: usize, j: usize) -> S {
         self[(i, j)]
     }
 }
 
-/// Blanket impl so any Faer Mat<T> is a DenseMatrix.
-pub trait DenseMatrix<T>: MatVec<Vec<T>> + Indexing {
+/// Blanket impl so any Faer Mat<S> is a DenseMatrix.
+pub trait DenseMatrix: MatVec<Vec<S>> + Indexing {
     /// Construct from raw column-major storage.
-    fn from_raw(nrows: usize, ncols: usize, data: Vec<T>) -> Self;
+    fn from_raw(nrows: usize, ncols: usize, data: Vec<S>) -> Self;
 }
 
-impl DenseMatrix<f64> for Mat<f64> {
-    fn from_raw(nrows: usize, ncols: usize, data: Vec<f64>) -> Self {
+impl DenseMatrix for Mat<S> {
+    fn from_raw(nrows: usize, ncols: usize, data: Vec<S>) -> Self {
         Mat::from_fn(nrows, ncols, |i, j| data[j * nrows + i])
     }
 }
 
-impl<T: Copy + num_traits::Float> SubmatrixExtract for Mat<T> {
+impl SubmatrixExtract for Mat<S> {
     fn submatrix(&self, indices: &[usize]) -> Self {
         let n = indices.len();
         Mat::from_fn(n, n, |i, j| self[(indices[i], indices[j])])
     }
 }
 
-impl<T: Copy + num_traits::Float> MatShape for Mat<T> {
+impl MatShape for Mat<S> {
     fn nrows(&self) -> usize {
         self.nrows()
     }

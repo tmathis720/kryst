@@ -36,8 +36,6 @@ use crate::preconditioner::ilu_csr::{
 use crate::solver::direct_lu::LuSolver;
 #[cfg(feature = "dense-direct")]
 use crate::solver::legacy::LinearSolver;
-#[cfg(not(feature = "dense-direct"))]
-use std::marker::PhantomData;
 
 /// Block-Jacobi preconditioner
 ///
@@ -45,19 +43,17 @@ use std::marker::PhantomData;
 ///
 /// - `blocks`: List of index sets, each representing a block (list of row/column indices)
 /// - `block_factors`: For each block, stores the indices and the corresponding LU solver
-pub struct BlockJacobi<T> {
+pub struct BlockJacobi {
     /// List of block index sets (each block is a list of row/column indices)
     pub blocks: Vec<Vec<usize>>,
     /// For each block: (indices, LU solver for the block)
     #[cfg(feature = "dense-direct")]
-    pub block_factors: Vec<(Vec<usize>, LuSolver<T>)>, // (indices, LU solver)
+    pub block_factors: Vec<(Vec<usize>, LuSolver)>, // (indices, LU solver)
     #[cfg(not(feature = "dense-direct"))]
     pub block_factors_ilu: Vec<(Vec<usize>, std::sync::Arc<IluCsr>)>,
-    #[cfg(not(feature = "dense-direct"))]
-    _marker: PhantomData<T>,
 }
 
-impl BlockJacobi<f64> {
+impl BlockJacobi {
     pub fn dims(&self) -> (usize, usize) {
         let n = self
             .blocks
@@ -76,7 +72,7 @@ impl BlockJacobi<f64> {
     /// # Arguments
     /// * `a` - The system matrix (must support row access and element access)
     #[cfg(feature = "dense-direct")]
-    pub fn setup<M: RowPattern + MatrixGet<f64> + crate::matrix::dense::DenseMatrix<f64>>(
+    pub fn setup<M: RowPattern + MatrixGet<S> + crate::matrix::dense::DenseMatrix>(
         &mut self,
         a: &M,
     ) {
@@ -96,7 +92,7 @@ impl BlockJacobi<f64> {
             }
             // Create a dense matrix for the block
             let amat = crate::matrix::dense::DenseMatrix::from_raw(n, n, data);
-            let mut lusolver = LuSolver::<f64>::new();
+            let mut lusolver = LuSolver::new();
             // Factorize the block (dummy solve to trigger factorization)
             let _ = LinearSolver::solve(
                 &mut lusolver,
@@ -113,7 +109,7 @@ impl BlockJacobi<f64> {
         }
     }
     #[cfg(not(feature = "dense-direct"))]
-    pub fn setup<M: RowPattern + MatrixGet<f64>>(&mut self, a: &M) {
+    pub fn setup<M: RowPattern + MatrixGet<S>>(&mut self, a: &M) {
         self.block_factors_ilu.clear();
         let cfg = IluCsrConfig {
             kind: IluKind::Ilu0,
@@ -141,8 +137,7 @@ impl BlockJacobi<f64> {
                 }
                 row_ptr.push(col_idx.len());
             }
-            let csr =
-                std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
+            let csr = std::sync::Arc::new(CsrMatrix::<S>::from_csr(n, n, row_ptr, col_idx, values));
             let mut ilu = IluCsr::new_with_config(cfg.clone());
             let op = CsrOp::new(csr.clone());
             let _ = ilu.setup(&op);
@@ -157,7 +152,7 @@ impl BlockJacobi<f64> {
     /// # Arguments
     /// * `r` - Input vector (right-hand side)
     /// * `z` - Output vector (solution, overwritten)
-    pub fn apply(&self, r: &[f64], z: &mut [f64]) {
+    pub fn apply(&self, r: &[S], z: &mut [S]) {
         // Zero out the output vector
         for zi in z.iter_mut() {
             *zi = R::default();
@@ -244,7 +239,7 @@ impl BlockJacobi<f64> {
 }
 
 #[cfg(feature = "complex")]
-impl KPreconditioner for BlockJacobi<f64> {
+impl KPreconditioner for BlockJacobi {
     type Scalar = S;
 
     #[inline]
@@ -289,12 +284,12 @@ mod tests {
     use crate::preconditioner::PcSide;
 
     struct TestDiagMatrix {
-        diag: Vec<f64>,
+        diag: Vec<S>,
         pattern: Vec<Vec<usize>>,
     }
 
     impl TestDiagMatrix {
-        fn new(diag: Vec<f64>) -> Self {
+        fn new(diag: Vec<S>) -> Self {
             let pattern = (0..diag.len()).map(|i| vec![i]).collect();
             Self { diag, pattern }
         }
@@ -306,13 +301,9 @@ mod tests {
         }
     }
 
-    impl MatrixGet<f64> for TestDiagMatrix {
-        fn get(&self, i: usize, j: usize) -> f64 {
-            if i == j {
-                self.diag[i]
-            } else {
-                0.0
-            }
+    impl MatrixGet<S> for TestDiagMatrix {
+        fn get(&self, i: usize, j: usize) -> S {
+            if i == j { self.diag[i] } else { S::zero() }
         }
     }
 
@@ -322,15 +313,15 @@ mod tests {
         }
     }
 
-    impl MatVec<Vec<f64>> for TestDiagMatrix {
-        fn matvec(&self, x: &Vec<f64>, y: &mut Vec<f64>) {
+    impl MatVec<Vec<S>> for TestDiagMatrix {
+        fn matvec(&self, x: &Vec<S>, y: &mut Vec<S>) {
             assert_eq!(
                 x.len(),
                 self.diag.len(),
                 "TestDiagMatrix::matvec input length mismatch"
             );
             if y.len() != self.diag.len() {
-                y.resize(self.diag.len(), 0.0);
+                y.resize(self.diag.len(), S::zero());
             }
             for (i, diag) in self.diag.iter().enumerate() {
                 y[i] = diag * x[i];
@@ -338,8 +329,8 @@ mod tests {
         }
     }
 
-    impl crate::matrix::dense::DenseMatrix<f64> for TestDiagMatrix {
-        fn from_raw(nrows: usize, ncols: usize, data: Vec<f64>) -> Self {
+    impl crate::matrix::dense::DenseMatrix for TestDiagMatrix {
+        fn from_raw(nrows: usize, ncols: usize, data: Vec<S>) -> Self {
             assert_eq!(
                 nrows, ncols,
                 "TestDiagMatrix::from_raw expects a square matrix"
@@ -349,23 +340,21 @@ mod tests {
                 nrows * ncols,
                 "TestDiagMatrix::from_raw received inconsistent storage"
             );
-            let diag = (0..nrows)
-                .map(|i| data[i + i * nrows])
-                .collect::<Vec<_>>();
+            let diag = (0..nrows).map(|i| data[i + i * nrows]).collect::<Vec<_>>();
             TestDiagMatrix::new(diag)
         }
     }
 
-    impl crate::preconditioner::Preconditioner for BlockJacobi<f64> {
+    impl crate::preconditioner::Preconditioner for BlockJacobi {
         fn dims(&self) -> (usize, usize) {
             Self::dims(self)
         }
 
-        fn setup(&mut self, _a: &dyn crate::matrix::op::LinOp<S = f64>) -> Result<(), KError> {
+        fn setup(&mut self, _a: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
             Ok(())
         }
 
-        fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
             BlockJacobi::apply(self, x, y);
             Ok(())
         }
@@ -380,18 +369,16 @@ mod tests {
             block_factors: Vec::new(),
             #[cfg(not(feature = "dense-direct"))]
             block_factors_ilu: Vec::new(),
-            #[cfg(not(feature = "dense-direct"))]
-            _marker: PhantomData,
         };
 
-        let a = TestDiagMatrix::new(vec![4.0, 9.0]);
+        let a = TestDiagMatrix::new(vec![S::from_real(4.0), S::from_real(9.0)]);
         pc.setup(&a);
 
-        let rhs_real = vec![8.0, 18.0];
+        let rhs_real = vec![S::from_real(8.0), S::from_real(18.0)];
         let mut out_real = vec![R::default(); rhs_real.len()];
         pc.apply(&rhs_real, &mut out_real);
 
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
+        let rhs_s: Vec<S> = rhs_real.iter().copied().collect();
         let mut out_s = vec![S::zero(); rhs_real.len()];
         let mut scratch = BridgeScratch::default();
         pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)

@@ -14,7 +14,7 @@ use crate::algebra::prelude::*;
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
 use crate::matrix::{csc::CscMatrix, csr::CsrMatrix, sparse};
-use faer::{MatMut, MatRef, traits::ComplexField};
+use faer::{MatMut, MatRef};
 
 #[inline]
 pub fn spmv_scaled_f32_on_pattern(
@@ -115,10 +115,7 @@ impl<S: KrystScalar> CsrAccess<S> for CsrMatrix<S> {
     }
 }
 
-impl<S> CsrAccess<S> for sparse::CsrMatrix<S>
-where
-    S: KrystScalar + ComplexField + num_traits::Zero,
-{
+impl<S: KrystScalar> CsrAccess<S> for sparse::CsrMatrix<S> {
     #[inline]
     fn nrows(&self) -> usize {
         self.nrows()
@@ -273,10 +270,11 @@ pub enum TBackend<'a, S: KrystScalar> {
 }
 
 #[cfg(feature = "rayon")]
-fn t_spmv_csr_parallel_csc<S>(csc: &CscMatrix<S>, x: &[S], y: &mut [S]) -> Result<(), KError>
-where
-    S: KrystScalar + ComplexField<Real = f64> + num_traits::Zero,
-{
+fn t_spmv_csr_parallel_csc<S: KrystScalar>(
+    csc: &CscMatrix<S>,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError> {
     if x.len() != csc.nrows() || y.len() != csc.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -298,10 +296,11 @@ where
 }
 
 #[cfg(not(feature = "rayon"))]
-fn t_spmv_csr_parallel_csc<S>(csc: &CscMatrix<S>, x: &[S], y: &mut [S]) -> Result<(), KError>
-where
-    S: KrystScalar + ComplexField<Real = f64> + num_traits::Zero,
-{
+fn t_spmv_csr_parallel_csc<S: KrystScalar>(
+    csc: &CscMatrix<S>,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError> {
     if x.len() != csc.nrows() || y.len() != csc.ncols() {
         return Err(KError::InvalidInput("t_spmv: dimension mismatch".into()));
     }
@@ -390,7 +389,7 @@ pub fn t_spmv_csr_parallel<S, A>(
     y: &mut [S],
 ) -> Result<(), KError>
 where
-    S: KrystScalar + ComplexField<Real = f64> + num_traits::Zero,
+    S: KrystScalar,
     A: CsrAccess<S>,
 {
     match t_backend {
@@ -450,7 +449,7 @@ where
 /// zero `Y` prior to invocation if accumulation is not desired.
 pub fn csr_spmm_dense<S, A>(a: &A, x: MatRef<'_, S>, mut y: MatMut<'_, S>) -> Result<(), KError>
 where
-    S: KrystScalar + ComplexField<Real = f64>,
+    S: KrystScalar,
     A: CsrAccess<S>,
 {
     let (m, n) = (a.nrows(), a.ncols());

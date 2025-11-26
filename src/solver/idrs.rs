@@ -733,18 +733,14 @@ impl IdrsSolver {
                 let vr = reductions[0];
                 let vv = reductions[1];
                 if vv.abs() <= f64::EPSILON {
-                    if self
-                        .attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)?
-                    {
+                    if self.attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)? {
                         continue;
                     }
                     return Err(KError::BreakdownOrIndefinite);
                 }
                 let omega = vr / vv;
                 if omega.abs() <= f64::EPSILON {
-                    if self
-                        .attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)?
-                    {
+                    if self.attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)? {
                         continue;
                     }
                     return Err(KError::BreakdownOrIndefinite);
@@ -793,9 +789,7 @@ impl IdrsSolver {
                     self.compute_ph_r(comm, &mut stats);
                     self.compute_ph_drn(comm, &mut stats);
                     if self.solve_small_system().is_err() {
-                        if self
-                            .attempt_breakdown_repair(&mut attempts, comm, &mut stats)?
-                        {
+                        if self.attempt_breakdown_repair(&mut attempts, comm, &mut stats)? {
                             continue 'block;
                         }
                         return Err(KError::BreakdownOrIndefinite);
@@ -825,9 +819,7 @@ impl IdrsSolver {
                                 &self.ws.v[..n],
                             );
                             if omega_block.abs() <= f64::EPSILON {
-                                if self
-                                    .attempt_breakdown_repair(&mut attempts, comm, &mut stats)?
-                                {
+                                if self.attempt_breakdown_repair(&mut attempts, comm, &mut stats)? {
                                     continue 'block;
                                 }
                                 return Err(KError::BreakdownOrIndefinite);
@@ -863,10 +855,8 @@ impl IdrsSolver {
                         self.ws.d_x.rotate_right(1);
                         self.ws.d_r.rotate_right(1);
                         self.ws.d_r_raw.rotate_right(1);
-                        let (newest_x, _rest_x) =
-                            self.ws.d_x.split_first_mut().expect("nonempty");
-                        let (newest_r, _rest_r) =
-                            self.ws.d_r.split_first_mut().expect("nonempty");
+                        let (newest_x, _rest_x) = self.ws.d_x.split_first_mut().expect("nonempty");
+                        let (newest_r, _rest_r) = self.ws.d_r.split_first_mut().expect("nonempty");
                         let (newest_r_raw, _rest_rr) =
                             self.ws.d_r_raw.split_first_mut().expect("nonempty");
                         let src_x = &self.ws.g_hist_x[..self.opts.s];

@@ -1,13 +1,12 @@
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::scalar::KrystScalar;
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
 use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{NoComm, UniverseComm};
-use faer::traits::ComplexField;
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +18,7 @@ pub struct ValuesId(pub u64);
 
 /// Format-agnostic linear operator.
 pub trait LinOp: Send + Sync + Any {
-    type S: ComplexField;
+    type S: KrystScalar;
 
     /// Dimensions (rows, cols).
     fn dims(&self) -> (usize, usize);
@@ -175,10 +174,7 @@ impl<S: KrystScalar> GenericCsrOp<S> {
     }
 }
 
-impl<S> LinOp for GenericCsrOp<S>
-where
-    S: KrystScalar + ComplexField<Real = f64>,
-{
+impl<S: KrystScalar> LinOp for GenericCsrOp<S> {
     type S = S;
 
     fn dims(&self) -> (usize, usize) {

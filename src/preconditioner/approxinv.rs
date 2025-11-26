@@ -27,7 +27,6 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
 use crate::algebra::prelude::*;
 use crate::core::traits::MatVec;
 use crate::error::KError;
@@ -41,7 +40,6 @@ use crate::preconditioner::legacy::Preconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
 use faer::linalg::solvers::{SolveCore, SolveLstsq};
-use num_traits::Float;
 use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -54,12 +52,12 @@ use std::sync::Arc;
 /// # Type Parameters
 /// - `M`: Matrix type (must implement `MatVec<V>`)
 /// - `V`: Vector type (must be convertible from/to `Vec<T>`)
-/// - `T`: Scalar type (must implement `Float`)
+/// - `T`: Scalar type (must implement `KrystScalar` with `Real = R`)
 pub struct ApproxInv<M, V, T> {
     /// Sparsity pattern for the approximate inverse (manual or automatic)
     pub pattern: SparsityPattern,
     /// Tolerance for numerical operations (pivoting, etc.)
-    pub tol: T,
+    pub tol: R,
     /// Maximum number of outer iterations (not used in this basic SPAI)
     pub max_iter: usize,
     /// Maximum number of improvement steps per row (not used in this basic SPAI)
@@ -81,19 +79,19 @@ pub struct ApproxInv<M, V, T> {
     /// Optionally stores the matrix A (not used in this implementation)
     pub a: Option<M>,
     /// Cached CSR view of the last operator (if setup via LinOp)
-    pub csr: Option<Arc<CsrMatrix<f64>>>,
+    pub csr: Option<Arc<CsrMatrix<T>>>,
     /// Last structure id (for reuse decisions)
     pub last_sid: Option<StructureId>,
     /// Last values id
     pub last_vid: Option<ValuesId>,
     /// Drop tolerance used when converting dense->CSR in setup
-    pub drop_tol: f64,
+    pub drop_tol: R,
     _phantom: PhantomData<V>,
 }
 
 impl<M, V, T> ApproxInv<M, V, T>
 where
-    T: Float,
+    T: KrystScalar<Real = R>,
 {
     #[allow(clippy::too_many_arguments)]
     /// Create a new SPAI preconditioner with the given parameters.
@@ -101,7 +99,7 @@ where
     /// Most parameters are for future extensions; only `pattern` and `tol` are essential.
     pub fn new(
         pattern: SparsityPattern,
-        tol: T,
+        tol: R,
         max_iter: usize,
         nbsteps: usize,
         max_size: usize,
@@ -137,7 +135,7 @@ impl<M: 'static + Sync, V: Sync, T> Preconditioner<M, V> for ApproxInv<M, V, T>
 where
     M: MatVec<V>,
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone,
-    T: Float + 'static + Send + Sync,
+    T: KrystScalar<Real = R> + 'static + Send + Sync,
 {
     /// Setup the SPAI preconditioner by computing the approximate inverse rows.
     ///
@@ -192,8 +190,8 @@ where
                 use faer::linalg::solvers::{FullPivLu, Qr};
                 use faer::{Mat, MatMut};
                 // b_f64: n x m (column-major)
-                let b_f64 = Mat::from_fn(n, m, |j, i| b[i][j].to_f64().unwrap());
-                let rhs = Mat::from_fn(n, 1, |i, _| e_j[i].to_f64().unwrap());
+                let b_f64 = Mat::from_fn(n, m, |j, i| b[i][j].real());
+                let rhs = Mat::from_fn(n, 1, |i, _| e_j[i].real());
                 let sol: Vec<f64> = if m == n {
                     // square: FullPivLu
                     let lu = FullPivLu::new(b_f64.as_ref());
@@ -209,7 +207,7 @@ where
                 // Scatter m values into n-length vector
                 let mut full = vec![T::zero(); n];
                 for (k, &row_i) in pattern.iter().enumerate() {
-                    full[row_i] = T::from(sol[k]).unwrap();
+                    full[row_i] = T::from_real(sol[k]);
                 }
                 full
             } else {
@@ -530,7 +528,7 @@ mod tests {
     struct DenseMat<T> {
         data: Vec<Vec<T>>,
     }
-    impl<T: Float> MatVec<Vec<T>> for DenseMat<T> {
+    impl<T: KrystScalar<Real = R>> MatVec<Vec<T>> for DenseMat<T> {
         fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
             for (i, row) in self.data.iter().enumerate() {
                 y[i] = row
@@ -541,7 +539,7 @@ mod tests {
             }
         }
     }
-    impl<T: Float> crate::core::traits::RowPattern for DenseMat<T> {
+    impl<T: KrystScalar<Real = R>> crate::core::traits::RowPattern for DenseMat<T> {
         fn row_indices(&self, i: usize) -> &[usize] {
             thread_local! {
                 static IDX: std::cell::RefCell<Vec<usize>> = std::cell::RefCell::new(Vec::new());
@@ -562,7 +560,7 @@ mod tests {
     }
 
     /// Construct an identity matrix of size n
-    fn eye<T: Float>(n: usize) -> DenseMat<T> {
+    fn eye<T: KrystScalar<Real = R>>(n: usize) -> DenseMat<T> {
         DenseMat {
             data: (0..n)
                 .map(|i| {
