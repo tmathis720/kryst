@@ -35,7 +35,6 @@ use crate::preconditioner::bridge::{
 };
 use crate::preconditioner::{PcSide, legacy::Preconditioner};
 use bitflags::bitflags;
-use num_traits::Float;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -67,23 +66,20 @@ bitflags! {
 /// - `fshift`: Diagonal shift (for regularization)
 /// - `inv_diag`: Inverse diagonal entries
 /// - `a`: Matrix reference (after setup)
-pub struct Sor<M, V, T> {
+pub struct Sor<M, V> {
     pub its: usize,       // Number of outer SOR iterations
     pub lits: usize,      // Number of local iterations (unused)
     pub sym: MatSorType,  // Sweep type (forward, backward, symmetric)
-    pub omega: T,         // Relaxation parameter
-    pub fshift: T,        // Diagonal shift
-    pub inv_diag: Vec<T>, // Inverse diagonal entries
+    pub omega: S,         // Relaxation parameter
+    pub fshift: S,        // Diagonal shift
+    pub inv_diag: Vec<S>, // Inverse diagonal entries
     pub a: Option<M>,     // Matrix reference (after setup)
     _phantom: PhantomData<V>,
 }
 
-impl<M, V, T> Sor<M, V, T>
-where
-    T: Float,
-{
+impl<M, V> Sor<M, V> {
     /// Create a new SOR preconditioner with the given parameters.
-    pub fn new(omega: T, its: usize, lits: usize, sym: MatSorType, fshift: T) -> Self {
+    pub fn new(omega: S, its: usize, lits: usize, sym: MatSorType, fshift: S) -> Self {
         Self {
             its,
             lits,
@@ -96,10 +92,10 @@ where
         }
     }
     // Setters and getters for parameters
-    pub fn set_omega(&mut self, omega: T) {
+    pub fn set_omega(&mut self, omega: S) {
         self.omega = omega;
     }
-    pub fn omega(&self) -> T {
+    pub fn omega(&self) -> S {
         self.omega
     }
     pub fn set_its(&mut self, its: usize) {
@@ -120,17 +116,17 @@ where
     pub fn sym(&self) -> MatSorType {
         self.sym
     }
-    pub fn set_fshift(&mut self, fshift: T) {
+    pub fn set_fshift(&mut self, fshift: S) {
         self.fshift = fshift;
     }
-    pub fn fshift(&self) -> T {
+    pub fn fshift(&self) -> S {
         self.fshift
     }
 }
 
-impl<M, V, T> fmt::Display for Sor<M, V, T>
+impl<M, V> fmt::Display for Sor<M, V>
 where
-    T: Float + fmt::Display,
+    S: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -141,11 +137,10 @@ where
     }
 }
 
-impl<M, V, T> Preconditioner<M, V> for Sor<M, V, T>
+impl<M, V> Preconditioner<M, V> for Sor<M, V>
 where
-    M: MatVec<V> + Indexing + Clone + std::ops::Index<(usize, usize), Output = T>,
-    V: AsRef<[T]> + AsMut<[T]> + From<Vec<T>>,
-    T: Float + Copy,
+    M: MatVec<V> + Indexing + Clone + std::ops::Index<(usize, usize), Output = S>,
+    V: AsRef<[S]> + AsMut<[S]> + From<Vec<S>>,
 {
     /// Setup SOR: extract diagonal and store inverse.
     ///
@@ -153,13 +148,13 @@ where
     fn setup(&mut self, a: &M) -> Result<(), KError> {
         self.a = Some(a.clone());
         let n = a.nrows();
-        self.inv_diag.resize(n, T::zero());
+        self.inv_diag.resize(n, S::zero());
         for i in 0..n {
             let aii = a[(i, i)] + self.fshift;
-            if aii == T::zero() {
+            if aii == S::zero() {
                 return Err(KError::ZeroPivot(i));
             }
-            self.inv_diag[i] = T::one() / aii;
+            self.inv_diag[i] = S::one() / aii;
         }
         Ok(())
     }
@@ -173,14 +168,14 @@ where
         let a = self.a.as_ref().expect("SOR not setup");
         let x = x.as_ref();
         let y_mut = y.as_mut();
-        y_mut.fill(T::zero());
+        y_mut.fill(S::zero());
 
         for _ in 0..self.its {
             match (side, self.sym) {
                 (_, s) if s.contains(MatSorType::SYMMETRIC_SWEEP) => {
                     self.forward_sweep(a, x, y_mut);
                     let tmp = y_mut.to_vec();
-                    y_mut.fill(T::zero());
+                    y_mut.fill(S::zero());
                     self.backward_sweep(a, &tmp, y_mut);
                 }
                 (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_LOWER) => {
@@ -196,16 +191,15 @@ where
     }
 }
 
-impl<M, V, T> Sor<M, V, T>
+impl<M, V> Sor<M, V>
 where
-    M: MatVec<V> + Indexing + std::ops::Index<(usize, usize), Output = T>,
-    V: AsRef<[T]> + AsMut<[T]> + From<Vec<T>>,
-    T: Float + Copy,
+    M: MatVec<V> + Indexing + std::ops::Index<(usize, usize), Output = S>,
+    V: AsRef<[S]> + AsMut<[S]> + From<Vec<S>>,
 {
-    fn forward_sweep(&self, a: &M, x: &[T], y: &mut [T]) {
+    fn forward_sweep(&self, a: &M, x: &[S], y: &mut [S]) {
         let n = x.len();
         for i in 0..n {
-            let mut sigma = T::zero();
+            let mut sigma = S::zero();
             for j in 0..i {
                 sigma = sigma + a[(i, j)] * y[j];
             }
@@ -216,14 +210,14 @@ where
             }
             let xi = x[i];
             let yi = (xi - sigma) * self.inv_diag[i];
-            y[i] = (T::one() - self.omega) * xi + self.omega * yi;
+            y[i] = (S::one() - self.omega) * xi + self.omega * yi;
         }
     }
 
-    fn backward_sweep(&self, a: &M, x: &[T], y: &mut [T]) {
+    fn backward_sweep(&self, a: &M, x: &[S], y: &mut [S]) {
         let n = x.len();
         for ii in (0..n).rev() {
-            let mut sigma = T::zero();
+            let mut sigma = S::zero();
             for j in (ii + 1)..n {
                 sigma = sigma + a[(ii, j)] * y[j];
             }
@@ -234,7 +228,7 @@ where
             }
             let xi = x[ii];
             let yi = (xi - sigma) * self.inv_diag[ii];
-            y[ii] = (T::one() - self.omega) * xi + self.omega * yi;
+            y[ii] = (S::one() - self.omega) * xi + self.omega * yi;
         }
     }
 }

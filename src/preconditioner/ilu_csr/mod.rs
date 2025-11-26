@@ -766,12 +766,12 @@ impl IluCsr {
         self.n = n;
 
         // Builders for L and U
-        let mut l_build = CsrBuilder::<S>::new(n);
-        let mut u_build = CsrBuilder::<S>::new(n);
+        let mut l_build = CsrBuilder::new(n);
+        let mut u_build = CsrBuilder::new(n);
         let mut inv_diag_u = vec![S::zero(); n];
 
         // Row workspace
-        let mut w = RowWork::<S>::new();
+        let mut w = RowWork::new();
         w.ensure_size(n);
         let mut l_tmp: Vec<(usize, S)> = Vec::new();
         let mut u_tmp: Vec<(usize, S)> = Vec::new();

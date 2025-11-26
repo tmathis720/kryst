@@ -1,6 +1,5 @@
-use crate::algebra::scalar::KrystScalar;
+use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
-use faer::traits::ComplexField;
 
 /// Permutation with cached inverse mapping.
 #[derive(Clone, Debug)]
@@ -41,14 +40,7 @@ impl Permutation {
 }
 
 /// Symmetric permutation of CSR matrix: A' = P A P^T
-pub fn permute_csr_symmetric<T>(a: &CsrMatrix<T>, perm: &Permutation) -> CsrMatrix<T>
-where
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-{
+pub fn permute_csr_symmetric(a: &CsrMatrix<S>, perm: &Permutation) -> CsrMatrix<S> {
     let n = a.nrows();
     assert_eq!(n, a.ncols());
     let rp = a.row_ptr();
@@ -64,7 +56,7 @@ where
         let old_i = perm.p[new_i];
         let rs = rp[old_i];
         let re = rp[old_i + 1];
-        let mut entries: Vec<(usize, T)> = Vec::with_capacity(re - rs);
+        let mut entries: Vec<(usize, S)> = Vec::with_capacity(re - rs);
         for k in rs..re {
             let old_j = cj[k];
             let new_j = perm.pinv[old_j];
@@ -82,14 +74,7 @@ where
 }
 
 /// Reverse Cuthill-McKee ordering for a symmetric graph given by CSR matrix.
-pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation
-where
-    T: ComplexField
-        + Copy
-        + num_traits::Zero
-        + std::ops::Add<Output = T>
-        + std::ops::Mul<Output = T>,
-{
+pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
     let n = a.nrows();
     let rp = a.row_ptr();
     let cj = a.col_idx();

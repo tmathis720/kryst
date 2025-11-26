@@ -1,15 +1,15 @@
-use num_traits::Zero;
+use crate::algebra::prelude::*;
 
 /// Sparse row work array using epoch marking.
 #[derive(Clone, Debug)]
-pub struct RowWork<T> {
+pub struct RowWork {
     epoch: usize,
     mark: Vec<usize>,
-    val: Vec<T>,
+    val: Vec<S>,
     idx: Vec<usize>,
 }
 
-impl<T: Zero + Copy> RowWork<T> {
+impl RowWork {
     pub fn new() -> Self {
         Self {
             epoch: 0,
@@ -22,7 +22,7 @@ impl<T: Zero + Copy> RowWork<T> {
     pub fn ensure_size(&mut self, n: usize) {
         if self.mark.len() < n {
             self.mark.resize(n, 0);
-            self.val.resize(n, T::zero());
+            self.val.resize(n, S::zero());
         }
     }
 
@@ -32,16 +32,16 @@ impl<T: Zero + Copy> RowWork<T> {
     }
 
     #[inline]
-    pub fn get(&self, j: usize) -> T {
+    pub fn get(&self, j: usize) -> S {
         if self.mark.get(j).copied().unwrap_or(0) == self.epoch {
             self.val[j]
         } else {
-            T::zero()
+            S::zero()
         }
     }
 
     #[inline]
-    pub fn set(&mut self, j: usize, x: T) {
+    pub fn set(&mut self, j: usize, x: S) {
         if self.mark.get(j).copied().unwrap_or(0) != self.epoch {
             self.mark[j] = self.epoch;
             self.idx.push(j);
@@ -50,10 +50,7 @@ impl<T: Zero + Copy> RowWork<T> {
     }
 
     #[inline]
-    pub fn add_to(&mut self, j: usize, delta: T)
-    where
-        T: std::ops::Add<Output = T>,
-    {
+    pub fn add_to(&mut self, j: usize, delta: S) {
         if self.mark.get(j).copied().unwrap_or(0) != self.epoch {
             self.mark[j] = self.epoch;
             self.val[j] = delta;
@@ -63,7 +60,7 @@ impl<T: Zero + Copy> RowWork<T> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (usize, T)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (usize, S)> + '_ {
         self.idx.iter().copied().map(|j| (j, self.val[j]))
     }
 }

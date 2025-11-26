@@ -1,6 +1,3 @@
-#[allow(unused_imports)]
-use crate::algebra::blas::{dot_conj, nrm2};
-#[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
 
@@ -85,38 +82,33 @@ impl Default for PivotStats {
     }
 }
 
-fn record_pivot_shift<T>(stats: &mut PivotStats, old: T, new: T)
-where
-    T: KrystScalar<Real = f64>,
-{
-    let sh: f64 = (new - old).abs();
+fn record_pivot_shift(stats: &mut PivotStats, old: S, new: S) {
+    let sh: R = (new - old).abs();
+    let sh_f64: f64 = sh;
     stats.num_floors += 1;
-    if sh > stats.max_abs_shift {
-        stats.max_abs_shift = sh;
+    if sh_f64 > stats.max_abs_shift {
+        stats.max_abs_shift = sh_f64;
     }
-    stats.sum_abs_shift += sh;
+    stats.sum_abs_shift += sh_f64;
     stats.last_floor_value = new.abs();
 }
 
 /// Apply minimal additive shift to stabilize pivot.
-pub fn stabilize_pivot_in_place<T>(
-    u_ii: &mut T,
-    s_i: T,
-    tau: f64,
+pub fn stabilize_pivot_in_place(
+    u_ii: &mut S,
+    s_i: R,
+    tau: R,
     sign_policy: PivotSignPolicy,
     mode: PivotMode,
     stats: &mut PivotStats,
     row: usize,
-) -> Result<(), KError>
-where
-    T: KrystScalar<Real = f64>,
-{
-    let floor = tau * s_i.real();
-    let abs = u_ii.abs();
+) -> Result<(), KError> {
+    let floor = tau * s_i;
+    let abs: R = (*u_ii).abs();
 
     match mode {
         PivotMode::Strict => {
-            if !(abs >= floor) {
+            if abs < floor {
                 stats.num_strict_fail += 1;
                 stats.last_floor_value = floor;
                 return Err(KError::ZeroPivot(row));
@@ -126,18 +118,15 @@ where
             if abs >= floor {
                 return Ok(());
             }
-            // Determine target magnitude
+
+            let magnitude = floor;
             let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
-                    if u_ii.real() >= 0.0 {
-                        T::one()
-                    } else {
-                        cf_from_real(&floor)
-                    }
+                    let sign = if (*u_ii).real() >= 0.0 { 1.0 } else { -1.0 };
+                    S::from_real(sign * magnitude)
                 }
-                PivotSignPolicy::Positive => cf_from_real(&floor),
+                PivotSignPolicy::Positive => S::from_real(magnitude),
             };
-            let target = new_sign * T::from_real(floor);
             let old = *u_ii;
             *u_ii = new_value;
             record_pivot_shift(stats, old, *u_ii);

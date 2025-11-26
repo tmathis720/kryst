@@ -12,10 +12,10 @@
 //! - Faer documentation: https://github.com/sarah-ek/faer-rs
 //! - Golub & Van Loan, Matrix Computations
 
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::solver::legacy::LinearSolver;
 use faer::linalg::solvers::{FullPivLu, Qr, SolveCore};
-use faer::traits::{ComplexField, RealField};
 use faer::{Conj, Mat, MatMut};
 
 #[cfg(feature = "logging")]
@@ -24,12 +24,12 @@ use crate::utils::profiling::StageGuard;
 /// LU solver using full pivoting from Faer.
 ///
 /// Stores the LU factorization for reuse (if desired).
-pub struct LuSolver<T> {
+pub struct LuSolver {
     /// Cached LU factorization (if computed)
-    factor: Option<FullPivLu<T>>,
+    factor: Option<FullPivLu<S>>,
 }
 
-impl<T: ComplexField + RealField> LuSolver<T> {
+impl LuSolver {
     /// Create a new LU solver (no factorization yet).
     pub fn new() -> Self {
         LuSolver { factor: None }
@@ -43,7 +43,7 @@ impl<T: ComplexField + RealField> LuSolver<T> {
     /// # Arguments
     /// * `b` - Right-hand side vector
     /// * `x` - Output vector (solution)
-    pub fn solve_cached(&self, b: &[T], x: &mut [T]) {
+    pub fn solve_cached(&self, b: &[S], x: &mut [S]) {
         if let Some(factor) = &self.factor {
             let n = b.len();
             x.clone_from_slice(b);
@@ -55,21 +55,9 @@ impl<T: ComplexField + RealField> LuSolver<T> {
     }
 }
 
-impl<T> LinearSolver<Mat<T>, Vec<T>> for LuSolver<T>
-where
-    T: ComplexField
-        + RealField
-        + Copy
-        + PartialOrd
-        + From<f64>
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + std::fmt::LowerExp
-        + Default,
-{
+impl LinearSolver<Mat<S>, Vec<S>> for LuSolver {
     type Error = KError;
-    type Scalar = T;
+    type Scalar = S;
 
     /// Solve Ax = b using LU factorization (full pivoting).
     ///
@@ -86,15 +74,15 @@ where
     /// * `Ok(SolveStats)` (always converged in 1 iteration)
     fn solve(
         &mut self,
-        a: &Mat<T>,
-        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<T>, Vec<T>> + '_)>,
-        b: &Vec<T>,
-        x: &mut Vec<T>,
+        a: &Mat<S>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<S>, Vec<S>> + '_)>,
+        b: &Vec<S>,
+        x: &mut Vec<S>,
         _pc_side: crate::preconditioner::PcSide,
         _comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    ) -> Result<crate::utils::convergence::SolveStats<S>, KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("LuSolve");
 
@@ -104,7 +92,7 @@ where
         // Call monitors at start if provided
         if let Some(monitors) = monitors {
             for monitor in monitors {
-                monitor(0, T::zero());
+                monitor(0, S::zero());
             }
         }
 
@@ -129,20 +117,20 @@ where
         // Call monitors at end if provided
         if let Some(monitors) = monitors {
             for monitor in monitors {
-                monitor(1, T::zero());
+                monitor(1, S::zero());
             }
         }
 
         // For direct solvers, always converged in 1 iteration
         Ok(crate::utils::convergence::SolveStats::new(
             1,
-            T::zero(),
+            S::zero(),
             crate::utils::convergence::ConvergedReason::ConvergedAtol,
         ))
     }
 }
 
-impl<T: faer::traits::ComplexField + faer::traits::RealField> Default for LuSolver<T> {
+impl Default for LuSolver {
     fn default() -> Self {
         Self::new()
     }
@@ -158,11 +146,9 @@ impl QrSolver {
     }
 }
 
-impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64> + Default>
-    LinearSolver<Mat<T>, Vec<T>> for QrSolver
-{
+impl LinearSolver<Mat<S>, Vec<S>> for QrSolver {
     type Error = KError;
-    type Scalar = T;
+    type Scalar = S;
 
     /// Solve Ax = b using QR factorization.
     ///
@@ -179,15 +165,15 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64> + Default>
     /// * `Ok(SolveStats)` (always converged in 1 iteration)
     fn solve(
         &mut self,
-        a: &Mat<T>,
-        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<T>, Vec<T>> + '_)>,
-        b: &Vec<T>,
-        x: &mut Vec<T>,
+        a: &Mat<S>,
+        pc: Option<&(dyn crate::preconditioner::legacy::Preconditioner<Mat<S>, Vec<S>> + '_)>,
+        b: &Vec<S>,
+        x: &mut Vec<S>,
         _pc_side: crate::preconditioner::PcSide,
         _comm: &crate::parallel::UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
-    ) -> Result<crate::utils::convergence::SolveStats<T>, KError> {
+    ) -> Result<crate::utils::convergence::SolveStats<S>, KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("QrSolve");
 
@@ -197,7 +183,7 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64> + Default>
         // Call monitors at start if provided
         if let Some(monitors) = monitors {
             for monitor in monitors {
-                monitor(0, T::zero());
+                monitor(0, S::zero());
             }
         }
 
@@ -211,13 +197,13 @@ impl<T: ComplexField + RealField + Copy + PartialOrd + From<f64> + Default>
         // Call monitors at end if provided
         if let Some(monitors) = monitors {
             for monitor in monitors {
-                monitor(1, T::zero());
+                monitor(1, S::zero());
             }
         }
 
         Ok(crate::utils::convergence::SolveStats::new(
             1,
-            T::zero(),
+            S::zero(),
             crate::utils::convergence::ConvergedReason::ConvergedAtol,
         ))
     }
@@ -240,20 +226,20 @@ mod tests {
         // 3x3 system: [[2,1,1],[1,3,2],[1,0,0]] x = [4,5,6]
         // True solution: [6,15,-23]
         let a = Mat::from_fn(3, 3, |i, j| match (i, j) {
-            (0, 0) => 2.0,
-            (0, 1) => 1.0,
-            (0, 2) => 1.0,
-            (1, 0) => 1.0,
-            (1, 1) => 3.0,
-            (1, 2) => 2.0,
-            (2, 0) => 1.0,
-            (2, 1) => 0.0,
-            (2, 2) => 0.0,
-            _ => 0.0,
+            (0, 0) => S::from_real(2.0),
+            (0, 1) => S::from_real(1.0),
+            (0, 2) => S::from_real(1.0),
+            (1, 0) => S::from_real(1.0),
+            (1, 1) => S::from_real(3.0),
+            (1, 2) => S::from_real(2.0),
+            (2, 0) => S::from_real(1.0),
+            (2, 1) => S::zero(),
+            (2, 2) => S::zero(),
+            _ => S::zero(),
         });
-        let b = vec![4.0, 5.0, 6.0];
-        let mut x = vec![0.0; 3];
-        let mut solver = LuSolver::<f64>::new();
+        let b = vec![S::from_real(4.0), S::from_real(5.0), S::from_real(6.0)];
+        let mut x = vec![S::zero(); 3];
+        let mut solver = LuSolver::new();
         let stats = solver
             .solve(
                 &a,
@@ -266,11 +252,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let expected = vec![6.0, 15.0, -23.0];
+        let expected = vec![S::from_real(6.0), S::from_real(15.0), S::from_real(-23.0)];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!(
-                (f64::from(*xi) - f64::from(*ei)).abs() < tol,
+                (xi.real() - ei.real()).abs() < tol,
                 "xi = {}, expected = {}",
                 xi,
                 ei
@@ -291,19 +277,19 @@ mod tests {
         // 3x3 system: [[2,1,1],[1,3,2],[1,0,0]] x = [4,5,6]
         // True solution: [6,15,-23]
         let a = Mat::from_fn(3, 3, |i, j| match (i, j) {
-            (0, 0) => 2.0,
-            (0, 1) => 1.0,
-            (0, 2) => 1.0,
-            (1, 0) => 1.0,
-            (1, 1) => 3.0,
-            (1, 2) => 2.0,
-            (2, 0) => 1.0,
-            (2, 1) => 0.0,
-            (2, 2) => 0.0,
-            _ => 0.0,
+            (0, 0) => S::from_real(2.0),
+            (0, 1) => S::from_real(1.0),
+            (0, 2) => S::from_real(1.0),
+            (1, 0) => S::from_real(1.0),
+            (1, 1) => S::from_real(3.0),
+            (1, 2) => S::from_real(2.0),
+            (2, 0) => S::from_real(1.0),
+            (2, 1) => S::zero(),
+            (2, 2) => S::zero(),
+            _ => S::zero(),
         });
-        let b = vec![4.0, 5.0, 6.0];
-        let mut x = vec![0.0; 3];
+        let b = vec![S::from_real(4.0), S::from_real(5.0), S::from_real(6.0)];
+        let mut x = vec![S::zero(); 3];
         let mut solver = QrSolver::new();
         let stats = solver
             .solve(
@@ -317,11 +303,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let expected = vec![6.0, 15.0, -23.0];
+        let expected = vec![S::from_real(6.0), S::from_real(15.0), S::from_real(-23.0)];
         let tol = 1e-10;
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!(
-                (f64::from(*xi) - f64::from(*ei)).abs() < tol,
+                (xi.real() - ei.real()).abs() < tol,
                 "xi = {}, expected = {}",
                 xi,
                 ei
