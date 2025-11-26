@@ -143,11 +143,11 @@ pub struct IluConfig {
     /// Maximum nonzeros per row (HYPRE: maxRowNnz)
     pub max_fill_per_row: usize,
     /// Drop tolerance for ILUT (HYPRE: droptol[0])
-    pub drop_tolerance: f64,
+    pub drop_tolerance: R,
     /// Drop tolerance for off-diagonal blocks (HYPRE: droptol[1])
-    pub offdiag_drop_tolerance: f64,
+    pub offdiag_drop_tolerance: R,
     /// Drop tolerance for Schur complement (HYPRE: droptol[2])
-    pub schur_drop_tolerance: f64,
+    pub schur_drop_tolerance: R,
     /// Reordering strategy (HYPRE: reordering_type)
     pub reordering_type: ReorderingType,
     /// Triangular solve type (HYPRE: tri_solve)
@@ -157,7 +157,7 @@ pub struct IluConfig {
     /// Upper triangular Jacobi iterations (HYPRE: upper_jacobi_iters)
     pub upper_jacobi_iters: usize,
     /// Tolerance for iterative solve (HYPRE: tol)
-    pub tolerance: f64,
+    pub tolerance: R,
     /// Maximum iterations for iterative solve (HYPRE: max_iter)
     pub max_iterations: usize,
     /// Logging level (HYPRE: logging)
@@ -271,7 +271,7 @@ impl IluBuilder {
     }
 
     /// Set drop tolerance for ILUT (HYPRE: droptol)
-    pub fn drop_tolerance(mut self, tol: f64) -> Self {
+    pub fn drop_tolerance(mut self, tol: R) -> Self {
         self.config.drop_tolerance = tol;
         self
     }
@@ -1289,7 +1289,7 @@ impl Ilu {
     }
 
     /// Quick factory method for common ILU configurations
-    pub fn create_quick(ilu_type: IluType, fill_or_drop: f64) -> Result<Self, KError> {
+    pub fn create_quick(ilu_type: IluType, fill_or_drop: R) -> Result<Self, KError> {
         let mut config = IluConfig::default();
         config.ilu_type = ilu_type;
 

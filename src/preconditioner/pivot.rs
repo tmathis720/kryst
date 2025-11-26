@@ -5,7 +5,7 @@ use crate::error::KError;
 #[derive(Clone, Debug)]
 pub struct PivotPolicy {
     pub mode: PivotMode,
-    pub tau: f64,
+    pub tau: R,
     pub scale: PivotScale,
     pub sign: PivotSignPolicy,
     pub deterministic: bool,
@@ -64,10 +64,10 @@ pub enum PivotSignPolicy {
 #[derive(Clone, Debug)]
 pub struct PivotStats {
     pub num_floors: usize,
-    pub max_abs_shift: f64,
-    pub sum_abs_shift: f64,
+    pub max_abs_shift: R,
+    pub sum_abs_shift: R,
     pub num_strict_fail: usize,
-    pub last_floor_value: f64,
+    pub last_floor_value: R,
 }
 
 impl Default for PivotStats {
@@ -84,12 +84,11 @@ impl Default for PivotStats {
 
 fn record_pivot_shift(stats: &mut PivotStats, old: S, new: S) {
     let sh: R = (new - old).abs();
-    let sh_f64: f64 = sh;
     stats.num_floors += 1;
-    if sh_f64 > stats.max_abs_shift {
-        stats.max_abs_shift = sh_f64;
+    if sh > stats.max_abs_shift {
+        stats.max_abs_shift = sh;
     }
-    stats.sum_abs_shift += sh_f64;
+    stats.sum_abs_shift += sh;
     stats.last_floor_value = new.abs();
 }
 
