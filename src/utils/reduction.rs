@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::cell::RefCell;
 use std::sync::mpsc::Receiver;
 
 use crate::algebra::prelude::*;
@@ -7,11 +7,7 @@ use crate::parallel::Comm;
 use crate::reduction::{CommDeterministic, Packet, ReproMode};
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
-use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-
-static WAIT_PAIR_COUNT: AtomicUsize = AtomicUsize::new(0);
-static WAIT_VEC_COUNT: AtomicUsize = AtomicUsize::new(0);
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // Compact encoding of the active reproducibility mode for cross-module queries.
 // 0 = Fast, 1 = Deterministic, 2 = DeterministicAccurate
@@ -26,31 +22,51 @@ pub struct ReductionCounters {
     pub reduced_scalars: usize,
 }
 
-static TEST_COUNTER_ENABLED: AtomicBool = AtomicBool::new(false);
-static TEST_COUNTERS: Lazy<Mutex<ReductionCounters>> =
-    Lazy::new(|| Mutex::new(ReductionCounters::default()));
+#[derive(Default)]
+struct TestCounterState {
+    enabled: bool,
+    reductions: ReductionCounters,
+    wait_pairs: usize,
+    wait_vecs: usize,
+}
+
+thread_local! {
+    static TEST_COUNTER_STATE: RefCell<TestCounterState> = RefCell::new(TestCounterState::default());
+}
+
+fn counter_active_for_current_thread() -> bool {
+    TEST_COUNTER_STATE.with(|state| state.borrow().enabled)
+}
 
 fn record_reduction(len: usize) {
-    if TEST_COUNTER_ENABLED.load(Ordering::Relaxed) {
-        let mut guard = TEST_COUNTERS.lock().unwrap();
-        guard.allreduces += 1;
-        guard.reduced_scalars += len;
+    if !counter_active_for_current_thread() {
+        return;
     }
+
+    TEST_COUNTER_STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        s.reductions.allreduces += 1;
+        s.reductions.reduced_scalars += len;
+    });
 }
 
 /// Enable or disable the global reduction counter used in tests.
 pub fn install_test_counter(enable: bool) {
-    TEST_COUNTER_ENABLED.store(enable, Ordering::SeqCst);
-    if !enable {
-        let mut guard = TEST_COUNTERS.lock().unwrap();
-        *guard = ReductionCounters::default();
-    }
+    TEST_COUNTER_STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        s.enabled = enable;
+        s.reductions = ReductionCounters::default();
+        s.wait_pairs = 0;
+        s.wait_vecs = 0;
+    });
 }
 
 /// Take the current reduction counters, resetting the stored values to zero.
 pub fn take_test_counter() -> ReductionCounters {
-    let mut guard = TEST_COUNTERS.lock().unwrap();
-    std::mem::take(&mut *guard)
+    TEST_COUNTER_STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        std::mem::take(&mut s.reductions)
+    })
 }
 
 #[inline]
@@ -82,12 +98,20 @@ pub fn repro_mode_is_strict() -> bool {
 
 #[inline]
 fn record_wait_pair() {
-    WAIT_PAIR_COUNT.fetch_add(1, Ordering::Relaxed);
+    if counter_active_for_current_thread() {
+        TEST_COUNTER_STATE.with(|state| {
+            state.borrow_mut().wait_pairs += 1;
+        });
+    }
 }
 
 #[inline]
 fn record_wait_vec() {
-    WAIT_VEC_COUNT.fetch_add(1, Ordering::Relaxed);
+    if counter_active_for_current_thread() {
+        TEST_COUNTER_STATE.with(|state| {
+            state.borrow_mut().wait_vecs += 1;
+        });
+    }
 }
 
 pub mod test_hooks {
@@ -95,16 +119,19 @@ pub mod test_hooks {
 
     /// Reset the asynchronous reduction completion counters. Intended for tests.
     pub fn reset_wait_counters() {
-        WAIT_PAIR_COUNT.store(0, Ordering::Relaxed);
-        WAIT_VEC_COUNT.store(0, Ordering::Relaxed);
+        TEST_COUNTER_STATE.with(|state| {
+            let mut s = state.borrow_mut();
+            s.wait_pairs = 0;
+            s.wait_vecs = 0;
+        });
     }
 
     /// Return the number of completed pair and vector reductions recorded so far.
     pub fn wait_counters() -> (usize, usize) {
-        (
-            WAIT_PAIR_COUNT.load(Ordering::Relaxed),
-            WAIT_VEC_COUNT.load(Ordering::Relaxed),
-        )
+        TEST_COUNTER_STATE.with(|state| {
+            let s = state.borrow();
+            (s.wait_pairs, s.wait_vecs)
+        })
     }
 }
 

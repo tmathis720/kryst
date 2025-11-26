@@ -80,6 +80,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*};
 use crate::utils::metrics::{Counters, SolveTimer};
@@ -683,14 +684,16 @@ impl Ilu {
     fn handle_pivot(&mut self, pivot: &mut S, row: usize, matrix: &Mat<S>) -> Result<(), KError> {
         let policy = &self.config.pivot_policy;
 
-        // determine scaling value
+        // determine scaling value and guard against vanishing floors by
+        // clamping to the global maximum diagonal magnitude
         let s_i = match policy.scale {
             PivotScale::MaxDiagA => self.max_diag_a,
             PivotScale::LocalDiagA => matrix[(row, row)].abs(),
             PivotScale::RowInfA => self.row_inf_a[row],
             PivotScale::RowGershgorin => self.row_gersh_a[row],
             PivotScale::RunningMaxU => self.running_max_u,
-        };
+        }
+        .max(self.max_diag_a);
 
         let tau = policy.tau;
         if let Err(e) = stabilize_pivot_in_place(
@@ -1523,6 +1526,16 @@ impl Ilu {
 
     pub fn set_monitor(&mut self, m: Option<Box<dyn Monitor>>) {
         self.monitor = m;
+    }
+}
+
+impl LocalPreconditioner for Ilu {
+    fn dims(&self) -> (usize, usize) {
+        (self.l.nrows(), self.l.ncols())
+    }
+
+    fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        self.apply_slice(PcSide::Left, x, y)
     }
 }
 

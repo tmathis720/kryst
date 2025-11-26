@@ -6,7 +6,7 @@ use mpi::datatype::Equivalence;
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
 use std::marker::PhantomData;
-#[cfg(any(feature = "mpi", feature = "rayon"))]
+#[cfg(feature = "mpi")]
 use std::sync::Arc;
 
 mod reduce;

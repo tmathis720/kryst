@@ -241,6 +241,27 @@ pub fn par_xpay(x: &[S], alpha: S, y: &mut [S]) {
     par_axpby(x, S::one(), y, alpha);
 }
 
+/// Apply `f(i)` for each index `i` in `0..len`, using Rayon when enabled and the
+/// problem size exceeds the configured threshold.
+#[inline]
+pub fn par_for_each_index<F>(len: usize, f: F)
+where
+    F: Fn(usize) + Sync + Send,
+{
+    #[cfg(feature = "rayon")]
+    {
+        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
+        if len >= min_len {
+            (0..len).into_par_iter().for_each(|i| f(i));
+            return;
+        }
+    }
+
+    for i in 0..len {
+        f(i);
+    }
+}
+
 #[inline]
 pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
     debug_assert_eq!(x.len(), y.len());

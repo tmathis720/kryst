@@ -1,5 +1,6 @@
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::parallel;
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -7,13 +8,10 @@ use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{LocalPreconditioner, PcSide, Preconditioner};
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 pub struct Jacobi {
     pub(crate) diag_inv: Vec<S>,
@@ -100,25 +98,36 @@ impl Preconditioner for Jacobi {
                 z.len()
             )));
         }
-        #[cfg_attr(not(feature = "rayon"), allow(unused_mut))]
-        let mut used_parallel = false;
-        #[cfg(feature = "rayon")]
-        {
-            if r.len() >= crate::parallel_cfg::parallel_tune().min_len_vec {
-                z.par_iter_mut()
-                    .zip(r.par_iter().copied())
-                    .zip(self.diag_inv.par_iter().copied())
-                    .for_each(|((zi, ri), di)| {
-                        *zi = di.real() * ri;
-                    });
-                used_parallel = true;
-            }
+        let z_ptr = AtomicPtr::new(z.as_mut_ptr());
+        parallel::par_for_each_index(r.len(), move |i| unsafe {
+            let z_ptr = z_ptr.load(Ordering::Relaxed);
+            *z_ptr.add(i) = self.diag_inv[i].real() * r[i];
+        });
+        self.applies.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl LocalPreconditioner for Jacobi {
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput(format!(
+                "Jacobi::apply_local dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
         }
-        if !used_parallel {
-            for (zi, (&ri, &di)) in z.iter_mut().zip(r.iter().zip(self.diag_inv.iter())) {
-                *zi = di.real() * ri;
-            }
-        }
+
+        let y_ptr = AtomicPtr::new(y.as_mut_ptr());
+        parallel::par_for_each_index(x.len(), move |i| unsafe {
+            let y_ptr = y_ptr.load(Ordering::Relaxed);
+            *y_ptr.add(i) = self.diag_inv[i] * x[i];
+        });
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -149,24 +158,11 @@ impl KPreconditioner for Jacobi {
             )));
         }
 
-        let mut used_parallel = false;
-        #[cfg(feature = "rayon")]
-        {
-            if x.len() >= crate::parallel_cfg::parallel_tune().min_len_vec {
-                y.par_iter_mut()
-                    .zip(x.par_iter().copied())
-                    .zip(self.diag_inv.par_iter().copied())
-                    .for_each(|((yi, xi), di)| {
-                        *yi = di * xi;
-                    });
-                used_parallel = true;
-            }
-        }
-        if !used_parallel {
-            for (yi, (&xi, &di)) in y.iter_mut().zip(x.iter().zip(self.diag_inv.iter())) {
-                *yi = di * xi;
-            }
-        }
+        let y_ptr = AtomicPtr::new(y.as_mut_ptr());
+        parallel::par_for_each_index(x.len(), move |i| unsafe {
+            let y_ptr = y_ptr.load(Ordering::Relaxed);
+            *y_ptr.add(i) = self.diag_inv[i] * x[i];
+        });
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }

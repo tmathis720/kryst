@@ -40,6 +40,7 @@
 
 #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use crate::algebra::prelude::*;
+use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::LinOp;
@@ -247,6 +248,23 @@ pub trait Preconditioner: Send + Sync {
     /// Return `None` to keep all values (treated as 0.0).
     fn preferred_drop_tol_for_format(&self) -> Option<f64> {
         None
+    }
+}
+
+/// Local, communicator-agnostic preconditioner used by kernel abstractions.
+pub trait LocalPreconditioner<T: KrystScalar = S>: Send + Sync {
+    /// Dimensions `(nrows, ncols)` of the operator.
+    fn dims(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    /// Apply `M^{-1}` locally: `y = M^{-1} x`.
+    fn apply_local(&self, x: &[T], y: &mut [T]) -> Result<(), crate::error::KError>;
+
+    /// Convenience in-place application using a temporary buffer.
+    fn apply_local_in_place(&self, x: &mut [T]) -> Result<(), crate::error::KError> {
+        let tmp = x.to_vec();
+        self.apply_local(&tmp, x)
     }
 }
 

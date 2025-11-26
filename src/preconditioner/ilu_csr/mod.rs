@@ -6,7 +6,7 @@ use crate::matrix::convert::csr_from_linop;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
-use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
+use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 
 #[cfg(feature = "complex")]
@@ -1149,6 +1149,25 @@ impl Preconditioner for IluCsr {
             is_spd: false,
             side_restriction: Some(PcSide::Left),
         }
+    }
+}
+
+impl LocalPreconditioner for IluCsr {
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput(format!(
+                "IluCsr::apply_local dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+
+        self.apply_op_scalar(Op::NoTrans, x, y)
     }
 }
 

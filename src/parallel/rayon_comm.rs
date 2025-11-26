@@ -14,6 +14,7 @@
 //! - [num_cpus documentation](https://docs.rs/num_cpus)
 
 use rayon::prelude::*;
+use rayon::scope;
 
 /// Shared-memory communicator using Rayon for parallelism.
 ///
@@ -58,7 +59,7 @@ impl super::Comm for RayonComm {
 
     /// Synchronization barrier (no-op in shared memory, but uses a Rayon scope for API compatibility).
     fn barrier(&self) {
-        rayon::scope(|_| {});
+        scope(|_| {});
     }
 
     /// Mimics scatter operation by copying a chunk of the global array to the output buffer.
