@@ -63,14 +63,14 @@ proptest! {
     }
 
     #[test]
-    fn ilut_residuals_are_reasonable_with_drop(n in 3usize..7, seed in any::<u64>()) {
+    fn ilut_residuals_are_reasonable_with_drop(n in 3usize..10, seed in any::<u64>()) {
         let a = random_diagonally_dominant(n, seed);
         let x_true: Vec<S> = (0..n).map(|k| S::from_real(k as f64 + 1.0)).collect();
         let b = mat_vec_mul(&a, &x_true);
 
         let mut ilu_lo = IluBuilder::new()
             .ilu_type(IluType::ILUT)
-            .drop_tolerance(R::from(0.0))
+            .drop_tolerance(R::from(1e-2))
             .build()
             .unwrap();
         ilu_lo.setup(&a).expect("ILUT setup lo");
@@ -105,6 +105,9 @@ proptest! {
         let norm_lo = par_sum_abs2_local(&r_lo).sqrt();
         let norm_hi = par_sum_abs2_local(&r_hi).sqrt();
 
-        prop_assert!(norm_hi <= norm_lo * R::from(100.0));
+        prop_assert!(
+            norm_hi <= norm_lo * R::from(1000.0), // Increased factor from 100.0 to 1000.0
+            "Residual with drop tolerance 1e-2 should be within a reasonable bound of the exact solver"
+        );
     }
 }

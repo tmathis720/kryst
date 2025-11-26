@@ -507,7 +507,7 @@ impl CgSolver {
             (rho, rsq, znorm)
         };
         let mut rho_prev: R = rho;
-        if rho <= R::zero() || !rho.is_finite() {
+        if rho < R::zero() || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
         let mut xnorm = if self.trust_region.is_some() {
@@ -522,6 +522,11 @@ impl CgSolver {
             CgNormType::Natural => znorm.unwrap().abs().sqrt(),
             CgNormType::None => R::zero(),
         };
+        let zero_floor = self
+            .conv
+            .atol
+            .max(self.conv.rtol * res0_reported)
+            * R::from(1e-5);
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -543,6 +548,9 @@ impl CgSolver {
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut s = s0;
             s.final_residual = global_nrm2(comm, r);
+            if s.final_residual <= zero_floor {
+                s.final_residual = R::zero();
+            }
             return Ok(Self::attach_drift_stats(s));
         }
 
@@ -694,7 +702,7 @@ impl CgSolver {
             let rho_scalar = dot_results[rho_idx];
             debug::record_dot(debug::DotKind::Rho, rho_scalar);
             let rho_new: R = dot_result_to_real(rho_scalar);
-            if rho_new <= R::zero() || !rho_new.is_finite() {
+            if rho_new < R::zero() || !rho_new.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
             }
 
@@ -743,6 +751,9 @@ impl CgSolver {
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 s.final_residual = global_nrm2(comm, r);
+                if s.final_residual <= zero_floor {
+                    s.final_residual = R::zero();
+                }
                 return Ok(Self::attach_drift_stats(s));
             }
 
@@ -838,6 +849,7 @@ impl CgSolver {
         if delta <= R::zero() || !delta.is_finite() {
             return Err(KError::IndefiniteMatrix);
         }
+        let mut alpha: R = rho / delta;
 
         let rsq = if let Some(idx) = rsq_idx {
             let value = scalars[idx];
@@ -869,6 +881,11 @@ impl CgSolver {
             CgNormType::Natural => znorm.unwrap().abs().sqrt(),
             CgNormType::None => R::zero(),
         };
+        let zero_floor = self
+            .conv
+            .atol
+            .max(self.conv.rtol * res0_reported)
+            * R::from(1e-5);
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -888,13 +905,15 @@ impl CgSolver {
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut s_out = s0;
             s_out.final_residual = global_nrm2(comm, r);
+            if s_out.final_residual <= zero_floor {
+                s_out.final_residual = R::zero();
+            }
             return Ok(Self::attach_drift_stats(s_out));
         }
 
         let mut rho_prev = rho;
 
         for k in 1..=self.conv.max_iters {
-            let alpha: R = rho / delta;
             let alpha_s: S = S::from_real(alpha);
             let local_pnorm_sq = if self.trust_region.is_some() {
                 par_sum_abs2_local(p)
@@ -968,16 +987,13 @@ impl CgSolver {
             let rho_scalar = tuple[rho_idx];
             debug::record_dot(debug::DotKind::Rho, rho_scalar);
             let rho_new: R = dot_result_to_real(rho_scalar);
-            if rho_new <= R::zero() || !rho_new.is_finite() {
+            if rho_new < R::zero() || !rho_new.is_finite() {
                 return Err(KError::IndefinitePreconditioner);
             }
 
             let delta_scalar = tuple[delta_idx];
             debug::record_dot(debug::DotKind::PAp, delta_scalar);
             let delta_new: R = dot_result_to_real(delta_scalar);
-            if delta_new <= R::zero() || !delta_new.is_finite() {
-                return Err(KError::IndefiniteMatrix);
-            }
 
             let rsq_new = if let Some(idx) = rsq_idx {
                 let value = tuple[idx];
@@ -1031,12 +1047,25 @@ impl CgSolver {
             let (reason, mut s_out) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 s_out.final_residual = global_nrm2(comm, r);
+                if s_out.final_residual <= zero_floor {
+                    s_out.final_residual = R::zero();
+                }
                 return Ok(Self::attach_drift_stats(s_out));
+            }
+
+            if delta_new <= R::zero() || !delta_new.is_finite() {
+                return Err(KError::IndefiniteMatrix);
+            }
+
+            let denom: R = delta_new - (beta / alpha) * rho_new;
+            if denom <= R::zero() || !denom.is_finite() {
+                return Err(KError::IndefiniteMatrix);
             }
 
             rho_prev = rho;
             rho = rho_new;
             delta = delta_new;
+            alpha = rho / denom;
             stats.iterations = k;
             stats.final_residual = res_reported;
         }
