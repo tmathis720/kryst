@@ -456,7 +456,8 @@ impl LinearSolver for MinresSolver {
 mod tests {
     use super::*;
 
-    use crate::{MatShell, parallel::UniverseComm};
+    use crate::parallel::UniverseComm;
+    use crate::matrix::MatShell;
 
     // Helper to make a MatShell from a closure
     fn matshell_from<F: Fn(&[f64], &mut [f64]) + Send + Sync + 'static>(
