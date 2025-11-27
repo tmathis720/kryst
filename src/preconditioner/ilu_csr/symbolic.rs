@@ -1,4 +1,5 @@
-use crate::algebra::scalar::{KrystScalar, S};
+use crate::algebra::scalar::KrystScalar;
+use super::S;
 
 #[derive(Clone, Debug)]
 pub struct RowWork {

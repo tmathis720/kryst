@@ -326,6 +326,8 @@ impl UniverseComm {
 
     /// Deterministic sum of multiple scalars across all ranks.
     pub fn reduce_sum_scalars_s_repro(&self, locals: &mut [S]) {
+        #[cfg(not(feature = "mpi"))]
+        let _ = locals;
         match self {
             UniverseComm::NoComm(_) => {}
             #[cfg(feature = "mpi")]

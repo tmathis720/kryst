@@ -367,7 +367,15 @@ impl MatrixMarketData {
     /// Convert to a dense matrix of Kryst scalars.
     pub fn to_dense_matrix_scalar(&self) -> Result<Mat<S>, KError> {
         if self.is_coordinate {
-            return Ok(self.to_csr_matrix_scalar()?.to_dense());
+            let csr = self.to_csr_matrix_scalar()?;
+            let mut dense = Mat::zeros(csr.nrows(), csr.ncols());
+            for i in 0..csr.nrows() {
+                let (cols, vals) = csr.row(i);
+                for (&j, &v) in cols.iter().zip(vals.iter()) {
+                    dense[(i, j)] = v;
+                }
+            }
+            return Ok(dense);
         }
 
         let mut dense = Mat::zeros(self.rows, self.cols);

@@ -40,7 +40,10 @@ impl Permutation {
 }
 
 /// Symmetric permutation of CSR matrix: A' = P A P^T
-pub fn permute_csr_symmetric(a: &CsrMatrix<S>, perm: &Permutation) -> CsrMatrix<S> {
+pub fn permute_csr_symmetric<T: KrystScalar>(
+    a: &CsrMatrix<T>,
+    perm: &Permutation,
+) -> CsrMatrix<T> {
     let n = a.nrows();
     assert_eq!(n, a.ncols());
     let rp = a.row_ptr();
@@ -56,7 +59,7 @@ pub fn permute_csr_symmetric(a: &CsrMatrix<S>, perm: &Permutation) -> CsrMatrix<
         let old_i = perm.p[new_i];
         let rs = rp[old_i];
         let re = rp[old_i + 1];
-        let mut entries: Vec<(usize, S)> = Vec::with_capacity(re - rs);
+        let mut entries: Vec<(usize, T)> = Vec::with_capacity(re - rs);
         for k in rs..re {
             let old_j = cj[k];
             let new_j = perm.pinv[old_j];

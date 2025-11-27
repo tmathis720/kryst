@@ -4045,9 +4045,17 @@ pub trait MatrixGet<T> {
 }
 
 /// Trait for extracting a submatrix by index set (for block/ASM preconditioners).
-pub trait SubmatrixExtract {
-    /// Returns the submatrix with rows and columns given by `indices`.
-    fn submatrix(&self, indices: &[usize]) -> Self;
+pub trait SubmatrixExtract: Sized {
+    /// Stored scalar type for the matrix.
+    type S;
+
+    /// Extract a submatrix defined by row and column index sets.
+    fn extract_submatrix(&self, rows: &[usize], cols: &[usize]) -> Self;
+
+    /// Convenience helper for square sub-blocks that use the same index set.
+    fn submatrix(&self, indices: &[usize]) -> Self {
+        self.extract_submatrix(indices, indices)
+    }
 }
 
 /// Sparse-aware matrix-vector operations for AMG and iterative solvers
@@ -5174,4 +5182,3 @@ impl<V> MatShape for ShellMat<V> {
     }
 }
 ```
-

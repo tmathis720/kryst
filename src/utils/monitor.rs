@@ -61,6 +61,8 @@ pub struct TextMonitor {
 
 impl Monitor for TextMonitor {
     fn on_event(&self, ev: Event<'_>) {
+        #[cfg(not(feature = "logging"))]
+        let _ = ev;
         #[cfg(feature = "logging")]
         if self.rank0 {
             match ev {

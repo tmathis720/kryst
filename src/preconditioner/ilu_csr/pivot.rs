@@ -1,4 +1,5 @@
-use crate::algebra::scalar::{KrystScalar, R, S};
+use crate::algebra::scalar::{KrystScalar, R};
+use super::S;
 use crate::error::KError;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

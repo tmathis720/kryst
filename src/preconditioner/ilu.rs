@@ -72,14 +72,10 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
-#[cfg(feature = "complex")]
-use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
-use crate::algebra::prelude::*;
+use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
-#[cfg(feature = "complex")]
-use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*};
@@ -90,6 +86,10 @@ use std::sync::Mutex;
 
 #[cfg(feature = "logging")]
 use log::{debug, info, trace, warn};
+
+// ILU is restricted to real scalars.
+type S = f64;
+type R = f64;
 
 /// HYPRE-inspired ILU types
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1545,41 +1545,6 @@ impl LocalPreconditioner for Ilu {
 /// Legacy ILU(0) type alias for backward compatibility
 pub type Ilu0 = Ilu;
 
-#[cfg(feature = "complex")]
-impl KPreconditioner for Ilu {
-    type Scalar = S;
-
-    #[inline]
-    fn dims(&self) -> (usize, usize) {
-        (self.l.nrows(), self.l.ncols())
-    }
-
-    fn apply_s(
-        &self,
-        side: PcSide,
-        x: &[S],
-        y: &mut [S],
-        scratch: &mut BridgeScratch,
-    ) -> Result<(), KError> {
-        let n = self.l.nrows();
-        if x.len() != n || y.len() != n {
-            return Err(KError::InvalidInput(format!(
-                "Ilu::apply_s dimension mismatch: expected {}, got x={} y={}",
-                n,
-                x.len(),
-                y.len()
-            )));
-        }
-
-        scratch.with_pair(n, |xr, yr| {
-            copy_scalar_to_real_in(x, xr);
-            self.apply_slice(side, xr, yr)?;
-            copy_real_into_scalar(yr, y);
-            Ok(())
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Ilu, IluBuilder, IluConfig, IluType, TriSolveType};
@@ -1779,45 +1744,6 @@ mod tests {
         assert!(apply_result.is_ok());
     }
 
-    #[cfg(feature = "complex")]
-    #[test]
-    fn apply_s_matches_real_path() {
-        use crate::algebra::bridge::BridgeScratch;
-        use crate::algebra::prelude::*;
-        use crate::ops::kpc::KPreconditioner;
-
-        let matrix = faer::Mat::from_fn(3, 3, |i, j| if i == j { 4.0 } else { -1.0 });
-
-        let mut ilu = Ilu::new();
-        use crate::preconditioner::legacy::Preconditioner;
-        ilu.setup(&matrix).expect("ilu setup");
-
-        let rhs_real = vec![1.0f64, 2.0, 3.0];
-        let mut out_real = vec![0.0; rhs_real.len()];
-        Preconditioner::<faer::Mat<f64>, Vec<f64>>::apply(
-            &ilu,
-            crate::preconditioner::PcSide::Left,
-            &rhs_real,
-            &mut out_real,
-        )
-        .expect("ilu real apply");
-
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
-        let mut out_s = vec![S::zero(); rhs_s.len()];
-        let mut scratch = BridgeScratch::default();
-        ilu.apply_s(
-            crate::preconditioner::PcSide::Left,
-            &rhs_s,
-            &mut out_s,
-            &mut scratch,
-        )
-        .expect("ilu apply_s");
-
-        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
-            assert!((ys.real() - yr).abs() < 1e-10);
-        }
-    }
-
     #[cfg(feature = "rayon")]
     #[test]
     fn test_parallel_factorization() {
@@ -1888,40 +1814,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "complex")]
-    #[test]
-    fn ilu0_complex_factorization_handles_hermitian() {
-        let matrix = faer::Mat::from_fn(2, 2, |i, j| match (i, j) {
-            (0, 0) => S::from_real(4.0),
-            (1, 1) => S::from_real(3.0),
-            (0, 1) => S::from_parts(1.0, -1.0),
-            (1, 0) => S::from_parts(1.0, 1.0),
-            _ => S::zero(),
-        });
-
-        let x_true = vec![S::from_parts(1.0, 0.5), S::from_parts(-0.5, 1.0)];
-        let b = mat_vec_mul(&matrix, &x_true);
-
-        let mut ilu = Ilu::new();
-        ilu.setup(&matrix)
-            .expect("complex ILU(0) setup on Hermitian matrix");
-
-        let mut x = vec![S::zero(); b.len()];
-        ilu.apply(PcSide::Left, &b, &mut x)
-            .expect("complex ILU(0) apply");
-
-        let r: Vec<S> = mat_vec_mul(&matrix, &x)
-            .into_iter()
-            .zip(b.iter())
-            .map(|(ax, &bi)| ax - bi)
-            .collect();
-        let res_norm = par_sum_abs2_local(&r);
-        assert!(
-            res_norm < R::from(1e-10),
-            "residual too large: {:?}",
-            res_norm
-        );
-    }
 }
 
 /// Benchmarking module for measuring allocation costs and performance

@@ -1,9 +1,9 @@
 use crate::algebra::parallel;
-use crate::algebra::scalar::{KrystScalar, S};
+use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use super::IluCsr;
+use super::{IluCsr, S};
 
 pub fn tri_solve_serial(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<(), KError> {
     let n = pc.n();

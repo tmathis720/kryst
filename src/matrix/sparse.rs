@@ -367,19 +367,22 @@ impl<T> Indexing for CsrMatrix<T> {
 }
 
 impl<T: Clone> SubmatrixExtract for CsrMatrix<T> {
-    fn submatrix(&self, indices: &[usize]) -> Self {
-        let n = indices.len();
-        let mut row_ptr = Vec::with_capacity(n + 1);
+    type S = T;
+
+    fn extract_submatrix(&self, rows: &[usize], cols: &[usize]) -> Self {
+        let m = rows.len();
+        let n = cols.len();
+        let mut row_ptr = Vec::with_capacity(m + 1);
         row_ptr.push(0);
         let mut col_idx = Vec::new();
         let mut values = Vec::new();
 
         let mut g2l: HashMap<usize, usize> = HashMap::with_capacity(n);
-        for (l, &g) in indices.iter().enumerate() {
+        for (l, &g) in cols.iter().enumerate() {
             g2l.insert(g, l);
         }
 
-        for &g_row in indices {
+        for &g_row in rows {
             let rs = self.row_ptr[g_row];
             let re = self.row_ptr[g_row + 1];
             for p in rs..re {
@@ -392,7 +395,7 @@ impl<T: Clone> SubmatrixExtract for CsrMatrix<T> {
             row_ptr.push(col_idx.len());
         }
 
-        CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
+        CsrMatrix::from_csr(m, n, row_ptr, col_idx, values)
     }
 }
 

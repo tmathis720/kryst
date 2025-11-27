@@ -301,6 +301,8 @@ pub(crate) fn iallreduce_sum_scalars<'a>(
     comm: &UniverseComm,
     buf: &'a mut [S],
 ) -> ReduceReqScalars<'a> {
+    #[cfg(not(feature = "mpi"))]
+    let _ = buf;
     match comm {
         UniverseComm::NoComm(_) => ReduceReqScalars::new_no_comm(),
         #[cfg(feature = "mpi")]

@@ -25,10 +25,13 @@ impl DenseMatrix for Mat<S> {
     }
 }
 
-impl SubmatrixExtract for Mat<S> {
-    fn submatrix(&self, indices: &[usize]) -> Self {
-        let n = indices.len();
-        Mat::from_fn(n, n, |i, j| self[(indices[i], indices[j])])
+impl<T: Clone> SubmatrixExtract for Mat<T> {
+    type S = T;
+
+    fn extract_submatrix(&self, rows: &[usize], cols: &[usize]) -> Self {
+        let m = rows.len();
+        let n = cols.len();
+        Mat::from_fn(m, n, |i, j| self[(rows[i], cols[j])].clone())
     }
 }
 

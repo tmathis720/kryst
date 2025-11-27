@@ -165,9 +165,9 @@ pub struct Chebyshev {
     /// Degree of the Chebyshev polynomial
     pub degree: usize,
     /// Lower bound of the spectrum (smallest eigenvalue)
-    pub lambda_min: Option<R>,
+    pub lambda_min: Option<f64>,
     /// Upper bound of the spectrum (largest eigenvalue)
-    pub lambda_max: Option<R>,
+    pub lambda_max: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -315,7 +315,7 @@ impl Chebyshev {
     /// * `degree` - Degree of the Chebyshev polynomial
     /// * `lambda_min` - Optional lower bound of the spectrum
     /// * `lambda_max` - Optional upper bound of the spectrum
-    pub fn new(degree: usize, lambda_min: Option<R>, lambda_max: Option<R>) -> Self {
+    pub fn new(degree: usize, lambda_min: Option<f64>, lambda_max: Option<f64>) -> Self {
         Self {
             degree,
             lambda_min,
@@ -326,8 +326,8 @@ impl Chebyshev {
 
 impl<M, V> Preconditioner<M, V> for Chebyshev
 where
-    M: MatVec<Vec<S>>,
-    V: AsRef<[S]> + AsMut<[S]> + Clone,
+    M: MatVec<Vec<f64>>,
+    V: AsRef<[f64]> + AsMut<[f64]> + Clone,
 {
     /// Setup the Chebyshev preconditioner (no-op; spectrum estimation could be added here)
     fn setup(&mut self, _a: &M) -> Result<(), KError> {
@@ -358,11 +358,11 @@ where
 /// * `beta` - Upper bound of the spectrum
 /// * `m` - Degree of the Chebyshev polynomial
 #[allow(clippy::ptr_arg)]
-pub fn apply_chebyshev<M>(a: &M, r: &Vec<S>, z: &mut [S], alpha: R, beta: R, m: usize)
+pub fn apply_chebyshev<M>(a: &M, r: &Vec<f64>, z: &mut [f64], alpha: f64, beta: f64, m: usize)
 where
-    M: MatVec<Vec<S>>,
+    M: MatVec<Vec<f64>>,
 {
-    if (beta - alpha).abs() < R::EPSILON {
+    if (beta - alpha).abs() < f64::EPSILON {
         // Degenerate interval: just copy r to z
         z.copy_from_slice(r);
         return;
@@ -370,19 +370,17 @@ where
     let n = r.len();
     // v0, v1, v2 are the three-term recurrence vectors
     let mut v0 = r.to_vec();
-    let mut v1 = vec![S::zero(); n];
-    let mut v2 = vec![S::zero(); n];
+    let mut v1 = vec![0.0; n];
+    let mut v2 = vec![0.0; n];
     // c and d are the scaling and shifting parameters for the spectrum
-    let c: R = (beta + alpha) / 2.0;
-    let d: R = (beta - alpha) / 2.0;
-    let c_s = S::from_real(c);
-    let d_s = S::from_real(d);
+    let c: f64 = (beta + alpha) / 2.0;
+    let d: f64 = (beta - alpha) / 2.0;
     // tau is a normalization factor to ensure p_m(0) = 1
-    let tau = S::one() / S::from_real(chebyshev_t(m, (0.0 - c) / d));
+    let tau = 1.0 / chebyshev_t(m, (0.0 - c) / d);
     // First step: v1 = (A v0 - c v0) / d
     a.matvec(&v0, &mut v1);
     for i in 0..n {
-        v1[i] = (v1[i] - c_s * v0[i]) / d_s;
+        v1[i] = (v1[i] - c * v0[i]) / d;
     }
     if m == 0 {
         // Degree 0: just copy input
@@ -397,7 +395,7 @@ where
     for _k in 2..=m {
         a.matvec(&v1, &mut v2);
         for i in 0..n {
-            v2[i] = (S::from_real(2.0) * (v2[i] - c_s * v1[i]) / d_s) - v0[i];
+            v2[i] = (2.0 * (v2[i] - c * v1[i]) / d) - v0[i];
         }
         std::mem::swap(&mut v0, &mut v1);
         std::mem::swap(&mut v1, &mut v2);

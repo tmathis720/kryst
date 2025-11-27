@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::algebra::scalar::{KrystScalar, S, copy_real_to_scalar_in, copy_scalar_to_real_in};
+use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::format::FormatHint;
@@ -9,15 +9,10 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 
-#[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
-use crate::ops::kpc::KPreconditioner;
-#[cfg(feature = "complex")]
-use crate::preconditioner::bridge::{
-    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
-};
 use once_cell::sync::OnceCell;
+
+// ILU_CSR is restricted to real scalars for now.
+type S = f64;
 
 mod csr_builder;
 mod ilut_params;
@@ -1083,12 +1078,7 @@ impl Preconditioner for IluCsr {
                 "IluCsr supports PcSide::Left only; Right/Symmetric not implemented".into(),
             ));
         }
-        let mut x_s = vec![S::zero(); self.n];
-        let mut y_s = vec![S::zero(); self.n];
-        copy_real_to_scalar_in(x, &mut x_s);
-        let res = self.apply_op_scalar(Op::NoTrans, &x_s, &mut y_s);
-        copy_scalar_to_real_in(&y_s, y);
-        res
+        self.apply_op_scalar(Op::NoTrans, x, y)
     }
 
     fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
@@ -1100,12 +1090,7 @@ impl Preconditioner for IluCsr {
                 y.len()
             )));
         }
-        let mut x_s = vec![S::zero(); self.n];
-        let mut y_s = vec![S::zero(); self.n];
-        copy_real_to_scalar_in(x, &mut x_s);
-        let res = self.apply_op_scalar(op, &x_s, &mut y_s);
-        copy_scalar_to_real_in(&y_s, y);
-        res
+        self.apply_op_scalar(op, x, y)
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
@@ -1152,12 +1137,12 @@ impl Preconditioner for IluCsr {
     }
 }
 
-impl LocalPreconditioner for IluCsr {
+impl LocalPreconditioner<f64> for IluCsr {
     fn dims(&self) -> (usize, usize) {
         (self.n, self.n)
     }
 
-    fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_local(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         if x.len() != self.n || y.len() != self.n {
             return Err(KError::InvalidInput(format!(
                 "IluCsr::apply_local dimension mismatch: n={}, x.len()={}, y.len()={}",
@@ -1171,37 +1156,6 @@ impl LocalPreconditioner for IluCsr {
     }
 }
 
-#[cfg(feature = "complex")]
-impl KPreconditioner for IluCsr {
-    type Scalar = S;
-
-    #[inline]
-    fn dims(&self) -> (usize, usize) {
-        Preconditioner::dims(self)
-    }
-
-    fn apply_s(
-        &self,
-        side: PcSide,
-        x: &[S],
-        y: &mut [S],
-        scratch: &mut BridgeScratch,
-    ) -> Result<(), KError> {
-        bridge_apply_pc_s(self, side, x, y, scratch)
-    }
-
-    fn apply_mut_s(
-        &mut self,
-        side: PcSide,
-        x: &[S],
-        y: &mut [S],
-        scratch: &mut BridgeScratch,
-    ) -> Result<(), KError> {
-        bridge_apply_pc_mut_s(self, side, x, y, scratch)
-    }
-}
-
-// === Simple accessors for internal solves ===
 impl IluCsr {
     #[inline]
     pub(crate) fn n(&self) -> usize {

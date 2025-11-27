@@ -1,11 +1,10 @@
-use crate::algebra::prelude::*;
 use crate::error::KError;
 
 /// How to fix "too-small" pivots during ILU numerics.
 #[derive(Clone, Debug)]
 pub struct PivotPolicy {
     pub mode: PivotMode,
-    pub tau: R,
+    pub tau: f64,
     pub scale: PivotScale,
     pub sign: PivotSignPolicy,
     pub deterministic: bool,
@@ -64,26 +63,26 @@ pub enum PivotSignPolicy {
 #[derive(Clone, Debug)]
 pub struct PivotStats {
     pub num_floors: usize,
-    pub max_abs_shift: R,
-    pub sum_abs_shift: R,
+    pub max_abs_shift: f64,
+    pub sum_abs_shift: f64,
     pub num_strict_fail: usize,
-    pub last_floor_value: R,
+    pub last_floor_value: f64,
 }
 
 impl Default for PivotStats {
     fn default() -> Self {
         Self {
             num_floors: 0,
-            max_abs_shift: R::default(),
-            sum_abs_shift: R::default(),
+            max_abs_shift: 0.0,
+            sum_abs_shift: 0.0,
             num_strict_fail: 0,
-            last_floor_value: R::default(),
+            last_floor_value: 0.0,
         }
     }
 }
 
-fn record_pivot_shift(stats: &mut PivotStats, old: S, new: S) {
-    let sh: R = (new - old).abs();
+fn record_pivot_shift(stats: &mut PivotStats, old: f64, new: f64) {
+    let sh: f64 = (new - old).abs();
     stats.num_floors += 1;
     if sh > stats.max_abs_shift {
         stats.max_abs_shift = sh;
@@ -94,16 +93,16 @@ fn record_pivot_shift(stats: &mut PivotStats, old: S, new: S) {
 
 /// Apply minimal additive shift to stabilize pivot.
 pub fn stabilize_pivot_in_place(
-    u_ii: &mut S,
-    s_i: R,
-    tau: R,
+    u_ii: &mut f64,
+    s_i: f64,
+    tau: f64,
     sign_policy: PivotSignPolicy,
     mode: PivotMode,
     stats: &mut PivotStats,
     row: usize,
 ) -> Result<(), KError> {
     let floor = tau * s_i;
-    let abs: R = (*u_ii).abs();
+    let abs: f64 = (*u_ii).abs();
 
     match mode {
         PivotMode::Strict => {
@@ -121,14 +120,10 @@ pub fn stabilize_pivot_in_place(
             let magnitude = floor;
             let new_value = match sign_policy {
                 PivotSignPolicy::Preserve => {
-                    let sign: R = if (*u_ii).real() >= R::default() {
-                        1.0
-                    } else {
-                        -1.0
-                    };
-                    S::from_real(sign * magnitude)
+                    let sign: f64 = if *u_ii >= 0.0 { 1.0 } else { -1.0 };
+                    sign * magnitude
                 }
-                PivotSignPolicy::Positive => S::from_real(magnitude),
+                PivotSignPolicy::Positive => magnitude,
             };
             let old = *u_ii;
             *u_ii = new_value;

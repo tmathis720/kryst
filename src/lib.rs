@@ -44,13 +44,16 @@ pub mod solver;
 pub mod testkit;
 pub mod utils;
 
-// Re-exports for convenience
-pub use algebra::*;
+pub mod prelude {
+    pub use crate::algebra::{dense as algebra_dense, *};
+    pub use crate::matrix::{dense as matrix_dense, CsrMatrix, DenseMatrix};
+}
+
+pub use crate::prelude::*;
 pub use config::*;
 pub use context::*;
 pub use core::*;
 pub use error::*;
-pub use matrix::*;
 pub use reduction::*;
 pub use utils::*;
 

@@ -116,7 +116,7 @@ pub struct SubdomainMeta {
 
 impl<M, V, T> AdditiveSchwarz<M, V, T>
 where
-    M: MatVec<V> + Clone + Send + Sync + crate::core::traits::SubmatrixExtract,
+    M: MatVec<V> + Clone + Send + Sync + crate::core::traits::SubmatrixExtract<S = T>,
     V: From<Vec<T>> + AsRef<[T]> + AsMut<[T]> + Clone + Send + Sync,
     T: 'static + KrystScalar<Real = R> + From<f64> + PartialOrd + Send + Sync,
 {
@@ -156,7 +156,7 @@ where
     pub fn setup<S>(&mut self, a: &M, mut solver_factory: impl FnMut() -> S)
     where
         S: LinearSolver<M, V, Scalar = T, Error = KError> + Send + Sync + 'static,
-        M: crate::core::traits::MatShape + Clone + crate::core::traits::SubmatrixExtract,
+        M: crate::core::traits::MatShape + Clone + crate::core::traits::SubmatrixExtract<S = T>,
     {
         // If no explicit subdomains, partition uniformly by row
         if self.subdomains.is_empty() {

@@ -450,22 +450,24 @@ impl<Scalar> CsrOp<Scalar> {
     }
 }
 #[cfg(feature = "backend-faer")]
-impl<Scalar: KrystScalar> LinOp for CsrOp<Scalar> {
-    type S = Scalar;
+impl<S: KrystScalar> LinOp for CsrOp<S> {
+    type S = S;
     fn dims(&self) -> (usize, usize) {
         (self.csr.nrows(), self.csr.ncols())
     }
-    fn matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
+    fn matvec(&self, x: &[S], y: &mut [S]) {
         if let Err(err) = crate::matrix::spmv::spmv_csr_parallel(&*self.csr, x, y) {
             #[cfg(feature = "logging")]
             log::trace!("CsrOp::matvec fallback to serial SpMV: {err}");
+            #[cfg(not(feature = "logging"))]
+            let _ = err;
             (*self.csr).spmv(x, y);
         }
     }
     fn supports_transpose(&self) -> bool {
         true
     }
-    fn t_matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
         #[cfg(feature = "transpose-cache")]
         {
             if let Some(csc) = self.ensure_csc_view() {
@@ -556,16 +558,16 @@ use std::hash::{Hash, Hasher};
 
 /// Generic LinOp implementation for Faer dense matrices.
 #[cfg(feature = "backend-faer")]
-impl<Scalar: KrystScalar> LinOp for Mat<Scalar> {
-    type S = Scalar;
+impl<S: KrystScalar> LinOp for Mat<S> {
+    type S = S;
     fn dims(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }
-    fn matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
+    fn matvec(&self, x: &[S], y: &mut [S]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
         for i in 0..self.nrows() {
-            let mut sum = Scalar::zero();
+            let mut sum = S::zero();
             for j in 0..self.ncols() {
                 sum = sum + self[(i, j)] * x[j];
             }
@@ -575,11 +577,11 @@ impl<Scalar: KrystScalar> LinOp for Mat<Scalar> {
     fn supports_transpose(&self) -> bool {
         true
     }
-    fn t_matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
         assert_eq!(x.len(), self.nrows());
         assert_eq!(y.len(), self.ncols());
         for j in 0..self.ncols() {
-            let mut sum = Scalar::zero();
+            let mut sum = S::zero();
             for i in 0..self.nrows() {
                 sum = sum + self[(i, j)] * x[i];
             }
@@ -639,7 +641,6 @@ impl LinOpF64 for Mat<f64> {
     }
 }
 
-use crate::matrix::sparse::SparseMatrix;
 impl LinOp for CsrMatrix<f64> {
     type S = f64;
     fn dims(&self) -> (usize, usize) {

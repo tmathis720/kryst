@@ -1,5 +1,5 @@
-#[allow(unused_imports)]
-use crate::algebra::prelude::*;
+use crate::algebra::scalar::KrystScalar;
+use super::S;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
