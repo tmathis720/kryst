@@ -1,7 +1,7 @@
 #[cfg(feature = "mpi")]
 use std::sync::Arc;
 
-use kryst::LinOp;
+use kryst::matrix::LinOp;
 use kryst::algebra::prelude::*;
 use kryst::algebra::scalar::S;
 use kryst::matrix::{CsrMatrix, DistCsrOp};

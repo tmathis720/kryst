@@ -89,7 +89,7 @@ use log::{debug, info, trace, warn};
 
 // ILU is restricted to real scalars.
 type S = f64;
-type R = f64;
+type Real = f64;
 
 /// HYPRE-inspired ILU types
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,11 +144,11 @@ pub struct IluConfig {
     /// Maximum nonzeros per row (HYPRE: maxRowNnz)
     pub max_fill_per_row: usize,
     /// Drop tolerance for ILUT (HYPRE: droptol[0])
-    pub drop_tolerance: R,
+    pub drop_tolerance: Real,
     /// Drop tolerance for off-diagonal blocks (HYPRE: droptol[1])
-    pub offdiag_drop_tolerance: R,
+    pub offdiag_drop_tolerance: Real,
     /// Drop tolerance for Schur complement (HYPRE: droptol[2])
-    pub schur_drop_tolerance: R,
+    pub schur_drop_tolerance: Real,
     /// Reordering strategy (HYPRE: reordering_type)
     pub reordering_type: ReorderingType,
     /// Triangular solve type (HYPRE: tri_solve)
@@ -158,7 +158,7 @@ pub struct IluConfig {
     /// Upper triangular Jacobi iterations (HYPRE: upper_jacobi_iters)
     pub upper_jacobi_iters: usize,
     /// Tolerance for iterative solve (HYPRE: tol)
-    pub tolerance: R,
+    pub tolerance: Real,
     /// Maximum iterations for iterative solve (HYPRE: max_iter)
     pub max_iterations: usize,
     /// Logging level (HYPRE: logging)
@@ -272,7 +272,7 @@ impl IluBuilder {
     }
 
     /// Set drop tolerance for ILUT (HYPRE: droptol)
-    pub fn drop_tolerance(mut self, tol: R) -> Self {
+    pub fn drop_tolerance(mut self, tol: Real) -> Self {
         self.config.drop_tolerance = tol;
         self
     }
@@ -587,10 +587,10 @@ impl Ilu {
             nnz_u: 0,
             num_zero_pivots: 0,
             pivot_stats: PivotStats::default(),
-            max_diag_a: R::default(),
+            max_diag_a: Real::default(),
             row_inf_a: Vec::new(),
             row_gersh_a: Vec::new(),
-            running_max_u: R::default(),
+            running_max_u: Real::default(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
             history: None,
@@ -1295,7 +1295,7 @@ impl Ilu {
     }
 
     /// Quick factory method for common ILU configurations
-    pub fn create_quick(ilu_type: IluType, fill_or_drop: R) -> Result<Self, KError> {
+    pub fn create_quick(ilu_type: IluType, fill_or_drop: Real) -> Result<Self, KError> {
         let mut config = IluConfig::default();
         config.ilu_type = ilu_type;
 
@@ -1367,11 +1367,11 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         print_ilu_banner(&self.config);
 
         // Precompute scaling terms for pivoting
-        let mut max_diag: R = R::default();
-        self.row_inf_a.resize(n, R::default());
-        self.row_gersh_a.resize(n, R::default());
+        let mut max_diag: Real = Real::default();
+        self.row_inf_a.resize(n, Real::default());
+        self.row_gersh_a.resize(n, Real::default());
         for i in 0..n {
-            let mut row_inf: R = R::default();
+            let mut row_inf: Real = Real::default();
             let mut row_gersh = matrix[(i, i)].abs();
             for j in 0..n {
                 let val_abs = matrix[(i, j)].abs();
@@ -1387,7 +1387,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
             max_diag = max_diag.max(matrix[(i, i)].abs());
         }
         self.max_diag_a = max_diag;
-        self.running_max_u = R::default();
+        self.running_max_u = Real::default();
         self.pivot_stats = PivotStats::default();
 
         #[cfg(feature = "logging")]
@@ -1532,7 +1532,7 @@ impl Ilu {
     }
 }
 
-impl LocalPreconditioner for Ilu {
+impl LocalPreconditioner<f64> for Ilu {
     fn dims(&self) -> (usize, usize) {
         (self.l.nrows(), self.l.ncols())
     }
