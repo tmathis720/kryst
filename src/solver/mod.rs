@@ -40,12 +40,13 @@ pub trait LinearSolver: Send + Any {
 
 /// Legacy generic solver trait retained for existing implementations.
 pub mod legacy {
+    use crate::algebra::prelude::KrystScalar;
     use crate::preconditioner::legacy::Preconditioner;
     use crate::utils::convergence::SolveStats;
 
     pub trait LinearSolver<M: ?Sized, V> {
         type Error;
-        type Scalar: Copy + PartialOrd + From<f64>;
+        type Scalar: KrystScalar;
 
         fn solve(
             &mut self,

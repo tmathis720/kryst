@@ -109,7 +109,7 @@ impl BlockJacobi {
         }
     }
     #[cfg(not(feature = "dense-direct"))]
-    pub fn setup<M: RowPattern + MatrixGet<S>>(&mut self, a: &M) {
+    pub fn setup<M: RowPattern + MatrixGet<f64>>(&mut self, a: &M) {
         self.block_factors_ilu.clear();
         let cfg = IluCsrConfig {
             kind: IluKind::Ilu0,
@@ -137,7 +137,7 @@ impl BlockJacobi {
                 }
                 row_ptr.push(col_idx.len());
             }
-            let csr = std::sync::Arc::new(CsrMatrix::<S>::from_csr(n, n, row_ptr, col_idx, values));
+            let csr = std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
             let mut ilu = IluCsr::new_with_config(cfg.clone());
             let op = CsrOp::new(csr.clone());
             let _ = ilu.setup(&op);
@@ -152,10 +152,27 @@ impl BlockJacobi {
     /// # Arguments
     /// * `r` - Input vector (right-hand side)
     /// * `z` - Output vector (solution, overwritten)
+    ///
+    /// **Note:** When `S != f64` (complex), this panics - use KPreconditioner trait instead.
     pub fn apply(&self, r: &[S], z: &mut [S]) {
+        #[cfg(feature = "complex")]
+        {
+            panic!("BlockJacobi::apply called with S != f64; use KPreconditioner trait");
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            // When complex is disabled, S == f64, so this is safe
+            let r_f64 = unsafe { std::mem::transmute::<&[S], &[f64]>(r) };
+            let z_f64 = unsafe { std::mem::transmute::<&mut [S], &mut [f64]>(z) };
+            self.apply_real(r_f64, z_f64);
+        }
+    }
+
+    /// Internal real-valued apply implementation
+    fn apply_real(&self, r: &[f64], z: &mut [f64]) {
         // Zero out the output vector
         for zi in z.iter_mut() {
-            *zi = R::default();
+            *zi = 0.0;
         }
         #[cfg(all(feature = "rayon", feature = "dense-direct"))]
         {
@@ -171,7 +188,7 @@ impl BlockJacobi {
                     for &i in indices {
                         r_block.push(r[i]);
                     }
-                    let mut x_block = vec![R::default(); indices.len()];
+                    let mut x_block = vec![0.0; indices.len()];
                     // Solve the block system
                     lusolver.solve_cached(&r_block, &mut x_block);
                     // Write the solution back to the correct entries in z
@@ -189,7 +206,7 @@ impl BlockJacobi {
                 for &i in indices {
                     r_block.push(r[i]);
                 }
-                let mut x_block = vec![R::default(); indices.len()];
+                let mut x_block = vec![0.0; indices.len()];
                 // Solve the block system
                 lusolver.solve_cached(&r_block, &mut x_block);
                 // Write the solution back to the correct entries in z
@@ -212,7 +229,7 @@ impl BlockJacobi {
                         for &i in indices {
                             r_blk.push(r[i]);
                         }
-                        let mut x_blk = vec![R::default(); indices.len()];
+                        let mut x_blk = vec![0.0; indices.len()];
                         let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
                         let mut z_guard = z_arc.lock().unwrap();
                         for (&i, &xi) in indices.iter().zip(x_blk.iter()) {
@@ -227,7 +244,7 @@ impl BlockJacobi {
                     for &i in indices {
                         r_blk.push(r[i]);
                     }
-                    let mut x_blk = vec![R::default(); indices.len()];
+                    let mut x_blk = vec![0.0; indices.len()];
                     let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
                     for (&i, &xi) in indices.iter().zip(x_blk.iter()) {
                         z[i] = xi;
@@ -265,7 +282,7 @@ impl KPreconditioner for BlockJacobi {
         let n = x.len();
         scratch.with_pair(n, |xr, yr| {
             copy_scalar_to_real_in(x, xr);
-            self.apply(xr, yr);
+            self.apply_real(xr, yr);
             copy_real_into_scalar(yr, y);
             Ok(())
         })

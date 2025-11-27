@@ -1,8 +1,6 @@
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-#[cfg(feature = "backend-faer")]
-use crate::preconditioner::chain::PcChain;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
 

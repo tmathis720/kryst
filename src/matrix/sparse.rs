@@ -186,33 +186,20 @@ impl<T> SparseMatrix for CsrMatrix<T> {
     }
 }
 
-impl CsrMatrix<S> {
-    /// Convert to dense faer::Mat for use with dense solvers.
-    #[cfg(feature = "backend-faer")]
-    pub fn to_dense(&self) -> faer::Mat<S> {
-        let mut dense = faer::Mat::zeros(self.nrows, self.ncols);
-        for i in 0..self.nrows {
-            let (cols, vals) = self.row(i);
-            for (&j, &v) in cols.iter().zip(vals.iter()) {
-                dense[(i, j)] = v;
-            }
-        }
-        dense
-    }
-
+impl<T: KrystScalar> CsrMatrix<T> {
     /// Create an identity matrix of size n x n.
     pub fn identity(n: usize) -> Self {
         let row_ptr: Vec<usize> = (0..=n).collect();
         let col_idx: Vec<usize> = (0..n).collect();
-        let values: Vec<S> = vec![S::one(); n];
+        let values: Vec<T> = vec![T::one(); n];
 
         Self::from_csr(n, n, row_ptr, col_idx, values)
     }
 
     /// Extract diagonal as a vector.
-    pub fn diagonal(&self) -> Vec<S> {
+    pub fn diagonal(&self) -> Vec<T> {
         let n = self.nrows().min(self.ncols());
-        let mut diag = vec![S::zero(); n];
+        let mut diag = vec![T::zero(); n];
 
         for i in 0..n {
             let (cols, vals) = self.row(i);
@@ -230,18 +217,18 @@ impl CsrMatrix<S> {
     }
 
     /// Sparse matrix-vector product with default scaling: y = A * x.
-    pub fn spmv(&self, x: &[S], y: &mut [S]) {
-        self.spmv_scaled(S::one(), x, S::zero(), y)
+    pub fn spmv(&self, x: &[T], y: &mut [T]) {
+        self.spmv_scaled(T::one(), x, T::zero(), y)
             .expect("spmv dimension mismatch");
     }
 
     /// Sparse matrix-vector product: y = alpha * A * x + beta * y.
     pub fn spmv_scaled(
         &self,
-        alpha: S,
-        x: &[S],
-        beta: S,
-        y: &mut [S],
+        alpha: T,
+        x: &[T],
+        beta: T,
+        y: &mut [T],
     ) -> Result<(), crate::error::KError> {
         if x.len() != self.ncols() || y.len() != self.nrows() {
             return Err(crate::error::KError::InvalidInput(format!(
@@ -253,23 +240,11 @@ impl CsrMatrix<S> {
             )));
         }
 
-        #[cfg(all(feature = "backend-faer", feature = "simd"))]
-        if let Some(plan) = self.spmv_plan.as_ref() {
-            unsafe {
-                let alpha = *(&alpha as *const S as *const f64);
-                let beta = *(&beta as *const S as *const f64);
-                let x = std::slice::from_raw_parts(x.as_ptr() as *const f64, x.len());
-                let y_slice = std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len());
-                plan.apply_scaled(alpha, x, beta, y_slice);
-            }
-            return Ok(());
-        }
-
         for i in 0..self.nrows() {
             let row_start = self.row_ptr[i];
             let row_end = self.row_ptr[i + 1];
 
-            let mut sum = S::zero();
+            let mut sum = T::zero();
             for idx in row_start..row_end {
                 let j = self.col_idx[idx];
                 sum = sum + self.values[idx] * x[j];
@@ -284,10 +259,10 @@ impl CsrMatrix<S> {
     /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y.
     pub fn spmv_transpose_scaled(
         &self,
-        alpha: S,
-        x: &[S],
-        beta: S,
-        y: &mut [S],
+        alpha: T,
+        x: &[T],
+        beta: T,
+        y: &mut [T],
     ) -> Result<(), crate::error::KError> {
         if x.len() != self.nrows() || y.len() != self.ncols() {
             return Err(crate::error::KError::InvalidInput(format!(
@@ -320,10 +295,30 @@ impl CsrMatrix<S> {
 
         Ok(())
     }
+}
 
-    /// Convert from dense faer::Mat to sparse CSR format with drop tolerance.
+/// Methods that only work when `T::Real = f64` (for faer interop).
+impl<T> CsrMatrix<T>
+where
+    T: KrystScalar<Real = f64>,
+{
+    /// Convert to dense faer::Mat with real (f64) entries. Works for any T: KrystScalar.
     #[cfg(feature = "backend-faer")]
-    pub fn from_dense(dense: &faer::Mat<S>, drop_tol: R) -> Self {
+    pub fn to_dense(&self) -> faer::Mat<f64> {
+        let mut dense = faer::Mat::zeros(self.nrows, self.ncols);
+        for i in 0..self.nrows {
+            let (cols, vals) = self.row(i);
+            for (&j, &v) in cols.iter().zip(vals.iter()) {
+                dense[(i, j)] = v.real();
+            }
+        }
+        dense
+    }
+
+    /// Convert from dense faer::Mat (with real entries) to sparse CSR format with drop tolerance.
+    /// Works for any T: KrystScalar by converting each entry via T::from_real.
+    #[cfg(feature = "backend-faer")]
+    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Self {
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
@@ -335,7 +330,7 @@ impl CsrMatrix<S> {
                 let val = dense[(i, j)];
                 if val.abs() >= drop_tol {
                     col_idx.push(j);
-                    values.push(val);
+                    values.push(T::from_real(val));
                 }
             }
             row_ptr.push(col_idx.len());
@@ -344,9 +339,9 @@ impl CsrMatrix<S> {
         Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
     }
 
-    /// Convert from an owned dense `faer::Mat<S>` to sparse CSR format with drop tolerance.
+    /// Convert from an owned dense `faer::Mat<R>` to sparse CSR format with drop tolerance.
     #[cfg(feature = "backend-faer")]
-    pub fn from_dense_owned(dense: faer::Mat<S>, drop_tol: R) -> Self {
+    pub fn from_dense_owned(dense: faer::Mat<R>, drop_tol: R) -> Self {
         Self::from_dense(&dense, drop_tol)
     }
 }

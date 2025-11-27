@@ -52,25 +52,28 @@ impl<T> CscMatrix<T> {
     }
 }
 
-impl CscMatrix<S> {
-    pub fn to_dense(&self) -> faer::Mat<S> {
+impl<T> CscMatrix<T>
+where
+    T: KrystScalar<Real = R>,
+{
+    pub fn to_dense(&self) -> faer::Mat<R> {
         let m = self.nrows();
         let n = self.ncols();
-        let mut dense = faer::Mat::from_fn(m, n, |_, _| S::zero());
+        let mut dense = faer::Mat::from_fn(m, n, |_, _| R::default());
         let cp = self.col_ptr();
         let ri = self.row_idx();
         let vv = self.values();
         for j in 0..n {
             for p in cp[j]..cp[j + 1] {
                 let row = ri[p];
-                dense[(row, j)] = vv[p];
+                dense[(row, j)] = vv[p].real();
             }
         }
         dense
     }
 
-    /// Convert from dense `faer::Mat` to CSC format with drop tolerance.
-    pub fn from_dense(dense: &faer::Mat<S>, drop_tol: R) -> Self {
+    /// Convert from dense `faer::Mat` (with real entries) to CSC format with drop tolerance.
+    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Self {
         let m = dense.nrows();
         let n = dense.ncols();
         let mut col_ptr = Vec::with_capacity(n + 1);
@@ -82,7 +85,7 @@ impl CscMatrix<S> {
                 let v = dense[(i, j)];
                 if v.abs() >= drop_tol {
                     row_idx.push(i);
-                    values.push(v);
+                    values.push(T::from_real(v));
                 }
             }
             col_ptr.push(row_idx.len());
@@ -94,10 +97,10 @@ impl CscMatrix<S> {
     ///
     /// Sequential implementation that updates `y` in place.
     /// Requires `x.len() == ncols` and `y.len() == nrows`.
-    pub fn spmv(&self, x: &[S], y: &mut [S]) {
+    pub fn spmv(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
-        y.fill(S::zero());
+        y.fill(T::zero());
         let cp = self.col_ptr();
         let ri = self.row_idx();
         let vv = self.values();
@@ -115,7 +118,7 @@ impl CscMatrix<S> {
     /// Sequential implementation mirroring [`spmv`]. The output slice is fully
     /// overwritten, so callers do not need to zero-initialize it before calling
     /// this routine.
-    pub fn t_matvec(&self, x: &[S], y: &mut [S]) {
+    pub fn t_matvec(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.nrows());
         assert_eq!(y.len(), self.ncols());
         let cp = self.col_ptr();
@@ -123,7 +126,7 @@ impl CscMatrix<S> {
         let vv = self.values();
 
         for (j, yj) in y.iter_mut().enumerate() {
-            let mut acc = S::zero();
+            let mut acc = T::zero();
             for p in cp[j]..cp[j + 1] {
                 let row = ri[p];
                 acc = acc + vv[p] * x[row];
@@ -134,12 +137,15 @@ impl CscMatrix<S> {
 }
 
 #[cfg(feature = "rayon")]
-impl CscMatrix<S> {
+impl<T> CscMatrix<T>
+where
+    T: KrystScalar<Real = R>,
+{
     /// Parallel sparse matrix-vector multiply: `y = A * x`.
     ///
     /// Each thread accumulates into a private buffer to avoid write conflicts
     /// on the output vector.
-    pub fn spmv_parallel(&self, x: &[S], y: &mut [S]) {
+    pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
         use rayon::prelude::*;
@@ -152,7 +158,7 @@ impl CscMatrix<S> {
         let result = (0..self.ncols())
             .into_par_iter()
             .fold(
-                || vec![S::zero(); m],
+                || vec![T::zero(); m],
                 |mut accum, j| {
                     let xj = x[j];
                     for p in cp[j]..cp[j + 1] {
@@ -163,7 +169,7 @@ impl CscMatrix<S> {
                 },
             )
             .reduce(
-                || vec![S::zero(); m],
+                || vec![T::zero(); m],
                 |mut a, b| {
                     for i in 0..m {
                         a[i] = a[i] + b[i];

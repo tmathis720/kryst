@@ -370,15 +370,18 @@ impl Default for IluBuilder {
 }
 
 /// HYPRE-inspired comprehensive ILU preconditioner with sparse storage
+/// 
+/// **Note:** ILU is currently restricted to real (`f64`) matrices only.
+/// Complex-valued problems should use simpler preconditioners (e.g., Jacobi, diagonal scaling).
 pub struct Ilu {
     /// Configuration parameters
     config: IluConfig,
     /// Lower triangular factor in CSR format (unit diagonal)
-    l: CsrMatrix<S>,
+    l: CsrMatrix<f64>,
     /// Upper triangular factor in CSR format
-    u: CsrMatrix<S>,
+    u: CsrMatrix<f64>,
     /// Cached inverse of U's diagonal entries for fast solves
-    inv_diag_u: Vec<S>,
+    inv_diag_u: Vec<f64>,
     /// Permutation arrays (HYPRE: perm, qperm)
     #[allow(dead_code)]
     row_perm: Vec<usize>,
@@ -401,13 +404,13 @@ pub struct Ilu {
     /// Pivot handling statistics
     pivot_stats: PivotStats,
     /// Global scaling from A's diagonal
-    max_diag_a: R,
+    max_diag_a: f64,
     /// Row-wise infinity norm of A
-    row_inf_a: Vec<R>,
+    row_inf_a: Vec<f64>,
     /// Row-wise Gershgorin estimate of A
-    row_gersh_a: Vec<R>,
+    row_gersh_a: Vec<f64>,
     /// Running maximum of |U_kk|
-    running_max_u: R,
+    running_max_u: f64,
     /// Performance timing
     setup_time: f64,
     solve_ctrs: Counters,
@@ -421,9 +424,9 @@ pub struct Ilu {
 #[derive(Debug)]
 pub struct IluWorkspace {
     /// Scratch buffer for triangular solves (sized once in setup)
-    solve_buf: Mutex<Vec<S>>,
+    solve_buf: Mutex<Vec<f64>>,
     /// Secondary workspace for complex operations
-    temp2: Mutex<Vec<S>>,
+    temp2: Mutex<Vec<f64>>,
     /// Workspace for level scheduling in parallel triangular solves
     levels: Mutex<Vec<usize>>,
     /// Workspace for sparse pattern operations
@@ -436,8 +439,8 @@ impl IluWorkspace {
     /// Create new workspace with given size
     pub fn new(size: usize) -> Self {
         Self {
-            solve_buf: Mutex::new(vec![S::zero(); size]),
-            temp2: Mutex::new(vec![S::zero(); size]),
+            solve_buf: Mutex::new(vec![0.0; size]),
+            temp2: Mutex::new(vec![0.0; size]),
             levels: Mutex::new(vec![0; size]),
             pattern_work: Mutex::new(vec![false; size]),
             size,
@@ -447,8 +450,8 @@ impl IluWorkspace {
     /// Resize workspace if needed (avoids reallocation when possible)
     pub fn ensure_size(&mut self, new_size: usize) {
         if new_size > self.size {
-            self.solve_buf.lock().unwrap().resize(new_size, S::zero());
-            self.temp2.lock().unwrap().resize(new_size, S::zero());
+            self.solve_buf.lock().unwrap().resize(new_size, 0.0);
+            self.temp2.lock().unwrap().resize(new_size, 0.0);
             self.levels.lock().unwrap().resize(new_size, 0);
             self.pattern_work.lock().unwrap().resize(new_size, false);
             self.size = new_size;
@@ -458,10 +461,10 @@ impl IluWorkspace {
     /// Clear workspace (without deallocation)
     pub fn clear(&self) {
         for x in self.solve_buf.lock().unwrap().iter_mut() {
-            *x = S::zero();
+            *x = 0.0;
         }
         for x in self.temp2.lock().unwrap().iter_mut() {
-            *x = S::zero();
+            *x = 0.0;
         }
         for x in self.levels.lock().unwrap().iter_mut() {
             *x = 0;
@@ -473,7 +476,7 @@ impl IluWorkspace {
 
     /// Borrow the solve buffer sized in `setup()`.
     #[inline]
-    pub fn borrow_solve_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<S>> {
+    pub fn borrow_solve_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<f64>> {
         debug_assert!(
             self.size >= n,
             "workspace not sized; call ensure_size in setup()"
@@ -492,7 +495,7 @@ struct Levels {
 }
 
 #[cfg(feature = "rayon")]
-fn build_levels_lower(l: &CsrMatrix<S>) -> Levels {
+fn build_levels_lower(l: &CsrMatrix<f64>) -> Levels {
     let n = l.nrows();
     let mut lev = vec![0u32; n];
     let mut maxl = 0u32;
@@ -519,7 +522,7 @@ fn build_levels_lower(l: &CsrMatrix<S>) -> Levels {
 }
 
 #[cfg(feature = "rayon")]
-fn build_levels_upper(u: &CsrMatrix<S>) -> Levels {
+fn build_levels_upper(u: &CsrMatrix<f64>) -> Levels {
     let n = u.nrows();
     let mut lev = vec![0u32; n];
     let mut maxl = 0u32;
@@ -611,7 +614,7 @@ impl Ilu {
     }
 
     /// HYPRE-inspired IEEE safety checks
-    fn check_ieee_values(matrix: &Mat<S>) -> Result<(), KError> {
+    fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
         for i in 0..matrix.nrows() {
             for j in 0..matrix.ncols() {
                 let val = matrix[(i, j)];
@@ -631,7 +634,7 @@ impl Ilu {
     }
 
     /// HYPRE-inspired matrix validation with enhanced analysis
-    fn validate_matrix(matrix: &Mat<S>) -> Result<(), KError> {
+    fn validate_matrix(matrix: &Mat<f64>) -> Result<(), KError> {
         if matrix.nrows() == 0 || matrix.ncols() == 0 {
             return Err(KError::InvalidInput("Matrix cannot be empty".to_string()));
         }
@@ -668,11 +671,11 @@ impl Ilu {
     }
 
     /// Count nonzeros in matrix
-    fn count_nnz(matrix: &Mat<S>) -> usize {
+    fn count_nnz(matrix: &Mat<f64>) -> usize {
         let mut nnz = 0;
         for i in 0..matrix.nrows() {
             for j in 0..matrix.ncols() {
-                if matrix[(i, j)] != S::zero() {
+                if matrix[(i, j)] != 0.0 {
                     nnz += 1;
                 }
             }
@@ -681,7 +684,7 @@ impl Ilu {
     }
 
     /// Pivot stabilization using configurable policy
-    fn handle_pivot(&mut self, pivot: &mut S, row: usize, matrix: &Mat<S>) -> Result<(), KError> {
+    fn handle_pivot(&mut self, pivot: &mut f64, row: usize, matrix: &Mat<f64>) -> Result<(), KError> {
         let policy = &self.config.pivot_policy;
 
         // determine scaling value and guard against vanishing floors by
@@ -718,11 +721,11 @@ impl Ilu {
     }
 
     /// Helper: Get element from sparse matrix (returns zero if not present)
-    fn sparse_get(&self, matrix: &CsrMatrix<S>, i: usize, j: usize) -> S {
+    fn sparse_get(&self, matrix: &CsrMatrix<f64>, i: usize, j: usize) -> f64 {
         let (cols, vals) = matrix.row(i);
         match cols.binary_search(&j) {
             Ok(pos) => vals[pos],
-            Err(_) => S::zero(),
+            Err(_) => 0.0,
         }
     }
 
@@ -730,7 +733,7 @@ impl Ilu {
     ///
     /// This routine assumes the sparsity pattern already contains the
     /// entry `(i, j)`.  If the entry is absent, the call is a no-op.
-    fn sparse_set(&mut self, matrix: &mut CsrMatrix<S>, i: usize, j: usize, value: S) {
+    fn sparse_set(&mut self, matrix: &mut CsrMatrix<f64>, i: usize, j: usize, value: f64) {
         let start = matrix.row_ptr()[i];
         let end = matrix.row_ptr()[i + 1];
         // Determine position of column j within the row while holding only
@@ -749,11 +752,11 @@ impl Ilu {
     }
 
     /// Compute ILU(0) factorization with enhanced pivot handling and sparse storage
-    fn compute_ilu0(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
+    fn compute_ilu0(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format for L and U factors
-        let drop_tol: R = 1e-15;
+        let drop_tol: f64 = 1e-15;
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
@@ -762,13 +765,13 @@ impl Ilu {
             for j in 0..n {
                 if i > j {
                     // L gets lower triangular part
-                    self.sparse_set(&mut u, i, j, S::zero());
+                    self.sparse_set(&mut u, i, j, 0.0);
                 } else if i < j {
                     // U gets upper triangular part
-                    self.sparse_set(&mut l, i, j, S::zero());
+                    self.sparse_set(&mut l, i, j, 0.0);
                 } else {
                     // L has unit diagonal
-                    self.sparse_set(&mut l, i, i, S::one());
+                    self.sparse_set(&mut l, i, i, 1.0);
                 }
             }
         }
@@ -782,13 +785,13 @@ impl Ilu {
 
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
-                if l_ik != S::zero() {
+                if l_ik != 0.0 {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
 
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
-                        if u_kj != S::zero() && matrix[(i, j)] != S::zero() {
+                        if u_kj != 0.0 && matrix[(i, j)] != 0.0 {
                             let u_ij = self.sparse_get(&u, i, j);
                             let new_val = u_ij - multiplier * u_kj;
                             self.sparse_set(&mut u, i, j, new_val);
@@ -803,7 +806,7 @@ impl Ilu {
         self.nnz_u = u.nnz();
 
         // Cache inverse diagonal of U for fast solves
-        self.inv_diag_u = u.diagonal().into_iter().map(|v| S::one() / v).collect();
+        self.inv_diag_u = u.diagonal().into_iter().map(|v| 1.0 / v).collect();
 
         self.l = l;
         self.u = u;
@@ -812,16 +815,16 @@ impl Ilu {
     }
 
     /// Compute Modified ILU(0) with row-sum correction and sparse storage
-    fn compute_milu0(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
+    fn compute_milu0(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
 
         // Convert input matrix to sparse CSR format
-        let drop_tol: R = 1e-15;
+        let drop_tol: f64 = 1e-15;
         let mut l = CsrMatrix::from_dense(matrix, drop_tol);
         let mut u = CsrMatrix::from_dense(matrix, drop_tol);
 
         // Store original row sums for diagonal correction
-        let mut original_row_sums = vec![S::zero(); n];
+        let mut original_row_sums = vec![0.0; n];
         for i in 0..n {
             for j in 0..n {
                 original_row_sums[i] = original_row_sums[i] + matrix[(i, j)];
@@ -832,11 +835,11 @@ impl Ilu {
         for i in 0..n {
             for j in 0..n {
                 if i > j {
-                    self.sparse_set(&mut u, i, j, S::zero());
+                    self.sparse_set(&mut u, i, j, 0.0);
                 } else if i < j {
-                    self.sparse_set(&mut l, i, j, S::zero());
+                    self.sparse_set(&mut l, i, j, 0.0);
                 } else {
-                    self.sparse_set(&mut l, i, i, S::one());
+                    self.sparse_set(&mut l, i, i, 1.0);
                 }
             }
         }
@@ -849,16 +852,16 @@ impl Ilu {
 
             for i in (k + 1)..n {
                 let l_ik = self.sparse_get(&l, i, k);
-                if l_ik != S::zero() {
+                if l_ik != 0.0 {
                     let multiplier = l_ik / pivot;
                     self.sparse_set(&mut l, i, k, multiplier);
 
-                    let mut dropped_sum = S::zero();
+                    let mut dropped_sum = 0.0;
                     for j in (k + 1)..n {
                         let u_kj = self.sparse_get(&u, k, j);
-                        if u_kj != S::zero() {
+                        if u_kj != 0.0 {
                             let update = multiplier * u_kj;
-                            if matrix[(i, j)] != S::zero() {
+                            if matrix[(i, j)] != 0.0 {
                                 let u_ij = self.sparse_get(&u, i, j);
                                 self.sparse_set(&mut u, i, j, u_ij - update);
                             } else {
@@ -876,7 +879,7 @@ impl Ilu {
         self.nnz_l = l.nnz();
         self.nnz_u = u.nnz();
 
-        self.inv_diag_u = u.diagonal().into_iter().map(|v| S::one() / v).collect();
+        self.inv_diag_u = u.diagonal().into_iter().map(|v| 1.0 / v).collect();
 
         self.l = l;
         self.u = u;
@@ -885,7 +888,7 @@ impl Ilu {
     }
 
     /// Compute ILU(k) factorization with level-of-fill control
-    fn compute_iluk(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
+    fn compute_iluk(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
@@ -896,7 +899,7 @@ impl Ilu {
         // Initialize levels for original nonzeros
         for i in 0..n {
             for j in 0..n {
-                if matrix[(i, j)] != S::zero() {
+                if matrix[(i, j)] != 0.0 {
                     level[i][j] = 0;
                     if i <= j {
                         u[(i, j)] = matrix[(i, j)];
@@ -905,7 +908,7 @@ impl Ilu {
                     }
                 }
             }
-            l[(i, i)] = S::one(); // Unit diagonal for L
+            l[(i, i)] = 1.0; // Unit diagonal for L
         }
 
         // ILU(k) factorization with fill-level control
@@ -931,17 +934,17 @@ impl Ilu {
                         }
                     }
                 } else {
-                    l[(i, k)] = S::zero(); // Drop high-level fill
+                    l[(i, k)] = 0.0; // Drop high-level fill
                 }
             }
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol: R = 1e-15;
+        let drop_tol: f64 = 1e-15;
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
-        self.inv_diag_u = (0..n).map(|i| S::one() / u[(i, i)]).collect();
+        self.inv_diag_u = (0..n).map(|i| 1.0 / u[(i, i)]).collect();
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
@@ -950,11 +953,11 @@ impl Ilu {
     }
 
     /// Compute ILUT factorization with threshold-based dropping
-    fn compute_ilut(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
+    fn compute_ilut(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
         let mut l = Mat::zeros(n, n);
         let mut u = Mat::zeros(n, n);
-        let drop_tol: R = self.config.drop_tolerance;
+        let drop_tol: f64 = self.config.drop_tolerance;
 
         // Initialize with matrix values above drop tolerance
         for i in 0..n {
@@ -968,7 +971,7 @@ impl Ilu {
                     }
                 }
             }
-            l[(i, i)] = S::one(); // Unit diagonal for L
+            l[(i, i)] = 1.0; // Unit diagonal for L
         }
 
         // ILUT factorization with threshold dropping and fill control
@@ -999,7 +1002,7 @@ impl Ilu {
                 if new_val.abs() >= drop_tol {
                     u[(i, j)] = new_val;
                 } else {
-                    u[(i, j)] = S::zero(); // Drop small entries
+                    u[(i, j)] = 0.0; // Drop small entries
                 }
             }
 
@@ -1012,11 +1015,11 @@ impl Ilu {
         }
 
         // Convert to sparse format and cache inverse diagonal
-        let drop_tol: R = 1e-15;
+        let drop_tol: f64 = 1e-15;
         self.l = CsrMatrix::from_dense(&l, drop_tol);
         self.u = CsrMatrix::from_dense(&u, drop_tol);
 
-        self.inv_diag_u = (0..n).map(|i| S::one() / u[(i, i)]).collect();
+        self.inv_diag_u = (0..n).map(|i| 1.0 / u[(i, i)]).collect();
 
         self.nnz_l = self.l.nnz();
         self.nnz_u = self.u.nnz();
@@ -1025,16 +1028,16 @@ impl Ilu {
     }
 
     /// Apply fill-in control to a single row, keeping only the largest entries
-    fn apply_fill_control_to_row(&self, matrix: &mut Mat<S>, row: usize, start_col: usize) {
+    fn apply_fill_control_to_row(&self, matrix: &mut Mat<f64>, row: usize, start_col: usize) {
         if self.config.max_fill_per_row == 0 {
             return;
         }
 
         // Collect (magnitude, column, value) for this row
-        let mut entries: Vec<(R, usize, S)> = Vec::new();
+        let mut entries: Vec<(f64, usize, f64)> = Vec::new();
         for j in start_col..matrix.ncols() {
             let val = matrix[(row, j)];
-            if val != S::zero() {
+            if val != 0.0 {
                 entries.push((val.abs(), j, val));
             }
         }
@@ -1045,7 +1048,7 @@ impl Ilu {
 
             // Zero out all entries first
             for j in start_col..matrix.ncols() {
-                matrix[(row, j)] = S::zero();
+                matrix[(row, j)] = 0.0;
             }
 
             // Keep only the largest entries
@@ -1336,9 +1339,9 @@ impl Default for Ilu {
     }
 }
 
-impl Preconditioner<Mat<S>, Vec<S>> for Ilu {
+impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
     /// HYPRE-inspired setup with comprehensive safety checks and monitoring
-    fn setup(&mut self, matrix: &Mat<S>) -> Result<(), KError> {
+    fn setup(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let setup_start = std::time::Instant::now();
 
         if let Some(m) = &self.monitor {
@@ -1468,13 +1471,13 @@ impl Preconditioner<Mat<S>, Vec<S>> for Ilu {
     }
 
     /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
-    fn apply(&self, side: PcSide, x: &Vec<S>, y: &mut Vec<S>) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<(), KError> {
         self.apply_slice(side, x.as_slice(), y.as_mut_slice())
     }
 }
 
 impl Ilu {
-    fn apply_slice(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_slice(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         let n = self.l.nrows();
         if x.len() != n || y.len() != n {
             return Err(KError::InvalidInput(format!(

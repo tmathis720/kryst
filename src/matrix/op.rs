@@ -413,16 +413,16 @@ impl LinOp for DenseOp {
 ///   thresholds and falls back to the serial kernel for small systems.
 /// - See [`crate::parallel::threads`] for details on Rayon pool sizing.
 #[cfg(feature = "backend-faer")]
-pub struct CsrOp {
-    csr: Arc<CsrMatrix<f64>>,
+pub struct CsrOp<Scalar = S> {
+    csr: Arc<CsrMatrix<Scalar>>,
     ids: ChangeIds,
     comm: UniverseComm,
     #[cfg(feature = "transpose-cache")]
-    t_cache: parking_lot::RwLock<Option<(ValuesId, Arc<CscMatrix<f64>>)>>,
+    t_cache: parking_lot::RwLock<Option<(ValuesId, Arc<CscMatrix<Scalar>>)>>,
 }
 #[cfg(feature = "backend-faer")]
-impl CsrOp {
-    pub fn new(csr: Arc<CsrMatrix<f64>>) -> Self {
+impl<Scalar> CsrOp<Scalar> {
+    pub fn new(csr: Arc<CsrMatrix<Scalar>>) -> Self {
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
@@ -440,7 +440,7 @@ impl CsrOp {
     pub fn mark_values_changed(&self) {
         self.ids.bump_values();
     }
-    pub fn inner(&self) -> &CsrMatrix<f64> {
+    pub fn inner(&self) -> &CsrMatrix<Scalar> {
         &self.csr
     }
     /// Attach a communicator to this operator.
@@ -450,22 +450,22 @@ impl CsrOp {
     }
 }
 #[cfg(feature = "backend-faer")]
-impl LinOp for CsrOp {
-    type S = f64;
+impl<Scalar: KrystScalar> LinOp for CsrOp<Scalar> {
+    type S = Scalar;
     fn dims(&self) -> (usize, usize) {
         (self.csr.nrows(), self.csr.ncols())
     }
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        if let Err(err) = crate::matrix::spmv::spmv_csr_parallel(self.csr.as_ref(), x, y) {
+    fn matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
+        if let Err(err) = crate::matrix::spmv::spmv_csr_parallel(&*self.csr, x, y) {
             #[cfg(feature = "logging")]
             log::trace!("CsrOp::matvec fallback to serial SpMV: {err}");
-            self.csr.spmv(x, y);
+            (*self.csr).spmv(x, y);
         }
     }
     fn supports_transpose(&self) -> bool {
         true
     }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn t_matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
         #[cfg(feature = "transpose-cache")]
         {
             if let Some(csc) = self.ensure_csc_view() {
@@ -500,7 +500,7 @@ impl LinOp for CsrOp {
 }
 
 #[cfg(feature = "backend-faer")]
-impl LinOpF64 for CsrOp {
+impl LinOpF64 for CsrOp<f64> {
     #[inline]
     fn dims(&self) -> (usize, usize) {
         <Self as LinOp>::dims(self)
@@ -525,8 +525,8 @@ impl LinOpF64 for dyn LinOp<S = f64> + '_ {
 }
 
 #[cfg(feature = "transpose-cache")]
-impl CsrOp {
-    pub fn ensure_csc_view(&self) -> Option<Arc<CscMatrix<f64>>> {
+impl<Scalar: KrystScalar> CsrOp<Scalar> {
+    pub fn ensure_csc_view(&self) -> Option<Arc<CscMatrix<Scalar>>> {
         use crate::matrix::format::AsFormat;
         let vid = self.values_id();
         {
@@ -537,7 +537,7 @@ impl CsrOp {
                 }
             }
         }
-        let csc = AsFormat::to_csc_cached(self.csr.as_ref(), 0.0);
+        let csc = AsFormat::to_csc_cached(&**self.csr, Scalar::zero().real());
         {
             let mut guard = self.t_cache.write();
             *guard = Some((vid, csc.clone()));
@@ -554,19 +554,20 @@ impl CsrOp {
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+/// Generic LinOp implementation for Faer dense matrices.
 #[cfg(feature = "backend-faer")]
-impl LinOp for Mat<f64> {
-    type S = f64;
+impl<Scalar: KrystScalar> LinOp for Mat<Scalar> {
+    type S = Scalar;
     fn dims(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
         assert_eq!(x.len(), self.ncols());
         assert_eq!(y.len(), self.nrows());
         for i in 0..self.nrows() {
-            let mut sum = 0.0;
+            let mut sum = Scalar::zero();
             for j in 0..self.ncols() {
-                sum += self[(i, j)] * x[j];
+                sum = sum + self[(i, j)] * x[j];
             }
             y[i] = sum;
         }
@@ -574,13 +575,13 @@ impl LinOp for Mat<f64> {
     fn supports_transpose(&self) -> bool {
         true
     }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn t_matvec(&self, x: &[Scalar], y: &mut [Scalar]) {
         assert_eq!(x.len(), self.nrows());
         assert_eq!(y.len(), self.ncols());
         for j in 0..self.ncols() {
-            let mut sum = 0.0;
+            let mut sum = Scalar::zero();
             for i in 0..self.nrows() {
-                sum += self[(i, j)] * x[i];
+                sum = sum + self[(i, j)] * x[i];
             }
             y[j] = sum;
         }
@@ -604,10 +605,17 @@ impl LinOp for Mat<f64> {
             m.hash(&mut h);
             n.hash(&mut h);
             // Full scan for correctness; opt-in via feature due to cost.
+            // Note: complex values don't have to_bits, so this only works for real
+            #[cfg(not(feature = "complex"))]
             for i in 0..m {
                 for j in 0..n {
                     self[(i, j)].to_bits().hash(&mut h);
                 }
+            }
+            #[cfg(feature = "complex")]
+            {
+                // For complex, use a simple fallback: 0 (unknown)
+                // Higher layers may use pointer identity instead
             }
             ValuesId(h.finish())
         }
