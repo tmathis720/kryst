@@ -1,5 +1,5 @@
-use crate::algebra::scalar::KrystScalar;
 use super::S;
+use crate::algebra::scalar::KrystScalar;
 
 /// Sparse row work array using epoch marking.
 #[derive(Clone, Debug)]

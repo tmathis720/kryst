@@ -46,7 +46,7 @@ pub mod utils;
 
 pub mod prelude {
     pub use crate::algebra::{dense as algebra_dense, *};
-    pub use crate::matrix::{dense as matrix_dense, CsrMatrix, DenseMatrix};
+    pub use crate::matrix::{CsrMatrix, DenseMatrix, dense as matrix_dense};
 }
 
 pub use crate::prelude::*;

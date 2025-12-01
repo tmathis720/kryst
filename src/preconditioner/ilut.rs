@@ -217,7 +217,6 @@ impl LocalPreconditioner for Ilut {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::prelude::*;
     use crate::core::traits::MatShape;
 
     struct DenseMat<T> {

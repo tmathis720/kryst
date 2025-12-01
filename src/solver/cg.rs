@@ -522,11 +522,7 @@ impl CgSolver {
             CgNormType::Natural => znorm.unwrap().abs().sqrt(),
             CgNormType::None => R::zero(),
         };
-        let zero_floor = self
-            .conv
-            .atol
-            .max(self.conv.rtol * res0_reported)
-            * R::from(1e-5);
+        let zero_floor = self.conv.atol.max(self.conv.rtol * res0_reported) * R::from(1e-5);
 
         if let Some(ms) = monitors {
             for m in ms {
@@ -881,11 +877,7 @@ impl CgSolver {
             CgNormType::Natural => znorm.unwrap().abs().sqrt(),
             CgNormType::None => R::zero(),
         };
-        let zero_floor = self
-            .conv
-            .atol
-            .max(self.conv.rtol * res0_reported)
-            * R::from(1e-5);
+        let zero_floor = self.conv.atol.max(self.conv.rtol * res0_reported) * R::from(1e-5);
 
         if let Some(ms) = monitors {
             for m in ms {

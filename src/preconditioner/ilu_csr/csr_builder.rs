@@ -1,5 +1,5 @@
-use crate::algebra::scalar::KrystScalar;
 use super::S;
+use crate::algebra::scalar::KrystScalar;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 

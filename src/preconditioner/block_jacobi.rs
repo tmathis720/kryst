@@ -137,7 +137,8 @@ impl BlockJacobi {
                 }
                 row_ptr.push(col_idx.len());
             }
-            let csr = std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
+            let csr =
+                std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
             let mut ilu = IluCsr::new_with_config(cfg.clone());
             let op = CsrOp::new(csr.clone());
             let _ = ilu.setup(&op);
@@ -154,7 +155,7 @@ impl BlockJacobi {
     /// * `z` - Output vector (solution, overwritten)
     ///
     /// **Note:** When `S != f64` (complex), this panics - use KPreconditioner trait instead.
-    pub fn apply(&self, r: &[S], z: &mut [S]) {
+    pub fn apply(&self, _r: &[S], _z: &mut [S]) {
         #[cfg(feature = "complex")]
         {
             panic!("BlockJacobi::apply called with S != f64; use KPreconditioner trait");
@@ -162,8 +163,8 @@ impl BlockJacobi {
         #[cfg(not(feature = "complex"))]
         {
             // When complex is disabled, S == f64, so this is safe
-            let r_f64 = unsafe { std::mem::transmute::<&[S], &[f64]>(r) };
-            let z_f64 = unsafe { std::mem::transmute::<&mut [S], &mut [f64]>(z) };
+            let r_f64 = unsafe { std::mem::transmute::<&[S], &[f64]>(_r) };
+            let z_f64 = unsafe { std::mem::transmute::<&mut [S], &mut [f64]>(_z) };
             self.apply_real(r_f64, z_f64);
         }
     }
@@ -362,6 +363,8 @@ mod tests {
         }
     }
 
+    // Only provide the real-valued Preconditioner impl when `S = f64`
+    #[cfg(not(feature = "complex"))]
     impl crate::preconditioner::Preconditioner for BlockJacobi {
         fn dims(&self) -> (usize, usize) {
             Self::dims(self)
@@ -377,7 +380,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "complex")]
+    #[cfg(all(feature = "complex", feature = "dense-direct"))]
     #[test]
     fn apply_s_matches_real_path() {
         let mut pc = BlockJacobi {

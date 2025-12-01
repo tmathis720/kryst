@@ -1156,6 +1156,28 @@ impl LocalPreconditioner<f64> for IluCsr {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for IluCsr {
+    type Scalar = S;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        // IluCsr already implements the real Preconditioner, which has dims()
+        crate::preconditioner::Preconditioner::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        // Generic bridge from complex S to real f64, then back
+        apply_pc_s(self, side, x, y, scratch)
+    }
+}
+
 impl IluCsr {
     #[inline]
     pub(crate) fn n(&self) -> usize {

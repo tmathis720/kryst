@@ -370,7 +370,7 @@ impl Default for IluBuilder {
 }
 
 /// HYPRE-inspired comprehensive ILU preconditioner with sparse storage
-/// 
+///
 /// **Note:** ILU is currently restricted to real (`f64`) matrices only.
 /// Complex-valued problems should use simpler preconditioners (e.g., Jacobi, diagonal scaling).
 pub struct Ilu {
@@ -684,7 +684,12 @@ impl Ilu {
     }
 
     /// Pivot stabilization using configurable policy
-    fn handle_pivot(&mut self, pivot: &mut f64, row: usize, matrix: &Mat<f64>) -> Result<(), KError> {
+    fn handle_pivot(
+        &mut self,
+        pivot: &mut f64,
+        row: usize,
+        matrix: &Mat<f64>,
+    ) -> Result<(), KError> {
         let policy = &self.config.pivot_policy;
 
         // determine scaling value and guard against vanishing floors by
@@ -1651,6 +1656,7 @@ mod tests {
         assert!(ilu.pivot_stats().num_floors > 0);
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn test_ilu_variants() {
         let _matrix = faer::Mat::from_fn(3, 3, |i, j| {
@@ -1690,6 +1696,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn test_specialized_factory() {
         let config = IluConfig {
@@ -1789,6 +1796,7 @@ mod tests {
         assert!(ilu.config.enable_distributed);
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn ilu0_real_factorization_solves_spd() {
         let matrix = make_spd_3x3();
@@ -1813,7 +1821,6 @@ mod tests {
             res_norm
         );
     }
-
 }
 
 /// Benchmarking module for measuring allocation costs and performance

@@ -62,6 +62,7 @@ proptest! {
         prop_assert!(nnz_hi <= nnz_lo, "nnz hi {} > nnz lo {}", nnz_hi, nnz_lo);
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn ilut_residuals_are_reasonable_with_drop(n in 3usize..10, seed in any::<u64>()) {
         let a = random_diagonally_dominant(n, seed);

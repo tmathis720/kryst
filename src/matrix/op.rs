@@ -819,8 +819,6 @@ where
 #[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
-    #[cfg(feature = "complex")]
-    use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix as RealCsrMatrix;
     use crate::matrix::spmv::scalar::spmv_csr_scalar;
 

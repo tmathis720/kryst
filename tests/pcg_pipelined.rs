@@ -123,7 +123,10 @@ fn pipelined_reports_reduction_counts() {
 
     // Adjust this assertion to match the actual reported value if necessary
     if stats.counters.num_global_reductions != expected_total {
-        println!("Expected: {}, Got: {}", expected_total, stats.counters.num_global_reductions);
+        println!(
+            "Expected: {}, Got: {}",
+            expected_total, stats.counters.num_global_reductions
+        );
     }
     assert_eq!(stats.counters.num_global_reductions, expected_total);
 }

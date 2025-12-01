@@ -40,10 +40,7 @@ impl Permutation {
 }
 
 /// Symmetric permutation of CSR matrix: A' = P A P^T
-pub fn permute_csr_symmetric<T: KrystScalar>(
-    a: &CsrMatrix<T>,
-    perm: &Permutation,
-) -> CsrMatrix<T> {
+pub fn permute_csr_symmetric<T: KrystScalar>(a: &CsrMatrix<T>, perm: &Permutation) -> CsrMatrix<T> {
     let n = a.nrows();
     assert_eq!(n, a.ncols());
     let rp = a.row_ptr();

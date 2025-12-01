@@ -645,17 +645,18 @@ mod tests {
     #[cfg(feature = "complex")]
     #[test]
     fn approxinv_apply_s_matches_real_path() {
+        use crate::matrix::Csr;
         use crate::matrix::op::CsrOp;
         use crate::matrix::sparse::CsrMatrix;
 
         let n = 3;
         let pattern = SparsityPattern::Manual((0..n).map(|i| vec![i]).collect());
-        let mut spai = ApproxInv::<CsrOp, Vec<f64>, f64>::new(
+        let mut spai = ApproxInv::<CsrOp<f64>, Vec<f64>, f64>::new(
             pattern, 1e-12, 10, 1, 100, 8, 1, 0, false, false,
         );
 
-        let csr = Arc::new(CsrMatrix::identity(n));
-        let op = CsrOp::new(csr);
+        let csr = Arc::new(CsrMatrix::<f64>::identity(n));
+        let op: CsrOp<f64> = CsrOp::new(csr);
         spai.setup(&op)
             .expect("setup should succeed for identity operator");
 
