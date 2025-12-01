@@ -1,4 +1,4 @@
-use super::S;
+use super::Real;
 use crate::algebra::scalar::KrystScalar;
 
 /// Sparse row work array using epoch marking.
@@ -6,7 +6,7 @@ use crate::algebra::scalar::KrystScalar;
 pub struct RowWork {
     epoch: usize,
     mark: Vec<usize>,
-    val: Vec<S>,
+    val: Vec<Real>,
     idx: Vec<usize>,
 }
 
@@ -23,7 +23,7 @@ impl RowWork {
     pub fn ensure_size(&mut self, n: usize) {
         if self.mark.len() < n {
             self.mark.resize(n, 0);
-            self.val.resize(n, S::zero());
+            self.val.resize(n, Real::zero());
         }
     }
 
@@ -33,16 +33,16 @@ impl RowWork {
     }
 
     #[inline]
-    pub fn get(&self, j: usize) -> S {
+    pub fn get(&self, j: usize) -> Real {
         if self.mark.get(j).copied().unwrap_or(0) == self.epoch {
             self.val[j]
         } else {
-            S::zero()
+            Real::zero()
         }
     }
 
     #[inline]
-    pub fn set(&mut self, j: usize, x: S) {
+    pub fn set(&mut self, j: usize, x: Real) {
         if self.mark.get(j).copied().unwrap_or(0) != self.epoch {
             self.mark[j] = self.epoch;
             self.idx.push(j);
@@ -51,7 +51,7 @@ impl RowWork {
     }
 
     #[inline]
-    pub fn add_to(&mut self, j: usize, delta: S) {
+    pub fn add_to(&mut self, j: usize, delta: Real) {
         if self.mark.get(j).copied().unwrap_or(0) != self.epoch {
             self.mark[j] = self.epoch;
             self.val[j] = delta;
@@ -61,7 +61,7 @@ impl RowWork {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (usize, S)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (usize, Real)> + '_ {
         self.idx.iter().copied().map(|j| (j, self.val[j]))
     }
 }

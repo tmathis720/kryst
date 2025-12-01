@@ -7258,6 +7258,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn filter_enforces_row_sums() {
         let a = poisson1d(64);
         let mut filtered = AMGBuilder::new()
@@ -7323,6 +7324,7 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn filter_non_galerkin_preserves_row_sums() {
         let a = poisson1d(64);
         let mut cfg_filtered = AMGConfig::default();
@@ -7389,6 +7391,7 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn filter_reduces_constant_mode_residual() {
         let a = poisson1d(64);
         let mut cfg_off = AMGConfig::default();
@@ -7512,6 +7515,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn refresh_updates_caches() {
         let a = poisson1d(4);
         let mut amg_l1 = AMGBuilder::new()
@@ -7572,6 +7576,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn coarse_ilu_reused() {
         let n = 8;
         let mut row_ptr = vec![0usize; n + 1];
@@ -7634,6 +7639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn preserves_num_functions_across_levels() {
         // Build 1D Poisson matrix of size 16
         let n = 16;
@@ -7703,6 +7709,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "complex"))]
         fn apply_s_matches_real_path() {
             let a = poisson_1d(12);
             let mut amg = AMGBuilder::new()

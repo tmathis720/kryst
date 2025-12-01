@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 //! SOR/SSOR preconditioner tests for kryst
 //!
 //! This module contains unit tests for the Successive Over-Relaxation (SOR) and Symmetric SOR (SSOR)

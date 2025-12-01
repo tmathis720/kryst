@@ -1,11 +1,11 @@
-use super::S;
+use super::Real;
 use crate::algebra::scalar::KrystScalar;
 
 #[derive(Clone, Debug)]
 pub struct RowWork {
     pub mark: Vec<i32>,  // n, initialized to -1
     pub idx: Vec<usize>, // positions used in this row
-    pub val: Vec<S>,     // values aligned with idx
+    pub val: Vec<Real>,     // values aligned with idx
 }
 
 pub fn ensure_rowwork(w: &mut RowWork, n: usize) {
@@ -25,7 +25,7 @@ pub fn find_or_insert(w: &mut RowWork, j: usize) -> usize {
     } else {
         let pos = w.idx.len();
         w.idx.push(j);
-        w.val.push(S::zero());
+        w.val.push(Real::zero());
         w.mark[j] = pos as i32;
         pos
     }

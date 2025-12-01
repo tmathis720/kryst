@@ -1377,6 +1377,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn preonly_without_direct_pc_errors() {
         let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let mut ksp = KspContext::new();

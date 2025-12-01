@@ -175,39 +175,38 @@ mod tests {
     #[cfg(feature = "complex")]
     #[test]
     fn permute_csr_symmetric_complex_matches_dense() {
-        use num_complex::Complex64;
+        use crate::algebra::prelude::*; // gives you S, R, etc.
 
         let row_ptr = vec![0, 2, 4, 6];
         let col_idx = vec![0, 1, 1, 2, 0, 2];
-        let vals = vec![
-            Complex64::new(1.0, 0.5),
-            Complex64::new(2.0, -1.0),
-            Complex64::new(3.0, 0.25),
-            Complex64::new(4.0, -0.75),
-            Complex64::new(5.0, 1.5),
-            Complex64::new(6.0, -2.0),
+        let vals: Vec<S> = vec![
+            S::new(R::from(1.0),  R::from(0.5)),
+            S::new(R::from(2.0),  R::from(-1.0)),
+            S::new(R::from(3.0),  R::from(0.25)),
+            S::new(R::from(4.0),  R::from(-0.75)),
+            S::new(R::from(5.0),  R::from(1.5)),
+            S::new(R::from(6.0),  R::from(-2.0)),
         ];
         let a = CsrMatrix::from_csr(3, 3, row_ptr, col_idx, vals);
-        let perm = Permutation {
-            p: vec![2, 0, 1],
-            pinv: vec![1, 2, 0],
-        };
+        let perm = Permutation { p: vec![2, 0, 1], pinv: vec![1, 2, 0] };
+
         let ap = permute_csr_symmetric(&a, &perm);
         let dense_ap = ap.to_dense();
         let dense_a = a.to_dense();
-        let mut ref_dense = faer::Mat::<Complex64>::zeros(3, 3);
+        let mut ref_dense = faer::Mat::<S>::zeros(3, 3);
         for i in 0..3 {
             for j in 0..3 {
                 let old_i = perm.p[i];
                 let old_j = perm.p[j];
-                ref_dense[(i, j)] = dense_a[(old_i, old_j)];
+                ref_dense[(i, j)] = dense_a[(old_i, old_j)].into();
             }
         }
         for i in 0..3 {
             for j in 0..3 {
                 let diff = dense_ap[(i, j)] - ref_dense[(i, j)];
-                assert!(diff.norm() < 1e-12);
+                assert!(diff.norm() < R::from(1e-12));
             }
         }
     }
+
 }

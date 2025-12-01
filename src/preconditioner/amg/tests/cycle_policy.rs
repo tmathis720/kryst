@@ -3,6 +3,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use faer::Mat;
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn v_cycle_policy_reports_single_visit() -> Result<(), KError> {
     let a = poisson1d(16);
     let mut amg = AMGBuilder::new()
@@ -16,6 +17,7 @@ fn v_cycle_policy_reports_single_visit() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn w_cycle_policy_uses_configured_gamma() -> Result<(), KError> {
     let a = poisson1d(16);
     let mut amg = AMGBuilder::new()
@@ -29,6 +31,7 @@ fn w_cycle_policy_uses_configured_gamma() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn kcycle_postsmoother_reduces_residual() -> Result<(), KError> {
     let a = poisson1d(64);
     let rhs = vec![1.0; a.nrows()];
@@ -79,6 +82,7 @@ fn kcycle_postsmoother_reduces_residual() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn kcycle_is_deterministic() -> Result<(), KError> {
     let a = poisson1d(32);
     let kc = KCycle {

@@ -100,6 +100,7 @@ fn nodal_row_basis_is_locally_orthonormal() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn nodal_tentative_is_deterministic() {
     let _guard = super::relax_lock()
         .lock()
@@ -142,6 +143,7 @@ fn nodal_tentative_is_deterministic() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn restriction_respects_component_modes() {
     let _guard = super::relax_lock()
         .lock()
@@ -264,6 +266,7 @@ fn scalar_and_nodal_singleton_match() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn nodal_numeric_refresh_updates_values() {
     let _guard = super::relax_lock()
         .lock()

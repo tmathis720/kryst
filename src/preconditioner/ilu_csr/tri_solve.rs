@@ -3,9 +3,9 @@ use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use super::{IluCsr, S};
+use super::{IluCsr, Real};
 
-pub fn tri_solve_serial(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<(), KError> {
+pub fn tri_solve_serial(pc: &IluCsr, x: &[Real], y: &mut [Real]) -> Result<(), KError> {
     let n = pc.n();
     let lr = pc.l_row();
     let lc = pc.l_col();
@@ -45,7 +45,7 @@ pub fn tri_solve_serial(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<(), KError>
     Ok(())
 }
 
-pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<(), KError> {
+pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[Real], y: &mut [Real]) -> Result<(), KError> {
     // Fallback to serial if no levels computed
     if pc.buckets_fwd().is_empty() || pc.buckets_bwd().is_empty() {
         return tri_solve_serial(pc, x, y);
@@ -65,7 +65,7 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[S], y: &mut [S]) -> Result<()
     let di = pc.u_diag_ix();
 
     // Forward: L y = x (unit diagonal). Per-level parallel, disjoint writes.
-    y.fill(S::zero());
+    y.fill(Real::zero());
     for bucket in pc.buckets_fwd() {
         let y_ptr = AtomicPtr::new(y.as_mut_ptr());
         parallel::par_for_each_index(bucket.len(), move |k| unsafe {
@@ -113,12 +113,12 @@ pub fn tri_solve_transpose_serial(
     pc: &IluCsr,
     ut_row: &[usize],
     ut_col: &[usize],
-    ut_val: &[S],
+    ut_val: &[Real],
     lt_row: &[usize],
     lt_col: &[usize],
-    lt_val: &[S],
-    x: &[S],
-    y: &mut [S],
+    lt_val: &[Real],
+    x: &[Real],
+    y: &mut [Real],
 ) -> Result<(), KError> {
     let n = pc.n();
     if x.len() != n || y.len() != n {

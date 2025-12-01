@@ -10,6 +10,7 @@ use faer::Mat;
 use std::sync::Arc;
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn pc_chain_applies_in_sequence() {
     struct AddOne;
     impl Preconditioner for AddOne {
@@ -48,6 +49,7 @@ fn pc_chain_applies_in_sequence() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn deferred_chain_constructs_in_setup() {
     use crate::context::ksp_context::KspContext;
     use crate::context::pc_context::PcFactory;

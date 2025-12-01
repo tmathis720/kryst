@@ -1,4 +1,5 @@
 #![cfg(feature = "backend-faer")]
+#![cfg(not(feature = "complex"))]
 
 use faer::Mat;
 use kryst::algebra::parallel::par_sum_abs2_local;

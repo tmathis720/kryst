@@ -1,4 +1,4 @@
-use super::S;
+use super::Real;
 use crate::algebra::scalar::{KrystScalar, R};
 use crate::error::KError;
 
@@ -11,12 +11,12 @@ pub enum PivotStrategy {
 
 #[inline]
 pub fn handle_pivot(
-    raw_pivot: S,
+    raw_pivot: Real,
     strategy: PivotStrategy,
     thr: R,
     diag_perturb_factor: R,
     max_diag_abs: R,
-) -> Result<S, KError> {
+) -> Result<Real, KError> {
     match strategy {
         PivotStrategy::Strict => {
             if raw_pivot.abs() < thr {
@@ -42,11 +42,11 @@ pub fn handle_pivot(
                     1.0
                 };
                 let delta = (diag_perturb_factor.abs().max(thr.min(1.0) * 1e-12)) * base;
-                let delta_s = S::from_real(delta);
+                let delta_s = Real::from_real(delta);
                 let direction = if abs > 0.0 {
-                    raw_pivot / S::from_real(abs)
+                    raw_pivot / Real::from_real(abs)
                 } else {
-                    S::one()
+                    Real::one()
                 };
                 Ok(direction * delta_s)
             } else {
@@ -57,14 +57,14 @@ pub fn handle_pivot(
 }
 
 #[inline]
-fn rescale_to_magnitude(pivot: S, magnitude: R) -> S {
+fn rescale_to_magnitude(pivot: Real, magnitude: R) -> Real {
     if magnitude == 0.0 {
-        return S::zero();
+        return Real::zero();
     }
     let abs = pivot.abs();
     if abs == 0.0 {
-        S::from_real(magnitude)
+        Real::from_real(magnitude)
     } else {
-        pivot * S::from_real(magnitude / abs)
+        pivot * Real::from_real(magnitude / abs)
     }
 }

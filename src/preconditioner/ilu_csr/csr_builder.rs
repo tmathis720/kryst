@@ -1,4 +1,4 @@
-use super::S;
+use super::Real;
 use crate::algebra::scalar::KrystScalar;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -6,7 +6,7 @@ use std::collections::BinaryHeap;
 #[derive(Clone, Debug)]
 pub struct CsrRowBuilder {
     pub cols: Vec<usize>,
-    pub vals: Vec<S>,
+    pub vals: Vec<Real>,
 }
 
 impl Default for CsrRowBuilder {
@@ -33,32 +33,32 @@ impl CsrBuilder {
     }
 
     #[inline]
-    pub fn push(&mut self, i: usize, j: usize, v: S) {
+    pub fn push(&mut self, i: usize, j: usize, v: Real) {
         self.rows[i].cols.push(j);
         self.rows[i].vals.push(v);
     }
 
-    pub fn row(&self, i: usize) -> (&[usize], &[S]) {
+    pub fn row(&self, i: usize) -> (&[usize], &[Real]) {
         let r = &self.rows[i];
         (&r.cols, &r.vals)
     }
 }
 
 impl CsrBuilder {
-    pub fn finalize_sorted_unique(self, reproducible: bool) -> (Vec<usize>, Vec<usize>, Vec<S>) {
+    pub fn finalize_sorted_unique(self, reproducible: bool) -> (Vec<usize>, Vec<usize>, Vec<Real>) {
         let mut row_ptr = Vec::with_capacity(self.nrows + 1);
         let mut col_idx: Vec<usize> = Vec::new();
-        let mut vals: Vec<S> = Vec::new();
+        let mut vals: Vec<Real> = Vec::new();
         row_ptr.push(0);
         for mut r in self.rows.into_iter() {
-            let mut pairs: Vec<(usize, S)> = r.cols.drain(..).zip(r.vals.drain(..)).collect();
+            let mut pairs: Vec<(usize, Real)> = r.cols.drain(..).zip(r.vals.drain(..)).collect();
             if reproducible {
                 pairs.sort_by(|a, b| a.0.cmp(&b.0));
             } else {
                 pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             }
             let mut last_col: Option<usize> = None;
-            let mut last_val: S = S::zero();
+            let mut last_val: Real = Real::zero();
             for (c, v) in pairs {
                 if let Some(lc) = last_col {
                     if lc == c {

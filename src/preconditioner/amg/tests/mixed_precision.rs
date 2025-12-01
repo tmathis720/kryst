@@ -2,6 +2,7 @@ use super::*;
 use crate::preconditioner::PcSide;
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn mixed_precision_jacobi_matches_baseline() -> Result<(), KError> {
     let _guard = super::relax_lock()
         .lock()
@@ -43,6 +44,7 @@ fn mixed_precision_jacobi_matches_baseline() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn mixed_precision_residual_matches_baseline_norm() -> Result<(), KError> {
     let _guard = super::relax_lock()
         .lock()
@@ -97,6 +99,7 @@ fn mixed_precision_residual_matches_baseline_norm() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn mixed_precision_transient_storage_runs() -> Result<(), KError> {
     let _guard = super::relax_lock()
         .lock()
@@ -164,6 +167,7 @@ fn mixed_precision_transient_storage_runs() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn mixed_precision_refresh_updates_cached_values() -> Result<(), KError> {
     let _guard = super::relax_lock()
         .lock()

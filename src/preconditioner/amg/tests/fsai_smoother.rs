@@ -36,6 +36,7 @@ fn poisson2d_anisotropic(nx: usize, ny: usize, eps: f64) -> CsrMatrix<f64> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn fsai_damps_high_frequency_mode() -> Result<(), KError> {
     let n = 64;
     let a = poisson1d(n);
@@ -112,6 +113,7 @@ fn fsai_damps_high_frequency_mode() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn fsai_handles_anisotropy() -> Result<(), KError> {
     let a = poisson2d_anisotropic(12, 12, 1e-2);
     let n = a.nrows();
@@ -149,6 +151,7 @@ fn fsai_handles_anisotropy() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn pcg_with_fsai_converges() -> Result<(), KError> {
     let _guard = super::relax_lock()
         .lock()
@@ -182,6 +185,7 @@ fn pcg_with_fsai_converges() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn fsai_numeric_refresh_updates_values() -> Result<(), KError> {
     let n = 40;
     let a = poisson1d(n);
@@ -217,6 +221,7 @@ fn fsai_numeric_refresh_updates_values() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn fsai_build_is_deterministic() -> Result<(), KError> {
     let a = poisson1d(48);
     let make_amg = || {

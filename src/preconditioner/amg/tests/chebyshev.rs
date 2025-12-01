@@ -52,6 +52,7 @@ fn chebyshev_damps_high_frequency_mode() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn chebyshev_recompute_toggle_and_safety() -> Result<(), KError> {
     let a = poisson1d(8);
     let mut amg = AMGBuilder::new()
@@ -118,6 +119,7 @@ fn chebyshev_recompute_toggle_and_safety() -> Result<(), KError> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn pcg_with_chebyshev_smoother_converges() -> Result<(), KError> {
     let _guard = super::relax_lock()
         .lock()
