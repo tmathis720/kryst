@@ -1194,17 +1194,17 @@ struct FsaiData {
 
 struct AMGLevel {
     /// A_l (coarse operator at this level, l = 0 is finest)
-    a: CsrMatrix<f64>,
+    a: CsrMatrix<S>,
     /// P_l (interpolation to next coarser level)
-    p: CsrMatrix<f64>,
+    p: CsrMatrix<S>,
     /// R_l (restriction to next coarser level)
-    r: CsrMatrix<f64>,
+    r: CsrMatrix<S>,
     /// diag(A_l)^{-1}
-    diag_inv: Vec<f64>,
+    diag_inv: Vec<S>,
     /// diag(A_l)^{-1/2} (optional)
-    d_sqrt_inv: Option<Vec<f64>>,
+    d_sqrt_inv: Option<Vec<S>>,
     /// 1 / (\sum_j |a_ij|) for L1-Jacobi
-    l1_inv: Option<Vec<f64>>,
+    l1_inv: Option<Vec<S>>,
     /// Cached spectral bounds for Chebyshev smoother
     cheb: Option<ChebData>,
     /// fine->coarse aggregate id used to rebuild P values (SA numeric refresh)
