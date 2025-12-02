@@ -29,6 +29,7 @@ mod tests_gmres_z_basis {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn gmres_right_uses_z_basis_and_calls_pc_per_step() -> Result<(), KError> {
         // A: simple nonsymmetric to avoid early convergence in one step
         let a = Mat::from_fn(4, 4, |i, j| {

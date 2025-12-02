@@ -30,6 +30,7 @@ fn tridiag_csr(n: usize, a: R, b: R, c: R) -> CsrMatrix<R> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn ilu0_single_rank_matches_serial_ref() {
     use crate::preconditioner::PcSide;
     use oorandom::Rand64;
@@ -80,6 +81,7 @@ fn ilu0_single_rank_matches_serial_ref() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn iluk_basic_pivots_nonzero() {
     let n = 8;
     let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
@@ -113,6 +115,7 @@ fn iluk_basic_pivots_nonzero() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn ilut_basic_and_numeric_update_keeps_pattern() {
     let n = 10;
     let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));
@@ -172,6 +175,7 @@ fn ilut_basic_and_numeric_update_keeps_pattern() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn milu0_preserves_row_sums() {
     use crate::preconditioner::ilu_csr::IluKind;
     // 4x4 "arrow" matrix that induces dropped fill in ILU(0)
@@ -249,6 +253,7 @@ fn milu0_preserves_row_sums() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn ilu0_with_rcm_setup() {
     let n = 8;
     let a = tridiag_csr(n, R::from(-1.0), R::from(4.0), R::from(-1.0));

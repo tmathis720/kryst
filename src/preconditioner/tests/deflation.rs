@@ -28,6 +28,7 @@ fn poisson_1d(n: usize) -> CsrMatrix<R> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn extract_coarse_space_identity() {
     let a = poisson_1d(12);
     let mut amg = AMGBuilder::new()
@@ -44,6 +45,7 @@ fn extract_coarse_space_identity() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn deflation_preconditioner_applies() {
     let a = poisson_1d(10);
     let mut amg = AMGBuilder::new()

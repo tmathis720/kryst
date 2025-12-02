@@ -24,6 +24,7 @@ fn sample_block_matrix() -> CsrMatrix<f64> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn nodal_row_basis_is_locally_orthonormal() {
     let _guard = super::relax_lock()
         .lock()

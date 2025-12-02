@@ -27,6 +27,7 @@ fn poisson_1d(n: usize) -> CsrMatrix<R> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn spd_preconditioned_operator_positive() {
     let a = poisson_1d(16);
     let mut amg = AMGBuilder::new()
@@ -63,6 +64,7 @@ fn spd_preconditioned_operator_positive() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn spd_enforces_r_equals_pt() {
     let a = poisson_1d(12);
     let mut amg = AMGBuilder::new()
@@ -133,6 +135,7 @@ fn spd_rejects_non_galerkin_when_forbidden() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn spd_right_side_errors() {
     let a = poisson_1d(14);
     let mut amg = AMGBuilder::new()

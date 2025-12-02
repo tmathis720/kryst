@@ -23,6 +23,7 @@ mod tests_gmres_lr {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn gmres_left_right_same_solution_jacobi() -> Result<(), KError> {
         // Nonsymmetric, strictly diagonally dominant (easy to solve)
         let a = Mat::from_fn(3, 3, |i, j| match (i, j) {

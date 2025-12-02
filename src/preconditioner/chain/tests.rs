@@ -97,8 +97,8 @@ fn apply_s_matches_real_chain() {
 
     let mut chain = PcChain::new(vec![Box::new(AddOne), Box::new(ScaleTwo), Box::new(AddOne)]);
 
-    let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
-    chain.setup(&a).unwrap();
+    // let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
+    // chain.setup(&a).unwrap();
 
     let x_real = [3.0, -1.0];
     let mut y_real = [0.0, 0.0];

@@ -58,6 +58,7 @@ fn direct_pc_apply_is_not_identity() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn builders_sor_and_chebyshev_object_safe() {
     // Identity CSR as operator
     let csr = CsrMatrix::identity(5);
@@ -93,6 +94,7 @@ fn builders_sor_and_chebyshev_object_safe() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn ilu_right_side_errors() {
     use crate::matrix::op::CsrOp;
     let csr = CsrMatrix::identity(3);

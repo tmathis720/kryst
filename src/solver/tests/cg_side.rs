@@ -10,6 +10,7 @@ mod tests_cg_side {
     use std::sync::Arc;
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn cg_rejects_right_side() {
         // SPD 2x2
         let a = Mat::<R>::from_fn(

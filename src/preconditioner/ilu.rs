@@ -1796,8 +1796,9 @@ mod tests {
         assert!(ilu.config.enable_distributed);
     }
 
-    #[cfg(not(feature = "complex"))]
+    
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn ilu0_real_factorization_solves_spd() {
         let matrix = make_spd_3x3();
         let x_true = vec![S::from_real(1.0), S::from_real(2.0), S::from_real(-1.0)];

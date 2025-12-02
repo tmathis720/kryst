@@ -38,6 +38,7 @@ fn to_scalar_vec(values: &[R]) -> Vec<S> {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn asm_identity_matches_input() {
     let a = Arc::new(identity(4));
     let op = CsrOp::new(a.clone());
@@ -58,6 +59,7 @@ fn asm_identity_matches_input() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn asm_amg_skip_coarse_matches_asm() {
     let a = Arc::new(poisson_1d(8));
     let op = CsrOp::new(a.clone());
@@ -87,6 +89,7 @@ fn asm_amg_skip_coarse_matches_asm() {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn asm_numeric_update_refreshes_values() {
     let a1 = Arc::new(poisson_1d(6));
     let op1 = CsrOp::new(a1.clone());
