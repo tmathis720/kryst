@@ -11,7 +11,7 @@ use crate::solver::pcg::{PcgSolver, PcgVariant};
 use super::util;
 
 fn solve_with_variant(
-    a: &crate::matrix::sparse::CsrMatrix<f64>,
+    a: &[R],
     b: &[R],
     variant: PcgVariant,
 ) -> Result<(Vec<R>, usize, R), KError> {
@@ -20,7 +20,7 @@ fn solve_with_variant(
     let mut x: Vec<R> = vec![R::default(); b.len()];
     let mut ws = Workspace::default();
     let mut pc = Jacobi::new();
-    let op: &dyn crate::matrix::op::LinOp<S = f64> = a;
+    let op: &dyn crate::matrix::op::LinOp<S = S> = a;
     pc.setup(op)?;
     let comm = UniverseComm::NoComm(NoComm);
     let stats = solver.solve(

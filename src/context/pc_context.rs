@@ -3,6 +3,7 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
+use crate::algebra::scalar::{S, R};
 
 #[cfg(feature = "backend-faer")]
 type MatSorSide = crate::preconditioner::sor::MatSorType;
@@ -112,15 +113,15 @@ pub struct DeferredPcInfo {
 pub struct NoOpPreconditioner;
 
 impl Preconditioner for NoOpPreconditioner {
-    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
         Ok(())
     }
-    fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
         z.copy_from_slice(r);
         Ok(())
     }
 
-    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 }
@@ -562,7 +563,7 @@ impl PcFactory {
 
     pub fn construct_deferred_preconditioner(
         info: DeferredPcInfo,
-        _op: &dyn LinOp<S = f64>,
+        _op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // The concrete operator format is deferred to the preconditioner itself.
         match info.pc_type {
@@ -607,7 +608,7 @@ impl PcFactory {
     #[cfg(feature = "backend-faer")]
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
-        op: &dyn LinOp<S = f64>,
+        op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // validate again in case specs were assembled elsewhere
         Self::validate_chain_specs(&specs)?;
@@ -624,7 +625,7 @@ impl PcFactory {
     #[cfg(not(feature = "backend-faer"))]
     pub fn construct_deferred_pc_chain(
         _specs: Vec<DeferredPcInfo>,
-        _op: &dyn LinOp<S = f64>,
+        _op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         Err(KError::Unsupported(
             "backend-faer feature is required to build chained preconditioners".into(),
@@ -633,7 +634,7 @@ impl PcFactory {
 
     pub fn create_pc_chain(
         chain: &str,
-        op: &dyn LinOp<S = f64>,
+        op: &dyn LinOp<S = S>,
         opts: Option<PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         let specs = Self::create_pc_chain_from_str(chain, opts.as_ref())?;

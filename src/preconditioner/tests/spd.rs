@@ -135,7 +135,6 @@ fn spd_rejects_non_galerkin_when_forbidden() {
 }
 
 #[test]
-#[cfg(not(feature = "complex"))]
 fn spd_right_side_errors() {
     let a = poisson_1d(14);
     let mut amg = AMGBuilder::new()

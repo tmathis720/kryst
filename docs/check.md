@@ -1,5 +1,8 @@
-Here is the overall directly structure:
+I'm conducting a complete, end-to-end audit of `kryst` to flesh out features such as MPI, Rayon, and flexible backend linear algebra libraries (a la `faer`, `nalgebra`, `blas`, `cgmath`, etc.) via a thin interface layer. I want every numerical implementation to rely on `kryst` built-in capabilities for working with CSR CSC, and dense matrices as necessary. I obviously want to avoid having to write duplicative code. Additionally, we are working on making sure that `kryst` is capable of handling real and complex scalar types. We've started this process, but it is still partially complete. We will start from the highest level of the program and work our way down into more detail as we go. Ultimately, we'll be going through each preconditioner and solver one-by-one, but for now we want to focus on the overall architecture and making sure it's totally sound.
 
+Here is the layout of the library overall as it stands:
+
+```bash
 ```bash
 │   lib.rs
 │   reduction.rs
@@ -238,9 +241,7 @@ Here is the overall directly structure:
             workspace.rs
 ```
 
-We will start the review in parts, looking at one module at a time in isolation, working from the most foundational elements to the highest-level ones.
-
-Here we will start with the context module:
+We will start from the `context` module, which describes the generic interfaces for the Solver and Preconditioners. Remember, if everything looks to be in order in the module, feel free to say "this looks good" or to give some kind of vote of confidence that what has been done looks robust and production-ready.
 
 `src/context/mod.rs`
 
@@ -280,9 +281,45 @@ pub use pc_context::{DeferredPcInfo, NoOpPreconditioner, PC, PcFactory, PcType, 
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::approxinv_csr::ApproxInvKind;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
+
+#[cfg(feature = "backend-faer")]
+type MatSorSide = crate::preconditioner::sor::MatSorType;
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatSorSide {
+    APPLY_LOWER,
+    APPLY_UPPER,
+    SYMMETRIC_SWEEP,
+}
+
+#[cfg(feature = "backend-faer")]
+type ApproxInvKindAlias = crate::preconditioner::approxinv_csr::ApproxInvKind;
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApproxInvKindAlias {
+    FSAI,
+    SPAI,
+}
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static CHAIN_STRICT_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct ChainStrictGuard(Option<bool>);
+
+#[cfg(test)]
+impl Drop for ChainStrictGuard {
+    fn drop(&mut self) {
+        CHAIN_STRICT_OVERRIDE.with(|cell| cell.set(self.0));
+    }
+}
 
 /// Supported preconditioner types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +340,7 @@ pub enum PcType {
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
+    #[cfg(feature = "superlu_dist")]
     SuperLuDist,
 }
 
@@ -326,7 +364,18 @@ impl FromStr for PcType {
             "approxinv" | "approxinverse" => Ok(PcType::ApproxInverse),
             "lu" => Ok(PcType::Lu),
             "qr" => Ok(PcType::Qr),
-            "superludist" => Ok(PcType::SuperLuDist),
+            "superludist" => {
+                #[cfg(feature = "superlu_dist")]
+                {
+                    Ok(PcType::SuperLuDist)
+                }
+                #[cfg(not(feature = "superlu_dist"))]
+                {
+                    Err(KError::Unsupported(
+                        "build without feature=\"superlu_dist\"".into(),
+                    ))
+                }
+            }
             other => Err(KError::UnrecognizedPcType(other.to_string())),
         }
     }
@@ -377,7 +426,7 @@ pub enum PcConfig {
     Sor {
         omega: f64,
         sweeps: usize,
-        mat_side: crate::preconditioner::sor::MatSorType,
+        mat_side: MatSorSide,
         symmetric: bool,
     },
     Chebyshev {
@@ -397,7 +446,7 @@ pub enum PcConfig {
         smoother: Option<String>,
     },
     ApproxInv {
-        kind: ApproxInvKind,
+        kind: ApproxInvKindAlias,
         levels: usize,
         max_per_col: usize,
         drop_tol: f64,
@@ -408,6 +457,7 @@ pub enum PcConfig {
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
+    #[cfg(feature = "superlu_dist")]
     SuperLuDist,
 }
 
@@ -469,11 +519,10 @@ impl PcConfig {
             },
 
             Sor => {
-                use crate::preconditioner::sor::MatSorType;
                 let mat_side = match o.sor_mat_side.as_deref() {
-                    Some("lower") | Option::None => MatSorType::APPLY_LOWER,
-                    Some("upper") => MatSorType::APPLY_UPPER,
-                    Some("symmetric") => MatSorType::SYMMETRIC_SWEEP,
+                    Some("lower") | Option::None => MatSorSide::APPLY_LOWER,
+                    Some("upper") => MatSorSide::APPLY_UPPER,
+                    Some("symmetric") => MatSorSide::SYMMETRIC_SWEEP,
                     Some(s) => {
                         return Err(KError::InvalidInput(format!("unknown sor_mat_side: {s}")));
                     }
@@ -525,8 +574,8 @@ impl PcConfig {
                     .to_lowercase()
                     .as_str()
                 {
-                    "fsai" => ApproxInvKind::FSAI,
-                    "spai" => ApproxInvKind::SPAI,
+                    "fsai" => ApproxInvKindAlias::FSAI,
+                    "spai" => ApproxInvKindAlias::SPAI,
                     other => {
                         return Err(KError::InvalidInput(format!(
                             "unknown pc_approxinv_kind: {other}"
@@ -552,6 +601,7 @@ impl PcConfig {
 
             Lu => PcConfig::Lu,
             Qr => PcConfig::Qr,
+            #[cfg(feature = "superlu_dist")]
             SuperLuDist => PcConfig::SuperLuDist,
             BlockJacobi => unreachable!(),
         })
@@ -564,7 +614,7 @@ impl PcConfig {
 ///
 /// - `PcOptions` → typed `PcConfig` → concrete builder
 /// - Feature gates:
-///   - `superlu_dist`: enables [`PcType::SuperLuDist`]
+///   - `superlu_dist`: enables the SuperLU_DIST preconditioner
 ///   - `legacy-pc-bridge`: enables adapters for legacy implementations (no per-apply allocs)
 ///
 /// ## Chains
@@ -576,16 +626,33 @@ pub struct PcFactory;
 impl PcFactory {
     #[inline]
     fn is_direct(pc: PcType) -> bool {
-        matches!(pc, PcType::Lu | PcType::Qr | PcType::SuperLuDist)
+        match pc {
+            PcType::Lu | PcType::Qr => true,
+            #[cfg(feature = "superlu_dist")]
+            PcType::SuperLuDist => true,
+            _ => false,
+        }
     }
 
     #[inline]
     fn chain_strict() -> bool {
+        #[cfg(test)]
+        if let Some(val) = CHAIN_STRICT_OVERRIDE.with(|cell| cell.get()) {
+            return val;
+        }
         // Opt-in strict mode via env var.
         // KRYST_PC_CHAIN_STRICT=1|true enforces selected warnings as errors.
         std::env::var("KRYST_PC_CHAIN_STRICT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn override_chain_strict(value: Option<bool>) -> ChainStrictGuard {
+        CHAIN_STRICT_OVERRIDE.with(|cell| {
+            let prev = cell.replace(value);
+            ChainStrictGuard(prev)
+        })
     }
 
     /// Validate high-level invariants for a PC chain.
@@ -665,6 +732,7 @@ impl PcFactory {
 
         Ok(())
     }
+    #[cfg(feature = "backend-faer")]
     pub fn create_preconditioner(
         pc_type: PcType,
         options: Option<&PcOptions>,
@@ -733,15 +801,26 @@ impl PcFactory {
                     parallel,
                 };
                 match kind {
-                    ApproxInvKind::FSAI => Ok(Box::new(FsaiCsr::new_with_params(params))),
-                    ApproxInvKind::SPAI => Ok(Box::new(SpaiCsr::new_with_params(params))),
+                    ApproxInvKindAlias::FSAI => Ok(Box::new(FsaiCsr::new_with_params(params))),
+                    ApproxInvKindAlias::SPAI => Ok(Box::new(SpaiCsr::new_with_params(params))),
                 }
             }
 
             PcConfig::Lu => b::build_lu(),
             PcConfig::Qr => b::build_qr(),
+            #[cfg(feature = "superlu_dist")]
             PcConfig::SuperLuDist => b::build_superlu_dist(),
         }
+    }
+
+    #[cfg(not(feature = "backend-faer"))]
+    pub fn create_preconditioner(
+        _pc_type: PcType,
+        _options: Option<&PcOptions>,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        Err(KError::Unsupported(
+            "backend-faer feature is required to build preconditioners".into(),
+        ))
     }
 
     /// Convenience: build directly from options (when `pc_type` lives inside options)
@@ -763,7 +842,7 @@ impl PcFactory {
 
     pub fn construct_deferred_preconditioner(
         info: DeferredPcInfo,
-        _op: &dyn LinOp<S = f64>,
+        _op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // The concrete operator format is deferred to the preconditioner itself.
         match info.pc_type {
@@ -777,6 +856,9 @@ impl PcFactory {
         }
     }
 
+    /// Parse a string chain and clone the same [`PcOptions`] for every stage.
+    ///
+    /// To tune stages individually, populate [`PcOptions::chain`].
     pub fn create_pc_chain_from_str(
         chain: &str,
         opts: Option<&PcOptions>,
@@ -802,6 +884,7 @@ impl PcFactory {
         Ok(specs)
     }
 
+    #[cfg(feature = "backend-faer")]
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
         op: &dyn LinOp<S = f64>,
@@ -816,6 +899,16 @@ impl PcFactory {
             stages.push(stage);
         }
         Ok(Box::new(PcChain::new(stages)))
+    }
+
+    #[cfg(not(feature = "backend-faer"))]
+    pub fn construct_deferred_pc_chain(
+        _specs: Vec<DeferredPcInfo>,
+        _op: &dyn LinOp<S = f64>,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        Err(KError::Unsupported(
+            "backend-faer feature is required to build chained preconditioners".into(),
+        ))
     }
 
     pub fn create_pc_chain(
@@ -862,106 +955,6 @@ pub enum SparsityPattern {
 
 /// Placeholder type for API compatibility.
 pub type PC = ();
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::preconditioner::Preconditioner;
-
-    #[cfg(feature = "dense-direct")]
-    #[test]
-    fn factory_builds_lu_qr() {
-        let lu = PcFactory::create_preconditioner(PcType::from_str("lu").unwrap(), None).unwrap();
-        let qr = PcFactory::create_preconditioner(PcType::from_str("qr").unwrap(), None).unwrap();
-
-        fn _is_pc(_p: &Box<dyn Preconditioner>) {}
-        _is_pc(&lu);
-        _is_pc(&qr);
-    }
-
-    #[cfg(feature = "legacy-pc-bridge")]
-    #[test]
-    fn factory_uses_options_for_ilut() {
-        let opts = PcOptions {
-            pc_type: Some("ilut".into()),
-            ilut_drop_tol: Some(1e-6),
-            ilut_max_fill: Some(50),
-            ..Default::default()
-        };
-        let pc = PcFactory::create_from_options(&opts).unwrap();
-        fn _is_pc(_: &Box<dyn Preconditioner>) {}
-        _is_pc(&pc);
-    }
-
-    #[cfg(feature = "legacy-pc-bridge")]
-    #[test]
-    fn factory_builds_sor_from_options() {
-        let opts = PcOptions {
-            pc_type: Some("sor".into()),
-            sor_omega: Some(1.5),
-            sor_sweeps: Some(2),
-            sor_mat_side: Some("lower".into()),
-            ..Default::default()
-        };
-        let pc = PcFactory::create_from_options(&opts).unwrap();
-        fn _is_pc(_: &Box<dyn Preconditioner>) {}
-        _is_pc(&pc);
-    }
-
-    #[test]
-    fn chebyshev_validates_bounds() {
-        let bad = PcOptions {
-            pc_type: Some("chebyshev".into()),
-            cheb_degree: Some(0),
-            cheb_eig_lo: Some(2.0),
-            cheb_eig_hi: Some(1.0),
-            ..Default::default()
-        };
-        let err = PcFactory::create_from_options(&bad).err().unwrap();
-        assert!(matches!(err, KError::InvalidInput(_)));
-    }
-
-    #[test]
-    fn factory_builds_asm_from_options() {
-        let opts = crate::config::options::PcOptions {
-            pc_type: Some("asm".into()),
-            asm_block_solver: Some("ludense".into()),
-            ..Default::default()
-        };
-        let pc = PcFactory::create_from_options(&opts).unwrap_or_else(|_| {
-            // When dense-direct is disabled, builder still constructs ASM (LuDense maps to CSR fallback)
-            PcFactory::create_from_options(&crate::config::options::PcOptions {
-                pc_type: Some("asm".into()),
-                asm_block_solver: Some("csr".into()),
-                ..Default::default()
-            })
-            .unwrap()
-        });
-        fn _is_pc(_: &Box<dyn Preconditioner>) {}
-        _is_pc(&pc);
-    }
-
-    #[test]
-    fn chain_direct_not_last_is_error_in_strict_mode() {
-        // flip strict mode via env var for this test
-        unsafe { std::env::set_var("KRYST_PC_CHAIN_STRICT", "1") };
-        let opts = crate::config::options::PcOptions::default();
-
-        // "lu->jacobi" => direct not last
-        let specs = PcFactory::create_pc_chain_from_str("lu->jacobi", Some(&opts));
-        assert!(specs.is_err(), "expected validation error in strict mode");
-        unsafe { std::env::remove_var("KRYST_PC_CHAIN_STRICT") };
-    }
-
-    #[test]
-    fn chain_duplicate_consecutive_warns_but_allows_by_default() {
-        // Default (non-strict): should allow "ilu->ilu"
-        let opts = crate::config::options::PcOptions::default();
-        let specs = PcFactory::create_pc_chain_from_str("ilu->ilu", Some(&opts))
-            .expect("duplicates allowed with warning by default");
-        assert!(!specs.is_empty());
-    }
-}
 ```
 
 `src/context/ksp_context/mod.rs`
@@ -1021,6 +1014,7 @@ use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, set_rayon_t
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
+#[cfg(feature = "backend-faer")]
 use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 use crate::parallel::{Comm, set_global_reduction_mode, set_global_reduction_mode_scoped};
@@ -1090,7 +1084,7 @@ impl FromStr for SolverType {
 }
 
 /// Minimal KSP context holding solver, preconditioner, and operators.
-pub struct KspContext {
+pub struct KspContext<S: Scalar> {
     solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>>,
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
@@ -2017,6 +2011,7 @@ impl KspContext {
             self.last_pc_vid = None;
         }
 
+        #[cfg(feature = "backend-faer")]
         if let Some(pc) = self.pc.as_mut() {
             // Pre-convert once to the PC's requested format, preserving communicator.
             let hint = pc.required_format();
@@ -2080,6 +2075,13 @@ impl KspContext {
             }
         }
 
+        #[cfg(not(feature = "backend-faer"))]
+        if let Some(_pc) = self.pc.as_mut() {
+            return Err(KError::Unsupported(
+                "preconditioner materialization requires the backend-faer feature".into(),
+            ));
+        }
+
         let (m, _) = amat.dims();
         if self
             .work
@@ -2122,7 +2124,25 @@ impl KspContext {
                 );
             }
             pc.direct_solve(pmat.as_ref(), b, x)?;
-            return Ok(SolveStats::new(1, 0.0, ConvergedReason::ConvergedAtol));
+            let mat_for_residual = self
+                .amat
+                .as_ref()
+                .map(|a| a.as_ref())
+                .unwrap_or_else(|| pmat.as_ref());
+            let mut residual = vec![0.0f64; b.len()];
+            if let Err(e) = mat_for_residual.try_matvec(x, &mut residual) {
+                return Err(KError::SolveError(format!("residual matvec failed: {e}")));
+            }
+            for (ri, &bi) in residual.iter_mut().zip(b.iter()) {
+                *ri = bi - *ri;
+            }
+            let comm = mat_for_residual.comm();
+            let res_sq = comm.dot(&residual, &residual);
+            return Ok(SolveStats::new(
+                0,
+                res_sq.sqrt(),
+                ConvergedReason::ConvergedAtol,
+            ));
         }
 
         // Ensure the configured reduction mode is active while solving and configure
@@ -2962,14 +2982,11 @@ impl Workspace {
 
 /// Grow vector to `need` length without zeroing. Never shrinks silently.
 #[inline]
-fn ensure_len<T: Copy>(v: &mut Vec<T>, need: usize) {
-    if v.len() != need {
-        if v.capacity() < need {
-            v.reserve_exact(need - v.capacity());
-        }
-        unsafe {
-            v.set_len(need);
-        }
+fn ensure_len<T: Copy + Default>(v: &mut Vec<T>, need: usize) {
+    if v.len() < need {
+        v.resize(need, T::default());
+    } else if v.len() > need {
+        v.truncate(need);
     }
 }
 
@@ -2993,2192 +3010,6 @@ fn block_payload_capacity(max_blocks: usize, block_size: usize) -> usize {
     #[cfg(not(feature = "complex"))]
     {
         scalars
-    }
-}
-```
-
-We specifically want to focus on (1) overall code correctness, scalability, and robustness; and (2) completeness of the complex, mpi, and rayon implementations.
-
-Now we want to focus on the algebra module. Here is the source code. In addition to reviewing the code for completeness, robustness, MPI/rayon capabilities, and complex support, we also want to scope out removal of `faer` as a dependency for the whole crate, so that means feature gating the `faer` code specifically, and likely introducing new feature gates for other linear algebra crates (i.e., `nalgebra`, `rulinalg`, `alga`, `sprs`, `cgmath`, etc.) numerical implementations.
-
-`src/algebra/mod.rs`
-
-```rust
-//! Basic numeric traits and operations used throughout the crate.
-
-pub mod blas;
-pub mod bridge;
-pub mod parallel;
-pub mod parallel_cfg;
-pub mod prelude;
-pub mod scalar;
-
-pub use scalar::{KrystScalar, R, S};
-```
-
-`src/algebra/blas.rs`
-
-```rust
-#[allow(unused_imports)]
-use crate::algebra::prelude::*;
-
-#[inline]
-pub fn dot_conj(x: &[S], y: &[S]) -> S {
-    debug_assert_eq!(x.len(), y.len());
-    let mut acc = S::zero();
-    for i in 0..x.len() {
-        acc = x[i].conj().mul_add(y[i], acc);
-    }
-    acc
-}
-
-#[inline]
-pub fn nrm2(x: &[S]) -> R {
-    dot_conj(x, x).abs().sqrt()
-}
-```
-
-`src/algebra/bridge.rs`
-
-```rust
-use crate::algebra::prelude::*;
-
-/// Temporary buffers reused by solver bridges when converting between `S` and `f64`.
-#[derive(Default, Clone, Debug)]
-pub struct BridgeScratch {
-    buf: Vec<f64>,
-}
-
-impl BridgeScratch {
-    /// Create an empty scratch buffer.
-    #[inline]
-    pub fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
-    #[inline]
-    fn ensure(&mut self, want: usize) {
-        if self.buf.len() < want {
-            self.buf.resize(want, 0.0);
-        }
-    }
-
-    /// Loan two disjoint real buffers of length `n` at once.
-    #[inline]
-    pub fn with_pair<F, Rv>(&mut self, n: usize, f: F) -> Rv
-    where
-        F: FnOnce(&mut [f64], &mut [f64]) -> Rv,
-    {
-        self.ensure(2 * n);
-        let (xr, rest) = self.buf.split_at_mut(n);
-        let (yr, _) = rest.split_at_mut(n);
-        f(xr, yr)
-    }
-
-    /// Loan a single temporary buffer of length `n`.
-    #[inline]
-    pub fn with_one<F, Rv>(&mut self, n: usize, f: F) -> Rv
-    where
-        F: FnOnce(&mut [f64]) -> Rv,
-    {
-        self.ensure(n);
-        f(&mut self.buf[..n])
-    }
-}
-
-#[inline]
-pub fn copy_scalar_to_real_in<T: KrystScalar<Real = f64>>(x: &[T], xr: &mut [f64]) {
-    debug_assert_eq!(x.len(), xr.len());
-    for (dst, &src) in xr.iter_mut().zip(x.iter()) {
-        *dst = src.real();
-    }
-}
-
-#[inline]
-pub fn copy_real_into_scalar<T: KrystScalar<Real = f64>>(yr: &[f64], y: &mut [T]) {
-    debug_assert_eq!(yr.len(), y.len());
-    for (dst, &src) in y.iter_mut().zip(yr.iter()) {
-        *dst = T::from_real(src);
-    }
-}
-```
-
-`src/algebra/parallel_cfg.rs`
-
-```rust
-use once_cell::sync::OnceCell;
-use std::sync::RwLock;
-
-#[derive(Clone, Copy, Debug)]
-pub struct ParallelTune {
-    /// Minimum vector length to enable Rayon in elementwise kernels.
-    pub min_len_vec: usize,
-    /// Minimum rows to enable Rayon in CSR SpMV.
-    pub min_rows_spmv: usize,
-    /// Target chunk size in rows for CSR SpMV (approx).
-    pub chunk_rows_spmv: usize,
-}
-
-impl Default for ParallelTune {
-    fn default() -> Self {
-        Self {
-            min_len_vec: 8192,
-            min_rows_spmv: 2048,
-            chunk_rows_spmv: 512,
-        }
-    }
-}
-
-static PAR_TUNE: OnceCell<RwLock<ParallelTune>> = OnceCell::new();
-
-fn cell() -> &'static RwLock<ParallelTune> {
-    PAR_TUNE.get_or_init(|| RwLock::new(ParallelTune::default()))
-}
-
-pub fn set_parallel_tune(t: ParallelTune) {
-    if let Ok(mut guard) = cell().write() {
-        *guard = t;
-    }
-}
-
-pub fn parallel_tune() -> ParallelTune {
-    cell()
-        .read()
-        .map(|g| *g)
-        .unwrap_or_else(|_| ParallelTune::default())
-}
-
-/// Configure Rayon for reproducible runs by constraining the global pool.
-pub fn set_rayon_threads_for_repro(enable: bool) {
-    #[cfg(feature = "rayon")]
-    {
-        if enable {
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build_global();
-        }
-    }
-    let _ = enable;
-}
-```
-
-`src/algebra/parallel.rs`
-
-```rust
-//! Thread-parallel vector kernels with scalar fallback.
-//!
-//! - Works with or without `feature="rayon"`.
-//! - Uses stable chunking (configurable) to keep reductions numerically steady.
-//! - Provides scalar fallbacks for small problems or builds without Rayon.
-//!
-//! The kernels assume crate-level aliases/traits brought in via
-//! [`crate::algebra::prelude`].
-
-#![allow(clippy::needless_borrow)]
-
-use crate::algebra::prelude::*;
-
-#[cfg(feature = "rayon")]
-use rayon::ThreadPoolBuilder;
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
-
-const VEC_CHUNK: usize = 1 << 14;
-const REPRO_CHUNK: usize = 1 << 14;
-
-/// Configure the global Rayon thread pool used by Kryst's parallel kernels.
-///
-/// This is a thin wrapper around [`rayon::ThreadPoolBuilder::build_global`]; it is
-/// safe to call multiple times, but only the first successful invocation takes
-/// effect. Subsequent calls are ignored once the global pool has been initialised.
-#[cfg(feature = "rayon")]
-pub fn set_rayon_threads(n: usize) {
-    let _ = ThreadPoolBuilder::new().num_threads(n).build_global();
-}
-
-// -------------------- scalar fallbacks --------------------
-
-#[inline]
-fn s_copy(src: &[S], dst: &mut [S]) {
-    debug_assert_eq!(src.len(), dst.len());
-    dst.copy_from_slice(src);
-}
-
-#[inline]
-fn s_fill_zero(dst: &mut [S]) {
-    for value in dst {
-        *value = S::zero();
-    }
-}
-
-#[inline]
-fn s_scale(alpha: S, y: &mut [S]) {
-    if alpha == S::from_real(1.0) {
-        return;
-    }
-    if alpha == S::zero() {
-        s_fill_zero(y);
-        return;
-    }
-    for yi in y {
-        *yi = alpha * *yi;
-    }
-}
-
-#[inline]
-fn s_axpy(x: &[S], alpha: S, y: &mut [S]) {
-    debug_assert_eq!(x.len(), y.len());
-    if alpha == S::zero() {
-        return;
-    }
-    for (yi, &xi) in y.iter_mut().zip(x) {
-        *yi = *yi + alpha * xi;
-    }
-}
-
-#[inline]
-fn s_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
-    debug_assert_eq!(x.len(), y.len());
-    if beta == S::zero() {
-        for (yi, &xi) in y.iter_mut().zip(x) {
-            *yi = alpha * xi;
-        }
-    } else if beta == S::from_real(1.0) {
-        s_axpy(x, alpha, y);
-    } else {
-        for (yi, &xi) in y.iter_mut().zip(x) {
-            *yi = alpha * xi + beta * *yi;
-        }
-    }
-}
-
-#[inline]
-fn s_dot_conj_local(x: &[S], y: &[S]) -> S {
-    debug_assert_eq!(x.len(), y.len());
-    let mut acc = S::zero();
-    const BLK: usize = 1 << 14;
-    let mut i = 0;
-    while i < x.len() {
-        let end = (i + BLK).min(x.len());
-        let mut blk = S::zero();
-        for j in i..end {
-            blk = blk + x[j].conj() * y[j];
-        }
-        acc = acc + blk;
-        i = end;
-    }
-    acc
-}
-
-#[inline]
-fn s_sum_abs2_local(x: &[S]) -> R {
-    let mut acc = R::default();
-    const BLK: usize = 1 << 14;
-    let mut i = 0;
-    while i < x.len() {
-        let end = (i + BLK).min(x.len());
-        let mut blk = R::default();
-        for j in i..end {
-            let a = x[j].abs();
-            blk = blk + a * a;
-        }
-        acc = acc + blk;
-        i = end;
-    }
-    acc
-}
-
-// -------------------- public API (dual-path) --------------------
-
-#[inline]
-pub fn par_copy(src: &[S], dst: &mut [S]) {
-    debug_assert_eq!(src.len(), dst.len());
-    #[cfg(feature = "rayon")]
-    {
-        let n = src.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        let chunk = VEC_CHUNK;
-        if n >= min_len {
-            src.par_chunks(chunk)
-                .zip(dst.par_chunks_mut(chunk))
-                .for_each(|(s, d)| d.copy_from_slice(s));
-            return;
-        }
-    }
-    s_copy(src, dst);
-}
-
-#[inline]
-pub fn par_fill_zero(dst: &mut [S]) {
-    #[cfg(feature = "rayon")]
-    {
-        let n = dst.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        let chunk = VEC_CHUNK;
-        if n >= min_len {
-            dst.par_chunks_mut(chunk)
-                .for_each(|chunk| s_fill_zero(chunk));
-            return;
-        }
-    }
-    s_fill_zero(dst);
-}
-
-#[inline]
-pub fn par_scale(alpha: S, y: &mut [S]) {
-    #[cfg(feature = "rayon")]
-    {
-        let n = y.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        let chunk = VEC_CHUNK;
-        if n >= min_len {
-            if alpha == S::from_real(1.0) {
-                return;
-            }
-            if alpha == S::zero() {
-                par_fill_zero(y);
-                return;
-            }
-            y.par_chunks_mut(chunk).for_each(|yc| {
-                for yi in yc {
-                    *yi = alpha * *yi;
-                }
-            });
-            return;
-        }
-    }
-    s_scale(alpha, y);
-}
-
-#[inline]
-pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
-    debug_assert_eq!(x.len(), y.len());
-    #[cfg(feature = "rayon")]
-    {
-        let n = x.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        if n >= min_len {
-            if alpha == S::zero() {
-                return;
-            }
-            y.par_iter_mut()
-                .zip(x.par_iter().copied())
-                .for_each(|(yi, xi)| {
-                    *yi = *yi + alpha * xi;
-                });
-            return;
-        }
-    }
-    s_axpy(x, alpha, y);
-}
-
-#[inline]
-pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
-    debug_assert_eq!(x.len(), y.len());
-    #[cfg(feature = "rayon")]
-    {
-        let n = x.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        if n >= min_len {
-            if beta == S::zero() {
-                y.par_iter_mut()
-                    .zip(x.par_iter().copied())
-                    .for_each(|(yi, xi)| {
-                        *yi = alpha * xi;
-                    });
-            } else if beta == S::from_real(1.0) {
-                par_axpy(x, alpha, y);
-            } else {
-                y.par_iter_mut()
-                    .zip(x.par_iter().copied())
-                    .for_each(|(yi, xi)| {
-                        *yi = alpha * xi + beta * *yi;
-                    });
-            }
-            return;
-        }
-    }
-    s_axpby(x, alpha, y, beta);
-}
-
-/// Compute `y = x + alpha * y`.
-#[inline]
-pub fn par_xpay(x: &[S], alpha: S, y: &mut [S]) {
-    par_axpby(x, S::one(), y, alpha);
-}
-
-#[inline]
-pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
-    debug_assert_eq!(x.len(), y.len());
-    #[cfg(feature = "rayon")]
-    {
-        let n = x.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        let chunk = VEC_CHUNK;
-        if n >= min_len {
-            return x
-                .par_chunks(chunk)
-                .zip(y.par_chunks(chunk))
-                .map(|(xc, yc)| {
-                    let mut acc = S::zero();
-                    for (&xi, &yi) in xc.iter().zip(yc) {
-                        acc = acc + xi.conj() * yi;
-                    }
-                    acc
-                })
-                .reduce(S::zero, |a, b| a + b);
-        }
-    }
-    s_dot_conj_local(x, y)
-}
-
-#[inline]
-pub fn par_sum_abs2_local(x: &[S]) -> R {
-    #[cfg(feature = "rayon")]
-    {
-        let n = x.len();
-        let min_len = crate::parallel_cfg::parallel_tune().min_len_vec;
-        let chunk = VEC_CHUNK;
-        if n >= min_len {
-            return x
-                .par_chunks(chunk)
-                .map(|xc| {
-                    let mut ssq = R::default();
-                    for &value in xc {
-                        let a = value.abs();
-                        ssq = ssq + a * a;
-                    }
-                    ssq
-                })
-                .reduce(R::default, |a, b| a + b);
-        }
-    }
-    s_sum_abs2_local(x)
-}
-
-/// Deterministic conjugated dot product using fixed chunking.
-pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
-    debug_assert_eq!(x.len(), y.len());
-    if x.is_empty() {
-        return S::zero();
-    }
-
-    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
-    let mut parts = vec![S::zero(); nchunks];
-
-    #[cfg(feature = "rayon")]
-    {
-        use rayon::prelude::*;
-        parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
-            let start = cid * REPRO_CHUNK;
-            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
-            let mut acc = S::zero();
-            for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
-                acc = acc + xi.conj() * yi;
-            }
-            *slot = acc;
-        });
-    }
-
-    #[cfg(not(feature = "rayon"))]
-    {
-        for cid in 0..nchunks {
-            let start = cid * REPRO_CHUNK;
-            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
-            let mut acc = S::zero();
-            for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
-                acc = acc + xi.conj() * yi;
-            }
-            parts[cid] = acc;
-        }
-    }
-
-    let mut total = S::zero();
-    for part in parts {
-        total = total + part;
-    }
-    total
-}
-
-/// Deterministic sum of squared magnitudes using fixed chunking.
-pub fn sum_abs2_local_repro(x: &[S]) -> R {
-    if x.is_empty() {
-        return R::zero();
-    }
-
-    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
-    let mut parts = vec![R::zero(); nchunks];
-
-    #[cfg(feature = "rayon")]
-    {
-        use rayon::prelude::*;
-        parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
-            let start = cid * REPRO_CHUNK;
-            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
-            let mut acc = R::zero();
-            for &value in &x[start..end] {
-                let a = value.abs();
-                acc = acc + a * a;
-            }
-            *slot = acc;
-        });
-    }
-
-    #[cfg(not(feature = "rayon"))]
-    {
-        for cid in 0..nchunks {
-            let start = cid * REPRO_CHUNK;
-            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
-            let mut acc = R::zero();
-            for &value in &x[start..end] {
-                let a = value.abs();
-                acc = acc + a * a;
-            }
-            parts[cid] = acc;
-        }
-    }
-
-    let mut total = R::zero();
-    for part in parts {
-        total = total + part;
-    }
-    total
-}
-```
-
-`src/algebra/prelude.rs`
-
-```rust
-//! Bring scalar aliases and `KrystScalar` into scope in one shot.
-//! Usage in modules: `use crate::algebra::prelude::*;`
-
-pub use super::scalar::{KrystScalar, R, S};
-```
-
-`src/algebra/scalar.rs`
-
-```rust
-#![allow(clippy::excessive_precision)]
-
-use core::ops::{Add, Div, Mul, Neg, Sub};
-
-#[cfg(feature = "complex")]
-use num_complex::Complex64;
-
-/// Scalar abstraction used internally by kryst.  The goal is to
-/// keep the public API monomorphic (f64), while the internals use `S`.
-pub trait KrystScalar:
-    Copy
-    + Clone
-    + Send
-    + Sync
-    + 'static
-    + Default
-    + PartialEq
-    + Add<Output = Self>
-    + Sub<Output = Self>
-    + Mul<Output = Self>
-    + Div<Output = Self>
-    + Neg<Output = Self>
-{
-    /// The corresponding real type (always `f64` for now).
-    type Real: Copy
-        + Clone
-        + Send
-        + Sync
-        + 'static
-        + Default
-        + PartialEq
-        + PartialOrd
-        + Add<Output = Self::Real>
-        + Sub<Output = Self::Real>
-        + Mul<Output = Self::Real>
-        + Div<Output = Self::Real>;
-
-    // Constructors / constants
-    fn zero() -> Self;
-    fn one() -> Self;
-
-    /// Convert from a real (`f64`) to this scalar type.
-    fn from_real(x: Self::Real) -> Self;
-
-    /// Extract the real part (identity for real, `.re` for complex).
-    fn real(self) -> Self::Real;
-
-    /// Extract the imaginary part (zero for real scalars).
-    fn imag(self) -> Self::Real;
-
-    /// Construct a scalar from its real and imaginary components.
-    fn from_parts(re: Self::Real, im: Self::Real) -> Self;
-
-    // Basic ops we need everywhere
-    fn abs(self) -> Self::Real; // |z| for complex, |x| for real
-    fn conj(self) -> Self; // identity for real
-    fn inv(self) -> Self; // 1/self (caller ensures nonzero)
-    fn is_finite(self) -> bool;
-
-    /// Fused multiply-add.  For `f64` we use HW FMA; for complex we fall back.
-    fn mul_add(self, a: Self, b: Self) -> Self;
-}
-
-// ==================== Implementations ====================
-
-impl KrystScalar for f64 {
-    type Real = f64;
-
-    #[inline]
-    fn zero() -> Self {
-        0.0
-    }
-
-    #[inline]
-    fn one() -> Self {
-        1.0
-    }
-
-    #[inline]
-    fn from_real(x: Self::Real) -> Self {
-        x
-    }
-
-    #[inline]
-    fn real(self) -> Self::Real {
-        self
-    }
-
-    #[inline]
-    fn imag(self) -> Self::Real {
-        0.0
-    }
-
-    #[inline]
-    fn from_parts(re: Self::Real, _im: Self::Real) -> Self {
-        re
-    }
-
-    #[inline]
-    fn abs(self) -> Self::Real {
-        f64::abs(self)
-    }
-
-    #[inline]
-    fn conj(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn inv(self) -> Self {
-        1.0 / self
-    }
-
-    #[inline]
-    fn is_finite(self) -> bool {
-        f64::is_finite(self)
-    }
-
-    #[inline]
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        f64::mul_add(self, a, b)
-    }
-}
-
-#[cfg(feature = "complex")]
-impl KrystScalar for Complex64 {
-    type Real = f64;
-
-    #[inline]
-    fn zero() -> Self {
-        Complex64::new(0.0, 0.0)
-    }
-
-    #[inline]
-    fn one() -> Self {
-        Complex64::new(1.0, 0.0)
-    }
-
-    #[inline]
-    fn from_real(x: Self::Real) -> Self {
-        Complex64::new(x, 0.0)
-    }
-
-    #[inline]
-    fn real(self) -> Self::Real {
-        self.re
-    }
-
-    #[inline]
-    fn imag(self) -> Self::Real {
-        self.im
-    }
-
-    #[inline]
-    fn from_parts(re: Self::Real, im: Self::Real) -> Self {
-        Complex64::new(re, im)
-    }
-
-    #[inline]
-    fn abs(self) -> Self::Real {
-        self.norm()
-    }
-
-    #[inline]
-    fn conj(self) -> Self {
-        Complex64::new(self.re, -self.im)
-    }
-
-    #[inline]
-    fn inv(self) -> Self {
-        let n2 = self.re * self.re + self.im * self.im;
-        Complex64::new(self.re / n2, -self.im / n2)
-    }
-
-    #[inline]
-    fn is_finite(self) -> bool {
-        self.re.is_finite() && self.im.is_finite()
-    }
-
-    #[inline]
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        self * a + b
-    }
-}
-
-// ==================== Feature-gated scalar choice ====================
-
-#[cfg(feature = "complex")]
-pub type S = Complex64;
-#[cfg(not(feature = "complex"))]
-pub type S = f64;
-
-/// Real partner of `S` (currently always `f64`)
-pub type R = <S as KrystScalar>::Real;
-
-#[cfg(feature = "complex")]
-#[inline]
-pub fn copy_scalar_to_real_in(z: &[S], out: &mut [f64]) {
-    debug_assert_eq!(z.len(), out.len());
-    for (dst, &src) in out.iter_mut().zip(z.iter()) {
-        *dst = src.real();
-    }
-}
-
-#[cfg(feature = "complex")]
-#[inline]
-pub fn copy_real_to_scalar_in(x: &[f64], out: &mut [S]) {
-    debug_assert_eq!(x.len(), out.len());
-    for (dst, &src) in out.iter_mut().zip(x.iter()) {
-        *dst = S::from_real(src);
-    }
-}
-
-#[cfg(not(feature = "complex"))]
-#[inline]
-pub fn copy_scalar_to_real_in(z: &[S], out: &mut [f64]) {
-    debug_assert_eq!(z.len(), out.len());
-    if core::ptr::eq(z.as_ptr() as *const f64, out.as_ptr()) {
-        return;
-    }
-    // SAFETY: when the complex feature is disabled we have S == f64.
-    let z_as_f64: &[f64] = unsafe { &*(z as *const [S] as *const [f64]) };
-    out.copy_from_slice(z_as_f64);
-}
-
-#[cfg(not(feature = "complex"))]
-#[inline]
-pub fn copy_real_to_scalar_in(x: &[f64], out: &mut [S]) {
-    debug_assert_eq!(x.len(), out.len());
-    if core::ptr::eq(x.as_ptr(), out.as_ptr() as *const f64) {
-        return;
-    }
-    // SAFETY: when the complex feature is disabled we have S == f64.
-    let out_as_f64: &mut [f64] = unsafe { &mut *(out as *mut [S] as *mut [f64]) };
-    out_as_f64.copy_from_slice(x);
-}
-```
-
-Next, provide a review of the core module:
-
-`src/core/mod.rs`
-
-```rust
-pub mod block;
-pub mod mat;
-pub mod traits;
-pub mod wrappers;
-
-```
-
-`src/core/block.rs`
-
-```rust
-use crate::algebra::prelude::*;
-use crate::error::KError;
-
-/// Column-major dense block vector storage used by block Krylov variants.
-#[derive(Debug, Clone, Default)]
-pub struct BlockVec {
-    data: Vec<S>,
-    n: usize,
-    p: usize,
-}
-
-impl BlockVec {
-    /// Create a new block vector with `n` rows and `p` columns.
-    pub fn new(n: usize, p: usize) -> Self {
-        Self {
-            data: vec![S::zero(); n.saturating_mul(p)],
-            n,
-            p,
-        }
-    }
-
-    /// Resize the block vector to `n` rows and `p` columns, zero-filling new entries.
-    pub fn resize(&mut self, n: usize, p: usize) {
-        if self.n != n || self.p != p {
-            self.data.resize(n.saturating_mul(p), S::zero());
-            self.n = n;
-            self.p = p;
-        } else {
-            let needed = n.saturating_mul(p);
-            if self.data.len() != needed {
-                self.data.resize(needed, S::zero());
-            }
-        }
-    }
-
-    /// Number of rows in the block vector.
-    #[inline]
-    pub fn nrows(&self) -> usize {
-        self.n
-    }
-
-    /// Number of columns in the block vector.
-    #[inline]
-    pub fn ncols(&self) -> usize {
-        self.p
-    }
-
-    /// Immutable view into the `j`-th column.
-    #[inline]
-    pub fn col(&self, j: usize) -> &[S] {
-        let offset = j * self.n;
-        &self.data[offset..offset + self.n]
-    }
-
-    /// Mutable view into the `j`-th column.
-    #[inline]
-    pub fn col_mut(&mut self, j: usize) -> &mut [S] {
-        let offset = j * self.n;
-        &mut self.data[offset..offset + self.n]
-    }
-
-    /// Immutable view into the raw column-major storage.
-    #[inline]
-    pub fn as_slice(&self) -> &[S] {
-        &self.data
-    }
-
-    /// Mutable view into the raw column-major storage.
-    #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [S] {
-        &mut self.data
-    }
-}
-
-impl BlockVec {
-    /// Fill the block vector with zeros.
-    pub fn fill_zero(&mut self) {
-        for v in &mut self.data {
-            *v = S::zero();
-        }
-    }
-}
-
-/// Convenience helper for verifying block dimensions.
-#[allow(dead_code)]
-pub(crate) fn assert_block_dims(expected_rows: usize, vec: &BlockVec) -> Result<(), KError> {
-    if vec.nrows() != expected_rows {
-        return Err(KError::InvalidInput(format!(
-            "BlockVec has {} rows but expected {}",
-            vec.nrows(),
-            expected_rows
-        )));
-    }
-    Ok(())
-}
-```
-
-`src/core/traits.rs`
-
-```rust
-//! Core linear-algebra traits for kryst.
-
-/// Matrix–vector product: y ← A x.
-pub trait MatVec<V> {
-    /// Compute y = A · x.
-    fn matvec(&self, x: &V, y: &mut V);
-}
-
-/// Matrix–transpose–vector product: y ← Aᵗ x.
-pub trait MatTransVec<V> {
-    /// Compute y = Aᵗ · x.
-    fn mattransvec(&self, x: &V, y: &mut V);
-}
-
-// Blanket implementations of MatVec/MatTransVec for LinOp types using Vec storage.
-use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
-use crate::core::block::BlockVec;
-use crate::error::KError;
-use crate::matrix::op::LinOp;
-use faer::traits::ComplexField;
-
-impl<T, L> MatVec<Vec<T>> for L
-where
-    L: LinOp<S = T> + ?Sized,
-    T: ComplexField,
-{
-    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        LinOp::matvec(self, &x[..], &mut y[..]);
-    }
-}
-
-impl<T, L> MatTransVec<Vec<T>> for L
-where
-    L: LinOp<S = T> + ?Sized,
-    T: ComplexField,
-{
-    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        if !LinOp::supports_transpose(self) {
-            panic!("t_matvec not supported");
-        }
-        LinOp::t_matvec(self, &x[..], &mut y[..]);
-    }
-}
-
-/// Optional extension trait for block matvec operations while remaining matrix-free.
-pub trait BlockOp {
-    /// Apply the operator to multiple columns at once. Default implementation calls
-    /// [`apply`](Self::apply) per column to remain format agnostic.
-    fn apply_many(&self, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError> {
-        if x.ncols() != y.ncols() {
-            return Err(KError::InvalidInput(format!(
-                "apply_many column mismatch: {} vs {}",
-                x.ncols(),
-                y.ncols()
-            )));
-        }
-        let mut x_real = vec![0.0; x.nrows()];
-        let mut y_real = vec![0.0; y.nrows()];
-        for c in 0..x.ncols() {
-            copy_scalar_to_real_in(x.col(c), &mut x_real);
-            copy_scalar_to_real_in(y.col(c), &mut y_real);
-            self.apply(&x_real, &mut y_real)?;
-            copy_real_to_scalar_in(&y_real, y.col_mut(c));
-        }
-        Ok(())
-    }
-
-    /// Apply the operator to a single column.
-    fn apply(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
-
-    /// Apply the transpose of the operator if available.
-    fn apply_t(&self, _x: &[f64], _y: &mut [f64]) -> Result<(), KError> {
-        Err(KError::Unsupported("transpose not available"))
-    }
-}
-
-impl<T> BlockOp for T
-where
-    T: LinOp<S = f64> + ?Sized,
-{
-    fn apply(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        LinOp::try_matvec(self, x, y)
-    }
-
-    fn apply_t(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        if !LinOp::supports_transpose(self) {
-            return Err(KError::Unsupported(
-                "LinOp::t_matvec called but transpose not supported",
-            ));
-        }
-        LinOp::t_matvec(self, x, y);
-        Ok(())
-    }
-}
-
-/// Inner products & norms.
-pub trait InnerProduct<V> {
-    /// Associated scalar type.
-    type Scalar: Copy + PartialOrd + From<f64> + Into<f64>;
-    /// Compute dot(x, y) with communicator support for parallel reductions.
-    fn dot(&self, x: &V, y: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar;
-    /// Compute ‖x‖₂ with communicator support for parallel reductions.
-    fn norm(&self, x: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar {
-        let local_sq = self.dot(x, x, comm);
-        let global_sq = comm.all_reduce_f64(local_sq.into());
-        (global_sq.sqrt()).into()
-    }
-}
-
-/// Uniform indexing into vectors (dense or sparse).
-pub trait Indexing {
-    /// Number of rows (or length for a vector).
-    fn nrows(&self) -> usize;
-}
-
-/// Matrix shape trait: provides nrows/ncols for matrices and vectors.
-pub trait MatShape {
-    fn nrows(&self) -> usize;
-    fn ncols(&self) -> usize;
-}
-
-/// Trait for extracting the sparsity pattern of a matrix row.
-pub trait RowPattern {
-    /// Returns the column indices of nonzeros in row i.
-    fn row_indices(&self, i: usize) -> &[usize];
-}
-
-/// Trait for extracting elements from a matrix.
-pub trait MatrixGet<T> {
-    /// Get the element at position (i, j).
-    fn get(&self, i: usize, j: usize) -> T;
-}
-
-/// Trait for extracting a submatrix by index set (for block/ASM preconditioners).
-pub trait SubmatrixExtract: Sized {
-    /// Stored scalar type for the matrix.
-    type S;
-
-    /// Extract a submatrix defined by row and column index sets.
-    fn extract_submatrix(&self, rows: &[usize], cols: &[usize]) -> Self;
-
-    /// Convenience helper for square sub-blocks that use the same index set.
-    fn submatrix(&self, indices: &[usize]) -> Self {
-        self.extract_submatrix(indices, indices)
-    }
-}
-
-/// Sparse-aware matrix-vector operations for AMG and iterative solvers
-pub trait MatVecOp<T> {
-    /// Compute y = alpha * A * x + beta * y
-    fn mat_vec(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), crate::error::KError>;
-
-    /// Compute y = alpha * A^T * x + beta * y (transpose operation)
-    fn mat_vec_trans(
-        &self,
-        alpha: T,
-        x: &[T],
-        beta: T,
-        y: &mut [T],
-    ) -> Result<(), crate::error::KError>;
-
-    /// Get the number of rows
-    fn nrows(&self) -> usize;
-
-    /// Get the number of columns  
-    fn ncols(&self) -> usize;
-}
-
-/// Sparse-aware dot product operations
-pub trait DotOp<T> {
-    /// Compute the dot product x^T * y
-    fn dot(&self, x: &[T], y: &[T]) -> T;
-
-    /// Compute the 2-norm of a vector
-    fn norm2(&self, x: &[T]) -> T;
-}
-
-/// Implementation for dense matrices (faer Mat)
-impl MatVecOp<f64> for faer::Mat<f64> {
-    fn mat_vec(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        if x.len() != self.ncols() || y.len() != self.nrows() {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        for i in 0..self.nrows() {
-            let mut sum = 0.0;
-            for j in 0..self.ncols() {
-                sum += self[(i, j)] * x[j];
-            }
-            y[i] = alpha * sum + beta * y[i];
-        }
-        Ok(())
-    }
-
-    fn mat_vec_trans(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        if x.len() != self.nrows() || y.len() != self.ncols() {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        for j in 0..self.ncols() {
-            let mut sum = 0.0;
-            for i in 0..self.nrows() {
-                sum += self[(i, j)] * x[i];
-            }
-            y[j] = alpha * sum + beta * y[j];
-        }
-        Ok(())
-    }
-
-    fn nrows(&self) -> usize {
-        faer::Mat::nrows(self)
-    }
-    fn ncols(&self) -> usize {
-        faer::Mat::ncols(self)
-    }
-}
-
-/// Implementation for sparse matrices (CsrMatrix)
-impl MatVecOp<f64> for crate::matrix::sparse::CsrMatrix<f64> {
-    fn mat_vec(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        use crate::matrix::sparse::SparseMatrix;
-        // Dimension checks
-        if x.len() != SparseMatrix::ncols(self) || y.len() != SparseMatrix::nrows(self) {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        // Quick exits for alpha/beta
-        if alpha.abs() <= f64::EPSILON {
-            if beta.abs() <= f64::EPSILON {
-                for v in y.iter_mut() {
-                    *v = 0.0;
-                }
-            } else if (beta - 1.0).abs() > f64::EPSILON {
-                for v in y.iter_mut() {
-                    *v *= beta;
-                }
-            }
-            return Ok(());
-        }
-
-        // Canonical CSR access (no allocations)
-        let rp = self.row_ptr();
-        let cj = self.col_idx();
-        let vv = self.values();
-
-        #[cfg(debug_assertions)]
-        {
-            // Basic CSR integrity checks
-            assert_eq!(rp.len(), self.nrows() + 1, "row_ptr length must be nrows+1");
-            assert!(
-                rp.windows(2).all(|w| w[0] <= w[1]),
-                "row_ptr must be non-decreasing"
-            );
-            let nnz = *rp.last().unwrap();
-            assert_eq!(cj.len(), nnz, "col_idx length must equal nnz");
-            assert_eq!(vv.len(), nnz, "values length must equal nnz");
-        }
-
-        let m = self.nrows();
-        if beta == 0.0 {
-            // y[i] = alpha * sum_j a[i,j] x[j]
-            for i in 0..m {
-                let rs = rp[i];
-                let re = rp[i + 1];
-                let mut acc = 0.0;
-                for p in rs..re {
-                    let j = cj[p];
-                    acc = f64::mul_add(vv[p], x[j], acc);
-                }
-                y[i] = alpha * acc;
-            }
-        } else if beta == 1.0 {
-            // y[i] += alpha * A x
-            for i in 0..m {
-                let rs = rp[i];
-                let re = rp[i + 1];
-                let mut acc = 0.0;
-                for p in rs..re {
-                    let j = cj[p];
-                    acc = f64::mul_add(vv[p], x[j], acc);
-                }
-                y[i] += alpha * acc;
-            }
-        } else {
-            // y[i] = alpha * (A x)_i + beta * y[i]
-            for i in 0..m {
-                let rs = rp[i];
-                let re = rp[i + 1];
-                let mut acc = 0.0;
-                for p in rs..re {
-                    let j = cj[p];
-                    acc = f64::mul_add(vv[p], x[j], acc);
-                }
-                y[i] = alpha * acc + beta * y[i];
-            }
-        }
-        Ok(())
-    }
-
-    fn mat_vec_trans(
-        &self,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-    ) -> Result<(), crate::error::KError> {
-        use crate::matrix::sparse::SparseMatrix;
-
-        // Dimension checks: x is in R^{m}, y in R^{n} for A^T (A is m×n)
-        if x.len() != SparseMatrix::nrows(self) || y.len() != SparseMatrix::ncols(self) {
-            return Err(crate::error::KError::InvalidInput(
-                "Matrix-vector dimension mismatch".to_string(),
-            ));
-        }
-
-        // Quick exits
-        if alpha == 0.0 {
-            // y = beta * y
-            if beta == 0.0 {
-                for v in y.iter_mut() {
-                    *v = 0.0;
-                }
-            } else {
-                for v in y.iter_mut() {
-                    *v *= beta;
-                }
-            }
-            return Ok(());
-        }
-
-        // Scale y by beta (or zero) up front
-        if beta == 0.0 {
-            for v in y.iter_mut() {
-                *v = 0.0;
-            }
-        } else if beta != 1.0 {
-            for v in y.iter_mut() {
-                *v *= beta;
-            }
-        }
-        // If beta == 1.0, leave y as-is and accumulate into it.
-
-        // Access CSR structure. These accessor names assume your CSR exposes them.
-        // If your type uses different getters, adjust accordingly.
-        let row_ptr = self.row_ptr(); // &[usize] of length m+1
-        let col_idx = self.col_idx(); // &[usize] of length nnz
-        let values = self.values(); // &[f64]   of length nnz
-
-        // y_j += alpha * a_ij * x_i  for all nonzeros a_ij
-        let m = SparseMatrix::nrows(self);
-        for i in 0..m {
-            let xi = x[i];
-            if xi == 0.0 {
-                continue;
-            }
-            let start = row_ptr[i];
-            let end = row_ptr[i + 1];
-            // SAFETY: bounds guaranteed by CSR invariants
-            for k in start..end {
-                let j = col_idx[k];
-                y[j] += alpha * values[k] * xi;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn nrows(&self) -> usize {
-        use crate::matrix::sparse::SparseMatrix;
-        SparseMatrix::nrows(self)
-    }
-    fn ncols(&self) -> usize {
-        use crate::matrix::sparse::SparseMatrix;
-        SparseMatrix::ncols(self)
-    }
-}
-
-/// Standard dot product implementation
-pub struct StandardDotOp;
-
-impl DotOp<f64> for StandardDotOp {
-    fn dot(&self, x: &[f64], y: &[f64]) -> f64 {
-        x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
-    }
-
-    fn norm2(&self, x: &[f64]) -> f64 {
-        self.dot(x, x).sqrt()
-    }
-}
-
-/// Unified kernel trait for local vs distributed operations
-/// Provides a consistent interface for AMG operations that can work
-/// both in single-process (local) and multi-process (MPI) scenarios
-pub trait KernelOp<T> {
-    /// The communicator type for this kernel (e.g., UniverseComm for MPI, () for local)
-    type Comm: crate::parallel::Comm;
-
-    /// Matrix-vector product with communicator support: y = alpha * A * x + beta * y
-    fn kernel_mat_vec(
-        &self,
-        matrix: &dyn MatVecOp<T>,
-        alpha: T,
-        x: &[T],
-        beta: T,
-        y: &mut [T],
-        comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError>;
-
-    /// Transpose matrix-vector product: y = alpha * A^T * x + beta * y
-    fn kernel_mat_vec_trans(
-        &self,
-        matrix: &dyn MatVecOp<T>,
-        alpha: T,
-        x: &[T],
-        beta: T,
-        y: &mut [T],
-        comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError>;
-
-    /// Global dot product with reduction across processes
-    fn kernel_dot(&self, x: &[T], y: &[T], comm: &Self::Comm) -> T;
-
-    /// Global norm computation with reduction
-    fn kernel_norm2(&self, x: &[T], comm: &Self::Comm) -> T;
-
-    /// Vector operations: y = alpha * x + beta * y
-    fn kernel_axpby(&self, alpha: T, x: &[T], beta: T, y: &mut [T]);
-
-    /// Copy operation: y = x
-    fn kernel_copy(&self, x: &[T], y: &mut [T]);
-
-    /// Scale operation: x = alpha * x
-    fn kernel_scale(&self, alpha: T, x: &mut [T]);
-}
-
-/// Local (single-process) kernel implementation
-pub struct LocalKernel;
-
-impl KernelOp<f64> for LocalKernel {
-    type Comm = crate::parallel::NoComm;
-
-    fn kernel_mat_vec(
-        &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        _comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError> {
-        // For local operations, no communication needed
-        matrix.mat_vec(alpha, x, beta, y)
-    }
-
-    fn kernel_mat_vec_trans(
-        &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        _comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError> {
-        matrix.mat_vec_trans(alpha, x, beta, y)
-    }
-
-    fn kernel_dot(&self, x: &[f64], y: &[f64], _comm: &Self::Comm) -> f64 {
-        let dot_op = StandardDotOp;
-        dot_op.dot(x, y)
-    }
-
-    fn kernel_norm2(&self, x: &[f64], _comm: &Self::Comm) -> f64 {
-        let dot_op = StandardDotOp;
-        dot_op.norm2(x)
-    }
-
-    fn kernel_axpby(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val = alpha * x_val + beta * (*y_val);
-        }
-    }
-
-    fn kernel_copy(&self, x: &[f64], y: &mut [f64]) {
-        y.copy_from_slice(x);
-    }
-
-    fn kernel_scale(&self, alpha: f64, x: &mut [f64]) {
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
-    }
-}
-
-/// Distributed (MPI) kernel implementation for future use
-/// Currently a placeholder that delegates to local operations
-pub struct DistributedKernel;
-
-impl KernelOp<f64> for DistributedKernel {
-    type Comm = crate::parallel::UniverseComm;
-
-    fn kernel_mat_vec(
-        &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError> {
-        let mut local = vec![0.0f64; y.len()];
-        matrix.mat_vec(alpha, x, 0.0, &mut local)?;
-        use crate::parallel::Comm as _;
-        comm.allreduce_sum_slice(&mut local);
-        if beta == 0.0 {
-            y.copy_from_slice(&local);
-        } else {
-            let original: Vec<f64> = y.to_vec();
-            for (out, (accum, orig)) in y
-                .iter_mut()
-                .zip(local.into_iter().zip(original.into_iter()))
-            {
-                *out = accum + beta * orig;
-            }
-        }
-        Ok(())
-    }
-
-    fn kernel_mat_vec_trans(
-        &self,
-        matrix: &dyn MatVecOp<f64>,
-        alpha: f64,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError> {
-        let mut local = vec![0.0f64; y.len()];
-        matrix.mat_vec_trans(alpha, x, 0.0, &mut local)?;
-        use crate::parallel::Comm as _;
-        comm.allreduce_sum_slice(&mut local);
-        if beta == 0.0 {
-            y.copy_from_slice(&local);
-        } else {
-            let original: Vec<f64> = y.to_vec();
-            for (out, (accum, orig)) in y
-                .iter_mut()
-                .zip(local.into_iter().zip(original.into_iter()))
-            {
-                *out = accum + beta * orig;
-            }
-        }
-        Ok(())
-    }
-
-    fn kernel_dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64 {
-        use crate::parallel::Comm;
-        // Compute local dot product
-        let local_dot: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
-        // Reduce across all processes
-        comm.all_reduce_f64(local_dot)
-    }
-
-    fn kernel_norm2(&self, x: &[f64], comm: &Self::Comm) -> f64 {
-        self.kernel_dot(x, x, comm).sqrt()
-    }
-
-    fn kernel_axpby(&self, alpha: f64, x: &[f64], beta: f64, y: &mut [f64]) {
-        // Vector operations are local in distributed setting
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val = alpha * x_val + beta * (*y_val);
-        }
-    }
-
-    fn kernel_copy(&self, x: &[f64], y: &mut [f64]) {
-        y.copy_from_slice(x);
-    }
-
-    fn kernel_scale(&self, alpha: f64, x: &mut [f64]) {
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
-    }
-}
-
-/// Unified AMG kernel trait to eliminate code duplication between local and MPI variants
-pub trait AmgKernel {
-    /// Associated communicator type  
-    type Comm: crate::parallel::Comm;
-
-    /// Matrix-vector multiplication with alpha/beta scaling
-    fn matvec<M>(
-        &self,
-        alpha: f64,
-        a: &M,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError>
-    where
-        M: MatVecOp<f64>;
-
-    /// Global dot product with communicator reduction
-    fn dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64;
-
-    /// Global norm with communicator reduction  
-    fn norm(&self, x: &[f64], comm: &Self::Comm) -> f64 {
-        self.dot(x, x, comm).sqrt()
-    }
-
-    /// Vector scaling: x = alpha * x
-    fn scale(&self, alpha: f64, x: &mut [f64]);
-
-    /// Vector copy: y = x
-    fn copy(&self, x: &[f64], y: &mut [f64]);
-
-    /// AXPY operation: y = alpha * x + y
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]);
-}
-
-/// Local (single-process) AMG kernel implementation
-pub struct LocalAmgKernel;
-
-impl LocalAmgKernel {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for LocalAmgKernel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AmgKernel for LocalAmgKernel {
-    type Comm = crate::parallel::NoComm;
-
-    fn matvec<M>(
-        &self,
-        alpha: f64,
-        a: &M,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        _comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError>
-    where
-        M: MatVecOp<f64>,
-    {
-        a.mat_vec(alpha, x, beta, y)
-    }
-
-    fn dot(&self, x: &[f64], y: &[f64], _comm: &Self::Comm) -> f64 {
-        x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
-    }
-
-    fn scale(&self, alpha: f64, x: &mut [f64]) {
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
-    }
-
-    fn copy(&self, x: &[f64], y: &mut [f64]) {
-        y.copy_from_slice(x);
-    }
-
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val += alpha * x_val;
-        }
-    }
-}
-
-/// Distributed (MPI) AMG kernel implementation
-pub struct DistributedAmgKernel;
-
-impl DistributedAmgKernel {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for DistributedAmgKernel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AmgKernel for DistributedAmgKernel {
-    type Comm = crate::parallel::UniverseComm;
-
-    fn matvec<M>(
-        &self,
-        alpha: f64,
-        a: &M,
-        x: &[f64],
-        beta: f64,
-        y: &mut [f64],
-        comm: &Self::Comm,
-    ) -> Result<(), crate::error::KError>
-    where
-        M: MatVecOp<f64>,
-    {
-        let mut local = vec![0.0f64; y.len()];
-        a.mat_vec(alpha, x, 0.0, &mut local)?;
-        use crate::parallel::Comm as _;
-        comm.allreduce_sum_slice(&mut local);
-        if beta == 0.0 {
-            y.copy_from_slice(&local);
-        } else {
-            let original: Vec<f64> = y.to_vec();
-            for (out, (accum, orig)) in y
-                .iter_mut()
-                .zip(local.into_iter().zip(original.into_iter()))
-            {
-                *out = accum + beta * orig;
-            }
-        }
-        Ok(())
-    }
-
-    fn dot(&self, x: &[f64], y: &[f64], comm: &Self::Comm) -> f64 {
-        use crate::parallel::Comm;
-        // Compute local dot product, then reduce across processes
-        let local_dot: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
-        comm.all_reduce_f64(local_dot)
-    }
-
-    fn scale(&self, alpha: f64, x: &mut [f64]) {
-        // Vector operations are local even in distributed setting
-        for val in x.iter_mut() {
-            *val *= alpha;
-        }
-    }
-
-    fn copy(&self, x: &[f64], y: &mut [f64]) {
-        y.copy_from_slice(x);
-    }
-
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
-        for (y_val, x_val) in y.iter_mut().zip(x.iter()) {
-            *y_val += alpha * x_val;
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::matrix::sparse::CsrMatrix;
-
-    // Simple test to verify traits can be imported and used
-    #[test]
-    fn test_traits_exist() {
-        // This test just verifies that all traits compile and can be referenced
-        // More comprehensive tests would require mock implementations
-
-        // Test that trait bounds can be specified
-        fn _test_matvec_bound<T, V>(_: &T)
-        where
-            T: MatVec<V>,
-        {
-        }
-        fn _test_mattransvec_bound<T, V>(_: &T)
-        where
-            T: MatTransVec<V>,
-        {
-        }
-        fn _test_inner_product_bound<T, V>(_: &T)
-        where
-            T: InnerProduct<V>,
-        {
-        }
-        fn _test_indexing_bound<T>(_: &T)
-        where
-            T: Indexing,
-        {
-        }
-        fn _test_mat_shape_bound<T>(_: &T)
-        where
-            T: MatShape,
-        {
-        }
-        fn _test_row_pattern_bound<T>(_: &T)
-        where
-            T: RowPattern,
-        {
-        }
-        fn _test_matrix_get_bound<T, U>(_: &T)
-        where
-            T: MatrixGet<U>,
-        {
-        }
-        fn _test_submatrix_extract_bound<T>(_: &T)
-        where
-            T: SubmatrixExtract,
-        {
-        }
-
-        // All traits should compile
-        assert!(true);
-    }
-
-    #[test]
-    fn test_inner_product_scalar_trait_bounds() {
-        // Test that the associated Scalar type has the required bounds
-        fn _check_scalar_bounds<T: Copy + PartialOrd + From<f64> + Into<f64>>() {}
-
-        // f64 should satisfy the bounds
-        _check_scalar_bounds::<f64>();
-
-        assert!(true);
-    }
-
-    #[test]
-    fn test_trait_names_and_methods() {
-        // Verify method names exist by checking trait signatures
-        trait TestMatVec<V> {
-            fn matvec(&self, x: &V, y: &mut V);
-        }
-
-        trait TestMatTransVec<V> {
-            fn mattransvec(&self, x: &V, y: &mut V);
-        }
-
-        trait TestInnerProduct<V> {
-            type Scalar: Copy + PartialOrd + From<f64> + Into<f64>;
-            fn dot(&self, x: &V, y: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar;
-            fn norm(&self, x: &V, comm: &impl crate::parallel::Comm) -> Self::Scalar {
-                let local_sq = self.dot(x, x, comm);
-                let global_sq = comm.all_reduce_f64(local_sq.into());
-                (global_sq.sqrt()).into()
-            }
-        }
-        struct Dummy;
-
-        impl TestMatVec<Vec<f64>> for Dummy {
-            fn matvec(&self, _x: &Vec<f64>, _y: &mut Vec<f64>) {}
-        }
-
-        impl TestMatTransVec<Vec<f64>> for Dummy {
-            fn mattransvec(&self, _x: &Vec<f64>, _y: &mut Vec<f64>) {}
-        }
-
-        impl TestInnerProduct<Vec<f64>> for Dummy {
-            type Scalar = f64;
-            fn dot(
-                &self,
-                _x: &Vec<f64>,
-                _y: &Vec<f64>,
-                _comm: &impl crate::parallel::Comm,
-            ) -> Self::Scalar {
-                0.0
-            }
-        }
-
-        fn _use_traits<
-            T: TestMatVec<Vec<f64>> + TestMatTransVec<Vec<f64>> + TestInnerProduct<Vec<f64>>,
-        >() {
-        }
-        _use_traits::<Dummy>();
-
-        let dummy = Dummy;
-        let comm = crate::parallel::NoComm;
-        let v = vec![0.0; 1];
-        let mut y = vec![0.0; 1];
-        dummy.matvec(&v, &mut y);
-        dummy.mattransvec(&v, &mut y);
-        let _ = dummy.dot(&v, &v, &comm);
-        let _ = dummy.norm(&v, &comm);
-
-        // All method signatures should compile without panicking.
-    }
-
-    #[test]
-    fn csr_matvec_happy_path() {
-        // 2x3 CSR: row_ptr=[0,2,3], col_idx=[0,2,1], val=[1,4,5]
-        // A = [1 0 4; 0 5 0]
-        let a = CsrMatrix::from_csr(2, 3, vec![0, 2, 3], vec![0, 2, 1], vec![1.0, 4.0, 5.0]);
-        let x = [10.0, 20.0, 30.0];
-        let mut y = [0.0; 2];
-        MatVecOp::mat_vec(&a, 1.0, &x, 0.0, &mut y).unwrap();
-        let expected = [130.0, 100.0];
-        for (got, target) in y.iter().zip(expected.iter()) {
-            assert!((got - target).abs() < 1e-12);
-        }
-        // with scaling
-        let mut y2 = [1.0, 2.0];
-        MatVecOp::mat_vec(&a, 2.0, &x, 3.0, &mut y2).unwrap();
-        // 2*A*x + 3*y0
-        assert!((y2[0] - (2.0 * 130.0 + 3.0 * 1.0)).abs() < 1e-12);
-        assert!((y2[1] - (2.0 * 100.0 + 3.0 * 2.0)).abs() < 1e-12);
-    }
-}
-```
-
-`src/core/wrappers.rs`
-
-```rust
-//! Wrappers for faer dense matrix types and vector operations.
-//!
-//! This module provides implementations of core linear algebra traits for `faer::Mat`, `faer::MatRef`, and `Vec<T>`,
-//! enabling their use in generic iterative solvers and preconditioners. It also provides parallel and distributed
-//! inner product operations, supporting both single-threaded, multi-threaded (Rayon), and MPI-based distributed environments.
-//!
-//! # Features
-//! - Matrix-vector and matrix-transpose-vector multiplication for `faer` dense matrices.
-//! - Inner product and norm operations for vectors, with optional Rayon parallelism.
-//! - Distributed inner product and norm for MPI-enabled builds.
-//! - Indexing trait implementations for vectors and matrices.
-//!
-//! # Usage
-//! These wrappers allow the use of `faer` matrices and Rust vectors as generic types in the KrylovKit solver framework.
-//!
-//! # References
-//! - [faer crate documentation](https://docs.rs/faer)
-//! - [num-traits crate documentation](https://docs.rs/num-traits)
-
-use crate::core::traits::{Indexing, InnerProduct, MatTransVec, MatVec};
-use faer::{Mat, MatRef};
-use num_traits::Float;
-
-/// Implements matrix-vector multiplication for a matrix reference (`faer::MatRef`).
-impl<'a, T: Float> MatVec<Vec<T>> for MatRef<'a, T> {
-    fn matvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        assert_eq!(
-            self.nrows(),
-            y.len(),
-            "Output vector y has incorrect length"
-        );
-        assert_eq!(self.ncols(), x.len(), "Input vector x has incorrect length");
-        for i in 0..self.nrows() {
-            y[i] = T::zero();
-            for j in 0..self.ncols() {
-                y[i] = y[i] + self[(i, j)] * x[j];
-            }
-        }
-    }
-}
-
-/// Implements matrix-transpose-vector multiplication for a matrix reference (`faer::MatRef`).
-impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
-    fn mattransvec(&self, x: &Vec<T>, y: &mut Vec<T>) {
-        assert_eq!(
-            self.ncols(),
-            y.len(),
-            "Output vector y has incorrect length"
-        );
-        assert_eq!(self.nrows(), x.len(), "Input vector x has incorrect length");
-        for j in 0..self.ncols() {
-            y[j] = T::zero();
-            for i in 0..self.nrows() {
-                y[j] = y[j] + self[(i, j)] * x[i];
-            }
-        }
-    }
-}
-
-/// Implements inner product and norm for vectors, with optional Rayon parallelism.
-///
-/// If the `rayon` feature is enabled, uses parallel iterators for performance.
-impl<T: Float + From<f64> + Into<f64> + Send + Sync> InnerProduct<Vec<T>> for () {
-    type Scalar = T;
-    /// Computes the dot product of two vectors: `x^T y` with parallel reduction.
-    fn dot(&self, x: &Vec<T>, y: &Vec<T>, comm: &impl crate::parallel::Comm) -> T {
-        assert_eq!(x.len(), y.len(), "Vectors must have the same length");
-        let local_dot = {
-            #[cfg(feature = "rayon")]
-            {
-                use rayon::prelude::*;
-                x.as_slice()
-                    .par_iter()
-                    .zip(y.as_slice().par_iter())
-                    .map(|(xi, yi)| *xi * *yi)
-                    .reduce(|| T::zero(), |acc, v| acc + v)
-            }
-            #[cfg(not(feature = "rayon"))]
-            {
-                x.iter()
-                    .zip(y.iter())
-                    .map(|(xi, yi)| *xi * *yi)
-                    .fold(T::zero(), |acc, v| acc + v)
-            }
-        };
-        let global_dot = comm.all_reduce_f64(local_dot.into());
-        global_dot.into()
-    }
-}
-
-/// Distributed inner product and norm for MPI-enabled builds.
-///
-/// This struct is only available if the `mpi` feature is enabled. It wraps a communicator and provides
-/// collective dot product and norm operations across distributed memory processes.
-#[cfg(feature = "mpi")]
-pub struct DistributedInnerProduct<'a, C: crate::parallel::Comm> {
-    /// Reference to the communicator implementing the `Comm` trait.
-    pub comm: &'a C,
-}
-
-#[cfg(feature = "mpi")]
-impl<'a, C: crate::parallel::Comm> DistributedInnerProduct<'a, C> {
-    /// Computes the distributed dot product of two slices, reducing across all processes.
-    pub fn dot<
-        T: Copy
-            + std::ops::Add<Output = T>
-            + std::ops::Mul<Output = T>
-            + num_traits::FromPrimitive
-            + num_traits::ToPrimitive
-            + num_traits::Zero,
-    >(
-        &self,
-        x: &[T],
-        y: &[T],
-    ) -> T {
-        assert_eq!(x.len(), y.len(), "Vectors must have the same length");
-        // Convert local dot product to f64 for reduction
-        let local: f64 = x
-            .iter()
-            .zip(y.iter())
-            .map(|(&a, &b)| (a * b).to_f64().unwrap_or(0.0))
-            .sum();
-        let global = self.comm.all_reduce(local);
-        T::from_f64(global).unwrap_or(T::zero())
-    }
-    /// Computes the distributed Euclidean norm of a slice, reducing across all processes.
-    pub fn norm<
-        T: Copy
-            + std::ops::Add<Output = T>
-            + std::ops::Mul<Output = T>
-            + num_traits::FromPrimitive
-            + num_traits::ToPrimitive
-            + num_traits::Zero
-            + num_traits::Float,
-    >(
-        &self,
-        x: &[T],
-    ) -> T {
-        let local: f64 = x.iter().map(|&a| (a * a).to_f64().unwrap_or(0.0)).sum();
-        let global = self.comm.all_reduce(local);
-        T::from_f64(global.sqrt()).unwrap_or(T::zero())
-    }
-}
-
-/// Implements the `Indexing` trait for `Vec<T>`, treating a vector as a column vector.
-impl<T> Indexing for Vec<T> {
-    /// Returns the number of rows (length) of the vector.
-    fn nrows(&self) -> usize {
-        self.len()
-    }
-}
-
-/// Implements the `Indexing` trait for `faer::Mat`, returning the number of rows.
-impl<T> Indexing for Mat<T> {
-    fn nrows(&self) -> usize {
-        self.nrows()
-    }
-}
-```
-
-`src/core/mat/mod.rs`
-
-```rust
-//! Matrix types and operations for kryst.
-
-pub mod shell;
-
-pub use shell::ShellMat;
-```
-
-`src/core/mat/shell.rs`
-
-```rust
-//! Matrix-free ("shell") operators for kryst.
-//!
-//! This module provides `ShellMat`, which allows users to define matrix operations
-//! via callbacks rather than storing matrix entries explicitly. This is useful for:
-//! - Large matrices that are expensive to store
-//! - Matrices defined by algorithms (e.g., finite difference operators)
-//! - Hierarchical or adaptive methods
-//! - GPU-based or distributed matrix operations
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use kryst::core::mat::shell::ShellMat;
-//!
-//! // Create a 3x3 diagonal matrix with entries [2.0, 3.0, 4.0]
-//! let shell = ShellMat::new(
-//!     3,
-//!     |x, y| {
-//!         let x_ref = x.as_ref();
-//!         let y_mut = y.as_mut();
-//!         y_mut[0] = 2.0 * x_ref[0];
-//!         y_mut[1] = 3.0 * x_ref[1];
-//!         y_mut[2] = 4.0 * x_ref[2];
-//!     },
-//!     |x, y| {
-//!         // For a diagonal matrix, transpose is the same
-//!         let x_ref = x.as_ref();
-//!         let y_mut = y.as_mut();
-//!         y_mut[0] = 2.0 * x_ref[0];
-//!         y_mut[1] = 3.0 * x_ref[1];
-//!         y_mut[2] = 4.0 * x_ref[2];
-//!     },
-//! );
-//! ```
-
-use crate::core::traits::{MatShape, MatTransVec, MatVec};
-use std::marker::PhantomData;
-
-type ShellFn<V> = dyn Fn(&V, &mut V) + Send + Sync;
-/// A "shell" matrix: user-supplied callbacks for A·x and Aᵀ·x
-///
-/// `ShellMat` provides a matrix-free interface where matrix operations are defined
-/// by user-provided closures. This allows for efficient representation of matrices
-/// that don't need to be stored explicitly.
-pub struct ShellMat<V> {
-    pub dim: usize,
-    mult: Box<ShellFn<V>>,
-    mult_trans: Box<ShellFn<V>>,
-    // Makes the dependency on V explicit without requiring V: Send/Sync.
-    // Using `fn(&V)` (not `V`) avoids imposing Send/Sync bounds on V.
-    _marker: PhantomData<fn(&V)>,
-}
-
-impl<V> ShellMat<V> {
-    /// Construct a new shell matrix of size `dim` with user-provided operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `dim` - The dimension of the square matrix
-    /// * `mult` - Closure computing y = A·x
-    /// * `mult_trans` - Closure computing y = Aᵀ·x
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use kryst::core::mat::shell::ShellMat;
-    ///
-    /// // Identity matrix
-    /// let identity = ShellMat::new(
-    ///     3,
-    ///     |x, y| {
-    ///         let x_ref = x.as_ref();
-    ///         let y_mut = y.as_mut();
-    ///         for i in 0..x_ref.len() {
-    ///             y_mut[i] = x_ref[i];
-    ///         }
-    ///     },
-    ///     |x, y| {
-    ///         let x_ref = x.as_ref();
-    ///         let y_mut = y.as_mut();
-    ///         for i in 0..x_ref.len() {
-    ///             y_mut[i] = x_ref[i];
-    ///         }
-    ///     },
-    /// );
-    /// ```
-    pub fn new<F, G>(dim: usize, mult: F, mult_trans: G) -> Self
-    where
-        F: Fn(&V, &mut V) + Send + Sync + 'static,
-        G: Fn(&V, &mut V) + Send + Sync + 'static,
-    {
-        ShellMat {
-            dim,
-            mult: Box::new(mult),
-            mult_trans: Box::new(mult_trans),
-            _marker: PhantomData,
-        }
-    }
-
-    /// Create a shell matrix where the transpose operation is the same as the forward operation.
-    /// This is useful for symmetric matrices.
-    ///
-    /// # Arguments
-    ///
-    /// * `dim` - The dimension of the square matrix
-    /// * `mult` - Closure computing y = A·x (used for both A·x and Aᵀ·x)
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use kryst::core::mat::shell::ShellMat;
-    ///
-    /// // Symmetric diagonal matrix
-    /// let symmetric = ShellMat::new_symmetric(
-    ///     3,
-    ///     |x, y| {
-    ///         let x_ref = x.as_ref();
-    ///         let y_mut = y.as_mut();
-    ///         y_mut[0] = 5.0 * x_ref[0];
-    ///         y_mut[1] = 3.0 * x_ref[1];
-    ///         y_mut[2] = 7.0 * x_ref[2];
-    ///     },
-    /// );
-    /// ```
-    pub fn new_symmetric<F>(dim: usize, mult: F) -> Self
-    where
-        F: Fn(&V, &mut V) + Send + Sync + 'static + Clone,
-    {
-        ShellMat {
-            dim,
-            mult: Box::new(mult.clone()),
-            mult_trans: Box::new(mult),
-            _marker: PhantomData,
-        }
-    }
-
-    /// Get the dimension of this shell matrix.
-    pub fn dimension(&self) -> usize {
-        self.dim
-    }
-}
-
-impl<V> MatVec<V> for ShellMat<V>
-where
-    V: AsRef<[f64]> + AsMut<[f64]>,
-{
-    /// Apply the matrix-vector product: y = A·x
-    fn matvec(&self, x: &V, y: &mut V) {
-        (self.mult)(x, y);
-    }
-}
-
-impl<V> MatTransVec<V> for ShellMat<V>
-where
-    V: AsRef<[f64]> + AsMut<[f64]>,
-{
-    /// Apply the matrix-transpose-vector product: y = Aᵀ·x
-    fn mattransvec(&self, x: &V, y: &mut V) {
-        (self.mult_trans)(x, y);
-    }
-}
-
-impl<V> MatShape for ShellMat<V> {
-    /// Number of rows in the matrix
-    fn nrows(&self) -> usize {
-        self.dim
-    }
-
-    /// Number of columns in the matrix
-    fn ncols(&self) -> usize {
-        self.dim
     }
 }
 ```
