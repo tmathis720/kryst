@@ -149,13 +149,13 @@ pub trait Preconditioner: Send + Sync {
     }
 
     /// Build any factorization/hierarchy once from the system matrix.
-    fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError>;
+    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
 
     /// Apply `M^{-op}` to input vector, writing result to output slice.
     ///
     /// When used with CG and [`PcSide::Left`], this operation must represent an
     /// SPD preconditioner `M` so that `rᵀ M⁻¹ r > 0` holds.
-    fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError>;
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
 
     /// Apply `M^{-op}` where the operation (`op`) specifies transpose handling.
     ///
@@ -163,7 +163,7 @@ pub trait Preconditioner: Send + Sync {
     /// requests return [`KError::Unsupported`]. Implementations overriding this
     /// method should ignore the [`PcSide`] argument entirely and instead allow
     /// callers to decide left/right placement by where they invoke the method.
-    fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         match op {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
             Op::Trans | Op::ConjTrans => {
@@ -176,7 +176,7 @@ pub trait Preconditioner: Send + Sync {
     ///
     /// The default implementation allocates a temporary buffer; performance-
     /// sensitive implementations should override this.
-    fn apply_op_inplace(&self, op: Op, y: &mut [S]) -> Result<(), KError> {
+    fn apply_op_inplace(&self, op: Op, y: &mut [f64]) -> Result<(), KError> {
         let tmp = y.to_vec();
         self.apply_op(op, &tmp, y)
     }
@@ -190,7 +190,7 @@ pub trait Preconditioner: Send + Sync {
     ///
     /// By default, delegates to [`apply`], so existing preconditioners
     /// remain immutable unless they explicitly override this method.
-    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 
@@ -209,9 +209,9 @@ pub trait Preconditioner: Send + Sync {
     /// that direct solves are not supported by this preconditioner.
     fn direct_solve(
         &mut self,
-        _op: &dyn LinOp<S = S>,
-        _b: &[S],
-        _x: &mut [S],
+        _op: &dyn LinOp<S = f64>,
+        _b: &[f64],
+        _x: &mut [f64],
     ) -> Result<(), KError> {
         Err(KError::SolveError(
             "direct_solve not supported by this preconditioner".into(),
@@ -224,12 +224,12 @@ pub trait Preconditioner: Send + Sync {
     }
 
     /// Pattern unchanged: re-use hierarchy/structure, BUT refresh all numeric data.
-    fn update_numeric(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+    fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         Err(KError::Unsupported("numeric update not supported"))
     }
 
     /// Pattern may have changed: rebuild structure (potentially expensive).
-    fn update_symbolic(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+    fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         // By default, fall back to a full setup
         self.setup(a)
     }

@@ -642,7 +642,7 @@ impl LinOpF64 for Mat<f64> {
 }
 
 impl LinOp for CsrMatrix<f64> {
-    type S = S;
+    type S = f64;
     fn dims(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }

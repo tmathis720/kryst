@@ -15,7 +15,7 @@ use super::util;
 fn pipelined_cg_reports_residual_replacements() -> Result<(), KError> {
     let a = util::rotated_anisotropy_2d(12, 0.3, 1e-2);
     let b = util::rhs_random(a.nrows(), 21);
-    let op: &dyn crate::matrix::op::LinOp<S = S> = &a;
+    let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
     let mut solver = PcgSolver::new(1e-8, 5_000);
     solver.set_variant(PcgVariant::Pipelined { replace_every: 5 });
     let mut ws = Workspace::default();
