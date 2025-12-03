@@ -57,27 +57,65 @@ struct PatternCheckPc {
     row_ptr: Vec<usize>,
     col_idx: Vec<usize>,
 }
+
+impl PatternCheckPc {
+    /// Extract a CSR-like sparsity pattern from a LinOp in a stable way.
+    fn pattern_from_linop(a: &dyn LinOp<S = f64>) -> Result<(Vec<usize>, Vec<usize>), KError> {
+        // Direct CSR => copy the pattern.
+        if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<f64>>() {
+            return Ok((csr.row_ptr().to_vec(), csr.col_idx().to_vec()));
+        }
+
+        // Direct Mat => build pattern deterministically.
+        #[cfg(feature = "backend-faer")]
+        if let Some(d) = a.as_any().downcast_ref::<Mat<f64>>() {
+            let m = d.nrows();
+            let n = d.ncols();
+            let mut row_ptr = Vec::with_capacity(m + 1);
+            let mut col_idx = Vec::new();
+            row_ptr.push(0);
+            for i in 0..m {
+                for j in 0..n {
+                    if d[(i, j)] != 0.0 {
+                        col_idx.push(j);
+                    }
+                }
+                row_ptr.push(col_idx.len());
+            }
+            return Ok((row_ptr, col_idx));
+        }
+
+        // Fallback to the generic converter.
+        let csr = csr_from_linop(a, R::default())?;
+        Ok((csr.row_ptr().to_vec(), csr.col_idx().to_vec()))
+    }
+}
+
 impl Preconditioner for PatternCheckPc {
     fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, R::default())?;
-        self.row_ptr = csr.row_ptr().to_vec();
-        self.col_idx = csr.col_idx().to_vec();
+        let (row_ptr, col_idx) = Self::pattern_from_linop(a)?;
+        self.row_ptr = row_ptr;
+        self.col_idx = col_idx;
         Ok(())
     }
+
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         y.copy_from_slice(x);
         Ok(())
     }
+
     fn supports_numeric_update(&self) -> bool {
         true
     }
+
     fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, R::default())?;
-        if self.row_ptr != csr.row_ptr() || self.col_idx != csr.col_idx() {
+        let (row_ptr, col_idx) = Self::pattern_from_linop(a)?;
+        if self.row_ptr != row_ptr || self.col_idx != col_idx {
             return Err(KError::Unsupported("pattern changed; need update_symbolic"));
         }
         Ok(())
     }
+
     fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.setup(a)
     }
