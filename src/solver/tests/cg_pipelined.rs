@@ -1,6 +1,7 @@
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
+use crate::matrix::op::LinOp;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
 use crate::preconditioner::Preconditioner;
@@ -10,19 +11,23 @@ use crate::solver::pcg::{PcgSolver, PcgVariant};
 
 use super::util;
 
-fn solve_with_variant(
-    a: &[R],
-    b: &[R],
-    variant: PcgVariant,
-) -> Result<(Vec<R>, usize, R), KError> {
+/// Solve with a pipelined PCG variant on any operator that implements `LinOp<S = f64>`.
+fn solve_with_variant<A>(a: &A, b: &[R], variant: PcgVariant) -> Result<(Vec<R>, usize, R), KError>
+where
+    A: LinOp<S = f64> + 'static,
+{
     let mut solver = PcgSolver::new(1e-10, 5_000);
     solver.set_variant(variant);
+
+    // In non-complex builds R = f64; in complex builds R is the real scalar type.
     let mut x: Vec<R> = vec![R::default(); b.len()];
     let mut ws = Workspace::default();
     let mut pc = Jacobi::new();
-    let op: &dyn crate::matrix::op::LinOp<S = S> = a;
+
+    let op: &dyn LinOp<S = f64> = a;
     pc.setup(op)?;
     let comm = UniverseComm::NoComm(NoComm);
+
     let stats = solver.solve(
         op,
         Some(&mut pc),
@@ -78,8 +83,8 @@ fn pcg_pipelined_matches_classic_on_spd_gallery() -> Result<(), KError> {
             it_pipe
         );
 
-        // Ensure the solutions are close in norm.
-        let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
+        // Ensure the classic solution also has a small true residual.
+        let op: &dyn LinOp<S = f64> = &a;
         let r_classic = util::true_residual_norm(op, &x_classic, &b);
         assert!(r_classic <= R::from(1e-10) * bnorm + R::from(1e-12));
     }

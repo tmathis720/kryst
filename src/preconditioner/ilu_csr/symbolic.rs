@@ -5,7 +5,7 @@ use crate::algebra::scalar::KrystScalar;
 pub struct RowWork {
     pub mark: Vec<i32>,  // n, initialized to -1
     pub idx: Vec<usize>, // positions used in this row
-    pub val: Vec<Real>,     // values aligned with idx
+    pub val: Vec<Real>,  // values aligned with idx
 }
 
 pub fn ensure_rowwork(w: &mut RowWork, n: usize) {

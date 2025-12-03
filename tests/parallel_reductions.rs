@@ -14,10 +14,18 @@ use kryst::parallel::{
 };
 use kryst::utils::reduction::{AllreduceOps, ReductMode, ReductOptions};
 use kryst::{assert_s_close, assert_vec_close, testkit};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 fn make_world() -> UniverseComm {
     UniverseComm::Mpi(Arc::new(MpiComm::new()))
+}
+
+fn mpi_test_guard() -> MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("mpi_test_guard poisoned")
 }
 
 fn scaled_tol(base: f64, factor: usize) -> R {
@@ -48,6 +56,7 @@ fn local_slice(rank: usize) -> Vec<S> {
 
 #[test]
 fn allreduce_scalar_matches_closed_form() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -75,6 +84,7 @@ fn allreduce_scalar_matches_closed_form() {
 
 #[test]
 fn mpi_sys_scalar_matches_safe_path() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
 
     if comm.size() <= 1 {
@@ -94,6 +104,7 @@ fn mpi_sys_scalar_matches_safe_path() {
 
 #[test]
 fn allreduce_scalar_accurate_matches_safe_path() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
 
@@ -110,6 +121,7 @@ fn allreduce_scalar_accurate_matches_safe_path() {
 
 #[test]
 fn global_dot_conj_matches_manual_sum() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -129,6 +141,7 @@ fn global_dot_conj_matches_manual_sum() {
 
 #[test]
 fn global_dot_conj_accurate_matches_manual_sum() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -154,6 +167,7 @@ fn global_dot_conj_accurate_matches_manual_sum() {
 
 #[test]
 fn global_dot_conj_repro_matches_fast() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let (x_local, y_local) = local_vectors(rank);
@@ -166,6 +180,7 @@ fn global_dot_conj_repro_matches_fast() {
 
 #[test]
 fn global_dot_conj_many_matches_individual_calls() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -202,6 +217,7 @@ fn global_dot_conj_many_matches_individual_calls() {
 
 #[test]
 fn global_dot_conj_many_accurate_matches_individual_calls() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -235,6 +251,7 @@ fn global_dot_conj_many_accurate_matches_individual_calls() {
 
 #[test]
 fn global_dot_conj_many_into_matches_owned_helpers() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -275,6 +292,7 @@ fn global_dot_conj_many_into_matches_owned_helpers() {
 
 #[test]
 fn global_nrm2_many_matches_individual_calls() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
 
@@ -327,6 +345,7 @@ fn global_nrm2_many_matches_individual_calls() {
 
 #[test]
 fn global_nrm2_many_into_matches_owned_helpers() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
 
@@ -381,6 +400,7 @@ fn global_nrm2_many_into_matches_owned_helpers() {
 
 #[test]
 fn global_nrm2_matches_manual_norm() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -409,6 +429,7 @@ fn global_nrm2_matches_manual_norm() {
 
 #[test]
 fn global_nrm2_repro_matches_fast() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let values = local_slice(rank);
@@ -421,6 +442,7 @@ fn global_nrm2_repro_matches_fast() {
 
 #[test]
 fn global_nrm2_accurate_matches_fast() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let values = local_slice(rank);
@@ -437,6 +459,7 @@ fn global_nrm2_accurate_matches_fast() {
 
 #[test]
 fn allreduce_scalar_slice_in_place_matches_component_sums() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -460,6 +483,7 @@ fn allreduce_scalar_slice_in_place_matches_component_sums() {
 
 #[test]
 fn owned_slice_reduction_matches_component_sums() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let rank = comm.rank();
     let size = comm.size();
@@ -484,6 +508,7 @@ fn owned_slice_reduction_matches_component_sums() {
 
 #[test]
 fn mpi_async_pair_supports_deterministic_mode() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
         mode: ReductMode::Deterministic,
@@ -526,6 +551,7 @@ fn mpi_async_pair_supports_deterministic_mode() {
 
 #[test]
 fn mpi_async_vec_supports_deterministic_mode() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
         mode: ReductMode::Deterministic,
@@ -578,6 +604,7 @@ fn mpi_async_vec_supports_deterministic_mode() {
 
 #[test]
 fn mpi_async_pair_supports_deterministic_accurate_mode() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
         mode: ReductMode::DeterministicAccurate,
@@ -620,6 +647,7 @@ fn mpi_async_pair_supports_deterministic_accurate_mode() {
 
 #[test]
 fn mpi_async_vec_supports_deterministic_accurate_mode() {
+    let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
         mode: ReductMode::DeterministicAccurate,

@@ -154,6 +154,7 @@ impl PcgSolver {
         self
     }
 
+    #[must_use = "with_variant returns an updated solver; assign it before continuing"]
     pub fn with_variant(mut self, variant: PcgVariant) -> Self {
         self.variant = variant;
         self

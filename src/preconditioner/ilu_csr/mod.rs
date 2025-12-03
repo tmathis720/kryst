@@ -10,9 +10,9 @@ use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditio
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 
 #[cfg(feature = "complex")]
-use crate::ops::kpc::KPreconditioner;
-#[cfg(feature = "complex")]
 use crate::bridge::BridgeScratch;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
 
@@ -549,7 +549,8 @@ impl IluCsr {
                 }
                 let djj = {
                     let dix = self.u_diag_ix.get(j).copied().unwrap_or(0);
-                    if j < i && self.u_val.get(dix).copied().unwrap_or(Real::zero()) == Real::zero() {
+                    if j < i && self.u_val.get(dix).copied().unwrap_or(Real::zero()) == Real::zero()
+                    {
                         // Not yet built; for row 0 there is none — but we will handle when j<i holds
                     }
                     if j < i {

@@ -1796,7 +1796,6 @@ mod tests {
         assert!(ilu.config.enable_distributed);
     }
 
-    
     #[test]
     #[cfg(not(feature = "complex"))]
     fn ilu0_real_factorization_solves_spd() {

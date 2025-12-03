@@ -1,9 +1,9 @@
+use crate::algebra::scalar::{R, S};
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
-use crate::algebra::scalar::{S, R};
 
 #[cfg(feature = "backend-faer")]
 type MatSorSide = crate::preconditioner::sor::MatSorType;

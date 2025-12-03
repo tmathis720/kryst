@@ -180,15 +180,18 @@ mod tests {
         let row_ptr = vec![0, 2, 4, 6];
         let col_idx = vec![0, 1, 1, 2, 0, 2];
         let vals: Vec<S> = vec![
-            S::new(R::from(1.0),  R::from(0.5)),
-            S::new(R::from(2.0),  R::from(-1.0)),
-            S::new(R::from(3.0),  R::from(0.25)),
-            S::new(R::from(4.0),  R::from(-0.75)),
-            S::new(R::from(5.0),  R::from(1.5)),
-            S::new(R::from(6.0),  R::from(-2.0)),
+            S::new(R::from(1.0), R::from(0.5)),
+            S::new(R::from(2.0), R::from(-1.0)),
+            S::new(R::from(3.0), R::from(0.25)),
+            S::new(R::from(4.0), R::from(-0.75)),
+            S::new(R::from(5.0), R::from(1.5)),
+            S::new(R::from(6.0), R::from(-2.0)),
         ];
         let a = CsrMatrix::from_csr(3, 3, row_ptr, col_idx, vals);
-        let perm = Permutation { p: vec![2, 0, 1], pinv: vec![1, 2, 0] };
+        let perm = Permutation {
+            p: vec![2, 0, 1],
+            pinv: vec![1, 2, 0],
+        };
 
         let ap = permute_csr_symmetric(&a, &perm);
         let dense_ap = ap.to_dense();
@@ -208,5 +211,4 @@ mod tests {
             }
         }
     }
-
 }
