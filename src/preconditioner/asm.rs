@@ -345,7 +345,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let idx = &meta.indices;
                         let a_sub_csr = csr.as_ref().submatrix(idx);
                         let dense = a_sub_csr.to_dense();
-                        let mut ksp = LuSolver::<f64>::new();
+                        let mut ksp = LuSolver::new();
                         let _ = ksp.solve(
                             &dense,
                             None,
@@ -608,7 +608,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let indices = &meta.indices;
                         let a_sub_csr = csr.as_ref().submatrix(indices);
                         let dense = a_sub_csr.to_dense();
-                        let mut ksp = LuSolver::<f64>::new();
+                        let mut ksp = LuSolver::new();
                         let _ = ksp.solve(
                             &dense,
                             None,
@@ -726,7 +726,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let indices = &meta.indices;
                         let a_sub_csr = csr.as_ref().submatrix(indices);
                         let dense = a_sub_csr.to_dense();
-                        let mut ksp = LuSolver::<f64>::new();
+                        let mut ksp = LuSolver::new();
                         let _ = ksp.solve(
                             &dense,
                             None,
@@ -838,7 +838,7 @@ mod tests {
             subdomains,
             BlockSolverFactory::LuDense,
         );
-        asm.setup(&a, || LuSolver::<f64>::new());
+        asm.setup(&a, || LuSolver::new());
         let r = vec![1.0, 2.0, 3.0, 4.0];
         let mut z = vec![0.0; 4];
         crate::preconditioner::Preconditioner::apply(&asm, PcSide::Left, &r, &mut z).unwrap();
