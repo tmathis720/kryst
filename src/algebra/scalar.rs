@@ -193,6 +193,10 @@ pub type S = f64;
 /// Real partner of `S` (currently always `f64`)
 pub type R = <S as KrystScalar>::Real;
 
+/// Copy the current scalar alias `S` into a contiguous `f64` slice.
+///
+/// These helpers are specialized for the global scalar alias `S` and used when the
+/// current configuration already knows `S`; more generic copies live in `algebra::bridge`.
 #[cfg(feature = "complex")]
 #[inline]
 pub fn copy_scalar_to_real_in(z: &[S], out: &mut [f64]) {
@@ -202,6 +206,10 @@ pub fn copy_scalar_to_real_in(z: &[S], out: &mut [f64]) {
     }
 }
 
+/// Copy a real `f64` slice into the current scalar alias `S`.
+///
+/// These helpers are specialized for the global scalar alias `S` and used when the
+/// current configuration already knows `S`; more generic copies live in `algebra::bridge`.
 #[cfg(feature = "complex")]
 #[inline]
 pub fn copy_real_to_scalar_in(x: &[f64], out: &mut [S]) {
@@ -211,6 +219,10 @@ pub fn copy_real_to_scalar_in(x: &[f64], out: &mut [S]) {
     }
 }
 
+/// Copy the current scalar alias `S` into a contiguous `f64` slice.
+///
+/// These helpers are specialized for the global scalar alias `S` and used when the
+/// current configuration already knows `S`; more generic copies live in `algebra::bridge`.
 #[cfg(not(feature = "complex"))]
 #[inline]
 pub fn copy_scalar_to_real_in(z: &[S], out: &mut [f64]) {
@@ -223,6 +235,10 @@ pub fn copy_scalar_to_real_in(z: &[S], out: &mut [f64]) {
     out.copy_from_slice(z_as_f64);
 }
 
+/// Copy a real `f64` slice into the current scalar alias `S`.
+///
+/// These helpers are specialized for the global scalar alias `S` and used when the
+/// current configuration already knows `S`; more generic copies live in `algebra::bridge`.
 #[cfg(not(feature = "complex"))]
 #[inline]
 pub fn copy_real_to_scalar_in(x: &[f64], out: &mut [S]) {

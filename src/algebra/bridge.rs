@@ -43,6 +43,10 @@ impl BridgeScratch {
     }
 }
 
+/// Copy from any scalar `T` whose real part is `f64` into a real buffer.
+///
+/// This helper is intentionally generic so bridge code can handle arbitrary
+/// `KrystScalar` implementations without depending on the global alias `S`.
 #[inline]
 pub fn copy_scalar_to_real_in<T: KrystScalar<Real = f64>>(x: &[T], xr: &mut [f64]) {
     debug_assert_eq!(x.len(), xr.len());
@@ -51,6 +55,10 @@ pub fn copy_scalar_to_real_in<T: KrystScalar<Real = f64>>(x: &[T], xr: &mut [f64
     }
 }
 
+/// Copy from a real buffer into any scalar `T` whose real part is `f64`.
+///
+/// This helper is intentionally generic so bridge code can handle arbitrary
+/// `KrystScalar` implementations without depending on the global alias `S`.
 #[inline]
 pub fn copy_real_into_scalar<T: KrystScalar<Real = f64>>(yr: &[f64], y: &mut [T]) {
     debug_assert_eq!(yr.len(), y.len());

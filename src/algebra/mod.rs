@@ -2,11 +2,16 @@
 
 pub mod blas;
 pub mod bridge;
-#[cfg(any(feature = "backend-faer"))]
+#[cfg(any(
+    feature = "backend-faer",
+    feature = "backend-nalgebra",
+    feature = "backend-cgmath"
+))]
 pub mod dense;
 pub mod parallel;
 pub mod parallel_cfg;
 pub mod prelude;
 pub mod scalar;
 
+pub use parallel_cfg::{ParallelTune, parallel_tune, set_parallel_tune};
 pub use scalar::{KrystScalar, R, S};

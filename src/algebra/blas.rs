@@ -1,15 +1,10 @@
-use crate::algebra::parallel::par_sum_abs2_local;
+use crate::algebra::parallel::{par_dot_conj_local, par_sum_abs2_local};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 
 #[inline]
 pub fn dot_conj(x: &[S], y: &[S]) -> S {
-    debug_assert_eq!(x.len(), y.len());
-    let mut acc = S::zero();
-    for i in 0..x.len() {
-        acc = x[i].conj().mul_add(y[i], acc);
-    }
-    acc
+    par_dot_conj_local(x, y)
 }
 
 #[inline]
