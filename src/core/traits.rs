@@ -65,7 +65,12 @@ where
     }
 }
 
-/// Optional extension trait for block matvec operations while remaining matrix-free.
+/// Real-valued block operator used by block Krylov variants while remaining matrix-free.
+///
+/// This trait is intentionally defined in terms of `f64` scalars. In complex builds the helper
+/// conversions (`copy_scalar_to_real_in`) drop imaginary parts, so `apply_many`/`apply` work
+/// only on the real components of the block vectors. Use this trait for real preconditioners
+/// or diagnostics inside complex solvers rather than for fully complex-valued operators.
 pub trait BlockOp {
     /// Apply the operator to multiple columns at once. Default implementation calls
     /// [`apply`](Self::apply) per column to remain format agnostic.
@@ -79,6 +84,7 @@ pub trait BlockOp {
         }
         let mut x_real = vec![0.0; x.nrows()];
         let mut y_real = vec![0.0; y.nrows()];
+        // In complex builds `copy_scalar_to_real_in` discards imaginary components.
         for c in 0..x.ncols() {
             copy_scalar_to_real_in(x.col(c), &mut x_real);
             copy_scalar_to_real_in(y.col(c), &mut y_real);

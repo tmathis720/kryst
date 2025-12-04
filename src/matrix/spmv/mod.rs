@@ -13,7 +13,7 @@ pub use self::scalar::{spmv_csr_scalar, spmv_scaled_csr, spmv_t_scaled_csr};
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
-use crate::matrix::{csc::CscMatrix, csr::CsrMatrix, sparse};
+use crate::matrix::sparse_api::{CscMatRef, CsrMatRef};
 use faer::{MatMut, MatRef};
 
 #[inline]
@@ -80,67 +80,8 @@ pub fn spmv_t_scaled_f32_on_pattern(
 }
 
 /// y = A * x using CSR; parallel when `rayon` is enabled.
-pub trait CsrAccess<S: KrystScalar> {
-    fn nrows(&self) -> usize;
-    fn ncols(&self) -> usize;
-    fn row_ptr(&self) -> &[usize];
-    fn col_idx(&self) -> &[usize];
-    fn values(&self) -> &[S];
-}
-
-impl<S: KrystScalar> CsrAccess<S> for CsrMatrix<S> {
-    #[inline]
-    fn nrows(&self) -> usize {
-        self.nrows()
-    }
-
-    #[inline]
-    fn ncols(&self) -> usize {
-        self.ncols()
-    }
-
-    #[inline]
-    fn row_ptr(&self) -> &[usize] {
-        self.row_ptr()
-    }
-
-    #[inline]
-    fn col_idx(&self) -> &[usize] {
-        self.col_idx()
-    }
-
-    #[inline]
-    fn values(&self) -> &[S] {
-        self.values()
-    }
-}
-
-impl<S: KrystScalar> CsrAccess<S> for sparse::CsrMatrix<S> {
-    #[inline]
-    fn nrows(&self) -> usize {
-        self.nrows()
-    }
-
-    #[inline]
-    fn ncols(&self) -> usize {
-        self.ncols()
-    }
-
-    #[inline]
-    fn row_ptr(&self) -> &[usize] {
-        self.row_ptr()
-    }
-
-    #[inline]
-    fn col_idx(&self) -> &[usize] {
-        self.col_idx()
-    }
-
-    #[inline]
-    fn values(&self) -> &[S] {
-        self.values()
-    }
-}
+pub trait CsrAccess<S: KrystScalar>: CsrMatRef<S> {}
+impl<S: KrystScalar, T: CsrMatRef<S>> CsrAccess<S> for T {}
 
 #[inline(always)]
 fn csr_row_dot<S: KrystScalar>(
@@ -265,13 +206,13 @@ where
 
 /// Backend selection for transpose SpMV.
 pub enum TBackend<'a, S: KrystScalar> {
-    Csc(&'a CscMatrix<S>),
+    Csc(&'a dyn CscMatRef<S>),
     CsrGather,
 }
 
 #[cfg(feature = "rayon")]
 fn t_spmv_csr_parallel_csc<S: KrystScalar>(
-    csc: &CscMatrix<S>,
+    csc: &dyn CscMatRef<S>,
     x: &[S],
     y: &mut [S],
 ) -> Result<(), KError> {
@@ -297,7 +238,7 @@ fn t_spmv_csr_parallel_csc<S: KrystScalar>(
 
 #[cfg(not(feature = "rayon"))]
 fn t_spmv_csr_parallel_csc<S: KrystScalar>(
-    csc: &CscMatrix<S>,
+    csc: &dyn CscMatRef<S>,
     x: &[S],
     y: &mut [S],
 ) -> Result<(), KError> {

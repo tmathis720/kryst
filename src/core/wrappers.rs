@@ -60,7 +60,11 @@ impl<'a, T: Float> MatTransVec<Vec<T>> for MatRef<'a, T> {
     }
 }
 
-/// Implements inner product and norm for vectors, with optional Rayon parallelism.
+/// Implements inner product and norm for **real-valued** vectors, with optional Rayon parallelism.
+///
+/// This implementation only targets scalars that satisfy `num_traits::Float`, so it does not
+/// support complex vectors. In MPI builds the reduction uses `all_reduce_f64`, preserving the
+/// existing real-focused behavior.
 ///
 /// If the `rayon` feature is enabled, uses parallel iterators for performance.
 impl<T: Float + From<f64> + Into<f64> + Send + Sync> InnerProduct<Vec<T>> for () {
@@ -92,6 +96,9 @@ impl<T: Float + From<f64> + Into<f64> + Send + Sync> InnerProduct<Vec<T>> for ()
 }
 
 /// Distributed inner product and norm for MPI-enabled builds.
+///
+/// The reductions are performed on real scalars via `f64`, so this helper is intended for
+/// real-valued data (`T: Float + FromPrimitive`).
 ///
 /// This struct is only available if the `mpi` feature is enabled. It wraps a communicator and provides
 /// collective dot product and norm operations across distributed memory processes.

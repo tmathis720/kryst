@@ -122,7 +122,7 @@ pub fn to_csc_cached(
     }
     if let Some(generic) = pmat.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
-        return Ok(AsFormat::to_csc_cached(&csr, drop_tol));
+        return Ok(csr.to_csc_cached(drop_tol));
     }
     if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(csr.to_csc_cached(drop_tol));
@@ -198,7 +198,7 @@ pub fn materialize_linop_with_hint(
         return Ok(match hint {
             FormatHint::Csr => wrap_with_comm(Arc::new(csr.clone()), comm),
             FormatHint::Csc => {
-                let csc = AsFormat::to_csc_cached(&csr, drop_tol);
+                let csc = csr.to_csc_cached(drop_tol);
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
@@ -211,7 +211,7 @@ pub fn materialize_linop_with_hint(
         return Ok(match hint {
             FormatHint::Csr => wrap_with_comm(std::sync::Arc::new(csr.clone()), comm),
             FormatHint::Csc => {
-                let csc = AsFormat::to_csc_cached(csr, drop_tol);
+                let csc = csr.to_csc_cached(drop_tol);
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
@@ -225,7 +225,7 @@ pub fn materialize_linop_with_hint(
     if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
         return Ok(match hint {
             FormatHint::Csr => {
-                let csr = AsFormat::to_csr_cached(csc, drop_tol);
+                let csr = csc.to_csr_cached(drop_tol);
                 wrap_with_comm(csr, comm)
             }
             FormatHint::Csc => wrap_with_comm(std::sync::Arc::new(csc.clone()), comm),
@@ -246,7 +246,7 @@ pub fn materialize_linop_with_hint(
             }
             FormatHint::Csc => {
                 let csr_local = dist.local_matrix();
-                let csc = AsFormat::to_csc_cached(&csr_local, drop_tol);
+                let csc = csr_local.to_csc_cached(drop_tol);
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
@@ -261,11 +261,11 @@ pub fn materialize_linop_with_hint(
         let inner = dense_op.inner();
         return Ok(match hint {
             FormatHint::Csr => {
-                let csr = AsFormat::to_csr_cached(dense_op, drop_tol);
+                let csr = dense_op.to_csr_cached(drop_tol);
                 wrap_with_comm(csr, comm)
             }
             FormatHint::Csc => {
-                let csc = AsFormat::to_csc_cached(dense_op, drop_tol);
+                let csc = dense_op.to_csc_cached(drop_tol);
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {

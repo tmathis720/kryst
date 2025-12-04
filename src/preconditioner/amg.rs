@@ -12,6 +12,7 @@ use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{
     convert::csr_from_linop,
+    dense_api::DenseMatRef,
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
@@ -6162,17 +6163,20 @@ fn rap(
 
 // ===== Coarsening & interpolation (dense helpers, same as old) ==============
 
-fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
+fn compute_anisotropy<M>(a: &M) -> Vec<f64>
+where
+    M: DenseMatRef<f64> + Sync,
+{
     let n = a.nrows();
     #[cfg(feature = "rayon")]
     return (0..n)
         .into_par_iter()
         .map(|i| {
-            let diag = a[(i, i)];
+            let diag = a.get(i, i);
             let mut max_off: f64 = 0.0;
             for j in 0..n {
                 if i != j {
-                    max_off = max_off.max(a[(i, j)].abs());
+                    max_off = max_off.max(a.get(i, j).abs());
                 }
             }
             if diag.abs() > 1e-14 {
@@ -6186,11 +6190,11 @@ fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
     {
         let mut out = vec![0.0; n];
         for i in 0..n {
-            let diag = a[(i, i)];
+            let diag = a.get(i, i);
             let mut max_off: f64 = 0.0;
             for j in 0..n {
                 if i != j {
-                    max_off = max_off.max(a[(i, j)].abs());
+                    max_off = max_off.max(a.get(i, j).abs());
                 }
             }
             out[i] = if diag.abs() > 1e-14 {
@@ -6203,7 +6207,10 @@ fn compute_anisotropy(a: &Mat<f64>) -> Vec<f64> {
     }
 }
 
-fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
+fn compute_adaptive_threshold<M>(a: &M, base_threshold: f64) -> f64
+where
+    M: DenseMatRef<f64> + Sync,
+{
     let anis = compute_anisotropy(a);
     let avg = if anis.is_empty() {
         1.0
@@ -6214,12 +6221,15 @@ fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
 }
 
 /// S(i,j) = |A_ij| / sqrt(|A_ii| |A_jj|) if above threshold.
-fn compute_strength_matrix(a: &Mat<f64>, thr: f64) -> Mat<f64> {
+fn compute_strength_matrix<M>(a: &M, thr: f64) -> Mat<f64>
+where
+    M: DenseMatRef<f64>,
+{
     let n = a.nrows();
     let mut s = Mat::<f64>::zeros(n, n);
     let mut diag = vec![0.0; n];
     for i in 0..n {
-        diag[i] = a[(i, i)].abs();
+        diag[i] = a.get(i, i).abs();
     }
     for i in 0..n {
         for j in 0..n {
@@ -6228,7 +6238,7 @@ fn compute_strength_matrix(a: &Mat<f64>, thr: f64) -> Mat<f64> {
             }
             let denom = (diag[i] * diag[j]).sqrt();
             if denom > 1e-14 {
-                let st = a[(i, j)].abs() / denom;
+                let st = a.get(i, j).abs() / denom;
                 if st > thr {
                     s[(i, j)] = st;
                 }

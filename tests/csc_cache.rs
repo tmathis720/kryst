@@ -17,11 +17,11 @@ fn denseop_csc_cache_includes_values_id() {
     });
     let dop = DenseOp::new(Arc::new(m));
     // First conversion
-    let c1 = <DenseOp as AsFormat>::to_csc_cached(&dop, R::default());
+    let c1 = <DenseOp as AsFormat<f64>>::to_csc_cached(&dop, R::default());
     // Mark numeric change (simulate in-place edits)
     dop.mark_values_changed();
     // Second conversion should not hit the same cache entry
-    let c2 = <DenseOp as AsFormat>::to_csc_cached(&dop, R::default());
+    let c2 = <DenseOp as AsFormat<f64>>::to_csc_cached(&dop, R::default());
 
     // The arcs should be distinct instances because key includes ValuesId
     let p1 = Arc::as_ptr(&c1) as usize;
@@ -40,8 +40,8 @@ fn raw_mat_csc_cache_is_stable_without_values_tracking() {
             R::default()
         }
     });
-    let c1 = <Mat<R> as AsFormat>::to_csc_cached(&m, R::default());
-    let c2 = <Mat<R> as AsFormat>::to_csc_cached(&m, R::default());
+    let c1 = <Mat<R> as AsFormat<f64>>::to_csc_cached(&m, R::default());
+    let c2 = <Mat<R> as AsFormat<f64>>::to_csc_cached(&m, R::default());
     let p1 = Arc::as_ptr(&c1) as usize;
     let p2 = Arc::as_ptr(&c2) as usize;
     assert_eq!(

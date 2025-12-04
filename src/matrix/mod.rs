@@ -1,5 +1,8 @@
 //! Matrix module: dense and sparse matrix types and traits.
 
+pub mod backend;
+pub mod dense_api;
+pub mod sparse_api;
 #[cfg(feature = "backend-faer")]
 pub mod dense;
 #[cfg(feature = "backend-faer")]
@@ -33,6 +36,9 @@ pub use convert::{
 #[cfg(feature = "backend-faer")]
 pub use csc::CscMatrix;
 pub use sparse::CsrMatrix;
+pub use sparse_api::{CscMatMut, CscMatRef, CsrMatMut, CsrMatRef};
+#[cfg(feature = "backend-faer")]
+pub use backend::faer::{DefaultCscMat, DefaultCsrMat, DefaultDenseMat, FaerBackend};
 
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;

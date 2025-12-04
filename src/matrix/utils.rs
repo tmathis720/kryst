@@ -4,6 +4,7 @@
 //! utilities that are useful beyond just the AMG preconditioner.
 
 use crate::error::KError;
+use crate::matrix::dense_api::DenseMatRef;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "simd")]
 use crate::matrix::spmv::SpmvTuning;
@@ -17,15 +18,17 @@ use rayon::prelude::*;
 /// Matrix analysis helper function that computes basic properties
 ///
 /// Returns (nnz, diagonal_dominance, diagonal_sum)
-#[cfg(feature = "backend-faer")]
-pub fn analyze_matrix_properties(matrix: &Mat<f64>) -> (usize, f64, f64) {
+pub fn analyze_matrix_properties<M>(matrix: &M) -> (usize, f64, f64)
+where
+    M: DenseMatRef<f64>,
+{
     let mut nnz = 0;
     let mut diagonal_sum = 0.0;
     let mut off_diagonal_sum = 0.0;
 
     for i in 0..matrix.nrows() {
         for j in 0..matrix.ncols() {
-            let val = matrix[(i, j)];
+            let val = matrix.get(i, j);
             if val.abs() > 1e-15 {
                 nnz += 1;
                 if i == j {
@@ -47,11 +50,13 @@ pub fn analyze_matrix_properties(matrix: &Mat<f64>) -> (usize, f64, f64) {
 }
 
 /// Check for numerical issues in the matrix (NaN, Inf, very large condition numbers)
-#[cfg(feature = "backend-faer")]
-pub fn has_numerical_issues(matrix: &Mat<f64>) -> bool {
+pub fn has_numerical_issues<M>(matrix: &M) -> bool
+where
+    M: DenseMatRef<f64>,
+{
     for i in 0..matrix.nrows() {
         for j in 0..matrix.ncols() {
-            let val = matrix[(i, j)];
+            let val = matrix.get(i, j);
             if !val.is_finite() {
                 return true;
             }
@@ -61,11 +66,13 @@ pub fn has_numerical_issues(matrix: &Mat<f64>) -> bool {
 }
 
 /// IEEE safety check for matrix values
-#[cfg(feature = "backend-faer")]
-pub fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
+pub fn check_ieee_values<M>(matrix: &M) -> Result<(), KError>
+where
+    M: DenseMatRef<f64>,
+{
     for i in 0..matrix.nrows() {
         for j in 0..matrix.ncols() {
-            let val = matrix[(i, j)];
+            let val = matrix.get(i, j);
             if val.is_nan() {
                 return Err(KError::InvalidInput(format!(
                     "NaN detected at position ({i}, {j})"
@@ -82,12 +89,14 @@ pub fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
 }
 
 /// Extract the inverse of the diagonal of a matrix, with zero for near-singular entries.
-#[cfg(feature = "backend-faer")]
-pub fn extract_diagonal_inverse(m: &Mat<f64>) -> Vec<f64> {
+pub fn extract_diagonal_inverse<M>(m: &M) -> Vec<f64>
+where
+    M: DenseMatRef<f64>,
+{
     let n = m.nrows();
     let mut diag_inv = vec![0.0; n];
     for i in 0..n {
-        let diag_val = m[(i, i)];
+        let diag_val = m.get(i, i);
         if diag_val.abs() > 1e-14 {
             diag_inv[i] = 1.0 / diag_val;
         }

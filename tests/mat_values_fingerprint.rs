@@ -12,10 +12,10 @@ fn raw_mat_csc_cache_invalidation_with_fingerprint() {
         2,
         |i, j| if i == j { R::from(1.0) } else { R::default() },
     );
-    let c1 = <Mat<R> as AsFormat>::to_csc_cached(&m, R::default());
+    let c1 = <Mat<R> as AsFormat<f64>>::to_csc_cached(&m, R::default());
     // mutate values in-place
     m[(0, 0)] = R::from(2.0);
-    let c2 = <Mat<R> as AsFormat>::to_csc_cached(&m, R::default());
+    let c2 = <Mat<R> as AsFormat<f64>>::to_csc_cached(&m, R::default());
     let p1 = Arc::as_ptr(&c1) as usize;
     let p2 = Arc::as_ptr(&c2) as usize;
     assert_ne!(

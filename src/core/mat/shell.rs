@@ -42,6 +42,10 @@ type ShellFn<V> = dyn Fn(&V, &mut V) + Send + Sync;
 /// `ShellMat` provides a matrix-free interface where matrix operations are defined
 /// by user-provided closures. This allows for efficient representation of matrices
 /// that don't need to be stored explicitly.
+///
+/// The current `MatVec`/`MatTransVec` implementations are restricted to `f64` slices
+/// (`V: AsRef<[f64]> + AsMut<[f64]>`), so shell matrices remain real-valued and drop
+/// any imaginary components in complex builds.
 pub struct ShellMat<V> {
     pub dim: usize,
     mult: Box<ShellFn<V>>,

@@ -539,7 +539,7 @@ impl<Scalar: KrystScalar> CsrOp<Scalar> {
                 }
             }
         }
-        let csc = AsFormat::to_csc_cached(&**self.csr, Scalar::zero().real());
+        let csc = self.csr.to_csc_cached(Scalar::zero().real());
         {
             let mut guard = self.t_cache.write();
             *guard = Some((vid, csc.clone()));
