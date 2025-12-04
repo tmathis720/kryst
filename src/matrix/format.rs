@@ -1,8 +1,11 @@
+<<<<<<< HEAD
 //! Real-only format conversion trait used by AMG helpers.
 //!
 //! While the `AsFormat` trait is generic, current implementations target
 //! `CsrMatrix<f64>`, `CscMatrix<f64>`, and dense `Mat<f64>` to support
 //! real-valued operators in AMG/factorization workflows.
+=======
+>>>>>>> 0ea28bb (Added backend-neutral dense and sparse traits (src/matrix/dense_api.rs, src/matrix/sparse_api.rs) and wired a backend namespace (src/matrix/backend/**) with Faer adapters implementing the new traits plus default type aliases; src/matrix/dense.rs and src/matrix/mod.rs now re-export the abstractions.)
 use crate::algebra::scalar::KrystScalar;
 use crate::matrix::sparse_api::{CscMatRef, CsrMatRef};
 use std::sync::Arc;
