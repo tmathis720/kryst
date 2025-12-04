@@ -1,4 +1,5 @@
 use crate::algebra::prelude::*;
+use crate::matrix::dist::halo::HaloIndexPlan;
 use crate::parallel::{Comm, UniverseComm};
 
 /// Communication plan for halo exchanges in distributed matrices.
@@ -77,6 +78,56 @@ impl HaloPlan {
         assert_eq!(recv_buf.len(), self.recv_idx.len());
         for (p, &idx) in self.recv_idx.iter().enumerate() {
             x_ghost[idx as usize] = recv_buf[p];
+        }
+    }
+}
+
+impl From<&HaloIndexPlan> for HaloPlan {
+    fn from(plan: &HaloIndexPlan) -> Self {
+        let mut neighbors: Vec<i32> = plan
+            .send_local_idx
+            .keys()
+            .chain(plan.recv_map.keys())
+            .map(|&r| r as i32)
+            .collect();
+        neighbors.sort_unstable();
+        neighbors.dedup();
+        neighbors.retain(|&r| r != plan.rank as i32);
+
+        let mut send_ptr = Vec::with_capacity(neighbors.len() + 1);
+        let mut send_idx = Vec::new();
+        send_ptr.push(0);
+        for &nbr in &neighbors {
+            if let Some(local_idxs) = plan.send_local_idx.get(&(nbr as usize)) {
+                for &idx in local_idxs {
+                    send_idx.push(idx as u64);
+                }
+            }
+            send_ptr.push(send_idx.len());
+        }
+
+        let mut recv_ptr = Vec::with_capacity(neighbors.len() + 1);
+        let mut recv_idx = Vec::new();
+        recv_ptr.push(0);
+        for &nbr in &neighbors {
+            if let Some(cols) = plan.recv_map.get(&(nbr as usize)) {
+                for &gcol in cols {
+                    let ghost_pos = *plan
+                        .ghost_index_of
+                        .get(&gcol)
+                        .expect("ghost_index_of must cover recv_map");
+                    recv_idx.push(ghost_pos as u64);
+                }
+            }
+            recv_ptr.push(recv_idx.len());
+        }
+
+        HaloPlan {
+            neighbors,
+            send_ptr,
+            send_idx,
+            recv_ptr,
+            recv_idx,
         }
     }
 }

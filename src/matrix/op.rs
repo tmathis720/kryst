@@ -19,6 +19,11 @@ pub struct StructureId(pub u64);
 pub struct ValuesId(pub u64);
 
 /// Format-agnostic linear operator.
+///
+/// # Thread-safety / reentrancy
+/// Unless otherwise stated, `LinOp` implementations are not required to support
+/// concurrent `matvec` calls on the same instance. Callers must avoid invoking
+/// `matvec`/`try_matvec` on the same operator from multiple threads at once.
 pub trait LinOp: Send + Sync + Any {
     type S: KrystScalar;
 

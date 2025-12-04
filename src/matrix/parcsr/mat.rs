@@ -2,7 +2,9 @@ use super::halo::HaloPlan;
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::op::LinOp;
 use crate::parallel::{Comm, UniverseComm};
+use std::sync::Arc;
 
 /// Distributed CSR matrix split into on- and off-process blocks.
 #[derive(Clone)]
@@ -17,6 +19,49 @@ pub struct ParCsrMatrix {
     pub colmap_owned: Vec<usize>,
     pub colmap_ghost: Vec<usize>,
     pub halo: HaloPlan,
+}
+
+/// LinOp adapter that exposes a [`ParCsrMatrix`] through the common interface.
+pub struct ParCsrOp {
+    pub mat: Arc<ParCsrMatrix>,
+}
+
+impl ParCsrOp {
+    pub fn new(mat: Arc<ParCsrMatrix>) -> Self {
+        Self { mat }
+    }
+
+    pub fn from_owned(mat: ParCsrMatrix) -> Self {
+        Self {
+            mat: Arc::new(mat),
+        }
+    }
+}
+
+impl LinOp for ParCsrOp {
+    type S = f64;
+
+    fn dims(&self) -> (usize, usize) {
+        (self.mat.local_n(), self.mat.global_m)
+    }
+
+    fn matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
+        self.mat
+            .spmv(x, y)
+            .expect("ParCsrMatrix::spmv dimension mismatch");
+    }
+
+    fn try_matvec(&self, x: &[Self::S], y: &mut [Self::S]) -> Result<(), KError> {
+        self.mat.spmv(x, y)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn comm(&self) -> UniverseComm {
+        self.mat.comm.clone()
+    }
 }
 
 impl ParCsrMatrix {

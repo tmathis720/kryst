@@ -12,7 +12,7 @@ pub struct HaloReq<'a> {
     pub send_reqs: Vec<<UniverseComm as Comm>::Request<'a>>,
 }
 
-pub struct HaloPlan {
+pub struct HaloIndexPlan {
     pub comm: UniverseComm,
     pub rank: usize,
     pub size: usize,
@@ -26,17 +26,9 @@ pub struct HaloPlan {
     pub ghost_index_of: BTreeMap<usize, usize>,
     pub ghost_ranges: BTreeMap<usize, Range<usize>>,
     pub n_ghost: usize,
-    send_buf: BTreeMap<usize, UnsafeCell<Vec<S>>>,
-    recv_buf: BTreeMap<usize, UnsafeCell<Vec<S>>>,
-    ghost_flat: RwLock<Vec<S>>,
 }
 
-// Safety: All accesses to `send_buf`/`recv_buf` occur within `post_halo`/`complete_halo`
-// which are invoked sequentially within a matvec. No concurrent aliasing occurs while
-// Rayon executes because the halo buffers are never touched inside the parallel regions.
-unsafe impl Sync for HaloPlan {}
-
-impl HaloPlan {
+impl HaloIndexPlan {
     pub fn new(
         comm: UniverseComm,
         row_part: Arc<Vec<usize>>,
@@ -159,33 +151,18 @@ impl HaloPlan {
 
         let mut ghost_index_of: BTreeMap<usize, usize> = BTreeMap::new();
         let mut ghost_ranges: BTreeMap<usize, Range<usize>> = BTreeMap::new();
-        let mut ghost_flat_vec = Vec::new();
+        let mut n_ghost = 0;
         for (&nbr, cols) in &recv_map {
             if cols.is_empty() {
                 continue;
             }
-            let start = ghost_flat_vec.len();
+            let start = n_ghost;
             for &g in cols {
-                ghost_index_of.insert(g, ghost_flat_vec.len());
-                ghost_flat_vec.push(S::zero());
+                ghost_index_of.insert(g, n_ghost);
+                n_ghost += 1;
             }
-            let end = ghost_flat_vec.len();
+            let end = n_ghost;
             ghost_ranges.insert(nbr, start..end);
-        }
-        let n_ghost = ghost_flat_vec.len();
-
-        let mut send_buf_map: BTreeMap<usize, UnsafeCell<Vec<S>>> = BTreeMap::new();
-        for (&nbr, cols) in &send_map {
-            let mut buf = Vec::with_capacity(cols.len());
-            buf.resize(cols.len(), S::zero());
-            send_buf_map.insert(nbr, UnsafeCell::new(buf));
-        }
-
-        let mut recv_buf_map: BTreeMap<usize, UnsafeCell<Vec<S>>> = BTreeMap::new();
-        for (&nbr, cols) in &recv_map {
-            let mut buf = Vec::with_capacity(cols.len());
-            buf.resize(cols.len(), S::zero());
-            recv_buf_map.insert(nbr, UnsafeCell::new(buf));
         }
 
         Ok(Self {
@@ -202,33 +179,92 @@ impl HaloPlan {
             ghost_index_of,
             ghost_ranges,
             n_ghost,
-            send_buf: send_buf_map,
-            recv_buf: recv_buf_map,
-            ghost_flat: RwLock::new(ghost_flat_vec),
         })
+    }
+}
+
+pub struct HaloBuffers {
+    pub send_buf: BTreeMap<usize, UnsafeCell<Vec<S>>>,
+    pub recv_buf: BTreeMap<usize, UnsafeCell<Vec<S>>>,
+    pub ghost_flat: RwLock<Vec<S>>,
+}
+
+impl HaloBuffers {
+    pub fn new(plan: &HaloIndexPlan) -> Self {
+        let mut send_buf = BTreeMap::new();
+        for (&nbr, cols) in &plan.send_map {
+            let mut buf = Vec::with_capacity(cols.len());
+            buf.resize(cols.len(), S::zero());
+            send_buf.insert(nbr, UnsafeCell::new(buf));
+        }
+
+        let mut recv_buf = BTreeMap::new();
+        for (&nbr, cols) in &plan.recv_map {
+            let mut buf = Vec::with_capacity(cols.len());
+            buf.resize(cols.len(), S::zero());
+            recv_buf.insert(nbr, UnsafeCell::new(buf));
+        }
+
+        let ghost_flat = RwLock::new(vec![S::zero(); plan.n_ghost]);
+
+        Self {
+            send_buf,
+            recv_buf,
+            ghost_flat,
+        }
+    }
+}
+
+pub struct HaloPlan {
+    pub index: Arc<HaloIndexPlan>,
+    buffers: HaloBuffers,
+}
+
+// Safety: All accesses to `send_buf`/`recv_buf` occur within `post_halo`/`complete_halo`
+// which are invoked sequentially within a matvec. No concurrent aliasing occurs while
+// Rayon executes because the halo buffers are never touched inside the parallel regions.
+unsafe impl Sync for HaloPlan {}
+
+impl HaloPlan {
+    pub fn new(
+        comm: UniverseComm,
+        row_part: Arc<Vec<usize>>,
+        row_start: usize,
+        row_end: usize,
+        recv_map: BTreeMap<usize, Vec<usize>>,
+    ) -> Result<Self, KError> {
+        let index = Arc::new(HaloIndexPlan::new(
+            comm,
+            row_part,
+            row_start,
+            row_end,
+            recv_map,
+        )?);
+        let buffers = HaloBuffers::new(&index);
+        Ok(Self { index, buffers })
     }
 
     pub fn ghost_slice_ref(&self) -> std::sync::RwLockReadGuard<'_, Vec<S>> {
-        self.ghost_flat.read().unwrap()
+        self.buffers.ghost_flat.read().unwrap()
     }
 
     pub fn post_halo<'a>(&'a self, x_local: &[S]) -> HaloReq<'a> {
         let mut recv_reqs = Vec::new();
-        for (&nbr, cols) in &self.recv_map {
+        for (&nbr, cols) in &self.index.recv_map {
             if cols.is_empty() {
                 continue;
             }
-            if let Some(buf_lock) = self.recv_buf.get(&nbr) {
+            if let Some(buf_lock) = self.buffers.recv_buf.get(&nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
                 let slice = halo_slice_mut(buf);
-                let req = self.comm.irecv_from(slice, nbr as i32);
+                let req = self.index.comm.irecv_from(slice, nbr as i32);
                 recv_reqs.push(req);
             }
         }
 
         let mut send_reqs = Vec::new();
-        for (&nbr, buf_lock) in &self.send_buf {
-            if let Some(idxs) = self.send_local_idx.get(&nbr) {
+        for (&nbr, buf_lock) in &self.buffers.send_buf {
+            if let Some(idxs) = self.index.send_local_idx.get(&nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
                 if buf.is_empty() {
                     continue;
@@ -237,7 +273,7 @@ impl HaloPlan {
                     *dst = x_local[idx_val];
                 }
                 let slice = halo_slice(buf);
-                let req = self.comm.isend_to(slice, nbr as i32);
+                let req = self.index.comm.isend_to(slice, nbr as i32);
                 send_reqs.push(req);
             }
         }
@@ -249,16 +285,16 @@ impl HaloPlan {
     }
 
     pub fn complete_halo(&self, mut req: HaloReq<'_>) {
-        self.comm.wait_all(&mut req.recv_reqs);
-        self.comm.wait_all(&mut req.send_reqs);
+        self.index.comm.wait_all(&mut req.recv_reqs);
+        self.index.comm.wait_all(&mut req.send_reqs);
 
-        if self.n_ghost > 0 {
-            let mut ghost = self.ghost_flat.write().unwrap();
-            for (&nbr, range) in &self.ghost_ranges {
+        if self.index.n_ghost > 0 {
+            let mut ghost = self.buffers.ghost_flat.write().unwrap();
+            for (&nbr, range) in &self.index.ghost_ranges {
                 if range.is_empty() {
                     continue;
                 }
-                if let Some(buf_lock) = self.recv_buf.get(&nbr) {
+                if let Some(buf_lock) = self.buffers.recv_buf.get(&nbr) {
                     let src = unsafe { &*buf_lock.get() };
                     ghost[range.clone()].copy_from_slice(src);
                 }

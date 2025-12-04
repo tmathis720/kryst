@@ -1,13 +1,23 @@
+//! DistCsrOp: canonical distributed CSR linear operator.
+//!
+//! This is the preferred representation for distributed sparse matrices. Other
+//! distributed matrix APIs (e.g. `parcsr::*`) are secondary and will gradually
+//! be reworked to build on this abstraction.
+
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
-use crate::matrix::dist::halo::HaloPlan;
+use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan};
 use crate::matrix::dist::spmv_dist::RowRanges;
 use crate::matrix::op::{ChangeIds, LinOp, StructureId, ValuesId};
+use crate::matrix::parcsr::{self, ParCsrMatrix};
 use crate::matrix::sparse::CsrMatrix;
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm};
@@ -33,14 +43,20 @@ fn owner_of(j: usize, row_part: &[usize]) -> usize {
     lo
 }
 
-fn self_idx(halo: &HaloPlan, gcol: usize) -> usize {
-    halo.n_local
-        + *halo
+fn self_idx(plan: &HaloIndexPlan, gcol: usize) -> usize {
+    plan.n_local
+        + *plan
             .ghost_index_of
             .get(&gcol)
             .expect("ghost column missing from halo plan")
 }
 
+/// Canonical distributed CSR operator with an MPI-backed halo plan.
+///
+/// # Thread-safety
+/// `DistCsrOp` is `Send + Sync` but not reentrant: concurrent `matvec` calls on
+/// the same instance are not supported because the internal halo buffers are
+/// reused per operation.
 pub struct DistCsrOp {
     pub n_global: usize,
     pub row_start: usize,
@@ -57,6 +73,7 @@ pub struct DistCsrOp {
     border_col_unified: Vec<usize>,
     border_vals: Vec<S>,
     halo: HaloPlan,
+    reentrancy: AtomicUsize,
     ids: ChangeIds,
 }
 
@@ -115,11 +132,11 @@ impl DistCsrOp {
             let start = border_col_unified.len();
             for idx in row_ptr[i]..row_ptr[i + 1] {
                 let gcol = col_idx[idx];
-                let owner = owner_of(gcol, halo.row_part.as_ref());
+                let owner = owner_of(gcol, halo.index.row_part.as_ref());
                 let unified = if owner == rank {
                     gcol - row_start
                 } else {
-                    self_idx(&halo, gcol)
+                    self_idx(&halo.index, gcol)
                 };
                 border_col_unified.push(unified);
                 border_vals.push(vals[idx]);
@@ -147,8 +164,65 @@ impl DistCsrOp {
             border_col_unified,
             border_vals,
             halo,
+            reentrancy: AtomicUsize::new(0),
             ids,
         })
+    }
+
+    /// Build a distributed operator from a [`ParCsrMatrix`].
+    ///
+    /// This merges the diagonal and off-process blocks into a single local CSR
+    /// with global column indices before delegating to [`from_local_rows`].
+    pub fn from_parcsr(par: &ParCsrMatrix) -> Result<Self, KError> {
+        let n_local = par.local_n();
+        let n_global = par.global_m;
+
+        let mut row_ptr = Vec::with_capacity(n_local + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+
+        for i in 0..n_local {
+            let (diag_cols, diag_vals) = par.a_diag.row(i);
+            let (off_cols, off_vals) = par.a_off.row(i);
+            let mut entries = Vec::with_capacity(diag_cols.len() + off_cols.len());
+
+            for (&local_j, &v) in diag_cols.iter().zip(diag_vals.iter()) {
+                let gcol = *par
+                    .colmap_owned
+                    .get(local_j)
+                    .ok_or_else(|| KError::InvalidInput("diag colmap missing entry".into()))?;
+                entries.push((gcol, S::from_real(v)));
+            }
+            for (&ghost_j, &v) in off_cols.iter().zip(off_vals.iter()) {
+                let gcol = *par
+                    .colmap_ghost
+                    .get(ghost_j)
+                    .ok_or_else(|| KError::InvalidInput("ghost colmap missing entry".into()))?;
+                entries.push((gcol, S::from_real(v)));
+            }
+
+            entries.sort_unstable_by_key(|(c, _)| *c);
+            for (c, v) in entries {
+                col_idx.push(c);
+                vals.push(v);
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        let local_rows = CsrMatrix::from_csr(n_local, n_global, row_ptr, col_idx, vals);
+        let part_prefix: Vec<usize> = parcsr::builder::partition_rows(n_global as u64, &par.comm)
+            .into_iter()
+            .map(|g| g as usize)
+            .collect();
+
+        Self::from_local_rows(
+            n_global,
+            par.row_start,
+            &local_rows,
+            &part_prefix,
+            par.comm.clone(),
+        )
     }
 
     pub fn update_numeric(&mut self, new_vals: &[S]) -> Result<(), KError> {
@@ -272,10 +346,13 @@ impl KLinOp for DistCsrOp {
     fn matvec_s(&self, x: &[S], y: &mut [S], _scratch: &mut BridgeScratch) {
         assert_eq!(x.len(), self.n_local);
         assert_eq!(y.len(), self.n_local);
+        let prev = self.reentrancy.fetch_add(1, Ordering::SeqCst);
+        debug_assert_eq!(prev, 0, "DistCsrOp::matvec_s called reentrantly");
         for v in y.iter_mut() {
             *v = S::zero();
         }
-        let halo_req = if self.halo.n_ghost > 0 || !self.halo.send_local_idx.is_empty() {
+        let halo_req = if self.halo.index.n_ghost > 0 || !self.halo.index.send_local_idx.is_empty()
+        {
             Some(self.halo.post_halo(x))
         } else {
             None
@@ -289,6 +366,7 @@ impl KLinOp for DistCsrOp {
 
         let ghost_guard = self.halo.ghost_slice_ref();
         self.spmv_border(x, y, &ghost_guard[..]);
+        self.reentrancy.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -325,6 +403,6 @@ impl LinOp for DistCsrOp {
     }
 
     fn comm(&self) -> UniverseComm {
-        self.halo.comm.clone()
+        self.halo.index.comm.clone()
     }
 }
