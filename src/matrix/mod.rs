@@ -1,4 +1,15 @@
 //! Matrix module: dense and sparse matrix types and traits.
+//!
+//! # Real-only helpers vs generic APIs
+//!
+//! - The core `LinOp` trait and most sparse structures are generic over
+//!   `S: KrystScalar`.
+//! - AMG-oriented helpers (e.g. `matrix::convert`, `matrix::format`,
+//!   `matrix::utils`, SIMD SpMV plans) are intentionally **restricted to
+//!   `S = f64`**.
+//!
+//! This split lets the solvers remain scalar-general while making real-valued
+//! workflows (AMG, ILU, etc.) fast and ergonomic.
 
 pub mod backend;
 pub mod dense_api;
@@ -25,6 +36,15 @@ pub mod sparse;
 #[cfg(feature = "backend-faer")]
 pub mod spmv;
 pub mod utils;
+
+#[cfg(feature = "backend-faer")]
+pub mod real_amg {
+    //! Re-exports of AMG-oriented helpers that assume `S = f64`.
+    pub use super::convert;
+    pub use super::format;
+    pub use super::spmv;
+    pub use super::utils;
+}
 
 #[cfg(feature = "backend-faer")]
 pub use convert::owned_from_mat;

@@ -3,6 +3,8 @@
 //! The SELL-C-σ format groups rows into fixed-height slices (`C`) while sorting
 //! within a sliding window of size `σ` to reduce row length variance. This
 //! produces near-contiguous access patterns that map well to portable SIMD.
+//! Implementations here operate on `f64` values and are used only in real
+//! builds.
 
 use wide::{f64x2, f64x4};
 

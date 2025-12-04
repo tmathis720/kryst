@@ -1,4 +1,8 @@
-//! Runtime SpMV plan selection and metadata.
+//! Runtime SpMV plan selection and metadata for real-valued CSR matrices.
+//!
+//! SIMD paths are intentionally limited to `S = f64` for AMG-oriented SpMV.
+//! In complex builds (`feature = "complex"`), the plan always selects the
+//! scalar kernel even when `feature = "simd"` is enabled.
 
 #[cfg(all(feature = "simd", not(feature = "complex")))]
 use core::any::TypeId;
@@ -22,7 +26,8 @@ pub enum SpmvKernel {
 }
 
 /// Per-matrix runtime plan describing how sparse matrix-vector products should
-/// be executed.
+/// be executed. Complex builds keep `kernel` at [`SpmvKernel::Scalar`] even
+/// when SIMD is available.
 #[derive(Clone, Debug)]
 pub struct SpmvPlan<S: KrystScalar> {
     pub kernel: SpmvKernel,
@@ -264,6 +269,9 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
         }
     }
 
+    #[cfg(feature = "complex")]
+    debug_assert!(matches!(plan.kernel, SpmvKernel::Scalar));
+
     plan
 }
 
@@ -312,4 +320,23 @@ fn microbench<F: FnMut()>(nsamples: usize, mut f: F) -> f64 {
         }
     }
     best
+}
+
+#[cfg(all(test, feature = "complex"))]
+mod tests {
+    use super::*;
+    use crate::algebra::prelude::*;
+
+    #[test]
+    fn complex_build_uses_scalar_kernel() {
+        let matrix = CsrMatrix::<S>::new(
+            2,
+            2,
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![S::from_real(1.0), S::from_real(2.0)],
+        );
+        let plan = build(&matrix, &SpmvTuning::default());
+        assert!(matches!(plan.kernel, SpmvKernel::Scalar));
+    }
 }

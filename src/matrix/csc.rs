@@ -56,6 +56,8 @@ impl<T> CscMatrix<T>
 where
     T: KrystScalar<Real = R>,
 {
+    /// Convert to dense `faer::Mat` with real entries, discarding any imaginary
+    /// component in complex builds because AMG routines operate on real data.
     pub fn to_dense(&self) -> faer::Mat<R> {
         let m = self.nrows();
         let n = self.ncols();
@@ -73,6 +75,9 @@ where
     }
 
     /// Convert from dense `faer::Mat` (with real entries) to CSC format with drop tolerance.
+    ///
+    /// When `T` is complex, the imaginary part of each entry is
+    /// zero-initialised by `T::from_real`.
     pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Self {
         let m = dense.nrows();
         let n = dense.ncols();

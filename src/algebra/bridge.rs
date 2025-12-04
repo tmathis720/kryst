@@ -1,3 +1,8 @@
+//! Temporary buffers and copy helpers for bridging real operators into the
+//! active scalar domain.
+//!
+//! Complex builds project complex vectors to real workspace slices, apply a
+//! `LinOp<S = f64>`, then lift the result back into scalars.
 use crate::algebra::prelude::*;
 
 /// Temporary buffers reused by solver bridges when converting between `S` and `f64`.

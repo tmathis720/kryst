@@ -3,7 +3,8 @@
 //! The routines in this module provide portable gather-based SpMV
 //! implementations that are selected at runtime by the plan builder. While the
 //! API mirrors what a `std::simd` implementation would offer, the use of
-//! `wide` keeps the kernels available on stable Rust.
+//! `wide` keeps the kernels available on stable Rust. These kernels are
+//! specialized for `f64` values and are only compiled in real builds.
 
 use super::scalar;
 use wide::{f64x2, f64x4};

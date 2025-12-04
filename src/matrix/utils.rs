@@ -1,8 +1,11 @@
-//! Matrix utility functions that can be used across different modules.
+//! Real-only matrix utilities for AMG-oriented workflows.
 //!
-//! This module contains generic matrix operations, analysis functions, and
-//! utilities that are useful beyond just the AMG preconditioner.
+//! The helpers here intentionally assume `f64` matrices (`Mat<f64>`,
+//! `CsrMatrix<f64>`) to keep AMG and factorization paths fast and ergonomic.
+//! In complex builds they operate on the underlying real operator only.
+//! Generic scalar code lives elsewhere in the crate.
 
+use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use crate::matrix::dense_api::DenseMatRef;
 use crate::matrix::sparse::CsrMatrix;
@@ -111,15 +114,20 @@ pub fn to_sparse_with_tolerance(matrix: &Mat<f64>, drop_tol: f64) -> CsrMatrix<f
     CsrMatrix::from_dense(matrix, drop_tol)
 }
 
-/// Sparse C = A * B using Gustavson's algorithm on CSR arrays.
+/// Generic sparse C = A * B using Gustavson's algorithm on CSR arrays.
 /// Returns a CSR with sorted columns per row and optional dropping.
 ///
+/// In complex builds, accumulation uses the real component of each product and
+/// values are lifted with `T::from_real`, so imaginary parts remain zero.
 /// `drop_tol`: entries with |v| <= drop_tol are removed.
-pub fn spgemm_with_drop_tol(
-    a: &CsrMatrix<f64>,
-    b: &CsrMatrix<f64>,
-    drop_tol: f64,
-) -> Result<CsrMatrix<f64>, KError> {
+pub fn spgemm_with_drop_tol_generic<T>(
+    a: &CsrMatrix<T>,
+    b: &CsrMatrix<T>,
+    drop_tol: T::Real,
+) -> Result<CsrMatrix<T>, KError>
+where
+    T: KrystScalar<Real = f64>,
+{
     if a.ncols() != b.nrows() {
         return Err(KError::InvalidInput(format!(
             "spgemm: dimension mismatch A is {}x{}, B is {}x{}",
@@ -144,7 +152,7 @@ pub fn spgemm_with_drop_tol(
     let mut row_ptr = Vec::with_capacity(m + 1);
     row_ptr.push(0usize);
     let mut cols: Vec<usize> = Vec::new();
-    let mut vals: Vec<f64> = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
 
     // Marker and accumulator per column of C's row.
     // `mark[j] == i` means column j is present in row i's structure.
@@ -162,7 +170,7 @@ pub fn spgemm_with_drop_tol(
             // Row k of B (since B is CSR, this is B[k,:])
             for jj in bp[k]..bp[k + 1] {
                 let j = bj[jj];
-                let inc = aik * bv[jj];
+                let inc = (aik * bv[jj]).real();
 
                 if mark[j] != i {
                     mark[j] = i;
@@ -195,7 +203,7 @@ pub fn spgemm_with_drop_tol(
             mark[j0] = usize::MAX;
             if sum.abs() > drop_tol {
                 cols[write] = j0;
-                vals.push(sum);
+                vals.push(T::from_real(sum));
                 write += 1;
             }
             // else: drop this column entirely
@@ -209,10 +217,30 @@ pub fn spgemm_with_drop_tol(
     Ok(CsrMatrix::from_csr(m, n, row_ptr, cols, vals))
 }
 
-/// Convenience wrapper with a default numerical drop tolerance.
+/// Sparse C = A * B using Gustavson's algorithm on CSR arrays (real wrapper).
+/// Returns a CSR with sorted columns per row and optional dropping.
+#[inline]
+pub fn spgemm_with_drop_tol(
+    a: &CsrMatrix<f64>,
+    b: &CsrMatrix<f64>,
+    drop_tol: f64,
+) -> Result<CsrMatrix<f64>, KError> {
+    spgemm_with_drop_tol_generic(a, b, drop_tol)
+}
+
+/// Convenience wrapper with a default numerical drop tolerance (generic).
+#[inline]
+pub fn spgemm_generic<T>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> Result<CsrMatrix<T>, KError>
+where
+    T: KrystScalar<Real = f64>,
+{
+    spgemm_with_drop_tol_generic(a, b, 1e-12)
+}
+
+/// Convenience wrapper with a default numerical drop tolerance (real).
 #[inline]
 pub fn spgemm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, KError> {
-    spgemm_with_drop_tol(a, b, 1e-12)
+    spgemm_generic(a, b)
 }
 
 /// Canonical Poisson stencil helpers used by solver tests and benchmarks.
@@ -410,9 +438,14 @@ pub fn default_spmv_tuning() -> SpmvTuning {
 
 /// Baseline Sparse C = A * B using per-row BTreeMap accumulation.
 ///
+/// In complex builds, accumulation uses the real component of each product and
+/// values are lifted with `T::from_real`, so imaginary parts remain zero.
 /// This implementation is intentionally simple and allocation-heavy to serve
 /// as a comparison baseline for optimized kernels in benchmarks.
-pub fn spgemm_btree(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, KError> {
+pub fn spgemm_btree_generic<T>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> Result<CsrMatrix<T>, KError>
+where
+    T: KrystScalar<Real = f64>,
+{
     use std::collections::BTreeMap;
 
     if a.ncols() != b.nrows() {
@@ -436,7 +469,7 @@ pub fn spgemm_btree(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<
 
     let mut row_ptr = Vec::with_capacity(m + 1);
     let mut col_idx: Vec<usize> = Vec::new();
-    let mut vals: Vec<f64> = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
     row_ptr.push(0);
 
     for i in 0..m {
@@ -446,13 +479,13 @@ pub fn spgemm_btree(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<
             let aik = av[kk];
             for jj in bp[k]..bp[k + 1] {
                 let j = bj[jj];
-                *acc.entry(j).or_insert(0.0) += aik * bv[jj];
+                *acc.entry(j).or_insert(0.0) += (aik * bv[jj]).real();
             }
         }
         for (j, v) in acc.into_iter() {
             if v != 0.0 {
                 col_idx.push(j);
-                vals.push(v);
+                vals.push(T::from_real(v));
             }
         }
         row_ptr.push(col_idx.len());
@@ -461,38 +494,80 @@ pub fn spgemm_btree(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<
     Ok(CsrMatrix::from_csr(m, n, row_ptr, col_idx, vals))
 }
 
+/// Baseline Sparse C = A * B using per-row BTreeMap accumulation (real wrapper).
+pub fn spgemm_btree(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> Result<CsrMatrix<f64>, KError> {
+    spgemm_btree_generic(a, b)
+}
+
 /// Sparse Galerkin product: C = R * A * P
 /// with all inputs CSR, via two SpGEMMs.
+pub fn sparse_galerkin_product_generic<T>(
+    restriction: &CsrMatrix<T>,   // R
+    matrix: &CsrMatrix<T>,        // A
+    interpolation: &CsrMatrix<T>, // P
+) -> Result<CsrMatrix<T>, KError>
+where
+    T: KrystScalar<Real = f64>,
+{
+    // Step 1: T = A * P
+    let ap = spgemm_generic(matrix, interpolation)?;
+    // Step 2: C = R * T
+    spgemm_generic(restriction, &ap)
+}
+
+/// Sparse Galerkin product: C = R * A * P (real wrapper).
 pub fn sparse_galerkin_product(
     restriction: &CsrMatrix<f64>,   // R
     matrix: &CsrMatrix<f64>,        // A
     interpolation: &CsrMatrix<f64>, // P
 ) -> Result<CsrMatrix<f64>, KError> {
-    // Step 1: T = A * P
-    let ap = spgemm(matrix, interpolation)?;
-    // Step 2: C = R * T
-    spgemm(restriction, &ap)
+    sparse_galerkin_product_generic(restriction, matrix, interpolation)
 }
 
 /// Baseline RAP (triple product) using the `spgemm_btree` baseline twice.
+pub fn rap_btree_generic<T>(
+    restriction: &CsrMatrix<T>,
+    matrix: &CsrMatrix<T>,
+    interpolation: &CsrMatrix<T>,
+) -> Result<CsrMatrix<T>, KError>
+where
+    T: KrystScalar<Real = f64>,
+{
+    let ap = spgemm_btree_generic(matrix, interpolation)?;
+    spgemm_btree_generic(restriction, &ap)
+}
+
+/// Baseline RAP (triple product) using the `spgemm_btree` baseline twice (real wrapper).
 pub fn rap_btree(
     restriction: &CsrMatrix<f64>,
     matrix: &CsrMatrix<f64>,
     interpolation: &CsrMatrix<f64>,
 ) -> Result<CsrMatrix<f64>, KError> {
-    let ap = spgemm_btree(matrix, interpolation)?;
-    spgemm_btree(restriction, &ap)
+    rap_btree_generic(restriction, matrix, interpolation)
 }
 
 /// Optimized RAP wrapper to keep a stable API for benchmarks.
 /// Currently composes two calls to the optimized SpGEMM.
+#[inline]
+pub fn rap_opt_generic<T>(
+    restriction: &CsrMatrix<T>,
+    matrix: &CsrMatrix<T>,
+    interpolation: &CsrMatrix<T>,
+) -> Result<CsrMatrix<T>, KError>
+where
+    T: KrystScalar<Real = f64>,
+{
+    sparse_galerkin_product_generic(restriction, matrix, interpolation)
+}
+
+/// Optimized RAP wrapper to keep a stable API for benchmarks (real wrapper).
 #[inline]
 pub fn rap_opt(
     restriction: &CsrMatrix<f64>,
     matrix: &CsrMatrix<f64>,
     interpolation: &CsrMatrix<f64>,
 ) -> Result<CsrMatrix<f64>, KError> {
-    sparse_galerkin_product(restriction, matrix, interpolation)
+    rap_opt_generic(restriction, matrix, interpolation)
 }
 
 /// Apply HYPRE-style truncation to interpolation matrix

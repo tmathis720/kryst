@@ -1,3 +1,8 @@
+//! Real-only conversion helpers for `LinOp<S = f64>`.
+//!
+//! These functions are intended for AMG and factorization workflows that
+//! operate on real-valued operators. All APIs here assume `S = f64` and should
+//! not be used with complex `LinOp` implementations.
 use std::sync::Arc;
 
 use faer::Mat;
@@ -69,6 +74,9 @@ pub fn try_as_csr(pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
 
 /// Convert a matrix to CSR, caching dense conversions.
 ///
+/// This only applies to real-valued operators with `S = f64`. Complex builds
+/// are expected to use the underlying real operator explicitly rather than
+/// these helpers.
 /// # Errors
 /// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
 /// an unsupported `LinOp` type. See message for how to wrap with
@@ -106,6 +114,9 @@ pub fn try_as_csc(pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
 
 /// Convert a matrix to CSC, caching dense/CSR conversions.
 ///
+/// This only applies to real-valued operators with `S = f64`. Complex builds
+/// are expected to use the underlying real operator explicitly rather than
+/// these helpers.
 /// # Errors
 /// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
 /// an unsupported `LinOp` type. See message for how to wrap with
@@ -141,6 +152,8 @@ pub fn csc_from_linop(
 
 /// Obtain a dense matrix from a [`LinOp`], converting formats as needed.
 ///
+/// This helper is restricted to real operators (`S = f64`) and materializes
+/// the real part of the operator for AMG-oriented routines.
 /// # Errors
 /// Returns a recoverable `KError::InvalidInput` with guidance when `op` is
 /// an unsupported `LinOp` type. See message for how to wrap with `DenseOp` to
@@ -167,6 +180,7 @@ pub fn owned_from_mat(mat: &Mat<f64>) -> Mat<f64> {
 
 /// Convert `op` to a LinOp view with the requested `hint`, preserving communicator.
 /// For Dense, returns an owned `faer::Mat<f64>` so preconditioners can safely factorize.
+/// Only applies to real-valued operators (`S = f64`).
 pub fn materialize_linop_with_hint(
     op: &dyn LinOp<S = f64>,
     hint: FormatHint,

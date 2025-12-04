@@ -303,6 +303,9 @@ where
     T: KrystScalar<Real = f64>,
 {
     /// Convert to dense faer::Mat with real (f64) entries. Works for any T: KrystScalar.
+    ///
+    /// In complex builds, this projects the matrix onto its real component;
+    /// imaginary parts are discarded because AMG operates on real operators.
     #[cfg(feature = "backend-faer")]
     pub fn to_dense(&self) -> faer::Mat<f64> {
         let mut dense = faer::Mat::zeros(self.nrows, self.ncols);
@@ -317,6 +320,10 @@ where
 
     /// Convert from dense faer::Mat (with real entries) to sparse CSR format with drop tolerance.
     /// Works for any T: KrystScalar by converting each entry via T::from_real.
+    ///
+    /// When `T` is complex, the imaginary parts of the resulting matrix are
+    /// zero-initialised because the construction lifts real values through
+    /// [`KrystScalar::from_real`].
     #[cfg(feature = "backend-faer")]
     pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Self {
         let nrows = dense.nrows();
