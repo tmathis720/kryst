@@ -741,14 +741,7 @@ impl PcFactory {
         use crate::preconditioner::builders as b;
         match cfg {
             PcConfig::None => Ok(Box::new(NoOpPreconditioner)),
-            PcConfig::Jacobi => {
-                if cfg!(feature = "complex") {
-                    return Err(KError::Unsupported(
-                        "Jacobi preconditioner is not yet supported for complex scalars".into(),
-                    ));
-                }
-                b::build_jacobi()
-            }
+            PcConfig::Jacobi => b::build_jacobi(),
             PcConfig::BlockJacobi { block } => b::build_block_jacobi(block),
 
             PcConfig::Ilu0 => b::build_ilu0(),

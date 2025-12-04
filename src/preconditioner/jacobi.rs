@@ -7,8 +7,14 @@ use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::{
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+};
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
 use crate::preconditioner::{LocalPreconditioner, PcSide, Preconditioner};
+#[cfg(feature = "complex")]
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -144,27 +150,26 @@ impl KPreconditioner for Jacobi {
 
     fn apply_s(
         &self,
-        _side: PcSide,
+        side: PcSide,
         x: &[S],
         y: &mut [S],
-        _scratch: &mut BridgeScratch,
+        scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        if x.len() != self.n || y.len() != self.n {
-            return Err(KError::InvalidInput(format!(
-                "Jacobi::apply_s dimension mismatch: n={}, x.len()={}, y.len()={}",
-                self.n,
-                x.len(),
-                y.len()
-            )));
-        }
+        bridge_apply_pc_s(self, side, x, y, scratch)
+    }
 
-        let y_ptr = AtomicPtr::new(y.as_mut_ptr());
-        parallel::par_for_each_index(x.len(), move |i| unsafe {
-            let y_ptr = y_ptr.load(Ordering::Relaxed);
-            *y_ptr.add(i) = self.diag_inv[i] * x[i];
-        });
-        self.applies.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_mut_s(self, side, x, y, scratch)
+    }
+
+    fn on_restart_s(&mut self, outer_iter: usize, residual_norm: R) -> Result<(), KError> {
+        ObjPreconditioner::on_restart(self, outer_iter, residual_norm)
     }
 }
 

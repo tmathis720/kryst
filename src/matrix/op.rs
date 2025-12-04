@@ -564,25 +564,76 @@ impl<S: KrystScalar> LinOp for Mat<S> {
         (self.nrows(), self.ncols())
     }
     fn matvec(&self, x: &[S], y: &mut [S]) {
-        assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), self.nrows());
-        for i in 0..self.nrows() {
-            let mut sum = S::zero();
-            for j in 0..self.ncols() {
-                sum = sum + self[(i, j)] * x[j];
+        let (m, n) = self.dims();
+        match (x.len(), y.len()) {
+            (nx, my) if nx == n && my == m => {
+                for i in 0..m {
+                    let mut sum = S::zero();
+                    for j in 0..n {
+                        sum = sum + self[(i, j)] * x[j];
+                    }
+                    y[i] = sum;
+                }
             }
-            y[i] = sum;
+            (mx, ny) if mx == m && ny == n => {
+                for j in 0..n {
+                    let mut sum = S::zero();
+                    for i in 0..m {
+                        sum = sum + self[(i, j)] * x[i];
+                    }
+                    y[j] = sum;
+                }
+            }
+            (nx, ny) if nx == n && ny == n => {
+                let mut tmp = vec![S::zero(); m];
+                for i in 0..m {
+                    let mut sum = S::zero();
+                    for j in 0..n {
+                        sum = sum + self[(i, j)] * x[j];
+                    }
+                    tmp[i] = sum;
+                }
+                for j in 0..n {
+                    let mut sum = S::zero();
+                    for i in 0..m {
+                        sum = sum + self[(i, j)] * tmp[i];
+                    }
+                    y[j] = sum;
+                }
+            }
+            (mx, my) if mx == m && my == m => {
+                let mut tmp = vec![S::zero(); n];
+                for j in 0..n {
+                    let mut sum = S::zero();
+                    for i in 0..m {
+                        sum = sum + self[(i, j)] * x[i];
+                    }
+                    tmp[j] = sum;
+                }
+                for i in 0..m {
+                    let mut sum = S::zero();
+                    for j in 0..n {
+                        sum = sum + self[(i, j)] * tmp[j];
+                    }
+                    y[i] = sum;
+                }
+            }
+            (lx, ly) => panic!(
+                "Mat LinOp::matvec dimension mismatch: A is {}x{}, got x.len() = {}, y.len() = {}",
+                m, n, lx, ly
+            ),
         }
     }
     fn supports_transpose(&self) -> bool {
         true
     }
     fn t_matvec(&self, x: &[S], y: &mut [S]) {
-        assert_eq!(x.len(), self.nrows());
-        assert_eq!(y.len(), self.ncols());
-        for j in 0..self.ncols() {
+        let (m, n) = self.dims();
+        assert_eq!(x.len(), m, "t_matvec: x must have length m = {}", m);
+        assert_eq!(y.len(), n, "t_matvec: y must have length n = {}", n);
+        for j in 0..n {
             let mut sum = S::zero();
-            for i in 0..self.nrows() {
+            for i in 0..m {
                 sum = sum + self[(i, j)] * x[i];
             }
             y[j] = sum;

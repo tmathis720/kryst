@@ -30,8 +30,10 @@ mod real_demo {
     use kryst::context::ksp_context::{KspContext, SolverType};
     use kryst::context::pc_context::PcType;
     use kryst::error::KError;
-    use kryst::matrix::DistCsrOp;
     use kryst::matrix::op::{CsrOp, LinOp};
+    #[cfg(feature = "mpi")]
+    use kryst::matrix::DistCsrOp;
+    #[cfg(feature = "mpi")]
     use kryst::matrix::parcsr::builder::partition_rows;
     use kryst::matrix::sparse::CsrMatrix;
     #[cfg(not(feature = "mpi"))]
@@ -97,6 +99,19 @@ mod real_demo {
         notes: Vec<&'static str>,
     }
 
+    fn is_comm_parallel(comm: &UniverseComm, size: usize) -> bool {
+        #[cfg(feature = "mpi")]
+        {
+            matches!(comm, UniverseComm::Mpi(_)) && size > 1
+        }
+        #[cfg(not(feature = "mpi"))]
+        {
+            let _ = comm;
+            let _ = size;
+            false
+        }
+    }
+
     pub fn run() -> Result<(), KError> {
         #[cfg(feature = "logging")]
         let _ = env_logger::try_init();
@@ -108,8 +123,7 @@ mod real_demo {
 
         let rank = comm.rank();
         let size = comm.size();
-        #[cfg(feature = "mpi")]
-        let is_parallel = matches!(comm, UniverseComm::Mpi(_)) && size > 1;
+        let is_parallel = is_comm_parallel(&comm, size);
 
         if rank == 0 {
             println!("Matrix Market solver/preconditioner comparison (matrix-free)");
@@ -153,6 +167,7 @@ mod real_demo {
             let mat_path = base.join(mat_rel);
             let rhs_path = base.join(rhs_rel);
 
+            #[cfg_attr(not(feature = "mpi"), allow(unused_mut))]
             let mut available = mat_path.exists() && rhs_path.exists();
             if is_parallel {
                 #[cfg(feature = "mpi")]
@@ -562,6 +577,7 @@ mod real_demo {
         None
     }
 
+    #[cfg(feature = "mpi")]
     fn slice_csr_rows(matrix: &CsrMatrix<f64>, start: usize, end: usize) -> CsrMatrix<f64> {
         let row_ptr = matrix.row_ptr();
         let col_idx = matrix.col_idx();
@@ -586,7 +602,7 @@ mod real_demo {
     ) -> Result<(Problem, Analysis), KError> {
         let rank = comm.rank();
         let size = comm.size();
-        let is_parallel = matches!(comm, UniverseComm::Mpi(_)) && size > 1;
+        let is_parallel = is_comm_parallel(comm, size);
 
         let mut matrix_root: Option<CsrMatrix<f64>> = None;
         let mut rhs_root: Option<Vec<f64>> = None;
