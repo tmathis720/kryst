@@ -290,6 +290,21 @@ impl LocalPreconditioner<f64> for Ilutp {
     }
 }
 
+#[cfg(test)]
+impl Ilutp {
+    pub fn test_max_fill(&self) -> usize {
+        self.max_fill
+    }
+
+    pub fn test_drop_tolerance(&self) -> f64 {
+        self.drop_tol
+    }
+
+    pub fn test_perm_tolerance(&self) -> f64 {
+        self.perm_tol
+    }
+}
+
 #[cfg(feature = "complex")]
 impl KPreconditioner for Ilutp {
     type Scalar = S;

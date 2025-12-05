@@ -17,6 +17,16 @@ use crate::preconditioner::ilu_options::{
     IluKind, IluOptions, IterativeSetupType, Overlay, PivotPolicy, ReorderingType, TriSolveType,
 };
 
+fn env_bool(key: &str) -> Option<bool> {
+    std::env::var(key)
+        .ok()
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+}
+
+fn env_lower(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|v| v.to_lowercase())
+}
+
 /// Supported CG algorithm variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CgVariant {
@@ -140,6 +150,9 @@ pub struct PcOptions {
     /// Maximum fill for ILUT.
     pub ilut_max_fill: Option<usize>,
     pub ilut_perm_tol: Option<f64>,
+    pub ilutp_max_fill: Option<usize>,
+    pub ilutp_drop_tol: Option<f64>,
+    pub ilutp_perm_tol: Option<f64>,
     pub reorder: Option<String>,
     pub scaling: Option<String>,
     /// Overlap for Additive Schwarz.
@@ -200,6 +213,13 @@ pub struct PcOptions {
     pub ilu_pivot_monitoring: Option<bool>,
     pub ilu_optimize_workspace: Option<bool>,
     pub ilu_pivot_threshold: Option<f64>,
+    pub ilu_parallel_factorization: Option<bool>,
+    pub ilu_parallel_triangular_solve: Option<bool>,
+    pub ilu_parallel_chunk_size: Option<usize>,
+    pub ilu_distributed: Option<bool>,
+    pub ilu_pivot_mode: Option<String>,
+    pub ilu_pivot_scale: Option<String>,
+    pub ilu_pivot_tau: Option<f64>,
     /// Structured ILU options (new schema).
     pub ilu: IluOptions,
     // ---- Approximate inverse (CSR) ----
@@ -428,6 +448,13 @@ impl Sink for PcOptions {
             "pc_ilu_ieee_checks" => set_opt!(&mut self.ilu_ieee_checks, v),
             "pc_ilu_pivot_monitoring" => set_opt!(&mut self.ilu_pivot_monitoring, v),
             "pc_ilu_optimize_workspace" => set_opt!(&mut self.ilu_optimize_workspace, v),
+            "pc_ilu_parallel_factorization" => {
+                set_opt!(&mut self.ilu_parallel_factorization, v)
+            }
+            "pc_ilu_parallel_trisolve" => {
+                set_opt!(&mut self.ilu_parallel_triangular_solve, v)
+            }
+            "pc_ilu_distributed" => set_opt!(&mut self.ilu_distributed, v),
             "pc_superlu_replace_tiny_pivot" => set_opt!(&mut self.superlu_replace_tiny_pivots, v),
             "pc_superlu_static_pivoting" => set_opt!(&mut self.superlu_static_pivoting, v),
             "pc_superlu_enable_3d_factorization" => {
@@ -606,6 +633,22 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.ilu_pivot_threshold, val)?;
                 self.update_ilu_pivot();
                 Ok(())
+            }
+            "pc_ilu_parallel_chunk_size" => {
+                let val = ensure_ge_1("pc_ilu_parallel_chunk_size", parse_as::<usize>(v, spec)?)?;
+                set_opt!(&mut self.ilu_parallel_chunk_size, val)
+            }
+            "pc_ilu_pivot_mode" => set_opt!(&mut self.ilu_pivot_mode, v.to_lowercase()),
+            "pc_ilu_pivot_scale" => set_opt!(&mut self.ilu_pivot_scale, v.to_lowercase()),
+            "pc_ilu_pivot_tau" => set_opt!(&mut self.ilu_pivot_tau, parse_as::<f64>(v, spec)?),
+            "pc_ilutp_max_fill" => {
+                set_opt!(&mut self.ilutp_max_fill, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ilutp_drop_tol" => {
+                set_opt!(&mut self.ilutp_drop_tol, parse_as::<f64>(v, spec)?)
+            }
+            "pc_ilutp_perm_tol" => {
+                set_opt!(&mut self.ilutp_perm_tol, parse_as::<f64>(v, spec)?)
             }
             "pc_superlu_pivot_threshold" => {
                 set_opt!(&mut self.superlu_pivot_threshold, parse_as::<f64>(v, spec)?)
@@ -1059,6 +1102,57 @@ impl PcOptions {
                     KError::SolveError(format!("Invalid KRYST_PC_ILU_LEVELS: {v}"))
                 })?);
         }
+        if let Some(v) = env_lower("KRYST_PC_ILU_TYPE") {
+            me.ilu_type = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_LEVEL_OF_FILL") {
+            me.ilu_level_of_fill = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_LEVEL_OF_FILL: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_MAX_FILL_PER_ROW") {
+            me.ilu_max_fill_per_row = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_MAX_FILL_PER_ROW: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_OFFDIAG_DROP_TOL") {
+            me.ilu_offdiag_drop_tolerance = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_OFFDIAG_DROP_TOL: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_SCHUR_DROP_TOL") {
+            me.ilu_schur_drop_tolerance = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_SCHUR_DROP_TOL: {v}"))
+            })?);
+        }
+        if let Some(v) = env_lower("KRYST_PC_ILU_REORDERING_TYPE") {
+            me.ilu_reordering_type = Some(v);
+        }
+        if let Some(v) = env_lower("KRYST_PC_ILU_TRI_SOLVE") {
+            me.ilu_triangular_solve = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_LOWER_JACOBI_ITERS") {
+            me.ilu_lower_jacobi_iters = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_LOWER_JACOBI_ITERS: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_UPPER_JACOBI_ITERS") {
+            me.ilu_upper_jacobi_iters = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_UPPER_JACOBI_ITERS: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_TOL") {
+            me.ilu_tolerance = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILU_TOL: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_MAX_ITER") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILU_MAX_ITER: {v}")))?;
+            me.ilu_max_iterations = Some(ensure_ge_1("KRYST_PC_ILU_MAX_ITER", n)?);
+        }
         if let Ok(v) = std::env::var("KRYST_PC_CHEBYSHEV_DEGREE") {
             me.chebyshev_degree = Some(v.parse().map_err(|_| {
                 KError::SolveError(format!("Invalid KRYST_PC_CHEBYSHEV_DEGREE: {v}"))
@@ -1107,6 +1201,48 @@ impl PcOptions {
         if let Ok(v) = std::env::var("KRYST_PC_SOR_MAT_SIDE") {
             kinds::SorMatSideKind::from_str(&v)?;
             me.sor_mat_side = Some(v.to_lowercase());
+        }
+        if let Some(v) = env_lower("KRYST_PC_ILU_PIVOT_MODE") {
+            me.ilu_pivot_mode = Some(v);
+        }
+        if let Some(v) = env_lower("KRYST_PC_ILU_PIVOT_SCALE") {
+            me.ilu_pivot_scale = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_PIVOT_TAU") {
+            me.ilu_pivot_tau =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILU_PIVOT_TAU: {v}"))
+                })?);
+        }
+        if let Some(v) = env_bool("KRYST_PC_ILU_PARALLEL_FACTORIZATION") {
+            me.ilu_parallel_factorization = Some(v);
+        }
+        if let Some(v) = env_bool("KRYST_PC_ILU_PARALLEL_TRISOLVE") {
+            me.ilu_parallel_triangular_solve = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_PARALLEL_CHUNK_SIZE") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_PARALLEL_CHUNK_SIZE: {v}"))
+            })?;
+            me.ilu_parallel_chunk_size = Some(ensure_ge_1("KRYST_PC_ILU_PARALLEL_CHUNK_SIZE", n)?);
+        }
+        if let Some(v) = env_bool("KRYST_PC_ILU_DISTRIBUTED") {
+            me.ilu_distributed = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUTP_MAX_FILL") {
+            me.ilutp_max_fill = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILUTP_MAX_FILL: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUTP_DROP_TOL") {
+            me.ilutp_drop_tol = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILUTP_DROP_TOL: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUTP_PERM_TOL") {
+            me.ilutp_perm_tol = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILUTP_PERM_TOL: {v}"))
+            })?);
         }
         me.sync_ilu_all();
         Ok(me)
@@ -1268,6 +1404,16 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         ilu_pivot_monitoring,
         ilu_optimize_workspace,
         ilu_pivot_threshold,
+        ilu_parallel_factorization,
+        ilu_parallel_triangular_solve,
+        ilu_parallel_chunk_size,
+        ilu_distributed,
+        ilu_pivot_mode,
+        ilu_pivot_scale,
+        ilu_pivot_tau,
+        ilutp_max_fill,
+        ilutp_drop_tol,
+        ilutp_perm_tol,
         superlu_pivot_threshold,
         superlu_replace_tiny_pivots,
         superlu_print_level,
