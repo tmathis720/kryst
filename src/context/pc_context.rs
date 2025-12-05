@@ -1,18 +1,11 @@
+use crate::config::kinds::SorMatSideKind;
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
 
-#[cfg(feature = "backend-faer")]
 type MatSorSide = crate::preconditioner::sor::MatSorType;
-#[cfg(not(feature = "backend-faer"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MatSorSide {
-    APPLY_LOWER,
-    APPLY_UPPER,
-    SYMMETRIC_SWEEP,
-}
 
 #[cfg(feature = "backend-faer")]
 type ApproxInvKindAlias = crate::preconditioner::approxinv_csr::ApproxInvKind;
@@ -147,7 +140,6 @@ pub enum PcConfig {
         omega: f64,
         sweeps: usize,
         mat_side: MatSorSide,
-        symmetric: bool,
     },
     Chebyshev {
         degree: usize,
@@ -239,14 +231,21 @@ impl PcConfig {
             },
 
             Sor => {
-                let mat_side = match o.sor_mat_side.as_deref() {
-                    Some("lower") | Option::None => MatSorSide::APPLY_LOWER,
-                    Some("upper") => MatSorSide::APPLY_UPPER,
-                    Some("symmetric") => MatSorSide::SYMMETRIC_SWEEP,
-                    Some(s) => {
-                        return Err(KError::InvalidInput(format!("unknown sor_mat_side: {s}")));
+                let mut mat_side = if let Some(ref side) = o.sor_mat_side {
+                    match SorMatSideKind::from_str(side)? {
+                        SorMatSideKind::Lower => MatSorSide::APPLY_LOWER,
+                        SorMatSideKind::Upper => MatSorSide::APPLY_UPPER,
+                        SorMatSideKind::Symmetric => MatSorSide::SYMMETRIC_SWEEP,
+                        SorMatSideKind::Eisenstat => {
+                            MatSorSide::SYMMETRIC_SWEEP | MatSorSide::EISENSTAT
+                        }
                     }
+                } else {
+                    MatSorSide::APPLY_LOWER
                 };
+                if o.sor_symmetric.unwrap_or(false) {
+                    mat_side |= MatSorSide::SYMMETRIC_SWEEP;
+                }
                 let omega = o.sor_omega.unwrap_or(1.0);
                 if !(0.0..2.0).contains(&omega) {
                     return Err(KError::InvalidInput("sor_omega must be in (0,2)".into()));
@@ -255,7 +254,6 @@ impl PcConfig {
                     omega,
                     sweeps: o.sor_sweeps.unwrap_or(1),
                     mat_side,
-                    symmetric: o.sor_symmetric.unwrap_or(false),
                 }
             }
 
@@ -477,8 +475,7 @@ impl PcFactory {
                 omega,
                 sweeps,
                 mat_side,
-                symmetric,
-            } => b::build_sor(omega, sweeps, mat_side, symmetric),
+            } => b::build_sor(omega, sweeps, mat_side),
 
             PcConfig::Chebyshev {
                 degree,

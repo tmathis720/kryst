@@ -67,13 +67,8 @@ fn builders_sor_and_chebyshev_object_safe() {
     let zero = R::default();
 
     // SOR
-    let mut sor = b::build_sor(
-        one,
-        1,
-        crate::preconditioner::sor::MatSorType::APPLY_LOWER,
-        false,
-    )
-    .expect("build_sor should succeed");
+    let mut sor = b::build_sor(one, 1, crate::preconditioner::sor::MatSorType::APPLY_LOWER)
+        .expect("build_sor should succeed");
     sor.setup(&op as &dyn LinOp<S = f64>).unwrap();
     let x = vec![one; 5];
     let mut y = vec![zero; 5];

@@ -37,7 +37,6 @@ pub fn build_sor(
     omega: f64,
     sweeps: usize,
     mat_side: MatSorType,
-    _symmetric: bool,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     let pc = SorPc::new(omega, sweeps, mat_side, 0.0);
     Ok(Box::new(pc))

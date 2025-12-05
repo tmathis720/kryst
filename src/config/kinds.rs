@@ -100,3 +100,13 @@ simple_kind! {
 simple_kind! {
     pub enum AsmModeKind { Asm => "asm", Ras => "ras" }
 }
+
+// pc_sor_mat_side
+simple_kind! {
+    pub enum SorMatSideKind {
+        Lower => "lower",
+        Upper => "upper",
+        Symmetric => "symmetric",
+        Eisenstat => "eisenstat",
+    }
+}

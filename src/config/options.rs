@@ -424,6 +424,7 @@ impl Sink for PcOptions {
         match key {
             "pc_amg_ieee_checks" => set_opt!(&mut self.amg_ieee_checks, v),
             "pc_amg_optimize_workspace" => set_opt!(&mut self.amg_optimize_workspace, v),
+            "pc_sor_symmetric" => set_opt!(&mut self.sor_symmetric, v),
             "pc_ilu_ieee_checks" => set_opt!(&mut self.ilu_ieee_checks, v),
             "pc_ilu_pivot_monitoring" => set_opt!(&mut self.ilu_pivot_monitoring, v),
             "pc_ilu_optimize_workspace" => set_opt!(&mut self.ilu_optimize_workspace, v),
@@ -517,6 +518,15 @@ impl Sink for PcOptions {
             }
             "pc_amg_min_iterations" => {
                 set_opt!(&mut self.amg_min_iterations, parse_as::<usize>(v, spec)?)
+            }
+            "pc_sor_omega" => set_opt!(&mut self.sor_omega, parse_as::<f64>(v, spec)?),
+            "pc_sor_sweeps" => set_opt!(
+                &mut self.sor_sweeps,
+                ensure_ge_1("pc_sor_sweeps", parse_as::<usize>(v, spec)?)?
+            ),
+            "pc_sor_mat_side" => {
+                kinds::SorMatSideKind::from_str(v)?;
+                set_opt!(&mut self.sor_mat_side, v.to_lowercase())
             }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_ilu_type" => {
@@ -1026,6 +1036,9 @@ impl PcOptions {
         if let Some(ref t) = me.asm_mode {
             kinds::AsmModeKind::from_str(t)?;
         }
+        if let Some(ref t) = me.sor_mat_side {
+            kinds::SorMatSideKind::from_str(t)?;
+        }
         me.sync_ilu_all();
         Ok(me)
     }
@@ -1074,6 +1087,26 @@ impl PcOptions {
         }
         if let Ok(v) = std::env::var("KRYST_PC_SCALING") {
             me.scaling = Some(v.to_lowercase());
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SOR_OMEGA") {
+            me.sor_omega = Some(
+                v.parse()
+                    .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_SOR_OMEGA: {v}")))?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SOR_SWEEPS") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_SOR_SWEEPS: {v}")))?;
+            me.sor_sweeps = Some(ensure_ge_1("KRYST_PC_SOR_SWEEPS", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SOR_SYMMETRIC") {
+            let l = v.to_lowercase();
+            me.sor_symmetric = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SOR_MAT_SIDE") {
+            kinds::SorMatSideKind::from_str(&v)?;
+            me.sor_mat_side = Some(v.to_lowercase());
         }
         me.sync_ilu_all();
         Ok(me)
@@ -1205,6 +1238,10 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
         amg_ieee_checks,
         amg_optimize_workspace,
         pc_chain,
+        sor_omega,
+        sor_sweeps,
+        sor_symmetric,
+        sor_mat_side,
         omega,
         drop_tol,
         approxinv_kind,
