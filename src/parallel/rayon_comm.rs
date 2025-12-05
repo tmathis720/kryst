@@ -1,9 +1,8 @@
 //! Rayon-based parallel communication implementation for shared-memory environments.
 //!
-//! This module provides a `RayonComm` struct that implements the `Comm` trait for parallel
-//! operations using the Rayon thread pool. It is intended for use in shared-memory settings
-//! where distributed communication is not required. The implementation provides parallel
-//! matrix-vector multiplication and no-op collective operations, mimicking MPI-like interfaces.
+//! This module provides a `RayonComm` struct that implements the `Comm` trait for shared-memory
+//! environments using the Rayon thread pool. Collective operations are local, reflecting the fact
+//! that there is no inter-process communication in this mode.
 //!
 //! # Usage
 //! Use `RayonComm` as the communicator in solver contexts to enable parallel computation
@@ -13,7 +12,6 @@
 //! - [Rayon documentation](https://docs.rs/rayon)
 //! - [num_cpus documentation](https://docs.rs/num_cpus)
 
-use rayon::prelude::*;
 use rayon::scope;
 
 /// Shared-memory communicator using Rayon for parallelism.
@@ -100,30 +98,6 @@ impl super::Comm for RayonComm {
     /// Split this communicator into sub‐colors
     fn split(&self, _color: i32, _key: i32) -> super::UniverseComm {
         super::UniverseComm::Rayon(RayonComm::new()) // For shared memory, just return a new instance
-    }
-
-    /// Parallel matrix-vector multiplication using Rayon.
-    ///
-    /// # Arguments
-    /// * `a` - Matrix (faer::Mat<f64>).
-    /// * `x` - Input vector.
-    /// * `y` - Output vector (will be overwritten).
-    #[cfg(feature = "backend-faer")]
-    fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
-        assert_eq!(
-            a.ncols(),
-            x.len(),
-            "Matrix columns must match input vector length"
-        );
-        assert_eq!(
-            a.nrows(),
-            y.len(),
-            "Matrix rows must match output vector length"
-        );
-        // Compute y = A * x in parallel over rows
-        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
-            *yi = (0..a.ncols()).map(|j| a[(i, j)] * x[j]).sum();
-        });
     }
 
     fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {}

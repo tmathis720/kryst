@@ -307,37 +307,6 @@ impl super::Comm for MpiComm {
         }))
     }
 
-    #[cfg(feature = "backend-faer")]
-    fn parallel_mat_vec(&self, a: &faer::Mat<f64>, x: &[f64], y: &mut [f64]) {
-        assert_eq!(a.ncols(), x.len());
-        assert_eq!(a.nrows(), y.len());
-        let nrows = a.nrows();
-        let size = self.size.max(1);
-        let rank = self.rank.min(size - 1);
-
-        // Determine the row block owned by this rank (1D block distribution).
-        let base_rows = nrows / size;
-        let remainder = nrows % size;
-        let local_rows = base_rows + usize::from(rank < remainder);
-        let start = rank * base_rows + rank.min(remainder);
-        let end = start + local_rows;
-
-        // Compute local contributions only.
-        for yi in y.iter_mut() {
-            *yi = 0.0;
-        }
-        for i in start..end {
-            let mut sum = 0.0;
-            for j in 0..a.ncols() {
-                sum += a[(i, j)] * x[j];
-            }
-            y[i] = sum;
-        }
-
-        // Sum contributions from all ranks so every rank observes the global result.
-        self.allreduce_sum_slice(y);
-    }
-
     fn irecv_from<'a>(&'a self, buf: &'a mut [f64], src: i32) -> Self::Request<'a> {
         // Nonblocking receive via raw MPI
         let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
