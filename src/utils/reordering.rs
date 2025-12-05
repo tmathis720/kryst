@@ -16,8 +16,8 @@
 //! - Duff, I.S. and Koster, J. (2001). On algorithms for permuting large entries to the diagonal
 
 use crate::error::KError;
+use crate::utils::permutation::{Permutation, cuthill_mckee_from_adj};
 use faer::Mat;
-use std::collections::VecDeque;
 
 /// Matrix reordering algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,10 +48,8 @@ pub enum ScalingMethod {
 /// Result of matrix preprocessing (reordering + scaling).
 #[derive(Debug, Clone)]
 pub struct MatrixPreprocessing {
-    /// Permutation array: new_index = perm[old_index]
-    pub permutation: Vec<usize>,
-    /// Inverse permutation: old_index = inv_perm[new_index]
-    pub inv_permutation: Vec<usize>,
+    /// Permutation mapping: permutation[new_index] = old_index (with cached inverse).
+    pub permutation: Permutation,
     /// Left scaling factors (if any)
     pub left_scaling: Option<Vec<f64>>,
     /// Right scaling factors (if any)
@@ -64,8 +62,7 @@ impl MatrixPreprocessing {
     /// Create identity preprocessing (no changes).
     pub fn identity(n: usize) -> Self {
         Self {
-            permutation: (0..n).collect(),
-            inv_permutation: (0..n).collect(),
+            permutation: Permutation::identity(n),
             left_scaling: None,
             right_scaling: None,
             is_identity: true,
@@ -83,8 +80,8 @@ impl MatrixPreprocessing {
         let mut result = Mat::zeros(n, n);
         for i in 0..n {
             for j in 0..n {
-                let orig_i = self.inv_permutation[i];
-                let orig_j = self.inv_permutation[j];
+                let orig_i = self.permutation.p[i];
+                let orig_j = self.permutation.p[j];
                 result[(i, j)] = a[(orig_i, orig_j)];
             }
         }
@@ -115,7 +112,7 @@ impl MatrixPreprocessing {
 
         // Apply permutation
         for i in 0..n {
-            result[i] = x[self.inv_permutation[i]];
+            result[i] = x[self.permutation.p[i]];
         }
 
         // Apply left scaling (if any)
@@ -143,7 +140,7 @@ impl MatrixPreprocessing {
         // Undo permutation
         let mut result = vec![0.0; n];
         for i in 0..n {
-            result[self.inv_permutation[i]] = temp[i];
+            result[self.permutation.pinv[i]] = temp[i];
         }
 
         result
@@ -173,7 +170,7 @@ pub fn preprocess_matrix(
     }
 
     // Step 1: Compute reordering permutation
-    let permutation = match reorder_method {
+    let perm_vec = match reorder_method {
         ReorderingMethod::None => (0..n).collect(),
         ReorderingMethod::Rcm => reverse_cuthill_mckee(a)?,
         ReorderingMethod::CuthillMckee => cuthill_mckee(a)?,
@@ -184,18 +181,12 @@ pub fn preprocess_matrix(
         }
     };
 
-    // Compute inverse permutation
-    let mut inv_permutation = vec![0; n];
-    for (new_idx, &old_idx) in permutation.iter().enumerate() {
-        inv_permutation[old_idx] = new_idx;
-    }
-
     // Step 2: Apply permutation to get P A P^T
     let mut permuted = Mat::zeros(n, n);
     for i in 0..n {
         for j in 0..n {
-            let orig_i = inv_permutation[i];
-            let orig_j = inv_permutation[j];
+            let orig_i = perm_vec[i];
+            let orig_j = perm_vec[j];
             permuted[(i, j)] = a[(orig_i, orig_j)];
         }
     }
@@ -233,9 +224,12 @@ pub fn preprocess_matrix(
         }
     }
 
+    let mut pinv = vec![0; n];
+    for (new_idx, &old_idx) in perm_vec.iter().enumerate() {
+        pinv[old_idx] = new_idx;
+    }
     let preprocessing = MatrixPreprocessing {
-        permutation,
-        inv_permutation,
+        permutation: Permutation { p: perm_vec, pinv },
         left_scaling,
         right_scaling,
         is_identity: reorder_method == ReorderingMethod::None
@@ -258,7 +252,6 @@ pub fn preprocess_matrix(
 /// * `Err(KError)` - If algorithm fails
 fn reverse_cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
     let perm = cuthill_mckee(a)?;
-    // Reverse the permutation
     Ok(perm.into_iter().rev().collect())
 }
 
@@ -277,7 +270,6 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
     let n = a.nrows();
     let tol = 1e-15; // Zero tolerance
 
-    // Build adjacency list (considering matrix symmetry)
     let mut adj = vec![Vec::new(); n];
     for i in 0..n {
         for j in 0..n {
@@ -287,53 +279,7 @@ fn cuthill_mckee(a: &Mat<f64>) -> Result<Vec<usize>, KError> {
         }
     }
 
-    // Precompute degrees once and sort neighbors by degree (ascending)
-    let degrees: Vec<usize> = adj.iter().map(|nbrs| nbrs.len()).collect();
-    for i in 0..n {
-        // Stable order not required for CM; use unstable for speed
-        adj[i].sort_unstable_by_key(|&nbr| degrees[nbr]);
-        // For deterministic tie-breaks, consider:
-        // adj[i].sort_unstable_by(|&a, &b| degrees[a].cmp(&degrees[b]).then(a.cmp(&b)));
-    }
-
-    let mut visited = vec![false; n];
-    let mut permutation = Vec::new();
-
-    // Process all connected components
-    for start in 0..n {
-        if visited[start] {
-            continue;
-        }
-
-        // Find peripheral node (node with minimum degree in unvisited component)
-        let mut current_start = start;
-        let mut min_degree = degrees[start];
-        for i in start..n {
-            if !visited[i] && degrees[i] < min_degree {
-                min_degree = degrees[i];
-                current_start = i;
-            }
-        }
-
-        // BFS from peripheral node
-        let mut queue = VecDeque::new();
-        queue.push_back(current_start);
-        visited[current_start] = true;
-
-        while let Some(node) = queue.pop_front() {
-            permutation.push(node);
-
-            // Neighbors are already sorted by degree; enqueue unvisited
-            for &neighbor in &adj[node] {
-                if !visited[neighbor] {
-                    visited[neighbor] = true;
-                    queue.push_back(neighbor);
-                }
-            }
-        }
-    }
-
-    Ok(permutation)
+    Ok(cuthill_mckee_from_adj(&mut adj))
 }
 
 #[cfg(test)]
@@ -371,8 +317,8 @@ mod tests {
             preprocess_matrix(&a, ReorderingMethod::None, ScalingMethod::None).unwrap();
 
         assert!(info.is_identity);
-        assert_eq!(info.permutation, vec![0, 1, 2, 3]);
-        assert_eq!(info.inv_permutation, vec![0, 1, 2, 3]);
+        assert_eq!(info.permutation.p, vec![0, 1, 2, 3]);
+        assert_eq!(info.permutation.pinv, vec![0, 1, 2, 3]);
         assert!(info.left_scaling.is_none());
         assert!(info.right_scaling.is_none());
 
@@ -392,11 +338,10 @@ mod tests {
 
         assert!(!info.is_identity);
         assert_eq!(info.permutation.len(), 4);
-        assert_eq!(info.inv_permutation.len(), 4);
 
         // Verify permutation is valid
         let mut check = vec![false; 4];
-        for &p in &info.permutation {
+        for &p in &info.permutation.p {
             assert!(p < 4);
             assert!(!check[p]); // No duplicates
             check[p] = true;
@@ -404,8 +349,8 @@ mod tests {
         assert!(check.iter().all(|&x| x)); // All indices covered
 
         // Verify inverse permutation
-        for (new_idx, &old_idx) in info.permutation.iter().enumerate() {
-            assert_eq!(info.inv_permutation[old_idx], new_idx);
+        for (new_idx, &old_idx) in info.permutation.p.iter().enumerate() {
+            assert_eq!(info.permutation.pinv[old_idx], new_idx);
         }
     }
 

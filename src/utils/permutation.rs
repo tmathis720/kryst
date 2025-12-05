@@ -1,5 +1,6 @@
 use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
+use std::collections::VecDeque;
 
 /// Permutation with cached inverse mapping.
 #[derive(Clone, Debug)]
@@ -76,9 +77,21 @@ pub fn permute_csr_symmetric<T: KrystScalar>(a: &CsrMatrix<T>, perm: &Permutatio
 /// Reverse Cuthill-McKee ordering for a symmetric graph given by CSR matrix.
 pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
     let n = a.nrows();
+    let mut adj = build_symmetric_adj_from_csr(a);
+    let mut order = cuthill_mckee_from_adj(&mut adj);
+    order.reverse();
+
+    let mut pinv = vec![0; n];
+    for (new, &old) in order.iter().enumerate() {
+        pinv[old] = new;
+    }
+    Permutation { p: order, pinv }
+}
+
+fn build_symmetric_adj_from_csr<T>(a: &CsrMatrix<T>) -> Vec<Vec<usize>> {
+    let n = a.nrows();
     let rp = a.row_ptr();
     let cj = a.col_idx();
-    // build symmetric adjacency list
     let mut adj = vec![Vec::new(); n];
     for i in 0..n {
         for k in rp[i]..rp[i + 1] {
@@ -90,57 +103,60 @@ pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
             adj[j].push(i);
         }
     }
-    for v in &mut adj {
-        v.sort_unstable();
-        v.dedup();
-    }
+    adj
+}
 
+pub(crate) fn cuthill_mckee_from_adj(adj: &mut [Vec<usize>]) -> Vec<usize> {
+    let n = adj.len();
+    for neighbors in adj.iter_mut() {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
     let degrees: Vec<usize> = adj.iter().map(|nbrs| nbrs.len()).collect();
-    for i in 0..n {
-        adj[i].sort_unstable_by(|&a, &b| degrees[a].cmp(&degrees[b]).then(a.cmp(&b)));
+    for neighbors in adj.iter_mut() {
+        neighbors.sort_unstable_by(|&a, &b| degrees[a].cmp(&degrees[b]).then_with(|| a.cmp(&b)));
     }
 
     let mut visited = vec![false; n];
-    let mut order = Vec::with_capacity(n);
+    let mut permutation = Vec::with_capacity(n);
+
     for start in 0..n {
         if visited[start] {
             continue;
         }
-        // find unvisited node with smallest degree
-        let mut s = start;
-        let mut min_deg = degrees[start];
+
+        let mut current_start = start;
+        let mut min_degree = degrees[start];
         for i in start..n {
-            if !visited[i] && degrees[i] < min_deg {
-                min_deg = degrees[i];
-                s = i;
+            if !visited[i] && degrees[i] < min_degree {
+                min_degree = degrees[i];
+                current_start = i;
             }
         }
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(s);
-        visited[s] = true;
-        while let Some(i) = queue.pop_front() {
-            order.push(i);
-            for &j in &adj[i] {
-                if !visited[j] {
-                    visited[j] = true;
-                    queue.push_back(j);
+
+        let mut queue = VecDeque::new();
+        queue.push_back(current_start);
+        visited[current_start] = true;
+
+        while let Some(node) = queue.pop_front() {
+            permutation.push(node);
+            for &neighbor in &adj[node] {
+                if !visited[neighbor] {
+                    visited[neighbor] = true;
+                    queue.push_back(neighbor);
                 }
             }
         }
     }
-    order.reverse();
 
-    let mut pinv = vec![0; n];
-    for (new, &old) in order.iter().enumerate() {
-        pinv[old] = new;
-    }
-    Permutation { p: order, pinv }
+    permutation
 }
 
 #[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
-
+    use crate::matrix::sparse::CsrMatrix;
+    use faer::Mat;
     #[test]
     fn permute_csr_symmetric_matches_dense() {
         // 3x3 matrix
@@ -209,6 +225,25 @@ mod tests {
                 let diff = dense_ap[(i, j)] - ref_dense[(i, j)];
                 assert!(diff.norm() < R::from(1e-12));
             }
+        }
+    }
+
+    #[test]
+    fn rcm_csr_matches_helper_reverse() {
+        let row_ptr = vec![0, 3, 6, 9, 12];
+        let col_idx = vec![0, 1, 3, 0, 1, 2, 1, 2, 3, 0, 2, 3];
+        let vals = vec![2.0, 1.0, 1.0, 1.0, 3.0, 1.0, 1.0, 4.0, 1.0, 1.0, 1.0, 5.0];
+        let a = CsrMatrix::from_csr(4, 4, row_ptr, col_idx, vals);
+        let mut adj = build_symmetric_adj_from_csr(&a);
+        let order = cuthill_mckee_from_adj(&mut adj);
+
+        let perm = rcm_csr(&a);
+        let mut expected = order.clone();
+        expected.reverse();
+        assert_eq!(perm.p, expected);
+
+        for (new, &old) in perm.p.iter().enumerate() {
+            assert_eq!(perm.pinv[old], new);
         }
     }
 }

@@ -64,7 +64,7 @@ use crate::solver::{
     PcgVariant,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
-use crate::utils::reduction::{ReductMode, ReductOptions};
+use crate::utils::reduction::ReductOptions;
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
@@ -212,12 +212,12 @@ impl KspContext {
         }
     }
 
-    fn parse_reduction_mode(label: &str) -> Result<ReductMode, KError> {
+    fn parse_reduction_mode(label: &str) -> Result<ReproMode, KError> {
         match label.to_lowercase().as_str() {
-            "fast" => Ok(ReductMode::Fast),
-            "deterministic" | "det" => Ok(ReductMode::Deterministic),
+            "fast" => Ok(ReproMode::Fast),
+            "deterministic" | "det" => Ok(ReproMode::Deterministic),
             "deterministic-accurate" | "deterministic_accurate" | "accurate" => {
-                Ok(ReductMode::DeterministicAccurate)
+                Ok(ReproMode::DeterministicAccurate)
             }
             other => Err(KError::SolveError(format!(
                 "Unrecognized ksp_reduction mode: {other} (expected 'fast'|'deterministic'|'deterministic-accurate')"
@@ -225,16 +225,8 @@ impl KspContext {
         }
     }
 
-    fn repro_from_mode(mode: ReductMode) -> ReproMode {
-        match mode {
-            ReductMode::Fast => ReproMode::Fast,
-            ReductMode::Deterministic => ReproMode::Deterministic,
-            ReductMode::DeterministicAccurate => ReproMode::DeterministicAccurate,
-        }
-    }
-
     fn apply_global_reduction_mode(&self) {
-        set_global_reduction_mode(Self::repro_from_mode(self.reduction_opts.mode));
+        set_global_reduction_mode(self.reduction_opts.mode);
     }
 
     /// Validate that `side` is compatible with `solver_type` (if set).
@@ -1185,8 +1177,7 @@ impl KspContext {
 
         // Ensure the configured reduction mode is active while solving and configure
         // solver preconditioning side, validating compatibility along the way.
-        let _reduction_mode_guard =
-            set_global_reduction_mode_scoped(Self::repro_from_mode(self.reduction_opts.mode));
+        let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
         self.configure_pc_side()?;
 
         let amat = self
@@ -1586,7 +1577,7 @@ mod tests {
 
     #[test]
     fn reduction_option_updates_workspace() {
-        use crate::utils::reduction::ReductMode;
+        use crate::reduction::ReproMode;
         let mut ksp = KspContext::new();
         ksp.work = Some(Workspace::new(4));
         let opts = KspOptions {
@@ -1597,7 +1588,7 @@ mod tests {
         let ws = ksp.work.as_ref().unwrap();
         assert!(matches!(
             ws.reduction_options().mode,
-            ReductMode::Deterministic
+            ReproMode::Deterministic
         ));
 
         let opts = KspOptions {
@@ -1608,7 +1599,7 @@ mod tests {
         let ws = ksp.work.as_ref().unwrap();
         assert!(matches!(
             ws.reduction_options().mode,
-            ReductMode::DeterministicAccurate
+            ReproMode::DeterministicAccurate
         ));
     }
 }

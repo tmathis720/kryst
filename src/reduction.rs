@@ -476,4 +476,65 @@ mod tests {
             assert!((out[idx] - expected).abs() < 1e-12);
         }
     }
+
+    #[test]
+    fn dot_engine_modes_match_dot_many_for_each_mode() {
+        let a = vec![1.0, -2.0, 3.5, 0.75];
+        let b = vec![0.5, 1.5, -2.0, 4.0];
+        let c = vec![1.25, -0.5, 3.0, -1.0];
+        let pairs = [(&a[..], &b[..]), (&a[..], &c[..])];
+        let comm = NoComm;
+
+        for &mode in &[
+            ReproMode::Fast,
+            ReproMode::Deterministic,
+            ReproMode::DeterministicAccurate,
+        ] {
+            let mut opts = ReductionOptions::default();
+            opts.packet_width = 4;
+            opts.mode = mode;
+            let engine = DotEngine { opts };
+
+            let many = engine.dot_many(&pairs, &comm);
+            assert_eq!(many.len(), pairs.len());
+            for (idx, (u, v)) in pairs.iter().enumerate() {
+                let single = engine.dot(u, v, &comm);
+                assert!(
+                    (single - many[idx]).abs() < 1e-12,
+                    "mode {mode:?} mismatch at idx {idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_modes_resist_cancellation() {
+        let u = [1e16, 1.0, -1e16];
+        let v = [1.0, 1.0, 1.0];
+        let comm = NoComm;
+
+        let mut fast_opts = ReductionOptions::default();
+        fast_opts.mode = ReproMode::Fast;
+        let fast_engine = DotEngine { opts: fast_opts };
+        let fast = fast_engine.dot(&u, &v, &comm);
+        assert_eq!(fast, 0.0);
+
+        let mut det_opts = ReductionOptions::default();
+        det_opts.mode = ReproMode::Deterministic;
+        let det_engine = DotEngine { opts: det_opts };
+        let det = det_engine.dot(&u, &v, &comm);
+        assert!((det - 1.0).abs() < 1e-12);
+        let det_many = det_engine.dot_many(&[(&u, &v)], &comm);
+        assert!((det_many[0] - det).abs() < 1e-12);
+
+        let mut accurate_opts = ReductionOptions::default();
+        accurate_opts.mode = ReproMode::DeterministicAccurate;
+        let accurate_engine = DotEngine {
+            opts: accurate_opts,
+        };
+        let accurate = accurate_engine.dot(&u, &v, &comm);
+        assert!((accurate - 1.0).abs() < 1e-12);
+        let accurate_many = accurate_engine.dot_many(&[(&u, &v)], &comm);
+        assert!((accurate_many[0] - accurate).abs() < 1e-12);
+    }
 }

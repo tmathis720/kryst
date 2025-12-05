@@ -18,7 +18,7 @@ use crate::solver::LinearSolver;
 use crate::solver::common::dot_result_to_real;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
-use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductMode, ReductOptions};
+use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -174,11 +174,7 @@ impl PcgSolver {
 
     fn async_options(&self) -> ReductOptions {
         let mut opt = self.async_reduction.clone();
-        opt.mode = match self.reduction.mode {
-            ReproMode::Fast => ReductMode::Fast,
-            ReproMode::Deterministic => ReductMode::Deterministic,
-            ReproMode::DeterministicAccurate => ReductMode::DeterministicAccurate,
-        };
+        opt.mode = self.reduction.mode;
         opt
     }
 

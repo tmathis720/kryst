@@ -12,7 +12,8 @@ use kryst::parallel::{
     global_nrm2_many_into_accurate, global_nrm2_many_into_repro, global_nrm2_many_repro,
     global_nrm2_repro,
 };
-use kryst::utils::reduction::{AllreduceOps, ReductMode, ReductOptions};
+use kryst::reduction::ReproMode;
+use kryst::utils::reduction::{AllreduceOps, ReductOptions};
 use kryst::{assert_s_close, assert_vec_close, testkit};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -511,7 +512,7 @@ fn mpi_async_pair_supports_deterministic_mode() {
     let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
-        mode: ReductMode::Deterministic,
+        mode: ReproMode::Deterministic,
         ..Default::default()
     };
 
@@ -554,7 +555,7 @@ fn mpi_async_vec_supports_deterministic_mode() {
     let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
-        mode: ReductMode::Deterministic,
+        mode: ReproMode::Deterministic,
         ..Default::default()
     };
 
@@ -607,7 +608,7 @@ fn mpi_async_pair_supports_deterministic_accurate_mode() {
     let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
-        mode: ReductMode::DeterministicAccurate,
+        mode: ReproMode::DeterministicAccurate,
         ..Default::default()
     };
 
@@ -650,7 +651,7 @@ fn mpi_async_vec_supports_deterministic_accurate_mode() {
     let _guard = mpi_test_guard();
     let comm = make_world();
     let opt = ReductOptions {
-        mode: ReductMode::DeterministicAccurate,
+        mode: ReproMode::DeterministicAccurate,
         ..Default::default()
     };
 

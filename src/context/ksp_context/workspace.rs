@@ -2,6 +2,7 @@ use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::core::block::BlockVec;
+use crate::reduction::ReproMode;
 use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
 use crate::solver::gmres::AugmentationPolicy;
 
@@ -342,7 +343,7 @@ impl Workspace {
         self.reduction = opt;
     }
 
-    pub fn set_reduction_mode(&mut self, mode: crate::utils::reduction::ReductMode) {
+    pub fn set_reduction_mode(&mut self, mode: ReproMode) {
         self.reduction.mode = mode;
     }
 

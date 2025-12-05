@@ -136,36 +136,17 @@ pub mod test_hooks {
 }
 
 /// Reduction execution mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReductMode {
-    /// Fast, implementation-defined reduction path.
-    Fast,
-    /// Deterministic tree reductions.
-    Deterministic,
-    /// Deterministic reductions with extended-precision accumulation.
-    DeterministicAccurate,
-}
-
-#[inline]
-fn repro_mode_from_reduct(mode: ReductMode) -> ReproMode {
-    match mode {
-        ReductMode::Fast => ReproMode::Fast,
-        ReductMode::Deterministic => ReproMode::Deterministic,
-        ReductMode::DeterministicAccurate => ReproMode::DeterministicAccurate,
-    }
-}
-
 /// Options that control asynchronous reductions.
 #[derive(Debug, Clone)]
 pub struct ReductOptions {
-    pub mode: ReductMode,
+    pub mode: ReproMode,
     pub max_inflight: usize,
 }
 
 impl Default for ReductOptions {
     fn default() -> Self {
         Self {
-            mode: ReductMode::Fast,
+            mode: ReproMode::Fast,
             max_inflight: 4,
         }
     }
@@ -466,10 +447,13 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         b: R,
         opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
-        if let ReductMode::Deterministic | ReductMode::DeterministicAccurate = opt.mode {
+        if matches!(
+            opt.mode,
+            ReproMode::Deterministic | ReproMode::DeterministicAccurate
+        ) {
             record_reduction(2);
             let packet = Packet::<2> { v: [a, b] };
-            let reduced = self.allreduce_det(&packet, repro_mode_from_reduct(opt.mode));
+            let reduced = self.allreduce_det(&packet, opt.mode);
             let result = (reduced.v[0], reduced.v[1]);
             return Ok((AllreduceHandle::new_ready(result), (a, b)));
         }
@@ -505,9 +489,12 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         data: Vec<R>,
         opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
-        if let ReductMode::Deterministic | ReductMode::DeterministicAccurate = opt.mode {
+        if matches!(
+            opt.mode,
+            ReproMode::Deterministic | ReproMode::DeterministicAccurate
+        ) {
             record_reduction(data.len());
-            let reduced = deterministic_reduce_vec(self, &data, repro_mode_from_reduct(opt.mode));
+            let reduced = deterministic_reduce_vec(self, &data, opt.mode);
             return Ok((AllreduceHandle::new_ready(reduced.clone()), reduced));
         }
         record_reduction(data.len());
@@ -644,7 +631,9 @@ impl AllreduceOps for crate::parallel::UniverseComm {
             }
             #[cfg(not(feature = "rayon"))]
             AllreduceHandle::Rayon { .. } => None,
-            AllreduceHandle::Deterministic { .. } => None,
+            AllreduceHandle::Deterministic { .. } => {
+                panic!("deterministic async reductions not implemented")
+            }
         }
     }
 
@@ -661,7 +650,9 @@ impl AllreduceOps for crate::parallel::UniverseComm {
             }
             #[cfg(not(feature = "rayon"))]
             AllreduceHandle::Rayon { .. } => None,
-            AllreduceHandle::Deterministic { .. } => None,
+            AllreduceHandle::Deterministic { .. } => {
+                panic!("deterministic async reductions not implemented")
+            }
         }
     }
 

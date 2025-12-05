@@ -86,7 +86,7 @@ pub struct MatrixMarketData {
     pub rows: usize,
     /// Number of columns in the matrix
     pub cols: usize,
-    /// Number of non-zero entries (may be different from triplets.len() for symmetric matrices)
+    /// Number of non-zero entries actually stored in the triplets.
     pub nonzeros: usize,
     /// Row indices (0-based)
     pub row_indices: Vec<usize>,
@@ -109,7 +109,6 @@ impl MatrixMarketData {
     pub fn new(
         rows: usize,
         cols: usize,
-        nonzeros: usize,
         row_indices: Vec<usize>,
         col_indices: Vec<usize>,
         values: Vec<f64>,
@@ -119,7 +118,6 @@ impl MatrixMarketData {
         Self::with_field(
             rows,
             cols,
-            nonzeros,
             row_indices,
             col_indices,
             values,
@@ -134,7 +132,6 @@ impl MatrixMarketData {
     pub fn with_field(
         rows: usize,
         cols: usize,
-        nonzeros: usize,
         row_indices: Vec<usize>,
         col_indices: Vec<usize>,
         values: Vec<f64>,
@@ -143,10 +140,19 @@ impl MatrixMarketData {
         symmetry: MatrixMarketSymmetry,
         is_coordinate: bool,
     ) -> Self {
+        let idx_len = row_indices.len();
+        if idx_len != col_indices.len() || idx_len != values.len() {
+            panic!("MatrixMarketData triplets must have matching lengths");
+        }
+        if let Some(ref imag) = imag_values {
+            if imag.len() != values.len() {
+                panic!("MatrixMarketData imaginary component must match value length");
+            }
+        }
         Self {
             rows,
             cols,
-            nonzeros,
+            nonzeros: idx_len,
             row_indices,
             col_indices,
             values,
@@ -701,9 +707,9 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
         _ => None,
     };
 
+    let mut entry_count = 0;
     if is_array {
         // Parse dense array data (column-major order in Matrix Market)
-        let mut entry_count = 0;
         for line in lines {
             let line = line.map_err(|e| KError::SolveError(format!("Failed to read line: {e}")))?;
             let trimmed_line = line.trim();
@@ -820,12 +826,23 @@ pub fn read_matrix_market<P: AsRef<Path>>(file_path: P) -> Result<MatrixMarketDa
         }
     }
 
-    let _actual_nonzeros = row_indices.len();
+    let actual_nonzeros = row_indices.len();
+
+    if is_array && entry_count < declared_nonzeros {
+        return Err(KError::SolveError(
+            "Unexpected EOF while reading array values".to_string(),
+        ));
+    }
+
+    if is_coordinate && actual_nonzeros != declared_nonzeros {
+        return Err(KError::SolveError(format!(
+            "Matrix Market declared {declared_nonzeros} nonzeros but found {actual_nonzeros}"
+        )));
+    }
 
     Ok(MatrixMarketData::with_field(
         rows,
         cols,
-        declared_nonzeros,
         row_indices,
         col_indices,
         values,
@@ -971,7 +988,6 @@ pub fn write_matrix_market_coordinate<P: AsRef<Path>>(
     let data = MatrixMarketData::new(
         rows,
         cols,
-        row_indices.len(),
         row_indices.to_vec(),
         col_indices.to_vec(),
         values.to_vec(),
@@ -1054,7 +1070,6 @@ pub fn write_matrix_market_coordinate_scalar<P: AsRef<Path>>(
     let data = MatrixMarketData::with_field(
         rows,
         cols,
-        row_indices.len(),
         row_indices.to_vec(),
         col_indices.to_vec(),
         values,
@@ -1103,7 +1118,6 @@ pub fn write_matrix_market_array_scalar<P: AsRef<Path>>(
     let data = MatrixMarketData::with_field(
         rows,
         cols,
-        values.len(),
         row_indices,
         col_indices,
         values_re,
@@ -1124,7 +1138,6 @@ pub fn write_vector_market<P: AsRef<Path>>(file_path: P, vector: &[f64]) -> Resu
     let data = MatrixMarketData::new(
         vector.len(),
         1,
-        vector.len(),
         row_indices,
         col_indices,
         vector.to_vec(),
@@ -1149,7 +1162,6 @@ pub fn write_vector_market_scalar<P: AsRef<Path>>(
     let data = MatrixMarketData::with_field(
         vector.len(),
         1,
-        vector.len(),
         row_indices,
         col_indices,
         values,
@@ -1165,6 +1177,7 @@ pub fn write_vector_market_scalar<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faer::Mat;
 
     const MATRIX_FILE: &str = "examples/e05r0000/e05r0000.mtx";
     const RHS_FILE: &str = "examples/e05r0000/e05r0000_rhs1.mtx";
@@ -1180,6 +1193,7 @@ mod tests {
     const OUTPUT_FILE_ARRAY_SCALAR_REAL: &str = "test_output_array_scalar_real.mtx";
     #[cfg(feature = "complex")]
     const OUTPUT_FILE_ARRAY_SCALAR_COMPLEX: &str = "test_output_array_scalar_complex.mtx";
+    const OUTPUT_FILE_ARRAY_SCALAR_SYMMETRIC: &str = "test_output_array_scalar_symmetric.mtx";
 
     fn temp_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create temp directory");
@@ -1219,6 +1233,44 @@ mod tests {
     }
 
     #[test]
+    fn test_read_coordinate_nonzeros_mismatch() {
+        let (_tmp_dir, path) = temp_path("bad_coord_nonzeros.mtx");
+        let contents = "\
+%%MatrixMarket matrix coordinate real general
+2 2 3
+1 1 1.0
+2 2 1.0
+";
+        std::fs::write(&path, contents).expect("Failed to write malformed matrix");
+
+        let err = read_matrix_market(&path).expect_err("Mismatch should fail");
+        assert!(
+            err.to_string().contains("declared 3 nonzeros but found 2"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_read_array_unexpected_eof() {
+        let (_tmp_dir, path) = temp_path("bad_array_eof.mtx");
+        let contents = "\
+%%MatrixMarket matrix array real general
+2 2
+1.0
+2.0
+3.0
+";
+        std::fs::write(&path, contents).expect("Failed to write malformed array");
+
+        let err = read_matrix_market(&path).expect_err("EOF should fail");
+        assert!(
+            err.to_string()
+                .contains("Unexpected EOF while reading array values"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_read_dense_matrix_market() {
         // Skip test if example file doesn't exist
         if !std::path::Path::new(RHS_FILE).exists() {
@@ -1253,7 +1305,6 @@ mod tests {
             MatrixMarketData::new(
                 3,
                 3,
-                4,
                 vec![0, 1, 2, 0],
                 vec![0, 1, 2, 2],
                 vec![1.0, 2.0, 3.0, 4.0],
@@ -1284,7 +1335,6 @@ mod tests {
             MatrixMarketData::new(
                 5,
                 1,
-                5,
                 row_indices,
                 col_indices,
                 values,
@@ -1317,7 +1367,6 @@ mod tests {
             MatrixMarketData::new(
                 3,
                 3,
-                4,
                 row_indices,
                 col_indices,
                 values,
@@ -1366,7 +1415,6 @@ mod tests {
             MatrixMarketData::new(
                 5,
                 1,
-                5,
                 row_indices,
                 col_indices,
                 values,
@@ -1755,11 +1803,75 @@ mod tests {
         // temp_dir cleanup handled automatically
     }
 
+    #[test]
+    fn test_write_matrix_market_array_scalar_symmetric_validation() {
+        let rows = 2;
+        let cols = 2;
+        let values = vec![
+            S::from_real(1.0),
+            S::from_real(2.0),
+            S::from_real(3.0),
+            S::from_real(4.0),
+        ];
+
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_SYMMETRIC);
+        let err = write_matrix_market_array_scalar(
+            &path,
+            rows,
+            cols,
+            &values,
+            MatrixMarketSymmetry::Symmetric,
+        )
+        .expect_err("Symmetric validation should fail for asymmetric values");
+        assert!(
+            err.to_string()
+                .contains("must be equal for symmetric matrices"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_write_matrix_market_array_scalar_symmetric_round_trip() {
+        let rows = 3;
+        let cols = 3;
+        let expected = Mat::from_fn(rows, cols, |row, col| match (row, col) {
+            (0, 0) => S::from_real(1.0),
+            (0, 1) | (1, 0) => S::from_real(2.0),
+            (0, 2) | (2, 0) => S::from_real(3.0),
+            (1, 1) => S::from_real(4.0),
+            (1, 2) | (2, 1) => S::from_real(5.0),
+            (2, 2) => S::from_real(6.0),
+            _ => S::zero(),
+        });
+        let mut values = Vec::with_capacity(rows * cols);
+        for col in 0..cols {
+            for row in 0..rows {
+                values.push(expected[(row, col)]);
+            }
+        }
+
+        let (_tmp_dir, path) = temp_path(OUTPUT_FILE_ARRAY_SCALAR_SYMMETRIC);
+        write_matrix_market_array_scalar(
+            &path,
+            rows,
+            cols,
+            &values,
+            MatrixMarketSymmetry::Symmetric,
+        )
+        .expect("Failed to write symmetric array matrix");
+
+        let data = read_matrix_market(&path).expect("Failed to read symmetric array matrix");
+        assert_eq!(data.symmetry, MatrixMarketSymmetry::Symmetric);
+        let dense = data
+            .to_dense_matrix_scalar()
+            .expect("Failed to convert symmetric data to dense");
+        assert_eq!(dense, expected);
+    }
+
     #[cfg(feature = "complex")]
     #[test]
     fn test_complex_matrix_to_scalar_csr() {
         let data = MatrixMarketData::with_field(
-            2,
             2,
             2,
             vec![0, 1],
@@ -1803,7 +1915,6 @@ mod tests {
         let data = MatrixMarketData::with_field(
             3,
             1,
-            3,
             vec![0, 1, 2],
             vec![0, 0, 0],
             vec![1.0, 0.0, -2.0],
@@ -1837,7 +1948,6 @@ mod tests {
         let data = MatrixMarketData::with_field(
             2,
             2,
-            3,
             vec![0, 0, 1],
             vec![0, 1, 1],
             vec![1.0, 2.0, 4.0],
@@ -1859,7 +1969,6 @@ mod tests {
         assert_eq!(vals[3], S::from_parts(4.0, 0.0));
 
         let bad = MatrixMarketData::with_field(
-            2,
             2,
             2,
             vec![0, 1],
@@ -1886,7 +1995,6 @@ mod tests {
         let data = MatrixMarketData::with_field(
             3,
             3,
-            2,
             vec![0, 1],
             vec![1, 2],
             vec![2.0, -3.0],
@@ -1910,7 +2018,6 @@ mod tests {
         let bad = MatrixMarketData::with_field(
             2,
             2,
-            1,
             vec![0],
             vec![0],
             vec![1.0],
@@ -1935,7 +2042,6 @@ mod tests {
         let data = MatrixMarketData::new(
             3,
             3,
-            4,
             vec![0, 1, 2, 0],
             vec![0, 1, 2, 2],
             vec![1.0, 2.0, 3.0, 4.0],
@@ -1964,7 +2070,6 @@ mod tests {
         let data = MatrixMarketData::new(
             2,
             2,
-            2,
             vec![0, 1],
             vec![0, 1],
             vec![1.0, 2.0],
@@ -1980,7 +2085,6 @@ mod tests {
         let data = MatrixMarketData::with_field(
             2,
             2,
-            4,
             vec![0, 1, 0, 1],
             vec![0, 0, 1, 1],
             vec![1.0, 2.0, 3.0, 4.0],
@@ -2005,7 +2109,6 @@ mod tests {
         let data = MatrixMarketData::with_field(
             2,
             2,
-            4,
             vec![0, 1, 0, 1],
             vec![0, 0, 1, 1],
             vec![1.0, 2.0, 3.0, 4.0],
@@ -2029,7 +2132,6 @@ mod tests {
         let data = MatrixMarketData::with_field(
             2,
             2,
-            3,
             vec![0, 0, 1],
             vec![0, 1, 1],
             vec![5.0, -1.0, 2.0],
@@ -2046,5 +2148,86 @@ mod tests {
         crate::assert_s_close!("a01", dense[(0, 1)], S::from_real(-1.0));
         crate::assert_s_close!("a10", dense[(1, 0)], S::from_real(0.0));
         crate::assert_s_close!("a11", dense[(1, 1)], S::from_real(2.0));
+    }
+
+    #[test]
+    fn test_symmetric_matrix_market_to_dense() {
+        let data = MatrixMarketData::with_field(
+            3,
+            3,
+            vec![0, 0, 1],
+            vec![0, 1, 2],
+            vec![1.0, 2.0, 3.0],
+            None,
+            MatrixMarketField::Real,
+            MatrixMarketSymmetry::Symmetric,
+            true,
+        );
+
+        let dense = data
+            .to_dense_matrix_scalar()
+            .expect("Failed to convert symmetric data to dense");
+        let expected = Mat::from_fn(3, 3, |row, col| match (row, col) {
+            (0, 0) => S::from_real(1.0),
+            (0, 1) | (1, 0) => S::from_real(2.0),
+            (1, 2) | (2, 1) => S::from_real(3.0),
+            _ => S::zero(),
+        });
+        assert_eq!(dense, expected);
+    }
+
+    #[test]
+    fn test_skew_symmetric_matrix_market_to_dense() {
+        let data = MatrixMarketData::with_field(
+            3,
+            3,
+            vec![0, 1],
+            vec![1, 2],
+            vec![2.0, -3.0],
+            None,
+            MatrixMarketField::Real,
+            MatrixMarketSymmetry::SkewSymmetric,
+            true,
+        );
+
+        let dense = data
+            .to_dense_matrix_scalar()
+            .expect("Failed to convert skew-symmetric data to dense");
+        let expected = Mat::from_fn(3, 3, |row, col| match (row, col) {
+            (0, 1) => S::from_real(2.0),
+            (1, 0) => S::from_real(-2.0),
+            (1, 2) => S::from_real(-3.0),
+            (2, 1) => S::from_real(3.0),
+            _ => S::zero(),
+        });
+        assert_eq!(dense, expected);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn test_hermitian_matrix_market_to_dense() {
+        let data = MatrixMarketData::with_field(
+            2,
+            2,
+            vec![0, 0, 1],
+            vec![0, 1, 1],
+            vec![1.0, 2.0, 4.0],
+            Some(vec![0.0, 3.0, 0.0]),
+            MatrixMarketField::Complex,
+            MatrixMarketSymmetry::Hermitian,
+            true,
+        );
+
+        let dense = data
+            .to_dense_matrix_scalar()
+            .expect("Failed to convert Hermitian data to dense");
+        let expected = Mat::from_fn(2, 2, |row, col| match (row, col) {
+            (0, 0) => S::from_parts(1.0, 0.0),
+            (0, 1) => S::from_parts(2.0, 3.0),
+            (1, 0) => S::from_parts(2.0, -3.0),
+            (1, 1) => S::from_parts(4.0, 0.0),
+            _ => S::zero(),
+        });
+        assert_eq!(dense, expected);
     }
 }

@@ -993,6 +993,11 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
    cargo test --features "mpi"  # If MPI is available
    ```
 
+### Developer scripts
+- `scripts/ci_checks.sh` – runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features`, and `cargo test --all-features`.
+- `scripts/ub_paranoia.sh` – executes ASan-enabled tests on the nightly toolchain for the buffer pool and dot engines.
+- `scripts/miri_reduction.sh` – runs the same focused suite under `cargo miri` (nightly) to catch UB in the unsafe utilities.
+
 ### Areas for Contribution
 
 #### High Priority
