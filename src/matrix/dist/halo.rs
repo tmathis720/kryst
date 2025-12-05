@@ -263,7 +263,7 @@ impl HaloPlan {
                 let buf = unsafe { &mut *buf_lock.get() };
                 let slice = halo_slice_mut(buf);
                 let req = self.index.comm.irecv_from(slice, nbr as i32);
-        recv_reqs.push(req);
+                recv_reqs.push(req);
             }
         }
 

@@ -1,4 +1,3 @@
-
 //! Test Phase I changes: deferred PC construction and FGMRES support
 //!
 //! This example verifies that:

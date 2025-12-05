@@ -40,7 +40,6 @@ fn main() {
     eprintln!("optimized_solver_demo requires the backend-faer feature.");
 }
 
-
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;

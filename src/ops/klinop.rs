@@ -40,6 +40,10 @@ pub trait KLinOp: Send + Sync {
     }
 }
 
+/// Blanket implementation for native `f64` operators.
+///
+/// Complex scalar solvers should wrap real backends via [`crate::ops::wrap::F64AsSOp`]
+/// instead of relying on this impl.
 impl<T> KLinOp for T
 where
     T: LinOpF64 + LinOp<S = f64> + Send + Sync,

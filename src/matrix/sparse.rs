@@ -84,9 +84,7 @@ impl<T> CsrMatrix<T> {
                 let start = row_ptr[i];
                 let end = row_ptr[i + 1];
                 debug_assert!(
-                    col_idx[start..end]
-                        .windows(2)
-                        .all(|w| w[0] <= w[1]),
+                    col_idx[start..end].windows(2).all(|w| w[0] <= w[1]),
                     "CsrMatrix::from_csr: row {i} has unsorted column indices"
                 );
             }

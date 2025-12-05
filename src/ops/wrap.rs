@@ -69,6 +69,9 @@ where
 
         #[cfg(feature = "complex")]
         {
+            // The real backend only exposes the real transpose, so for complex `S` we
+            // bridge the components into `scratch`, apply that transpose (no conjugation),
+            // and copy the results back into `y`.
             let need = x.len().max(y.len());
             scratch.with_pair(need, |xr, yr| {
                 copy_scalar_to_real_in(x, &mut xr[..x.len()]);
@@ -120,6 +123,9 @@ where
 }
 
 /// Mutable adapter that exposes an `f64` preconditioner via [`KPreconditioner`].
+///
+/// This handle is `Send` but intentionally not `Sync` so that solvers cannot shred the
+/// same mutable preconditioner across threads; use `F64AsSPc` for shared (immutable) access.
 pub struct F64AsSPcMut<'a, P: PreconditionerF64 + ?Sized> {
     inner: *mut P,
     _marker: PhantomData<&'a mut P>,
@@ -141,7 +147,6 @@ pub fn as_s_pc_mut<'a, P: PreconditionerF64 + ?Sized>(pc: &'a mut P) -> F64AsSPc
 }
 
 unsafe impl<'a, P> Send for F64AsSPcMut<'a, P> where P: PreconditionerF64 + Send + Sync + ?Sized {}
-unsafe impl<'a, P> Sync for F64AsSPcMut<'a, P> where P: PreconditionerF64 + Send + Sync + ?Sized {}
 
 impl<'a, P> KPreconditioner for F64AsSPcMut<'a, P>
 where

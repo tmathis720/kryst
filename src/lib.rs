@@ -45,10 +45,10 @@ pub mod testkit;
 pub mod utils;
 
 pub mod prelude {
-    pub use crate::algebra::*;
-    pub use crate::matrix::CsrMatrix;
     #[cfg(feature = "backend-faer")]
     pub use crate::algebra::dense as algebra_dense;
+    pub use crate::algebra::*;
+    pub use crate::matrix::CsrMatrix;
     #[cfg(feature = "backend-faer")]
     pub use crate::matrix::DenseMatrix;
     #[cfg(feature = "backend-faer")]

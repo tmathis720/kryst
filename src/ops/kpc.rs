@@ -7,10 +7,10 @@ use crate::preconditioner::Preconditioner as PreconditionerF64;
 
 /// Internal, scalar-generic preconditioner interface.
 ///
-/// The trait is object safe so solvers can work with `Arc<dyn KPreconditioner>`. Future
-/// extensions (transpose support, batched application) can be added without breaking
-/// callers.
-pub trait KPreconditioner: Send + Sync {
+/// The trait is object safe so solvers can work with `Arc<dyn KPreconditioner<Scalar = S> + Sync>` when
+/// sharing a handle between threads, or with mutable references when per-thread access is sufficient.
+/// Future extensions (transpose support, batched application) can be added without breaking callers.
+pub trait KPreconditioner: Send {
     type Scalar: KrystScalar;
 
     /// Dimensions of the preconditioner, typically `(n, n)`.
@@ -53,6 +53,8 @@ pub trait KPreconditioner: Send + Sync {
 }
 
 #[cfg(not(feature = "complex"))]
+/// Blanket impl for native `f64` preconditioners. Complex builds should use the adapters in
+/// [`crate::ops::wrap`] instead of this impl.
 impl<T> KPreconditioner for T
 where
     T: PreconditionerF64 + Send + Sync,
