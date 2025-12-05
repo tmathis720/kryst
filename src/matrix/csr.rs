@@ -1,6 +1,14 @@
 use crate::algebra::prelude::*;
+use crate::matrix::sparse_api::CsrMatRef;
 
 /// Compressed Sparse Row matrix with scalar entries of type `S`.
+///
+/// # Invariants
+/// - Same CSR structure invariants as [`matrix::sparse::CsrMatrix`], i.e.
+///   `rowptr.len() == nrows + 1`, non-decreasing `rowptr`, matching
+///   `colind`/`values` lengths, and strictly-bounded column indices.
+/// - Rows are expected to have sorted `colind[rowptr[i]..rowptr[i+1]]`.
+///   Some conversions and diagnostics rely on each row being in ascending order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CsrMatrix<S: KrystScalar> {
     pub nrows: usize,
@@ -11,6 +19,24 @@ pub struct CsrMatrix<S: KrystScalar> {
     pub colind: Vec<usize>,
     /// Nonzero values
     pub values: Vec<S>,
+}
+
+impl<S: KrystScalar> CsrMatRef<S> for CsrMatrix<S> {
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+    fn ncols(&self) -> usize {
+        self.ncols
+    }
+    fn row_ptr(&self) -> &[usize] {
+        &self.rowptr
+    }
+    fn col_idx(&self) -> &[usize] {
+        &self.colind
+    }
+    fn values(&self) -> &[S] {
+        &self.values
+    }
 }
 
 impl<S: KrystScalar> CsrMatrix<S> {

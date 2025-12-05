@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use faer::Mat;
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};

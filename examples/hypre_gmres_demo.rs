@@ -7,12 +7,18 @@
 //! to run:
 //! cargo run --example hypre_gmres_demo
 
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("hypre_gmres_demo requires the backend-faer feature.");
+}
+
 use faer::mat;
 use kryst::core::traits::MatVec;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
 use kryst::solver::GmresSolver;
 
+#[cfg(feature = "backend-faer")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a well-conditioned non-symmetric system
     let a = mat![

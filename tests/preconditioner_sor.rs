@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 #![cfg(not(feature = "complex"))]
 //! SOR/SSOR preconditioner tests for kryst
 //!

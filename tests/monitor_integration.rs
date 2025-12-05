@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 //! Tests for iteration monitoring and profiling functionality.
 
 use faer::Mat;

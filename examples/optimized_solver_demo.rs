@@ -35,14 +35,24 @@
 //! - Trilinos BiCGStab + ILU: 4 iterations, 0.324s (best)
 //! - Trilinos GMRES + ILU: 7 iterations, 0.326s
 //! - Without ILU: 17,000+ iterations, very slow
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("optimized_solver_demo requires the backend-faer feature.");
+}
 
-use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::context::pc_context::PcType;
-use kryst::matrix::sparse::CsrMatrix;
-use kryst::utils::matrix_market::read_matrix_market;
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(feature = "backend-faer")]
+use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(feature = "backend-faer")]
+use kryst::context::pc_context::PcType;
+#[cfg(feature = "backend-faer")]
+use kryst::matrix::sparse::CsrMatrix;
+#[cfg(feature = "backend-faer")]
+use kryst::utils::matrix_market::read_matrix_market;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 struct OptimalConfig {
@@ -237,6 +247,7 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     (density, condition_estimate, is_well_conditioned)
 }
 
+#[cfg(feature = "backend-faer")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging if available
     #[cfg(feature = "logging")]

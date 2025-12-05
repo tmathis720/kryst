@@ -1,9 +1,15 @@
+
 //! Test Phase I changes: deferred PC construction and FGMRES support
 //!
 //! This example verifies that:
 //! 1. FGMRES solver can be selected
 //! 2. Deferred PC construction works for matrix-dependent PCs
 //! 3. Command-line parsing works for new ASM/Chebyshev/AMG options
+
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("phase_i_test requires the backend-faer feature.");
+}
 
 use faer::Mat;
 use kryst::{
@@ -14,6 +20,7 @@ use kryst::{
 };
 use std::sync::Arc;
 
+#[cfg(feature = "backend-faer")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 1: FGMRES solver selection
     println!("=== Test 1: FGMRES solver selection ===");

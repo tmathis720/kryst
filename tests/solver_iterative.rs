@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 //! Tests for iterative solvers (CG, GMRES) vs direct solvers on random matrices.
 //!
 //! This module verifies that the implemented iterative solvers (Conjugate Gradient and GMRES)

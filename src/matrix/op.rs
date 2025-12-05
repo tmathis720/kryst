@@ -24,6 +24,14 @@ pub struct ValuesId(pub u64);
 /// Unless otherwise stated, `LinOp` implementations are not required to support
 /// concurrent `matvec` calls on the same instance. Callers must avoid invoking
 /// `matvec`/`try_matvec` on the same operator from multiple threads at once.
+///
+/// # Change IDs
+/// - `structure_id()` must change when the sparsity pattern or dimensions change.
+/// - `values_id()` must change when only the numeric values change.
+/// - Returning `StructureId(0)` or `ValuesId(0)` means "unknown" and causes
+///   downstream caches (format/PC conversions) to fall back to pointer identity.
+///   Wrappers that mutate matrices in place should call
+///   [`mark_structure_changed`] / [`mark_values_changed`] to keep caches valid.
 pub trait LinOp: Send + Sync + Any {
     type S: KrystScalar;
 
@@ -102,10 +110,15 @@ impl ChangeIds {
 
 /// Scalar-generic CSR linear operator backed by [`ScalarCsrMatrix`].
 ///
-/// This lightweight wrapper wires the scalar-polymorphic sparse matrix storage
-/// into the [`LinOp`] trait by constructing an [`SpmvPlan`](ScalarSpmvPlan) at
-/// creation time. Real builds continue to select SIMD kernels when available
-/// while complex builds transparently fall back to the portable scalar path.
+/// This wrapper tracks [`StructureId`]/[`ValuesId`] so callers can mutate the
+/// owned matrix and keep format caches valid. After any in-place edits,
+/// call [`mark_structure_changed`] or [`mark_values_changed`] before reusing
+/// the operator in cached conversions.
+///
+/// The operator wires the scalar-polymorphic sparse matrix storage into the
+/// [`LinOp`] trait by constructing an [`SpmvPlan`](ScalarSpmvPlan) at creation
+/// time. Real builds continue to select SIMD kernels when available while
+/// complex builds transparently fall back to the portable scalar path.
 #[cfg(feature = "backend-faer")]
 pub struct GenericCsrOp<S: KrystScalar> {
     matrix: Arc<ScalarCsrMatrix<S>>,
@@ -294,6 +307,10 @@ use faer::Mat;
 
 /// Wrap your concrete dense matrix with `DenseOp` to provide stable
 /// `StructureId`/`ValuesId` so conversions and preconditioner reuse can be cached.
+///
+/// Callers that modify the underlying matrix in place must invoke
+/// [`mark_structure_changed`] or [`mark_values_changed`] as appropriate so
+/// cached conversions/preconditioners can detect the new contents.
 #[cfg(feature = "backend-faer")]
 pub struct DenseOp {
     mat: Arc<Mat<f64>>,
@@ -418,6 +435,9 @@ impl LinOp for DenseOp {
 ///   thresholds and falls back to the serial kernel for small systems via
 ///   the canonical [`crate::matrix::spmv`] entry points.
 /// - See [`crate::parallel::threads`] for details on Rayon pool sizing.
+/// - After any in-place update to the wrapped CSR matrix, call
+///   [`mark_structure_changed`] or [`mark_values_changed`] so caches keyed on
+///   [`StructureId`] / [`ValuesId`] stay valid.
 #[cfg(feature = "backend-faer")]
 pub struct CsrOp<Scalar = S> {
     csr: Arc<CsrMatrix<Scalar>>,

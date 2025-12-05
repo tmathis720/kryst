@@ -215,14 +215,23 @@ impl HaloBuffers {
     }
 }
 
+/// Halo exchange plan for distributed CSR matvecs.
+///
+/// # Thread-safety
+/// - `HaloPlan` is `Sync` but assumes `post_halo` / `complete_halo` are invoked
+///   sequentially on a single thread per matvec; they must not be called from
+///   multiple threads concurrently.
+/// - The buffers guarded by this plan are never accessed from Rayon callbacks
+///   while a matvec is running.
 pub struct HaloPlan {
     pub index: Arc<HaloIndexPlan>,
     buffers: HaloBuffers,
 }
 
-// Safety: All accesses to `send_buf`/`recv_buf` occur within `post_halo`/`complete_halo`
-// which are invoked sequentially within a matvec. No concurrent aliasing occurs while
-// Rayon executes because the halo buffers are never touched inside the parallel regions.
+// SAFETY: HaloPlan is shared immutably and all mutation occurs through the
+// sequential `post_halo` / `complete_halo` calls on a single matvec. Rayon
+// parallel regions never touch `send_buf`/`recv_buf`/`ghost_flat`, so the plan
+// can safely be shared while still requiring external synchronization.
 unsafe impl Sync for HaloPlan {}
 
 impl HaloPlan {
@@ -254,7 +263,7 @@ impl HaloPlan {
                 let buf = unsafe { &mut *buf_lock.get() };
                 let slice = halo_slice_mut(buf);
                 let req = self.index.comm.irecv_from(slice, nbr as i32);
-                recv_reqs.push(req);
+        recv_reqs.push(req);
             }
         }
 
@@ -318,5 +327,39 @@ fn halo_slice_mut(buf: &mut Vec<S>) -> &mut [R] {
     #[cfg(not(feature = "complex"))]
     {
         unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut R, buf.len()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel::{NoComm, UniverseComm};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn halo_plan_rejects_local_neighbor() {
+        let comm = UniverseComm::NoComm(NoComm);
+        let row_part = Arc::new(vec![0usize, 4usize]);
+        let mut recv_map = BTreeMap::new();
+        recv_map.insert(0, vec![1, 2]);
+        let res = HaloPlan::new(comm, row_part, 0, 4, recv_map);
+        assert!(matches!(res, Err(KError::InvalidInput(_))));
+        if let Err(KError::InvalidInput(msg)) = res {
+            assert!(msg.contains("local rank"));
+        }
+    }
+
+    #[test]
+    fn halo_plan_rejects_out_of_bounds_neighbor() {
+        let comm = UniverseComm::NoComm(NoComm);
+        let row_part = Arc::new(vec![0usize, 4usize]);
+        let mut recv_map = BTreeMap::new();
+        recv_map.insert(5, vec![8]);
+        let res = HaloPlan::new(comm, row_part, 0, 4, recv_map);
+        assert!(matches!(res, Err(KError::InvalidInput(_))));
+        if let Err(KError::InvalidInput(msg)) = res {
+            assert!(msg.contains("neighbor rank 5 out of bounds"))
+        }
     }
 }

@@ -33,6 +33,20 @@ pub trait CscMatRef<S: KrystScalar> {
     fn col_ptr(&self) -> &[usize];
     fn row_idx(&self) -> &[usize];
     fn values(&self) -> &[S];
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
+        assert_eq!(x.len(), self.nrows());
+        assert_eq!(y.len(), self.ncols());
+        y.fill(S::zero());
+        let cp = self.col_ptr();
+        let ri = self.row_idx();
+        let vv = self.values();
+        for col in 0..self.ncols() {
+            for ptr in cp[col]..cp[col + 1] {
+                let row = ri[ptr];
+                y[col] = y[col] + vv[ptr] * x[row];
+            }
+        }
+    }
 }
 
 /// Mutable CSC interface.

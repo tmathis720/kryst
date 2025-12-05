@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use faer::Mat;
 use kryst::matrix::op::LinOp;
 use kryst::parallel::{NoComm, UniverseComm};

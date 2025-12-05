@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use crate::algebra::prelude::*;
 use crate::matrix::op::DenseOp;
 use crate::parallel::{NoComm, UniverseComm};

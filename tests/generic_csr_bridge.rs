@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use std::sync::Arc;
 
 use kryst::algebra::prelude::*;

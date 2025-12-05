@@ -2,6 +2,7 @@
 
 use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, SubmatrixExtract};
+use crate::matrix::sparse_api::CsrMatRef;
 
 #[cfg(all(feature = "backend-faer", feature = "simd"))]
 use crate::matrix::spmv::{SpmvPlan, SpmvTuning, build_plan_owned as build_spmv_plan};
@@ -24,7 +25,21 @@ pub trait SparseMatrix {
     fn values(&self) -> &[Self::Scalar];
 }
 
-/// CSR matrix with structural access available for any scalar type.
+/// Compressed Sparse Row (CSR) matrix (structure + values).
+///
+/// # Invariants
+/// - `row_ptr.len() == nrows + 1`.
+/// - `row_ptr` is non-decreasing and `row_ptr[i] <= row_ptr[i + 1]` for each row.
+/// - `col_idx.len() == values.len()`.
+/// - Within each row, `col_idx[row_ptr[i]..row_ptr[i + 1]]` is sorted ascending.
+///   Sorted rows are required for:
+///   - `diag_pos` lookups in [`build_diag_pos`],
+///   - some SpGEMM / SpMV algorithms, and
+///   - interop with backend caches (Faer, format conversions).
+/// - Column indices satisfy `col_idx[*] < ncols`.
+///
+/// Callers that mutate the structure must preserve these invariants and invoke
+/// [`CsrMatrix::build_diag_pos`] before relying on diagonal access.
 #[derive(Clone)]
 pub struct CsrMatrix<T> {
     nrows: usize,
@@ -46,6 +61,12 @@ pub struct CsrMatrix<T> {
 
 impl<T> CsrMatrix<T> {
     /// Build a CSR from raw row‐ptr, col‐idx, and values.
+    ///
+    /// # Invariants
+    /// - All of the invariants documented on [`CsrMatrix`] hold.
+    /// - Debug builds will assert the structure matches those requirements,
+    ///   including per-row sortedness and column bounds.
+    /// - Diagonal positions are cached via [`build_diag_pos`] before returning.
     pub fn from_csr(
         nrows: usize,
         ncols: usize,
@@ -53,6 +74,23 @@ impl<T> CsrMatrix<T> {
         col_idx: Vec<usize>,
         values: Vec<T>,
     ) -> Self {
+        debug_assert_eq!(row_ptr.len(), nrows + 1);
+        debug_assert_eq!(col_idx.len(), values.len());
+        debug_assert!(row_ptr.windows(2).all(|w| w[0] <= w[1]));
+        debug_assert!(col_idx.iter().all(|&j| j < ncols));
+        #[cfg(debug_assertions)]
+        {
+            for i in 0..nrows {
+                let start = row_ptr[i];
+                let end = row_ptr[i + 1];
+                debug_assert!(
+                    col_idx[start..end]
+                        .windows(2)
+                        .all(|w| w[0] <= w[1]),
+                    "CsrMatrix::from_csr: row {i} has unsorted column indices"
+                );
+            }
+        }
         let mut this = Self {
             nrows,
             ncols,
@@ -433,6 +471,24 @@ where
     }
 }
 
+impl<T: KrystScalar> CsrMatRef<T> for CsrMatrix<T> {
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+    fn ncols(&self) -> usize {
+        self.ncols
+    }
+    fn row_ptr(&self) -> &[usize] {
+        &self.row_ptr
+    }
+    fn col_idx(&self) -> &[usize] {
+        &self.col_idx
+    }
+    fn values(&self) -> &[T] {
+        &self.values
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +552,39 @@ mod tests {
         assert_eq!(
             y,
             vec![S::from_real(1.0), S::from_real(8.0), S::from_real(8.0)]
+        );
+    }
+
+    #[test]
+    fn diag_ref_tracks_cached_positions() {
+        let m = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 4, 5],
+            vec![0, 1, 1, 2, 2],
+            vec![
+                S::from_real(1.0),
+                S::from_real(2.0),
+                S::from_real(3.0),
+                S::from_real(4.0),
+                S::from_real(5.0),
+            ],
+        );
+        assert_eq!(m.diag_ref(0).map(|v| *v), Some(S::from_real(1.0)));
+        assert_eq!(m.diag_ref(1).map(|v| *v), Some(S::from_real(3.0)));
+        assert_eq!(m.diag_ref(2).map(|v| *v), Some(S::from_real(5.0)));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "unsorted column indices")]
+    fn from_csr_panics_on_unsorted_row() {
+        let _ = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![1, 0, 0, 1], // unsorted in row 0
+            vec![1.0, 1.0, 1.0, 1.0],
         );
     }
 }

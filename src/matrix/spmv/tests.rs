@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use crate::error::KError;
 use crate::matrix::spmv::SpmvTuning;
 #[cfg(all(feature = "simd", not(feature = "complex")))]

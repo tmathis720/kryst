@@ -25,12 +25,21 @@
 //! cargo run --example options_demo -- -help
 //! ```
 
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("options_demo requires the backend-faer feature.");
+}
+
+#[cfg(feature = "backend-faer")]
 use faer::Mat;
+#[cfg(feature = "backend-faer")]
 use kryst::config::options::parse_all_options;
+#[cfg(feature = "backend-faer")]
 use kryst::context::ksp_context::KspContext;
 use std::env;
 use std::sync::Arc;
 
+#[cfg(feature = "backend-faer")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();

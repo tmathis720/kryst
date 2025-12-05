@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 mod support;
 use faer::Mat;
 use kryst::algebra::prelude::*;

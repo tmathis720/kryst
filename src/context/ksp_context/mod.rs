@@ -1342,7 +1342,7 @@ impl KspContext {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
     use crate::context::pc_context::PcType;

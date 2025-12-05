@@ -569,7 +569,7 @@ impl LinearSolver for BiCgStabSolver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;

@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 #![cfg(feature = "mat-values-fingerprint")]
 
 use faer::Mat;

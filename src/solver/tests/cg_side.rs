@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 #[cfg(test)]
 mod tests_cg_side {
     use crate::algebra::prelude::*;

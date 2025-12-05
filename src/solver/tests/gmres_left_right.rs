@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 #[cfg(test)]
 mod tests_gmres_lr {
     use crate::algebra::prelude::*;

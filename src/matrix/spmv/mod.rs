@@ -23,6 +23,7 @@ use crate::algebra::prelude::*;
 use crate::context::ksp_context::BlockVec;
 use crate::error::KError;
 use crate::matrix::sparse_api::{CscMatRef, CsrMatRef};
+#[cfg(feature = "backend-faer")]
 use faer::{MatMut, MatRef};
 
 #[inline]
@@ -397,6 +398,7 @@ where
 /// Computes `Y = A * X` where `A` is CSR and `X`, `Y` are column-major dense
 /// matrices provided as [`MatRef`] and [`MatMut`] respectively. The caller must
 /// zero `Y` prior to invocation if accumulation is not desired.
+#[cfg(feature = "backend-faer")]
 pub fn csr_spmm_dense<S, A>(a: &A, x: MatRef<'_, S>, mut y: MatMut<'_, S>) -> Result<(), KError>
 where
     S: KrystScalar,

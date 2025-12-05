@@ -10,10 +10,18 @@
 //! ```bash
 //! cargo run --example convergence_demo
 //! ```
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("convergence_demo requires the backend-faer feature.");
+}
 
+#[cfg(feature = "backend-faer")]
 use faer::Mat;
+#[cfg(feature = "backend-faer")]
 use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(feature = "backend-faer")]
 use kryst::context::pc_context::PcType;
+#[cfg(feature = "backend-faer")]
 use std::sync::Arc;
 
 fn create_test_matrix(n: usize) -> Mat<f64> {
@@ -29,6 +37,7 @@ fn create_test_matrix(n: usize) -> Mat<f64> {
     })
 }
 
+#[cfg(feature = "backend-faer")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Flexible Convergence & Divergence Tests Demo");
     println!("============================================");

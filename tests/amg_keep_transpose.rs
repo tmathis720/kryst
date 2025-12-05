@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use faer::Mat;
 use fixtures::csr_poisson_1d;
 use kryst::algebra::prelude::*;

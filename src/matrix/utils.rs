@@ -117,6 +117,12 @@ pub fn to_sparse_with_tolerance(matrix: &Mat<f64>, drop_tol: f64) -> CsrMatrix<f
 /// Generic sparse C = A * B using Gustavson's algorithm on CSR arrays.
 /// Returns a CSR with sorted columns per row and optional dropping.
 ///
+/// # Requirements
+/// - `a` and `b` must already satisfy the CSR invariants documented on
+///   [`CsrMatrix`], including sorted `col_idx` slices per row.
+/// - Column indices stay in ascending order as rows are merged; duplicates
+///   within a row are collapsed during accumulation before applying `drop_tol`.
+///
 /// In complex builds, accumulation uses the real component of each product and
 /// values are lifted with `T::from_real`, so imaginary parts remain zero.
 /// `drop_tol`: entries with |v| <= drop_tol are removed.
@@ -266,6 +272,10 @@ pub mod poisson {
 /// The discretisation uses a nine-point stencil so that cross-derivative terms
 /// are represented explicitly; the diagonal entry is chosen to preserve row
 /// sum symmetry so the matrix remains SPD.
+/// # CSR invariants
+/// - The intermediate entries are sorted and deduplicated before CSR assembly.
+/// - Each row ends up with sorted columns and a single diagonal entry.
+/// - Diagonal dominance is enforced via the accumulated contribution of neighbors.
 pub fn anisotropic_poisson_2d(n: usize, theta: f64, eps: f64) -> CsrMatrix<f64> {
     assert!(n > 1, "grid must be at least 2 × 2");
     let nx = n;
@@ -357,6 +367,9 @@ pub fn anisotropic_poisson_2d(n: usize, theta: f64, eps: f64) -> CsrMatrix<f64> 
 ///
 /// The diffusion part is the standard 5-point Laplacian, while the
 /// convection term uses a simple upwind bias controlled by the Peclet number.
+/// # CSR invariants
+/// - Each row is sorted because we sort/deduplicate the small stencil entries before appending.
+/// - Duplicate neighbors (e.g., east/west) are merged so each column index appears once.
 pub fn convection_diffusion_2d(n: usize, peclet: f64) -> CsrMatrix<f64> {
     assert!(n > 1, "grid must be at least 2 × 2");
     let nx = n;
@@ -437,6 +450,11 @@ pub fn default_spmv_tuning() -> SpmvTuning {
 }
 
 /// Baseline Sparse C = A * B using per-row BTreeMap accumulation.
+///
+/// # Requirements
+/// - Inputs must satisfy the CSR invariants: sorted rows and `col_idx < ncols`.
+/// - Row storage is merged at the end via the `BTreeMap`, so duplicates are
+///   automatically coalesced while preserving ascending order.
 ///
 /// In complex builds, accumulation uses the real component of each product and
 /// values are lifted with `T::from_real`, so imaginary parts remain zero.
@@ -725,6 +743,12 @@ pub fn compute_adaptive_threshold(a: &Mat<f64>, base_threshold: f64) -> f64 {
 /// Generate a 2D Poisson matrix on an `n_x` by `n_y` grid using the 5-point stencil.
 ///
 /// The resulting matrix is SPD with size `(n_x*n_y)`.
+///
+/// # CSR invariants
+/// - Rows are assembled in geometric order (west, south, diag, east, north) so that
+///   each `col_idx[row_ptr[i]..row_ptr[i+1]]` is sorted.
+/// - No duplicate column indices occur within a row.
+/// - Diagonal entries exist where expected, allowing [`CsrMatrix::build_diag_pos`] to find them.
 pub fn poisson_2d(n_x: usize, n_y: usize) -> CsrMatrix<f64> {
     let n = n_x * n_y;
     let mut row_ptr = Vec::with_capacity(n + 1);
@@ -761,6 +785,11 @@ pub fn poisson_2d(n_x: usize, n_y: usize) -> CsrMatrix<f64> {
 /// Generate a 3D Poisson matrix on an `n_x` by `n_y` by `n_z` grid using the 7-point stencil.
 ///
 /// The resulting matrix is symmetric positive definite with size `(n_x*n_y*n_z)`.
+///
+/// # CSR invariants
+/// - Neighbor entries are appended in increasing order so per-row columns stay sorted.
+/// - Diagonal entries are included once and neighbors never duplicate per row.
+/// - The pattern produced matches the finite-difference stencil expected by downstream solvers.
 pub fn poisson_3d(n_x: usize, n_y: usize, n_z: usize) -> CsrMatrix<f64> {
     let n = n_x * n_y * n_z;
     let mut row_ptr = Vec::with_capacity(n + 1);
@@ -813,6 +842,11 @@ pub fn poisson_3d(n_x: usize, n_y: usize, n_z: usize) -> CsrMatrix<f64> {
 /// Generate a random symmetric positive definite banded matrix.
 ///
 /// `bandwidth` controls the half-bandwidth; larger values yield denser matrices.
+///
+/// # CSR invariants
+/// - Entries are sorted because the tuple vector is sorted by `(row, col)` before assembly.
+/// - Duplicate `(i, j)` pairs are merged during the CSR build so each column appears at most once per row.
+/// - Diagonal dominance is enforced via accumulated absolute off-diagonal contributions.
 pub fn random_spd(n: usize, bandwidth: usize) -> CsrMatrix<f64> {
     let mut rng = Rand64::new(0);
     let mut entries: Vec<(usize, usize, f64)> = Vec::new();
@@ -856,7 +890,7 @@ pub fn random_spd(n: usize, bandwidth: usize) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
     use crate::matrix::sparse::CsrMatrix;

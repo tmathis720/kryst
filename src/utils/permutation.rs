@@ -137,7 +137,7 @@ pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
     Permutation { p: order, pinv }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
 

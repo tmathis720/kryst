@@ -33,7 +33,6 @@ pub mod op_bridge;
 pub mod op_shell;
 pub mod parcsr;
 pub mod sparse;
-#[cfg(feature = "backend-faer")]
 pub mod spmv;
 pub mod utils;
 

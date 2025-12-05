@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 //! Integration test for DRIVCAV matrix family support.
 //! cargo run --example mpi_amg_gmres_demo -- -ksp_type gmres -pc_type ilutp -pc_ilut_max_fill 10 -pc_ilut_perm_tol 0.1
 //! Tests the comprehensive ILUTP implementation with option parsing,

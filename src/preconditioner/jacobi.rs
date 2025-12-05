@@ -183,7 +183,7 @@ impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacob
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;

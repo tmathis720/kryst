@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use kryst::algebra::blas::nrm2;
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;

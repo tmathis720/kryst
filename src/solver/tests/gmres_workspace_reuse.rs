@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 #[cfg(test)]
 mod tests_gmres_workspace_reuse {
     use crate::algebra::prelude::*;

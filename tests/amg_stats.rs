@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use std::time::Duration;
 
 use faer::Mat;

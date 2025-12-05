@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use kryst::config::options::{CgVariant, KspOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::{CsrOp, LinOp};

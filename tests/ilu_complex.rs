@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 #![cfg(all(feature = "complex", feature = "complex_ilu"))]
 
 use faer::Mat;

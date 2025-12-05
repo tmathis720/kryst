@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 use faer::Mat;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::PcSide;

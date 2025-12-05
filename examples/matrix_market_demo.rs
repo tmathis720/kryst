@@ -1,6 +1,11 @@
 #![cfg_attr(feature = "complex", allow(dead_code))]
 
-#[cfg(feature = "complex")]
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("matrix_market_demo requires the backend-faer feature.");
+}
+
+#[cfg(all(feature = "backend-faer", feature = "complex"))]
 fn main() {
     eprintln!(
         "matrix_market_demo is only available for real-valued builds.\n\
@@ -8,7 +13,7 @@ fn main() {
     );
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 mod real_demo {
     //! Unified Matrix Market demo covering serial and MPI runs with multiple solver/preconditioner
     //! combinations. The example keeps the solver boundary matrix-free and reports iteration metrics
@@ -827,7 +832,7 @@ mod real_demo {
     }
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), kryst::error::KError> {
     real_demo::run()
 }

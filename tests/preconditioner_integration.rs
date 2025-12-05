@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 //! Integration tests for preconditioners and solvers in the KrylovKit library.
 //!
 //! This module verifies that various preconditioners (e.g., Jacobi, ILU0) work correctly

@@ -1,3 +1,4 @@
+#![cfg(feature = "backend-faer")]
 //! Tests for core dense matrix operations: matrix-vector multiplication, dot product, and norm.
 //!
 //! These tests verify the correctness of the MatVec and InnerProduct trait implementations

@@ -714,6 +714,7 @@ mod tests {
         _is_pc(&pc);
     }
 
+    #[cfg(feature = "backend-faer")]
     #[test]
     fn chebyshev_validates_bounds() {
         let bad = PcOptions {
@@ -727,6 +728,7 @@ mod tests {
         assert!(matches!(err, KError::InvalidInput(_)));
     }
 
+    #[cfg(feature = "backend-faer")]
     #[test]
     fn factory_builds_asm_from_options() {
         let opts = crate::config::options::PcOptions {

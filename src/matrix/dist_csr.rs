@@ -57,6 +57,9 @@ fn self_idx(plan: &HaloIndexPlan, gcol: usize) -> usize {
 /// `DistCsrOp` is `Send + Sync` but not reentrant: concurrent `matvec` calls on
 /// the same instance are not supported because the internal halo buffers are
 /// reused per operation.
+/// - Even though Rayon may be used for local/border rows, the halo exchange
+///   (`post_halo`/`complete_halo`) runs single-threaded per matvec and must not
+///   be invoked concurrently.
 pub struct DistCsrOp {
     pub n_global: usize,
     pub row_start: usize,
