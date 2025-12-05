@@ -6,6 +6,9 @@
 //! with partial pivoting to improve stability for difficult matrices such as those
 //! arising from discretized Navier-Stokes equations.
 //!
+//! For non-pivoting ILUT on `faer::Mat<f64>`, prefer the canonical `Ilu` implementation
+//! with `IluType::ILUT`.
+//!
 //! The algorithm follows the approach described in Saad's "Iterative Methods for
 //! Sparse Linear Systems" with modifications for numerical stability.
 
@@ -142,6 +145,8 @@ impl Ilutp {
 
             let pivot = work_matrix[(k, k)];
             if pivot.abs() < 1e-12 {
+                // TODO: consider reusing `preconditioner::pivot` handling (e.g., `PivotPolicy`)
+                // for consistent stabilization instead of this ad-hoc regularization.
                 // Handle near-zero pivot by regularization
                 work_matrix[(k, k)] = if pivot >= 0.0 { 1e-12 } else { -1e-12 };
                 eprintln!(

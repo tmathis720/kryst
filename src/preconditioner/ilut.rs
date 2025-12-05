@@ -1,23 +1,10 @@
-//! ILUT preconditioner stub
+//! Row-filtering preconditioner with threshold and fill-in control.
 //!
-//! Implements ILUT (Incomplete LU with threshold and fill-in control) as a preconditioner.
+//! This streams each row, drops entries below a magnitude threshold, keeps at most `fill`
+//! entries, and splits the remaining entries into L (j < i) and U (j >= i) parts.
+//! It does **not** perform an ILUT elimination.
 //!
-//! # Overview
-//!
-//! ILUT is an incomplete LU factorization with user-specified fill-in and drop tolerance.
-//! It produces lower (L) and upper (U) triangular factors by dropping small entries and limiting
-//! the number of nonzeros per row, making it suitable as a preconditioner for iterative solvers
-//! on sparse matrices. The drop tolerance controls numerical dropping, and the fill parameter
-//! limits the number of nonzeros per row.
-//!
-//! # Usage
-//!
-//! - Create an `Ilut` preconditioner with the desired fill and drop tolerance.
-//! - Call `setup` with the system matrix to compute the factors.
-//! - Use `apply` to solve M⁻¹r ≈ A⁻¹r using the computed factors.
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
+//! For a true ILUT factorization, use `Ilu` with `IluType::ILUT`.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
@@ -53,14 +40,15 @@ impl Default for SparseRow {
     }
 }
 
-/// ILUT preconditioner struct.
+/// Row-filtering preconditioner struct.
 ///
+/// This preconditioner performs threshold-based dropping and row splitting without elimination.
 /// - `fill`: Maximum number of nonzeros per row (fill-in control)
 /// - `droptol`: Drop tolerance (numerical dropping)
-/// - `l`: Lower triangular factor (sparse row format)
-/// - `u`: Upper triangular factor (sparse row format)
+/// - `l`: Lower triangular portion (sparse row format)
+/// - `u`: Upper triangular portion (sparse row format)
 /// - `n`: Matrix size
-pub struct Ilut {
+pub struct RowFilterPreconditioner {
     pub fill: usize,
     pub droptol: R,
     pub l: Vec<SparseRow>,
@@ -68,7 +56,14 @@ pub struct Ilut {
     pub n: usize,
 }
 
-impl Ilut {
+/// Deprecated name; this type is *not* a true ILUT factorization.
+/// Use `RowFilterPreconditioner` or `Ilu` with `IluType::ILUT` for a real ILUT factorization.
+#[deprecated(
+    note = "Ilut here is not a true ILUT factorization. Use Ilu (IluType::ILUT) or RowFilterPreconditioner instead."
+)]
+pub type Ilut = RowFilterPreconditioner;
+
+impl RowFilterPreconditioner {
     /// Create a new ILUT preconditioner with fill and drop tolerance.
     pub fn new(fill: usize, droptol: R) -> Self {
         Self {
@@ -81,7 +76,7 @@ impl Ilut {
     }
 }
 
-impl Ilut {
+impl RowFilterPreconditioner {
     fn apply_slice(
         &self,
         _side: crate::preconditioner::PcSide,
@@ -91,7 +86,7 @@ impl Ilut {
         let n = self.n;
         if r.len() != n || z.len() != n {
             return Err(KError::InvalidInput(format!(
-                "Ilut::apply dimension mismatch: n={}, r.len()={}, z.len()={}",
+                "RowFilterPreconditioner::apply dimension mismatch: n={}, r.len()={}, z.len()={}",
                 n,
                 r.len(),
                 z.len()
@@ -125,7 +120,7 @@ impl Ilut {
     }
 }
 
-impl<M, V> Preconditioner<M, V> for Ilut
+impl<M, V> Preconditioner<M, V> for RowFilterPreconditioner
 where
     M: crate::core::traits::MatVec<V> + MatShape + std::ops::Index<(usize, usize), Output = S>,
     V: AsRef<[S]> + AsMut<[S]>,
@@ -185,7 +180,7 @@ where
 }
 
 #[cfg(feature = "complex")]
-impl KPreconditioner for Ilut {
+impl KPreconditioner for RowFilterPreconditioner {
     type Scalar = S;
 
     #[inline]
@@ -204,7 +199,7 @@ impl KPreconditioner for Ilut {
     }
 }
 
-impl LocalPreconditioner for Ilut {
+impl LocalPreconditioner for RowFilterPreconditioner {
     fn dims(&self) -> (usize, usize) {
         (self.n, self.n)
     }
@@ -258,7 +253,7 @@ mod tests {
             vec![S::from_real(1.0), S::zero()],
             vec![S::zero(), S::from_real(1.0)],
         ]);
-        let mut pc: Ilut = Ilut::new(2, R::from_real(1e-12));
+        let mut pc = RowFilterPreconditioner::new(2, R::from_real(1e-12));
         pc.setup(&a).unwrap();
         let r = vec![S::from_real(2.0), S::from_real(3.0)];
         let mut z = vec![S::zero(); 2];
@@ -278,7 +273,7 @@ mod tests {
             vec![S::from_real(-1.0), S::from_real(2.0), S::from_real(-1.0)],
             vec![S::zero(), S::from_real(-1.0), S::from_real(2.0)],
         ]);
-        let mut pc: Ilut = Ilut::new(3, R::from_real(1e-12));
+        let mut pc = RowFilterPreconditioner::new(3, R::from_real(1e-12));
         pc.setup(&a).unwrap();
         let r = vec![S::from_real(1.0), S::from_real(2.0), S::from_real(3.0)];
         let mut z = vec![S::zero(); 3];
@@ -299,7 +294,7 @@ mod tests {
             vec![S::from_real(4.0), S::from_real(1.0)],
             vec![S::from_real(2.0), S::from_real(3.0)],
         ]);
-        let mut pc: Ilut = Ilut::new(2, R::from_real(1e-9));
+        let mut pc = RowFilterPreconditioner::new(2, R::from_real(1e-9));
         pc.setup(&a).unwrap();
 
         let rhs_real = vec![S::from_real(5.0), S::from_real(7.0)];

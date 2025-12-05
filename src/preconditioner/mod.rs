@@ -500,6 +500,7 @@ pub mod jacobi;
 pub mod pivot;
 #[cfg(feature = "backend-faer")]
 pub mod sor;
+pub mod tri_solve;
 
 // Re-exports for convenience
 #[cfg(feature = "backend-faer")]
@@ -529,12 +530,15 @@ pub use ilu::Ilu0;
 #[cfg(feature = "backend-faer")]
 pub use ilup::Ilup;
 #[cfg(feature = "backend-faer")]
-pub use ilut::Ilut;
+pub use ilut::{Ilut, RowFilterPreconditioner};
 #[cfg(feature = "backend-faer")]
 pub use ilutp::Ilutp;
 pub use jacobi::Jacobi;
 #[cfg(feature = "backend-faer")]
 pub use sor::Sor;
+
+pub use pivot::{PivotMode, PivotPolicy, PivotScale, PivotSignPolicy, PivotStats};
+pub use tri_solve::TriangularSolve;
 
 /// Unified preconditioner enum for all supported types.
 pub use crate::context::pc_context::{PC, SparsityPattern};

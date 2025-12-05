@@ -1,71 +1,21 @@
 #![cfg(feature = "backend-faer")]
 
-//! HYPRE-Inspired ILU Factorization Implementation
+//! HYPRE-inspired ILU factorization (canonical implementation).
 //!
-//! This module provides a comprehensive, production-grade implementation of Incomplete LU (ILU)
-//! factorization inspired by HYPRE's ParILU. It includes multiple ILU variants (ILU(k), ILUT),
-//! advanced configuration options, robust error handling, workspace optimization, parallel execution,
-//! and comprehensive monitoring capabilities.
+//! This module provides Kryst's canonical implementation for:
+//! - **ILU(0)** (`IluType::ILU0`)
+//! - **MILU(0)** (`IluType::MILU0`)
+//! - **ILU(k)** (`IluType::ILUK`)
+//! - **ILUT** (`IluType::ILUT`)
+//!
+//! It targets `faer::Mat<f64>` with CSR representation for real-valued matrices.
+//! For complex problems, prefer the K-preconditioner bridge or a simpler real-valued preconditioner.
 //!
 //! # Features
-//!
-//! ## ILU Variants
-//! - **ILU(0)**: Zero fill-in factorization (original sparsity pattern preserved)
-//! - **ILU(k)**: Level-of-fill factorization with k levels of fill-in
-//! - **ILUT**: Threshold-based factorization with drop tolerance
-//! - **Modified ILU**: Modified factorization for better stability
-//!
-//! ## HYPRE-Inspired Configuration
-//! - **Drop Tolerances**: Configurable drop thresholds for numerical stability
-//! - **Fill Levels**: Control memory usage vs. accuracy trade-off
-//! - **Reordering**: Built-in support for various reordering strategies
-//! - **Triangular Solve Options**: Exact vs. iterative triangular solves
-//! - **Jacobi Iterations**: Configurable Jacobi smoothing for triangular solves
-//!
-//! ## Parallel & Distributed Computing
-//! - **Thread Parallelism**: Rayon-based parallel factorization and triangular solves
-//! - **Workspace Optimization**: Preallocated buffers for efficient repeated solves
-//! - **Chunk-based Processing**: Configurable chunk sizes for optimal cache performance
-//! - **Distributed Memory**: MPI support for distributed matrix factorization (planned)
-//! - **NUMA Awareness**: Thread affinity and memory layout optimization (planned)
-//!
-//! ## Production-Grade Features
-//! - **IEEE Safety**: NaN/Inf detection and handling
-//! - **Pivot Monitoring**: Zero pivot detection and mitigation
-//! - **Memory Management**: Workspace reuse and optimization
-//! - **Performance Metrics**: Setup complexity and solve timing
-//! - **Comprehensive Logging**: Configurable verbosity for debugging
-//!
-//! # Usage Examples
-//!
-//! ```rust
-//! // Basic ILU(0) with HYPRE defaults
-//! let ilu = IluBuilder::new()
-//!     .ilu_type(IluType::ILU0)
-//!     .build();
-//!
-//! // Advanced ILUT configuration with parallel execution
-//! let ilu = IluBuilder::new()
-//!     .ilu_type(IluType::ILUT)
-//!     .drop_tolerance(1e-4)
-//!     .max_fill_per_row(50)
-//!     .enable_reordering(ReorderingType::RCM)
-//!     .triangular_solve(TriSolveType::Iterative)
-//!     .jacobi_iterations(3, 3)
-//!     .enable_parallel()
-//!     .parallel_chunk_size(128)
-//!     .enable_logging()
-//!     .build();
-//!
-//! // High-performance configuration for large problems
-//! let ilu = IluBuilder::new()
-//!     .ilu_type(IluType::ILU0)
-//!     .enable_parallel_factorization()
-//!     .enable_parallel_triangular_solve()
-//!     .parallel_chunk_size(256)
-//!     .enable_distributed()  // For MPI environments
-//!     .build();
-//! ```
+//! - Drop tolerances and fill control inspired by HYPRE ParILU.
+//! - Optional reordering, triangular solve modes, and logging hooks.
+//! - Parallel factorization/triangular solves (`rayon` feature) with workspace reuse.
+//! - IEEE safety checks and pivot monitoring to avoid zero pivots.
 //!
 //! # References
 //! - HYPRE ParILU implementation
@@ -78,7 +28,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
 use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
-use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*};
+use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
@@ -169,7 +119,7 @@ pub struct IluConfig {
     pub ieee_checks: bool,
     /// Enable workspace optimization
     pub optimize_workspace: bool,
-    /// Pivot handling policy
+    /// Pivot handling policy (see [`crate::preconditioner::pivot`] for details)
     pub pivot_policy: PivotPolicy,
     /// Enable parallel factorization (requires rayon feature)
     pub enable_parallel_factorization: bool,
@@ -646,18 +596,6 @@ impl Ilu {
         }
 
         Ok(())
-    }
-
-    /// Enhanced matrix analysis using matrix utils
-    #[allow(dead_code)]
-    fn analyze_matrix_for_ilu(matrix: &Mat<f64>) -> (usize, f64, f64) {
-        utils::analyze_matrix_properties(matrix)
-    }
-
-    /// Check matrix for IEEE issues using matrix utils
-    #[allow(dead_code)]
-    fn check_matrix_ieee(matrix: &Mat<f64>) -> Result<(), KError> {
-        utils::check_ieee_values(matrix)
     }
 
     /// Calculate setup complexity (HYPRE: operator_complexity)
@@ -1268,8 +1206,11 @@ impl Ilu {
 
 #[cfg(not(feature = "complex"))]
 impl Ilu {
-    /// Create specialized ILU preconditioners that leverage existing implementations
-    /// This provides a unified interface while potentially using optimized separate implementations
+    /// Create specialized ILU preconditioners that leverage existing implementations.
+    ///
+    /// - `IluType::ILUK`: uses classical ILU(p) (`Ilup`) for level-of-fill control.
+    /// - `IluType::ILUT`: uses the unified `Ilu` implementation (`compute_ilut`).
+    /// - Other variants: also use the unified `Ilu` implementation.
     pub fn create_specialized(
         config: IluConfig,
     ) -> Result<Box<dyn Preconditioner<Mat<S>, Vec<S>>>, KError> {
@@ -1279,20 +1220,8 @@ impl Ilu {
                 let ilup = crate::preconditioner::ilup::Ilup::new(config.level_of_fill);
                 Ok(Box::new(ilup))
             }
-            IluType::ILUT => {
-                // Use the dedicated ILUT implementation
-                let ilut = crate::preconditioner::ilut::Ilut::new(
-                    if config.max_fill_per_row > 0 {
-                        config.max_fill_per_row
-                    } else {
-                        20
-                    },
-                    config.drop_tolerance,
-                );
-                Ok(Box::new(ilut))
-            }
-            _ => {
-                // Use the unified implementation for other types
+            IluType::ILUT | _ => {
+                // Use the canonical Ilu implementation, including ILUT.
                 let ilu = Ilu::new_with_config(config)?;
                 Ok(Box::new(ilu))
             }
@@ -1523,6 +1452,18 @@ impl Ilu {
             );
         }
 
+        Ok(())
+    }
+}
+
+impl TriangularSolve<f64> for Ilu {
+    fn solve_lower_in_place(&self, x: &mut [f64]) -> Result<(), KError> {
+        self.solve_triangular_exact(true, x);
+        Ok(())
+    }
+
+    fn solve_upper_in_place(&self, x: &mut [f64]) -> Result<(), KError> {
+        self.solve_triangular_exact(false, x);
         Ok(())
     }
 }

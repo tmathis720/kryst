@@ -1,23 +1,21 @@
-//! ILU(p) preconditioner stub
+//! Classical ILU(p) preconditioner.
 //!
-//! Implements classical ILU(p) factorization with level-of-fill control (Saad §10.3).
-//! Used as a preconditioner for Krylov solvers.
+//! Implements the textbook ILU(p) factorization with explicit level-of-fill control (Saad §10.3).
+//! This preconditioner is useful for general `MatVec`/`MatShape` operators where the matrix is
+//! not stored in a dense or CSR-friendly format.
 //!
 //! # Overview
 //!
-//! ILU(p) is an incomplete LU factorization with a user-specified level-of-fill `p`.
-//! It produces lower (L) and upper (U) triangular factors with controlled fill-in, making it suitable
-//! as a preconditioner for iterative solvers on sparse matrices. The fill level determines how much
-//! additional nonzero structure is allowed beyond the original sparsity pattern.
+//! - Create an `Ilup` preconditioner with the desired level-of-fill.
+//! - Call `setup` with the system matrix to compute the L/U factors.
+//! - Use `apply` to perform the forward/backward sweeps (Ly = r, Uz = y).
 //!
-//! # Usage
+//! # Notes
 //!
-//! - Create an `Ilup` preconditioner with the desired fill level.
-//! - Call `setup` with the system matrix to compute the factors.
-//! - Use `apply` to solve M⁻¹r ≈ A⁻¹r using the computed factors.
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems, Section 10.3.
+//! - For HYPRE-style ILUK or ILUT on `faer::Mat<f64>`, prefer the canonical `Ilu` implementation
+//!   (`IluType::ILUK` / `IluType::ILUT`).
+//! - `Ilup` remains useful when you need a generic matrix interface or want to embed the fill
+//!   control logic in custom operators.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
