@@ -1,3 +1,12 @@
+//! Sparse matrix-vector multiplication backends.
+//!
+//! Canonical high-level entry points:
+//! - [`csr_matvec`]     – serial `y = A * x`
+//! - [`csr_matvec_par`] – parallel `y = A * x` (Rayon-aware)
+//! - [`csr_t_matvec_par`] – `y = A^T * x` using CSC or CSR gather
+//!
+//! These operate on any type implementing [`CsrAccess`], including
+//! [`crate::matrix::csr::CsrMatrix`] and [`crate::matrix::sparse::CsrMatrix`].
 pub mod plan;
 pub mod scalar;
 #[cfg(all(feature = "simd", not(feature = "complex")))]
@@ -430,6 +439,64 @@ where
     }
 
     Ok(())
+}
+
+/// Canonical serial CSR matvec: `y = A * x`.
+pub fn csr_matvec<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
+    spmv_csr_serial(a, x, y)
+}
+
+/// Canonical parallel CSR matvec: `y = A * x`.
+pub fn csr_matvec_par<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
+    spmv_csr_parallel(a, x, y)
+}
+
+/// Serial transpose CSR matvec: `y = A^T * x`.
+pub fn csr_t_matvec<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
+    if x.len() != a.nrows() || y.len() != a.ncols() {
+        return Err(KError::InvalidInput(
+            "csr_t_matvec: dimension mismatch".into(),
+        ));
+    }
+    scalar::spmv_t_scaled_csr(
+        a.nrows(),
+        a.row_ptr(),
+        a.col_idx(),
+        a.values(),
+        S::one(),
+        x,
+        S::zero(),
+        y,
+    );
+    Ok(())
+}
+
+/// Canonical transpose CSR matvec: `y = A^T * x`.
+///
+/// Uses CSC backend where available, otherwise CSR gather path.
+pub fn csr_t_matvec_par<S, A>(
+    a: &A,
+    t_backend: TBackend<'_, S>,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError>
+where
+    S: KrystScalar,
+    A: CsrAccess<S>,
+{
+    t_spmv_csr_parallel(a, t_backend, x, y)
 }
 
 #[cfg(test)]

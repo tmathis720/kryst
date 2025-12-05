@@ -218,8 +218,7 @@ impl<T: KrystScalar> CsrMatrix<T> {
 
     /// Sparse matrix-vector product with default scaling: y = A * x.
     pub fn spmv(&self, x: &[T], y: &mut [T]) {
-        self.spmv_scaled(T::one(), x, T::zero(), y)
-            .expect("spmv dimension mismatch");
+        crate::matrix::spmv::csr_matvec(self, x, y).expect("spmv dimension mismatch");
     }
 
     /// Sparse matrix-vector product: y = alpha * A * x + beta * y.
@@ -240,19 +239,16 @@ impl<T: KrystScalar> CsrMatrix<T> {
             )));
         }
 
-        for i in 0..self.nrows() {
-            let row_start = self.row_ptr[i];
-            let row_end = self.row_ptr[i + 1];
-
-            let mut sum = T::zero();
-            for idx in row_start..row_end {
-                let j = self.col_idx[idx];
-                sum = sum + self.values[idx] * x[j];
-            }
-
-            y[i] = alpha * sum + beta * y[i];
-        }
-
+        crate::matrix::spmv::scalar::spmv_scaled_csr(
+            self.nrows(),
+            self.row_ptr(),
+            self.col_idx(),
+            self.values(),
+            alpha,
+            x,
+            beta,
+            y,
+        );
         Ok(())
     }
 
@@ -274,25 +270,16 @@ impl<T: KrystScalar> CsrMatrix<T> {
             )));
         }
 
-        // y = beta * y
-        for yi in y.iter_mut() {
-            *yi = *yi * beta;
-        }
-
-        let rp = &self.row_ptr;
-        let cj = &self.col_idx;
-        let vv = &self.values;
-
-        for i in 0..self.nrows() {
-            let xi = x[i];
-            let row_start = rp[i];
-            let row_end = rp[i + 1];
-            for idx in row_start..row_end {
-                let j = cj[idx];
-                y[j] = y[j] + alpha * vv[idx] * xi;
-            }
-        }
-
+        crate::matrix::spmv::scalar::spmv_t_scaled_csr(
+            self.nrows(),
+            self.row_ptr(),
+            self.col_idx(),
+            self.values(),
+            alpha,
+            x,
+            beta,
+            y,
+        );
         Ok(())
     }
 }
@@ -436,33 +423,14 @@ impl CsrMatrix<f64> {
 }
 
 #[cfg(feature = "rayon")]
-use rayon::prelude::*;
-
-#[cfg(feature = "rayon")]
 impl<T> CsrMatrix<T>
 where
-    T: Copy + Send + Sync + std::ops::Add<Output = T> + std::ops::Mul<Output = T>,
+    T: KrystScalar,
 {
     /// Parallel SpMV using CSR structure directly.
-    pub fn spmv_parallel(&self, x: &[T], y: &mut [T])
-    where
-        T: KrystScalar,
-    {
-        assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), self.nrows());
-        let rp = self.row_ptr();
-        let cj = self.col_idx();
-        let vv = self.values();
-        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
-            let mut sum = T::zero();
-            let rs = rp[i];
-            let re = rp[i + 1];
-            for p in rs..re {
-                let j = cj[p];
-                sum = sum + vv[p] * x[j];
-            }
-            *yi = sum;
-        });
+    pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
+        crate::matrix::spmv::csr_matvec_par(self, x, y)
+            .expect("spmv_parallel dimension mismatch");
     }
 }
 

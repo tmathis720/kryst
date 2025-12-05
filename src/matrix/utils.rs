@@ -656,7 +656,16 @@ pub fn parallel_mat_vec(a: &Mat<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KE
 /// Parallel matrix-vector operation for sparse matrices
 /// Returns Result for error handling
 pub fn parallel_mat_vec_sparse(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-    a.spmv_scaled(1.0, x, 0.0, y)
+    #[cfg(feature = "rayon")]
+    {
+        use crate::matrix::spmv::csr_matvec_par;
+        return csr_matvec_par(a, x, y);
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        use crate::matrix::spmv::csr_matvec;
+        csr_matvec(a, x, y)
+    }
 }
 
 /// Count non-zeros in a dense matrix

@@ -415,7 +415,8 @@ impl LinOp for DenseOp {
 ///
 /// ## Notes
 /// - Threaded SpMV honours [`ParallelTune`](crate::algebra::parallel_cfg::ParallelTune)
-///   thresholds and falls back to the serial kernel for small systems.
+///   thresholds and falls back to the serial kernel for small systems via
+///   the canonical [`crate::matrix::spmv`] entry points.
 /// - See [`crate::parallel::threads`] for details on Rayon pool sizing.
 #[cfg(feature = "backend-faer")]
 pub struct CsrOp<Scalar = S> {
@@ -461,7 +462,7 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
         (self.csr.nrows(), self.csr.ncols())
     }
     fn matvec(&self, x: &[S], y: &mut [S]) {
-        if let Err(err) = crate::matrix::spmv::spmv_csr_parallel(&*self.csr, x, y) {
+        if let Err(err) = crate::matrix::spmv::csr_matvec_par(&*self.csr, x, y) {
             #[cfg(feature = "logging")]
             log::trace!("CsrOp::matvec fallback to serial SpMV: {err}");
             #[cfg(not(feature = "logging"))]
@@ -476,7 +477,7 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
         #[cfg(feature = "transpose-cache")]
         {
             if let Some(csc) = self.ensure_csc_view() {
-                let _ = crate::matrix::spmv::t_spmv_csr_parallel(
+                let _ = crate::matrix::spmv::csr_t_matvec_par(
                     self.csr.as_ref(),
                     crate::matrix::spmv::TBackend::Csc(&csc),
                     x,
@@ -485,7 +486,7 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
                 return;
             }
         }
-        let _ = crate::matrix::spmv::t_spmv_csr_parallel(
+        let _ = crate::matrix::spmv::csr_t_matvec_par(
             self.csr.as_ref(),
             crate::matrix::spmv::TBackend::CsrGather,
             x,

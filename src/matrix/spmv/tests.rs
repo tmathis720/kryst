@@ -1,10 +1,11 @@
+use crate::error::KError;
 use crate::matrix::spmv::SpmvTuning;
 #[cfg(all(feature = "simd", not(feature = "complex")))]
 use crate::matrix::spmv::{sellc, simd_csr};
 use crate::matrix::{
     csc::CscMatrix,
     csr::CsrMatrix as GenericCsrMatrix,
-    sparse::{CsrMatrix, SparseMatrix},
+    sparse::CsrMatrix,
     spmv::{
         TBackend, spmm_csr_block, spmv_csr_parallel, spmv_scaled_csr, spmv_t_scaled_csr,
         t_spmv_csr_parallel,
@@ -184,6 +185,95 @@ fn spmv_matches_reference_small() {
     let mut y = vec![0.0; 2];
     spmv_csr_parallel(&a, &x, &mut y).unwrap();
     assert_eq!(y, y_ref); // bitwise parity on this case
+}
+
+#[test]
+fn csr_matvec_matches_sparse_method() {
+    use crate::algebra::prelude::*;
+
+    // 2×3 matrix [[1,2,0],[0,3,4]]
+    let a = CsrMatrix::from_csr(
+        2,
+        3,
+        vec![0, 2, 4],
+        vec![0, 1, 1, 2],
+        vec![
+            S::from_real(1.0),
+            S::from_real(2.0),
+            S::from_real(3.0),
+            S::from_real(4.0),
+        ],
+    );
+    let x = vec![S::one(), S::one(), S::one()];
+    let mut y_api = vec![S::zero(); 2];
+    let mut y_method = vec![S::zero(); 2];
+
+    crate::matrix::spmv::csr_matvec(&a, &x, &mut y_api).unwrap();
+    a.spmv(&x, &mut y_method);
+
+    assert_eq!(y_api, y_method);
+}
+
+#[test]
+fn csr_t_matvec_matches_transpose_method() {
+    use crate::algebra::prelude::*;
+
+    // 2×3 matrix [[1,2,0],[0,3,4]]; transpose is 3×2
+    let a = CsrMatrix::from_csr(
+        2,
+        3,
+        vec![0, 2, 4],
+        vec![0, 1, 1, 2],
+        vec![
+            S::from_real(1.0),
+            S::from_real(2.0),
+            S::from_real(3.0),
+            S::from_real(4.0),
+        ],
+    );
+    let x = vec![S::from_real(1.0), S::from_real(2.0)];
+    let mut y_api = vec![S::zero(); 3];
+    let mut y_method = vec![S::zero(); 3];
+
+    crate::matrix::spmv::csr_t_matvec(&a, &x, &mut y_api).unwrap();
+    a.spmv_transpose_scaled(S::one(), &x, S::zero(), &mut y_method)
+        .unwrap();
+
+    assert_eq!(y_api, y_method);
+}
+
+#[test]
+fn csr_matvec_dim_mismatch_errors() {
+    use crate::algebra::prelude::*;
+
+    let a = CsrMatrix::from_csr(
+        1,
+        2,
+        vec![0, 1],
+        vec![0],
+        vec![S::from_real(1.0)],
+    );
+    let mut y = vec![S::zero(); 1];
+    let err = crate::matrix::spmv::csr_matvec(&a, &[S::one(), S::one(), S::one()], &mut y)
+        .unwrap_err();
+    assert!(matches!(err, KError::InvalidInput(_)));
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn csr_matvec_par_dim_mismatch_errors() {
+    use crate::algebra::prelude::*;
+
+    let a = CsrMatrix::from_csr(
+        1,
+        1,
+        vec![0, 1],
+        vec![0],
+        vec![S::from_real(2.0)],
+    );
+    let mut y = vec![S::zero(); 1];
+    let err = crate::matrix::spmv::csr_matvec_par(&a, &[], &mut y).unwrap_err();
+    assert!(matches!(err, KError::InvalidInput(_)));
 }
 
 #[test]
