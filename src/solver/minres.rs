@@ -309,8 +309,7 @@ impl MinresSolver {
                 reason,
                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
             ) {
-                let true_res_check =
-                    recompute_true_residual_norm_s(a, b, x, comm, tmp1, scratch);
+                let true_res_check = recompute_true_residual_norm_s(a, b, x, comm, tmp1, scratch);
                 let (reason_true, _) = self.conv.check(true_res_check, bnorm, k);
                 if matches!(
                     reason_true,

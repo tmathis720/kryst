@@ -3,6 +3,7 @@ use std::sync::Arc;
 use faer::Mat;
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
+use kryst::matrix::backend::DefaultBackend;
 use kryst::matrix::csc::CscMatrix;
 use kryst::matrix::format::AsFormat;
 use kryst::matrix::op::LinOp;
@@ -30,8 +31,8 @@ fn csc_dense_roundtrip_cache() {
         3,
         |i, j| if i == j { R::from(2.0) } else { R::default() },
     );
-    let c1 = a.to_csc_cached(R::default());
-    let c2 = a.to_csc_cached(R::default());
+    let c1 = <Mat<R> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&a, R::default());
+    let c2 = <Mat<R> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&a, R::default());
     assert!(Arc::ptr_eq(&c1, &c2));
 }
 
@@ -44,8 +45,8 @@ fn csr_to_csc_and_back() {
         vec![0, 1, 1, 2],
         vec![R::from(1.0), R::from(2.0), R::from(3.0), R::from(4.0)],
     );
-    let csc = csr.to_csc_cached(R::default());
-    let csr2 = csc.to_csr_cached(R::default());
+    let csc = <CsrMatrix<R> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&csr, R::default());
+    let csr2 = <CscMatrix<R> as AsFormat<f64, DefaultBackend>>::to_csr_cached(&csc, R::default());
     assert_eq!(csr.row_ptr(), csr2.row_ptr());
     assert_eq!(csr.col_idx(), csr2.col_idx());
     assert_eq!(csr.values(), csr2.values());
@@ -60,7 +61,7 @@ fn csc_linop_t_matvec() {
         vec![0, 0, 1],
         vec![R::from(1.0), R::from(2.0), R::from(3.0)],
     );
-    let csc = csr.to_csc_cached(R::default());
+    let csc = <CsrMatrix<R> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&csr, R::default());
     let x = vec![R::from(10.0), R::from(100.0)];
     let mut y = vec![R::default(); 3];
     csc.t_matvec(&x, &mut y);

@@ -11,6 +11,7 @@ use crate::error::KError;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::DistCsrOp;
 use crate::matrix::{
+    backend::DefaultBackend,
     csc::CscMatrix,
     csr::CsrMatrix as ScalarCsrMatrix,
     format::{AsFormat, FormatHint},
@@ -88,12 +89,22 @@ pub fn to_csr_cached(
     if let Some(csr) = try_as_csr(pmat) {
         return Ok(Arc::new(csr.clone()));
     }
+    if let Some(csc) = pmat.as_any().downcast_ref::<CscMatrix<f64>>() {
+        return Ok(<CscMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(csc, drop_tol));
+    }
     if let Some(generic) = pmat.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
         return Ok(Arc::new(csr));
     }
     if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
-        return Ok(mat.to_csr_cached(drop_tol));
+        return Ok(<Mat<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(
+            mat, drop_tol,
+        ));
+    }
+    if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp>() {
+        return Ok(<DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(
+            dense_op, drop_tol,
+        ));
     }
     Err(unsupported_linop_err(pmat, "to_csr_cached", "CSR"))
 }
@@ -128,15 +139,24 @@ pub fn to_csc_cached(
     if let Some(csc) = try_as_csc(pmat) {
         return Ok(Arc::new(csc.clone()));
     }
-    if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
-        return Ok(mat.to_csc_cached(drop_tol));
-    }
     if let Some(generic) = pmat.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
-        return Ok(csr.to_csc_cached(drop_tol));
+        return Ok(
+            <CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&csr, drop_tol),
+        );
     }
     if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
-        return Ok(csr.to_csc_cached(drop_tol));
+        return Ok(<CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(csr, drop_tol));
+    }
+    if let Some(mat) = pmat.as_any().downcast_ref::<Mat<f64>>() {
+        return Ok(<Mat<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+            mat, drop_tol,
+        ));
+    }
+    if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp>() {
+        return Ok(<DenseOp as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+            dense_op, drop_tol,
+        ));
     }
     Err(unsupported_linop_err(pmat, "to_csc_cached", "CSC"))
 }
@@ -162,12 +182,18 @@ pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
     if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.clone());
     }
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
+        return Ok(owned_from_mat(dense_op.inner()));
+    }
     if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
         return Ok(csr.to_dense());
     }
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(csr.to_dense());
+    }
+    if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
+        return Ok(csc.to_dense());
     }
     Err(unsupported_linop_err(op, "dense_from_linop", "dense"))
 }
@@ -188,103 +214,103 @@ pub fn materialize_linop_with_hint(
 ) -> Result<std::sync::Arc<dyn LinOp<S = f64>>, KError> {
     let comm = op.comm();
 
-    // Dense matrix
-    if let Some(m) = op.as_any().downcast_ref::<Mat<f64>>() {
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(match hint {
-            FormatHint::Csr => {
-                let csr = m.to_csr_cached(drop_tol);
-                wrap_with_comm(csr, comm)
-            }
+            FormatHint::Csr => wrap_with_comm(Arc::new(csr.clone()), comm),
             FormatHint::Csc => {
-                let csc = m.to_csc_cached(drop_tol);
+                let csc =
+                    <CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(csr, drop_tol);
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
-                let owned = owned_from_mat(m);
-                wrap_with_comm(std::sync::Arc::new(owned), comm)
+                let dense = csr.to_dense();
+                wrap_with_comm(Arc::new(dense), comm)
             }
         });
     }
 
-    // CSR matrix
+    if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr =
+                    <CscMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(csc, drop_tol);
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => wrap_with_comm(Arc::new(csc.clone()), comm),
+            FormatHint::Dense => {
+                let dense = csc.to_dense();
+                wrap_with_comm(Arc::new(dense), comm)
+            }
+        });
+    }
+
+    if let Some(m) = op.as_any().downcast_ref::<Mat<f64>>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = <Mat<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(m, drop_tol);
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => {
+                let csc = <Mat<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(m, drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let owned = owned_from_mat(m);
+                wrap_with_comm(Arc::new(owned), comm)
+            }
+        });
+    }
+
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr =
+                    <DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(dense_op, drop_tol);
+                wrap_with_comm(csr, comm)
+            }
+            FormatHint::Csc => {
+                let csc =
+                    <DenseOp as AsFormat<f64, DefaultBackend>>::to_csc_cached(dense_op, drop_tol);
+                wrap_with_comm(csc, comm)
+            }
+            FormatHint::Dense => {
+                let owned = owned_from_mat(dense_op.inner());
+                wrap_with_comm(Arc::new(owned), comm)
+            }
+        });
+    }
+
     if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
         return Ok(match hint {
             FormatHint::Csr => wrap_with_comm(Arc::new(csr.clone()), comm),
             FormatHint::Csc => {
-                let csc = csr.to_csc_cached(drop_tol);
+                let csc = <CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+                    &csr, drop_tol,
+                );
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
                 let dense = csr.to_dense();
-                wrap_with_comm(std::sync::Arc::new(dense), comm)
-            }
-        });
-    }
-    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
-        return Ok(match hint {
-            FormatHint::Csr => wrap_with_comm(std::sync::Arc::new(csr.clone()), comm),
-            FormatHint::Csc => {
-                let csc = csr.to_csc_cached(drop_tol);
-                wrap_with_comm(csc, comm)
-            }
-            FormatHint::Dense => {
-                let dense = csr.to_dense();
-                wrap_with_comm(std::sync::Arc::new(dense), comm)
+                wrap_with_comm(Arc::new(dense), comm)
             }
         });
     }
 
-    // CSC matrix
-    if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
-        return Ok(match hint {
-            FormatHint::Csr => {
-                let csr = csc.to_csr_cached(drop_tol);
-                wrap_with_comm(csr, comm)
-            }
-            FormatHint::Csc => wrap_with_comm(std::sync::Arc::new(csc.clone()), comm),
-            FormatHint::Dense => {
-                let dense = csc.to_dense();
-                wrap_with_comm(std::sync::Arc::new(dense), comm)
-            }
-        });
-    }
-
-    // Distributed CSR operator — expose the on-processor block for lightweight PCs.
     #[cfg(not(feature = "complex"))]
     if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+        let local = dist.local_matrix();
         return Ok(match hint {
-            FormatHint::Csr => {
-                let csr = std::sync::Arc::new(dist.local_matrix());
-                wrap_with_comm(csr, comm)
-            }
+            FormatHint::Csr => wrap_with_comm(Arc::new(local.clone()), comm),
             FormatHint::Csc => {
-                let csr_local = dist.local_matrix();
-                let csc = csr_local.to_csc_cached(drop_tol);
+                let csc = <CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+                    &local, drop_tol,
+                );
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
-                let dense = dist.local_matrix().to_dense();
-                wrap_with_comm(std::sync::Arc::new(dense), comm)
-            }
-        });
-    }
-
-    // DenseOp wrapper
-    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
-        let inner = dense_op.inner();
-        return Ok(match hint {
-            FormatHint::Csr => {
-                let csr = dense_op.to_csr_cached(drop_tol);
-                wrap_with_comm(csr, comm)
-            }
-            FormatHint::Csc => {
-                let csc = dense_op.to_csc_cached(drop_tol);
-                wrap_with_comm(csc, comm)
-            }
-            FormatHint::Dense => {
-                let owned = owned_from_mat(inner);
-                wrap_with_comm(std::sync::Arc::new(owned), comm)
+                let dense = local.to_dense();
+                wrap_with_comm(Arc::new(dense), comm)
             }
         });
     }
@@ -295,7 +321,11 @@ pub fn materialize_linop_with_hint(
         FormatHint::Csc => "CSC",
         FormatHint::Dense => "dense",
     };
-    Err(unsupported_linop_err(op, "materialize_linop_with_hint", target))
+    Err(unsupported_linop_err(
+        op,
+        "materialize_linop_with_hint",
+        target,
+    ))
 }
 
 #[cfg(all(test, not(feature = "complex")))]

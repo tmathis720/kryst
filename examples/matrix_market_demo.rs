@@ -30,9 +30,9 @@ mod real_demo {
     use kryst::context::ksp_context::{KspContext, SolverType};
     use kryst::context::pc_context::PcType;
     use kryst::error::KError;
-    use kryst::matrix::op::{CsrOp, LinOp};
     #[cfg(feature = "mpi")]
     use kryst::matrix::DistCsrOp;
+    use kryst::matrix::op::{CsrOp, LinOp};
     #[cfg(feature = "mpi")]
     use kryst::matrix::parcsr::builder::partition_rows;
     use kryst::matrix::sparse::CsrMatrix;

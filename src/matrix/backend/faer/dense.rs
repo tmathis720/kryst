@@ -54,8 +54,7 @@ impl<T: KrystScalar> DenseMatMut<T> for Mat<T> {
     fn col_major_data_mut(&mut self) -> Option<&mut [T]> {
         let len = self.nrows() * self.ncols();
         let view = self.as_mut();
-        view
-            .try_as_col_major_mut()
+        view.try_as_col_major_mut()
             .map(|cm| unsafe { std::slice::from_raw_parts_mut(cm.as_ptr() as *mut T, len) })
     }
 }

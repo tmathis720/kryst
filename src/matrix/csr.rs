@@ -116,8 +116,7 @@ impl<S: KrystScalar> CsrMatrix<S> {
     /// Computes `y = A * x` using the scalar CSR kernel.
     #[inline]
     pub fn spmv(&self, x: &[S], y: &mut [S]) {
-        crate::matrix::spmv::csr_matvec(self, x, y)
-            .expect("CsrMatrix::spmv dimension mismatch");
+        crate::matrix::spmv::csr_matvec(self, x, y).expect("CsrMatrix::spmv dimension mismatch");
     }
 
     /// Computes `y = alpha * A * x + beta * y` using the scalar CSR kernel.

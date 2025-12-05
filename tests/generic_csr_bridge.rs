@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
+use kryst::matrix::backend::DefaultBackend;
 use kryst::matrix::convert::{dense_from_linop, to_csc_cached, to_csr_cached};
 use kryst::matrix::csc::CscMatrix as FaerCscMatrix;
 use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
@@ -39,7 +40,10 @@ fn generic_csr_to_csc_cached_roundtrips() {
     let (op, rowptr, colind, values) = make_generic_op();
     let csc = to_csc_cached(op.as_ref() as &dyn LinOp<S = f64>, R::default())
         .expect("conversion should succeed");
-    let csr = AsFormat::to_csr_cached(csc.as_ref(), R::default());
+    let csr = <FaerCscMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(
+        csc.as_ref(),
+        R::default(),
+    );
     assert_eq!(csr.row_ptr(), rowptr);
     assert_eq!(csr.col_idx(), colind);
     assert_eq!(csr.values(), values);

@@ -8,13 +8,13 @@ use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+#[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
 use crate::preconditioner::{LocalPreconditioner, PcSide, Preconditioner};
-#[cfg(feature = "complex")]
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};

@@ -3,6 +3,7 @@ use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
+use kryst::matrix::backend::DefaultBackend;
 use kryst::matrix::format::AsFormat;
 use kryst::matrix::op::{DenseOp, LinOp};
 use kryst::matrix::sparse::CsrMatrix;
@@ -191,10 +192,10 @@ fn denseop_cache_invalidation() {
         }
     }));
     let op = DenseOp::new(mat);
-    let csr1 = op.to_csr_cached(R::default());
+    let csr1 = <DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(&op, R::default());
     let p1 = Arc::as_ptr(&csr1);
     op.mark_values_changed();
-    let csr2 = op.to_csr_cached(R::default());
+    let csr2 = <DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(&op, R::default());
     let p2 = Arc::as_ptr(&csr2);
     assert_ne!(p1, p2);
 }

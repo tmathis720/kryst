@@ -246,16 +246,10 @@ fn csr_t_matvec_matches_transpose_method() {
 fn csr_matvec_dim_mismatch_errors() {
     use crate::algebra::prelude::*;
 
-    let a = CsrMatrix::from_csr(
-        1,
-        2,
-        vec![0, 1],
-        vec![0],
-        vec![S::from_real(1.0)],
-    );
+    let a = CsrMatrix::from_csr(1, 2, vec![0, 1], vec![0], vec![S::from_real(1.0)]);
     let mut y = vec![S::zero(); 1];
-    let err = crate::matrix::spmv::csr_matvec(&a, &[S::one(), S::one(), S::one()], &mut y)
-        .unwrap_err();
+    let err =
+        crate::matrix::spmv::csr_matvec(&a, &[S::one(), S::one(), S::one()], &mut y).unwrap_err();
     assert!(matches!(err, KError::InvalidInput(_)));
 }
 
@@ -264,13 +258,7 @@ fn csr_matvec_dim_mismatch_errors() {
 fn csr_matvec_par_dim_mismatch_errors() {
     use crate::algebra::prelude::*;
 
-    let a = CsrMatrix::from_csr(
-        1,
-        1,
-        vec![0, 1],
-        vec![0],
-        vec![S::from_real(2.0)],
-    );
+    let a = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![S::from_real(2.0)]);
     let mut y = vec![S::zero(); 1];
     let err = crate::matrix::spmv::csr_matvec_par(&a, &[], &mut y).unwrap_err();
     assert!(matches!(err, KError::InvalidInput(_)));

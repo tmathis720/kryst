@@ -7,8 +7,8 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use crate::algebra::bridge::BridgeScratch;

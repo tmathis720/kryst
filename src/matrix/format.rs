@@ -1,11 +1,14 @@
-//! Real-only format conversion trait used by AMG helpers.
-//!
-//! While the `AsFormat` trait is generic, current implementations target
-//! `CsrMatrix<f64>`, `CscMatrix<f64>`, and dense `Mat<f64>` to support
-//! real-valued operators in AMG/factorization workflows.
+//! Backend-aware format conversion traits and caches.
+use std::any::Any;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, Weak};
+
+use once_cell::sync::Lazy;
+
 use crate::algebra::scalar::KrystScalar;
-use crate::matrix::sparse_api::{CscMatRef, CsrMatRef};
-use std::sync::Arc;
+use crate::matrix::backend::SparseBackend;
+use crate::matrix::op::{StructureId, ValuesId};
 
 /// High-level format hints that preconditioners can request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,26 +18,131 @@ pub enum FormatHint {
     Csc,
 }
 
-/// Trait for converting matrices into specific formats in a backend-agnostic way.
-pub trait AsFormat<S: KrystScalar> {
-    /// Backend CSR type.
-    type Csr: CsrMatRef<S> + 'static;
-    /// Backend CSC type.
-    type Csc: CscMatRef<S> + 'static;
-
+/// Trait for converting matrices into specific formats under a backend.
+pub trait AsFormat<S: KrystScalar, B: SparseBackend<S>> {
     /// Borrow as CSR if already in that format.
-    fn as_csr(&self) -> Option<&Self::Csr> {
+    fn as_csr(&self) -> Option<&B::Csr> {
         None
     }
 
     /// Convert to CSR and cache the result.
-    fn to_csr_cached(&self, drop_tol: S::Real) -> Arc<Self::Csr>;
+    fn to_csr_cached(&self, drop_tol: S::Real) -> Arc<B::Csr>;
 
     /// Borrow as CSC if already in that format.
-    fn as_csc(&self) -> Option<&Self::Csc> {
+    fn as_csc(&self) -> Option<&B::Csc> {
         None
     }
 
     /// Convert to CSC and cache the result.
-    fn to_csc_cached(&self, drop_tol: S::Real) -> Arc<Self::Csc>;
+    fn to_csc_cached(&self, drop_tol: S::Real) -> Arc<B::Csc>;
+
+    /// Identifier for structure-driven cache invalidation.
+    fn structure_id_for_cache(&self) -> StructureId {
+        StructureId(0)
+    }
+
+    /// Identifier for value-driven cache invalidation.
+    fn values_id_for_cache(&self) -> ValuesId {
+        ValuesId(0)
+    }
+}
+
+/// Convenience alias for the active backend's [`AsFormat`] trait object.
+#[cfg(feature = "backend-faer")]
+pub type DefaultAsFormat<S> = dyn AsFormat<S, crate::matrix::backend::DefaultBackend>;
+
+/// Backend-agnostic cache key for format conversions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FormatKey {
+    pub base_ptr: usize,
+    pub structure_id: u64,
+    pub values_id: u64,
+    pub drop_tol_bits: u64,
+}
+
+impl PartialEq for FormatKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.base_ptr == other.base_ptr
+            && self.structure_id == other.structure_id
+            && self.values_id == other.values_id
+            && self.drop_tol_bits == other.drop_tol_bits
+    }
+}
+impl Eq for FormatKey {}
+impl Hash for FormatKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.base_ptr.hash(state);
+        self.structure_id.hash(state);
+        self.values_id.hash(state);
+        self.drop_tol_bits.hash(state);
+    }
+}
+
+#[inline]
+pub(crate) fn format_key_from_ptr(
+    base_ptr: usize,
+    structure_id: StructureId,
+    values_id: ValuesId,
+    drop_tol: f64,
+) -> FormatKey {
+    FormatKey {
+        base_ptr,
+        structure_id: structure_id.0,
+        values_id: values_id.0,
+        drop_tol_bits: drop_tol.to_bits(),
+    }
+}
+
+type CacheMap = HashMap<FormatKey, Weak<dyn Any + Send + Sync>>;
+
+/// Global cache of CSR conversions keyed by [`FormatKey`].
+pub(crate) static CSR_CACHE: Lazy<Mutex<CacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Global cache of CSC conversions keyed by [`FormatKey`].
+pub(crate) static CSC_CACHE: Lazy<Mutex<CacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[inline]
+pub(crate) fn get_or_insert_csr<T: 'static + Send + Sync>(
+    key: FormatKey,
+    build: impl FnOnce() -> Arc<T>,
+) -> Arc<T> {
+    if let Some(existing) = CSR_CACHE
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(|w| w.upgrade())
+    {
+        if let Ok(typed) = existing.downcast::<T>() {
+            return typed;
+        }
+    }
+
+    let arc: Arc<T> = build();
+    let erased: Arc<dyn Any + Send + Sync> = arc.clone();
+    let mut cache = CSR_CACHE.lock().unwrap();
+    cache.insert(key, Arc::downgrade(&erased));
+    arc
+}
+
+#[inline]
+pub(crate) fn get_or_insert_csc<T: 'static + Send + Sync>(
+    key: FormatKey,
+    build: impl FnOnce() -> Arc<T>,
+) -> Arc<T> {
+    if let Some(existing) = CSC_CACHE
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(|w| w.upgrade())
+    {
+        if let Ok(typed) = existing.downcast::<T>() {
+            return typed;
+        }
+    }
+
+    let arc: Arc<T> = build();
+    let erased: Arc<dyn Any + Send + Sync> = arc.clone();
+    let mut cache = CSC_CACHE.lock().unwrap();
+    cache.insert(key, Arc::downgrade(&erased));
+    arc
 }

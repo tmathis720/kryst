@@ -234,11 +234,7 @@ impl HaloPlan {
         recv_map: BTreeMap<usize, Vec<usize>>,
     ) -> Result<Self, KError> {
         let index = Arc::new(HaloIndexPlan::new(
-            comm,
-            row_part,
-            row_start,
-            row_end,
-            recv_map,
+            comm, row_part, row_start, row_end, recv_map,
         )?);
         let buffers = HaloBuffers::new(&index);
         Ok(Self { index, buffers })

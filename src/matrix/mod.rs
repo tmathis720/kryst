@@ -12,10 +12,10 @@
 //! workflows (AMG, ILU, etc.) fast and ergonomic.
 
 pub mod backend;
-pub mod dense_api;
-pub mod sparse_api;
 #[cfg(feature = "backend-faer")]
 pub mod dense;
+pub mod dense_api;
+pub mod sparse_api;
 #[cfg(feature = "backend-faer")]
 pub use dense::DenseMatrix;
 #[cfg(feature = "backend-faer")]
@@ -47,6 +47,10 @@ pub mod real_amg {
 }
 
 #[cfg(feature = "backend-faer")]
+pub use backend::DefaultBackend;
+#[cfg(feature = "backend-faer")]
+pub use backend::faer::{DefaultCscMat, DefaultCsrMat, DefaultDenseMat, FaerBackend};
+#[cfg(feature = "backend-faer")]
 pub use convert::owned_from_mat;
 #[cfg(feature = "backend-faer")]
 pub use convert::{
@@ -57,8 +61,6 @@ pub use convert::{
 pub use csc::CscMatrix;
 pub use sparse::CsrMatrix;
 pub use sparse_api::{CscMatMut, CscMatRef, CsrMatMut, CsrMatRef};
-#[cfg(feature = "backend-faer")]
-pub use backend::faer::{DefaultCscMat, DefaultCsrMat, DefaultDenseMat, FaerBackend};
 
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;

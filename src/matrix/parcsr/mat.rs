@@ -1,8 +1,8 @@
 use super::halo::HaloPlan;
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::op::LinOp;
+use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm};
 use std::sync::Arc;
 
@@ -32,9 +32,7 @@ impl ParCsrOp {
     }
 
     pub fn from_owned(mat: ParCsrMatrix) -> Self {
-        Self {
-            mat: Arc::new(mat),
-        }
+        Self { mat: Arc::new(mat) }
     }
 }
 

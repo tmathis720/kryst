@@ -429,8 +429,7 @@ where
 {
     /// Parallel SpMV using CSR structure directly.
     pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
-        crate::matrix::spmv::csr_matvec_par(self, x, y)
-            .expect("spmv_parallel dimension mismatch");
+        crate::matrix::spmv::csr_matvec_par(self, x, y).expect("spmv_parallel dimension mismatch");
     }
 }
 

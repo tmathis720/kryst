@@ -1,7 +1,7 @@
 #![cfg(feature = "backend-faer")]
 
-//! Faer-backed implementations of [`AsFormat`](crate::matrix::format::AsFormat) and
-//! backend-specific format caches.
+//! Faer-backed implementations of [`AsFormat`](crate::matrix::format::AsFormat) along with
+//! fast CSR/CSC conversions.
 //!
 //! NOTE on caching and invalidation:
 //! - Dense `faer::Mat<f64>` does not track `ValuesId` (returns 0). Conversions from raw Mat
@@ -9,235 +9,166 @@
 //! - Wrap dense matrices in `DenseOp` and call `mark_values_changed()` after in-place updates
 //!   to ensure CSC/CSR cache keys include the new `ValuesId`, triggering correct refreshes.
 
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
+use crate::algebra::prelude::*;
 use crate::matrix::{
+    backend::DefaultBackend,
     csc::CscMatrix,
-    format::AsFormat,
-    op::{DenseOp, LinOp},
+    format::{AsFormat, format_key_from_ptr, get_or_insert_csc, get_or_insert_csr},
+    op::{DenseOp, LinOp, StructureId, ValuesId},
     sparse::CsrMatrix,
 };
-use once_cell::sync::Lazy;
 use faer::Mat;
 
-#[derive(Clone, Copy, Debug)]
-struct CsrKey {
-    base_ptr: usize,
-    structure_id: u64,
-    values_id: u64,
-    drop_tol_bits: u64,
-}
-
-impl PartialEq for CsrKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.base_ptr == other.base_ptr
-            && self.structure_id == other.structure_id
-            && self.values_id == other.values_id
-            && self.drop_tol_bits == other.drop_tol_bits
-    }
-}
-impl Eq for CsrKey {}
-impl Hash for CsrKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.base_ptr.hash(state);
-        self.structure_id.hash(state);
-        self.values_id.hash(state);
-        self.drop_tol_bits.hash(state);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CscKey {
-    base_ptr: usize,
-    structure_id: u64,
-    values_id: u64,
-    drop_tol_bits: u64,
-}
-
-impl PartialEq for CscKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.base_ptr == other.base_ptr
-            && self.structure_id == other.structure_id
-            && self.values_id == other.values_id
-            && self.drop_tol_bits == other.drop_tol_bits
-    }
-}
-impl Eq for CscKey {}
-impl Hash for CscKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.base_ptr.hash(state);
-        self.structure_id.hash(state);
-        self.values_id.hash(state);
-        self.drop_tol_bits.hash(state);
-    }
-}
-
-/// Global cache of dense->CSR conversions.
-static CSR_CACHE: Lazy<Mutex<HashMap<CsrKey, Weak<CsrMatrix<f64>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Global cache of dense->CSC conversions.
-static CSC_CACHE: Lazy<Mutex<HashMap<CscKey, Weak<CscMatrix<f64>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-#[inline]
-fn key_from_ptr(ptr: usize, structure_id: u64, values_id: u64, drop_tol: f64) -> CsrKey {
-    CsrKey {
-        base_ptr: ptr,
-        structure_id,
-        values_id,
-        drop_tol_bits: drop_tol.to_bits(),
-    }
-}
-
-#[inline]
-fn csc_key_from_ptr(ptr: usize, structure_id: u64, values_id: u64, drop_tol: f64) -> CscKey {
-    CscKey {
-        base_ptr: ptr,
-        structure_id,
-        values_id,
-        drop_tol_bits: drop_tol.to_bits(),
-    }
-}
-
-impl AsFormat<f64> for CsrMatrix<f64> {
-    type Csr = CsrMatrix<f64>;
-    type Csc = CscMatrix<f64>;
-
-    fn as_csr(&self) -> Option<&Self::Csr> {
+impl<S> AsFormat<S, DefaultBackend> for CsrMatrix<f64>
+where
+    S: KrystScalar<Real = f64>,
+{
+    fn as_csr(&self) -> Option<&CsrMatrix<f64>> {
         Some(self)
     }
 
-    fn to_csr_cached(&self, _drop_tol: f64) -> Arc<Self::Csr> {
+    fn to_csr_cached(&self, _drop_tol: f64) -> Arc<CsrMatrix<f64>> {
         Arc::new(self.clone())
     }
 
-    fn as_csc(&self) -> Option<&Self::Csc> {
+    fn as_csc(&self) -> Option<&CscMatrix<f64>> {
         None
     }
 
-    fn to_csc_cached(&self, _drop_tol: f64) -> Arc<Self::Csc> {
+    fn to_csc_cached(&self, _drop_tol: f64) -> Arc<CscMatrix<f64>> {
         Arc::new(csr_to_csc(self))
     }
-}
 
-impl AsFormat<f64> for Mat<f64> {
-    type Csr = CsrMatrix<f64>;
-    type Csc = CscMatrix<f64>;
-
-    fn to_csr_cached(&self, drop_tol: f64) -> Arc<Self::Csr> {
-        let base_ptr = self as *const Mat<f64> as usize;
-        let structure_id = LinOp::structure_id(self).0;
-        let values_id = LinOp::values_id(self).0;
-        let key = key_from_ptr(base_ptr, structure_id, values_id, drop_tol);
-        if let Some(existing) = {
-            let cache = CSR_CACHE.lock().unwrap();
-            cache.get(&key).and_then(|w| w.upgrade())
-        } {
-            return existing;
-        }
-        let csr = CsrMatrix::from_dense(self, drop_tol);
-        let arc = Arc::new(csr);
-        let mut cache = CSR_CACHE.lock().unwrap();
-        cache.insert(key, Arc::downgrade(&arc));
-        arc
+    fn structure_id_for_cache(&self) -> StructureId {
+        LinOp::structure_id(self)
     }
 
-    fn as_csc(&self) -> Option<&Self::Csc> {
+    fn values_id_for_cache(&self) -> ValuesId {
+        LinOp::values_id(self)
+    }
+}
+
+impl<S> AsFormat<S, DefaultBackend> for Mat<f64>
+where
+    S: KrystScalar<Real = f64>,
+{
+    fn to_csr_cached(&self, drop_tol: f64) -> Arc<CsrMatrix<f64>> {
+        let key = format_key_from_ptr(
+            self as *const Mat<f64> as usize,
+            LinOp::structure_id(self),
+            LinOp::values_id(self),
+            drop_tol,
+        );
+        get_or_insert_csr(key, || {
+            let csr = CsrMatrix::<f64>::from_dense(self, drop_tol);
+            Arc::new(csr)
+        })
+    }
+
+    fn as_csc(&self) -> Option<&CscMatrix<f64>> {
         None
     }
 
-    fn to_csc_cached(&self, drop_tol: f64) -> Arc<Self::Csc> {
-        let base_ptr = self as *const Mat<f64> as usize;
-        let structure_id = LinOp::structure_id(self).0;
-        let values_id = LinOp::values_id(self).0;
-        let key = csc_key_from_ptr(base_ptr, structure_id, values_id, drop_tol);
-        if let Some(existing) = {
-            let cache = CSC_CACHE.lock().unwrap();
-            cache.get(&key).and_then(|w| w.upgrade())
-        } {
-            return existing;
-        }
-        let csc = CscMatrix::from_dense(self, drop_tol);
-        let arc = Arc::new(csc);
-        let mut cache = CSC_CACHE.lock().unwrap();
-        cache.insert(key, Arc::downgrade(&arc));
-        arc
+    fn to_csc_cached(&self, drop_tol: f64) -> Arc<CscMatrix<f64>> {
+        let key = format_key_from_ptr(
+            self as *const Mat<f64> as usize,
+            LinOp::structure_id(self),
+            LinOp::values_id(self),
+            drop_tol,
+        );
+        get_or_insert_csc(key, || {
+            let csc = CscMatrix::<f64>::from_dense(self, drop_tol);
+            Arc::new(csc)
+        })
+    }
+
+    fn structure_id_for_cache(&self) -> StructureId {
+        LinOp::structure_id(self)
+    }
+
+    fn values_id_for_cache(&self) -> ValuesId {
+        LinOp::values_id(self)
     }
 }
 
-impl AsFormat<f64> for DenseOp {
-    type Csr = CsrMatrix<f64>;
-    type Csc = CscMatrix<f64>;
-
-    fn to_csr_cached(&self, drop_tol: f64) -> Arc<Self::Csr> {
+impl<S> AsFormat<S, DefaultBackend> for DenseOp
+where
+    S: KrystScalar<Real = f64>,
+{
+    fn to_csr_cached(&self, drop_tol: f64) -> Arc<CsrMatrix<f64>> {
         let inner = self.inner();
-        let base_ptr = inner as *const Mat<f64> as usize;
-        let sid = self.structure_id().0;
-        let vid = self.values_id().0;
-        let key = key_from_ptr(base_ptr, sid, vid, drop_tol);
-        if let Some(existing) = {
-            let cache = CSR_CACHE.lock().unwrap();
-            cache.get(&key).and_then(|w| w.upgrade())
-        } {
-            return existing;
-        }
-        let csr = CsrMatrix::from_dense(inner, drop_tol);
-        let arc = Arc::new(csr);
-        let mut cache = CSR_CACHE.lock().unwrap();
-        cache.insert(key, Arc::downgrade(&arc));
-        arc
+        let key = format_key_from_ptr(
+            inner as *const Mat<f64> as usize,
+            self.structure_id(),
+            self.values_id(),
+            drop_tol,
+        );
+        get_or_insert_csr(key, || {
+            let csr = CsrMatrix::<f64>::from_dense(inner, drop_tol);
+            Arc::new(csr)
+        })
     }
 
-    fn as_csc(&self) -> Option<&Self::Csc> {
+    fn as_csc(&self) -> Option<&CscMatrix<f64>> {
         None
     }
 
-    fn to_csc_cached(&self, drop_tol: f64) -> Arc<Self::Csc> {
+    fn to_csc_cached(&self, drop_tol: f64) -> Arc<CscMatrix<f64>> {
         let inner = self.inner();
-        let base_ptr = inner as *const Mat<f64> as usize;
-        let sid = self.structure_id().0;
-        let vid = self.values_id().0;
-        let key = csc_key_from_ptr(base_ptr, sid, vid, drop_tol);
-        if let Some(existing) = {
-            let cache = CSC_CACHE.lock().unwrap();
-            cache.get(&key).and_then(|w| w.upgrade())
-        } {
-            return existing;
-        }
-        let csc = CscMatrix::from_dense(inner, drop_tol);
-        let arc = Arc::new(csc);
-        let mut cache = CSC_CACHE.lock().unwrap();
-        cache.insert(key, Arc::downgrade(&arc));
-        arc
+        let key = format_key_from_ptr(
+            inner as *const Mat<f64> as usize,
+            self.structure_id(),
+            self.values_id(),
+            drop_tol,
+        );
+        get_or_insert_csc(key, || {
+            let csc = CscMatrix::<f64>::from_dense(inner, drop_tol);
+            Arc::new(csc)
+        })
+    }
+
+    fn structure_id_for_cache(&self) -> StructureId {
+        self.structure_id()
+    }
+
+    fn values_id_for_cache(&self) -> ValuesId {
+        self.values_id()
     }
 }
 
-impl AsFormat<f64> for CscMatrix<f64> {
-    type Csr = CsrMatrix<f64>;
-    type Csc = CscMatrix<f64>;
-
-    fn as_csr(&self) -> Option<&Self::Csr> {
+impl<S> AsFormat<S, DefaultBackend> for CscMatrix<f64>
+where
+    S: KrystScalar<Real = f64>,
+{
+    fn as_csr(&self) -> Option<&CsrMatrix<f64>> {
         None
     }
 
-    fn to_csr_cached(&self, _drop_tol: f64) -> Arc<Self::Csr> {
+    fn to_csr_cached(&self, _drop_tol: f64) -> Arc<CsrMatrix<f64>> {
         Arc::new(csc_to_csr(self))
     }
 
-    fn as_csc(&self) -> Option<&Self::Csc> {
+    fn as_csc(&self) -> Option<&CscMatrix<f64>> {
         Some(self)
     }
 
-    fn to_csc_cached(&self, _drop_tol: f64) -> Arc<Self::Csc> {
+    fn to_csc_cached(&self, _drop_tol: f64) -> Arc<CscMatrix<f64>> {
         Arc::new(self.clone())
+    }
+
+    fn structure_id_for_cache(&self) -> StructureId {
+        LinOp::structure_id(self)
+    }
+
+    fn values_id_for_cache(&self) -> ValuesId {
+        LinOp::values_id(self)
     }
 }
 
 // --- Local helpers: fast CSR<->CSC conversion without densifying ----------
-fn csr_to_csc(a: &CsrMatrix<f64>) -> CscMatrix<f64> {
+pub(crate) fn csr_to_csc(a: &CsrMatrix<f64>) -> CscMatrix<f64> {
     let m = a.nrows();
     let n = a.ncols();
     let ap = a.row_ptr();
@@ -268,7 +199,7 @@ fn csr_to_csc(a: &CsrMatrix<f64>) -> CscMatrix<f64> {
     CscMatrix::from_csc(m, n, col_ptr, row_idx, values)
 }
 
-fn csc_to_csr(a: &CscMatrix<f64>) -> CsrMatrix<f64> {
+pub(crate) fn csc_to_csr(a: &CscMatrix<f64>) -> CsrMatrix<f64> {
     let m = a.nrows();
     let n = a.ncols();
     let cp = a.col_ptr();
