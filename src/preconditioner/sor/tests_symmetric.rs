@@ -1,4 +1,4 @@
-#[cfg(all(test, feature = "legacy-pc-bridge"))]
+#[cfg(all(test, feature = "legacy-pc-bridge", not(feature = "complex")))]
 mod tests_sor_symmetric {
     use crate::error::KError;
     use crate::preconditioner::sor::{MatSorType, Sor};

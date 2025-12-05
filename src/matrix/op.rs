@@ -494,12 +494,12 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
         true
     }
     fn t_matvec(&self, x: &[S], y: &mut [S]) {
-        #[cfg(feature = "transpose-cache")]
+        #[cfg(all(feature = "transpose-cache", not(feature = "complex")))]
         {
             if let Some(csc) = self.ensure_csc_view() {
                 let _ = crate::matrix::spmv::csr_t_matvec_par(
                     self.csr.as_ref(),
-                    crate::matrix::spmv::TBackend::Csc(&csc),
+                    crate::matrix::spmv::TBackend::Csc(csc.as_ref()),
                     x,
                     y,
                 );
@@ -552,7 +552,7 @@ impl LinOpF64 for dyn LinOp<S = f64> + '_ {
     }
 }
 
-#[cfg(feature = "transpose-cache")]
+#[cfg(all(feature = "transpose-cache", not(feature = "complex")))]
 impl<Scalar: KrystScalar> CsrOp<Scalar> {
     pub fn ensure_csc_view(&self) -> Option<Arc<CscMatrix<Scalar>>> {
         use crate::matrix::format::AsFormat;

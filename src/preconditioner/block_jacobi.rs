@@ -36,6 +36,7 @@ use crate::preconditioner::ilu_csr::{
 use crate::solver::direct_lu::LuSolver;
 #[cfg(feature = "dense-direct")]
 use crate::solver::legacy::LinearSolver;
+use faer::Mat;
 
 /// Block-Jacobi preconditioner
 ///
@@ -72,34 +73,33 @@ impl BlockJacobi {
     /// # Arguments
     /// * `a` - The system matrix (must support row access and element access)
     #[cfg(feature = "dense-direct")]
-    pub fn setup<M: RowPattern + MatrixGet<S> + crate::matrix::dense::DenseMatrix>(
-        &mut self,
-        a: &M,
-    ) {
+    pub fn setup<M>(&mut self, a: &M)
+    where
+        M: RowPattern + MatrixGet<S>,
+    {
         self.block_factors.clear();
         for block in &self.blocks {
             let n = block.len();
             // Extract the n x n block submatrix
-            let mut data = vec![R::default(); n * n];
+            let mut data = vec![R::zero(); n * n];
             for (ii, &i) in block.iter().enumerate() {
                 let row = a.row_indices(i);
                 for (jj, &j) in block.iter().enumerate() {
                     // Only fill if the entry exists in the original matrix
                     if row.contains(&j) {
-                        data[jj * n + ii] = a.get(i, j);
+                        data[jj * n + ii] = a.get(i, j).real();
                     }
                 }
             }
             // Create a dense matrix for the block
-            let amat = crate::matrix::dense::DenseMatrix::from_raw(n, n, data);
+            let amat = Mat::from_fn(n, n, |i, j| data[j * n + i]);
             let mut lusolver = LuSolver::new();
             // Factorize the block (dummy solve to trigger factorization)
-            let _ = LinearSolver::solve(
-                &mut lusolver,
+            let _ = lusolver.solve(
                 &amat,
                 None,
-                &vec![R::default(); n],
-                &mut vec![R::default(); n],
+                &vec![R::zero(); n],
+                &mut vec![R::zero(); n],
                 PcSide::Left,
                 &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                 None,

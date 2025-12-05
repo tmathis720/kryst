@@ -6950,7 +6950,7 @@ mod tests {
     }
 
     fn identity_level() -> AMGLevel {
-        let level = AMGLevel {
+        let mut level = AMGLevel {
             a: CsrMatrix::identity(1),
             p: CsrMatrix::identity(1),
             r: CsrMatrix::identity(1),
@@ -6991,7 +6991,7 @@ mod tests {
 
     fn level_from_matrix(a: &CsrMatrix<f64>) -> AMGLevel {
         let n = a.nrows();
-        let level = AMGLevel {
+        let mut level = AMGLevel {
             a: a.clone(),
             p: CsrMatrix::identity(n),
             r: CsrMatrix::identity(n),

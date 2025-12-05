@@ -55,7 +55,8 @@ impl<T> BufferPool<T> {
     ///
     /// The caller must guarantee the first `self.len` entries are fully initialized.
     pub unsafe fn initialized_slice(&self) -> &[T] {
-        std::slice::from_raw_parts(self.buf.as_ptr() as *const T, self.len)
+        let ptr = self.buf.as_ptr() as *const T;
+        unsafe { std::slice::from_raw_parts(ptr, self.len) }
     }
 
     /// Mutable access to the initialized slice.
@@ -64,7 +65,8 @@ impl<T> BufferPool<T> {
     ///
     /// The caller must guarantee the first `self.len` entries are fully initialized.
     pub unsafe fn initialized_slice_mut(&mut self) -> &mut [T] {
-        std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut T, self.len)
+        let ptr = self.buf.as_mut_ptr() as *mut T;
+        unsafe { std::slice::from_raw_parts_mut(ptr, self.len) }
     }
 
     /// Mutable access for initializing, returning the raw uninitialized bytes.
@@ -79,7 +81,7 @@ impl<T> BufferPool<T> {
     /// Use only if the caller has completed initialization for the first `self.len`
     /// entries.
     pub unsafe fn as_slice(&self) -> &[T] {
-        self.initialized_slice()
+        unsafe { self.initialized_slice() }
     }
 }
 
