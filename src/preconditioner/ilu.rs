@@ -9,7 +9,8 @@
 //! - **ILUT** (`IluType::ILUT`)
 //!
 //! It targets `faer::Mat<f64>` with CSR representation for real-valued matrices.
-//! For complex problems, prefer the K-preconditioner bridge or a simpler real-valued preconditioner.
+//! The factorization stays in `f64`, but complex builds can still expose this preconditioner
+//! via the `KPreconditioner` bridge (`BridgeScratch`).
 //!
 //! # Features
 //! - Drop tolerances and fill control inspired by HYPRE ParILU.
@@ -22,10 +23,16 @@
 //! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems
 //! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 use crate::algebra::scalar::KrystScalar;
+#[cfg(feature = "complex")]
+use crate::algebra::scalar::S as GlobalScalar;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils;
+#[cfg(feature = "complex")]
+use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve};
@@ -1488,6 +1495,61 @@ impl LocalPreconditioner<f64> for Ilu {
     }
 }
 
+#[cfg(feature = "complex")]
+impl KPreconditioner for Ilu {
+    type Scalar = GlobalScalar;
+
+    #[inline]
+    fn dims(&self) -> (usize, usize) {
+        LocalPreconditioner::<f64>::dims(self)
+    }
+
+    fn apply_s(
+        &self,
+        side: PcSide,
+        x: &[GlobalScalar],
+        y: &mut [GlobalScalar],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        let (rows, cols) = LocalPreconditioner::<f64>::dims(self);
+        let n = x.len();
+        if x.len() != y.len() || rows != n || cols != n {
+            return Err(KError::InvalidInput(format!(
+                "Ilu::apply_s dimension mismatch: expected {}x{}, got x.len()={} y.len()={}",
+                rows,
+                cols,
+                x.len(),
+                y.len()
+            )));
+        }
+
+        scratch.with_pair(n, |xr, yr| {
+            copy_scalar_to_real_in(x, xr);
+            self.apply_slice(side, xr, yr)?;
+            copy_real_into_scalar(yr, y);
+            Ok(())
+        })
+    }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[GlobalScalar],
+        y: &mut [GlobalScalar],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        KPreconditioner::apply_s(self, side, x, y, scratch)
+    }
+
+    fn on_restart_s(
+        &mut self,
+        _outer_iter: usize,
+        _residual_norm: <GlobalScalar as KrystScalar>::Real,
+    ) -> Result<(), KError> {
+        Ok(())
+    }
+}
+
 /// Legacy ILU(0) type alias for backward compatibility
 pub type Ilu0 = Ilu;
 
@@ -1761,6 +1823,49 @@ mod tests {
             "residual too large: {:?}",
             res_norm
         );
+    }
+}
+
+#[cfg(all(test, feature = "complex"))]
+mod tests_complex_bridge {
+    use super::Ilu;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::scalar::KrystScalar;
+    use crate::algebra::scalar::S as GlobalScalar;
+    use crate::ops::kpc::KPreconditioner;
+    use crate::preconditioner::PcSide;
+    use crate::preconditioner::legacy::Preconditioner as LegacyPc;
+    use faer::Mat;
+
+    #[test]
+    fn apply_s_matches_real_path_for_ilu() {
+        let matrix = Mat::from_fn(2, 2, |i, j| match (i, j) {
+            (0, 0) => 4.0,
+            (0, 1) | (1, 0) => 1.0,
+            (1, 1) => 3.0,
+            _ => 0.0,
+        });
+
+        let mut ilu = Ilu::new();
+        LegacyPc::setup(&mut ilu, &matrix).expect("ilu setup");
+
+        let rhs_real = vec![1.0f64, 2.0];
+        let mut out_real = vec![0.0; rhs_real.len()];
+        LegacyPc::apply(&ilu, PcSide::Left, &rhs_real, &mut out_real).expect("ilu real apply");
+
+        let rhs_s: Vec<GlobalScalar> = rhs_real
+            .iter()
+            .copied()
+            .map(GlobalScalar::from_real)
+            .collect();
+        let mut out_s = vec![GlobalScalar::zero(); rhs_s.len()];
+        let mut scratch = BridgeScratch::default();
+        ilu.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
+            .expect("ilu apply_s");
+
+        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
+            assert!((ys.real() - yr).abs() < 1e-12);
+        }
     }
 }
 

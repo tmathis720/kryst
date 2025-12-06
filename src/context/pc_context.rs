@@ -339,6 +339,11 @@ impl PcConfig {
 /// - String form: `"jacobi->ilut"` via [`PcFactory::create_pc_chain_from_str`]
 /// - Structured form: `PcOptions.chain: Vec<PcOptions>`
 /// - Construction is deferred until a matrix is available (see KSP docs).
+///
+/// Suites of ILU/ILUT options stay available when the crate is built with `feature = "complex"`
+/// because the factory relies on the real `Ilu` and `Ilutp` implementations plus the `KPreconditioner`
+/// bridge (`BridgeScratch`). When the specialized `backend-faer` path is unavailable, we fall back
+/// to the generic `Ilup` or `Ilut` implementations that already operate over the Kryst scalar `S`.
 pub struct PcFactory;
 
 impl PcFactory {

@@ -5,6 +5,8 @@
 //! This module implements the ILUTP algorithm which combines threshold-based dropping
 //! with partial pivoting to improve stability for difficult matrices such as those
 //! arising from discretized Navier-Stokes equations.
+//! The factorization is kept in `f64`, but a `KPreconditioner` bridge exposes the same
+//! functionality to complex solvers via `BridgeScratch`.
 //!
 //! For non-pivoting ILUT on `faer::Mat<f64>`, prefer the canonical `Ilu` implementation
 //! with `IluType::ILUT`.
@@ -245,8 +247,14 @@ impl Ilutp {
 
     fn apply_slice(&self, input: &[f64], output: &mut [f64]) -> Result<(), KError> {
         let n = input.len();
-        if output.len() != n || self.l_factor.nrows() != n {
-            return Err(KError::SolveError("Vector size mismatch".to_string()));
+        let expected = self.l_factor.nrows();
+        if output.len() != n || expected != n {
+            return Err(KError::InvalidInput(format!(
+                "Ilutp::apply_slice dimension mismatch: expected {}, got input.len()={}, output.len()={}",
+                expected,
+                n,
+                output.len()
+            )));
         }
 
         let mut temp = vec![0.0; n];
@@ -322,15 +330,17 @@ impl KPreconditioner for Ilutp {
         y: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        if x.len() != y.len() {
+        let (rows, cols) = LocalPreconditioner::<f64>::dims(self);
+        let n = x.len();
+        if x.len() != y.len() || rows != n || cols != n {
             return Err(KError::InvalidInput(format!(
-                "Ilutp::apply_s dimension mismatch: x.len()={}, y.len()={}",
+                "Ilutp::apply_s dimension mismatch: expected {}x{}, got x.len()={} y.len()={}",
+                rows,
+                cols,
                 x.len(),
                 y.len()
             )));
         }
-
-        let n = x.len();
         scratch.with_pair(n, |xr, yr| {
             copy_scalar_to_real_in(x, xr);
             self.apply_slice(xr, yr)?;

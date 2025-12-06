@@ -3,6 +3,8 @@
 //! This streams each row, drops entries below a magnitude threshold, keeps at most `fill`
 //! entries, and splits the remaining entries into L (j < i) and U (j >= i) parts.
 //! It does **not** perform an ILUT elimination.
+//! It is implemented generically over the Kryst scalar `S`, so complex systems can call it
+//! without requiring a real-to-complex bridge.
 //!
 //! For a true ILUT factorization, use `Ilu` with `IluType::ILUT`.
 

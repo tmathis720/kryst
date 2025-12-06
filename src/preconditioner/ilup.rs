@@ -16,6 +16,7 @@
 //!   (`IluType::ILUK` / `IluType::ILUT`).
 //! - `Ilup` remains useful when you need a generic matrix interface or want to embed the fill
 //!   control logic in custom operators.
+//! - It is generic over the Kryst scalar `S`, so complex problems can use this preconditioner directly.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
