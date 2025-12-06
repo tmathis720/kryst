@@ -41,6 +41,9 @@ use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
 use std::sync::Mutex;
 
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
 #[cfg(feature = "logging")]
 use log::{debug, info, trace, warn};
 
@@ -563,6 +566,13 @@ impl Ilu {
             ));
         }
 
+        if config.enable_parallel_triangular_solve && config.parallel_chunk_size == 0 {
+            return Err(KError::InvalidInput(
+                "parallel_chunk_size must be > 0 when parallel triangular solve is enabled"
+                    .to_string(),
+            ));
+        }
+
         if config.tolerance <= 0.0 {
             return Err(KError::InvalidInput("tolerance must be > 0".to_string()));
         }
@@ -1037,69 +1047,118 @@ impl Ilu {
             return;
         }
 
+        self.solve_triangular_exact_seq(lower, x);
+    }
+
+    #[inline]
+    fn solve_triangular_exact_seq(&self, lower: bool, x: &mut [S]) {
         let n = x.len();
         if lower {
-            // Forward substitution: L * x = b (unit diagonal) using x as both rhs and solution
+            // Forward substitution: L * x = b (unit diagonal)
             for i in 0..n {
                 let mut sum = x[i];
                 let (cols, vals) = self.l.row(i);
                 for (&j, &val) in cols.iter().zip(vals.iter()) {
                     if j < i {
-                        sum = sum - val * x[j];
+                        sum -= val * x[j];
                     }
                 }
                 x[i] = sum;
             }
         } else {
-            // Backward substitution: U * x = b using x in-place
+            // Backward substitution: U * x = b
             for i in (0..n).rev() {
-                let mut sum = x[i];
-                let (cols, vals) = self.u.row(i);
-                for (&j, &val) in cols.iter().zip(vals.iter()) {
-                    if j > i {
-                        sum = sum - val * x[j];
-                    }
-                }
-                x[i] = sum * self.inv_diag_u[i];
-            }
-        }
-    }
-
-    #[cfg(feature = "rayon")]
-    /// Level-scheduled forward substitution (currently executes sequentially).
-    fn solve_triangular_parallel_forward(&self, x: &mut [S]) {
-        let levels = &self.levels_l;
-        for rows in &levels.buckets {
-            for &i in rows {
-                let mut sum = x[i];
-                let (cols, vals) = self.l.row(i);
-                for (&j, &val) in cols.iter().zip(vals.iter()) {
-                    if j >= i {
-                        break;
-                    }
-                    sum = sum - val * x[j];
-                }
-                x[i] = sum;
-            }
-        }
-    }
-
-    #[cfg(feature = "rayon")]
-    /// Level-scheduled backward substitution (currently executes sequentially).
-    fn solve_triangular_parallel_backward(&self, x: &mut [S]) {
-        let levels = &self.levels_u;
-        for ell in (0..=levels.max_level).rev() {
-            let rows = &levels.buckets[ell as usize];
-            for &i in rows {
                 let mut sum = x[i];
                 let (cols, vals) = self.u.row(i);
                 for (&j, &val) in cols.iter().zip(vals.iter()) {
                     if j <= i {
                         continue;
                     }
-                    sum = sum - val * x[j];
+                    sum -= val * x[j];
                 }
                 x[i] = sum * self.inv_diag_u[i];
+            }
+        }
+    }
+
+    #[cfg(feature = "rayon")]
+    fn solve_triangular_parallel_forward(&self, x: &mut [S]) {
+        if x.is_empty() {
+            return;
+        }
+
+        let chunk_size = self.config.parallel_chunk_size.max(1);
+        let levels = &self.levels_l;
+        if levels.buckets.is_empty() {
+            return;
+        }
+
+        for rows in &levels.buckets {
+            if rows.is_empty() {
+                continue;
+            }
+
+            let updates: Vec<(usize, S)> = {
+                let x_ref: &[S] = &*x;
+                rows.par_iter()
+                    .with_min_len(chunk_size)
+                    .map(|&i| {
+                        let mut sum = x_ref[i];
+                        let (cols, vals) = self.l.row(i);
+                        for (&j, &val) in cols.iter().zip(vals.iter()) {
+                            if j < i {
+                                sum -= val * x_ref[j];
+                            }
+                        }
+                        (i, sum)
+                    })
+                    .collect()
+            };
+
+            for (i, val) in updates {
+                x[i] = val;
+            }
+        }
+    }
+
+    #[cfg(feature = "rayon")]
+    fn solve_triangular_parallel_backward(&self, x: &mut [S]) {
+        if x.is_empty() {
+            return;
+        }
+
+        let chunk_size = self.config.parallel_chunk_size.max(1);
+        let levels = &self.levels_u;
+        if levels.buckets.is_empty() {
+            return;
+        }
+
+        for ell in 0..=levels.max_level {
+            let rows = &levels.buckets[ell as usize];
+            if rows.is_empty() {
+                continue;
+            }
+
+            let updates: Vec<(usize, S)> = {
+                let x_ref: &[S] = &*x;
+                rows.par_iter()
+                    .with_min_len(chunk_size)
+                    .map(|&i| {
+                        let mut sum = x_ref[i];
+                        let (cols, vals) = self.u.row(i);
+                        for (&j, &val) in cols.iter().zip(vals.iter()) {
+                            if j <= i {
+                                continue;
+                            }
+                            sum -= val * x_ref[j];
+                        }
+                        (i, sum * self.inv_diag_u[i])
+                    })
+                    .collect()
+            };
+
+            for (i, val) in updates {
+                x[i] = val;
             }
         }
     }
@@ -1587,6 +1646,19 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "rayon")]
+    fn make_tridiag_matrix(n: usize) -> faer::Mat<f64> {
+        faer::Mat::from_fn(n, n, |i, j| {
+            if i == j {
+                4.0
+            } else if (i as isize - j as isize).abs() == 1 {
+                -1.0
+            } else {
+                0.0
+            }
+        })
+    }
+
     #[test]
     fn test_ilu_default_creation() {
         let ilu = Ilu::new();
@@ -1790,6 +1862,80 @@ mod tests {
 
         assert_eq!(serial_stats.nnz_l, parallel_stats.nnz_l);
         assert_eq!(serial_stats.nnz_u, parallel_stats.nnz_u);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn triangular_parallel_matches_sequential() {
+        let matrix = make_tridiag_matrix(5);
+
+        let mut cfg_seq = IluConfig::default();
+        cfg_seq.triangular_solve = TriSolveType::Exact;
+        cfg_seq.enable_parallel_triangular_solve = false;
+
+        let mut cfg_par = IluConfig::default();
+        cfg_par.triangular_solve = TriSolveType::Exact;
+        cfg_par.enable_parallel_triangular_solve = true;
+        cfg_par.parallel_chunk_size = 1;
+
+        let mut ilu_seq = Ilu::new_with_config(cfg_seq).unwrap();
+        ilu_seq.setup(&matrix).unwrap();
+
+        let mut ilu_par = Ilu::new_with_config(cfg_par).unwrap();
+        ilu_par.setup(&matrix).unwrap();
+
+        let n = matrix.nrows();
+        let x: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+
+        let mut y_seq = vec![0.0; n];
+        let mut y_par = vec![0.0; n];
+
+        ilu_seq.apply(PcSide::Left, &x, &mut y_seq).unwrap();
+        ilu_par.apply(PcSide::Left, &x, &mut y_par).unwrap();
+
+        for (&seq_val, &par_val) in y_seq.iter().zip(y_par.iter()) {
+            assert!(
+                (seq_val - par_val).abs() < 1e-12,
+                "seq={seq_val}, par={par_val} for n={n}"
+            );
+        }
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn triangular_parallel_matches_sequential_large() {
+        let n = 64;
+        let matrix = make_tridiag_matrix(n);
+
+        let mut cfg_seq = IluConfig::default();
+        cfg_seq.triangular_solve = TriSolveType::Exact;
+        cfg_seq.enable_parallel_triangular_solve = false;
+
+        let mut cfg_par = IluConfig::default();
+        cfg_par.triangular_solve = TriSolveType::Exact;
+        cfg_par.enable_parallel_triangular_solve = true;
+        cfg_par.parallel_chunk_size = 16;
+
+        let mut ilu_seq = Ilu::new_with_config(cfg_seq).unwrap();
+        ilu_seq.setup(&matrix).unwrap();
+
+        let mut ilu_par = Ilu::new_with_config(cfg_par).unwrap();
+        ilu_par.setup(&matrix).unwrap();
+
+        let x: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+
+        let mut y_seq = vec![0.0; n];
+        let mut y_par = vec![0.0; n];
+
+        ilu_seq.apply(PcSide::Left, &x, &mut y_seq).unwrap();
+        ilu_par.apply(PcSide::Left, &x, &mut y_par).unwrap();
+
+        for (&seq_val, &par_val) in y_seq.iter().zip(y_par.iter()) {
+            assert!(
+                (seq_val - par_val).abs() < 1e-10,
+                "seq={seq_val}, par={par_val} for n={n}"
+            );
+        }
     }
 
     #[test]
