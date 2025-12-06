@@ -217,6 +217,10 @@ pub struct PcOptions {
     pub ilu_parallel_triangular_solve: Option<bool>,
     pub ilu_parallel_chunk_size: Option<usize>,
     pub ilu_par_factor: Option<String>,
+    pub ilu_parilu_max_iters: Option<usize>,
+    pub ilu_parilu_min_iters: Option<usize>,
+    pub ilu_parilu_tol: Option<f64>,
+    pub ilu_parilu_omega: Option<f64>,
     pub ilu_distributed: Option<bool>,
     pub ilu_pivot_mode: Option<String>,
     pub ilu_pivot_scale: Option<String>,
@@ -646,6 +650,20 @@ impl Sink for PcOptions {
                 let val = ensure_ge_1("pc_ilu_parallel_chunk_size", parse_as::<usize>(v, spec)?)?;
                 set_opt!(&mut self.ilu_parallel_chunk_size, val)
             }
+            "pc_ilu_parilu_iters" => {
+                let val = ensure_ge_1("pc_ilu_parilu_iters", parse_as::<usize>(v, spec)?)?;
+                set_opt!(&mut self.ilu_parilu_max_iters, val)
+            }
+            "pc_ilu_parilu_min_iters" => {
+                let val = ensure_ge_1("pc_ilu_parilu_min_iters", parse_as::<usize>(v, spec)?)?;
+                set_opt!(&mut self.ilu_parilu_min_iters, val)
+            }
+            "pc_ilu_parilu_tol" => {
+                set_opt!(&mut self.ilu_parilu_tol, parse_as::<f64>(v, spec)?)
+            }
+            "pc_ilu_parilu_omega" => {
+                set_opt!(&mut self.ilu_parilu_omega, parse_as::<f64>(v, spec)?)
+            }
             "pc_ilu_block_size" => {
                 let val = ensure_ge_1("pc_ilu_block_size", parse_as::<usize>(v, spec)?)?;
                 set_opt!(&mut self.ilu_parallel_chunk_size, val)
@@ -1043,6 +1061,33 @@ impl PcOptions {
         }
     }
 
+    fn update_ilu_parilu(&mut self) {
+        if let Some(iters) = self.ilu_parilu_max_iters {
+            self.ilu.iterative_setup.max_iter = iters as u32;
+            if matches!(self.ilu.iterative_setup.ty, IterativeSetupType::Disabled) {
+                self.ilu.iterative_setup.ty = IterativeSetupType::ParILUFixedPoint;
+            }
+        }
+        if let Some(min_iters) = self.ilu_parilu_min_iters {
+            self.ilu.iterative_setup.min_iter = min_iters as u32;
+            if matches!(self.ilu.iterative_setup.ty, IterativeSetupType::Disabled) {
+                self.ilu.iterative_setup.ty = IterativeSetupType::ParILUFixedPoint;
+            }
+        }
+        if let Some(tol) = self.ilu_parilu_tol {
+            self.ilu.iterative_setup.tol = tol;
+            if matches!(self.ilu.iterative_setup.ty, IterativeSetupType::Disabled) {
+                self.ilu.iterative_setup.ty = IterativeSetupType::ParILUFixedPoint;
+            }
+        }
+        if let Some(omega) = self.ilu_parilu_omega {
+            self.ilu.iterative_setup.omega = omega;
+            if matches!(self.ilu.iterative_setup.ty, IterativeSetupType::Disabled) {
+                self.ilu.iterative_setup.ty = IterativeSetupType::ParILUFixedPoint;
+            }
+        }
+    }
+
     fn update_ilu_pivot(&mut self) {
         if let Some(tau) = self.ilu_pivot_threshold {
             self.ilu.pivot = PivotPolicy::Threshold { tau };
@@ -1061,6 +1106,7 @@ impl PcOptions {
         self.update_ilu_tri_solve();
         self.update_ilu_parallel_mode();
         self.update_ilu_iterative();
+        self.update_ilu_parilu();
         self.update_ilu_logging();
         self.update_ilu_pivot();
         self.update_ilu_schur();
@@ -1177,6 +1223,32 @@ impl PcOptions {
                 .parse()
                 .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILU_MAX_ITER: {v}")))?;
             me.ilu_max_iterations = Some(ensure_ge_1("KRYST_PC_ILU_MAX_ITER", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_PARILU_ITERS") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_ITERS: {v}"))
+            })?;
+            me.ilu_parilu_max_iters = Some(ensure_ge_1("KRYST_PC_ILU_PARILU_ITERS", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_PARILU_MIN_ITERS") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_MIN_ITERS: {v}"))
+            })?;
+            me.ilu_parilu_min_iters = Some(ensure_ge_1("KRYST_PC_ILU_PARILU_MIN_ITERS", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_PARILU_TOL") {
+            me.ilu_parilu_tol = Some(
+                v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_TOL: {v}"))
+                })?,
+            );
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_PARILU_OMEGA") {
+            me.ilu_parilu_omega = Some(
+                v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_OMEGA: {v}"))
+                })?,
+            );
         }
         if let Ok(v) = std::env::var("KRYST_PC_CHEBYSHEV_DEGREE") {
             me.chebyshev_degree = Some(v.parse().map_err(|_| {

@@ -105,6 +105,8 @@ pub struct IterativeSetupConfig {
     pub ty: IterativeSetupType,
     pub tol: f64,
     pub max_iter: u32,
+    pub min_iter: u32,
+    pub omega: f64,
     pub option_bits: IterativeSetupBits,
     pub keep_history: bool,
 }
@@ -115,6 +117,8 @@ impl Default for IterativeSetupConfig {
             ty: IterativeSetupType::Disabled,
             tol: 1e-2,
             max_iter: 10,
+            min_iter: 0,
+            omega: 1.0,
             option_bits: IterativeSetupBits::PIVOT_STAB,
             keep_history: false,
         }
@@ -279,11 +283,16 @@ impl IluOptions {
         let keep_history =
             it.keep_history || it.option_bits.contains(IterativeSetupBits::TRACE_HISTORY);
 
+        let omega = it.omega.max(0.0);
+        let min_iter = it.min_iter.min(max_iter);
+
         let o2 = IluOptions {
             iterative_setup: IterativeSetupConfig {
                 ty: it.ty,
                 tol,
                 max_iter,
+                min_iter,
+                omega,
                 option_bits: it.option_bits,
                 keep_history,
             },

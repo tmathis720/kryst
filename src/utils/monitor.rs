@@ -70,12 +70,8 @@ impl Monitor for TextMonitor {
                     log::info!("ILU: setup begin (opts={opts_hash:016x})")
                 }
                 Event::IluSetupIter { sample } => log::info!(
-                    "ILU: it {:>3}  corr(L)={:.3e}  corr(U)={:.3e}  res≈{:.3e}  maxΔpivot={:.3e}",
-                    sample.iter,
-                    sample.rel_corr_L,
-                    sample.rel_corr_U,
-                    sample.rel_residual,
-                    sample.max_pivot_rel
+                    "ILU: it {:>3}  parilu_res≈{:.3e}",
+                    sample.iter, sample.residual,
                 ),
                 Event::IluSetupEnd {
                     iters,

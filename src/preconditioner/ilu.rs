@@ -140,6 +140,16 @@ pub struct IluConfig {
     pub parallel_chunk_size: usize,
     /// Enable distributed memory support (requires MPI)
     pub enable_distributed: bool,
+    /// Enable ParILU refinement after the initial ILU factorization
+    pub parilu_enabled: bool,
+    /// Maximum ParILU sweeps
+    pub parilu_max_iters: usize,
+    /// Minimum ParILU sweeps before early-exit checks
+    pub parilu_min_iters: usize,
+    /// Convergence tolerance for ParILU residual
+    pub parilu_tol: Real,
+    /// Relaxation factor for ParILU fixed-point updates
+    pub parilu_omega: Real,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +163,8 @@ impl IluConfig {
     fn par_factor_mode(&self) -> ParFactorizationMode {
         if !self.enable_parallel_factorization {
             ParFactorizationMode::Serial
+        } else if self.parilu_enabled {
+            ParFactorizationMode::ParIlu
         } else {
             ParFactorizationMode::Block
         }
@@ -184,6 +196,11 @@ impl Default for IluConfig {
             enable_parallel_triangular_solve: false, // Conservative default
             parallel_chunk_size: 64,              // Reasonable chunk size for cache efficiency
             enable_distributed: false,            // Conservative default
+            parilu_enabled: false,
+            parilu_max_iters: 0,
+            parilu_min_iters: 0,
+            parilu_tol: 1e-2,
+            parilu_omega: 1.0,
         }
     }
 }
@@ -216,6 +233,10 @@ fn print_ilu_banner(cfg: &IluConfig) {
         cfg.enable_parallel_triangular_solve
     );
     info!("  pivot                : {:?}", cfg.pivot_policy);
+    info!(
+        "  parilu               : enabled={}, max_iter={}, min_iter={}, tol={:.2e}, omega={:.2}",
+        cfg.parilu_enabled, cfg.parilu_max_iters, cfg.parilu_min_iters, cfg.parilu_tol, cfg.parilu_omega
+    );
 }
 
 /// HYPRE-inspired ILU builder for advanced configuration
@@ -326,6 +347,21 @@ impl IluBuilder {
     pub fn enable_parallel(mut self) -> Self {
         self.config.enable_parallel_factorization = true;
         self.config.enable_parallel_triangular_solve = true;
+        self
+    }
+
+    /// Enable ParILU refinement with explicit iteration controls
+    pub fn enable_parilu(mut self, max_iters: usize, tol: Real, omega: Real) -> Self {
+        self.config.parilu_enabled = true;
+        self.config.parilu_max_iters = max_iters;
+        self.config.parilu_tol = tol;
+        self.config.parilu_omega = omega;
+        self
+    }
+
+    /// Set the minimum ParILU sweeps before checking convergence
+    pub fn parilu_min_iters(mut self, min_iters: usize) -> Self {
+        self.config.parilu_min_iters = min_iters;
         self
     }
 
@@ -604,6 +640,18 @@ impl Ilu {
             return Err(KError::InvalidInput("tolerance must be > 0".to_string()));
         }
 
+        if config.parilu_omega <= 0.0 {
+            return Err(KError::InvalidInput(
+                "parilu_omega must be > 0 (relaxation factor)".to_string(),
+            ));
+        }
+
+        if config.parilu_min_iters > config.parilu_max_iters {
+            return Err(KError::InvalidInput(
+                "parilu_min_iters cannot exceed parilu_max_iters".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -650,19 +698,6 @@ impl Ilu {
         } else {
             0.0
         }
-    }
-
-    /// Count nonzeros in matrix
-    fn count_nnz(matrix: &Mat<f64>) -> usize {
-        let mut nnz = 0;
-        for i in 0..matrix.nrows() {
-            for j in 0..matrix.ncols() {
-                if matrix[(i, j)] != 0.0 {
-                    nnz += 1;
-                }
-            }
-        }
-        nnz
     }
 
     fn stabilize_pivot_value(
@@ -1327,6 +1362,363 @@ impl Ilu {
         }
     }
 
+    /// Compute the LU product for entry (i, j) using the provided CSR slices.
+    fn lu_row_product(
+        &self,
+        i: usize,
+        j: usize,
+        l_row_ptr: &[usize],
+        l_col_idx: &[usize],
+        l_vals: &[f64],
+        u_row_ptr: &[usize],
+        u_col_idx: &[usize],
+        u_vals: &[f64],
+    ) -> f64 {
+        let limit = i.min(j);
+        let start_l = l_row_ptr[i];
+        let end_l = l_row_ptr[i + 1];
+        let mut sum = 0.0;
+
+        for idx in start_l..end_l {
+            let k = l_col_idx[idx];
+            if k >= limit {
+                break;
+            }
+            let lik = l_vals[idx];
+            let start_u = u_row_ptr[k];
+            let end_u = u_row_ptr[k + 1];
+            if let Ok(off) = u_col_idx[start_u..end_u].binary_search(&j) {
+                let ukj = u_vals[start_u + off];
+                sum = f64::mul_add(lik, ukj, sum);
+            }
+        }
+
+        sum
+    }
+
+    /// Single ParILU sweep (serial), returning the Frobenius-norm residual.
+    #[allow(clippy::too_many_arguments)]
+    fn parilu_sweep_serial(
+        &self,
+        a: &CsrMatrix<f64>,
+        l_row_ptr: &[usize],
+        l_col_idx: &[usize],
+        l_old: &[f64],
+        u_row_ptr: &[usize],
+        u_col_idx: &[usize],
+        u_old: &[f64],
+        l_new: &mut [f64],
+        u_new: &mut [f64],
+        omega: f64,
+    ) -> Result<f64, KError> {
+        let n = a.nrows();
+        let mut res_sq = 0.0;
+
+        let get_u_diag = |j: usize| -> f64 {
+            let start = u_row_ptr[j];
+            let end = u_row_ptr[j + 1];
+            for idx in start..end {
+                if u_col_idx[idx] == j {
+                    return u_old[idx];
+                }
+            }
+            0.0
+        };
+
+        for i in 0..n {
+            let (a_cols, a_vals) = a.row(i);
+
+            // Lower part (strict)
+            let l_start = l_row_ptr[i];
+            let l_end = l_row_ptr[i + 1];
+            for idx in l_start..l_end {
+                let j = l_col_idx[idx];
+                if j >= i {
+                    continue;
+                }
+
+                let a_ij = match a_cols.binary_search(&j) {
+                    Ok(pos) => a_vals[pos],
+                    Err(_) => 0.0,
+                };
+
+                let s_ij = self.lu_row_product(
+                    i, j, l_row_ptr, l_col_idx, l_old, u_row_ptr, u_col_idx, u_old,
+                );
+
+                let r_ij = a_ij - s_ij;
+
+                let u_jj = get_u_diag(j);
+                if u_jj == 0.0 {
+                    return Err(KError::ZeroPivot(j));
+                }
+
+                let lij_old = l_old[idx];
+                let lij_new = (1.0 - omega) * lij_old + omega * (r_ij / u_jj);
+                l_new[idx] = lij_new;
+
+                res_sq += r_ij * r_ij;
+            }
+
+            // Upper part (including diagonal)
+            let u_start = u_row_ptr[i];
+            let u_end = u_row_ptr[i + 1];
+            for idx in u_start..u_end {
+                let j = u_col_idx[idx];
+                if j < i {
+                    continue;
+                }
+
+                let a_ij = match a_cols.binary_search(&j) {
+                    Ok(pos) => a_vals[pos],
+                    Err(_) => 0.0,
+                };
+
+                let s_ij = self.lu_row_product(
+                    i, j, l_row_ptr, l_col_idx, l_old, u_row_ptr, u_col_idx, u_old,
+                );
+
+                let r_ij = a_ij - s_ij;
+
+                let uij_old = u_old[idx];
+                let uij_new = (1.0 - omega) * uij_old + omega * r_ij;
+                u_new[idx] = uij_new;
+
+                res_sq += r_ij * r_ij;
+            }
+        }
+
+        Ok(res_sq.sqrt())
+    }
+
+    /// ParILU sweep with optional rayon parallelism.
+    #[allow(clippy::too_many_arguments)]
+    fn parilu_sweep(
+        &self,
+        a: &CsrMatrix<f64>,
+        l_row_ptr: &[usize],
+        l_col_idx: &[usize],
+        l_old: &[f64],
+        u_row_ptr: &[usize],
+        u_col_idx: &[usize],
+        u_old: &[f64],
+        l_new: &mut [f64],
+        u_new: &mut [f64],
+        omega: f64,
+    ) -> Result<f64, KError> {
+        #[cfg(feature = "rayon")]
+        {
+            if self.config.enable_parallel_factorization {
+                return self.parilu_sweep_parallel(
+                    a, l_row_ptr, l_col_idx, l_old, u_row_ptr, u_col_idx, u_old, l_new, u_new,
+                    omega,
+                );
+            }
+        }
+        self.parilu_sweep_serial(
+            a, l_row_ptr, l_col_idx, l_old, u_row_ptr, u_col_idx, u_old, l_new, u_new, omega,
+        )
+    }
+
+    /// Row-parallel ParILU sweep (rayon).
+    #[cfg(feature = "rayon")]
+    #[allow(clippy::too_many_arguments)]
+    fn parilu_sweep_parallel(
+        &self,
+        a: &CsrMatrix<f64>,
+        l_row_ptr: &[usize],
+        l_col_idx: &[usize],
+        l_old: &[f64],
+        u_row_ptr: &[usize],
+        u_col_idx: &[usize],
+        u_old: &[f64],
+        l_new: &mut [f64],
+        u_new: &mut [f64],
+        omega: f64,
+    ) -> Result<f64, KError> {
+        let n = a.nrows();
+
+        // Safety: row_ptr partitions the value slices by row, so indices written by
+        // different iterations are disjoint. We pass raw addresses as usize to
+        // satisfy Sync bounds on the parallel closure.
+        let l_ptr = l_new.as_mut_ptr() as usize;
+        let u_ptr = u_new.as_mut_ptr() as usize;
+
+        let res_sq: Result<f64, KError> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let (a_cols, a_vals) = a.row(i);
+                let mut res_sq_i = 0.0;
+
+                let l_start = l_row_ptr[i];
+                let l_end = l_row_ptr[i + 1];
+                let u_start = u_row_ptr[i];
+                let u_end = u_row_ptr[i + 1];
+
+                let get_u_diag = |j: usize| -> f64 {
+                    let start = u_row_ptr[j];
+                    let end = u_row_ptr[j + 1];
+                    for idx in start..end {
+                        if u_col_idx[idx] == j {
+                            return u_old[idx];
+                        }
+                    }
+                    0.0
+                };
+
+                for idx in l_start..l_end {
+                    let j = l_col_idx[idx];
+                    if j >= i {
+                        continue;
+                    }
+
+                    let a_ij = match a_cols.binary_search(&j) {
+                        Ok(pos) => a_vals[pos],
+                        Err(_) => 0.0,
+                    };
+
+                    let s_ij = self.lu_row_product(
+                        i, j, l_row_ptr, l_col_idx, l_old, u_row_ptr, u_col_idx, u_old,
+                    );
+                    let r_ij = a_ij - s_ij;
+
+                    let u_jj = get_u_diag(j);
+                    if u_jj == 0.0 {
+                        return Err(KError::ZeroPivot(j));
+                    }
+
+                    let lij_old = l_old[idx];
+                    let lij_new = (1.0 - omega) * lij_old + omega * (r_ij / u_jj);
+                    unsafe { *(l_ptr as *mut f64).add(idx) = lij_new };
+
+                    res_sq_i += r_ij * r_ij;
+                }
+
+                for idx in u_start..u_end {
+                    let j = u_col_idx[idx];
+                    if j < i {
+                        continue;
+                    }
+
+                    let a_ij = match a_cols.binary_search(&j) {
+                        Ok(pos) => a_vals[pos],
+                        Err(_) => 0.0,
+                    };
+
+                    let s_ij = self.lu_row_product(
+                        i, j, l_row_ptr, l_col_idx, l_old, u_row_ptr, u_col_idx, u_old,
+                    );
+                    let r_ij = a_ij - s_ij;
+
+                    let uij_old = u_old[idx];
+                    let uij_new = (1.0 - omega) * uij_old + omega * r_ij;
+                    unsafe { *(u_ptr as *mut f64).add(idx) = uij_new };
+
+                    res_sq_i += r_ij * r_ij;
+                }
+
+                Ok(res_sq_i)
+            })
+            .try_reduce(|| 0.0, |a, b| Ok(a + b));
+
+        Ok(res_sq?.sqrt())
+    }
+
+    /// ParILU refinement over the fixed sparsity pattern of (L, U).
+    fn parilu_refine(&mut self, a: &CsrMatrix<f64>) -> Result<(), KError> {
+        if !self.config.parilu_enabled || self.config.parilu_max_iters == 0 {
+            self.history = None;
+            return Ok(());
+        }
+
+        let n = a.nrows();
+        if n == 0 {
+            self.history = None;
+            return Ok(());
+        }
+
+        if a.ncols() != n || self.l.nrows() != n || self.u.nrows() != n {
+            return Err(KError::InvalidInput(
+                "ParILU requires square matrices with matching dimensions".to_string(),
+            ));
+        }
+
+        let max_iters = self.config.parilu_max_iters;
+        let min_iters = self.config.parilu_min_iters.min(max_iters);
+        let omega = self.config.parilu_omega;
+        let tol = self.config.parilu_tol;
+
+        // Capture pattern
+        let l_row_ptr = self.l.row_ptr().to_vec();
+        let l_col_idx = self.l.col_idx().to_vec();
+        let mut l_vals = self.l.values().to_vec();
+
+        let u_row_ptr = self.u.row_ptr().to_vec();
+        let u_col_idx = self.u.col_idx().to_vec();
+        let mut u_vals = self.u.values().to_vec();
+
+        let mut l_old = l_vals.clone();
+        let mut u_old = u_vals.clone();
+
+        let mut history = ParIluHistory::with_capacity(max_iters);
+
+        for iter in 0..max_iters {
+            let res = self.parilu_sweep(
+                a,
+                &l_row_ptr,
+                &l_col_idx,
+                &l_old,
+                &u_row_ptr,
+                &u_col_idx,
+                &u_old,
+                &mut l_vals,
+                &mut u_vals,
+                omega,
+            )?;
+
+            history.push(ParIluIterSample {
+                iter: iter as u32,
+                residual: res,
+            });
+
+            if let Some(m) = &self.monitor {
+                if let Some(sample) = history.as_slice().last() {
+                    m.on_event(Event::IluSetupIter { sample });
+                }
+            }
+
+            if iter + 1 >= min_iters && res < tol {
+                break;
+            }
+
+            l_old.copy_from_slice(&l_vals);
+            u_old.copy_from_slice(&u_vals);
+        }
+
+        self.l = CsrMatrix::from_csr(n, n, l_row_ptr, l_col_idx, l_vals);
+        self.u = CsrMatrix::from_csr(n, n, u_row_ptr, u_col_idx, u_vals);
+        self.inv_diag_u = self.u.diagonal().into_iter().map(|v| 1.0 / v).collect();
+        self.nnz_l = self.l.nnz();
+        self.nnz_u = self.u.nnz();
+        self.history = Some(history);
+
+        #[cfg(feature = "logging")]
+        if self.config.logging_level > 0 {
+            if let Some(last) = self.history.as_ref().and_then(|h| h.as_slice().last()) {
+                let converged = last.residual < tol;
+                info!(
+                    "ParILU refinement: iterations={}, final residual {:.3e} (tol {:.3e}, converged={})",
+                    self.history.as_ref().map(|h| h.as_slice().len()).unwrap_or(0),
+                    last.residual,
+                    tol,
+                    converged
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Setup consolidated workspace for efficient operations (zero-allocation goal)
     fn setup_workspace(&mut self, n: usize) {
         if self.config.optimize_workspace {
@@ -1669,7 +2061,8 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         }
 
         let n = matrix.nrows();
-        let original_nnz = Self::count_nnz(matrix);
+        let a_csr = CsrMatrix::from_dense(matrix, 1e-15);
+        let original_nnz = a_csr.nnz();
 
         #[cfg(feature = "logging")]
         print_ilu_banner(&self.config);
@@ -1697,6 +2090,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         self.max_diag_a = max_diag;
         self.running_max_u = Real::default();
         self.pivot_stats = PivotStats::default();
+        self.history = None;
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
@@ -1706,6 +2100,9 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
 
         // Setup workspace for iterative solves
         self.setup_workspace(n);
+
+        let mut parilu_iters = 0u32;
+        let mut parilu_converged = true;
 
         // Perform factorization based on type
         match (self.config.ilu_type, self.config.par_factor_mode()) {
@@ -1733,6 +2130,20 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
             }
         }
 
+        if self.config.parilu_enabled && self.config.parilu_max_iters > 0 {
+            self.parilu_refine(&a_csr)?;
+            if let Some(hist) = &self.history {
+                parilu_iters = hist.as_slice().len() as u32;
+                parilu_converged = hist
+                    .as_slice()
+                    .last()
+                    .map(|s| s.residual < self.config.parilu_tol)
+                    .unwrap_or(false);
+            }
+        } else {
+            self.history = None;
+        }
+
         // Calculate metrics
         self.setup_complexity = self.calculate_complexity(original_nnz);
         self.setup_time = setup_start.elapsed().as_secs_f64();
@@ -1749,6 +2160,17 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
                 "ILU Setup Complete: complexity={:.2}, L_nnz={}, U_nnz={}, setup_time={:.3}s",
                 self.setup_complexity, self.nnz_l, self.nnz_u, self.setup_time
             );
+
+            if let Some(hist) = &self.history {
+                if let Some(last) = hist.as_slice().last() {
+                    info!(
+                        "ParILU refinement: sweeps={}, final residual {:.2e} (tol {:.2e})",
+                        hist.as_slice().len(),
+                        last.residual,
+                        self.config.parilu_tol
+                    );
+                }
+            }
 
             debug!(
                 "Pivot floors: {} (max shift {:.3e})",
@@ -1773,8 +2195,8 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         }
         if let Some(m) = &self.monitor {
             m.on_event(Event::IluSetupEnd {
-                iters: 0,
-                converged: true,
+                iters: parilu_iters,
+                converged: parilu_converged,
                 setup_time_s: self.setup_time,
             });
         }
@@ -2350,6 +2772,100 @@ mod tests {
             res_norm.real() < 1e-10,
             "residual too large: {:?}",
             res_norm
+        );
+    }
+
+    #[test]
+    fn parilu_refines_residual() {
+        let matrix = faer::Mat::<f64>::from_fn(3, 3, |i, j| match (i, j) {
+            (0, 0) => 4.0,
+            (0, 1) | (1, 0) => 1.0,
+            (1, 1) => 3.0,
+            (1, 2) | (2, 1) => 1.0,
+            (2, 2) => 2.0,
+            _ => 0.0,
+        });
+        let rhs = vec![1.0f64; 3];
+
+        let mut baseline = Ilu::new();
+        baseline.setup(&matrix).expect("baseline ILU");
+        let mut y_base = vec![0.0; 3];
+        baseline
+            .apply(PcSide::Left, &rhs, &mut y_base)
+            .expect("apply baseline");
+        let res_base = {
+            let mut sum = 0.0;
+            for i in 0..matrix.nrows() {
+                let mut ax = 0.0;
+                for j in 0..matrix.ncols() {
+                    ax += matrix[(i, j)] * y_base[j];
+                }
+                let r = ax - rhs[i];
+                sum += r * r;
+            }
+            sum.sqrt()
+        };
+
+        let mut cfg = IluConfig::default();
+        cfg.parilu_enabled = true;
+        cfg.parilu_max_iters = 5;
+        cfg.parilu_min_iters = 1;
+        cfg.parilu_tol = 1e-8;
+        let mut parilu = Ilu::new_with_config(cfg).unwrap();
+        parilu.setup(&matrix).expect("parilu ILU");
+        let mut y_parilu = vec![0.0; 3];
+        parilu
+            .apply(PcSide::Left, &rhs, &mut y_parilu)
+            .expect("apply parilu");
+        let res_parilu = {
+            let mut sum = 0.0;
+            for i in 0..matrix.nrows() {
+                let mut ax = 0.0;
+                for j in 0..matrix.ncols() {
+                    ax += matrix[(i, j)] * y_parilu[j];
+                }
+                let r = ax - rhs[i];
+                sum += r * r;
+            }
+            sum.sqrt()
+        };
+
+        assert!(
+            res_parilu <= res_base + 1e-10,
+            "ParILU should not worsen residual (baseline {res_base}, parilu {res_parilu})"
+        );
+
+        let hist = parilu.parilu_history().unwrap();
+        assert!(!hist.is_empty());
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn parilu_parallel_matches_serial_small() {
+        let n = 8;
+        let matrix = make_tridiag_matrix(n);
+
+        let mut cfg_serial = IluConfig::default();
+        cfg_serial.parilu_enabled = true;
+        cfg_serial.parilu_max_iters = 3;
+        cfg_serial.parilu_tol = 0.0;
+
+        let mut cfg_par = cfg_serial.clone();
+        cfg_par.enable_parallel_factorization = true;
+
+        let mut ilu_serial = Ilu::new_with_config(cfg_serial).unwrap();
+        ilu_serial.setup(&matrix).unwrap();
+        let mut ilu_par = Ilu::new_with_config(cfg_par).unwrap();
+        ilu_par.setup(&matrix).unwrap();
+
+        let h_serial = ilu_serial.parilu_history().unwrap();
+        let h_par = ilu_par.parilu_history().unwrap();
+        assert_eq!(h_serial.len(), h_par.len());
+        let last_serial = h_serial.last().unwrap().residual;
+        let last_par = h_par.last().unwrap().residual;
+        assert!(
+            (last_serial - last_par).abs() < 1e-6,
+            "serial {last_serial} vs parallel {last_par}"
         );
     }
 }

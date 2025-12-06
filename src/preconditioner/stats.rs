@@ -31,10 +31,7 @@ macro_rules! pc_log {
 #[derive(Debug, Clone)]
 pub struct ParIluIterSample {
     pub iter: u32,
-    pub rel_corr_L: f64,
-    pub rel_corr_U: f64,
-    pub rel_residual: f64,
-    pub max_pivot_rel: f64,
+    pub residual: f64,
 }
 
 #[derive(Debug, Clone)]
