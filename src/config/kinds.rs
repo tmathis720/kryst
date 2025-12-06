@@ -76,6 +76,10 @@ simple_kind! {
     pub enum IluTriSolveKind { Exact => "exact", Iterative => "iterative" }
 }
 
+simple_kind! {
+    pub enum IluParFactorKind { None => "none", Block => "block", ParILU => "parilu" }
+}
+
 // pc_amg_coarsen_type
 simple_kind! {
     pub enum AmgCoarsenKind { Rs => "rs", Hmis => "hmis", Pmis => "pmis", Falgout => "falgout" }

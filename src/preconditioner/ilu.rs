@@ -30,7 +30,6 @@ use crate::algebra::scalar::KrystScalar;
 use crate::algebra::scalar::S as GlobalScalar;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
-use crate::matrix::utils;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::LocalPreconditioner;
@@ -39,6 +38,8 @@ use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve:
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
+#[cfg(feature = "rayon")]
+use std::sync::Arc;
 use std::sync::Mutex;
 
 #[cfg(feature = "rayon")]
@@ -139,6 +140,23 @@ pub struct IluConfig {
     pub parallel_chunk_size: usize,
     /// Enable distributed memory support (requires MPI)
     pub enable_distributed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParFactorizationMode {
+    Serial,
+    Block,
+    ParIlu,
+}
+
+impl IluConfig {
+    fn par_factor_mode(&self) -> ParFactorizationMode {
+        if !self.enable_parallel_factorization {
+            ParFactorizationMode::Serial
+        } else {
+            ParFactorizationMode::Block
+        }
+    }
 }
 
 impl Default for IluConfig {
@@ -446,6 +464,15 @@ impl IluWorkspace {
 }
 
 #[cfg(feature = "rayon")]
+struct BlockFactorResult {
+    l: CsrMatrix<f64>,
+    u: CsrMatrix<f64>,
+    pivot_stats: PivotStats,
+    running_max: f64,
+    zero_pivots: usize,
+}
+
+#[cfg(feature = "rayon")]
 #[derive(Clone, Debug, Default)]
 struct Levels {
     /// Rows grouped by level
@@ -638,6 +665,41 @@ impl Ilu {
         nnz
     }
 
+    fn stabilize_pivot_value(
+        pivot: &mut f64,
+        row: usize,
+        matrix: &Mat<f64>,
+        policy: &PivotPolicy,
+        max_diag_a: f64,
+        row_inf_a: &[f64],
+        row_gersh_a: &[f64],
+        stats: &mut PivotStats,
+        running_max: &mut f64,
+        zero_pivots: &mut usize,
+    ) -> Result<(), KError> {
+        let s_i = match policy.scale {
+            PivotScale::MaxDiagA => max_diag_a,
+            PivotScale::LocalDiagA => matrix[(row, row)].abs(),
+            PivotScale::RowInfA => row_inf_a[row],
+            PivotScale::RowGershgorin => row_gersh_a[row],
+            PivotScale::RunningMaxU => *running_max,
+        }
+        .max(max_diag_a);
+
+        if let Err(e) =
+            stabilize_pivot_in_place(pivot, s_i, policy.tau, policy.sign, policy.mode, stats, row)
+        {
+            *zero_pivots += 1;
+            return Err(e);
+        }
+
+        let abs = pivot.abs();
+        if abs > *running_max {
+            *running_max = abs;
+        }
+        Ok(())
+    }
+
     /// Pivot stabilization using configurable policy
     fn handle_pivot(
         &mut self,
@@ -649,39 +711,126 @@ impl Ilu {
 
         // determine scaling value and guard against vanishing floors by
         // clamping to the global maximum diagonal magnitude
-        let s_i = match policy.scale {
-            PivotScale::MaxDiagA => self.max_diag_a,
-            PivotScale::LocalDiagA => matrix[(row, row)].abs(),
-            PivotScale::RowInfA => self.row_inf_a[row],
-            PivotScale::RowGershgorin => self.row_gersh_a[row],
-            PivotScale::RunningMaxU => self.running_max_u,
-        }
-        .max(self.max_diag_a);
-
-        let tau = policy.tau;
-        if let Err(e) = stabilize_pivot_in_place(
+        Self::stabilize_pivot_value(
             pivot,
-            s_i,
-            tau,
-            policy.sign,
-            policy.mode,
-            &mut self.pivot_stats,
             row,
-        ) {
-            self.num_zero_pivots += 1;
-            return Err(e);
-        }
-
-        let abs = pivot.abs();
-        if abs > self.running_max_u {
-            self.running_max_u = abs;
-        }
+            matrix,
+            policy,
+            self.max_diag_a,
+            &self.row_inf_a,
+            &self.row_gersh_a,
+            &mut self.pivot_stats,
+            &mut self.running_max_u,
+            &mut self.num_zero_pivots,
+        )?;
 
         Ok(())
     }
 
+    fn partition_rows(n: usize, block_size: usize) -> Vec<std::ops::Range<usize>> {
+        let block_size = block_size.max(1);
+        let mut blocks = Vec::new();
+        let mut start = 0;
+        while start < n {
+            let end = (start + block_size).min(n);
+            blocks.push(start..end);
+            start = end;
+        }
+        blocks
+    }
+
+    fn extract_block_dense(matrix: &Mat<f64>, rows: std::ops::Range<usize>) -> Mat<f64> {
+        let m = rows.len();
+        let mut block = Mat::zeros(m, m);
+        for local_i in 0..m {
+            let global_i = rows.start + local_i;
+            for local_j in 0..m {
+                let global_j = rows.start + local_j;
+                block[(local_i, local_j)] = matrix[(global_i, global_j)];
+            }
+        }
+        block
+    }
+
+    #[cfg(feature = "rayon")]
+    fn factor_block(
+        matrix: &Mat<f64>,
+        rows: std::ops::Range<usize>,
+        policy: &PivotPolicy,
+        max_diag: f64,
+        row_inf: &[f64],
+        row_gersh: &[f64],
+    ) -> Result<BlockFactorResult, KError> {
+        let block = Self::extract_block_dense(matrix, rows.clone());
+        let drop_tol: f64 = 1e-15;
+        let mut l = CsrMatrix::from_dense(&block, drop_tol);
+        let mut u = CsrMatrix::from_dense(&block, drop_tol);
+        let size = block.nrows();
+
+        for i in 0..size {
+            for j in 0..size {
+                if i > j {
+                    Self::sparse_set(&mut u, i, j, 0.0);
+                } else if i < j {
+                    Self::sparse_set(&mut l, i, j, 0.0);
+                } else {
+                    Self::sparse_set(&mut l, i, i, 1.0);
+                }
+            }
+        }
+
+        let mut stats = PivotStats::default();
+        let mut running_max: f64 = 0.0;
+        let mut zero_pivots = 0usize;
+
+        for k in 0..size {
+            let mut pivot = Self::sparse_get(&u, k, k);
+            Self::stabilize_pivot_value(
+                &mut pivot,
+                rows.start + k,
+                matrix,
+                policy,
+                max_diag,
+                row_inf,
+                row_gersh,
+                &mut stats,
+                &mut running_max,
+                &mut zero_pivots,
+            )?;
+            Self::sparse_set(&mut u, k, k, pivot);
+
+            for i in (k + 1)..size {
+                let l_ik = Self::sparse_get(&l, i, k);
+                if l_ik != 0.0 {
+                    let multiplier = l_ik / pivot;
+                    Self::sparse_set(&mut l, i, k, multiplier);
+                    for j in (k + 1)..size {
+                        let u_kj = Self::sparse_get(&u, k, j);
+                        if u_kj != 0.0 {
+                            let global_i = rows.start + i;
+                            let global_j = rows.start + j;
+                            if matrix[(global_i, global_j)] != 0.0 {
+                                let u_ij = Self::sparse_get(&u, i, j);
+                                let new_val = u_ij - multiplier * u_kj;
+                                Self::sparse_set(&mut u, i, j, new_val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(BlockFactorResult {
+            l,
+            u,
+            pivot_stats: stats,
+            running_max,
+            zero_pivots,
+        })
+    }
+
     /// Helper: Get element from sparse matrix (returns zero if not present)
-    fn sparse_get(&self, matrix: &CsrMatrix<f64>, i: usize, j: usize) -> f64 {
+    fn sparse_get(matrix: &CsrMatrix<f64>, i: usize, j: usize) -> f64 {
         let (cols, vals) = matrix.row(i);
         match cols.binary_search(&j) {
             Ok(pos) => vals[pos],
@@ -693,7 +842,7 @@ impl Ilu {
     ///
     /// This routine assumes the sparsity pattern already contains the
     /// entry `(i, j)`.  If the entry is absent, the call is a no-op.
-    fn sparse_set(&mut self, matrix: &mut CsrMatrix<f64>, i: usize, j: usize, value: f64) {
+    fn sparse_set(matrix: &mut CsrMatrix<f64>, i: usize, j: usize, value: f64) {
         let start = matrix.row_ptr()[i];
         let end = matrix.row_ptr()[i + 1];
         // Determine position of column j within the row while holding only
@@ -725,13 +874,13 @@ impl Ilu {
             for j in 0..n {
                 if i > j {
                     // L gets lower triangular part
-                    self.sparse_set(&mut u, i, j, 0.0);
+                    Self::sparse_set(&mut u, i, j, 0.0);
                 } else if i < j {
                     // U gets upper triangular part
-                    self.sparse_set(&mut l, i, j, 0.0);
+                    Self::sparse_set(&mut l, i, j, 0.0);
                 } else {
                     // L has unit diagonal
-                    self.sparse_set(&mut l, i, i, 1.0);
+                    Self::sparse_set(&mut l, i, i, 1.0);
                 }
             }
         }
@@ -739,22 +888,22 @@ impl Ilu {
         // HYPRE-style ILU(0) factorization
         for k in 0..n {
             // Enhanced pivot handling
-            let mut pivot = self.sparse_get(&u, k, k);
+            let mut pivot = Self::sparse_get(&u, k, k);
             self.handle_pivot(&mut pivot, k, matrix)?;
-            self.sparse_set(&mut u, k, k, pivot);
+            Self::sparse_set(&mut u, k, k, pivot);
 
             for i in (k + 1)..n {
-                let l_ik = self.sparse_get(&l, i, k);
+                let l_ik = Self::sparse_get(&l, i, k);
                 if l_ik != 0.0 {
                     let multiplier = l_ik / pivot;
-                    self.sparse_set(&mut l, i, k, multiplier);
+                    Self::sparse_set(&mut l, i, k, multiplier);
 
                     for j in (k + 1)..n {
-                        let u_kj = self.sparse_get(&u, k, j);
+                        let u_kj = Self::sparse_get(&u, k, j);
                         if u_kj != 0.0 && matrix[(i, j)] != 0.0 {
-                            let u_ij = self.sparse_get(&u, i, j);
+                            let u_ij = Self::sparse_get(&u, i, j);
                             let new_val = u_ij - multiplier * u_kj;
-                            self.sparse_set(&mut u, i, j, new_val);
+                            Self::sparse_set(&mut u, i, j, new_val);
                         }
                     }
                 }
@@ -770,6 +919,165 @@ impl Ilu {
 
         self.l = l;
         self.u = u;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "rayon")]
+    fn compute_ilu0_block_parallel(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
+        let n = matrix.nrows();
+        let chunk_size = self.config.parallel_chunk_size.max(1);
+        let blocks = Self::partition_rows(n, chunk_size);
+
+        let row_inf = Arc::new(self.row_inf_a.clone());
+        let row_gersh = Arc::new(self.row_gersh_a.clone());
+        let pivot_policy = Arc::new(self.config.pivot_policy.clone());
+        let max_diag = self.max_diag_a;
+
+        let results = Arc::new(Mutex::new(Vec::with_capacity(blocks.len())));
+        let first_error = Arc::new(Mutex::new(None::<KError>));
+
+        rayon::scope(|scope| {
+            for rows in blocks.iter().cloned() {
+                let results = Arc::clone(&results);
+                let first_error = Arc::clone(&first_error);
+                let row_inf = Arc::clone(&row_inf);
+                let row_gersh = Arc::clone(&row_gersh);
+                let policy = Arc::clone(&pivot_policy);
+                let matrix = matrix;
+                scope.spawn(move |_| {
+                    if first_error.lock().unwrap().is_some() {
+                        return;
+                    }
+                    match Self::factor_block(
+                        matrix,
+                        rows.clone(),
+                        policy.as_ref(),
+                        max_diag,
+                        row_inf.as_ref(),
+                        row_gersh.as_ref(),
+                    ) {
+                        Ok(res) => {
+                            results.lock().unwrap().push((rows, res));
+                        }
+                        Err(e) => {
+                            let mut guard = first_error.lock().unwrap();
+                            if guard.is_none() {
+                                *guard = Some(e);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        if let Some(err) = first_error.lock().unwrap().take() {
+            return Err(err);
+        }
+
+        let mut block_results = {
+            let mut guard = results.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+
+        block_results.sort_by_key(|(range, _)| range.start);
+
+        let mut merged_stats = PivotStats::default();
+        let mut running_max: f64 = 0.0;
+        let mut zero_pivots = 0usize;
+        for (_, result) in block_results.iter() {
+            merged_stats.num_floors += result.pivot_stats.num_floors;
+            merged_stats.sum_abs_shift += result.pivot_stats.sum_abs_shift;
+            merged_stats.num_strict_fail += result.pivot_stats.num_strict_fail;
+            merged_stats.max_abs_shift = merged_stats
+                .max_abs_shift
+                .max(result.pivot_stats.max_abs_shift);
+            merged_stats.last_floor_value = merged_stats
+                .last_floor_value
+                .max(result.pivot_stats.last_floor_value);
+            running_max = running_max.max(result.running_max);
+            zero_pivots += result.zero_pivots;
+        }
+
+        self.pivot_stats = merged_stats;
+        self.running_max_u = running_max;
+        self.num_zero_pivots = zero_pivots;
+
+        self.assemble_block_diagonal(n, block_results)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    fn compute_ilu0_block_parallel(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
+        #[cfg(feature = "logging")]
+        if self.config.logging_level > 0 && self.config.enable_parallel_factorization {
+            warn!(
+                "ILU parallel factorization requested but 'rayon' feature disabled; falling back to serial ILU0"
+            );
+        }
+        self.compute_ilu0(matrix)
+    }
+
+    #[cfg(feature = "rayon")]
+    fn assemble_block_diagonal(
+        &mut self,
+        n: usize,
+        block_results: Vec<(std::ops::Range<usize>, BlockFactorResult)>,
+    ) -> Result<(), KError> {
+        let mut l_row_ptr = Vec::with_capacity(n + 1);
+        let mut u_row_ptr = Vec::with_capacity(n + 1);
+        l_row_ptr.push(0);
+        u_row_ptr.push(0);
+        let mut l_cols = Vec::new();
+        let mut l_vals = Vec::new();
+        let mut u_cols = Vec::new();
+        let mut u_vals = Vec::new();
+        let mut inv_diag_u = vec![0.0; n];
+        let mut nnz_l = 0;
+        let mut nnz_u = 0;
+
+        for (rows, block) in block_results {
+            let size = rows.len();
+            for local_i in 0..size {
+                let global_i = rows.start + local_i;
+                let (cols_l, vals_l) = block.l.row(local_i);
+                for (&c, &v) in cols_l.iter().zip(vals_l.iter()) {
+                    l_cols.push(rows.start + c);
+                    l_vals.push(v);
+                    nnz_l += 1;
+                }
+                l_row_ptr.push(nnz_l);
+
+                let (cols_u, vals_u) = block.u.row(local_i);
+                let mut diag_found = false;
+                for (&c, &v) in cols_u.iter().zip(vals_u.iter()) {
+                    u_cols.push(rows.start + c);
+                    u_vals.push(v);
+                    if c == local_i {
+                        if v == 0.0 {
+                            return Err(KError::InvalidInput(format!(
+                                "zero diagonal detected in block row {global_i}"
+                            )));
+                        }
+                        inv_diag_u[global_i] = 1.0 / v;
+                        diag_found = true;
+                    }
+                    nnz_u += 1;
+                }
+                if !diag_found {
+                    return Err(KError::InvalidInput(format!(
+                        "block ILU lost diagonal entry at row {global_i}"
+                    )));
+                }
+                u_row_ptr.push(nnz_u);
+            }
+        }
+
+        self.l = CsrMatrix::from_csr(n, n, l_row_ptr, l_cols, l_vals);
+        self.u = CsrMatrix::from_csr(n, n, u_row_ptr, u_cols, u_vals);
+        self.inv_diag_u = inv_diag_u;
+        self.nnz_l = nnz_l;
+        self.nnz_u = nnz_u;
 
         Ok(())
     }
@@ -795,43 +1103,43 @@ impl Ilu {
         for i in 0..n {
             for j in 0..n {
                 if i > j {
-                    self.sparse_set(&mut u, i, j, 0.0);
+                    Self::sparse_set(&mut u, i, j, 0.0);
                 } else if i < j {
-                    self.sparse_set(&mut l, i, j, 0.0);
+                    Self::sparse_set(&mut l, i, j, 0.0);
                 } else {
-                    self.sparse_set(&mut l, i, i, 1.0);
+                    Self::sparse_set(&mut l, i, i, 1.0);
                 }
             }
         }
 
         // MILU(0) factorization with row-sum preservation
         for k in 0..n {
-            let mut pivot = self.sparse_get(&u, k, k);
+            let mut pivot = Self::sparse_get(&u, k, k);
             self.handle_pivot(&mut pivot, k, matrix)?;
-            self.sparse_set(&mut u, k, k, pivot);
+            Self::sparse_set(&mut u, k, k, pivot);
 
             for i in (k + 1)..n {
-                let l_ik = self.sparse_get(&l, i, k);
+                let l_ik = Self::sparse_get(&l, i, k);
                 if l_ik != 0.0 {
                     let multiplier = l_ik / pivot;
-                    self.sparse_set(&mut l, i, k, multiplier);
+                    Self::sparse_set(&mut l, i, k, multiplier);
 
                     let mut dropped_sum = 0.0;
                     for j in (k + 1)..n {
-                        let u_kj = self.sparse_get(&u, k, j);
+                        let u_kj = Self::sparse_get(&u, k, j);
                         if u_kj != 0.0 {
                             let update = multiplier * u_kj;
                             if matrix[(i, j)] != 0.0 {
-                                let u_ij = self.sparse_get(&u, i, j);
-                                self.sparse_set(&mut u, i, j, u_ij - update);
+                                let u_ij = Self::sparse_get(&u, i, j);
+                                Self::sparse_set(&mut u, i, j, u_ij - update);
                             } else {
                                 dropped_sum = dropped_sum + update;
                             }
                         }
                     }
                     // Apply diagonal correction for this row
-                    let u_ii = self.sparse_get(&u, i, i);
-                    self.sparse_set(&mut u, i, i, u_ii + dropped_sum);
+                    let u_ii = Self::sparse_get(&u, i, i);
+                    Self::sparse_set(&mut u, i, i, u_ii + dropped_sum);
                 }
             }
         }
@@ -1400,17 +1708,21 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         self.setup_workspace(n);
 
         // Perform factorization based on type
-        match self.config.ilu_type {
-            IluType::ILU0 => {
+        match (self.config.ilu_type, self.config.par_factor_mode()) {
+            (IluType::ILU0, ParFactorizationMode::Serial) => {
                 self.compute_ilu0(matrix)?;
             }
-            IluType::MILU0 => {
+            (IluType::ILU0, ParFactorizationMode::Block)
+            | (IluType::ILU0, ParFactorizationMode::ParIlu) => {
+                self.compute_ilu0_block_parallel(matrix)?;
+            }
+            (IluType::MILU0, _) => {
                 self.compute_milu0(matrix)?;
             }
-            IluType::ILUK => {
+            (IluType::ILUK, _) => {
                 self.compute_iluk(matrix)?;
             }
-            IluType::ILUT => {
+            (IluType::ILUT, _) => {
                 self.compute_ilut(matrix)?;
             }
             _ => {
@@ -1856,12 +2168,82 @@ mod tests {
         let parallel_result = ilu_parallel.setup(&matrix);
         assert!(parallel_result.is_ok());
 
-        // Both should have similar statistics
         let serial_stats = ilu_serial.get_stats();
         let parallel_stats = ilu_parallel.get_stats();
 
-        assert_eq!(serial_stats.nnz_l, parallel_stats.nnz_l);
-        assert_eq!(serial_stats.nnz_u, parallel_stats.nnz_u);
+        assert!(
+            parallel_stats.nnz_l <= serial_stats.nnz_l,
+            "block ILU should not increase L nz count: serial={} parallel={}",
+            serial_stats.nnz_l,
+            parallel_stats.nnz_l
+        );
+        assert!(
+            parallel_stats.nnz_u <= serial_stats.nnz_u,
+            "block ILU should not increase U nz count: serial={} parallel={}",
+            serial_stats.nnz_u,
+            parallel_stats.nnz_u
+        );
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn block_ilu_single_block_matches_serial() {
+        let n = 6;
+        let matrix = make_tridiag_matrix(n);
+
+        let mut ilu_serial = IluBuilder::new().ilu_type(IluType::ILU0).build().unwrap();
+        ilu_serial.setup(&matrix).unwrap();
+
+        let mut config = IluConfig::default();
+        config.enable_parallel_factorization = true;
+        config.parallel_chunk_size = n;
+        let mut ilu_block = Ilu::new_with_config(config).unwrap();
+        ilu_block.setup(&matrix).unwrap();
+
+        let serial_stats = ilu_serial.get_stats();
+        let block_stats = ilu_block.get_stats();
+        assert_eq!(
+            block_stats.nnz_l, serial_stats.nnz_l,
+            "single-block parallel should match serial L pattern"
+        );
+        assert_eq!(
+            block_stats.nnz_u, serial_stats.nnz_u,
+            "single-block parallel should match serial U pattern"
+        );
+
+        let rhs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let mut y_serial = vec![0.0; n];
+        let mut y_block = vec![0.0; n];
+        ilu_serial.apply(PcSide::Left, &rhs, &mut y_serial).unwrap();
+        ilu_block.apply(PcSide::Left, &rhs, &mut y_block).unwrap();
+
+        for (&a, &b) in y_serial.iter().zip(y_block.iter()) {
+            assert!((a - b).abs() < 1e-12, "serial {} vs block {}", a, b);
+        }
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn block_ilu_chunk_size_one_is_diag() {
+        let n = 5;
+        let matrix = make_tridiag_matrix(n);
+
+        let mut config = IluConfig::default();
+        config.enable_parallel_factorization = true;
+        config.parallel_chunk_size = 1;
+        let mut ilu_block = Ilu::new_with_config(config).unwrap();
+        ilu_block.setup(&matrix).unwrap();
+
+        let stats = ilu_block.get_stats();
+        assert_eq!(stats.nnz_l, n);
+        assert_eq!(stats.nnz_u, n);
+
+        let rhs = vec![1.0; n];
+        let mut sol = vec![0.0; n];
+        ilu_block.apply(PcSide::Left, &rhs, &mut sol).unwrap();
+        for &val in sol.iter() {
+            assert!(!val.is_nan());
+        }
     }
 
     #[cfg(feature = "rayon")]

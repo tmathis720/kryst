@@ -216,6 +216,7 @@ pub struct PcOptions {
     pub ilu_parallel_factorization: Option<bool>,
     pub ilu_parallel_triangular_solve: Option<bool>,
     pub ilu_parallel_chunk_size: Option<usize>,
+    pub ilu_par_factor: Option<String>,
     pub ilu_distributed: Option<bool>,
     pub ilu_pivot_mode: Option<String>,
     pub ilu_pivot_scale: Option<String>,
@@ -634,8 +635,19 @@ impl Sink for PcOptions {
                 self.update_ilu_pivot();
                 Ok(())
             }
+            "pc_ilu_par_factor" => {
+                let value = v.to_lowercase();
+                kinds::IluParFactorKind::from_str(&value)?;
+                set_opt!(&mut self.ilu_par_factor, value)?;
+                self.update_ilu_parallel_mode();
+                Ok(())
+            }
             "pc_ilu_parallel_chunk_size" => {
                 let val = ensure_ge_1("pc_ilu_parallel_chunk_size", parse_as::<usize>(v, spec)?)?;
+                set_opt!(&mut self.ilu_parallel_chunk_size, val)
+            }
+            "pc_ilu_block_size" => {
+                let val = ensure_ge_1("pc_ilu_block_size", parse_as::<usize>(v, spec)?)?;
                 set_opt!(&mut self.ilu_parallel_chunk_size, val)
             }
             "pc_ilu_pivot_mode" => set_opt!(&mut self.ilu_pivot_mode, v.to_lowercase()),
@@ -998,6 +1010,18 @@ impl PcOptions {
         }
     }
 
+    fn update_ilu_parallel_mode(&mut self) {
+        if let Some(ref mode) = self.ilu_par_factor {
+            let kind =
+                kinds::IluParFactorKind::from_str(mode).unwrap_or(kinds::IluParFactorKind::Block);
+            let enabled = matches!(
+                kind,
+                kinds::IluParFactorKind::Block | kinds::IluParFactorKind::ParILU
+            );
+            self.ilu_parallel_factorization = Some(enabled);
+        }
+    }
+
     fn update_ilu_iterative(&mut self) {
         if let Some(tol) = self.ilu_tolerance {
             self.ilu.iterative_setup.tol = tol;
@@ -1035,6 +1059,7 @@ impl PcOptions {
         self.update_ilu_kind();
         self.update_ilu_reordering();
         self.update_ilu_tri_solve();
+        self.update_ilu_parallel_mode();
         self.update_ilu_iterative();
         self.update_ilu_logging();
         self.update_ilu_pivot();
@@ -1225,6 +1250,16 @@ impl PcOptions {
                 KError::SolveError(format!("Invalid KRYST_PC_ILU_PARALLEL_CHUNK_SIZE: {v}"))
             })?;
             me.ilu_parallel_chunk_size = Some(ensure_ge_1("KRYST_PC_ILU_PARALLEL_CHUNK_SIZE", n)?);
+        }
+        if let Some(v) = env_lower("KRYST_PC_ILU_PAR_FACTOR") {
+            kinds::IluParFactorKind::from_str(&v)?;
+            me.ilu_par_factor = Some(v);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_ILU_BLOCK_SIZE") {
+            let n: usize = v
+                .parse()
+                .map_err(|_| KError::SolveError(format!("Invalid KRYST_PC_ILU_BLOCK_SIZE: {v}")))?;
+            me.ilu_parallel_chunk_size = Some(ensure_ge_1("KRYST_PC_ILU_BLOCK_SIZE", n)?);
         }
         if let Some(v) = env_bool("KRYST_PC_ILU_DISTRIBUTED") {
             me.ilu_distributed = Some(v);
@@ -2313,6 +2348,51 @@ mod old_tests {
         assert_eq!(opts.ilu_reordering_type, Some("none".to_string()));
         assert!(matches!(opts.ilu.kind, IluKind::ILU0));
         assert_eq!(opts.ilu.reordering, ReorderingType::None);
+    }
+
+    #[test]
+    fn test_pc_options_ilu_par_factor_block() {
+        let args = vec!["-pc_ilu_par_factor", "block"];
+        let opts = PcOptions::from_args(&args).unwrap();
+        assert_eq!(opts.ilu_par_factor, Some("block".to_string()));
+        assert_eq!(opts.ilu_parallel_factorization, Some(true));
+    }
+
+    #[test]
+    fn test_pc_options_ilu_par_factor_invalid() {
+        let args = vec!["-pc_ilu_par_factor", "bad"];
+        assert!(PcOptions::from_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_pc_options_ilu_block_size_alias() {
+        let args = vec!["-pc_ilu_block_size", "12"];
+        let opts = PcOptions::from_args(&args).unwrap();
+        assert_eq!(opts.ilu_parallel_chunk_size, Some(12));
+    }
+
+    #[test]
+    fn test_pc_options_env_par_factor() {
+        unsafe {
+            std::env::set_var("KRYST_PC_ILU_PAR_FACTOR", "parilu");
+        }
+        let opts = PcOptions::from_env().unwrap();
+        assert_eq!(opts.ilu_par_factor, Some("parilu".to_string()));
+        unsafe {
+            std::env::remove_var("KRYST_PC_ILU_PAR_FACTOR");
+        }
+    }
+
+    #[test]
+    fn test_pc_options_env_block_size() {
+        unsafe {
+            std::env::set_var("KRYST_PC_ILU_BLOCK_SIZE", "5");
+        }
+        let opts = PcOptions::from_env().unwrap();
+        assert_eq!(opts.ilu_parallel_chunk_size, Some(5));
+        unsafe {
+            std::env::remove_var("KRYST_PC_ILU_BLOCK_SIZE");
+        }
     }
 
     #[test]

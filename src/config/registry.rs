@@ -795,11 +795,25 @@ pub static SPECS: &[Spec] = &[
         doc: "enable ILU parallel triangular solves",
     },
     Spec {
+        flag: "-pc_ilu_par_factor",
+        key: "pc_ilu_par_factor",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "parallel ILU factorization mode: none|block|parilu",
+    },
+    Spec {
         flag: "-pc_ilu_parallel_chunk_size",
         key: "pc_ilu_parallel_chunk_size",
         arity: Arity::One,
         kind: ValueKind::UInt,
         doc: "chunk size for ILU parallel work",
+    },
+    Spec {
+        flag: "-pc_ilu_block_size",
+        key: "pc_ilu_block_size",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "block size for ILU block factorization",
     },
     Spec {
         flag: "-pc_ilu_distributed",
