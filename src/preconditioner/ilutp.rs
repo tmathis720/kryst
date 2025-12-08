@@ -29,6 +29,8 @@ use std::cmp::Ordering;
 ///
 /// This preconditioner is particularly effective for nonsymmetric, indefinite
 /// matrices arising from discretized Navier-Stokes equations.
+/// It implements [`LocalPreconditioner`] and is designed to stay on the local rank
+/// so that MPI routines can wrap it without additional communication.
 #[derive(Debug)]
 pub struct Ilutp {
     /// Lower triangular factor
@@ -294,6 +296,9 @@ impl LocalPreconditioner<f64> for Ilutp {
     }
 
     fn apply_local(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        let (n, _) = LocalPreconditioner::<f64>::dims(self);
+        debug_assert_eq!(x.len(), n);
+        debug_assert_eq!(y.len(), n);
         self.apply_slice(x, y)
     }
 }

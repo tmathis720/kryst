@@ -50,6 +50,9 @@ impl Default for SparseRow {
 /// - `l`: Lower triangular portion (sparse row format)
 /// - `u`: Upper triangular portion (sparse row format)
 /// - `n`: Matrix size
+///
+/// Implements [`LocalPreconditioner`] for use as a purely local block preconditioner that
+/// assumes no MPI communication.
 pub struct RowFilterPreconditioner {
     pub fill: usize,
     pub droptol: R,
@@ -207,6 +210,9 @@ impl LocalPreconditioner for RowFilterPreconditioner {
     }
 
     fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let (n, _) = LocalPreconditioner::<S>::dims(self);
+        debug_assert_eq!(x.len(), n);
+        debug_assert_eq!(y.len(), n);
         self.apply_slice(crate::preconditioner::PcSide::Left, x, y)
     }
 }

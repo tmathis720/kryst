@@ -259,6 +259,16 @@ pub trait LocalPreconditioner<T: KrystScalar = S>: Send + Sync {
     }
 
     /// Apply `M^{-1}` locally: `y = M^{-1} x`.
+    ///
+    /// Contract:
+    /// - `dims()` must return `(n_local, n_local)` = the number of rows handled
+    ///   on the calling rank.
+    /// - `x` and `y` are slices of length `n_local`, owned by the caller, and the
+    ///   implementor must not assume they are contiguous with any global vector.
+    /// - The implementation must perform no MPI communication; any halo exchanges
+    ///   or gathers belong in the global wrapper.
+    /// - After `setup` completes, repeated calls to `apply_local` should be
+    ///   allocation-free (same spirit as ILU workspaces).
     fn apply_local(&self, x: &[T], y: &mut [T]) -> Result<(), crate::error::KError>;
 
     /// Convenience in-place application using a temporary buffer.
@@ -485,6 +495,8 @@ pub mod chebyshev;
 pub mod deflation;
 #[cfg(feature = "backend-faer")]
 pub mod direct;
+#[cfg(feature = "backend-faer")]
+pub mod dist;
 #[cfg(feature = "backend-faer")]
 pub mod ilu;
 #[cfg(feature = "backend-faer")]

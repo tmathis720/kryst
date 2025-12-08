@@ -17,12 +17,12 @@ impl Monitor for TestMonitor {
 }
 
 #[test]
-    fn history_and_monitor_basic() {
-        let mut h = ParIluHistory::with_capacity(2);
-        h.push(ParIluIterSample {
-            iter: 1,
-            residual: 0.3,
-        });
+fn history_and_monitor_basic() {
+    let mut h = ParIluHistory::with_capacity(2);
+    h.push(ParIluIterSample {
+        iter: 1,
+        residual: 0.3,
+    });
     assert_eq!(h.as_slice().len(), 1);
 
     let m = TestMonitor(Mutex::new(Vec::new()));

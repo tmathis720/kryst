@@ -235,7 +235,11 @@ fn print_ilu_banner(cfg: &IluConfig) {
     info!("  pivot                : {:?}", cfg.pivot_policy);
     info!(
         "  parilu               : enabled={}, max_iter={}, min_iter={}, tol={:.2e}, omega={:.2}",
-        cfg.parilu_enabled, cfg.parilu_max_iters, cfg.parilu_min_iters, cfg.parilu_tol, cfg.parilu_omega
+        cfg.parilu_enabled,
+        cfg.parilu_max_iters,
+        cfg.parilu_min_iters,
+        cfg.parilu_tol,
+        cfg.parilu_omega
     );
 }
 
@@ -387,6 +391,8 @@ impl Default for IluBuilder {
 ///
 /// **Note:** ILU is currently restricted to real (`f64`) matrices only.
 /// Complex-valued problems should use simpler preconditioners (e.g., Jacobi, diagonal scaling).
+/// This type implements [`LocalPreconditioner`] and is intended to be wrapped by
+/// an MPI-aware distributed preconditioner; it performs no communication on its own.
 pub struct Ilu {
     /// Configuration parameters
     config: IluConfig,
@@ -1708,7 +1714,10 @@ impl Ilu {
                 let converged = last.residual < tol;
                 info!(
                     "ParILU refinement: iterations={}, final residual {:.3e} (tol {:.3e}, converged={})",
-                    self.history.as_ref().map(|h| h.as_slice().len()).unwrap_or(0),
+                    self.history
+                        .as_ref()
+                        .map(|h| h.as_slice().len())
+                        .unwrap_or(0),
                     last.residual,
                     tol,
                     converged
@@ -2284,6 +2293,9 @@ impl LocalPreconditioner<f64> for Ilu {
     }
 
     fn apply_local(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let (n, _) = LocalPreconditioner::<f64>::dims(self);
+        debug_assert_eq!(x.len(), n);
+        debug_assert_eq!(y.len(), n);
         self.apply_slice(PcSide::Left, x, y)
     }
 }

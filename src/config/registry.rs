@@ -309,6 +309,20 @@ pub static SPECS: &[Spec] = &[
         kind: ValueKind::Str,
         doc: "jacobi, ilu, amg, ...",
     },
+    Spec {
+        flag: "-pc_global",
+        key: "pc_global",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "distributed preconditioner: none | block-jacobi | asm",
+    },
+    Spec {
+        flag: "-pc_local",
+        key: "pc_local",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "local ILU variant for block Jacobi: ilu | ilut | ilutp",
+    },
     // Approximate inverse (CSR) options
     Spec {
         flag: "-pc_approxinv_kind",

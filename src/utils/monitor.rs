@@ -71,7 +71,8 @@ impl Monitor for TextMonitor {
                 }
                 Event::IluSetupIter { sample } => log::info!(
                     "ILU: it {:>3}  parilu_res≈{:.3e}",
-                    sample.iter, sample.residual,
+                    sample.iter,
+                    sample.residual,
                 ),
                 Event::IluSetupEnd {
                     iters,

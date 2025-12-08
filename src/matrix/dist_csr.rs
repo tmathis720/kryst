@@ -21,6 +21,8 @@ use crate::matrix::parcsr::{self, ParCsrMatrix};
 use crate::matrix::sparse::CsrMatrix;
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use faer::Mat;
 
 fn owner_of(j: usize, row_part: &[usize]) -> usize {
     // Locate the owner rank such that row_part[r] <= j < row_part[r + 1].
@@ -256,6 +258,32 @@ impl DistCsrOp {
             self.col_idx.clone(),
             self.vals.clone(),
         )
+    }
+
+    #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+    /// Extract the owned diagonal block as a dense matrix (real builds only).
+    pub fn local_block_dense(&self) -> Mat<f64> {
+        let n = self.n_local;
+        let mut local = Mat::zeros(n, n);
+        for row in 0..n {
+            for idx in self.row_ptr[row]..self.row_ptr[row + 1] {
+                let gcol = self.col_idx[idx];
+                if gcol >= self.row_start && gcol < self.row_end {
+                    local[(row, gcol - self.row_start)] = self.vals[idx];
+                }
+            }
+        }
+        local
+    }
+
+    /// Return the global index of the first local row.
+    pub fn local_row_offset(&self) -> usize {
+        self.row_start
+    }
+
+    /// Number of local rows stored on this rank.
+    pub fn local_nrows(&self) -> usize {
+        self.n_local
     }
 
     fn spmv_local_only(&self, x: &[S], y: &mut [S]) {

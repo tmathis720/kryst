@@ -13,6 +13,11 @@ use std::str::FromStr;
 use crate::config::options_core::is_help_requested;
 use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
+use crate::preconditioner::dist::{GlobalPcKind, LocalPcKind, MpiPcOptions};
+use crate::preconditioner::ilu::{
+    IluConfig, IluType as IluVariant, ReorderingType as IluReorderingType,
+    TriSolveType as IluTriSolveType,
+};
 use crate::preconditioner::ilu_options::{
     IluKind, IluOptions, IterativeSetupType, Overlay, PivotPolicy, ReorderingType, TriSolveType,
 };
@@ -258,6 +263,10 @@ pub struct PcOptions {
     // Additional per-PC knobs
     /// Block size for block Jacobi.
     pub jacobi_block_size: Option<usize>,
+    /// Choose the global MPI preconditioner mode.
+    pub pc_global: Option<String>,
+    /// Choose the local ILU variant for distributed runs.
+    pub pc_local: Option<String>,
     /// ILU variant ("iluk", "ilut", ...).
     pub ilu_variant: Option<String>,
     /// Reordering strategy for ILU.
@@ -478,6 +487,8 @@ impl Sink for PcOptions {
     fn set_val(&mut self, spec: &Spec, v: &str) -> Result<(), KError> {
         match spec.key {
             "pc_type" => set_opt!(&mut self.pc_type, v.to_string()),
+            "pc_global" => set_opt!(&mut self.pc_global, v.to_lowercase()),
+            "pc_local" => set_opt!(&mut self.pc_local, v.to_lowercase()),
             "pc_ilu_levels" => set_opt!(&mut self.ilu_level, parse_as::<usize>(v, spec)?),
             "pc_chebyshev_degree" => {
                 set_opt!(&mut self.chebyshev_degree, parse_as::<usize>(v, spec)?)
@@ -1167,6 +1178,12 @@ impl PcOptions {
         if let Ok(v) = std::env::var("KRYST_PC_TYPE") {
             me.pc_type = Some(v);
         }
+        if let Ok(v) = std::env::var("KRYST_PC_GLOBAL") {
+            me.pc_global = Some(v.to_lowercase());
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_LOCAL") {
+            me.pc_local = Some(v.to_lowercase());
+        }
         if let Ok(v) = std::env::var("KRYST_PC_ILU_LEVELS") {
             me.ilu_level =
                 Some(v.parse().map_err(|_| {
@@ -1237,18 +1254,14 @@ impl PcOptions {
             me.ilu_parilu_min_iters = Some(ensure_ge_1("KRYST_PC_ILU_PARILU_MIN_ITERS", n)?);
         }
         if let Ok(v) = std::env::var("KRYST_PC_ILU_PARILU_TOL") {
-            me.ilu_parilu_tol = Some(
-                v.parse().map_err(|_| {
-                    KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_TOL: {v}"))
-                })?,
-            );
+            me.ilu_parilu_tol = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_TOL: {v}"))
+            })?);
         }
         if let Ok(v) = std::env::var("KRYST_PC_ILU_PARILU_OMEGA") {
-            me.ilu_parilu_omega = Some(
-                v.parse().map_err(|_| {
-                    KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_OMEGA: {v}"))
-                })?,
-            );
+            me.ilu_parilu_omega = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_ILU_PARILU_OMEGA: {v}"))
+            })?);
         }
         if let Ok(v) = std::env::var("KRYST_PC_CHEBYSHEV_DEGREE") {
             me.chebyshev_degree = Some(v.parse().map_err(|_| {
@@ -1543,6 +1556,153 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
     pc_opts.ilu = pc_opts.ilu.overlay(&cli_pc.ilu);
 
     Ok((ksp_opts, pc_opts))
+}
+
+impl PcOptions {
+    /// Convert CLI-style options into MPI-specific preconditioner configuration.
+    pub fn mpi_pc_options(&self) -> Result<MpiPcOptions, KError> {
+        let global = self
+            .pc_global
+            .as_deref()
+            .map(GlobalPcKind::from_str)
+            .transpose()?
+            .unwrap_or(GlobalPcKind::None);
+        let local = self
+            .pc_local
+            .as_deref()
+            .map(LocalPcKind::from_str)
+            .transpose()?
+            .unwrap_or(LocalPcKind::Ilu);
+
+        let mut opts = MpiPcOptions::default();
+        opts.global_pc = global;
+        opts.local_pc = local;
+        opts.ilu_config = build_ilu_config(self)?;
+
+        opts.ilut_fill = self.ilut_max_fill.unwrap_or(opts.ilut_fill);
+        if let Some(drop_tol) = self.ilut_drop_tol {
+            opts.ilut_drop_tol = drop_tol;
+        }
+        if let Some(perm_tol) = self.ilut_perm_tol {
+            opts.ilut_perm_tol = perm_tol;
+        }
+
+        opts.ilutp_max_fill = self.ilutp_max_fill.unwrap_or(opts.ilutp_max_fill);
+        if let Some(drop_tol) = self.ilutp_drop_tol {
+            opts.ilutp_drop_tol = drop_tol;
+        }
+        if let Some(perm_tol) = self.ilutp_perm_tol {
+            opts.ilutp_perm_tol = perm_tol;
+        }
+
+        Ok(opts)
+    }
+}
+
+fn build_ilu_config(opts: &PcOptions) -> Result<IluConfig, KError> {
+    let mut config = IluConfig::default();
+
+    if let Some(ref ty) = opts.ilu_type {
+        config.ilu_type = parse_ilu_variant(ty)?;
+    }
+    if let Some(level) = opts.ilu_level_of_fill {
+        config.level_of_fill = level;
+    }
+    if let Some(max_fill) = opts.ilu_max_fill_per_row {
+        config.max_fill_per_row = max_fill;
+    }
+    if let Some(offdiag) = opts.ilu_offdiag_drop_tolerance {
+        config.offdiag_drop_tolerance = offdiag;
+    }
+    if let Some(schur) = opts.ilu_schur_drop_tolerance {
+        config.schur_drop_tolerance = schur;
+    }
+    if let Some(reordering) = opts.ilu_reordering_type.as_deref() {
+        config.reordering_type = parse_ilu_reordering(reordering)?;
+    }
+    if let Some(tri) = opts.ilu_triangular_solve.as_deref() {
+        config.triangular_solve = parse_ilu_tri_solve(tri)?;
+    }
+    if let Some(lower) = opts.ilu_lower_jacobi_iters {
+        config.lower_jacobi_iters = lower;
+    }
+    if let Some(upper) = opts.ilu_upper_jacobi_iters {
+        config.upper_jacobi_iters = upper;
+    }
+    if let Some(tol) = opts.ilu_tolerance {
+        config.tolerance = tol;
+    }
+    if let Some(max_iter) = opts.ilu_max_iterations {
+        config.max_iterations = max_iter;
+    }
+    if let Some(logging) = opts.ilu_logging_level {
+        config.logging_level = logging;
+    }
+    if let Some(print) = opts.ilu_print_level {
+        config.print_level = print;
+    }
+    if let Some(flag) = opts.ilu_ieee_checks {
+        config.ieee_checks = flag;
+    }
+    if let Some(flag) = opts.ilu_optimize_workspace {
+        config.optimize_workspace = flag;
+    }
+    if let Some(flag) = opts.ilu_parallel_factorization {
+        config.enable_parallel_factorization = flag;
+    }
+    if let Some(flag) = opts.ilu_parallel_triangular_solve {
+        config.enable_parallel_triangular_solve = flag;
+    }
+    if let Some(chunk) = opts.ilu_parallel_chunk_size {
+        config.parallel_chunk_size = chunk;
+    }
+    if let Some(iters) = opts.ilu_parilu_max_iters {
+        config.parilu_max_iters = iters;
+    }
+    if let Some(min_iters) = opts.ilu_parilu_min_iters {
+        config.parilu_min_iters = min_iters;
+    }
+    if let Some(tol) = opts.ilu_parilu_tol {
+        config.parilu_tol = tol;
+    }
+    if let Some(omega) = opts.ilu_parilu_omega {
+        config.parilu_omega = omega;
+    }
+
+    Ok(config)
+}
+
+fn parse_ilu_variant(value: &str) -> Result<IluVariant, KError> {
+    match value.to_lowercase().as_str() {
+        "ilu0" => Ok(IluVariant::ILU0),
+        "iluk" => Ok(IluVariant::ILUK),
+        "ilut" => Ok(IluVariant::ILUT),
+        "milu0" => Ok(IluVariant::MILU0),
+        other => Err(KError::InvalidInput(format!("Unknown ilu_type: {other}"))),
+    }
+}
+
+fn parse_ilu_reordering(value: &str) -> Result<IluReorderingType, KError> {
+    match value.to_lowercase().as_str() {
+        "none" => Ok(IluReorderingType::None),
+        "natural" => Ok(IluReorderingType::Natural),
+        "rcm" => Ok(IluReorderingType::RCM),
+        "amd" => Ok(IluReorderingType::AMD),
+        other => Err(KError::InvalidInput(format!(
+            "Unknown ilu_reordering_type: {other}"
+        ))),
+    }
+}
+
+fn parse_ilu_tri_solve(value: &str) -> Result<IluTriSolveType, KError> {
+    match value.to_lowercase().as_str() {
+        "exact" => Ok(IluTriSolveType::Exact),
+        "jacobi" => Ok(IluTriSolveType::Jacobi),
+        "gauss-seidel" | "gaussseidel" => Ok(IluTriSolveType::GaussSeidel),
+        other => Err(KError::InvalidInput(format!(
+            "Unknown ilu_triangular_solve: {other}"
+        ))),
+    }
 }
 
 // ---- tests: reuse your existing tests; only minor changes below ----
