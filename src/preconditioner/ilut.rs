@@ -1,12 +1,20 @@
 //! Row-filtering preconditioner with threshold and fill-in control.
 //!
-//! This streams each row, drops entries below a magnitude threshold, keeps at most `fill`
-//! entries, and splits the remaining entries into L (j < i) and U (j >= i) parts.
-//! It does **not** perform an ILUT elimination.
-//! It is implemented generically over the Kryst scalar `S`, so complex systems can call it
-//! without requiring a real-to-complex bridge.
+//! This ILUT implementation:
+//! - streams each row, drops entries below a magnitude threshold, and keeps at most `fill`
+//!   entries per row;
+//! - partitions the remaining entries into L (j < i) and U (j >= i) parts without performing
+//!   Gaussian elimination;
+//! - does **not** perform pivoting or sophisticated pivot handling, so it is best suited as a
+//!   lightweight local preconditioner for moderately well-conditioned problems.
 //!
-//! For a true ILUT factorization, use `Ilu` with `IluType::ILUT`.
+//! For a more feature-complete ILUT (pivoting, ParILU-like logging, etc.) see [`Ilu`] with
+//! [`IluType::ILUT`].
+//!
+//! # Real vs complex
+//! This preconditioner always works in real arithmetic (`S = f64`). When the `complex` feature is
+//! enabled, [`KPreconditioner`] is implemented via a [`BridgeScratch`] bridge that copies complex
+//! vectors into real scratch buffers and back.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;

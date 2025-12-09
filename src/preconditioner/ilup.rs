@@ -1,22 +1,20 @@
 //! Classical ILU(p) preconditioner.
 //!
-//! Implements the textbook ILU(p) factorization with explicit level-of-fill control (Saad §10.3).
-//! This preconditioner is useful for general `MatVec`/`MatShape` operators where the matrix is
-//! not stored in a dense or CSR-friendly format.
+//! This module implements the textbook ILU(p) factorization with explicit level-of-fill control
+//! (Saad §10.3). It is useful when the operator does not expose a CSR format or when you want to
+//! keep the factorization lightweight for a local preconditioner.
 //!
-//! # Overview
+//! Compared to [`IluType::ILUK`] in `ilu.rs`:
+//! - [`Ilup`] uses simple dense working arrays plus sparse per-row storage.
+//! - [`Ilu`] uses the HYPRE-inspired configuration, richer logging, and pivot safeguards.
+//! - `Ilup` is a common choice for block-Jacobi or domain-decomposition methods where each block
+//!   factorization must stay explicit and local.
 //!
-//! - Create an `Ilup` preconditioner with the desired level-of-fill.
-//! - Call `setup` with the system matrix to compute the L/U factors.
-//! - Use `apply` to perform the forward/backward sweeps (Ly = r, Uz = y).
-//!
-//! # Notes
-//!
-//! - For HYPRE-style ILUK or ILUT on `faer::Mat<f64>`, prefer the canonical `Ilu` implementation
-//!   (`IluType::ILUK` / `IluType::ILUT`).
-//! - `Ilup` remains useful when you need a generic matrix interface or want to embed the fill
-//!   control logic in custom operators.
-//! - It is generic over the Kryst scalar `S`, so complex problems can use this preconditioner directly.
+//! # Real vs complex
+//! Factorization is performed in real arithmetic (`S = f64`). When the `complex` feature is
+//! enabled, [`Ilup`] implements [`KPreconditioner`] via a [`BridgeScratch`] bridge:
+//! complex vectors are copied into real scratch buffers, the real preconditioner is applied,
+//! and the result is copied back.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
@@ -89,6 +87,9 @@ impl IlupWorkspace {
 /// - `l`: Lower triangular factor (sparse row format)
 /// - `u`: Upper triangular factor (sparse row format)
 /// - `n`: Matrix size
+///
+/// For `feature = "complex"`, [`KPreconditioner`] is implemented via a real-valued factorization
+/// plus a [`BridgeScratch`] bridge.
 pub struct Ilup {
     pub fill: usize,
     pub l: Vec<SparseRow>,

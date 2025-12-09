@@ -1711,6 +1711,7 @@ fn parse_ilu_tri_solve(value: &str) -> Result<IluTriSolveType, KError> {
 mod tests {
     use super::*;
     use crate::error::KError;
+    use crate::preconditioner::dist::{GlobalPcKind, LocalPcKind};
 
     #[test]
     fn ksp_bool_toggle() {
@@ -2800,5 +2801,49 @@ mod old_tests {
         assert_eq!(ksp_opts.rtol, Some(1e-6));
         assert_eq!(pc_opts.pc_type, Some("jacobi".to_string()));
         assert_eq!(pc_opts.ilu_level, Some(3));
+    }
+
+    #[test]
+    fn test_build_ilu_config_from_options() {
+        let mut opts = PcOptions::default();
+        opts.ilu_type = Some("iluk".to_string());
+        opts.ilu_level_of_fill = Some(2);
+        opts.ilu_max_fill_per_row = Some(40);
+        opts.ilu_offdiag_drop_tolerance = Some(1e-5);
+        opts.ilu_triangular_solve = Some("jacobi".to_string());
+        opts.ilu_lower_jacobi_iters = Some(2);
+        opts.ilu_upper_jacobi_iters = Some(3);
+        opts.ilu_parallel_factorization = Some(true);
+        opts.ilu_parallel_triangular_solve = Some(true);
+        opts.ilu_parallel_chunk_size = Some(128);
+
+        let config = build_ilu_config(&opts).unwrap();
+        assert_eq!(config.ilu_type, IluVariant::ILUK);
+        assert_eq!(config.level_of_fill, 2);
+        assert_eq!(config.max_fill_per_row, 40);
+        assert!((config.offdiag_drop_tolerance - 1e-5).abs() < 1e-12);
+        assert_eq!(config.triangular_solve, IluTriSolveType::Jacobi);
+        assert_eq!(config.lower_jacobi_iters, 2);
+        assert_eq!(config.upper_jacobi_iters, 3);
+        assert!(config.enable_parallel_factorization);
+        assert!(config.enable_parallel_triangular_solve);
+        assert_eq!(config.parallel_chunk_size, 128);
+    }
+
+    #[test]
+    fn test_ilutp_cli_to_mpi_options() {
+        let mut opts = PcOptions::default();
+        opts.pc_global = Some("block_jacobi".to_string());
+        opts.pc_local = Some("ilutp".to_string());
+        opts.ilutp_max_fill = Some(25);
+        opts.ilutp_drop_tol = Some(1e-4);
+        opts.ilutp_perm_tol = Some(0.2);
+
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        assert_eq!(mpi_opts.global_pc, GlobalPcKind::BlockJacobi);
+        assert_eq!(mpi_opts.local_pc, LocalPcKind::Ilutp);
+        assert_eq!(mpi_opts.ilutp_max_fill, 25);
+        assert!((mpi_opts.ilutp_drop_tol - 1e-4).abs() < 1e-12);
+        assert!((mpi_opts.ilutp_perm_tol - 0.2).abs() < 1e-12);
     }
 }

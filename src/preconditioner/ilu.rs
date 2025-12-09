@@ -2,26 +2,45 @@
 
 //! HYPRE-inspired ILU factorization (canonical implementation).
 //!
-//! This module provides Kryst's canonical implementation for:
-//! - **ILU(0)** (`IluType::ILU0`)
-//! - **MILU(0)** (`IluType::MILU0`)
-//! - **ILU(k)** (`IluType::ILUK`)
-//! - **ILUT** (`IluType::ILUT`)
+//! This module provides Kryst's canonical ILU engine built for `faer::Mat<f64>`.
+//! The implementation targets real-valued matrices and exposes the same knobs you
+//! expect from the HYPRE ILU family (tolerances, pivot policies, Schur handling, etc.).
 //!
-//! It targets `faer::Mat<f64>` with CSR representation for real-valued matrices.
-//! The factorization stays in `f64`, but complex builds can still expose this preconditioner
-//! via the `KPreconditioner` bridge (`BridgeScratch`).
+//! # ILU variants
+//! - `IluType::ILU0`: classical ILU(0) with no fill-in beyond the original pattern.
+//! - `IluType::MILU0`: modified ILU(0) that folds dropped contributions into the diagonal
+//!   to keep row sums approximately constant.
+//! - `IluType::ILUK`: level-of-fill ILU(k); fill is controlled via
+//!   [`IluConfig::level_of_fill`].
+//! - `IluType::ILUT`: threshold-based ILU with dropping and optional per-row fill limiting
+//!   via [`IluConfig::drop_tolerance`] and [`IluConfig::max_fill_per_row`].
+//! - `BlockJacobi` / `GmresIluk` / `GmresIlut`: HYPRE-style aliases. These builders defer to
+//!   [`Ilup`] or [`Ilut`] for performance when it makes sense while keeping the same configuration
+//!   story. They currently dispatch to the unified [`Ilu`] implementation unless
+//!   [`Ilu::create_specialized`] routes `IluType::ILUT` to the simpler [`crate::preconditioner::ilut::Ilut`].
 //!
-//! # Features
-//! - Drop tolerances and fill control inspired by HYPRE ParILU.
-//! - Optional reordering, triangular solve modes, and logging hooks.
-//! - Parallel factorization/triangular solves (`rayon` feature) with workspace reuse.
-//! - IEEE safety checks and pivot monitoring to avoid zero pivots.
+//! # Real vs complex
+//! `Ilu` currently factorizes only real-valued matrices (`faer::Mat<f64>`). The factorization
+//! and triangular solves are all done in real arithmetic. Complex-valued Krylov solvers should
+//! use simpler preconditioners (Jacobi, diagonal scaling) or ILU variants with explicit
+//! [`KPreconditioner`] bridges (`Ilup`, `Ilut`, `Ilutp`), which internally factorize in real
+//! arithmetic and map complex vectors through a bridge.
+//!
+//! # Parallel execution
+//! [`IluConfig::enable_parallel_factorization`] and
+//! [`IluConfig::enable_parallel_triangular_solve`] control optional parallel behavior when the
+//! `rayon` feature is enabled. Factorization remains mostly sequential today and the flag is held
+//! for future ParILU-style experiments, while triangular solves currently level-schedule the
+//! substitutions and only expose true concurrency when built with `rayon`.
+//! The [`IluConfig::parallel_chunk_size`] parameter caps the number of rows each task touches; it
+//! is mainly a tuning knob for these experimental paths.
 //!
 //! # References
 //! - HYPRE ParILU implementation
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems
-//! - Li, X. (2005). Iterative Methods for Large Sparse Linear Systems
+//! - Saad, Y. (2003). *Iterative Methods for Sparse Linear Systems*
+//! - Li, X. (2005). *Iterative Methods for Large Sparse Linear Systems*
+//! See `examples/poisson_spd_ilu0_vs_jacobi.rs` for a Jacobi vs ILU(0) comparison on a 1D Poisson problem.
+//! See `examples/mpi_poisson_block_jacobi_ilu.rs` for a distributed block-Jacobi + ILU(0) walk-through.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
@@ -95,7 +114,27 @@ pub enum TriSolveType {
     GaussSeidel = 2,
 }
 
-/// HYPRE-inspired ILU configuration
+/// HYPRE-inspired ILU configuration.
+///
+/// When `ilu_type` is [`IluType::ILUT`], the builder performs a unified threshold-based ILU
+/// factorization in [`Ilu`]. `Ilu::create_specialized` may instead dispatch that variant to the
+/// simpler [`crate::preconditioner::ilut::Ilut`] implementation for performance, but the unified
+/// `Ilu` stays feature-complete (pivot policy, iterative solves, logging, etc.).
+///
+/// ```no_run
+/// # #[cfg(feature = "backend-faer")]
+/// # {
+/// use kryst::preconditioner::ilu::{Ilu, IluConfig, IluType, TriSolveType};
+///
+/// let mut cfg = IluConfig::default();
+/// cfg.ilu_type = IluType::ILUT;
+/// cfg.drop_tolerance = 1e-4;
+/// cfg.max_fill_per_row = 50;
+/// cfg.triangular_solve = TriSolveType::Exact;
+///
+/// let _ilu = Ilu::new_with_config(cfg).unwrap();
+/// # }
+/// ```
 #[derive(Clone, Debug)]
 pub struct IluConfig {
     /// ILU factorization type (HYPRE: ilu_type)
@@ -132,11 +171,21 @@ pub struct IluConfig {
     pub optimize_workspace: bool,
     /// Pivot handling policy (see [`crate::preconditioner::pivot`] for details)
     pub pivot_policy: PivotPolicy,
-    /// Enable parallel factorization (requires rayon feature)
+    /// Enable parallel factorization (requires the `rayon` feature).
+    ///
+    /// Factorization remains mostly sequential today; this flag is reserved for future ParILU-style
+    /// implementations and experimental workspaces.
     pub enable_parallel_factorization: bool,
-    /// Enable parallel triangular solves (requires rayon feature)
+    /// Enable parallel triangular solves (requires the `rayon` feature).
+    ///
+    /// When enabled, level-scheduled forward/backward substitutions are prepared. The current
+    /// implementation still walks the levels sequentially but is structured to expose real
+    /// concurrency when built with `rayon`.
     pub enable_parallel_triangular_solve: bool,
-    /// Chunk size for parallel operations
+    /// Chunk size for parallel operations.
+    ///
+    /// Controls how many rows each task processes in the parallel factorization/triangular solve
+    /// paths. It mostly serves as a tuning knob for the experimental code paths today.
     pub parallel_chunk_size: usize,
     /// Enable distributed memory support (requires MPI)
     pub enable_distributed: bool,
@@ -391,6 +440,8 @@ impl Default for IluBuilder {
 ///
 /// **Note:** ILU is currently restricted to real (`f64`) matrices only.
 /// Complex-valued problems should use simpler preconditioners (e.g., Jacobi, diagonal scaling).
+/// Complex problems currently require using different preconditioner types or the bridge-based
+/// ILU variants (`Ilup`, `Ilut`, `Ilutp`).
 /// This type implements [`LocalPreconditioner`] and is intended to be wrapped by
 /// an MPI-aware distributed preconditioner; it performs no communication on its own.
 pub struct Ilu {
@@ -2382,7 +2433,7 @@ mod tests {
     use crate::preconditioner::PcSide;
     use crate::preconditioner::legacy::Preconditioner;
     #[cfg(not(feature = "complex"))]
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[cfg(feature = "rayon")]
     use rayon::prelude::*;
@@ -2444,12 +2495,7 @@ mod tests {
     }
 
     #[cfg(not(feature = "complex"))]
-    fn cg_unpreconditioned(
-        a: &faer::Mat<S>,
-        b: &[S],
-        x0: &[S],
-        max_iter: usize,
-    ) -> (usize, f64) {
+    fn cg_unpreconditioned(a: &faer::Mat<S>, b: &[S], x0: &[S], max_iter: usize) -> (usize, f64) {
         let n = b.len();
         let mut x = x0.to_vec();
         let mut r = vec![S::zero(); n];

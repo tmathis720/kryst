@@ -1,18 +1,28 @@
 #![cfg(feature = "backend-faer")]
 
-//! Incomplete LU factorization with threshold and pivoting (ILUTP).
+//! Incomplete LU factorization with threshold dropping plus partial pivoting (ILUTP).
 //!
-//! This module implements the ILUTP algorithm which combines threshold-based dropping
-//! with partial pivoting to improve stability for difficult matrices such as those
-//! arising from discretized Navier-Stokes equations.
-//! The factorization is kept in `f64`, but a `KPreconditioner` bridge exposes the same
-//! functionality to complex solvers via `BridgeScratch`.
+//! ILUTP is typically used for nonsymmetric, possibly indefinite problems (e.g., Navier–Stokes)
+//! where simple ILU0/ILUT may fail due to unstable pivots. This implementation combines ILUT-style
+//! dropping with partial pivoting in `U`.
+//! It uses:
+//! - a dense working matrix during factorization,
+//! - explicit row permutations recorded in `row_perm`,
+//! - threshold-based dropping controlled by `drop_tol` and `max_fill`,
+//! - pivot tolerance `perm_tol` to steer stability.
+//! The factors remain real (`f64`), but complex solvers reuse them via the `KPreconditioner`
+//! bridge (`BridgeScratch`).
 //!
-//! For non-pivoting ILUT on `faer::Mat<f64>`, prefer the canonical `Ilu` implementation
-//! with `IluType::ILUT`.
+//! # Real vs complex
+//! Factorization is always performed in real arithmetic (`f64`), and complex Krylov solvers depend
+//! on the [`KPreconditioner`] bridge that copies into real scratch buffers, applies ILUTP, and
+//! copies back.
 //!
-//! The algorithm follows the approach described in Saad's "Iterative Methods for
-//! Sparse Linear Systems" with modifications for numerical stability.
+//! For non-pivoting ILUT on `faer::Mat<f64>`, prefer [`Ilu`] with [`IluType::ILUT`].
+//!
+//! The algorithm follows Saad's *Iterative Methods for Sparse Linear Systems* with stability
+//! safeguards tailored for pragmatic use.
+//! See `examples/convection_diffusion_ilutp.rs` for a convection–diffusion demonstration.
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};

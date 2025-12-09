@@ -326,6 +326,46 @@ Run your program with PETSc-style options:
 - `-pc_type asm` - Additive Schwarz Method
 - `-pc_type approxinv` - Approximate inverse preconditioner
 
+#### ILU preconditioners
+`-pc_type ilu` selects Kryst's HYPRE-inspired incomplete LU family (`Ilu`). `-pc_type ilut`/`-pc_type
+ilutp` run the lighter-weight row-filter ILUT or pivoting ILUTP preconditioners, while
+`-pc_type blockjacobi` with `-pc_local <ilu|ilut|ilutp>` wraps a local ILU variant inside MPI
+block-Jacobi. Setting `-pc_type ilu` with `-pc_ilu_type ilut` runs the canonical ILU threshold
+factorization; `Ilu::create_specialized` may route that variant to `crate::preconditioner::ilut::Ilut`
+for simplicity/efficiency.
+
+| CLI flag | Config field | Notes |
+| --- | --- | --- |
+| `-pc_ilu_type <ilu0|milu0|iluk|ilut>` | `IluConfig::ilu_type` | `ilu0` is default; `iluk` uses `-pc_ilu_level_of_fill`, `ilut` uses drop/fill knobs. |
+| `-pc_ilu_level_of_fill <int>` | `IluConfig::level_of_fill` | Controls level-of-fill for `ILUK` (typical 0–5). |
+| `-pc_ilu_max_fill_per_row <int>` | `IluConfig::max_fill_per_row` | Per-row fill cap for `ILUK`/`ILUT`; 10–50 keeps memory bounded. |
+| `-pc_ilu_offdiag_drop_tolerance <float>` | `IluConfig::offdiag_drop_tolerance` | Drop entries outside LU blocks. |
+| `-pc_ilu_schur_drop_tolerance <float>` | `IluConfig::schur_drop_tolerance` | For future Schur complements (currently dormant). |
+| `-pc_ilu_triangular_solve <exact|jacobi|gauss_seidel>` | `IluConfig::triangular_solve` | Iterative solves trade accuracy for parallelism. |
+| `-pc_ilu_lower_jacobi_iters <int>` / `-pc_ilu_upper_jacobi_iters <int>` | Jacobi iteration counts | Only used when the triangular solve is iterative. |
+| `-pc_ilu_tolerance <float>` / `-pc_ilu_max_iterations <int>` | Iterative solve controls | Defaults 1e-6 & 1; iterative delivers residual-based refinement. |
+| `-pc_ilu_parallel_factorization` / `-pc_ilu_parallel_trisolve` / `-pc_ilu_parallel_chunk_size <int>` | `IluConfig::enable_parallel_*`, `parallel_chunk_size` | Enable experimental rayon paths; chunk size typically 16–256. |
+| `-pc_ilut_drop_tol <float>` | `IluConfig::drop_tolerance` (row-filter ILUT) | Simple heuristic ILUT drop threshold (1e-3–1e-6). |
+| `-pc_ilut_max_fill <int>` | `IluConfig::max_fill_per_row` (row-filter ILUT) | Limits kept entries per row (10–100). |
+| `-pc_ilut_perm_tol <float>` | Pivot tolerance for row-filter ILUT | Not used by canonical `Ilu` but available for the lightweight ILUT preconditioner. |
+| `-pc_ilutp_max_fill <int>` / `-pc_ilutp_drop_tol <float>` / `-pc_ilutp_perm_tol <float>` | `Ilutp` parameters | Controls density, drop tolerance, and pivoting aggressiveness for ILUTP. |
+
+Environment variables mirror the flags: `KRYST_PC_ILU_TYPE`, `KRYST_PC_ILU_LEVEL_OF_FILL`, `KRYST_PC_ILU_MAX_FILL_PER_ROW`, `KRYST_PC_ILU_OFFDIAG_DROP_TOL`, `KRYST_PC_ILU_SCHUR_DROP_TOL`, `KRYST_PC_ILU_TRI_SOLVE`, `KRYST_PC_ILU_LOWER_JACOBI_ITERS`, `KRYST_PC_ILU_UPPER_JACOBI_ITERS`, `KRYST_PC_ILU_PARALLEL_FACTORIZATION`, `KRYST_PC_ILU_PARALLEL_TRISOLVE`, `KRYST_PC_ILU_PARALLEL_CHUNK_SIZE`, plus `KRYST_PC_ILUT_DROP_TOL`, `KRYST_PC_ILUT_MAX_FILL`, `KRYST_PC_ILUT_PERM_TOL`, `KRYST_PC_ILUTP_MAX_FILL`, `KRYST_PC_ILUTP_DROP_TOL`, and `KRYST_PC_ILUTP_PERM_TOL`. Command-line flags override environment variables, which in turn override the built-in defaults.
+
+##### Examples
+
+```bash
+-pc_type ilu -pc_ilu_type ilu0 -pc_ilu_triangular_solve exact
+-pc_type ilu -pc_ilu_type ilut -pc_ilut_drop_tol 1e-5 -pc_ilut_max_fill 50
+-pc_type ilutp -pc_ilutp_max_fill 20 -pc_ilutp_drop_tol 1e-4 -pc_ilutp_perm_tol 0.1
+-pc_type blockjacobi -pc_local ilu -pc_ilu_type ilu0 -pc_ilu_level_of_fill 1
+```
+
+The first line compares Jacobi vs ILU(0) on `examples/poisson_spd_ilu0_vs_jacobi.rs`; the second
+shows ILUT tuning. The third line mirrors the convection–diffusion ILUTP demo
+(`examples/convection_diffusion_ilutp.rs`), and the last line is the MPI block-Jacobi + ILU(0)
+toy from `examples/mpi_poisson_block_jacobi_ilu.rs`.
+
 #### Direct Solver Options
 - `-pc_type lu` - Direct LU factorization via SuperLU
 - `-pc_type qr` - Direct QR factorization
