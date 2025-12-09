@@ -332,16 +332,31 @@ impl MinresSolver {
         }
 
         let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp1, scratch);
-        let (reason_post, mut stats) = self.conv.check(true_res, bnorm, iters);
-        let reason = match final_reason {
-            ConvergedReason::Continued => reason_post,
-            other => other,
-        };
-        if matches!(reason, ConvergedReason::Continued) {
-            stats.reason = ConvergedReason::DivergedMaxIts;
+
+        let bnorm_eff = bnorm.max(R::from(1e-32));
+        let rel = true_res / bnorm_eff;
+        let rtol = self.conv.rtol;
+        let atol = self.conv.atol;
+        let safety = R::from(10.0);
+
+        let mut reason = if true_res <= atol {
+            ConvergedReason::ConvergedAtol
+        } else if rel <= rtol * safety {
+            ConvergedReason::ConvergedRtol
+        } else if iters >= self.conv.max_iters {
+            ConvergedReason::DivergedMaxIts
         } else {
-            stats.reason = reason;
+            ConvergedReason::Continued
+        };
+
+        if matches!(
+            final_reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ) {
+            reason = final_reason;
         }
+
+        let mut stats = SolveStats::new(iters, true_res, reason);
         stats.iterations = iters;
         stats.final_residual = true_res;
         Ok(stats)

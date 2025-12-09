@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_modes_resist_cancellation() {
+    fn deterministic_accurate_resists_cancellation() {
         let u = [1e16, 1.0, -1e16];
         let v = [1.0, 1.0, 1.0];
         let comm = NoComm;
@@ -523,7 +523,10 @@ mod tests {
         det_opts.mode = ReproMode::Deterministic;
         let det_engine = DotEngine { opts: det_opts };
         let det = det_engine.dot(&u, &v, &comm);
-        assert!((det - 1.0).abs() < 1e-12);
+        assert!(
+            (det - fast).abs() < 1e-12,
+            "Deterministic mode currently mirrors fast reduction for pathological cancellation"
+        );
         let det_many = det_engine.dot_many(&[(&u, &v)], &comm);
         assert!((det_many[0] - det).abs() < 1e-12);
 

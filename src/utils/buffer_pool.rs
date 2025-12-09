@@ -15,10 +15,9 @@ impl<T> BufferPool<T> {
 
     /// Create a new pool with the given capacity.
     pub fn with_capacity(n: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(n),
-            len: 0,
-        }
+        let mut buf = Vec::with_capacity(n);
+        buf.resize_with(n, MaybeUninit::uninit);
+        Self { buf, len: 0 }
     }
 
     /// Returns the number of elements that the caller requested to populate.

@@ -27,7 +27,9 @@ impl FromStr for GlobalPcKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "none" => Ok(GlobalPcKind::None),
-            "block-jacobi" | "blockjacobi" => Ok(GlobalPcKind::BlockJacobi),
+            "block-jacobi" | "blockjacobi" | "block_jacobi" => {
+                Ok(GlobalPcKind::BlockJacobi)
+            }
             "asm" => Ok(GlobalPcKind::Asm),
             other => Err(KError::InvalidInput(format!(
                 "Unknown pc_global value: {other}"
