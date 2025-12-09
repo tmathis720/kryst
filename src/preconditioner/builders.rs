@@ -48,6 +48,16 @@ pub fn build_chebyshev(
     eig_lo: f64,
     eig_hi: f64,
 ) -> Result<Box<dyn Preconditioner>, KError> {
+    if degree < 1 {
+        return Err(KError::InvalidInput(
+            "chebyshev degree must be >= 1".into(),
+        ));
+    }
+    if !eig_lo.is_finite() || !eig_hi.is_finite() || eig_hi <= eig_lo || eig_lo < 0.0 {
+        return Err(KError::InvalidInput(
+            "invalid Chebyshev bounds (require 0 <= lambda_min < lambda_max)".into(),
+        ));
+    }
     let pc = ChebyshevPc::new(degree, eig_lo, eig_hi);
     Ok(Box::new(pc))
 }

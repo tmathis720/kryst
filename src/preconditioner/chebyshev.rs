@@ -50,6 +50,8 @@ use std::sync::Mutex;
 ///
 /// Stores the matrix, polynomial degree, and spectrum bounds.
 /// This is the Phase III enhanced version that works as a proper preconditioner.
+/// NOTE: Kept for legacy/manual use; the object-safe `ChebyshevPc` below is what
+/// `PcFactory` constructs at runtime.
 pub struct ChebyshevPre {
     /// The system matrix (stored for apply operations)
     matrix: Mat<f64>,
@@ -523,58 +525,77 @@ impl ObjPreconditioner for ChebyshevPc {
 
         let n = self.n;
         let mut s = self.scratch.lock().unwrap();
+        // Take ownership of scratch vectors to avoid overlapping borrows; restore before return.
+        let mut v0 = std::mem::take(&mut s.v0);
+        let mut v1 = std::mem::take(&mut s.v1);
+        let mut v2 = std::mem::take(&mut s.v2);
+        // PcSide is intentionally ignored: this smoother is symmetric and is applied
+        // as a left preconditioner in practice.
         // tau scaling to make p_m(0) ~ 1
         let c = (self.lambda_max + self.lambda_min) / 2.0;
         let d = (self.lambda_max - self.lambda_min) / 2.0;
-        if d.abs() < f64::EPSILON {
-            // Degenerate spectrum: copy input
-            z.copy_from_slice(r);
-            return Ok(());
-        }
-        let tau = 1.0 / chebyshev_t(self.degree, (0.0 - c) / d);
 
-        if self.degree == 0 {
-            z.copy_from_slice(r);
-            return Ok(());
-        }
-
-        // v1 = (A r - c r) / d
-        a.spmv_scaled(1.0, r, 0.0, &mut s.v1)?;
-        for i in 0..n {
-            s.v1[i] = (s.v1[i] - c * r[i]) / d;
-        }
-        if self.degree == 1 {
-            for i in 0..n {
-                z[i] = tau * s.v1[i];
+        let res = (|| {
+            if d.abs() < f64::EPSILON {
+                // Degenerate spectrum: copy input
+                z.copy_from_slice(r);
+                return Ok(());
             }
-            return Ok(());
-        }
+            let tau = 1.0 / chebyshev_t(self.degree, (0.0 - c) / d);
 
-        // Set v0 = r for the recurrence
-        s.v0[..n].copy_from_slice(r);
-
-        // Recurrence for k = 2..=m
-        for _k in 2..=self.degree {
-            // v2 = 2 * ((A v1 - c v1)/d) - v0
-            // Clone v1 into a temporary to satisfy borrow checker without unsafe.
-            let v1_tmp = s.v1.clone();
-            a.spmv_scaled(1.0, &v1_tmp, 0.0, &mut s.v2)?;
-            for i in 0..n {
-                s.v2[i] = 2.0 * ((s.v2[i] - c * s.v1[i]) / d) - s.v0[i];
+            if self.degree == 0 {
+                z.copy_from_slice(r);
+                return Ok(());
             }
-            // rotate: v0 <- v1, v1 <- v2, v2 <- old v0
-            let t0 = std::mem::take(&mut s.v0);
-            let t1 = std::mem::take(&mut s.v1);
-            let t2 = std::mem::take(&mut s.v2);
-            s.v0 = t1;
-            s.v1 = t2;
-            s.v2 = t0;
-        }
 
-        for i in 0..n {
-            z[i] = tau * s.v1[i];
-        }
-        Ok(())
+            // v1 = (A r - c r) / d
+            a.spmv_scaled(1.0, r, 0.0, &mut v1[..n])?;
+            for i in 0..n {
+                v1[i] = (v1[i] - c * r[i]) / d;
+            }
+            if self.degree == 1 {
+                for i in 0..n {
+                    z[i] = tau * v1[i];
+                }
+                return Ok(());
+            }
+
+            // Set v0 = r for the recurrence
+            v0[..n].copy_from_slice(r);
+
+            // Recurrence for k = 2..=m
+            for _k in 2..=self.degree {
+                // v2 = 2 * ((A v1 - c v1)/d) - v0
+                a.spmv_scaled(1.0, &v1[..n], 0.0, &mut v2[..n])?;
+                for i in 0..n {
+                    v2[i] = 2.0 * ((v2[i] - c * v1[i]) / d) - v0[i];
+                }
+                // rotate: v0 <- v1, v1 <- v2, v2 becomes scratch (old v0)
+                std::mem::swap(&mut v0, &mut v1);
+                std::mem::swap(&mut v1, &mut v2);
+            }
+
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                z.par_iter_mut()
+                    .zip(v1[..n].par_iter())
+                    .for_each(|(zi, &vi)| *zi = tau * vi);
+            }
+            #[cfg(not(feature = "rayon"))]
+            {
+                for i in 0..n {
+                    z[i] = tau * v1[i];
+                }
+            }
+            Ok(())
+        })();
+
+        // Restore scratch vectors before returning.
+        s.v0 = v0;
+        s.v1 = v1;
+        s.v2 = v2;
+        res
     }
 
     fn required_format(&self) -> crate::matrix::format::FormatHint {
@@ -624,6 +645,9 @@ impl KPreconditioner for ChebyshevPc {
 mod tests {
     use super::*;
     use crate::core::traits::MatVec;
+    use crate::matrix::op::CsrOp;
+    use crate::preconditioner::PcSide;
+    use std::sync::Arc;
 
     /// Simple dense matrix for testing
     struct DenseMat<T> {
@@ -669,6 +693,47 @@ mod tests {
         apply_chebyshev(&a, &r, &mut z, 2.0, 3.0, 1);
         // Just check for finite output
         assert!(z.iter().all(|&zi| zi.is_finite()));
+    }
+
+    #[test]
+    fn chebyshev_pc_degenerate_copy() {
+        // lam_min == lam_max triggers copy-through path
+        let row_ptr = vec![0, 1, 2];
+        let col_idx = vec![0, 1];
+        let values = vec![1.0, 1.0];
+        let csr = Arc::new(CsrMatrix::from_csr(2, 2, row_ptr, col_idx, values));
+        let op = CsrOp::new(csr);
+
+        let mut pc = ChebyshevPc::new(3, 1.0, 1.0);
+        pc.setup(&op).expect("setup");
+
+        let rhs = vec![2.5, -3.0];
+        let mut out = vec![0.0; rhs.len()];
+        pc.apply(PcSide::Left, &rhs, &mut out).expect("apply");
+
+        for i in 0..rhs.len() {
+            assert!((out[i] - rhs[i]).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn chebyshev_pc_basic_spd() {
+        // Simple SPD tridiagonal matrix
+        let row_ptr = vec![0, 2, 5, 7];
+        let col_idx = vec![0, 1, 0, 1, 2, 1, 2];
+        let values = vec![2.0, -1.0, -1.0, 2.0, -1.0, -1.0, 2.0];
+        let csr = Arc::new(CsrMatrix::from_csr(3, 3, row_ptr, col_idx, values));
+        let op = CsrOp::new(csr);
+
+        let mut pc = ChebyshevPc::new(2, 0.1, 4.0);
+        pc.setup(&op).expect("setup");
+
+        let rhs = vec![1.0, 0.0, -1.0];
+        let mut out = vec![0.0; rhs.len()];
+        pc.apply(PcSide::Left, &rhs, &mut out).expect("apply");
+
+        assert!(out.iter().all(|zi| zi.is_finite()));
+        assert!(out.iter().any(|&zi| zi.abs() > 1e-6));
     }
 }
 
