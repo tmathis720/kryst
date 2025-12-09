@@ -32,6 +32,7 @@ macro_rules! pc_log {
 pub struct ParIluIterSample {
     pub iter: u32,
     pub residual: f64,
+    pub time_s: f64,
 }
 
 #[derive(Debug, Clone)]

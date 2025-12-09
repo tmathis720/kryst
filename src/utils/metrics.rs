@@ -3,6 +3,7 @@ mod enabled {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
+    #[derive(Debug)]
     pub struct Counters {
         pub total_nanos: AtomicU64,
         pub count: AtomicU64,
@@ -66,6 +67,7 @@ pub use enabled::*;
 mod disabled {
     use std::time::Duration;
 
+    #[derive(Debug)]
     pub struct Counters;
     impl Default for Counters {
         fn default() -> Self {

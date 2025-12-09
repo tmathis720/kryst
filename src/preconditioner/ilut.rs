@@ -16,6 +16,7 @@ use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
+use std::sync::Mutex;
 
 /// Sparse row structure for storing L/U factors.
 ///
@@ -42,6 +43,36 @@ impl Default for SparseRow {
     }
 }
 
+/// Workspace reused across RowFilterPreconditioner solves.
+#[derive(Debug)]
+pub struct RowFilterWorkspace {
+    buf: Mutex<Vec<S>>,
+    size: usize,
+}
+
+impl RowFilterWorkspace {
+    pub fn new() -> Self {
+        Self {
+            buf: Mutex::new(Vec::new()),
+            size: 0,
+        }
+    }
+
+    pub fn ensure_size(&mut self, n: usize) {
+        if n > self.size {
+            let mut guard = self.buf.lock().unwrap();
+            guard.resize(n, S::zero());
+            self.size = n;
+        }
+    }
+
+    #[inline]
+    pub fn borrow_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<S>> {
+        debug_assert!(self.size >= n, "workspace not sized via setup()");
+        self.buf.lock().unwrap()
+    }
+}
+
 /// Row-filtering preconditioner struct.
 ///
 /// This preconditioner performs threshold-based dropping and row splitting without elimination.
@@ -59,6 +90,7 @@ pub struct RowFilterPreconditioner {
     pub l: Vec<SparseRow>,
     pub u: Vec<SparseRow>,
     pub n: usize,
+    workspace: RowFilterWorkspace,
 }
 
 /// Deprecated name; this type is *not* a true ILUT factorization.
@@ -77,6 +109,7 @@ impl RowFilterPreconditioner {
             l: Vec::new(),
             u: Vec::new(),
             n: 0,
+            workspace: RowFilterWorkspace::new(),
         }
     }
 }
@@ -98,7 +131,8 @@ impl RowFilterPreconditioner {
             )));
         }
 
-        let mut y = vec![S::zero(); n];
+        let mut y_guard = self.workspace.borrow_buf(n);
+        let y = &mut y_guard[..n];
         for i in 0..n {
             let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
@@ -174,6 +208,7 @@ where
             self.l[i] = lrow;
             self.u[i] = urow;
         }
+        self.workspace.ensure_size(n);
         Ok(())
     }
     /// Apply ILUT preconditioner: solve Ly = r, then Uz = y.

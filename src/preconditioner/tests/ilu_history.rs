@@ -22,6 +22,7 @@ fn history_and_monitor_basic() {
     h.push(ParIluIterSample {
         iter: 1,
         residual: 0.3,
+        time_s: 0.0,
     });
     assert_eq!(h.as_slice().len(), 1);
 

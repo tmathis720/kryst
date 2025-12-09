@@ -26,6 +26,7 @@ use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::legacy::Preconditioner;
+use std::sync::Mutex;
 
 /// Sparse row structure for storing L/U factors.
 ///
@@ -52,6 +53,36 @@ impl Default for SparseRow {
     }
 }
 
+/// Workspace reused across ILU(p) solves to avoid per-apply allocations.
+#[derive(Debug)]
+pub struct IlupWorkspace {
+    buf: Mutex<Vec<S>>,
+    size: usize,
+}
+
+impl IlupWorkspace {
+    pub fn new() -> Self {
+        Self {
+            buf: Mutex::new(Vec::new()),
+            size: 0,
+        }
+    }
+
+    pub fn ensure_size(&mut self, n: usize) {
+        if n > self.size {
+            let mut guard = self.buf.lock().unwrap();
+            guard.resize(n, S::zero());
+            self.size = n;
+        }
+    }
+
+    #[inline]
+    pub fn borrow_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<S>> {
+        debug_assert!(self.size >= n, "workspace not sized via setup()");
+        self.buf.lock().unwrap()
+    }
+}
+
 /// ILU(p) preconditioner struct.
 ///
 /// - `fill`: Level-of-fill parameter (maximum allowed fill-in)
@@ -63,6 +94,7 @@ pub struct Ilup {
     pub l: Vec<SparseRow>,
     pub u: Vec<SparseRow>,
     pub n: usize,
+    workspace: IlupWorkspace,
 }
 
 impl Ilup {
@@ -73,6 +105,7 @@ impl Ilup {
             l: Vec::new(),
             u: Vec::new(),
             n: 0,
+            workspace: IlupWorkspace::new(),
         }
     }
 }
@@ -94,7 +127,8 @@ impl Ilup {
             )));
         }
 
-        let mut y = vec![S::zero(); n];
+        let mut y_guard = self.workspace.borrow_buf(n);
+        let y = &mut y_guard[..n];
         for i in 0..n {
             let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
@@ -159,9 +193,7 @@ where
                     // Find U[j,j]
                     let u_jj = a_work[j][j];
                     if u_jj == S::zero() {
-                        return Err(KError::SolveError(format!(
-                            "ILUP: zero diagonal in U at row {j}"
-                        )));
+                        return Err(KError::ZeroPivot(j));
                     }
                     let lij = a_work[i][j] / u_jj;
                     self.l[i].cols.push(j);
@@ -188,6 +220,7 @@ where
                 }
             }
         }
+        self.workspace.ensure_size(n);
         Ok(())
     }
     /// Apply ILU(p) preconditioner: solve Ly = r, then Uz = y.

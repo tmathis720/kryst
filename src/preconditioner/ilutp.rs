@@ -22,8 +22,11 @@ use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
+use crate::utils::metrics::{Counters, SolveTimer};
 use faer::Mat;
 use std::cmp::Ordering;
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// ILUTP preconditioner with threshold control and partial pivoting.
 ///
@@ -45,6 +48,47 @@ pub struct Ilutp {
     drop_tol: f64,
     /// Pivot tolerance (threshold for pivoting)
     perm_tol: f64,
+    workspace: IlutpWorkspace,
+    /// Time spent in the most recent setup
+    setup_time: f64,
+    /// Solve timing counters
+    solve_ctrs: Counters,
+}
+
+#[derive(Debug, Clone)]
+pub struct IlutpStats {
+    pub setup_time: f64,
+    pub solve_time: f64,
+    pub solve_count: usize,
+}
+
+#[derive(Debug)]
+struct IlutpWorkspace {
+    buf: Mutex<Vec<f64>>,
+    size: usize,
+}
+
+impl IlutpWorkspace {
+    fn new() -> Self {
+        Self {
+            buf: Mutex::new(Vec::new()),
+            size: 0,
+        }
+    }
+
+    fn ensure_size(&mut self, n: usize) {
+        if n > self.size {
+            let mut guard = self.buf.lock().unwrap();
+            guard.resize(n, 0.0);
+            self.size = n;
+        }
+    }
+
+    #[inline]
+    fn borrow_buf(&self, n: usize) -> std::sync::MutexGuard<'_, Vec<f64>> {
+        debug_assert!(self.size >= n, "workspace not sized via setup()");
+        self.buf.lock().unwrap()
+    }
 }
 
 impl Ilutp {
@@ -57,6 +101,9 @@ impl Ilutp {
             max_fill: 10,
             drop_tol: 1e-4,
             perm_tol: 0.1,
+            workspace: IlutpWorkspace::new(),
+            setup_time: 0.0,
+            solve_ctrs: Counters::new(),
         }
     }
 
@@ -69,6 +116,9 @@ impl Ilutp {
             max_fill,
             drop_tol,
             perm_tol,
+            workspace: IlutpWorkspace::new(),
+            setup_time: 0.0,
+            solve_ctrs: Counters::new(),
         }
     }
 
@@ -91,7 +141,7 @@ impl Ilutp {
     fn compute_factorization(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
         if n != matrix.ncols() {
-            return Err(KError::SolveError(
+            return Err(KError::InvalidInput(
                 "Matrix must be square for ILUTP".to_string(),
             ));
         }
@@ -202,6 +252,7 @@ impl Ilutp {
 
         self.l_factor = l_factor;
         self.u_factor = u_factor;
+        self.workspace.ensure_size(n);
         Ok(())
     }
 
@@ -237,9 +288,7 @@ impl Ilutp {
             }
             let diag = self.u_factor[(i, i)];
             if diag.abs() < 1e-14 {
-                return Err(KError::SolveError(format!(
-                    "Singular U factor at diagonal {i}"
-                )));
+                return Err(KError::ZeroPivot(i));
             }
             x[i] /= diag;
         }
@@ -252,16 +301,18 @@ impl Ilutp {
         let expected = self.l_factor.nrows();
         if output.len() != n || expected != n {
             return Err(KError::InvalidInput(format!(
-                "Ilutp::apply_slice dimension mismatch: expected {}, got input.len()={}, output.len()={}",
-                expected,
+                "Ilutp::apply dimension mismatch: input.len()={}, output.len()={}, n={}",
                 n,
-                output.len()
+                output.len(),
+                expected
             )));
         }
 
-        let mut temp = vec![0.0; n];
-        self.forward_solve(input, &mut temp)?;
-        self.backward_solve(&temp, output)?;
+        let _timer = SolveTimer::start(&self.solve_ctrs);
+        let mut temp_guard = self.workspace.borrow_buf(n);
+        let temp = &mut temp_guard[..n];
+        self.forward_solve(input, temp)?;
+        self.backward_solve(temp, output)?;
         Ok(())
     }
 }
@@ -275,7 +326,11 @@ impl Default for Ilutp {
 impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
     /// Setup the ILUTP preconditioner by computing the factorization.
     fn setup(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
-        self.compute_factorization(matrix)
+        let start = Instant::now();
+        self.solve_ctrs = Counters::new();
+        self.compute_factorization(matrix)?;
+        self.setup_time = start.elapsed().as_secs_f64();
+        Ok(())
     }
 
     /// Apply the ILUTP preconditioner: solve M⁻¹x = b where M ≈ A.
@@ -300,6 +355,21 @@ impl LocalPreconditioner<f64> for Ilutp {
         debug_assert_eq!(x.len(), n);
         debug_assert_eq!(y.len(), n);
         self.apply_slice(x, y)
+    }
+}
+
+impl Ilutp {
+    pub fn get_stats(&self) -> IlutpStats {
+        let (total_ns, count, _) = self.solve_ctrs.snapshot();
+        IlutpStats {
+            setup_time: self.setup_time,
+            solve_time: if count == 0 {
+                0.0
+            } else {
+                total_ns as f64 / count as f64 / 1e9
+            },
+            solve_count: count as usize,
+        }
     }
 }
 

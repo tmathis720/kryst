@@ -1669,6 +1669,7 @@ impl Ilu {
         let mut history = ParIluHistory::with_capacity(max_iters);
 
         for iter in 0..max_iters {
+            let iter_start = std::time::Instant::now();
             let res = self.parilu_sweep(
                 a,
                 &l_row_ptr,
@@ -1681,10 +1682,12 @@ impl Ilu {
                 &mut u_vals,
                 omega,
             )?;
+            let iter_time = iter_start.elapsed().as_secs_f64();
 
             history.push(ParIluIterSample {
                 iter: iter as u32,
                 residual: res,
+                time_s: iter_time,
             });
 
             if let Some(m) = &self.monitor {
@@ -1730,6 +1733,17 @@ impl Ilu {
 
     /// Setup consolidated workspace for efficient operations (zero-allocation goal)
     fn setup_workspace(&mut self, n: usize) {
+        debug_assert_eq!(
+            self.l.nrows(),
+            n,
+            "L dimension mismatch during workspace sizing"
+        );
+        debug_assert_eq!(
+            self.u.nrows(),
+            n,
+            "U dimension mismatch during workspace sizing"
+        );
+
         if self.config.optimize_workspace {
             // Ensure workspace is properly sized (avoids reallocation if already correct size)
             self.workspace.ensure_size(n);
@@ -2107,9 +2121,6 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
             debug!("ILU: Using {:?} factorization type", self.config.ilu_type);
         }
 
-        // Setup workspace for iterative solves
-        self.setup_workspace(n);
-
         let mut parilu_iters = 0u32;
         let mut parilu_converged = true;
 
@@ -2152,6 +2163,9 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         } else {
             self.history = None;
         }
+
+        // Setup workspace for iterative solves (must match factor dimensions)
+        self.setup_workspace(n);
 
         // Calculate metrics
         self.setup_complexity = self.calculate_complexity(original_nnz);
@@ -2213,7 +2227,8 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         Ok(())
     }
 
-    /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace
+    /// HYPRE-inspired apply with configurable triangular solves and zero-allocation workspace.
+    /// No heap allocations occur after `setup()` has completed.
     fn apply(&self, side: PcSide, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<(), KError> {
         self.apply_slice(side, x.as_slice(), y.as_mut_slice())
     }
@@ -2363,8 +2378,16 @@ mod tests {
     use super::{Ilu, IluBuilder, IluConfig, IluType, TriSolveType};
     use crate::algebra::parallel::par_sum_abs2_local;
     use crate::algebra::prelude::*;
+    use crate::error::KError;
     use crate::preconditioner::PcSide;
     use crate::preconditioner::legacy::Preconditioner;
+    #[cfg(not(feature = "complex"))]
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    #[cfg(feature = "rayon")]
+    use rayon::prelude::*;
+    #[cfg(feature = "rayon")]
+    use std::sync::Arc;
 
     fn make_spd_3x3() -> faer::Mat<S> {
         // A = [[4, 1, 0],
@@ -2390,6 +2413,142 @@ mod tests {
             out[i] = acc;
         }
         out
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn mat_vec_mul_inplace(a: &faer::Mat<S>, x: &[S], y: &mut [S]) {
+        for i in 0..a.nrows() {
+            let mut acc = S::zero();
+            for j in 0..a.ncols() {
+                acc = acc + a[(i, j)] * x[j];
+            }
+            y[i] = acc;
+        }
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn random_spd(n: usize, seed: u64) -> faer::Mat<S> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut a = faer::Mat::zeros(n, n);
+        for i in 0..n {
+            for j in 0..=i {
+                let v = rng.gen_range(-1.0..1.0);
+                a[(i, j)] = S::from_real(v);
+                a[(j, i)] = S::from_real(v);
+            }
+        }
+        for i in 0..n {
+            a[(i, i)] = a[(i, i)] + S::from_real(n as f64 + 1.0);
+        }
+        a
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn cg_unpreconditioned(
+        a: &faer::Mat<S>,
+        b: &[S],
+        x0: &[S],
+        max_iter: usize,
+    ) -> (usize, f64) {
+        let n = b.len();
+        let mut x = x0.to_vec();
+        let mut r = vec![S::zero(); n];
+        let mut p = vec![S::zero(); n];
+        let mut ap = vec![S::zero(); n];
+
+        mat_vec_mul_inplace(a, &x, &mut r);
+        for i in 0..n {
+            r[i] = b[i] - r[i];
+        }
+        p.copy_from_slice(&r);
+        let mut rr = dot(&r, &r);
+
+        let mut iters = 0;
+        while iters < max_iter && rr > 1e-20 {
+            mat_vec_mul_inplace(a, &p, &mut ap);
+            let denom = dot(&p, &ap);
+            if denom.abs() < 1e-30 {
+                break;
+            }
+            let alpha = rr / denom;
+            for i in 0..n {
+                x[i] = x[i] + alpha * p[i];
+                r[i] = r[i] - alpha * ap[i];
+            }
+            let rr_new = dot(&r, &r);
+            if rr_new.sqrt() < 1e-10 {
+                rr = rr_new;
+                iters += 1;
+                break;
+            }
+            let beta = rr_new / rr;
+            for i in 0..n {
+                p[i] = r[i] + beta * p[i];
+            }
+            rr = rr_new;
+            iters += 1;
+        }
+
+        (iters, rr.sqrt())
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn cg_left_preconditioned(
+        a: &faer::Mat<S>,
+        pc: &Ilu,
+        b: &[S],
+        x0: &[S],
+        max_iter: usize,
+    ) -> (usize, f64) {
+        let n = b.len();
+        let mut x = x0.to_vec();
+        let mut r = vec![S::zero(); n];
+        let mut z = vec![S::zero(); n];
+        let mut p = vec![S::zero(); n];
+        let mut ap = vec![S::zero(); n];
+
+        mat_vec_mul_inplace(a, &x, &mut r);
+        for i in 0..n {
+            r[i] = b[i] - r[i];
+        }
+        pc.apply(PcSide::Left, &r, &mut z).expect("pc apply");
+        p.copy_from_slice(&z);
+        let mut rz = dot(&r, &z);
+
+        let mut iters = 0;
+        while iters < max_iter && rz.abs() > 1e-20 {
+            mat_vec_mul_inplace(a, &p, &mut ap);
+            let denom = dot(&p, &ap);
+            if denom.abs() < 1e-30 {
+                break;
+            }
+            let alpha = rz / denom;
+            for i in 0..n {
+                x[i] = x[i] + alpha * p[i];
+                r[i] = r[i] - alpha * ap[i];
+            }
+            let r_norm = dot(&r, &r).sqrt();
+            if r_norm < 1e-10 {
+                rz = r_norm;
+                iters += 1;
+                break;
+            }
+            pc.apply(PcSide::Left, &r, &mut z).expect("pc apply");
+            let rz_new = dot(&r, &z);
+            let beta = rz_new / rz;
+            for i in 0..n {
+                p[i] = z[i] + beta * p[i];
+            }
+            rz = rz_new;
+            iters += 1;
+        }
+
+        (iters, dot(&r, &r).sqrt())
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn dot(x: &[S], y: &[S]) -> f64 {
+        x.iter().zip(y.iter()).map(|(&a, &b)| a * b).sum()
     }
 
     #[cfg(feature = "rayon")]
@@ -2787,6 +2946,26 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "complex"))]
+    #[test]
+    fn ilu0_improves_cg_for_random_spd() {
+        let n = 20;
+        let a = random_spd(n, 12345);
+        let b = vec![S::from_real(1.0); n];
+        let x0 = vec![S::zero(); n];
+
+        let (iters_unpre, res_unpre) = cg_unpreconditioned(&a, &b, &x0, 200);
+
+        let mut ilu = Ilu::new();
+        ilu.setup(&a).expect("ilu0 setup");
+        let (iters_pc, res_pc) = cg_left_preconditioned(&a, &ilu, &b, &x0, 200);
+
+        assert!(
+            res_pc < res_unpre * 0.5 || iters_pc < iters_unpre,
+            "preconditioned res={res_pc} iters={iters_pc}, baseline res={res_unpre} iters={iters_unpre}"
+        );
+    }
+
     #[test]
     fn parilu_refines_residual() {
         let matrix = faer::Mat::<f64>::from_fn(3, 3, |i, j| match (i, j) {
@@ -2851,6 +3030,28 @@ mod tests {
         assert!(!hist.is_empty());
     }
 
+    #[test]
+    fn ilu_rejects_nan_inf_when_ieee_checks_enabled() {
+        let mut a = faer::Mat::zeros(3, 3);
+        a[(0, 0)] = 1.0;
+        a[(1, 1)] = f64::NAN;
+        a[(2, 2)] = f64::INFINITY;
+
+        let mut cfg = IluConfig::default();
+        cfg.ieee_checks = true;
+        let mut ilu = Ilu::new_with_config(cfg).unwrap();
+        let err = ilu.setup(&a).unwrap_err();
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("NaN") || msg.contains("Infinity"),
+                    "unexpected message: {msg}"
+                )
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
     #[cfg(feature = "rayon")]
     #[test]
     fn parilu_parallel_matches_serial_small() {
@@ -2879,6 +3080,29 @@ mod tests {
             (last_serial - last_par).abs() < 1e-6,
             "serial {last_serial} vs parallel {last_par}"
         );
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn parallel_triangular_stress() {
+        let n = 1000;
+        let matrix = make_tridiag_matrix(n);
+
+        let mut ilu = IluBuilder::new()
+            .ilu_type(IluType::ILU0)
+            .enable_parallel_triangular_solve()
+            .build()
+            .unwrap();
+        ilu.setup(&matrix).unwrap();
+
+        let rhs = Arc::new(vec![1.0; n]);
+        let ilu = Arc::new(ilu);
+
+        (0..100).into_par_iter().for_each(|_| {
+            let mut y = vec![0.0; n];
+            ilu.apply(PcSide::Left, &*rhs, &mut y).unwrap();
+            assert!(y.iter().all(|v| v.is_finite()));
+        });
     }
 }
 

@@ -70,9 +70,10 @@ impl Monitor for TextMonitor {
                     log::info!("ILU: setup begin (opts={opts_hash:016x})")
                 }
                 Event::IluSetupIter { sample } => log::info!(
-                    "ILU: it {:>3}  parilu_res≈{:.3e}",
+                    "ILU: it {:>3}  parilu_res≈{:.3e}  dt={:.3e}s",
                     sample.iter,
                     sample.residual,
+                    sample.time_s,
                 ),
                 Event::IluSetupEnd {
                     iters,
