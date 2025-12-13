@@ -1,13 +1,18 @@
 #![allow(dead_code)]
 
 use std::cmp::Ordering as CmpOrdering;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::str::FromStr;
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::config::kinds::{AmgCoarsenKind, AmgInterpKind, AmgRelaxKind};
+use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{
@@ -144,6 +149,9 @@ pub static RELAX_CALL_COUNTS: [AtomicUsize; 4] = [
     AtomicUsize::new(0),
     AtomicUsize::new(0),
 ];
+#[cfg(test)]
+static BUILD_SYMBOLIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 #[cfg(test)]
 pub fn reset_relax_counts() {
     for c in &RELAX_CALL_COUNTS {
@@ -480,6 +488,338 @@ impl Default for AMGConfig {
         cfg.num_grid_sweeps = [cfg.pre_sweeps, cfg.pre_sweeps, cfg.post_sweeps, 1];
         cfg.stats_eps = cfg.drop_tol;
         cfg
+    }
+}
+
+impl AMGConfig {
+    fn validate(&self) -> Result<(), KError> {
+        validate_relax_policy(self, self.coarse_solve)?;
+        validate_truncation_and_caps(self)?;
+        if self.max_levels == 0 {
+            return Err(KError::InvalidInput("max_levels must be at least 1".into()));
+        }
+        if self.min_coarse_size == 0 {
+            return Err(KError::InvalidInput(
+                "min_coarse_size must be at least 1".into(),
+            ));
+        }
+        if self.max_coarse_size > 0 && self.max_coarse_size < self.min_coarse_size {
+            return Err(KError::InvalidInput(
+                "max_coarse_size must be ≥ min_coarse_size".into(),
+            ));
+        }
+        if self.max_iterations < self.min_iterations {
+            return Err(KError::InvalidInput(
+                "max_iterations must be ≥ min_iterations".into(),
+            ));
+        }
+        if self.jacobi_omega <= 0.0 {
+            return Err(KError::InvalidInput("jacobi_omega must be positive".into()));
+        }
+        if self.chebyshev_power_steps == 0 {
+            return Err(KError::InvalidInput(
+                "chebyshev_power_steps must be ≥ 1".into(),
+            ));
+        }
+        if !(0.0 < self.chebyshev_lower_ratio && self.chebyshev_lower_ratio < 1.0) {
+            return Err(KError::InvalidInput(
+                "chebyshev_lower_ratio must be in (0, 1)".into(),
+            ));
+        }
+        if self.chebyshev_safety <= 0.0 {
+            return Err(KError::InvalidInput(
+                "chebyshev_safety must be positive".into(),
+            ));
+        }
+        if self.drop_tol < 0.0 {
+            return Err(KError::InvalidInput("drop_tol must be ≥ 0".into()));
+        }
+        if self.non_galerkin.enabled && self.non_galerkin.start_level >= self.max_levels {
+            return Err(KError::InvalidInput(
+                "non_galerkin.start_level must be less than max_levels".into(),
+            ));
+        }
+        if self.verify_galerkin && self.galerkin_samples == 0 {
+            return Err(KError::InvalidInput(
+                "galerkin_samples must be > 0 when verify_galerkin is enabled".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_smoothing_sweeps(&mut self, pre: usize, post: usize) {
+        self.pre_sweeps = pre;
+        self.post_sweeps = post;
+        self.num_grid_sweeps[RelaxPhase::Fine.ix()] = pre;
+        self.num_grid_sweeps[RelaxPhase::Down.ix()] = pre;
+        self.num_grid_sweeps[RelaxPhase::Up.ix()] = post;
+    }
+
+    fn apply_relax_type(&mut self, value: &str) -> Result<(), KError> {
+        let kind = AmgRelaxKind::from_str(value)?;
+        let relax = match kind {
+            AmgRelaxKind::Jacobi => RelaxType::Jacobi,
+            AmgRelaxKind::Gs => RelaxType::GaussSeidel,
+            AmgRelaxKind::Gsr => RelaxType::GaussSeidelBackward,
+            AmgRelaxKind::Sgs => RelaxType::SymmetricGaussSeidel,
+            AmgRelaxKind::Hgs => RelaxType::HybridGaussSeidel,
+            AmgRelaxKind::L1Jacobi => RelaxType::L1Jacobi,
+            AmgRelaxKind::Chebyshev => RelaxType::Chebyshev,
+        };
+        self.relax_type = relax;
+        for phase in RelaxPhase::ALL {
+            self.grid_relax_type[phase.ix()] = relax;
+        }
+        self.grid_relax_type[RelaxPhase::Coarsest.ix()] = RelaxType::GaussSeidel;
+        Ok(())
+    }
+
+    pub fn try_from_opts(opts: &PcOptions) -> Result<Self, KError> {
+        let mut cfg = Self::default();
+
+        if let Some(levels) = opts.amg_levels {
+            cfg.max_levels = levels;
+        }
+        if let Some(threshold) = opts.amg_strength_threshold {
+            let threshold = ensure_finite("amg_strength_threshold", threshold)?;
+            if !(threshold > 0.0 && threshold <= 1.0) {
+                return Err(KError::InvalidInput(
+                    "amg_strength_threshold must be in (0, 1]".into(),
+                ));
+            }
+            cfg.strong_threshold = threshold;
+        }
+        if let Some(pre) = opts.amg_nu_pre {
+            cfg.set_smoothing_sweeps(pre, cfg.post_sweeps);
+        }
+        if let Some(post) = opts.amg_nu_post {
+            cfg.set_smoothing_sweeps(cfg.pre_sweeps, post);
+        }
+        if let Some(threshold) = opts.amg_coarse_threshold {
+            cfg.coarse_threshold = threshold;
+        }
+        if let Some(max) = opts.amg_max_coarse_size {
+            cfg.max_coarse_size = max;
+        }
+        if let Some(min) = opts.amg_min_coarse_size {
+            cfg.min_coarse_size = min;
+        }
+        if let Some(trunc) = opts.amg_truncation_factor {
+            cfg.truncation_factor = trunc;
+        }
+        if let Some(cap) = opts.amg_max_elements_per_row {
+            cfg.max_elements_per_row = cap;
+        }
+        if let Some(interop) = opts.amg_interpolation_truncation {
+            cfg.interpolation_truncation = interop;
+        }
+        if let Some(abs) = opts.amg_rap_truncation_abs {
+            cfg.rap_truncation_abs = abs;
+        }
+        if let Some(cap) = opts.amg_rap_max_elements_per_row {
+            cfg.rap_max_elements_per_row = cap;
+        }
+        if let Some(ref coarsen) = opts.amg_coarsen_type {
+            cfg.coarsen_type = map_coarsen(AmgCoarsenKind::from_str(coarsen)?);
+        }
+        if let Some(ref interp) = opts.amg_interp_type {
+            cfg.interp_type = map_interp(AmgInterpKind::from_str(interp)?);
+        }
+        if let Some(ref smoother) = opts.amg_smoother {
+            cfg.apply_relax_type(smoother)?;
+        } else if let Some(ref relax) = opts.amg_relax_type {
+            cfg.apply_relax_type(relax)?;
+        }
+        if let Some(steps) = opts.amg_smoother_steps {
+            cfg.set_smoothing_sweeps(steps, steps);
+        }
+        if let Some(omega) = opts.amg_smoother_omega {
+            let omega = ensure_finite("amg_smoother_omega", omega)?;
+            if omega <= 0.0 {
+                return Err(KError::InvalidInput(
+                    "amg_smoother_omega must be > 0".into(),
+                ));
+            }
+            cfg.jacobi_omega = omega;
+            cfg.adaptive_smooth_omega = omega;
+        }
+        if let Some(val) = opts.amg_logging_level {
+            cfg.logging_level = val;
+        }
+        if let Some(val) = opts.amg_print_level {
+            cfg.print_level = val;
+        }
+        if let Some(val) = opts.amg_tolerance {
+            cfg.tolerance = val;
+        }
+        if let Some(val) = opts.amg_max_iterations {
+            cfg.max_iterations = val;
+        }
+        if let Some(val) = opts.amg_min_iterations {
+            cfg.min_iterations = val;
+        }
+        if let Some(flag) = opts.amg_ieee_checks {
+            cfg.ieee_checks = flag;
+        }
+        if let Some(flag) = opts.amg_optimize_workspace {
+            cfg.optimize_workspace = flag;
+        }
+        if let Some(flag) = opts.amg_keep_transpose {
+            cfg.keep_transpose = flag;
+        }
+        if let Some(flag) = opts.amg_keep_pivot_in_rap {
+            cfg.keep_pivot_in_rap = flag;
+        }
+        if let Some(flag) = opts.amg_require_spd {
+            cfg.require_spd = flag;
+        }
+        if cfg.require_spd && !cfg.keep_transpose {
+            return Err(KError::InvalidInput(
+                "SPD mode requires pc_amg_keep_transpose true".into(),
+            ));
+        }
+        if let Some(flag) = opts.amg_print_setup {
+            if flag {
+                cfg.print_level = cfg.print_level.max(1);
+                cfg.logging_level = cfg.logging_level.max(2);
+            }
+        }
+        cfg.validate()?;
+        Ok(cfg)
+    }
+}
+
+fn ensure_finite(name: &str, value: f64) -> Result<f64, KError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(KError::InvalidInput(format!("{name} must be finite")))
+    }
+}
+
+fn map_coarsen(kind: AmgCoarsenKind) -> CoarsenType {
+    match kind {
+        AmgCoarsenKind::Rs => CoarsenType::RS,
+        AmgCoarsenKind::Hmis => CoarsenType::HMIS,
+        AmgCoarsenKind::Pmis => CoarsenType::PMIS,
+        AmgCoarsenKind::Falgout => CoarsenType::Falgout,
+    }
+}
+
+fn map_interp(kind: AmgInterpKind) -> InterpType {
+    match kind {
+        AmgInterpKind::Classical => InterpType::Classical,
+        AmgInterpKind::Direct => InterpType::Direct,
+        AmgInterpKind::Multipass => InterpType::Multipass,
+        AmgInterpKind::Extended => InterpType::Extended,
+        AmgInterpKind::Standard => InterpType::Standard,
+    }
+}
+
+#[cfg(test)]
+mod config_mapping_tests {
+    use super::*;
+
+    fn opts_from(args: &[&str]) -> PcOptions {
+        PcOptions::from_args(args).expect("valid AMG args")
+    }
+
+    #[test]
+    fn amg_config_applies_cli_overrides() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_levels",
+            "6",
+            "-pc_amg_strength_threshold",
+            "0.25",
+            "-pc_amg_coarsen",
+            "hmis",
+            "-pc_amg_interp",
+            "extended",
+            "-pc_amg_smoother",
+            "chebyshev",
+            "-pc_amg_smoother_steps",
+            "2",
+            "-pc_amg_smoother_omega",
+            "0.8",
+            "-pc_amg_truncation_factor",
+            "0.2",
+            "-pc_amg_interp_maxnnz",
+            "8",
+            "-pc_amg_rap_truncation_abs",
+            "0.0",
+            "-pc_amg_rap_maxnnz",
+            "16",
+            "-pc_amg_keep_transpose",
+            "true",
+            "-pc_amg_keep_pivot_in_rap",
+            "true",
+            "-pc_amg_require_spd",
+            "true",
+            "-pc_amg_print_setup",
+            "true",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert_eq!(cfg.max_levels, 6);
+        assert!((cfg.strong_threshold - 0.25).abs() < 1e-12);
+        assert_eq!(cfg.coarsen_type, CoarsenType::HMIS);
+        assert_eq!(cfg.interp_type, InterpType::Extended);
+        assert_eq!(cfg.relax_type, RelaxType::Chebyshev);
+        assert_eq!(cfg.pre_sweeps, 2);
+        assert_eq!(cfg.post_sweeps, 2);
+        assert!((cfg.jacobi_omega - 0.8).abs() < 1e-12);
+        assert!((cfg.adaptive_smooth_omega - 0.8).abs() < 1e-12);
+        assert_eq!(cfg.truncation_factor, 0.2);
+        assert_eq!(cfg.max_elements_per_row, 8);
+        assert_eq!(cfg.rap_truncation_abs, 0.0);
+        assert_eq!(cfg.rap_max_elements_per_row, 16);
+        assert!(cfg.keep_transpose);
+        assert!(cfg.keep_pivot_in_rap);
+        assert!(cfg.require_spd);
+        assert!(cfg.logging_level >= 2);
+        assert!(cfg.print_level >= 1);
+    }
+
+    #[test]
+    fn amg_config_denies_keep_transpose_when_spd() {
+        let opts = opts_from(&["-pc_type", "amg", "-pc_amg_keep_transpose", "false"]);
+        assert!(AMGConfig::try_from_opts(&opts).is_err());
+    }
+
+    #[test]
+    fn amg_config_allows_keep_transpose_when_spd_off() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_require_spd",
+            "false",
+            "-pc_amg_keep_transpose",
+            "false",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert!(!cfg.require_spd);
+        assert!(!cfg.keep_transpose);
+    }
+
+    #[test]
+    fn amg_levels_zero_is_invalid() {
+        let opts = opts_from(&["-pc_type", "amg", "-pc_amg_levels", "0"]);
+        assert!(AMGConfig::try_from_opts(&opts).is_err());
+    }
+
+    #[test]
+    fn amg_strength_threshold_negative_is_invalid() {
+        let opts = opts_from(&["-pc_type", "amg", "-pc_amg_strength_threshold", "-0.1"]);
+        assert!(AMGConfig::try_from_opts(&opts).is_err());
+    }
+
+    #[test]
+    fn pc_amg_alias_sets_pc_type() {
+        let opts = opts_from(&["-pc_amg"]);
+        assert_eq!(opts.pc_type.as_deref(), Some("amg"));
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert_eq!(cfg.max_levels, AMGConfig::default().max_levels);
     }
 }
 
@@ -2009,13 +2349,105 @@ fn galerkin_sample_check(
     Ok((worst <= tol, worst))
 }
 
+fn csr_pattern_hash(a: &CsrMatrix<f64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    a.row_ptr().hash(&mut hasher);
+    a.col_idx().hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(debug_assertions)]
+fn debug_check_csr(a: &CsrMatrix<f64>, name: &str) {
+    let row_ptr = a.row_ptr();
+    let nrows = a.nrows();
+    let nnz = a.nnz();
+    let col_idx = a.col_idx();
+    let vals = a.values();
+    debug_assert_eq!(
+        row_ptr.len(),
+        nrows + 1,
+        "{name}: row_ptr.len() mismatch ({} vs {})",
+        row_ptr.len(),
+        nrows + 1
+    );
+    debug_assert_eq!(
+        col_idx.len(),
+        nnz,
+        "{name}: col_idx.len() ({}) != nnz ({})",
+        col_idx.len(),
+        nnz
+    );
+    debug_assert_eq!(
+        vals.len(),
+        nnz,
+        "{name}: vals.len() ({}) != nnz ({})",
+        vals.len(),
+        nnz
+    );
+    debug_assert_eq!(
+        row_ptr[nrows], nnz,
+        "{name}: row_ptr[nrows] ({}) != nnz ({})",
+        row_ptr[nrows], nnz
+    );
+    let ncols = a.ncols();
+    for row in 0..nrows {
+        let start = row_ptr[row];
+        let end = row_ptr[row + 1];
+        debug_assert!(
+            start <= end,
+            "{name}: row {row} pointers out-of-order ({start}..{end})"
+        );
+        let mut last_col = None;
+        for idx in start..end {
+            let col = col_idx[idx];
+            debug_assert!(
+                col < ncols,
+                "{name}: column index {} (row {}) out of bounds (ncols={ncols})",
+                col,
+                row
+            );
+            if let Some(prev) = last_col {
+                debug_assert!(
+                    col >= prev,
+                    "{name}: column index decreased at row {}: {} < {}",
+                    row,
+                    col,
+                    prev
+                );
+            }
+            last_col = Some(col);
+            let val = vals[idx];
+            debug_assert!(
+                val.is_finite(),
+                "{name}: non-finite value at row {} (idx {}): {}",
+                row,
+                idx,
+                val
+            );
+        }
+    }
+}
+
+enum AmgState {
+    Uninitialized,
+    SymbolicOnly {
+        hierarchy: Box<AmgHierarchy>,
+        last_structure_id: StructureId,
+        pattern_hash: u64,
+    },
+    Ready {
+        hierarchy: Box<AmgHierarchy>,
+        last_structure_id: StructureId,
+        last_values_id: ValuesId,
+        pattern_hash: u64,
+    },
+}
+
 // ===== Main AMG object =======================================================
 
 pub struct AMG {
     csr: Option<Arc<CsrMatrix<f64>>>,
-    state: Option<AmgHierarchy>,
-    last_sid: Option<StructureId>,
-    last_vid: Option<ValuesId>,
+    state: AmgState,
     cycle_policy: Box<dyn CyclePolicy + Send + Sync>,
     cfg: AMGConfig,
     stats: Option<AmgStats>,
@@ -2027,9 +2459,7 @@ impl Default for AMG {
         let cfg = AMGConfig::default();
         Self {
             csr: None,
-            state: None,
-            last_sid: None,
-            last_vid: None,
+            state: AmgState::Uninitialized,
             cycle_policy: Self::make_cycle_policy(&cfg),
             cfg,
             stats: None,
@@ -2052,6 +2482,7 @@ impl AMG {
         Self {
             cycle_policy: Self::make_cycle_policy(&cfg),
             cfg,
+            state: AmgState::Uninitialized,
             ..Default::default()
         }
     }
@@ -2067,13 +2498,10 @@ impl AMG {
     }
 
     pub fn extract_coarse_space(&self, opts: &DeflationOptions) -> Result<AmgCoarseSpace, KError> {
-        let state = self
-            .state
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
-        if state.levels.is_empty() {
-            return Err(KError::InvalidInput("AMG hierarchy empty".into()));
-        }
+        let state = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => return Err(KError::InvalidInput("AMG not set up".into())),
+        };
         match opts.z_source {
             ZSource::CoarsestIdentity { cap_k } => {
                 let coarse_ix = state.coarsest_ix();
@@ -2131,22 +2559,78 @@ impl AMG {
 
     // ---- Setup paths --------------------------------------------------------
 
-    fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<(), KError> {
+    fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<Box<AmgHierarchy>, KError> {
         // Build the full hierarchy from scratch (symbolic + numeric)
         let (hier, stats) = build_hierarchy(fine, &mut self.cfg)?;
-        self.state = Some(hier);
+        #[cfg(test)]
+        BUILD_SYMBOLIC_COUNT.fetch_add(1, Ordering::SeqCst);
         self.stats = stats;
+        Ok(Box::new(hier))
+    }
+
+    fn ensure_symbolic_structure(
+        &mut self,
+        fine: &CsrMatrix<f64>,
+        sid: StructureId,
+        pattern_hash: u64,
+    ) -> Result<(), KError> {
+        let needs_rebuild = match &self.state {
+            AmgState::Uninitialized => true,
+            AmgState::SymbolicOnly {
+                last_structure_id,
+                pattern_hash: hash,
+                ..
+            } => *last_structure_id != sid || *hash != pattern_hash,
+            AmgState::Ready {
+                last_structure_id,
+                pattern_hash: hash,
+                ..
+            } => *last_structure_id != sid || *hash != pattern_hash,
+        };
+        if needs_rebuild {
+            let hierarchy = self.build_symbolic(fine)?;
+            self.state = AmgState::SymbolicOnly {
+                hierarchy,
+                last_structure_id: sid,
+                pattern_hash,
+            };
+        }
         Ok(())
     }
 
-    fn refresh_numeric(&mut self, fine: &CsrMatrix<f64>) -> Result<(), KError> {
-        // Numeric refresh: keep structure; recompute diag, P values, R values and A_l via RAP.
-        if self.state.is_none() {
-            return self.build_symbolic(fine);
-        }
-        let h = self.state.as_mut().unwrap();
+    fn refresh_numeric_ready(
+        &mut self,
+        fine: &CsrMatrix<f64>,
+        sid: StructureId,
+        vid: ValuesId,
+        pattern_hash: u64,
+    ) -> Result<(), KError> {
+        let mut hierarchy = match std::mem::replace(&mut self.state, AmgState::Uninitialized) {
+            AmgState::SymbolicOnly { hierarchy, .. } => hierarchy,
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            AmgState::Uninitialized => {
+                return Err(KError::InvalidInput(
+                    "AMG internal state inconsistent".into(),
+                ));
+            }
+        };
+        self.refresh_numeric(fine, &mut hierarchy)?;
+        self.state = AmgState::Ready {
+            hierarchy,
+            last_structure_id: sid,
+            last_values_id: vid,
+            pattern_hash,
+        };
+        Ok(())
+    }
+
+    fn refresh_numeric(
+        &mut self,
+        fine: &CsrMatrix<f64>,
+        h: &mut AmgHierarchy,
+    ) -> Result<(), KError> {
         if h.levels.is_empty() {
-            return self.build_symbolic(fine);
+            return Err(KError::InvalidInput("AMG hierarchy empty".into()));
         }
 
         #[cfg(feature = "simd")]
@@ -2384,8 +2868,10 @@ impl AMG {
             }
             let mut galerkin_worst = 0.0;
             let has_ng = h.levels[l].a_next_pat_ng.is_some();
-            let allow_galerkin =
-                self.cfg.verify_galerkin && self.cfg.filter_omega <= 0.0 && !has_ng;
+            let allow_galerkin = self.cfg.verify_galerkin
+                && self.cfg.filter_omega <= 0.0
+                && !has_ng
+                && self.cfg.galerkin_samples > 0;
             // Recompute A_{l+1} values by RAP numeric using fixed pattern
             if let Some(pat_ref) = h.levels[l].a_next_pat.as_ref() {
                 let pat = pat_ref.clone();
@@ -2504,6 +2990,8 @@ impl AMG {
                 }
                 h.levels[l + 1].a = a_coarse;
                 h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&h.levels[l + 1].a, &self.cfg)?;
+                #[cfg(debug_assertions)]
+                debug_check_csr(&h.levels[l + 1].a, "coarse A");
                 trials_current = trials_next;
             } else {
                 // Safety fallback: full RAP (structure + values)
@@ -3640,10 +4128,10 @@ impl AMG {
         temp: &mut [f64],
         residual: &mut [f64],
     ) -> Result<(), KError> {
-        let h = self
-            .state
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => return Err(KError::InvalidInput("AMG not set up".into())),
+        };
         let lvl = h
             .levels
             .get(level)
@@ -3759,10 +4247,10 @@ impl AMG {
         if iters == 0 {
             return Ok(());
         }
-        let h = self
-            .state
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => return Err(KError::InvalidInput("AMG not set up".into())),
+        };
         let lvl = h
             .levels
             .get(level)
@@ -3854,10 +4342,10 @@ impl AMG {
         ws: &mut AMGWorkspace,
         mut cyc: Option<&mut CycleTimings>,
     ) -> Result<(), KError> {
-        let h = self
-            .state
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => return Err(KError::InvalidInput("AMG not set up".into())),
+        };
         let lc = h.coarsest_ix();
 
         let a = &h.levels[level].a;
@@ -4158,8 +4646,9 @@ impl AMG {
 
     #[cfg(test)]
     pub(crate) fn debug_levels_r_equals_pt(&self) -> bool {
-        let Some(h) = self.state.as_ref() else {
-            return true;
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => return true,
         };
         if !self.cfg.keep_transpose {
             return true;
@@ -4188,10 +4677,10 @@ impl AMG {
         if !self.cfg.require_spd {
             return Ok(());
         }
-        let h = self
-            .state
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => return Err(KError::InvalidInput("AMG not set up".into())),
+        };
         let n = h.finest().a.nrows();
         if n == 0 {
             return Ok(());
@@ -4220,8 +4709,8 @@ impl AMG {
 
 impl Preconditioner for AMG {
     fn dims(&self) -> (usize, usize) {
-        if let Some(state) = self.state.as_ref() {
-            let n = state.finest().a.nrows();
+        if let AmgState::Ready { hierarchy, .. } = &self.state {
+            let n = hierarchy.finest().a.nrows();
             (n, n)
         } else if let Some(csr) = self.csr.as_ref() {
             (csr.nrows(), csr.ncols())
@@ -4231,23 +4720,27 @@ impl Preconditioner for AMG {
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
-        validate_truncation_and_caps(&self.cfg)?;
-        // Convert to CSR via the new matrix layer entry point.
+        self.cfg.validate()?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
+        #[cfg(debug_assertions)]
+        debug_check_csr(csr.as_ref(), "setup csr");
         let sid = op.structure_id();
         let vid = op.values_id();
+        let pattern_hash = csr_pattern_hash(&csr);
 
-        match (self.last_sid, self.last_vid) {
-            (None, _) => self.build_symbolic(&csr)?,
-            (Some(old_sid), _) if old_sid != sid => self.build_symbolic(&csr)?,
-            (Some(_), Some(old_vid)) if old_vid != vid => self.refresh_numeric(&csr)?,
-            _ => {}
+        self.ensure_symbolic_structure(csr.as_ref(), sid, pattern_hash)?;
+
+        let need_numeric = match &self.state {
+            AmgState::Ready { last_values_id, .. } => *last_values_id != vid,
+            AmgState::SymbolicOnly { .. } => true,
+            AmgState::Uninitialized => true,
+        };
+
+        if need_numeric {
+            self.refresh_numeric_ready(csr.as_ref(), sid, vid, pattern_hash)?;
         }
 
-        self.csr = Some(csr);
-        self.last_sid = Some(sid);
-        self.last_vid = Some(vid);
+        self.csr = Some(csr.clone());
         if self.cfg.logging_level >= 2
             && self.cfg.print_level >= 1
             && let Some(s) = self.stats.as_ref()
@@ -4274,42 +4767,33 @@ impl Preconditioner for AMG {
                 "AMG in SPD mode supports only Left preconditioning for CG-safe use".into(),
             ));
         }
-        let h = self
-            .state
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
-        if h.levels.is_empty() {
-            // Fallback Jacobi with diagonal of input matrix if hierarchy missing
-            let a = self
-                .csr
-                .as_ref()
-                .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
-            let d = diag_inv_from_csr_cfg(a, &self.cfg)?;
-            let mut ws = AMGWorkspace::new(r.len());
-            Self::jacobi_smooth_sparse(self.cfg.jacobi_omega, a, &d, r, z, 10, &mut ws)
-        } else {
-            let mut ws = AMGWorkspace::new(h.finest().a.nrows());
-            let do_prof = self.cfg.logging_level >= 2;
-            if do_prof {
-                let mut cyc = CycleTimings::default();
-                let t_all = tic();
-                z.fill(R::default());
-                self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
-                cyc.total_cycle = toc(t_all);
-                cyc.cycle_type = self.cfg.cycle_type;
-                cyc.kcycle = self.cfg.kcycle.clone();
-                if let Ok(mut rt) = self.runtime.lock() {
-                    rt.last_cycle = Some(cyc.clone());
-                }
-                if self.cfg.print_level >= 2 {
-                    print_cycle_table(&cyc);
-                }
-            } else {
-                z.fill(R::default());
-                self.cycle(0, r, z, &mut ws)?;
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => {
+                return Err(KError::InvalidInput("AMG not set up".into()));
             }
-            Ok(())
+        };
+        let mut ws = AMGWorkspace::new(h.finest().a.nrows());
+        let do_prof = self.cfg.logging_level >= 2;
+        if do_prof {
+            let mut cyc = CycleTimings::default();
+            let t_all = tic();
+            z.fill(R::default());
+            self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
+            cyc.total_cycle = toc(t_all);
+            cyc.cycle_type = self.cfg.cycle_type;
+            cyc.kcycle = self.cfg.kcycle.clone();
+            if let Ok(mut rt) = self.runtime.lock() {
+                rt.last_cycle = Some(cyc.clone());
+            }
+            if self.cfg.print_level >= 2 {
+                print_cycle_table(&cyc);
+            }
+        } else {
+            z.fill(R::default());
+            self.cycle(0, r, z, &mut ws)?;
         }
+        Ok(())
     }
 
     fn capabilities(&self) -> PcCaps {
@@ -4326,11 +4810,14 @@ impl Preconditioner for AMG {
     }
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        validate_truncation_and_caps(&self.cfg)?;
+        self.cfg.validate()?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
-        self.refresh_numeric(&csr)?;
-        self.csr = Some(csr);
-        self.last_vid = Some(op.values_id());
+        let sid = op.structure_id();
+        let vid = op.values_id();
+        let pattern_hash = csr_pattern_hash(&csr);
+        self.ensure_symbolic_structure(csr.as_ref(), sid, pattern_hash)?;
+        self.refresh_numeric_ready(csr.as_ref(), sid, vid, pattern_hash)?;
+        self.csr = Some(csr.clone());
         if self.cfg.logging_level >= 2
             && self.cfg.print_level >= 1
             && let Some(s) = self.stats.as_ref()
@@ -4341,18 +4828,28 @@ impl Preconditioner for AMG {
     }
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        validate_relax_policy(&self.cfg, self.cfg.coarse_solve)?;
-        validate_truncation_and_caps(&self.cfg)?;
+        self.cfg.validate()?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
-        self.build_symbolic(&csr)?;
-        self.csr = Some(csr);
-        self.last_sid = Some(op.structure_id());
-        self.last_vid = Some(op.values_id());
+        let sid = op.structure_id();
+        let vid = op.values_id();
+        let pattern_hash = csr_pattern_hash(&csr);
+        let hierarchy = self.build_symbolic(csr.as_ref())?;
+        self.state = AmgState::SymbolicOnly {
+            hierarchy,
+            last_structure_id: sid,
+            pattern_hash,
+        };
+        self.refresh_numeric_ready(csr.as_ref(), sid, vid, pattern_hash)?;
+        self.csr = Some(csr.clone());
         if self.cfg.logging_level >= 2
             && self.cfg.print_level >= 1
             && let Some(s) = self.stats.as_ref()
         {
             print_setup_tables(s);
+        }
+        #[cfg(debug_assertions)]
+        if self.cfg.require_spd {
+            self.spd_probe()?;
         }
         Ok(())
     }
@@ -4856,6 +5353,8 @@ fn build_hierarchy(
             r_col_idx.clone(),
             r_vals.clone(),
         );
+        #[cfg(debug_assertions)]
+        debug_check_csr(&r, "R pattern");
         debug_assert_eq!(p_csr.col_idx.len(), p2r_pos.len());
         debug_assert_eq!(r_vals.len(), p2r_pos.len());
         for (pi, &ri) in p2r_pos.iter().enumerate() {
@@ -4943,7 +5442,8 @@ fn build_hierarchy(
             (a_full, None, None)
         };
         let mut galerkin_worst = 0.0;
-        let allow_galerkin = cfg.verify_galerkin && cfg.filter_omega <= 0.0 && !use_ng;
+        let allow_galerkin =
+            cfg.verify_galerkin && cfg.filter_omega <= 0.0 && !use_ng && cfg.galerkin_samples > 0;
         if allow_galerkin {
             let (ok, worst) = galerkin_sample_check(
                 &a_cur,
@@ -6848,7 +7348,9 @@ fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<us
 mod tests {
     use super::*;
     use faer::Mat;
+    use std::any::Any;
     use std::cmp::Ordering;
+    use std::sync::atomic::Ordering as AtomicOrdering;
     use std::sync::{Mutex, OnceLock};
 
     fn relax_lock() -> &'static Mutex<()> {
@@ -6884,6 +7386,65 @@ mod tests {
                     b[(i, j)]
                 );
             }
+        }
+    }
+
+    fn ready_hierarchy(amg: &AMG) -> &AmgHierarchy {
+        match &amg.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => panic!("AMG not ready"),
+        }
+    }
+
+    fn reset_symbolic_counter() {
+        BUILD_SYMBOLIC_COUNT.store(0, AtomicOrdering::SeqCst);
+    }
+
+    fn symbolic_counter() -> usize {
+        BUILD_SYMBOLIC_COUNT.load(AtomicOrdering::SeqCst)
+    }
+
+    struct TestLinOp {
+        mat: CsrMatrix<f64>,
+        sid: StructureId,
+        vid: ValuesId,
+    }
+
+    impl TestLinOp {
+        fn new(mat: CsrMatrix<f64>, sid: StructureId, vid: ValuesId) -> Self {
+            Self { mat, sid, vid }
+        }
+
+        fn with_values(&self, vid: ValuesId) -> Self {
+            Self {
+                mat: self.mat.clone(),
+                sid: self.sid,
+                vid,
+            }
+        }
+    }
+
+    impl LinOp for TestLinOp {
+        type S = f64;
+
+        fn dims(&self) -> (usize, usize) {
+            (self.mat.nrows(), self.mat.ncols())
+        }
+
+        fn matvec(&self, x: &[f64], y: &mut [f64]) {
+            crate::matrix::spmv::csr_matvec(&self.mat, x, y).unwrap();
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn structure_id(&self) -> StructureId {
+            self.sid
+        }
+
+        fn values_id(&self) -> ValuesId {
+            self.vid
         }
     }
 
@@ -7048,7 +7609,12 @@ mod tests {
             coarse_solve: CoarseSolve::DirectDense,
         };
         let mut amg = AMG {
-            state: Some(hier),
+            state: AmgState::Ready {
+                hierarchy: Box::new(hier),
+                last_structure_id: StructureId(0),
+                last_values_id: ValuesId(0),
+                pattern_hash: 0,
+            },
             ..Default::default()
         };
         amg.cfg.require_spd = false;
@@ -7100,15 +7666,20 @@ mod tests {
     #[test]
     fn flexible_presmooth_reduces_relax_calls() {
         let make_amg = || AMG {
-            state: Some(AmgHierarchy {
-                levels: vec![identity_level(), identity_level()],
-                policy: RelaxPolicy {
-                    kind: [RelaxType::Jacobi; 4],
-                    sweeps: [1, 1, 1, 0],
-                    omega: 1.0,
-                },
-                coarse_solve: CoarseSolve::DirectDense,
-            }),
+            state: AmgState::Ready {
+                hierarchy: Box::new(AmgHierarchy {
+                    levels: vec![identity_level(), identity_level()],
+                    policy: RelaxPolicy {
+                        kind: [RelaxType::Jacobi; 4],
+                        sweeps: [1, 1, 1, 0],
+                        omega: 1.0,
+                    },
+                    coarse_solve: CoarseSolve::DirectDense,
+                }),
+                last_structure_id: StructureId(0),
+                last_values_id: ValuesId(0),
+                pattern_hash: 0,
+            },
             ..Default::default()
         };
 
@@ -7285,8 +7856,8 @@ mod tests {
             .unwrap();
         filtered.setup(&a).unwrap();
         baseline.setup(&a).unwrap();
-        let h_filtered = filtered.state.as_ref().unwrap();
-        let h_baseline = baseline.state.as_ref().unwrap();
+        let h_filtered = ready_hierarchy(&filtered);
+        let h_baseline = ready_hierarchy(&baseline);
         assert_eq!(h_filtered.levels.len(), h_baseline.levels.len());
         let mut best_ratio = f64::INFINITY;
         let mut any_significant = false;
@@ -7352,8 +7923,8 @@ mod tests {
         let mut amg_baseline = AMG::with_config(cfg_baseline);
         amg_filtered.setup(&a).unwrap();
         amg_baseline.setup(&a).unwrap();
-        let h_filtered = amg_filtered.state.as_ref().unwrap();
-        let h_baseline = amg_baseline.state.as_ref().unwrap();
+        let h_filtered = ready_hierarchy(&amg_filtered);
+        let h_baseline = ready_hierarchy(&amg_baseline);
         assert_eq!(h_filtered.levels.len(), h_baseline.levels.len());
         let mut best_ratio = f64::INFINITY;
         let mut any_significant = false;
@@ -7414,8 +7985,8 @@ mod tests {
         let mut amg_on = AMG::with_config(cfg_on);
         amg_off.setup(&a).unwrap();
         amg_on.setup(&a).unwrap();
-        let h_on = amg_on.state.as_ref().unwrap();
-        let h_off = amg_off.state.as_ref().unwrap();
+        let h_on = ready_hierarchy(&amg_on);
+        let h_off = ready_hierarchy(&amg_off);
         assert!(h_on.coarsest_ix() >= 1);
         let coarse_ix = 1;
         let n_fine = h_on.levels[0].a.nrows();
@@ -7533,20 +8104,14 @@ mod tests {
             .build(&Mat::<f64>::zeros(0, 0))
             .unwrap();
         amg_l1.setup(&a).unwrap();
-        let old = amg_l1.state.as_ref().unwrap().levels[0]
-            .l1_inv
-            .as_ref()
-            .unwrap()[0];
+        let old = ready_hierarchy(&amg_l1).levels[0].l1_inv.as_ref().unwrap()[0];
         let mut a2 = a.clone();
         let rp = a2.row_ptr();
         for p in rp[0]..rp[1] {
             a2.values_mut()[p] *= 2.0;
         }
         amg_l1.update_numeric(&a2).unwrap();
-        let new = amg_l1.state.as_ref().unwrap().levels[0]
-            .l1_inv
-            .as_ref()
-            .unwrap()[0];
+        let new = ready_hierarchy(&amg_l1).levels[0].l1_inv.as_ref().unwrap()[0];
         assert!((new - old).abs() > 1e-12);
 
         let mut amg_ch = AMGBuilder::new()
@@ -7555,12 +8120,12 @@ mod tests {
             .build(&Mat::<f64>::zeros(0, 0))
             .unwrap();
         amg_ch.setup(&a).unwrap();
-        let old_l = amg_ch.state.as_ref().unwrap().levels[0]
+        let old_l = ready_hierarchy(&amg_ch).levels[0]
             .cheb
             .as_ref()
             .unwrap()
             .lambda_max;
-        let old_ds = amg_ch.state.as_ref().unwrap().levels[0]
+        let old_ds = ready_hierarchy(&amg_ch).levels[0]
             .d_sqrt_inv
             .as_ref()
             .unwrap()[0];
@@ -7572,12 +8137,12 @@ mod tests {
             }
         }
         amg_ch.update_numeric(&a3).unwrap();
-        let new_l = amg_ch.state.as_ref().unwrap().levels[0]
+        let new_l = ready_hierarchy(&amg_ch).levels[0]
             .cheb
             .as_ref()
             .unwrap()
             .lambda_max;
-        let new_ds = amg_ch.state.as_ref().unwrap().levels[0]
+        let new_ds = ready_hierarchy(&amg_ch).levels[0]
             .d_sqrt_inv
             .as_ref()
             .unwrap()[0];
@@ -7618,7 +8183,7 @@ mod tests {
         amg.setup(&a).unwrap();
 
         let setups_before = {
-            let h = amg.state.as_ref().unwrap();
+            let h = ready_hierarchy(&amg);
             let lvl = &h.levels[h.coarsest_ix()];
             lvl.coarse_solver
                 .as_ref()
@@ -7634,7 +8199,7 @@ mod tests {
         amg.apply(PcSide::Left, &rhs, &mut z).unwrap();
 
         let setups_after = {
-            let h = amg.state.as_ref().unwrap();
+            let h = ready_hierarchy(&amg);
             let lvl = &h.levels[h.coarsest_ix()];
             lvl.coarse_solver
                 .as_ref()
@@ -7684,9 +8249,176 @@ mod tests {
             .unwrap();
         amg.setup(&a).unwrap();
 
-        let h = amg.state.as_ref().unwrap();
+        let h = ready_hierarchy(&amg);
         for l in 0..h.coarsest_ix() {
             assert_eq!(h.levels[l].num_functions, 2);
+        }
+    }
+
+    #[test]
+    fn apply_before_setup_returns_err() {
+        let amg = AMG::default();
+        let rhs = vec![1.0, 2.0];
+        let mut sol = vec![0.0, 0.0];
+        assert!(matches!(
+            amg.apply(PcSide::Left, &rhs, &mut sol),
+            Err(KError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn setup_is_idempotent_when_ids_unchanged() {
+        reset_symbolic_counter();
+        let mat = csr_from_triples(
+            3,
+            3,
+            vec![
+                (0, 0, 2.0),
+                (0, 1, -1.0),
+                (1, 0, -1.0),
+                (1, 1, 2.0),
+                (1, 2, -1.0),
+                (2, 1, -1.0),
+                (2, 2, 2.0),
+            ],
+        );
+        let op = TestLinOp::new(mat.clone(), StructureId(1), ValuesId(1));
+        let mut amg = AMG::default();
+        amg.setup(&op).unwrap();
+        assert_eq!(symbolic_counter(), 1);
+        amg.setup(&op).unwrap();
+        assert_eq!(symbolic_counter(), 1);
+    }
+
+    #[test]
+    fn values_id_change_refreshes_numeric_only() {
+        reset_symbolic_counter();
+        let mat = csr_from_triples(
+            3,
+            3,
+            vec![
+                (0, 0, 2.0),
+                (0, 1, -1.0),
+                (1, 0, -1.0),
+                (1, 1, 2.0),
+                (1, 2, -1.0),
+                (2, 1, -1.0),
+                (2, 2, 2.0),
+            ],
+        );
+        let mut amg = AMG::default();
+        let op1 = TestLinOp::new(mat.clone(), StructureId(3), ValuesId(3));
+        amg.setup(&op1).unwrap();
+        assert_eq!(symbolic_counter(), 1);
+        let op2 = op1.with_values(ValuesId(4));
+        amg.setup(&op2).unwrap();
+        assert_eq!(symbolic_counter(), 1);
+    }
+
+    #[test]
+    fn structure_id_change_rebuilds_symbolic() {
+        reset_symbolic_counter();
+        let mat1 = csr_from_triples(
+            3,
+            3,
+            vec![
+                (0, 0, 2.0),
+                (0, 1, -1.0),
+                (1, 0, -1.0),
+                (1, 1, 2.0),
+                (1, 2, -1.0),
+                (2, 1, -1.0),
+                (2, 2, 2.0),
+            ],
+        );
+        let mat2 = csr_from_triples(
+            3,
+            3,
+            vec![
+                (0, 0, 3.0),
+                (0, 1, -1.0),
+                (1, 0, -1.0),
+                (1, 1, 3.0),
+                (1, 2, -1.0),
+                (2, 1, -1.0),
+                (2, 2, 3.0),
+                (2, 0, -0.5),
+            ],
+        );
+        let mut amg = AMG::default();
+        let op1 = TestLinOp::new(mat1, StructureId(5), ValuesId(5));
+        amg.setup(&op1).unwrap();
+        assert_eq!(symbolic_counter(), 1);
+        let op2 = TestLinOp::new(mat2, StructureId(6), ValuesId(6));
+        amg.setup(&op2).unwrap();
+        assert_eq!(symbolic_counter(), 2);
+    }
+
+    #[test]
+    fn transpose_mapping_updates_values() {
+        let p = prolong::Pcsr {
+            m: 4,
+            n: 5,
+            row_ptr: vec![0, 2, 4, 6, 7],
+            col_idx: vec![0, 2, 1, 3, 0, 4, 2],
+            vals: vec![1.0, 2.0, 3.0, 4.0, -1.0, 5.0, 6.0],
+        };
+        let (rr, rc, _, p2r) = transpose_csr_with_pos(&p);
+        let mut r = CsrMatrix::from_csr(p.n, p.m, rr.clone(), rc.clone(), vec![0.0; p.vals.len()]);
+        #[cfg(debug_assertions)]
+        debug_check_csr(&r, "test keep transpose");
+        let mut updated_rc = r.col_idx().to_vec();
+        let mut updated_vals = vec![0.0; p.vals.len()];
+        for (pi, &ri) in p2r.iter().enumerate() {
+            updated_vals[ri] = p.vals[pi] * 2.0;
+        }
+        let r_updated = CsrMatrix::from_csr(
+            p.n,
+            p.m,
+            rr.clone(),
+            updated_rc.to_vec(),
+            updated_vals.clone(),
+        );
+        let mut p_dense = Mat::<f64>::zeros(p.m, p.n);
+        for i in 0..p.m {
+            for k in p.row_ptr[i]..p.row_ptr[i + 1] {
+                p_dense[(i, p.col_idx[k])] = p.vals[k] * 2.0;
+            }
+        }
+        let r_dense = p_dense.transpose().to_owned();
+        let mut r_from_updated = Mat::<f64>::zeros(r_updated.nrows(), r_updated.ncols());
+        for i in 0..r_updated.nrows() {
+            for k in r_updated.row_ptr()[i]..r_updated.row_ptr()[i + 1] {
+                r_from_updated[(i, r_updated.col_idx()[k])] = r_updated.values()[k];
+            }
+        }
+        assert_dense_eq(&r_from_updated, &r_dense, 1e-12, 1e-12);
+    }
+
+    #[test]
+    fn galerkin_sample_check_spot() {
+        let a = csr_from_triples(
+            2,
+            2,
+            vec![(0, 0, 2.0), (0, 1, -1.0), (1, 0, -1.0), (1, 1, 2.0)],
+        );
+        let p = CsrMatrix::identity(2);
+        let r = CsrMatrix::identity(2);
+        let a_coarse = CsrMatrix::identity(2);
+        let (ok, worst) = galerkin_sample_check(&a, &p, &r, &a_coarse, 4, 1e-12, 0xFEED).unwrap();
+        assert!(ok);
+        assert!(worst <= 1e-12);
+    }
+
+    #[test]
+    fn near_zero_diagonal_aborts_setup() {
+        let a = csr_from_triples(2, 2, vec![(0, 1, -1.0), (1, 0, -1.0), (1, 1, 1.0)]);
+        let op = TestLinOp::new(a, StructureId(7), ValuesId(7));
+        let mut amg = AMG::default();
+        let err = amg.setup(&op).unwrap_err();
+        match err {
+            KError::SolveError(msg) => assert!(msg.contains("near-zero diagonal")),
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 

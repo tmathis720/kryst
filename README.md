@@ -321,6 +321,39 @@ Run your program with PETSc-style options:
 - `-amg_nu_pre <int>` - Pre-smoothing steps (default: 1)
 - `-amg_nu_post <int>` - Post-smoothing steps (default: 1)
 
+#### AMG CLI knobs
+- `-pc_amg` - shorthand alias for `-pc_type amg`.
+- `-pc_amg_coarsen <rs|hmis|pmis|falgout>` - Coarsening strategy (maps to `AMGConfig::coarsen_type`).
+- `-pc_amg_interp <classical|direct|multipass|extended|standard>` - Interpolation/extended-smoothing variant.
+- `-pc_amg_smoother <jacobi|gs|gsr|sgs|hgs|l1jacobi|chebyshev>` - Smoother applied on each level.
+- `-pc_amg_smoother_steps <int>` and `-pc_amg_smoother_omega <float>` control smoothing sweeps/relaxation weight.
+- `-pc_amg_truncation_factor <float>` / `-pc_amg_interp_maxnnz <int>` trim interpolation fill.
+- `-pc_amg_rap_truncation_factor <float>` / `-pc_amg_rap_truncation_abs <float>` / `-pc_amg_rap_maxnnz <int>` prune RAP entries.
+- `-pc_amg_keep_transpose <bool>` / `-pc_amg_keep_pivot_in_rap <bool>` control symmetry-preserving entries.
+- `-pc_amg_require_spd <bool>` / `-pc_amg_print_setup <bool>` control SPD enforcement and setup printing.
+
+Example AMG invocation:
+```bash
+./solve \
+  -pc_amg \
+  -pc_amg_levels 6 \
+  -pc_amg_strength_threshold 0.25 \
+  -pc_amg_coarsen hmis \
+  -pc_amg_interp extended \
+  -pc_amg_smoother chebyshev \
+  -pc_amg_smoother_steps 2 \
+  -pc_amg_smoother_omega 0.8 \
+  -pc_amg_truncation_factor 0.2 \
+  -pc_amg_interp_maxnnz 8 \
+  -pc_amg_rap_truncation_factor 0.05 \
+  -pc_amg_rap_truncation_abs 0.0 \
+  -pc_amg_rap_maxnnz 16 \
+  -pc_amg_keep_transpose true \
+  -pc_amg_keep_pivot_in_rap true \
+  -pc_amg_require_spd true \
+  -pc_amg_print_setup true
+```
+
 #### Composite Preconditioning Options
 - `-pc_chain <string>` - Sequential preconditioner chain (e.g., "jacobi,chebyshev")
 - `-pc_type asm` - Additive Schwarz Method

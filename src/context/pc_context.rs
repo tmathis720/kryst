@@ -2,6 +2,7 @@ use crate::config::kinds::SorMatSideKind;
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::preconditioner::amg::AMGConfig;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
 
@@ -154,8 +155,7 @@ pub enum PcConfig {
         weighting: Option<String>,
     },
     Amg {
-        levels: Option<usize>,
-        smoother: Option<String>,
+        config: AMGConfig,
     },
     ApproxInv {
         kind: ApproxInvKindAlias,
@@ -278,10 +278,10 @@ impl PcConfig {
                 mode: o.asm_mode.clone(),
                 weighting: o.asm_weighting.clone(),
             },
-            Amg => PcConfig::Amg {
-                levels: o.amg_levels,
-                smoother: o.amg_smoother.clone(),
-            },
+            Amg => {
+                let cfg = AMGConfig::try_from_opts(o)?;
+                PcConfig::Amg { config: cfg }
+            }
 
             ApproxInverse => {
                 // Interpret options for CSR-based SPAI/FSAI
@@ -495,7 +495,7 @@ impl PcFactory {
                 mode,
                 weighting,
             } => b::build_asm(overlap, subdomain_hint, block_solver, mode, weighting),
-            PcConfig::Amg { levels, smoother } => b::build_amg(levels, smoother),
+            PcConfig::Amg { config } => b::build_amg(config),
             PcConfig::ApproxInv {
                 kind,
                 levels,

@@ -1,4 +1,5 @@
 use crate::error::KError;
+use crate::preconditioner::amg::AMGConfig;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{
@@ -49,9 +50,7 @@ pub fn build_chebyshev(
     eig_hi: f64,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     if degree < 1 {
-        return Err(KError::InvalidInput(
-            "chebyshev degree must be >= 1".into(),
-        ));
+        return Err(KError::InvalidInput("chebyshev degree must be >= 1".into()));
     }
     if !eig_lo.is_finite() || !eig_hi.is_finite() || eig_hi <= eig_lo || eig_lo < 0.0 {
         return Err(KError::InvalidInput(
@@ -261,12 +260,9 @@ pub fn build_asm(
     ))
 }
 
-pub fn build_amg(
-    _levels: Option<usize>,
-    _smoother: Option<String>,
-) -> Result<Box<dyn Preconditioner>, KError> {
+pub fn build_amg(cfg: AMGConfig) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::amg::AMG;
-    let amg = AMG::with_config(Default::default());
+    let amg = AMG::with_config(cfg);
     Ok(Box::new(amg))
 }
 

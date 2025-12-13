@@ -191,6 +191,22 @@ pub struct PcOptions {
     pub amg_min_iterations: Option<usize>,
     pub amg_ieee_checks: Option<bool>,
     pub amg_optimize_workspace: Option<bool>,
+    /// Controls both pre/post smoothing sweeps.
+    pub amg_smoother_steps: Option<usize>,
+    /// Jacobi omega for smoothing/adaptive routines.
+    pub amg_smoother_omega: Option<f64>,
+    /// Absolute RAP truncation tolerance.
+    pub amg_rap_truncation_abs: Option<f64>,
+    /// Cap on entries per RAP row.
+    pub amg_rap_max_elements_per_row: Option<usize>,
+    /// Keep transpose copy for RAP when possible.
+    pub amg_keep_transpose: Option<bool>,
+    /// Preserve pivot entries while truncating RAP.
+    pub amg_keep_pivot_in_rap: Option<bool>,
+    /// Enforce SPD-safe AMG behavior.
+    pub amg_require_spd: Option<bool>,
+    /// Print the AMG setup statistics when enabled.
+    pub amg_print_setup: Option<bool>,
     /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
     /// Structured chain.
@@ -457,6 +473,16 @@ impl Sink for KspOptions {
 impl Sink for PcOptions {
     fn set_bool(&mut self, key: &str, v: bool) -> Result<(), KError> {
         match key {
+            "pc_amg" => {
+                if v {
+                    self.pc_type = Some("amg".to_string());
+                }
+                Ok(())
+            }
+            "pc_amg_keep_transpose" => set_opt!(&mut self.amg_keep_transpose, v),
+            "pc_amg_keep_pivot_in_rap" => set_opt!(&mut self.amg_keep_pivot_in_rap, v),
+            "pc_amg_require_spd" => set_opt!(&mut self.amg_require_spd, v),
+            "pc_amg_print_setup" => set_opt!(&mut self.amg_print_setup, v),
             "pc_amg_ieee_checks" => set_opt!(&mut self.amg_ieee_checks, v),
             "pc_amg_optimize_workspace" => set_opt!(&mut self.amg_optimize_workspace, v),
             "pc_sor_symmetric" => set_opt!(&mut self.sor_symmetric, v),
@@ -539,7 +565,14 @@ impl Sink for PcOptions {
             "pc_amg_truncation_factor" => {
                 set_opt!(&mut self.amg_truncation_factor, parse_as::<f64>(v, spec)?)
             }
+            "pc_amg_rap_truncation_factor" => {
+                set_opt!(&mut self.amg_truncation_factor, parse_as::<f64>(v, spec)?)
+            }
             "pc_amg_max_elements_per_row" => set_opt!(
+                &mut self.amg_max_elements_per_row,
+                parse_as::<usize>(v, spec)?
+            ),
+            "pc_amg_interp_maxnnz" => set_opt!(
                 &mut self.amg_max_elements_per_row,
                 parse_as::<usize>(v, spec)?
             ),
@@ -547,10 +580,28 @@ impl Sink for PcOptions {
                 &mut self.amg_interpolation_truncation,
                 parse_as::<f64>(v, spec)?
             ),
+            "pc_amg_rap_truncation_abs" => {
+                set_opt!(&mut self.amg_rap_truncation_abs, parse_as::<f64>(v, spec)?)
+            }
+            "pc_amg_rap_maxnnz" => set_opt!(
+                &mut self.amg_rap_max_elements_per_row,
+                parse_as::<usize>(v, spec)?
+            ),
             "pc_amg_coarsen_type" => set_opt!(&mut self.amg_coarsen_type, v.to_lowercase()),
+            "pc_amg_coarsen" => set_opt!(&mut self.amg_coarsen_type, v.to_lowercase()),
             "pc_amg_interp_type" => set_opt!(&mut self.amg_interp_type, v.to_lowercase()),
+            "pc_amg_interp" => set_opt!(&mut self.amg_interp_type, v.to_lowercase()),
             "pc_amg_relax_type" => set_opt!(&mut self.amg_relax_type, v.to_lowercase()),
             "pc_amg_smoother" => set_opt!(&mut self.amg_smoother, v.to_lowercase()),
+            "pc_amg_smoother_steps" => {
+                set_opt!(
+                    &mut self.amg_smoother_steps,
+                    ensure_ge_1("pc_amg_smoother_steps", parse_as::<usize>(v, spec)?)?
+                )
+            }
+            "pc_amg_smoother_omega" => {
+                set_opt!(&mut self.amg_smoother_omega, parse_as::<f64>(v, spec)?)
+            }
             "pc_amg_logging_level" => {
                 set_opt!(&mut self.amg_logging_level, parse_as::<usize>(v, spec)?)
             }
@@ -1488,6 +1539,14 @@ impl PcOptions {
         o!(amg_min_iterations);
         o!(amg_ieee_checks);
         o!(amg_optimize_workspace);
+        o!(amg_smoother_steps);
+        o!(amg_smoother_omega);
+        o!(amg_rap_truncation_abs);
+        o!(amg_rap_max_elements_per_row);
+        o!(amg_keep_transpose);
+        o!(amg_keep_pivot_in_rap);
+        o!(amg_require_spd);
+        o!(amg_print_setup);
 
         o!(pc_chain);
         o!(chain);
@@ -1780,9 +1839,9 @@ fn parse_ilu_tri_solve(value: &str) -> Result<IluTriSolveType, KError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::KError;
     use crate::config::options_core::{Arity, ValueKind};
     use crate::config::registry::SPECS;
+    use crate::error::KError;
 
     struct KrystEnvGuard {
         saved: Vec<(String, String)>,
@@ -1794,7 +1853,9 @@ mod tests {
             for (k, v) in std::env::vars() {
                 if k.starts_with("KRYST_") {
                     saved.push((k.clone(), v));
-                    unsafe { std::env::remove_var(k); }
+                    unsafe {
+                        std::env::remove_var(k);
+                    }
                 }
             }
             Self { saved }
@@ -1804,7 +1865,9 @@ mod tests {
     impl Drop for KrystEnvGuard {
         fn drop(&mut self) {
             for (k, v) in self.saved.drain(..) {
-                unsafe { std::env::set_var(k, v); }
+                unsafe {
+                    std::env::set_var(k, v);
+                }
             }
         }
     }
@@ -1841,6 +1904,14 @@ mod tests {
                     "pc_amg_interp_type" => "classical",
                     "pc_amg_relax_type" => "jacobi",
                     "pc_amg_smoother" => "jacobi",
+                    "pc_amg_coarsen" => "hmis",
+                    "pc_amg_interp" => "extended",
+                    "pc_amg_interp_maxnnz" => "8",
+                    "pc_amg_rap_truncation_factor" => "0.05",
+                    "pc_amg_rap_truncation_abs" => "0.0",
+                    "pc_amg_rap_maxnnz" => "16",
+                    "pc_amg_smoother_steps" => "2",
+                    "pc_amg_smoother_omega" => "0.8",
                     "pc_asm_subdomains" => "0,1",
 
                     // Fallback by kind (must satisfy ensure_ge_1 where applicable)
@@ -2097,9 +2168,8 @@ mod tests {
                 continue;
             }
             let args = sample_args_for(spec);
-            let (k, p) = parse_all_options(&args).unwrap_or_else(|e| {
-                panic!("Spec {} failed to parse/apply: {e:?}", spec.flag)
-            });
+            let (k, p) = parse_all_options(&args)
+                .unwrap_or_else(|e| panic!("Spec {} failed to parse/apply: {e:?}", spec.flag));
             let snapshot = format!("{k:?}\n{p:?}");
             assert_ne!(
                 snapshot, baseline,
