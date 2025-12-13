@@ -402,6 +402,7 @@ impl Sink for KspOptions {
             "ksp_fgmres_reorth_tol" => {
                 set_opt!(&mut self.fgmres_reorth_tol, parse_as::<f64>(v, spec)?)
             }
+            "ksp_fgmres_variant" => set_opt!(&mut self.fgmres_variant, v.to_string()),
             "ksp_pc_side" => set_opt!(&mut self.pc_side, v.to_string()),
             "matrix" => set_opt!(&mut self.matrix_file, v.to_string()),
             "rhs" => set_opt!(&mut self.rhs_file, v.to_string()),
@@ -549,6 +550,7 @@ impl Sink for PcOptions {
             "pc_amg_coarsen_type" => set_opt!(&mut self.amg_coarsen_type, v.to_lowercase()),
             "pc_amg_interp_type" => set_opt!(&mut self.amg_interp_type, v.to_lowercase()),
             "pc_amg_relax_type" => set_opt!(&mut self.amg_relax_type, v.to_lowercase()),
+            "pc_amg_smoother" => set_opt!(&mut self.amg_smoother, v.to_lowercase()),
             "pc_amg_logging_level" => {
                 set_opt!(&mut self.amg_logging_level, parse_as::<usize>(v, spec)?)
             }
@@ -951,6 +953,68 @@ impl KspOptions {
         Ok(me)
     }
 
+    pub fn overlay_from(&mut self, other: KspOptions) {
+        macro_rules! o {
+            ($f:ident) => {
+                if other.$f.is_some() {
+                    self.$f = other.$f;
+                }
+            };
+        }
+
+        o!(ksp_type);
+        o!(rtol);
+        o!(atol);
+        o!(dtol);
+        o!(maxits);
+        o!(restart);
+        o!(reduction);
+        o!(reproducible);
+        o!(cg_variant);
+
+        o!(gmres_restart);
+        o!(gmres_orthog);
+        o!(gmres_reorthog);
+        o!(gmres_reorth);
+        o!(gmres_reorth_tol);
+        o!(gmres_happy_breakdown);
+        o!(gmres_variant);
+        o!(gmres_sstep);
+        o!(gmres_sstep_max_cond);
+
+        o!(fgmres_restart);
+        o!(fgmres_orthog);
+        o!(fgmres_reorthog);
+        o!(fgmres_reorth);
+        o!(fgmres_reorth_tol);
+        o!(fgmres_happy_breakdown);
+        o!(fgmres_variant);
+
+        o!(pc_side);
+        o!(matrix_file);
+        o!(rhs_file);
+
+        o!(min_iter);
+        o!(cf_tol);
+        o!(skip_real_r_check);
+        o!(epsmac);
+        o!(guard_zero_residual);
+
+        o!(cg_norm);
+        o!(cg_pipelined);
+        o!(cg_replace_every);
+        o!(cg_single_reduction);
+        o!(cg_use_async);
+        o!(cg_async_min_n);
+
+        o!(trust_region);
+
+        o!(threads);
+        o!(min_len_vec);
+        o!(min_rows_spmv);
+        o!(chunk_rows_spmv);
+    }
+
     /// Configure the Rayon worker pool. Requires `feature="rayon"` to take effect.
     pub fn with_threads(mut self, n: usize) -> Self {
         self.threads = Some(n);
@@ -1153,6 +1217,9 @@ impl PcOptions {
             kinds::AmgInterpKind::from_str(t)?;
         }
         if let Some(ref t) = me.amg_relax_type {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = me.amg_smoother {
             kinds::AmgRelaxKind::from_str(t)?;
         }
         if let Some(ref t) = me.asm_block_solver {
@@ -1367,6 +1434,147 @@ impl PcOptions {
         me.sync_ilu_all();
         Ok(me)
     }
+
+    pub fn overlay_from(&mut self, other: PcOptions) {
+        macro_rules! o {
+            ($f:ident) => {
+                if other.$f.is_some() {
+                    self.$f = other.$f;
+                }
+            };
+        }
+
+        o!(pc_type);
+        o!(ilu_level);
+        o!(chebyshev_degree);
+        o!(ilut_drop_tol);
+        o!(ilut_max_fill);
+        o!(ilut_perm_tol);
+        o!(ilutp_max_fill);
+        o!(ilutp_drop_tol);
+        o!(ilutp_perm_tol);
+        o!(reorder);
+        o!(scaling);
+
+        o!(asm_overlap);
+        o!(asm_mode);
+        o!(asm_weighting);
+        o!(asm_subdomains);
+        o!(asm_inner_pc);
+        o!(asm_block_solver);
+        o!(asm_subdomain_size);
+
+        o!(chebyshev_lambda_min);
+        o!(chebyshev_lambda_max);
+
+        o!(amg_levels);
+        o!(amg_strength_threshold);
+        o!(amg_nu_pre);
+        o!(amg_nu_post);
+        o!(amg_coarse_threshold);
+        o!(amg_max_coarse_size);
+        o!(amg_min_coarse_size);
+        o!(amg_truncation_factor);
+        o!(amg_max_elements_per_row);
+        o!(amg_interpolation_truncation);
+        o!(amg_coarsen_type);
+        o!(amg_interp_type);
+        o!(amg_relax_type);
+        o!(amg_smoother);
+        o!(amg_logging_level);
+        o!(amg_print_level);
+        o!(amg_tolerance);
+        o!(amg_max_iterations);
+        o!(amg_min_iterations);
+        o!(amg_ieee_checks);
+        o!(amg_optimize_workspace);
+
+        o!(pc_chain);
+        o!(chain);
+
+        o!(sor_omega);
+        o!(sor_sweeps);
+        o!(sor_symmetric);
+        o!(sor_mat_side);
+
+        o!(omega);
+        o!(drop_tol);
+        o!(reuse_policy);
+
+        o!(approxinv_kind);
+        o!(approxinv_levels);
+        o!(approxinv_max_per_col);
+        o!(approxinv_drop_tol);
+        o!(approxinv_reg);
+        o!(approxinv_max_cond);
+        o!(approxinv_parallel);
+
+        o!(ilu_type);
+        o!(ilu_level_of_fill);
+        o!(ilu_max_fill_per_row);
+        o!(ilu_offdiag_drop_tolerance);
+        o!(ilu_schur_drop_tolerance);
+        o!(ilu_reordering_type);
+        o!(ilu_triangular_solve);
+        o!(ilu_lower_jacobi_iters);
+        o!(ilu_upper_jacobi_iters);
+        o!(ilu_tolerance);
+        o!(ilu_max_iterations);
+        o!(ilu_logging_level);
+        o!(ilu_print_level);
+        o!(ilu_ieee_checks);
+        o!(ilu_pivot_monitoring);
+        o!(ilu_optimize_workspace);
+        o!(ilu_pivot_threshold);
+
+        o!(ilu_par_factor);
+        o!(ilu_parilu_max_iters);
+        o!(ilu_parilu_min_iters);
+        o!(ilu_parilu_tol);
+        o!(ilu_parilu_omega);
+
+        o!(ilu_parallel_factorization);
+        o!(ilu_parallel_triangular_solve);
+        o!(ilu_parallel_chunk_size);
+        o!(ilu_distributed);
+
+        o!(ilu_pivot_mode);
+        o!(ilu_pivot_scale);
+        o!(ilu_pivot_tau);
+
+        o!(superlu_pivot_threshold);
+        o!(superlu_replace_tiny_pivots);
+        o!(superlu_print_level);
+        o!(superlu_process_grid);
+        o!(superlu_column_permutation);
+        o!(superlu_row_permutation);
+        o!(superlu_iterative_refinement);
+        o!(superlu_static_pivoting);
+        o!(superlu_panel_size);
+        o!(superlu_enable_3d_factorization);
+        o!(superlu_process_grid_3d_depth);
+        o!(superlu_memory_tradeoff_factor);
+        o!(superlu_max_concurrent_panels);
+        o!(superlu_async_panel_updates);
+        o!(superlu_workspace_memory_limit);
+        o!(superlu_aggressive_memory_reuse);
+        o!(superlu_preallocation_strategy);
+
+        o!(jacobi_block_size);
+        o!(pc_global);
+        o!(pc_local);
+        o!(ilu_variant);
+        o!(ilu_reordering);
+
+        o!(cheb_degree);
+        o!(cheb_eig_lo);
+        o!(cheb_eig_hi);
+
+        self.ilu = std::mem::take(&mut self.ilu).overlay(&other.ilu);
+
+        // Keep derived/legacy ↔ structured in sync after overlay.
+        self.sync_ilu_all();
+    }
 }
 
 // ---- Combined parsing with precedence & generated help ----
@@ -1414,146 +1622,8 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
     let cli_ksp = KspOptions::from_args(&as_refs)?;
     let cli_pc = PcOptions::from_args(&as_refs)?;
 
-    // overlay helper
-    macro_rules! overlay {
-        ($lhs:expr, $rhs:expr, $($f:ident),+ $(,)?) => { $( if $rhs.$f.is_some() { $lhs.$f = $rhs.$f; } )+ };
-    }
-
-    overlay!(
-        ksp_opts,
-        cli_ksp,
-        ksp_type,
-        rtol,
-        atol,
-        dtol,
-        maxits,
-        restart,
-        gmres_restart,
-        gmres_orthog,
-        gmres_reorthog,
-        gmres_reorth,
-        gmres_reorth_tol,
-        gmres_happy_breakdown,
-        fgmres_restart,
-        fgmres_orthog,
-        fgmres_reorthog,
-        fgmres_reorth,
-        fgmres_reorth_tol,
-        fgmres_happy_breakdown,
-        pc_side,
-        matrix_file,
-        rhs_file,
-        min_iter,
-        cf_tol,
-        skip_real_r_check,
-        epsmac,
-        guard_zero_residual,
-        cg_norm,
-        cg_pipelined,
-        cg_variant,
-        cg_replace_every,
-        cg_single_reduction,
-        cg_use_async,
-        cg_async_min_n,
-        trust_region,
-    );
-    overlay!(
-        pc_opts,
-        cli_pc,
-        pc_type,
-        ilu_level,
-        chebyshev_degree,
-        ilut_drop_tol,
-        ilut_max_fill,
-        ilut_perm_tol,
-        reorder,
-        scaling,
-        asm_overlap,
-        asm_subdomains,
-        asm_inner_pc,
-        chebyshev_lambda_min,
-        chebyshev_lambda_max,
-        amg_levels,
-        amg_strength_threshold,
-        amg_nu_pre,
-        amg_nu_post,
-        amg_coarse_threshold,
-        amg_max_coarse_size,
-        amg_min_coarse_size,
-        amg_truncation_factor,
-        amg_max_elements_per_row,
-        amg_interpolation_truncation,
-        amg_coarsen_type,
-        amg_interp_type,
-        amg_relax_type,
-        amg_logging_level,
-        amg_print_level,
-        amg_tolerance,
-        amg_max_iterations,
-        amg_min_iterations,
-        amg_ieee_checks,
-        amg_optimize_workspace,
-        pc_chain,
-        sor_omega,
-        sor_sweeps,
-        sor_symmetric,
-        sor_mat_side,
-        omega,
-        drop_tol,
-        approxinv_kind,
-        approxinv_levels,
-        approxinv_max_per_col,
-        approxinv_drop_tol,
-        approxinv_reg,
-        approxinv_max_cond,
-        approxinv_parallel,
-        ilu_type,
-        ilu_level_of_fill,
-        ilu_max_fill_per_row,
-        ilu_offdiag_drop_tolerance,
-        ilu_schur_drop_tolerance,
-        ilu_reordering_type,
-        ilu_triangular_solve,
-        ilu_lower_jacobi_iters,
-        ilu_upper_jacobi_iters,
-        ilu_tolerance,
-        ilu_max_iterations,
-        ilu_logging_level,
-        ilu_print_level,
-        ilu_ieee_checks,
-        ilu_pivot_monitoring,
-        ilu_optimize_workspace,
-        ilu_pivot_threshold,
-        ilu_parallel_factorization,
-        ilu_parallel_triangular_solve,
-        ilu_parallel_chunk_size,
-        ilu_distributed,
-        ilu_pivot_mode,
-        ilu_pivot_scale,
-        ilu_pivot_tau,
-        ilutp_max_fill,
-        ilutp_drop_tol,
-        ilutp_perm_tol,
-        superlu_pivot_threshold,
-        superlu_replace_tiny_pivots,
-        superlu_print_level,
-        superlu_process_grid,
-        superlu_column_permutation,
-        superlu_row_permutation,
-        superlu_iterative_refinement,
-        superlu_static_pivoting,
-        superlu_panel_size,
-        superlu_enable_3d_factorization,
-        superlu_process_grid_3d_depth,
-        superlu_memory_tradeoff_factor,
-        superlu_max_concurrent_panels,
-        superlu_async_panel_updates,
-        superlu_workspace_memory_limit,
-        superlu_aggressive_memory_reuse,
-        superlu_preallocation_strategy,
-    );
-
-    pc_opts.ilu = pc_opts.ilu.overlay(&cli_pc.ilu);
+    ksp_opts.overlay_from(cli_ksp);
+    pc_opts.overlay_from(cli_pc);
 
     Ok((ksp_opts, pc_opts))
 }
@@ -1711,7 +1781,87 @@ fn parse_ilu_tri_solve(value: &str) -> Result<IluTriSolveType, KError> {
 mod tests {
     use super::*;
     use crate::error::KError;
-    use crate::preconditioner::dist::{GlobalPcKind, LocalPcKind};
+    use crate::config::options_core::{Arity, ValueKind};
+    use crate::config::registry::SPECS;
+
+    struct KrystEnvGuard {
+        saved: Vec<(String, String)>,
+    }
+
+    impl KrystEnvGuard {
+        fn clear() -> Self {
+            let mut saved = Vec::new();
+            for (k, v) in std::env::vars() {
+                if k.starts_with("KRYST_") {
+                    saved.push((k.clone(), v));
+                    unsafe { std::env::remove_var(k); }
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for KrystEnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in self.saved.drain(..) {
+                unsafe { std::env::set_var(k, v); }
+            }
+        }
+    }
+
+    fn sample_args_for(spec: &Spec) -> Vec<String> {
+        let mut out = vec![spec.flag.to_string()];
+        match spec.arity {
+            Arity::Zero => {}
+            Arity::One => {
+                let v = match spec.key {
+                    // KSP strings with “known good” values
+                    "ksp_type" => "gmres",
+                    "ksp_gmres_orthog" => "mgs",
+                    "ksp_gmres_reorth" => "never",
+                    "ksp_gmres_variant" => "classical",
+                    "ksp_fgmres_variant" => "classical",
+                    "ksp_reduction" => "fast",
+                    "ksp_pc_side" => "left",
+                    "matrix" => "A.mtx",
+                    "rhs" => "b.vec",
+
+                    // PC validated enums
+                    "pc_type" => "amg",
+                    "pc_reorder" => "amd",
+                    "pc_scaling" => "diagonal",
+                    "pc_asm_mode" => "asm",
+                    "pc_asm_block_solver" => "ludense",
+                    "pc_sor_mat_side" => "lower",
+                    "pc_ilu_type" => "ilut",
+                    "pc_ilu_reordering_type" => "rcm",
+                    "pc_ilu_triangular_solve" => "exact",
+                    "pc_ilu_par_factor" => "parilu",
+                    "pc_amg_coarsen_type" => "rs",
+                    "pc_amg_interp_type" => "classical",
+                    "pc_amg_relax_type" => "jacobi",
+                    "pc_amg_smoother" => "jacobi",
+                    "pc_asm_subdomains" => "0,1",
+
+                    // Fallback by kind (must satisfy ensure_ge_1 where applicable)
+                    _ => match spec.kind {
+                        ValueKind::Bool => "true",
+                        ValueKind::Int => "1",
+                        ValueKind::UInt => "1",
+                        ValueKind::Float => "0.1",
+                        ValueKind::Str => "x",
+                        ValueKind::Pair(_, _) => unreachable!(),
+                    },
+                };
+                out.push(v.to_string());
+            }
+            Arity::Two => {
+                out.push("1".to_string());
+                out.push("1".to_string());
+            }
+        }
+        out
+    }
 
     #[test]
     fn ksp_bool_toggle() {
@@ -1933,6 +2083,30 @@ mod tests {
         let args = vec!["-options_file".to_string(), a.display().to_string()];
         let (ksp, _pc) = parse_all_options(&args).unwrap();
         assert_eq!(ksp.ksp_type.as_deref(), Some("gmres"));
+    }
+
+    #[test]
+    fn every_spec_affects_parse_all_options() {
+        let _guard = KrystEnvGuard::clear();
+
+        let (k0, p0) = parse_all_options(&vec![]).unwrap();
+        let baseline = format!("{k0:?}\n{p0:?}");
+
+        for spec in SPECS {
+            if spec.flag == "-options_file" {
+                continue;
+            }
+            let args = sample_args_for(spec);
+            let (k, p) = parse_all_options(&args).unwrap_or_else(|e| {
+                panic!("Spec {} failed to parse/apply: {e:?}", spec.flag)
+            });
+            let snapshot = format!("{k:?}\n{p:?}");
+            assert_ne!(
+                snapshot, baseline,
+                "Spec {} parsed but had no effect (overlay missing or ignored)",
+                spec.flag
+            );
+        }
     }
 }
 

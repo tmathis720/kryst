@@ -584,6 +584,13 @@ pub static SPECS: &[Spec] = &[
         doc: "jacobi|gs|...|chebyshev",
     },
     Spec {
+        flag: "-pc_amg_smoother",
+        key: "pc_amg_smoother",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "AMG smoother (e.g. jacobi|gs|...)",
+    },
+    Spec {
         flag: "-pc_amg_logging_level",
         key: "pc_amg_logging_level",
         arity: Arity::One,
