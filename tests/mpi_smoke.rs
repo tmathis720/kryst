@@ -94,7 +94,7 @@ fn mpi_replicated_cg_succeeds() {
     ksp.rtol = 1e-12;
     ksp.atol = 1e-12;
     ksp.set_type(SolverType::Cg).unwrap();
-    ksp.set_operators(op, None).unwrap();
+    ksp.set_operators(op, None);
     ksp.setup().unwrap();
 
     let stats = ksp.solve(&b, &mut x).unwrap();
