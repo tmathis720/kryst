@@ -3,6 +3,7 @@
 pub mod buffer_pool;
 pub mod coloring;
 pub mod convergence;
+pub mod invariants;
 #[cfg(feature = "backend-faer")]
 pub mod matrix_market;
 pub mod merge;

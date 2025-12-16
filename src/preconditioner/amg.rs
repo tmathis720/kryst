@@ -3,9 +3,9 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::str::FromStr;
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
@@ -7359,10 +7359,10 @@ fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<us
 #[cfg(test)]
 mod tests {
     use super::*;
-	    use faer::Mat;
-	    use std::any::Any;
-	    use std::cmp::Ordering;
-	    use std::sync::{Mutex, OnceLock};
+    use faer::Mat;
+    use std::any::Any;
+    use std::cmp::Ordering;
+    use std::sync::{Mutex, OnceLock};
 
     fn relax_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

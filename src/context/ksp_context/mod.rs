@@ -937,14 +937,34 @@ impl KspContext {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
         let pc = pmat.comm();
-        if ac != pc {
-            self.invalidate_setup();
-            return Err(KError::InvalidInput(format!(
-                "Amat/Pmat communicator mismatch: A={}, P={}",
-                ac.id(),
-                pc.id()
-            )));
-        }
+        crate::invariant!(
+            ac == pc,
+            "Amat/Pmat communicator mismatch: A={}, P={}",
+            ac.id(),
+            pc.id()
+        );
+
+        let a_dims = amat.dims();
+        let p_dims = pmat.dims();
+        crate::invariant!(
+            a_dims == p_dims,
+            "Amat/Pmat dimension mismatch: A={:?}, P={:?}",
+            a_dims,
+            p_dims
+        );
+        #[cfg(feature = "invariants")]
+        log::debug!(
+            "set_operators: comm_id={} size={} rank={} A_dims={:?} P_dims={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
+            ac.id(),
+            ac.size(),
+            ac.rank(),
+            a_dims,
+            p_dims,
+            amat.structure_id(),
+            amat.values_id(),
+            pmat.structure_id(),
+            pmat.values_id()
+        );
         self.amat = Some(amat);
         self.pmat = Some(pmat);
         self.invalidate_setup();
@@ -1014,6 +1034,35 @@ impl KspContext {
             .amat
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
+
+        let (m, n) = amat.dims();
+        let (pm, pn) = pmat.dims();
+        crate::invariant!(m == n, "Amat must be square: got {}x{}", m, n);
+        crate::invariant!(
+            m == pm && n == pn,
+            "Amat/Pmat dimension mismatch during setup: A=({m},{n}), P=({pm},{pn})"
+        );
+        #[cfg(feature = "invariants")]
+        {
+            let comm = amat.comm();
+            log::debug!(
+                "setup start: comm_id={} size={} rank={} dims=({},{}) pc_dims=({},{}) pc_reuse={:?} solver={:?} pc_side={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
+                comm.id(),
+                comm.size(),
+                comm.rank(),
+                m,
+                n,
+                pm,
+                pn,
+                self.pc_reuse,
+                self.solver_type,
+                self.pc_side,
+                amat.structure_id(),
+                amat.values_id(),
+                pmat.structure_id(),
+                pmat.values_id()
+            );
+        }
 
         if self.pc.is_none() {
             if let Some(specs) = self.pending_chain.take() {
@@ -1138,11 +1187,56 @@ impl KspContext {
         if !self.setup_called {
             self.setup()?;
         }
+        let amat = self
+            .amat
+            .clone()
+            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
+        let pmat = self
+            .pmat
+            .clone()
+            .ok_or_else(|| KError::InvalidInput("Pmat not set".into()))?;
+        let (m, n) = amat.dims();
+        let (pm, pn) = pmat.dims();
+
+        crate::invariant!(m == n, "Amat must be square: got {}x{}", m, n);
+        crate::invariant!(
+            m == pm && n == pn,
+            "Amat/Pmat dimension mismatch: A=({m},{n}), P=({pm},{pn})"
+        );
+        crate::invariant!(
+            b.len() == m,
+            "rhs length {} does not match operator rows {}",
+            b.len(),
+            m
+        );
+        crate::invariant!(
+            x.len() == n,
+            "solution length {} does not match operator cols {}",
+            x.len(),
+            n
+        );
+        #[cfg(feature = "invariants")]
+        {
+            let comm = amat.comm();
+            log::debug!(
+                "solve start: comm_id={} size={} rank={} dims=({},{}) rhs_len={} x_len={} solver={:?} pc_side={:?} pc_reuse={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
+                comm.id(),
+                comm.size(),
+                comm.rank(),
+                m,
+                n,
+                b.len(),
+                x.len(),
+                self.solver_type,
+                self.pc_side,
+                self.pc_reuse,
+                amat.structure_id(),
+                amat.values_id(),
+                pmat.structure_id(),
+                pmat.values_id()
+            );
+        }
         if matches!(self.solver_type, Some(SolverType::Preonly)) {
-            let pmat = self
-                .pmat
-                .as_ref()
-                .ok_or_else(|| KError::InvalidInput("Pmat not set".into()))?;
             let pc = self.pc.as_mut().ok_or_else(|| {
                 KError::SolveError("PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into())
             })?;
@@ -1154,11 +1248,7 @@ impl KspContext {
                 );
             }
             pc.direct_solve(pmat.as_ref(), b, x)?;
-            let mat_for_residual = self
-                .amat
-                .as_ref()
-                .map(|a| a.as_ref())
-                .unwrap_or_else(|| pmat.as_ref());
+            let mat_for_residual = amat.as_ref();
             let mut residual = vec![0.0f64; b.len()];
             if let Err(e) = mat_for_residual.try_matvec(x, &mut residual) {
                 return Err(KError::SolveError(format!("residual matvec failed: {e}")));

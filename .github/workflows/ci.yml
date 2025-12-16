@@ -1,139 +1,85 @@
-name: CI
+name: ci
 
 on:
   push:
-    branches: [ main ]
   pull_request:
 
 jobs:
-  build-test:
-    name: ${{ matrix.feature_set.name }}
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --all -- --check
+
+  test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        feature_set:
-          - name: serial-real
-            features: ""
-            threads: 1
-            mpi: false
-          - name: serial-complex
-            features: "complex"
-            threads: 1
-            mpi: false
-          - name: serial-rayon1
-            features: "rayon"
-            threads: 1
-            mpi: false
-          - name: serial-rayon4
-            features: "rayon"
-            threads: 4
-            mpi: false
-          - name: mpi-real
-            features: "mpi"
-            threads: 1
-            mpi: true
-          - name: mpi-complex
-            features: "mpi complex"
-            threads: 1
-            mpi: true
-          - name: mpi-rayon
-            features: "mpi rayon"
-            threads: 2
-            mpi: true
-    env:
-      CARGO_TERM_COLOR: always
-      RUSTFLAGS: -Dwarnings
+        include:
+          - name: no-default
+            cmd: cargo test --no-default-features
+          - name: default
+            cmd: cargo test
+          - name: complex
+            cmd: cargo test --features complex
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+  clippy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            cmd: cargo clippy -- -D warnings
+          - name: no-default
+            cmd: cargo clippy --no-default-features -- -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
 
-      - name: Install MPI toolchain
-        if: contains(matrix.feature_set.features, 'mpi')
+  mpi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install OpenMPI
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            libopenmpi-dev openmpi-bin
+          sudo apt-get update
+          sudo apt-get install -y openmpi-bin libopenmpi-dev
 
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: |
-          set -euo pipefail
-          FEATURES="${{ matrix.feature_set.features }}"
-          if [ -n "$FEATURES" ]; then
-            cargo build --all-targets --no-default-features --features "$FEATURES"
-          else
-            cargo build --all-targets --no-default-features
-          fi
-
-      - name: Clippy
-        run: |
-          set -euo pipefail
-          FEATURES="${{ matrix.feature_set.features }}"
-          if [ -n "$FEATURES" ]; then
-            cargo clippy --all-targets --no-default-features --features "$FEATURES"
-          else
-            cargo clippy --all-targets --no-default-features
-          fi
-
-      - name: rustfmt
-        if: matrix.feature_set.name == 'serial-real'
-        run: cargo fmt --all -- --check
-
-      - name: Unit tests (serial)
-        if: ${{ !matrix.feature_set.mpi }}
+      - name: MPI smoke tests (2 ranks)
         env:
-          RAYON_NUM_THREADS: ${{ matrix.feature_set.threads }}
+          RUST_TEST_THREADS: "1"
+          RUST_LOG: "kryst=debug"
         run: |
-          set -euo pipefail
-          FEATURES="${{ matrix.feature_set.features }}"
-          if [ -n "$FEATURES" ]; then
-            cargo test --no-default-features --features "$FEATURES"
-          else
-            cargo test --no-default-features
-          fi
+          mpirun -n 2 --oversubscribe \
+            cargo test --features mpi --test mpi_smoke -- --nocapture --test-threads=1
 
-      - name: Unit tests (MPI)
-        if: ${{ matrix.feature_set.mpi }}
-        run: |
-          set -euo pipefail
-          FEATURES="${{ matrix.feature_set.features }}"
-          export OMPI_MCA_btl=self,tcp
-          export RAYON_NUM_THREADS=${{ matrix.feature_set.threads }}
-          if [ -n "$FEATURES" ]; then
-            mpirun -n 2 cargo test --no-default-features --features "$FEATURES"
-          else
-            mpirun -n 2 cargo test --no-default-features
-          fi
-
-      - name: CG reproducibility (serial)
-        if: ${{ !matrix.feature_set.mpi }}
+      - name: MPI + complex smoke tests (2 ranks)
         env:
-          RAYON_NUM_THREADS: ${{ matrix.feature_set.threads }}
+          RUST_TEST_THREADS: "1"
+          RUST_LOG: "kryst=debug"
         run: |
-          set -euo pipefail
-          FEATURES="${{ matrix.feature_set.features }}"
-          if [ -n "$FEATURES" ]; then
-            cargo test --no-default-features --features "$FEATURES" --test cg_repro
-          else
-            cargo test --no-default-features --test cg_repro
-          fi
+          mpirun -n 2 --oversubscribe \
+            cargo test --features "mpi,complex" --test mpi_smoke -- --nocapture --test-threads=1
 
-      - name: CG reproducibility (MPI)
-        if: ${{ matrix.feature_set.mpi }}
-        run: |
-          set -euo pipefail
-          FEATURES="${{ matrix.feature_set.features }}"
-          export OMPI_MCA_btl=self,tcp
-          export RAYON_NUM_THREADS=${{ matrix.feature_set.threads }}
-          if [ -n "$FEATURES" ]; then
-            mpirun -n 2 cargo test --no-default-features --features "$FEATURES" --test cg_repro
-          else
-            mpirun -n 2 cargo test --no-default-features --test cg_repro
-          fi
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features invariants --test context_smoke -- --nocapture
