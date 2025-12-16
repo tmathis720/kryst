@@ -118,6 +118,16 @@ pub trait Comm: Send + Sync + 'static {
         self.all_reduce_f64(x)
     }
 
+    /// Real-valued squared 2-norm of a scalar slice.
+    fn norm2(&self, x: &[S]) -> R {
+        let mut local: R = 0.0;
+        for &v in x {
+            let a = v.abs();
+            local += a * a;
+        }
+        self.allreduce_sum(local)
+    }
+
     fn dot(&self, a: &[f64], b: &[f64]) -> f64 {
         let local = a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f64>();
         self.all_reduce_f64(local)
