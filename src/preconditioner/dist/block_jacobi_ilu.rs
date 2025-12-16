@@ -1,6 +1,7 @@
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
 use crate::matrix::dist_csr::DistCsrOp;
+use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::ilu::{Ilu, IluConfig};
 use crate::preconditioner::ilut::RowFilterPreconditioner;
