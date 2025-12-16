@@ -758,8 +758,15 @@ impl LinearSolver for GmresSolver {
     }
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
-        // Defer exact sizing to solve(), once n and side are known.
-        let _ = w;
+        // Pre-size GMRES buffers during KSP setup using the workspace dimension.
+        // If the side is unknown here, size conservatively based on whether a Z basis
+        // was previously requested.
+        let n = w.n();
+        if n == 0 {
+            return;
+        }
+        let side = if w.has_z() { PcSide::Right } else { PcSide::Left };
+        self.ensure_workspace(w, n, side);
     }
 
     #[allow(clippy::too_many_arguments)]

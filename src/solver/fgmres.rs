@@ -488,8 +488,13 @@ impl LinearSolver for FgmresSolver {
     }
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
-        // Sizing is performed in solve_f64()/solve_k once n is known.
-        let _ = w;
+        // Pre-size the GMRES-family buffers during KSP setup using the workspace dimension.
+        // FGMRES requires right preconditioning, so always request Z storage here.
+        let n = w.n();
+        if n == 0 {
+            return;
+        }
+        self.ensure_workspace(w, n, self.restart);
     }
 
     fn solve(

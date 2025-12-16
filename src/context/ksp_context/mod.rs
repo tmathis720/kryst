@@ -1410,6 +1410,31 @@ impl KspContext {
     /// Set the GMRES restart parameter.
     pub fn set_restart(&mut self, restart: usize) {
         self.restart = restart;
+        // Restart impacts GMRES-family solver workspaces and must update the active solver
+        // immediately (and be staged for later solver construction).
+        self.pending_gmres.restart = Some(restart);
+        self.pending_fgmres.restart = Some(restart);
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<GmresSolver>())
+        {
+            s.set_restart(restart);
+        }
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<FgmresSolver>())
+        {
+            s.set_restart(restart);
+        }
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<PcaGmresSolver>())
+        {
+            s.set_restart(restart);
+        }
         self.invalidate_setup();
     }
 }
@@ -1436,7 +1461,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn setup_workspace_runs_on_solver_switch_same_dim() {
+    fn setup_workspace_runs_on_solver_switch_same_dim_cgnr_to_cg() {
         let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
 
@@ -1457,6 +1482,56 @@ mod tests {
         // CG setup must have run and expanded workspace requirements.
         let ws = ksp.debug_workspace().unwrap();
         assert_eq!(ws.q_s.len(), 4);
+    }
+
+    #[test]
+    fn setup_workspace_runs_on_solver_switch_same_dim() {
+        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Arc::new(a);
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a.clone(), None);
+
+        ksp.set_type(SolverType::Cg).unwrap();
+        ksp.setup().unwrap();
+
+        // CG should not have allocated GMRES storage.
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.v_mem.len(), 0);
+        assert_eq!(ws.h_mem.len(), 0);
+
+        // Switch to GMRES *without changing matrix dims*
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.set_restart(3);
+        ksp.setup().unwrap();
+
+        // GMRES setup must have configured basis + Hessenberg storage.
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.v_mem.len(), (3 + 1) * 4);
+        assert_eq!(ws.h_mem.len(), (3 + 1) * 3);
+    }
+
+    #[test]
+    fn setup_workspace_runs_on_restart_change() {
+        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Arc::new(a);
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+        ksp.set_type(SolverType::Gmres).unwrap();
+
+        ksp.set_restart(2);
+        ksp.setup().unwrap();
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.v_mem.len(), (2 + 1) * 4);
+        assert_eq!(ws.h_mem.len(), (2 + 1) * 2);
+
+        // Change restart, same dimension -> must resize GMRES buffers
+        ksp.set_restart(5);
+        ksp.setup().unwrap();
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.v_mem.len(), (5 + 1) * 4);
+        assert_eq!(ws.h_mem.len(), (5 + 1) * 5);
     }
 
     #[test]
