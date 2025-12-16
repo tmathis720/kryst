@@ -197,7 +197,16 @@ fn mixed_precision_refresh_updates_cached_values() -> Result<(), KError> {
     for val in a_scaled.values_mut() {
         *val *= 1.2;
     }
-    AMG::refresh_numeric(&mut amg, &a_scaled)?;
+    let (sid, vid) = match &amg.state {
+        AmgState::Ready {
+            last_structure_id,
+            last_values_id,
+            ..
+        } => (*last_structure_id, *last_values_id),
+        _ => return Err(KError::InvalidInput("AMG not ready".into())),
+    };
+    let pattern_hash = csr_pattern_hash(&a_scaled);
+    amg.refresh_numeric_ready(&a_scaled, sid, ValuesId(vid.0 + 1), pattern_hash)?;
     let lvl_after = &amg.state.as_ref().unwrap().levels[0];
     let updated = lvl_after
         .a_vals_f32

@@ -150,7 +150,9 @@ pub static RELAX_CALL_COUNTS: [AtomicUsize; 4] = [
     AtomicUsize::new(0),
 ];
 #[cfg(test)]
-static BUILD_SYMBOLIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static BUILD_SYMBOLIC_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
 
 #[cfg(test)]
 pub fn reset_relax_counts() {
@@ -2443,6 +2445,16 @@ enum AmgState {
     },
 }
 
+impl AmgState {
+    fn as_ref(&self) -> Option<&AmgHierarchy> {
+        match self {
+            AmgState::SymbolicOnly { hierarchy, .. } => Some(hierarchy),
+            AmgState::Ready { hierarchy, .. } => Some(hierarchy),
+            _ => None,
+        }
+    }
+}
+
 // ===== Main AMG object =======================================================
 
 pub struct AMG {
@@ -2563,7 +2575,7 @@ impl AMG {
         // Build the full hierarchy from scratch (symbolic + numeric)
         let (hier, stats) = build_hierarchy(fine, &mut self.cfg)?;
         #[cfg(test)]
-        BUILD_SYMBOLIC_COUNT.fetch_add(1, Ordering::SeqCst);
+        BUILD_SYMBOLIC_COUNT.with(|c| c.set(c.get() + 1));
         self.stats = stats;
         Ok(Box::new(hier))
     }
@@ -7347,11 +7359,10 @@ fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faer::Mat;
-    use std::any::Any;
-    use std::cmp::Ordering;
-    use std::sync::atomic::Ordering as AtomicOrdering;
-    use std::sync::{Mutex, OnceLock};
+	    use faer::Mat;
+	    use std::any::Any;
+	    use std::cmp::Ordering;
+	    use std::sync::{Mutex, OnceLock};
 
     fn relax_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -7397,11 +7408,11 @@ mod tests {
     }
 
     fn reset_symbolic_counter() {
-        BUILD_SYMBOLIC_COUNT.store(0, AtomicOrdering::SeqCst);
+        BUILD_SYMBOLIC_COUNT.with(|c| c.set(0));
     }
 
     fn symbolic_counter() -> usize {
-        BUILD_SYMBOLIC_COUNT.load(AtomicOrdering::SeqCst)
+        BUILD_SYMBOLIC_COUNT.with(|c| c.get())
     }
 
     struct TestLinOp {
@@ -7436,7 +7447,7 @@ mod tests {
         }
 
         fn as_any(&self) -> &dyn Any {
-            self
+            &self.mat
         }
 
         fn structure_id(&self) -> StructureId {
