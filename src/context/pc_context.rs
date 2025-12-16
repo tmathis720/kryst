@@ -561,15 +561,7 @@ impl PcFactory {
         _op: &dyn LinOp<S = R>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // The concrete operator format is deferred to the preconditioner itself.
-        match info.pc_type {
-            PcType::Amg => Err(KError::NotImplemented(
-                "AMG not yet implemented".to_string(),
-            )),
-            PcType::Asm => Err(KError::NotImplemented(
-                "ASM not yet implemented".to_string(),
-            )),
-            _ => Self::create_preconditioner(info.pc_type, info.options.as_ref()),
-        }
+        Self::create_preconditioner(info.pc_type, info.options.as_ref())
     }
 
     /// Parse a string chain and clone the same [`PcOptions`] for every stage.
@@ -610,8 +602,11 @@ impl PcFactory {
         use crate::preconditioner::chain::PcChain;
 
         let mut stages: Vec<Box<dyn Preconditioner>> = Vec::with_capacity(specs.len());
-        for spec in specs {
-            let stage = Self::construct_deferred_preconditioner(spec, op)?;
+        for (i, spec) in specs.into_iter().enumerate() {
+            let pc_type = spec.pc_type;
+            let stage = Self::construct_deferred_preconditioner(spec, op).map_err(|e| {
+                KError::InvalidInput(format!("PC chain stage {i} ({pc_type:?}) failed: {e}",))
+            })?;
             stages.push(stage);
         }
         Ok(Box::new(PcChain::new(stages)))
