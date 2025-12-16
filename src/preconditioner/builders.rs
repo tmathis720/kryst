@@ -196,6 +196,13 @@ pub fn build_asm(
     use crate::preconditioner::asm::BlockSolverFactory;
     use crate::preconditioner::asm::{AdditiveSchwarz, AsmMode, Weighting};
 
+    if block_solver
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("amg"))
+    {
+        return build_asm_amg(overlap);
+    }
+
     let factory = match block_solver.as_deref() {
         Some("csr") => BlockSolverFactory::CsrSolver,
         _ => BlockSolverFactory::LuDense,

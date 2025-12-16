@@ -1526,8 +1526,10 @@ impl KspContext {
 #[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
+    use crate::config::options::{KspOptions, PcOptions};
     use crate::context::pc_context::PcType;
-    use crate::matrix::op::DenseOp;
+    use crate::matrix::op::{CsrOp, DenseOp};
+    use crate::matrix::utils::poisson_2d;
     use crate::preconditioner::PcSide;
     use faer::Mat;
     use std::sync::Arc;
@@ -1922,5 +1924,111 @@ mod tests {
             ws.reduction_options().mode,
             ReproMode::DeterministicAccurate
         ));
+    }
+
+    #[test]
+    fn chain_allows_amg_then_jacobi() {
+        let a = Arc::new(poisson_2d(8, 8));
+        let op = Arc::new(CsrOp::<R>::new(a.clone()));
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(op.clone(), None);
+
+        let ksp_opts = KspOptions {
+            ksp_type: Some("gmres".into()),
+            ..Default::default()
+        };
+
+        let pc_opts = PcOptions {
+            chain: Some(vec![
+                PcOptions {
+                    pc_type: Some("amg".into()),
+                    ..Default::default()
+                },
+                PcOptions {
+                    pc_type: Some("jacobi".into()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+        ksp.setup().unwrap();
+
+        let n = op.dims().0;
+        let b = vec![S::from_real(1.0); n];
+        let mut x = vec![S::zero(); n];
+        let stats = ksp.solve(&b, &mut x).unwrap();
+
+        assert!(stats.final_residual.is_finite());
+    }
+
+    #[test]
+    fn asm_with_amg_block_solver_builds_and_runs() {
+        let a = Arc::new(poisson_2d(8, 8));
+        let op = Arc::new(CsrOp::<R>::new(a.clone()));
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(op.clone(), None);
+
+        let ksp_opts = KspOptions {
+            ksp_type: Some("gmres".into()),
+            ..Default::default()
+        };
+
+        let pc_opts = PcOptions {
+            pc_type: Some("asm".into()),
+            asm_block_solver: Some("amg".into()),
+            asm_overlap: Some(1),
+            ..Default::default()
+        };
+
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+        ksp.setup().unwrap();
+
+        let n = op.dims().0;
+        let b = vec![S::from_real(1.0); n];
+        let mut x = vec![S::zero(); n];
+        let _ = ksp.solve(&b, &mut x).unwrap();
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn complex_chain_reports_stage_for_amg() {
+        let a = Arc::new(poisson_2d(4, 4));
+        let op = Arc::new(CsrOp::<R>::new(a.clone()));
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(op.clone(), None);
+
+        let ksp_opts = KspOptions {
+            ksp_type: Some("gmres".into()),
+            ..Default::default()
+        };
+
+        let pc_opts = PcOptions {
+            chain: Some(vec![PcOptions {
+                pc_type: Some("amg".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+
+        match ksp.setup() {
+            Ok(()) => {
+                let n = op.dims().0;
+                let b = vec![S::from_real(1.0); n];
+                let mut x = vec![S::zero(); n];
+                let _ = ksp.solve(&b, &mut x).unwrap();
+            }
+            Err(err) => {
+                let msg = err.to_string().to_lowercase();
+                assert!(msg.contains("stage 0"));
+                assert!(msg.contains("amg"));
+            }
+        }
     }
 }
