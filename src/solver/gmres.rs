@@ -765,7 +765,11 @@ impl LinearSolver for GmresSolver {
         if n == 0 {
             return;
         }
-        let side = if w.has_z() { PcSide::Right } else { PcSide::Left };
+        let side = if w.has_z() {
+            PcSide::Right
+        } else {
+            PcSide::Left
+        };
         self.ensure_workspace(w, n, side);
     }
 
