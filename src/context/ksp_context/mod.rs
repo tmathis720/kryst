@@ -342,7 +342,6 @@ impl KspContext {
             }
         };
         self.solver = solver;
-        self.apply_global_reduction_mode();
         // Fail fast if an explicit side was set and is incompatible with the selected solver
         if self.pc_side_explicit {
             self.check_pc_side_now(self.pc_side)?
@@ -474,7 +473,6 @@ impl KspContext {
             if let Some(ref mut w) = self.work {
                 w.set_reduction_mode(parsed);
             }
-            self.apply_global_reduction_mode();
         }
 
         if let Some(flag) = opts.reproducible {
@@ -539,6 +537,13 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
+                #[cfg(feature = "complex")]
+                if variant.as_str() == "pipelined" {
+                    return Err(KError::Unsupported(
+                        "pipelined GMRES is not available for complex scalars".into(),
+                    ));
+                }
+
                 let pv = match variant.as_str() {
                     "classical" => PendingGmresVariant::Classical,
                     "pipelined" => PendingGmresVariant::Pipelined,
@@ -589,6 +594,13 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
+                #[cfg(feature = "complex")]
+                if variant.as_str() == "pipelined" {
+                    return Err(KError::Unsupported(
+                        "pipelined GMRES is not available for complex scalars".into(),
+                    ));
+                }
+
                 self.pending_gmres.variant = Some(match variant.as_str() {
                     "classical" => PendingGmresVariant::Classical,
                     "pipelined" => PendingGmresVariant::Pipelined,
@@ -707,6 +719,13 @@ impl KspContext {
                 self.pending_fgmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.fgmres_variant {
+                #[cfg(feature = "complex")]
+                if variant.as_str() == "pipelined" {
+                    return Err(KError::Unsupported(
+                        "pipelined FGMRES is not available for complex scalars".into(),
+                    ));
+                }
+
                 self.pending_fgmres.variant = Some(match variant.as_str() {
                     "classical" => crate::solver::fgmres::FgmresVariant::Classical,
                     "pipelined" => crate::solver::fgmres::FgmresVariant::Pipelined,
@@ -1026,6 +1045,8 @@ impl KspContext {
 
     /// Prepare preconditioner and workspace.
     pub fn setup(&mut self) -> Result<(), KError> {
+        let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
+
         let pmat = self
             .pmat
             .as_ref()
@@ -1187,6 +1208,9 @@ impl KspContext {
 
     /// Solve the linear system using stored operators.
     pub fn solve(&mut self, b: &[f64], x: &mut [f64]) -> Result<SolveStats<f64>, KError> {
+        // Make the configured reduction mode active for *every* path
+        let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
+
         if !self.setup_called {
             self.setup()?;
         }
@@ -1260,6 +1284,7 @@ impl KspContext {
                 *ri = bi - *ri;
             }
             let comm = mat_for_residual.comm();
+            comm.set_reproducible(self.reproducible);
             let res_sq = comm.dot(&residual, &residual);
             return Ok(SolveStats::new(
                 0,
@@ -1268,9 +1293,7 @@ impl KspContext {
             ));
         }
 
-        // Ensure the configured reduction mode is active while solving and configure
-        // solver preconditioning side, validating compatibility along the way.
-        let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
+        // Configure solver preconditioning side, validating compatibility along the way.
         self.configure_pc_side()?;
 
         let amat = self
@@ -1759,6 +1782,23 @@ mod tests {
         assert!((s.reorth_tol - 0.55).abs() < 1e-12);
     }
 
+    #[cfg(feature = "complex")]
+    #[test]
+    fn complex_rejects_pipelined_gmres_at_options_parse_time() {
+        let mut ksp = KspContext::new();
+        let opts = KspOptions {
+            ksp_type: Some("gmres".into()),
+            gmres_variant: Some("pipelined".into()),
+            ..Default::default()
+        };
+        let err = ksp.set_from_options(&opts).unwrap_err();
+        assert!(matches!(
+            err,
+            KError::Unsupported(_) | KError::NotImplemented(_)
+        ));
+    }
+
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn fgmres_options_apply() {
         use crate::context::ksp_context::ReorthPolicy;
@@ -1792,6 +1832,19 @@ mod tests {
         assert_eq!(s.variant, FgmresVariant::Pipelined);
         assert!(matches!(s.reorth, ReorthPolicy::Never));
         assert!((s.reorth_tol - 0.42).abs() < 1e-12);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn fgmres_options_apply_rejects_pipelined_for_complex() {
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Fgmres).unwrap();
+
+        let opts = KspOptions {
+            fgmres_variant: Some("pipelined".into()),
+            ..Default::default()
+        };
+        assert!(ksp.set_from_options(&opts).is_err());
     }
 
     #[test]
