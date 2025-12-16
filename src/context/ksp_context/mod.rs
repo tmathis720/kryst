@@ -66,6 +66,7 @@ use crate::solver::{
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::utils::reduction::ReductOptions;
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
@@ -123,14 +124,13 @@ impl FromStr for SolverType {
 }
 
 /// Minimal KSP context holding solver, preconditioner, and operators.
-#[derive(Debug)]
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>>,
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
-    amat: Option<Arc<dyn LinOp<S = f64>>>,
-    pmat: Option<Arc<dyn LinOp<S = f64>>>,
+    amat: Option<Arc<dyn LinOp<S = S>>>,
+    pmat: Option<Arc<dyn LinOp<S = S>>>,
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
@@ -151,6 +151,38 @@ pub struct KspContext {
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
     pending_pcg: PendingPcg,
+}
+
+impl fmt::Debug for KspContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KspContext")
+            .field("solver", &self.solver.as_ref().map(|_| "set"))
+            .field("pc", &self.pc.as_ref().map(|_| "set"))
+            .field("pending_pc", &self.pending_pc)
+            .field("pending_chain", &self.pending_chain)
+            .field("amat_set", &self.amat.is_some())
+            .field("pmat_set", &self.pmat.is_some())
+            .field("work", &self.work)
+            .field("setup_called", &self.setup_called)
+            .field("monitors_len", &self.monitors.len())
+            .field("solver_type", &self.solver_type)
+            .field("rtol", &self.rtol)
+            .field("atol", &self.atol)
+            .field("dtol", &self.dtol)
+            .field("maxits", &self.maxits)
+            .field("restart", &self.restart)
+            .field("pc_side", &self.pc_side)
+            .field("pc_side_explicit", &self.pc_side_explicit)
+            .field("pc_reuse", &self.pc_reuse)
+            .field("last_pc_sid", &self.last_pc_sid)
+            .field("last_pc_vid", &self.last_pc_vid)
+            .field("reduction_opts", &self.reduction_opts)
+            .field("reproducible", &self.reproducible)
+            .field("pending_gmres", &self.pending_gmres)
+            .field("pending_fgmres", &self.pending_fgmres)
+            .field("pending_pcg", &self.pending_pcg)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -952,8 +984,8 @@ impl KspContext {
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
     ) -> Result<&mut Self, KError> {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
@@ -995,8 +1027,8 @@ impl KspContext {
     /// Like `try_set_operators`, but first wraps operators with an explicit communicator.
     pub fn try_set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
         comm: crate::parallel::UniverseComm,
     ) -> Result<&mut Self, KError> {
         let a_wrapped = wrap_with_comm(amat, comm.clone());
@@ -1010,8 +1042,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators`] in libraries to handle errors.
     pub fn set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
     ) -> &mut Self {
         self.try_set_operators(amat, pmat).unwrap()
     }
@@ -1021,8 +1053,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators_with_comm`].
     pub fn set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
         comm: crate::parallel::UniverseComm,
     ) -> &mut Self {
         self.try_set_operators_with_comm(amat, pmat, comm).unwrap()
