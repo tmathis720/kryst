@@ -49,6 +49,7 @@
 #[cfg(feature = "rayon")]
 use crate::algebra::parallel::set_rayon_threads;
 use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, set_rayon_threads_for_repro};
+use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
@@ -127,15 +128,15 @@ pub struct KspContext {
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
-    amat: Option<Arc<dyn LinOp<S = f64>>>,
-    pmat: Option<Arc<dyn LinOp<S = f64>>>,
+    amat: Option<Arc<dyn LinOp<S = S>>>,
+    pmat: Option<Arc<dyn LinOp<S = S>>>,
     work: Option<Workspace>,
     setup_called: bool,
-    monitors: Vec<Box<dyn Fn(usize, f64) + Send + Sync>>,
+    monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
     solver_type: Option<SolverType>,
-    pub rtol: f64,
-    pub atol: f64,
-    pub dtol: f64,
+    pub rtol: R,
+    pub atol: R,
+    pub dtol: R,
     pub maxits: usize,
     pub restart: usize,
     pub pc_side: PcSide,
@@ -163,11 +164,11 @@ struct PendingGmres {
     restart: Option<usize>,
     orthog: Option<crate::solver::gmres::GmresOrthog>,
     reorth: Option<ReorthPolicy>,
-    reorth_tol: Option<f64>,
+    reorth_tol: Option<R>,
     happy_breakdown: Option<bool>,
     variant: Option<PendingGmresVariant>,
     sstep: Option<usize>,
-    sstep_max_cond: Option<f64>,
+    sstep_max_cond: Option<R>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -175,7 +176,7 @@ struct PendingFgmres {
     restart: Option<usize>,
     orthog: Option<crate::solver::fgmres::Orthog>,
     reorth: Option<ReorthPolicy>,
-    reorth_tol: Option<f64>,
+    reorth_tol: Option<R>,
     happy_breakdown: Option<bool>,
     variant: Option<crate::solver::fgmres::FgmresVariant>,
 }
@@ -950,8 +951,8 @@ impl KspContext {
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
     ) -> Result<&mut Self, KError> {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
@@ -993,8 +994,8 @@ impl KspContext {
     /// Like `try_set_operators`, but first wraps operators with an explicit communicator.
     pub fn try_set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
         comm: crate::parallel::UniverseComm,
     ) -> Result<&mut Self, KError> {
         let a_wrapped = wrap_with_comm(amat, comm.clone());
@@ -1008,8 +1009,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators`] in libraries to handle errors.
     pub fn set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
     ) -> &mut Self {
         self.try_set_operators(amat, pmat).unwrap()
     }
@@ -1019,8 +1020,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators_with_comm`].
     pub fn set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = f64>>,
-        pmat: Option<Arc<dyn LinOp<S = f64>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
         comm: crate::parallel::UniverseComm,
     ) -> &mut Self {
         self.try_set_operators_with_comm(amat, pmat, comm).unwrap()
@@ -1207,7 +1208,7 @@ impl KspContext {
     }
 
     /// Solve the linear system using stored operators.
-    pub fn solve(&mut self, b: &[f64], x: &mut [f64]) -> Result<SolveStats<f64>, KError> {
+    pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         // Make the configured reduction mode active for *every* path
         let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
 
@@ -1276,16 +1277,16 @@ impl KspContext {
             }
             pc.direct_solve(pmat.as_ref(), b, x)?;
             let mat_for_residual = amat.as_ref();
-            let mut residual = vec![0.0f64; b.len()];
+            let mut residual = vec![S::zero(); b.len()];
             if let Err(e) = mat_for_residual.try_matvec(x, &mut residual) {
                 return Err(KError::SolveError(format!("residual matvec failed: {e}")));
             }
-            for (ri, &bi) in residual.iter_mut().zip(b.iter()) {
-                *ri = bi - *ri;
+            for (ri, bi) in residual.iter_mut().zip(b.iter()) {
+                *ri = *bi - *ri;
             }
             let comm = mat_for_residual.comm();
             comm.set_reproducible(self.reproducible);
-            let res_sq = comm.dot(&residual, &residual);
+            let res_sq: R = comm.dot(&residual, &residual);
             return Ok(SolveStats::new(
                 0,
                 res_sq.sqrt(),
@@ -1328,14 +1329,14 @@ impl KspContext {
         )?;
 
         // Compute true residual r = b - A x and use its norm for reporting
-        let mut residual = vec![0.0f64; b.len()];
+        let mut residual = vec![S::zero(); b.len()];
         if let Err(e) = amat.try_matvec(x, &mut residual) {
             return Err(KError::SolveError(format!("residual matvec failed: {e}")));
         }
-        for (ri, &bi) in residual.iter_mut().zip(b.iter()) {
-            *ri = bi - *ri;
+        for (ri, bi) in residual.iter_mut().zip(b.iter()) {
+            *ri = *bi - *ri;
         }
-        let res_sq = comm.dot(&residual, &residual);
+        let res_sq: R = comm.dot(&residual, &residual);
         stats.final_residual = res_sq.sqrt();
         Ok(stats)
     }
@@ -1348,7 +1349,7 @@ impl KspContext {
     /// Add an iteration monitor callback.
     pub fn add_monitor<F>(&mut self, f: F)
     where
-        F: Fn(usize, f64) + Send + Sync + 'static,
+        F: Fn(usize, R) + Send + Sync + 'static,
     {
         self.monitors.push(Box::new(f));
     }
@@ -1369,14 +1370,14 @@ impl KspContext {
     }
 
     /// Invoke all monitors with the provided iteration and residual.
-    pub fn invoke_monitors(&self, iter: usize, residual: f64) {
+    pub fn invoke_monitors(&self, iter: usize, residual: R) {
         for m in &self.monitors {
             m(iter, residual);
         }
     }
 
     /// Set solver tolerances and maximum iterations.
-    pub fn set_tolerances(&mut self, rtol: f64, atol: f64, dtol: f64, maxits: usize) -> &mut Self {
+    pub fn set_tolerances(&mut self, rtol: R, atol: R, dtol: R, maxits: usize) -> &mut Self {
         self.rtol = rtol;
         self.atol = atol;
         self.dtol = dtol;
@@ -1485,7 +1486,13 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_solver_switch_same_dim_cgnr_to_cg() {
-        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+            if i == j {
+                S::from_real(2.0)
+            } else {
+                S::from_real(0.5)
+            }
+        });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1509,7 +1516,13 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_solver_switch_same_dim() {
-        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+            if i == j {
+                S::from_real(2.0)
+            } else {
+                S::from_real(0.5)
+            }
+        });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1536,7 +1549,13 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_restart_change() {
-        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+            if i == j {
+                S::from_real(2.0)
+            } else {
+                S::from_real(0.5)
+            }
+        });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1559,7 +1578,13 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_cg_variant_change() {
-        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+            if i == j {
+                S::from_real(2.0)
+            } else {
+                S::from_real(0.5)
+            }
+        });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1588,22 +1613,28 @@ mod tests {
     #[test]
     fn preonly_with_lu_pc_solves() {
         // Simple 2x2 SPD: [2 1; 1 2]
-        let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 1.0 });
+        let a = Mat::<S>::from_fn(2, 2, |i, j| {
+            if i == j {
+                S::from_real(2.0)
+            } else {
+                S::from_real(1.0)
+            }
+        });
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Preonly).unwrap();
         ksp.set_pc_type(PcType::Lu, None).unwrap();
         ksp.set_operators(Arc::new(a), None);
 
-        let b = vec![3.0, 3.0];
-        let mut x = vec![0.0; 2];
+        let b: Vec<S> = vec![S::from_real(3.0), S::from_real(3.0)];
+        let mut x = vec![S::zero(); 2];
         let stats = ksp.solve(&b, &mut x).unwrap();
 
         // Verify Ax ≈ b using the stored operator
         let amat = ksp.amat.as_ref().unwrap().clone();
-        let mut ax = vec![0.0; 2];
+        let mut ax = vec![S::zero(); 2];
         amat.matvec(&x, &mut ax);
         for i in 0..2 {
-            assert!((ax[i] - b[i]).abs() < 1e-10);
+            assert!((ax[i] - b[i]).abs() < R::from_real(1e-10));
         }
         assert_eq!(stats.iterations, 1);
         assert_eq!(stats.reason, ConvergedReason::ConvergedAtol);
@@ -1612,15 +1643,21 @@ mod tests {
     #[test]
     #[cfg(not(feature = "complex"))]
     fn preonly_without_direct_pc_errors() {
-        let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let a = Mat::<S>::from_fn(
+            2,
+            2,
+            |i, j| {
+                if i == j { S::from_real(1.0) } else { S::zero() }
+            },
+        );
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Preonly).unwrap();
         // Jacobi is not a direct solver
         ksp.set_pc_type(PcType::Jacobi, None).unwrap();
         ksp.set_operators(Arc::new(a), None);
 
-        let b = vec![1.0, 2.0];
-        let mut x = vec![0.0; 2];
+        let b: Vec<S> = vec![S::from_real(1.0), S::from_real(2.0)];
+        let mut x = vec![S::zero(); 2];
 
         let err = ksp.solve(&b, &mut x).unwrap_err();
         match err {
@@ -1633,7 +1670,13 @@ mod tests {
 
     #[test]
     fn try_set_operators_ok_same_comm() {
-        let m = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let m = Mat::<S>::from_fn(
+            2,
+            2,
+            |i, j| {
+                if i == j { S::from_real(1.0) } else { S::zero() }
+            },
+        );
         // NoComm for both => equal
         let a = Arc::new(DenseOp::new(Arc::new(m)));
         let mut ksp = KspContext::new();
@@ -1648,7 +1691,13 @@ mod tests {
         use crate::parallel::{Comm as _, MpiComm};
 
         // Build a small dense and wrap with different communicators
-        let m = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let m = Mat::<S>::from_fn(
+            2,
+            2,
+            |i, j| {
+                if i == j { S::from_real(1.0) } else { S::zero() }
+            },
+        );
         let op = Arc::new(DenseOp::new(Arc::new(m)));
 
         let world = std::sync::Arc::new(MpiComm::new());

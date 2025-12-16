@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::config::kinds::SorMatSideKind;
 use crate::config::options::PcOptions;
 use crate::error::KError;
@@ -106,15 +107,15 @@ pub struct DeferredPcInfo {
 pub struct NoOpPreconditioner;
 
 impl Preconditioner for NoOpPreconditioner {
-    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
         Ok(())
     }
-    fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
         z.copy_from_slice(r);
         Ok(())
     }
 
-    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 }
@@ -132,20 +133,20 @@ pub enum PcConfig {
         level: usize,
     },
     Ilut {
-        drop_tol: f64,
+        drop_tol: R,
         max_fill: usize,
         reordering: Option<String>,
     },
     Milu0,
     Sor {
-        omega: f64,
+        omega: R,
         sweeps: usize,
         mat_side: MatSorSide,
     },
     Chebyshev {
         degree: usize,
-        eig_lo: f64,
-        eig_hi: f64,
+        eig_lo: R,
+        eig_hi: R,
     },
     Asm {
         overlap: usize,
@@ -161,9 +162,9 @@ pub enum PcConfig {
         kind: ApproxInvKindAlias,
         levels: usize,
         max_per_col: usize,
-        drop_tol: f64,
-        reg: f64,
-        max_cond: f64,
+        drop_tol: R,
+        reg: R,
+        max_cond: R,
         parallel: bool,
     },
     Lu,
@@ -557,7 +558,7 @@ impl PcFactory {
 
     pub fn construct_deferred_preconditioner(
         info: DeferredPcInfo,
-        _op: &dyn LinOp<S = f64>,
+        _op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // The concrete operator format is deferred to the preconditioner itself.
         match info.pc_type {
@@ -602,7 +603,7 @@ impl PcFactory {
     #[cfg(feature = "backend-faer")]
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
-        op: &dyn LinOp<S = f64>,
+        op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // validate again in case specs were assembled elsewhere
         Self::validate_chain_specs(&specs)?;
@@ -619,7 +620,7 @@ impl PcFactory {
     #[cfg(not(feature = "backend-faer"))]
     pub fn construct_deferred_pc_chain(
         _specs: Vec<DeferredPcInfo>,
-        _op: &dyn LinOp<S = f64>,
+        _op: &dyn LinOp<S = S>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         Err(KError::Unsupported(
             "backend-faer feature is required to build chained preconditioners".into(),
@@ -628,7 +629,7 @@ impl PcFactory {
 
     pub fn create_pc_chain(
         chain: &str,
-        op: &dyn LinOp<S = f64>,
+        op: &dyn LinOp<S = S>,
         opts: Option<PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         let specs = Self::create_pc_chain_from_str(chain, opts.as_ref())?;

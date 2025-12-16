@@ -536,7 +536,7 @@ impl Workspace {
         n: usize,
         comm: &crate::parallel::UniverseComm,
         policy: ReorthPolicy,
-        tol: f64,
+        tol: R,
     ) -> Result<usize, crate::error::KError> {
         debug_assert!(k < self.m);
 
@@ -580,12 +580,14 @@ impl Workspace {
             hnext_sq = R::zero();
         }
 
-        let tol = tol.max(0.0);
+        let tol = tol.max(R::zero());
         let tol_sq = tol * tol;
         let trigger_reorth = match policy {
             ReorthPolicy::Never => false,
             ReorthPolicy::Always => true,
-            ReorthPolicy::IfNeeded => total_norm_sq > 0.0 && hnext_sq < tol_sq * total_norm_sq,
+            ReorthPolicy::IfNeeded => {
+                total_norm_sq > R::zero() && hnext_sq < tol_sq * total_norm_sq
+            }
         };
 
         if trigger_reorth {
@@ -662,7 +664,7 @@ impl Workspace {
         n: usize,
         _comm: &crate::parallel::UniverseComm,
         _policy: ReorthPolicy,
-        _tol: f64,
+        _tol: R,
     ) -> Result<usize, crate::error::KError> {
         let _ = (k, n);
         Err(crate::error::KError::NotImplemented(
