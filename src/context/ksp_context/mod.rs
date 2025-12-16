@@ -123,13 +123,14 @@ impl FromStr for SolverType {
 }
 
 /// Minimal KSP context holding solver, preconditioner, and operators.
+#[derive(Debug)]
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>>,
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
-    amat: Option<Arc<dyn LinOp<S = S>>>,
-    pmat: Option<Arc<dyn LinOp<S = S>>>,
+    amat: Option<Arc<dyn LinOp<S = f64>>>,
+    pmat: Option<Arc<dyn LinOp<S = f64>>>,
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
@@ -951,8 +952,8 @@ impl KspContext {
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
     ) -> Result<&mut Self, KError> {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
@@ -994,8 +995,8 @@ impl KspContext {
     /// Like `try_set_operators`, but first wraps operators with an explicit communicator.
     pub fn try_set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
         comm: crate::parallel::UniverseComm,
     ) -> Result<&mut Self, KError> {
         let a_wrapped = wrap_with_comm(amat, comm.clone());
@@ -1009,8 +1010,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators`] in libraries to handle errors.
     pub fn set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
     ) -> &mut Self {
         self.try_set_operators(amat, pmat).unwrap()
     }
@@ -1020,8 +1021,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators_with_comm`].
     pub fn set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = f64>>,
+        pmat: Option<Arc<dyn LinOp<S = f64>>>,
         comm: crate::parallel::UniverseComm,
     ) -> &mut Self {
         self.try_set_operators_with_comm(amat, pmat, comm).unwrap()
@@ -1208,7 +1209,7 @@ impl KspContext {
     }
 
     /// Solve the linear system using stored operators.
-    pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
+    pub fn solve(&mut self, b: &[f64], x: &mut [f64]) -> Result<SolveStats<R>, KError> {
         // Make the configured reduction mode active for *every* path
         let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
 
@@ -1277,7 +1278,7 @@ impl KspContext {
             }
             pc.direct_solve(pmat.as_ref(), b, x)?;
             let mat_for_residual = amat.as_ref();
-            let mut residual = vec![S::zero(); b.len()];
+            let mut residual = vec![0.0; b.len()];
             if let Err(e) = mat_for_residual.try_matvec(x, &mut residual) {
                 return Err(KError::SolveError(format!("residual matvec failed: {e}")));
             }
@@ -1329,7 +1330,7 @@ impl KspContext {
         )?;
 
         // Compute true residual r = b - A x and use its norm for reporting
-        let mut residual = vec![S::zero(); b.len()];
+        let mut residual = vec![0.0; b.len()];
         if let Err(e) = amat.try_matvec(x, &mut residual) {
             return Err(KError::SolveError(format!("residual matvec failed: {e}")));
         }
@@ -1486,11 +1487,11 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_solver_switch_same_dim_cgnr_to_cg() {
-        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+        let a = Mat::<R>::from_fn(4, 4, |i, j| {
             if i == j {
-                S::from_real(2.0)
+                2.0
             } else {
-                S::from_real(0.5)
+                0.5
             }
         });
         let a = Arc::new(a);
@@ -1516,11 +1517,11 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_solver_switch_same_dim() {
-        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+        let a = Mat::<R>::from_fn(4, 4, |i, j| {
             if i == j {
-                S::from_real(2.0)
+                2.0
             } else {
-                S::from_real(0.5)
+                0.5
             }
         });
         let a = Arc::new(a);
@@ -1549,11 +1550,11 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_restart_change() {
-        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+        let a = Mat::<R>::from_fn(4, 4, |i, j| {
             if i == j {
-                S::from_real(2.0)
+                2.0
             } else {
-                S::from_real(0.5)
+                0.5
             }
         });
         let a = Arc::new(a);
@@ -1578,11 +1579,11 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_cg_variant_change() {
-        let a = Mat::<S>::from_fn(4, 4, |i, j| {
+        let a = Mat::<R>::from_fn(4, 4, |i, j| {
             if i == j {
-                S::from_real(2.0)
+                2.0
             } else {
-                S::from_real(0.5)
+                0.5
             }
         });
         let a = Arc::new(a);
@@ -1613,11 +1614,11 @@ mod tests {
     #[test]
     fn preonly_with_lu_pc_solves() {
         // Simple 2x2 SPD: [2 1; 1 2]
-        let a = Mat::<S>::from_fn(2, 2, |i, j| {
+        let a = Mat::<R>::from_fn(2, 2, |i, j| {
             if i == j {
-                S::from_real(2.0)
+                2.0
             } else {
-                S::from_real(1.0)
+                1.0
             }
         });
         let mut ksp = KspContext::new();
@@ -1625,13 +1626,13 @@ mod tests {
         ksp.set_pc_type(PcType::Lu, None).unwrap();
         ksp.set_operators(Arc::new(a), None);
 
-        let b: Vec<S> = vec![S::from_real(3.0), S::from_real(3.0)];
-        let mut x = vec![S::zero(); 2];
+        let b: Vec<R> = vec![3.0, 3.0];
+        let mut x = vec![0.0; 2];
         let stats = ksp.solve(&b, &mut x).unwrap();
 
         // Verify Ax ≈ b using the stored operator
         let amat = ksp.amat.as_ref().unwrap().clone();
-        let mut ax = vec![S::zero(); 2];
+        let mut ax = vec![0.0; 2];
         amat.matvec(&x, &mut ax);
         for i in 0..2 {
             assert!((ax[i] - b[i]).abs() < R::from_real(1e-10));
@@ -1643,11 +1644,11 @@ mod tests {
     #[test]
     #[cfg(not(feature = "complex"))]
     fn preonly_without_direct_pc_errors() {
-        let a = Mat::<S>::from_fn(
+        let a = Mat::<R>::from_fn(
             2,
             2,
             |i, j| {
-                if i == j { S::from_real(1.0) } else { S::zero() }
+                if i == j { 1.0 } else { 0.0 }
             },
         );
         let mut ksp = KspContext::new();
@@ -1656,8 +1657,8 @@ mod tests {
         ksp.set_pc_type(PcType::Jacobi, None).unwrap();
         ksp.set_operators(Arc::new(a), None);
 
-        let b: Vec<S> = vec![S::from_real(1.0), S::from_real(2.0)];
-        let mut x = vec![S::zero(); 2];
+        let b: Vec<R> = vec![1.0, 2.0];
+        let mut x = vec![0.0; 2];
 
         let err = ksp.solve(&b, &mut x).unwrap_err();
         match err {
@@ -1670,11 +1671,11 @@ mod tests {
 
     #[test]
     fn try_set_operators_ok_same_comm() {
-        let m = Mat::<S>::from_fn(
+        let m = Mat::<R>::from_fn(
             2,
             2,
             |i, j| {
-                if i == j { S::from_real(1.0) } else { S::zero() }
+                if i == j { 1.0 } else { 0.0 }
             },
         );
         // NoComm for both => equal
@@ -1691,11 +1692,11 @@ mod tests {
         use crate::parallel::{Comm as _, MpiComm};
 
         // Build a small dense and wrap with different communicators
-        let m = Mat::<S>::from_fn(
+        let m = Mat::<R>::from_fn(
             2,
             2,
             |i, j| {
-                if i == j { S::from_real(1.0) } else { S::zero() }
+                if i == j { 1.0 } else { 0.0 }
             },
         );
         let op = Arc::new(DenseOp::new(Arc::new(m)));

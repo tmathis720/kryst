@@ -107,15 +107,15 @@ pub struct DeferredPcInfo {
 pub struct NoOpPreconditioner;
 
 impl Preconditioner for NoOpPreconditioner {
-    fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
         Ok(())
     }
-    fn apply(&self, _side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
         z.copy_from_slice(r);
         Ok(())
     }
 
-    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 }
