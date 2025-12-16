@@ -1241,7 +1241,7 @@ impl KspContext {
     }
 
     /// Solve the linear system using stored operators.
-    pub fn solve(&mut self, b: &[f64], x: &mut [f64]) -> Result<SolveStats<R>, KError> {
+    pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         // Make the configured reduction mode active for *every* path
         let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
 
@@ -1298,49 +1298,39 @@ impl KspContext {
             );
         }
         if matches!(self.solver_type, Some(SolverType::Preonly)) {
-            let pc = self.pc.as_mut().ok_or_else(|| {
-                KError::SolveError("PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into())
-            })?;
-            if !pc.supports_numeric_update() {
-                // Not a reliable indicator of directness, but provides a hint if a user
-                // accidentally selects a non-direct PC like Jacobi/ILU.
-                log::debug!(
-                    "PREONLY: selected PC may not be a direct solver; expecting LU/QR/SuperLU_DIST."
-                );
+            let pmat = pmat.clone();
+
+            {
+                let pc = self.pc.as_mut().ok_or_else(|| {
+                    KError::SolveError("PREONLY requires a direct PC (LU/QR/SuperLU_DIST)".into())
+                })?;
+                if !pc.supports_numeric_update() {
+                    // Not a reliable indicator of directness, but provides a hint if a user
+                    // accidentally selects a non-direct PC like Jacobi/ILU.
+                    log::debug!(
+                        "PREONLY: selected PC may not be a direct solver; expecting LU/QR/SuperLU_DIST."
+                    );
+                }
+                pc.direct_solve(pmat.as_ref(), b, x)?;
             }
-            pc.direct_solve(pmat.as_ref(), b, x)?;
-            let mat_for_residual = amat.as_ref();
-            let mut residual = vec![0.0; b.len()];
-            if let Err(e) = mat_for_residual.try_matvec(x, &mut residual) {
-                return Err(KError::SolveError(format!("residual matvec failed: {e}")));
-            }
-            for (ri, bi) in residual.iter_mut().zip(b.iter()) {
-                *ri = *bi - *ri;
-            }
-            let comm = mat_for_residual.comm();
-            comm.set_reproducible(self.reproducible);
-            let res_sq: R = comm.dot(&residual, &residual);
-            return Ok(SolveStats::new(
-                0,
-                res_sq.sqrt(),
-                ConvergedReason::ConvergedAtol,
-            ));
+
+            let mat_for_residual: &dyn LinOp<S = S> = amat.as_ref();
+
+            let res = self.true_residual_norm_in_place(mat_for_residual, b, x)?;
+            return Ok(SolveStats::new(0, res, ConvergedReason::ConvergedAtol));
         }
 
         // Configure solver preconditioning side, validating compatibility along the way.
         self.configure_pc_side()?;
 
-        let amat = self
-            .amat
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
+        let amat_ref = amat.as_ref();
 
         let monitors = if self.monitors.is_empty() {
             None
         } else {
             Some(self.monitors.as_slice())
         };
-        let comm = amat.comm();
+        let comm = amat_ref.comm();
         comm.set_reproducible(self.reproducible);
         let pc = self
             .pc
@@ -1351,7 +1341,7 @@ impl KspContext {
             .as_mut()
             .ok_or_else(|| KError::SolveError("No solver".into()))?;
         let mut stats = solver.solve(
-            amat.as_ref(),
+            amat_ref,
             pc,
             b,
             x,
@@ -1361,17 +1351,42 @@ impl KspContext {
             self.work.as_mut(),
         )?;
 
-        // Compute true residual r = b - A x and use its norm for reporting
-        let mut residual = vec![0.0; b.len()];
-        if let Err(e) = amat.try_matvec(x, &mut residual) {
-            return Err(KError::SolveError(format!("residual matvec failed: {e}")));
+        let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
+        stats.final_residual = res;
+        Ok(stats)
+    }
+
+    fn true_residual_norm_in_place(
+        &mut self,
+        mat: &dyn LinOp<S = S>,
+        b: &[S],
+        x: &[S],
+    ) -> Result<R, KError> {
+        let w = self
+            .work
+            .as_mut()
+            .ok_or_else(|| KError::SolveError("Workspace not initialized".into()))?;
+
+        if w.tmp1.len() != b.len() {
+            return Err(KError::InvalidInput(format!(
+                "workspace.tmp1 len {} != b len {} (setup missing or dimension mismatch)",
+                w.tmp1.len(),
+                b.len()
+            )));
         }
-        for (ri, bi) in residual.iter_mut().zip(b.iter()) {
+
+        mat.try_matvec(x, &mut w.tmp1)
+            .map_err(|e| KError::SolveError(format!("residual matvec failed: {e}")))?;
+
+        for (ri, bi) in w.tmp1.iter_mut().zip(b.iter()) {
             *ri = *bi - *ri;
         }
-        let res_sq: R = comm.dot(&residual, &residual);
-        stats.final_residual = res_sq.sqrt();
-        Ok(stats)
+
+        let comm = mat.comm();
+        comm.set_reproducible(self.reproducible);
+
+        let r2: R = comm.norm2(&w.tmp1);
+        Ok(r2.sqrt())
     }
 
     fn invalidate_setup(&mut self) {
@@ -1519,13 +1534,7 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_solver_switch_same_dim_cgnr_to_cg() {
-        let a = Mat::<R>::from_fn(4, 4, |i, j| {
-            if i == j {
-                2.0
-            } else {
-                0.5
-            }
-        });
+        let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1549,13 +1558,7 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_solver_switch_same_dim() {
-        let a = Mat::<R>::from_fn(4, 4, |i, j| {
-            if i == j {
-                2.0
-            } else {
-                0.5
-            }
-        });
+        let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1582,13 +1585,7 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_restart_change() {
-        let a = Mat::<R>::from_fn(4, 4, |i, j| {
-            if i == j {
-                2.0
-            } else {
-                0.5
-            }
-        });
+        let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1611,13 +1608,7 @@ mod tests {
 
     #[test]
     fn setup_workspace_runs_on_cg_variant_change() {
-        let a = Mat::<R>::from_fn(4, 4, |i, j| {
-            if i == j {
-                2.0
-            } else {
-                0.5
-            }
-        });
+        let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
 
         let mut ksp = KspContext::new();
@@ -1646,13 +1637,7 @@ mod tests {
     #[test]
     fn preonly_with_lu_pc_solves() {
         // Simple 2x2 SPD: [2 1; 1 2]
-        let a = Mat::<R>::from_fn(2, 2, |i, j| {
-            if i == j {
-                2.0
-            } else {
-                1.0
-            }
-        });
+        let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 1.0 });
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Preonly).unwrap();
         ksp.set_pc_type(PcType::Lu, None).unwrap();
@@ -1676,13 +1661,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "complex"))]
     fn preonly_without_direct_pc_errors() {
-        let a = Mat::<R>::from_fn(
-            2,
-            2,
-            |i, j| {
-                if i == j { 1.0 } else { 0.0 }
-            },
-        );
+        let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Preonly).unwrap();
         // Jacobi is not a direct solver
@@ -1703,13 +1682,7 @@ mod tests {
 
     #[test]
     fn try_set_operators_ok_same_comm() {
-        let m = Mat::<R>::from_fn(
-            2,
-            2,
-            |i, j| {
-                if i == j { 1.0 } else { 0.0 }
-            },
-        );
+        let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         // NoComm for both => equal
         let a = Arc::new(DenseOp::new(Arc::new(m)));
         let mut ksp = KspContext::new();
@@ -1724,13 +1697,7 @@ mod tests {
         use crate::parallel::{Comm as _, MpiComm};
 
         // Build a small dense and wrap with different communicators
-        let m = Mat::<R>::from_fn(
-            2,
-            2,
-            |i, j| {
-                if i == j { 1.0 } else { 0.0 }
-            },
-        );
+        let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let op = Arc::new(DenseOp::new(Arc::new(m)));
 
         let world = std::sync::Arc::new(MpiComm::new());
