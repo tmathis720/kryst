@@ -129,8 +129,8 @@ pub struct KspContext {
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
-    amat: Option<Arc<dyn LinOp<S = S>>>,
-    pmat: Option<Arc<dyn LinOp<S = S>>>,
+    amat: Option<Arc<dyn LinOp<S = R>>>,
+    pmat: Option<Arc<dyn LinOp<S = R>>>,
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
@@ -984,8 +984,8 @@ impl KspContext {
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = R>>,
+        pmat: Option<Arc<dyn LinOp<S = R>>>,
     ) -> Result<&mut Self, KError> {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
@@ -1027,8 +1027,8 @@ impl KspContext {
     /// Like `try_set_operators`, but first wraps operators with an explicit communicator.
     pub fn try_set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = R>>,
+        pmat: Option<Arc<dyn LinOp<S = R>>>,
         comm: crate::parallel::UniverseComm,
     ) -> Result<&mut Self, KError> {
         let a_wrapped = wrap_with_comm(amat, comm.clone());
@@ -1042,8 +1042,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators`] in libraries to handle errors.
     pub fn set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = R>>,
+        pmat: Option<Arc<dyn LinOp<S = R>>>,
     ) -> &mut Self {
         self.try_set_operators(amat, pmat).unwrap()
     }
@@ -1053,8 +1053,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators_with_comm`].
     pub fn set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = S>>,
-        pmat: Option<Arc<dyn LinOp<S = S>>>,
+        amat: Arc<dyn LinOp<S = R>>,
+        pmat: Option<Arc<dyn LinOp<S = R>>>,
         comm: crate::parallel::UniverseComm,
     ) -> &mut Self {
         self.try_set_operators_with_comm(amat, pmat, comm).unwrap()
