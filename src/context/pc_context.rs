@@ -558,7 +558,7 @@ impl PcFactory {
 
     pub fn construct_deferred_preconditioner(
         info: DeferredPcInfo,
-        _op: &dyn LinOp<S = S>,
+        _op: &dyn LinOp<S = R>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // The concrete operator format is deferred to the preconditioner itself.
         match info.pc_type {
@@ -603,7 +603,7 @@ impl PcFactory {
     #[cfg(feature = "backend-faer")]
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
-        op: &dyn LinOp<S = S>,
+        op: &dyn LinOp<S = R>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         // validate again in case specs were assembled elsewhere
         Self::validate_chain_specs(&specs)?;
@@ -620,7 +620,7 @@ impl PcFactory {
     #[cfg(not(feature = "backend-faer"))]
     pub fn construct_deferred_pc_chain(
         _specs: Vec<DeferredPcInfo>,
-        _op: &dyn LinOp<S = S>,
+        _op: &dyn LinOp<S = R>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         Err(KError::Unsupported(
             "backend-faer feature is required to build chained preconditioners".into(),
@@ -629,7 +629,7 @@ impl PcFactory {
 
     pub fn create_pc_chain(
         chain: &str,
-        op: &dyn LinOp<S = S>,
+        op: &dyn LinOp<S = R>,
         opts: Option<PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         let specs = Self::create_pc_chain_from_str(chain, opts.as_ref())?;
