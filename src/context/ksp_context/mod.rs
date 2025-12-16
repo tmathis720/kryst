@@ -1162,19 +1162,22 @@ impl KspContext {
         }
 
         let (m, _) = amat.dims();
-        if self
+        let needs_new = self
             .work
             .as_ref()
             .map(|w| w.tmp1.len() != m)
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+
+        if needs_new {
             self.work = Some(Workspace::new(m));
-            if let Some(ref mut w) = self.work {
-                w.set_reduction_options(self.reduction_opts.clone());
-            }
-            if let Some(ref mut solver) = self.solver
-                && let Some(ref mut w) = self.work
-            {
+        }
+
+        if let Some(w) = self.work.as_mut() {
+            // Keep workspace metadata in sync even when reusing allocations.
+            w.set_reduction_options(self.reduction_opts.clone());
+
+            // Critical fix: re-run solver-specific workspace setup every setup().
+            if let Some(solver) = self.solver.as_mut() {
                 solver.setup_workspace(w);
             }
         }
@@ -1431,6 +1434,57 @@ mod tests {
     use crate::preconditioner::PcSide;
     use faer::Mat;
     use std::sync::Arc;
+
+    #[test]
+    fn setup_workspace_runs_on_solver_switch_same_dim() {
+        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Arc::new(a);
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+
+        ksp.set_type(SolverType::Cgnr).unwrap();
+        ksp.setup().unwrap();
+
+        // CGNR sets up a small workspace footprint.
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.q_s.len(), 2);
+
+        // Switch to CG without changing matrix dims.
+        ksp.set_type(SolverType::Cg).unwrap();
+        ksp.setup().unwrap();
+
+        // CG setup must have run and expanded workspace requirements.
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.q_s.len(), 4);
+    }
+
+    #[test]
+    fn setup_workspace_runs_on_cg_variant_change() {
+        let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Arc::new(a);
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+        ksp.set_type(SolverType::Cg).unwrap();
+
+        // Default CG variant should require 4 q_s buffers.
+        ksp.setup().unwrap();
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.q_s.len(), 4);
+
+        // Switch CG to pipelined via options; setup() should re-run solver workspace setup.
+        let opts = KspOptions {
+            cg_pipelined: Some(true),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        ksp.setup().unwrap();
+
+        // Pipelined CG requires one additional buffer.
+        let ws = ksp.debug_workspace().unwrap();
+        assert_eq!(ws.q_s.len(), 5);
+    }
 
     #[cfg(feature = "dense-direct")]
     #[test]
