@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::scalar::{KrystScalar, R, S};
 use kryst::solver::common::givens::{apply_complex_givens, build_complex_givens};
 

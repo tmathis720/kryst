@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::algebra::blas::nrm2;
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;

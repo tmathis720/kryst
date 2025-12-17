@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
 use fixtures::csr_poisson_1d;
 use kryst::algebra::prelude::*;

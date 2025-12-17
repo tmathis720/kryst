@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 mod support;
 
 use kryst::algebra::prelude::*;

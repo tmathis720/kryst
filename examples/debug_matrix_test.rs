@@ -5,13 +5,27 @@
 //! to run:
 //! cargo run --example debug_matrix_test
 
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("debug_matrix_test is disabled when the complex feature is enabled.");
+}
+
+#[cfg(not(feature = "complex"))]
+use kryst::algebra::prelude::*;
+#[cfg(not(feature = "complex"))]
 use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(not(feature = "complex"))]
 use kryst::context::pc_context::PcType;
+#[cfg(not(feature = "complex"))]
 use kryst::utils::matrix_market::read_matrix_market;
+#[cfg(not(feature = "complex"))]
 use std::path::PathBuf;
+#[cfg(not(feature = "complex"))]
 use std::sync::Arc;
+#[cfg(not(feature = "complex"))]
 use std::time::Instant;
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Debug Matrix Market Test (CSR-only)");
     println!("===================================");
@@ -67,8 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rhs_data = read_matrix_market(rhs_path.to_str().unwrap())?;
 
     println!("Converting to CSR format...");
-    let matrix = matrix_data.to_csr_matrix()?;
-    let rhs: Vec<f64> = rhs_data.to_vector()?;
+    let matrix = matrix_data.to_csr_matrix_scalar()?;
+    let rhs: Vec<S> = rhs_data.to_vector_scalar()?;
 
     println!("Matrix size: {}x{}", matrix.nrows(), matrix.ncols());
     println!("Matrix nnz: {}", matrix.nnz());
@@ -79,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut solution = vec![0.0; rhs.len()];
+    let mut solution = vec![S::default(); rhs.len()];
 
     println!("Setting up KSP context (CSR operator)...");
     let mut ksp = KspContext::new();

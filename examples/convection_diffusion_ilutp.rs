@@ -10,32 +10,38 @@
 //! cargo run --example convection_diffusion_ilutp --features backend-faer
 //! ```
 
-#[cfg(not(feature = "backend-faer"))]
+#[cfg(feature = "complex")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("convection_diffusion_ilutp is not available with the complex feature.");
+    Ok(())
+}
+
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("convection_diffusion_ilutp requires the backend-faer feature.");
     Ok(())
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::config::options::PcOptions;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::error::KError;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::op::LinOp;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::SolveStats;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::error::Error;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn convection_diffusion_1d(n: usize, eps: f64, beta: f64) -> Mat<f64> {
     let h = 1.0 / (n as f64 + 1.0);
     Mat::from_fn(n, n, |i, j| {
@@ -51,7 +57,7 @@ fn convection_diffusion_1d(n: usize, eps: f64, beta: f64) -> Mat<f64> {
     })
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn run_gmres_with_pc(
     matrix: Arc<Mat<f64>>,
     rhs: &[f64],
@@ -70,7 +76,7 @@ fn run_gmres_with_pc(
     ctx.solve(rhs, &mut sol)
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn Error>> {
     let size = 128;
     let eps = 1e-2;

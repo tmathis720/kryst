@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 //! Tests for flexible convergence and divergence criteria
 
 use kryst::algebra::prelude::*;

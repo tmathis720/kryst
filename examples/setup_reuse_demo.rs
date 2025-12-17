@@ -10,13 +10,30 @@
 //! cargo run --example setup_reuse_demo
 //! ```
 
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("setup_reuse_demo is disabled when the complex feature is enabled.");
+}
+
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+fn main() {
+    eprintln!("setup_reuse_demo requires the backend-faer feature.");
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::op::LinOp;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::time::Instant;
 
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
     // This is a common pattern in finite difference discretizations
@@ -31,6 +48,7 @@ fn create_test_matrix(n: usize) -> Mat<f64> {
     })
 }
 
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("KSP Context Setup & Workspace Reuse Demo");
     println!("========================================");

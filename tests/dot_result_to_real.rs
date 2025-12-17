@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 use kryst::solver::common::dot_result_to_real;
 

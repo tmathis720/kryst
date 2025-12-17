@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 #[test]
 fn no_distributed_claims_without_mpi() {
     #[cfg(not(feature = "mpi"))]

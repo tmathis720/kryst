@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
 use faer::Mat;
@@ -10,7 +10,7 @@ use kryst::parallel::{NoComm, UniverseComm};
 #[test]
 #[should_panic]
 fn mismatch_comm_panics() {
-    let a = Mat::<f64>::from_fn(
+    let a = Mat::<S>::from_fn(
         4,
         4,
         |i, j| {
@@ -18,7 +18,7 @@ fn mismatch_comm_panics() {
         },
     );
     let p = a.clone();
-    let a_op: Arc<dyn LinOp<S = f64>> = wrap_with_comm(Arc::new(a), UniverseComm::NoComm(NoComm));
+    let a_op: Arc<dyn LinOp<S = S>> = wrap_with_comm(Arc::new(a), UniverseComm::NoComm(NoComm));
 
     #[cfg(feature = "mpi")]
     let p_comm = UniverseComm::Mpi(std::sync::Arc::new(
@@ -29,22 +29,22 @@ fn mismatch_comm_panics() {
     #[cfg(not(any(feature = "mpi", feature = "rayon")))]
     let p_comm = UniverseComm::Serial;
 
-    let p_op: Arc<dyn LinOp<S = f64>> = wrap_with_comm(Arc::new(p), p_comm);
+    let p_op: Arc<dyn LinOp<S = S>> = wrap_with_comm(Arc::new(p), p_comm);
     let mut ksp = KspContext::new();
     ksp.set_operators(a_op, Some(p_op));
 }
 
 #[test]
 fn residual_uses_comm_serial() {
-    let a = Mat::<f64>::from_fn(
+    let a = Mat::<S>::from_fn(
         3,
         3,
         |i, j| {
             if i == j { R::from(2.0) } else { R::default() }
         },
     );
-    let b = vec![R::from(1.0); 3];
-    let mut x = vec![R::default(); 3];
+    let b = vec![S::from_real(1.0); 3];
+    let mut x = vec![S::default(); 3];
 
     let a_op = wrap_with_comm(Arc::new(a), UniverseComm::NoComm(NoComm));
     let mut ksp = KspContext::new();

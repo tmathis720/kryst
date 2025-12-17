@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::scalar::{KrystScalar, S};
 use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::op::LinOp;

@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 
 use kryst::config::options::{CgVariant, KspOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};

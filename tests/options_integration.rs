@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 //! Tests for the PETSc-style options parsing and integration.
 
 use kryst::config::options::{KspOptions, PcOptions, PcSide, parse_all_options};

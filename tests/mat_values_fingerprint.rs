@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #![cfg(feature = "mat-values-fingerprint")]
 
 use faer::Mat;

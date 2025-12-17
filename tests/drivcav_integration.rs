@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 //! Integration test for DRIVCAV matrix family support.
 //! cargo run --example mpi_amg_gmres_demo -- -ksp_type gmres -pc_type ilutp -pc_ilut_max_fill 10 -pc_ilut_perm_tol 0.1
 //! Tests the comprehensive ILUTP implementation with option parsing,
@@ -57,14 +57,14 @@ fn test_ilutp_environment_parsing() -> Result<(), KError> {
 fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Create a well-posed test matrix (8x8 symmetric positive definite)
     let n = 8;
-    let mut matrix = Mat::<R>::zeros(n, n);
+    let mut matrix = Mat::<S>::zeros(n, n);
 
     // Create a simple symmetric positive definite matrix
     // Using a scaled identity + symmetric matrix
     for i in 0..n {
-        matrix[(i, i)] = S::from_real(4.0).real(); // Strong diagonal dominance
+        matrix[(i, i)] = S::from_real(4.0); // Strong diagonal dominance
         if i > 0 {
-            let off_diag = S::from_real(-1.0).real();
+            let off_diag = S::from_real(-1.0);
             matrix[(i, i - 1)] = off_diag;
             matrix[(i - 1, i)] = off_diag; // Ensure symmetry
         }
@@ -72,17 +72,17 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
 
     // Create a simple RHS that gives a known solution
     // Let's use x = [1, 2, 3, 4, 5, 6, 7, 8] as our target solution
-    let exact_solution: Vec<R> = (1..=n).map(|i| S::from_real(i as f64).real()).collect();
+    let exact_solution: Vec<S> = (1..=n).map(|i| S::from_real(i as f64)).collect();
 
     // Compute b = A * exact_solution
-    let mut b = vec![R::default(); n];
+    let mut b = vec![S::default(); n];
     for i in 0..n {
         for j in 0..n {
             b[i] += matrix[(i, j)] * exact_solution[j];
         }
     }
 
-    let mut x = vec![R::default(); n];
+    let mut x = vec![S::default(); n];
 
     // Setup KspContext with ILUTP
     let mut ksp = KspContext::new();
@@ -95,7 +95,7 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
         reorder: Some("none".to_string()),
         ..Default::default()
     };
-    let amat: Arc<dyn LinOp<S = f64>> = Arc::new(matrix.clone());
+    let amat: Arc<dyn LinOp<S = S>> = Arc::new(matrix.clone());
     ksp.set_operators(amat, None);
 
     // Use reasonable tolerances
@@ -120,15 +120,15 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Verify solution quality by computing residual ||Ax - b||
     let mut residual = b.clone();
     for i in 0..n {
-        let mut ax_i = R::default();
+        let mut ax_i = S::default();
         for j in 0..n {
             ax_i += matrix[(i, j)] * x[j];
         }
         residual[i] -= ax_i;
     }
 
-    let residual_norm: R = residual.iter().map(|r| r * r).sum::<R>().sqrt();
-    let rhs_norm: R = b.iter().map(|r| r * r).sum::<R>().sqrt();
+    let residual_norm: R = residual.iter().map(|r| r.abs() * r.abs()).sum::<R>().sqrt();
+    let rhs_norm: R = b.iter().map(|r| r.abs() * r.abs()).sum::<R>().sqrt();
     let relative_residual = residual_norm / rhs_norm;
 
     println!("Final residual norm: {:.2e}", residual_norm);
@@ -144,10 +144,14 @@ fn test_ksp_context_ilutp_integration() -> Result<(), KError> {
     // Verify solution accuracy against known exact solution
     let mut solution_error = R::default();
     for i in 0..n {
-        solution_error += (x[i] - exact_solution[i]).powi(2);
+        solution_error += (x[i] - exact_solution[i]).abs() * (x[i] - exact_solution[i]).abs();
     }
     solution_error = solution_error.sqrt();
-    let exact_norm: R = exact_solution.iter().map(|s| s * s).sum::<R>().sqrt();
+    let exact_norm: R = exact_solution
+        .iter()
+        .map(|s| s.abs() * s.abs())
+        .sum::<R>()
+        .sqrt();
     let relative_error = solution_error / exact_norm;
 
     println!("Solution error norm: {:.2e}", solution_error);

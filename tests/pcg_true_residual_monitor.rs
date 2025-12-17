@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;

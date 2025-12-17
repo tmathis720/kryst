@@ -5,10 +5,19 @@
 // to run:
 // cargo run --example bicgstab_workspace_verification
 
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("bicgstab_workspace_verification is disabled when the complex feature is enabled.");
+}
+
+#[cfg(not(feature = "complex"))]
 use faer::prelude::*;
+#[cfg(not(feature = "complex"))]
 use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(not(feature = "complex"))]
 use std::sync::Arc;
 
+#[cfg(not(feature = "complex"))]
 fn create_test_matrix(n: usize) -> (Mat<f64>, Col<f64>, Col<f64>) {
     // Create a diagonally dominant non-symmetric matrix
     let mut a = Mat::zeros(n, n);
@@ -41,6 +50,7 @@ fn create_test_matrix(n: usize) -> (Mat<f64>, Col<f64>, Col<f64>) {
     (a, b, x_true)
 }
 
+#[cfg(not(feature = "complex"))]
 fn workspace_size_analysis() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== BiCGStab Workspace Analysis ===\n");
 
@@ -113,6 +123,7 @@ fn workspace_size_analysis() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(feature = "complex"))]
 fn workspace_reuse_demonstration() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Workspace Reuse Demonstration ===\n");
 
@@ -152,6 +163,7 @@ fn workspace_reuse_demonstration() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     workspace_size_analysis()?;
     workspace_reuse_demonstration()?;

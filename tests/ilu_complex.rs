@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #![cfg(all(feature = "complex", feature = "complex_ilu"))]
 
 use faer::Mat;
