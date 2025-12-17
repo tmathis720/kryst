@@ -1241,6 +1241,7 @@ impl KspContext {
     }
 
     /// Solve the linear system using stored operators.
+    #[cfg(not(feature = "complex"))]
     pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         // Make the configured reduction mode active for *every* path
         let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
@@ -1354,6 +1355,14 @@ impl KspContext {
         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
         stats.final_residual = res;
         Ok(stats)
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
+        let _ = (b, x);
+        Err(KError::Unsupported(
+            "KSP complex solves are not yet implemented; please disable the 'complex' feature",
+        ))
     }
 
     fn true_residual_norm_in_place(
