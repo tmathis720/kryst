@@ -10,20 +10,26 @@
 //! ```bash
 //! cargo run --example convergence_demo
 //! ```
-#[cfg(not(feature = "backend-faer"))]
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("convergence_demo is disabled when the complex feature is enabled.");
+}
+
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
 fn main() {
     eprintln!("convergence_demo requires the backend-faer feature.");
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
     Mat::from_fn(n, n, |i, j| {
@@ -37,7 +43,7 @@ fn create_test_matrix(n: usize) -> Mat<f64> {
     })
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Flexible Convergence & Divergence Tests Demo");
     println!("============================================");

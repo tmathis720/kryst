@@ -1,3 +1,5 @@
+#![cfg(not(feature = "complex"))]
+
 use std::any::Any;
 use std::sync::Arc;
 

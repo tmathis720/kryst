@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #![allow(clippy::too_many_arguments)]
 
 use std::sync::{Arc, Mutex};

@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
@@ -8,32 +8,32 @@ use kryst::preconditioner::PcSide;
 use kryst::{assert_s_close, testkit};
 use std::sync::Arc;
 
-fn diag_mat(vals: &[R]) -> Mat<R> {
+fn diag_mat(vals: &[S]) -> Mat<S> {
     let n = vals.len();
-    Mat::from_fn(n, n, |i, j| if i == j { vals[i] } else { R::default() })
+    Mat::from_fn(n, n, |i, j| if i == j { vals[i] } else { S::default() })
 }
 
-fn nrm2(x: &[R]) -> R {
-    x.iter().map(|&v| v * v).sum::<R>().sqrt()
+fn nrm2(x: &[S]) -> R {
+    x.iter().map(|&v| v.abs() * v.abs()).sum::<R>().sqrt()
 }
 
 #[test]
 fn monitors_reported_norms_and_final_true_residual() {
     // Small diagonal system so Jacobi is exact
     let d = [
-        S::from_real(2.0).real(),
-        S::from_real(3.0).real(),
-        S::from_real(4.0).real(),
-        S::from_real(5.0).real(),
-        S::from_real(6.0).real(),
+        S::from_real(2.0),
+        S::from_real(3.0),
+        S::from_real(4.0),
+        S::from_real(5.0),
+        S::from_real(6.0),
     ];
     let a = diag_mat(&d);
     let n = d.len();
-    let b = vec![S::one().real(); n];
+    let b = vec![S::one(); n];
 
     // Expected norms
     let bnorm = nrm2(&b);
-    let mut minv_b = vec![R::default(); n];
+    let mut minv_b = vec![S::default(); n];
     for i in 0..n {
         minv_b[i] = b[i] / d[i];
     }
@@ -41,23 +41,23 @@ fn monitors_reported_norms_and_final_true_residual() {
 
     // Helper to run a solver and capture first monitor value and final residual
     // Helper to recompute true residual norm
-    let true_res_norm = |a: &Mat<R>, b: &[R], x: &[R]| -> R {
+    let true_res_norm = |a: &Mat<S>, b: &[S], x: &[S]| -> R {
         let n = b.len();
-        let mut ax = vec![R::default(); n];
+        let mut ax = vec![S::default(); n];
         a.matvec(x, &mut ax);
-        let mut r = vec![R::default(); n];
+        let mut r = vec![S::default(); n];
         for i in 0..n {
             r[i] = b[i] - ax[i];
         }
         nrm2(&r)
     };
 
-    let run = |solver: SolverType, side: PcSide| -> (R, R, Vec<R>) {
+    let run = |solver: SolverType, side: PcSide| -> (R, R, Vec<S>) {
         let mut ksp = KspContext::new();
         ksp.set_type(solver).unwrap();
         ksp.set_pc_type(PcType::Jacobi, None).unwrap();
         ksp.pc_side = side;
-        let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
+        let amat: Arc<dyn LinOp<S = S>> = Arc::new(a.clone());
         ksp.set_operators(amat, None);
 
         use std::sync::{Arc, Mutex};
@@ -70,7 +70,7 @@ fn monitors_reported_norms_and_final_true_residual() {
             }
         });
 
-        let mut x = vec![R::default(); n];
+        let mut x = vec![S::default(); n];
         let stats = ksp.solve(&b, &mut x).unwrap();
         (
             first.lock().unwrap().unwrap_or(R::default()),
@@ -85,17 +85,17 @@ fn monitors_reported_norms_and_final_true_residual() {
     ksp.set_type(SolverType::Cg).unwrap();
     ksp.set_pc_type(PcType::None, None).unwrap();
     ksp.pc_side = PcSide::Left;
-    let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
+    let amat: Arc<dyn LinOp<S = S>> = Arc::new(a.clone());
     ksp.set_operators(amat, None);
     use std::sync::{Arc as SArc, Mutex as SMutex};
-    let first_cg: SArc<SMutex<Option<f64>>> = SArc::new(SMutex::new(None));
+    let first_cg: SArc<SMutex<Option<R>>> = SArc::new(SMutex::new(None));
     let first_cg_cl = SArc::clone(&first_cg);
     ksp.add_monitor(move |iter, res| {
         if iter == 0 {
             *first_cg_cl.lock().unwrap() = Some(res);
         }
     });
-    let mut x = vec![R::default(); n];
+    let mut x = vec![S::default(); n];
     let stats = ksp.solve(&b, &mut x).unwrap();
     let first = first_cg.lock().unwrap().unwrap_or(R::default());
     assert_s_close!("cg monitor first", S::from_real(first), S::from_real(bnorm));
@@ -142,16 +142,16 @@ fn monitors_reported_norms_and_final_true_residual() {
         ksp.set_type(SolverType::Cgs).unwrap();
         ksp.set_pc_type(PcType::None, None).unwrap();
         ksp.pc_side = PcSide::Left;
-        let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
+        let amat: Arc<dyn LinOp<S = S>> = Arc::new(a.clone());
         ksp.set_operators(amat, None);
-        let first: SArc<SMutex<Option<f64>>> = SArc::new(SMutex::new(None));
+        let first: SArc<SMutex<Option<R>>> = SArc::new(SMutex::new(None));
         let first_cl = SArc::clone(&first);
         ksp.add_monitor(move |iter, res| {
             if iter == 0 {
                 *first_cl.lock().unwrap() = Some(res);
             }
         });
-        let mut x = vec![R::default(); n];
+        let mut x = vec![S::default(); n];
         let stats = ksp.solve(&b, &mut x).unwrap();
         let res_true = true_res_norm(&a, &b, &x);
         assert_s_close!(
@@ -172,16 +172,16 @@ fn monitors_reported_norms_and_final_true_residual() {
         ksp.set_type(SolverType::Qmr).unwrap();
         ksp.set_pc_type(PcType::None, None).unwrap();
         ksp.pc_side = PcSide::Left;
-        let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
+        let amat: Arc<dyn LinOp<S = S>> = Arc::new(a.clone());
         ksp.set_operators(amat, None);
-        let first: SArc<SMutex<Option<f64>>> = SArc::new(SMutex::new(None));
+        let first: SArc<SMutex<Option<R>>> = SArc::new(SMutex::new(None));
         let first_cl = SArc::clone(&first);
         ksp.add_monitor(move |iter, res| {
             if iter == 0 {
                 *first_cl.lock().unwrap() = Some(res);
             }
         });
-        let mut x = vec![R::default(); n];
+        let mut x = vec![S::default(); n];
         let stats = ksp.solve(&b, &mut x).unwrap();
         let res_true = true_res_norm(&a, &b, &x);
         assert_s_close!(

@@ -35,22 +35,30 @@
 //! - Trilinos BiCGStab + ILU: 4 iterations, 0.324s (best)
 //! - Trilinos GMRES + ILU: 7 iterations, 0.326s
 //! - Without ILU: 17,000+ iterations, very slow
-#[cfg(not(feature = "backend-faer"))]
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("optimized_solver_demo is disabled when the complex feature is enabled.");
+}
+
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
 fn main() {
     eprintln!("optimized_solver_demo requires the backend-faer feature.");
 }
 
+#[cfg(not(feature = "complex"))]
 use std::str::FromStr;
+#[cfg(not(feature = "complex"))]
 use std::sync::Arc;
+#[cfg(not(feature = "complex"))]
 use std::time::Instant;
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
@@ -64,6 +72,7 @@ struct OptimalConfig {
 }
 
 /// Get the optimal solver configuration for a specific matrix
+#[cfg(not(feature = "complex"))]
 fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
     match matrix_name {
         "fidap005" => OptimalConfig {
@@ -126,6 +135,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
 }
 
 /// Test a solver configuration and return detailed results
+#[cfg(not(feature = "complex"))]
 fn test_optimal_solver(
     matrix: &CsrMatrix<f64>,
     rhs: &[f64],
@@ -207,6 +217,7 @@ fn test_optimal_solver(
 }
 
 /// Analyze matrix properties for diagnostics
+#[cfg(not(feature = "complex"))]
 fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     let n = matrix.nrows();
     let nnz = matrix.nnz();
@@ -246,7 +257,7 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     (density, condition_estimate, is_well_conditioned)
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging if available
     #[cfg(feature = "logging")]

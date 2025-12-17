@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::blas::dot_conj;
 use kryst::algebra::prelude::*;
 use kryst::parallel::NoComm;

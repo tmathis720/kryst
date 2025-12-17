@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 #[cfg(feature = "superlu_dist")]
 use kryst::solver::superlu_dist::{Panel, PivotingStrategy};
 use std::time::Instant;

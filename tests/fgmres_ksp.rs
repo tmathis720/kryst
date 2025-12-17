@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
 use faer::Mat;
@@ -13,63 +13,63 @@ fn fgmres_solves_dd_nonsym() {
     // Non-symmetric, diagonally-dominant 5x5 matrix
     let data = [
         [
-            S::from_real(10.0).real(),
-            S::from_real(2.0).real(),
-            R::default(),
-            R::default(),
-            R::default(),
+            S::from_real(10.0),
+            S::from_real(2.0),
+            S::default(),
+            S::default(),
+            S::default(),
         ],
         [
-            S::from_real(3.0).real(),
-            S::from_real(15.0).real(),
-            S::from_real(4.0).real(),
-            R::default(),
-            R::default(),
+            S::from_real(3.0),
+            S::from_real(15.0),
+            S::from_real(4.0),
+            S::default(),
+            S::default(),
         ],
         [
-            R::default(),
-            S::from_real(-2.0).real(),
-            S::from_real(8.0).real(),
-            S::from_real(1.0).real(),
-            R::default(),
+            S::default(),
+            S::from_real(-2.0),
+            S::from_real(8.0),
+            S::from_real(1.0),
+            S::default(),
         ],
         [
-            R::default(),
-            R::default(),
-            S::from_real(1.0).real(),
-            S::from_real(7.0).real(),
-            S::from_real(3.0).real(),
+            S::default(),
+            S::default(),
+            S::from_real(1.0),
+            S::from_real(7.0),
+            S::from_real(3.0),
         ],
         [
-            R::default(),
-            R::default(),
-            R::default(),
-            S::from_real(2.0).real(),
-            S::from_real(12.0).real(),
+            S::default(),
+            S::default(),
+            S::default(),
+            S::from_real(2.0),
+            S::from_real(12.0),
         ],
     ];
-    let mut a = Mat::<R>::zeros(5, 5);
+    let mut a = Mat::<S>::zeros(5, 5);
     for i in 0..5 {
         for j in 0..5 {
             a[(i, j)] = data[i][j];
         }
     }
 
-    let amat: Arc<dyn kryst::matrix::op::LinOp<S = f64>> = Arc::new(a.clone());
+    let amat: Arc<dyn kryst::matrix::op::LinOp<S = S>> = Arc::new(a.clone());
     let pmat = amat.clone();
 
     // x_true = [1,2,3,4,5]; b = A x_true
     let x_true = [
-        S::from_real(1.0).real(),
-        S::from_real(2.0).real(),
-        S::from_real(3.0).real(),
-        S::from_real(4.0).real(),
-        S::from_real(5.0).real(),
+        S::from_real(1.0),
+        S::from_real(2.0),
+        S::from_real(3.0),
+        S::from_real(4.0),
+        S::from_real(5.0),
     ];
-    let mut b = [R::default(); 5];
+    let mut b = [S::default(); 5];
     amat.matvec(&x_true, &mut b);
 
-    let mut x = [R::default(); 5];
+    let mut x = [S::default(); 5];
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Fgmres).unwrap();
     ksp.set_pc_type(PcType::Jacobi, None).unwrap();

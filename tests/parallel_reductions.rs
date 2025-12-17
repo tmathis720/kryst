@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 #![cfg(feature = "mpi")]
 
 use kryst::algebra::blas::dot_conj;

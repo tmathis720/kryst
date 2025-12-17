@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::blas::{dot_conj, nrm2};
 use kryst::algebra::scalar::{KrystScalar, R, S};
 

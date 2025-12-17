@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 #[cfg(feature = "superlu_dist")]
 use kryst::solver::superlu_dist::{Panel, PivotingStrategy};

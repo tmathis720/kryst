@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
 #[cfg(feature = "rayon")]

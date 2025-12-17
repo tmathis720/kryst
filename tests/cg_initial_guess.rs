@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::matrix::op::{LinOp, LinOpF64};

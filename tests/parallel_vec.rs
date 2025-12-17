@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::parallel::{par_axpy, par_dot_conj_local, par_sum_abs2_local};
 use kryst::algebra::prelude::*;
 

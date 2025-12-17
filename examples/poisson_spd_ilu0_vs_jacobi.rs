@@ -10,67 +10,74 @@
 //! cargo run --example poisson_spd_ilu0_vs_jacobi --features backend-faer
 //! ```
 
-#[cfg(not(feature = "backend-faer"))]
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("poisson_spd_ilu0_vs_jacobi is disabled when the complex feature is enabled.");
+}
+
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("poisson_spd_ilu0_vs_jacobi requires the backend-faer feature.");
     Ok(())
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::algebra::prelude::*;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::config::options::PcOptions;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::error::KError;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::op::LinOp;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::SolveStats;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::error::Error;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
-#[cfg(feature = "backend-faer")]
-fn make_poisson_1d(n: usize) -> Mat<f64> {
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn make_poisson_1d(n: usize) -> Mat<S> {
     Mat::from_fn(n, n, |i, j| {
         if i == j {
-            2.0
+            S::from_real(2.0)
         } else if (i as isize - j as isize).abs() == 1 {
-            -1.0
+            S::from_real(-1.0)
         } else {
-            0.0
+            S::default()
         }
     })
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn run_cg_with_pc(
-    matrix: Arc<Mat<f64>>,
-    rhs: &[f64],
+    matrix: Arc<Mat<S>>,
+    rhs: &[S],
     pc_type: PcType,
     pc_opts: Option<&PcOptions>,
-) -> Result<SolveStats<f64>, KError> {
+) -> Result<SolveStats<R>, KError> {
     let mut ctx = KspContext::new();
     ctx.set_type(SolverType::Cg)?
         .set_pc_type(pc_type, pc_opts)?
         .set_tolerances(1e-8, 1e-12, 1e3, 1000);
-    let operator: Arc<dyn LinOp<S = f64>> = matrix;
+    let operator: Arc<dyn LinOp<S = S>> = matrix;
     ctx.try_set_operators(operator, None)?;
     ctx.setup()?;
-    let mut sol = vec![0.0; rhs.len()];
+    let mut sol = vec![S::default(); rhs.len()];
     ctx.solve(rhs, &mut sol)
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn Error>> {
     let size = 256;
     let matrix = Arc::new(make_poisson_1d(size));
-    let rhs: Vec<f64> = vec![1.0; size];
+    let rhs: Vec<S> = vec![S::from_real(1.0); size];
 
     println!("Poisson SPD example: Jacobi vs ILU(0)");
     println!("======================================");

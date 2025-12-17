@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 use kryst::parallel::{Comm, NoComm};
 use kryst::utils::reduction::{AllreduceOps, ReductOptions};

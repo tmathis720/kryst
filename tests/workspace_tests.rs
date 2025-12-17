@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{GmresSpec, Workspace};
 use kryst::parallel::UniverseComm;

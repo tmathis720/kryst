@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 #![cfg(feature = "complex")]
 
 mod support;

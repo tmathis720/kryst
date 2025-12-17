@@ -11,15 +11,26 @@
 //! to run:
 //! cargo run --features=logging --example bicgstab_workspace_demo
 
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("bicgstab_workspace_demo is disabled when the complex feature is enabled.");
+}
+
+#[cfg(not(feature = "complex"))]
 use faer::Mat;
+#[cfg(not(feature = "complex"))]
 use kryst::context::ksp_context::{KspContext, SolverType};
+#[cfg(not(feature = "complex"))]
 use kryst::context::pc_context::PcType;
+#[cfg(not(feature = "complex"))]
 use kryst::utils::convergence::ConvergedReason;
+#[cfg(not(feature = "complex"))]
 use std::sync::Arc;
 
 #[cfg(feature = "logging")]
 use env_logger;
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     #[cfg(feature = "logging")]

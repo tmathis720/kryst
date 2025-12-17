@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 // Minimal CSR fixtures for golden tests
 use kryst::matrix::sparse::CsrMatrix;
 

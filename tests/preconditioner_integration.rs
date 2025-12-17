@@ -1,4 +1,4 @@
-#![cfg(feature = "backend-faer")]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 //! Integration tests for preconditioners and solvers in the KrylovKit library.
 //!
 //! This module verifies that various preconditioners (e.g., Jacobi, ILU0) work correctly

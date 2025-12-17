@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 use kryst::parallel::{NoComm, UniverseComm, global_dot_conj, global_nrm2, global_reduce_tuple2};
 

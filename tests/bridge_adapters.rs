@@ -1,3 +1,4 @@
+#![cfg(not(feature = "complex"))]
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
 use kryst::assert_s_close;

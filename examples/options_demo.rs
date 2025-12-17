@@ -25,21 +25,28 @@
 //! cargo run --example options_demo -- -help
 //! ```
 
-#[cfg(not(feature = "backend-faer"))]
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("options_demo is disabled when the complex feature is enabled.");
+}
+
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
 fn main() {
     eprintln!("options_demo requires the backend-faer feature.");
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::config::options::parse_all_options;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::KspContext;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::env;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
