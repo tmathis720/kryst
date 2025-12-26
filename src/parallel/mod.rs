@@ -1,3 +1,9 @@
+//! Parallel communicators and reduction helpers.
+//!
+//! `UniverseComm` and the [`Comm`] trait define the communication surface used by
+//! solvers and preconditioners. `LinOp::comm()` is the source of truth for
+//! communicator binding; see `docs/communicators.md` for details.
+
 use crate::algebra::prelude::*;
 use crate::reduction::ReproMode;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -215,15 +221,19 @@ impl NoComm {
 }
 
 #[cfg(feature = "mpi")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mpi")))]
 pub mod mpi_comm;
 #[cfg(feature = "mpi")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mpi")))]
 pub use mpi_comm::MpiComm;
 
 pub mod threads;
 
 #[cfg(feature = "rayon")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rayon")))]
 pub mod rayon_comm;
 #[cfg(feature = "rayon")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rayon")))]
 pub use rayon_comm::RayonComm;
 
 /// `UniverseComm` is a stable logical handle for MPI (or `NoComm` for serial).

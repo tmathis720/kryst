@@ -12,16 +12,22 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
+//! use kryst::utils::monitor::IterationMonitor;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut monitor = IterationMonitor::new();
-//! monitor.enable_logging("solver_convergence.csv");
+//! monitor.enable_csv_logging("solver_convergence.csv")?;
 //!
 //! // During solve iterations
-//! monitor.record_iteration(iter, residual_norm, Some(pc_apply_time));
+//! let iter = 0;
+//! let residual_norm = 1.0;
+//! monitor.record_iteration(iter, residual_norm, None);
 //!
 //! // After solve
 //! let stats = monitor.get_statistics();
 //! println!("Convergence rate: {:.2e}", stats.avg_convergence_rate);
+//! # Ok(()) }
 //! ```
 
 use serde::{Deserialize, Serialize};

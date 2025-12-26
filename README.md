@@ -56,6 +56,18 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Real (default)**: Builds without extra features keep all public APIs monomorphic on `f64`.
 - **Complex (`--features complex`)**: Internals promote Kryst's scalar alias `S` to `num_complex::Complex64` while the Matrix Market tooling converts boundary data to and from complex storage.
 
+`S` is the internal scalar alias and `R` is its real partner. In real builds
+`S = R = f64`. In complex builds `S = Complex64` and `R = f64`.
+
+### Cargo Features
+
+| Feature | Enables | Notes |
+| --- | --- | --- |
+| `mpi` | MPI communication backend | Requires MPI installed; examples run via `mpirun` |
+| `complex` | Complex scalar `S` | `KspContext::solve` is not yet implemented; pipelined GMRES/FGMRES are unavailable |
+| `backend-faer` | Dense/CSR backends and most PCs | Default feature |
+| backend flags | Direct solvers / matrix backends | e.g. `superlu_dist` (where available) |
+
 ### Cargo feature summary
 
 - `mpi` — enable distributed-memory execution via the `mpi` crate. Optional and independent from Rayon.
@@ -143,8 +155,7 @@ deterministic, allocation-free application time.
 ### Basic Usage with KspContext (Recommended)
 
 ```rust
-use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::context::pc_context::PcType;
+use kryst::prelude::*;
 use kryst::matrix::op::DenseOp;
 use faer::Mat;
 use std::sync::Arc;

@@ -26,7 +26,7 @@ mod tests_gmres_workspace_reuse {
         let comm = UniverseComm::NoComm(NoComm);
 
         // First solve to allocate workspace
-        solver.solve_f64(
+        let _ = solver.solve_f64(
             &a,
             None,
             &b,
@@ -43,7 +43,7 @@ mod tests_gmres_workspace_reuse {
 
         // Solve again and ensure buffers are reused
         x = [R::default(), R::default()];
-        solver.solve_f64(
+        let _ = solver.solve_f64(
             &a,
             None,
             &b,

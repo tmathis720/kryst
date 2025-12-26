@@ -1,4 +1,8 @@
-//! Solver traits and adapters.
+//! Solver traits and implementations.
+//!
+//! Most users configure solvers through [`KspContext`](crate::context::KspContext) and
+//! [`SolverType`](crate::context::ksp_context::SolverType). This module exposes the
+//! underlying solver types and traits for advanced use, custom pipelines, or testing.
 
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;

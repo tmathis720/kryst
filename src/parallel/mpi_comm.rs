@@ -7,6 +7,8 @@
 //!
 //! # Example
 //! ```no_run
+//! use kryst::parallel::{Comm, MpiComm};
+//!
 //! let comm = MpiComm::new();
 //! println!("Rank: {} / {}", comm.rank(), comm.size());
 //! comm.barrier();

@@ -30,6 +30,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ${{ matrix.cmd }}
 
+  docs:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            cmd: cargo test --doc
+          - name: complex
+            cmd: cargo test --doc --features complex
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
+
+  examples:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            cmd: cargo build --examples
+          - name: complex
+            cmd: cargo build --examples --features complex
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
+
   clippy:
     runs-on: ubuntu-latest
     strategy:
@@ -59,6 +91,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y openmpi-bin libopenmpi-dev
+
+      - name: Doc tests (MPI)
+        run: cargo test --doc --features mpi
+
+      - name: Build MPI examples
+        run: cargo build --examples --features mpi
 
       - name: MPI smoke tests (2 ranks)
         env:

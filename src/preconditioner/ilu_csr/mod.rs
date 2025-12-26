@@ -10,7 +10,7 @@ use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditio
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 
 #[cfg(feature = "complex")]
-use crate::bridge::BridgeScratch;
+use crate::algebra::bridge::BridgeScratch;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]

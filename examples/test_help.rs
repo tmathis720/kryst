@@ -1,4 +1,4 @@
-use kryst::PcOptions;
+use kryst::config::options::PcOptions;
 
 fn main() {
     let args = vec!["-help"];
@@ -10,6 +10,6 @@ fn main() {
 
     // Check if help is requested
     if kryst::config::options_core::is_help_requested(&args) {
-        kryst::print_help();
+        kryst::config::print_help();
     }
 }

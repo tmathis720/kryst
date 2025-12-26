@@ -1,25 +1,45 @@
-//! Context module for KrylovKit linear algebra library.
+//! KSP/PC context types and factories.
 //!
-//! This module provides context/factory types for configuring and managing solver and preconditioner objects.
-//! Contexts encapsulate algorithm selection, parameter management, and construction of solver/preconditioner pipelines.
+//! Most users configure solvers through [`KspContext`], which owns the solver type,
+//! preconditioner choice, operator bindings, and the `setup -> solve` lifecycle.
+//! Preconditioner construction helpers live in [`pc_context`].
 //!
-//! Modules:
-//! - [`ksp_context`]: Contains the `KspContext` struct for Krylov subspace solver configuration and management.
-//! - [`pc_context`]: Contains the preconditioner context types and factories.
+//! ## Lifecycle (summary)
+//! 1. `set_type` / `set_pc_type` / `set_from_options`
+//! 2. `set_operators(Amat, Pmat)`
+//! 3. `setup()` (idempotent; reuses cached structure/values when possible)
+//! 4. `solve(b, x)`
 //!
-//! Usage:
-//! Import the desired context type and use it to configure and instantiate solvers or preconditioners.
+//! ## Example
+//! ```rust,no_run
+//! use kryst::prelude::*;
+//! use std::sync::Arc;
 //!
-//! # Example
-//! ```rust,ignore
-//! use crate::context::KspContext;
-//! let ksp = KspContext::new();
-//! // Configure and use the context...
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! struct IdentityOp(usize);
+//! impl LinOp for IdentityOp {
+//!     type S = R;
+//!     fn dims(&self) -> (usize, usize) {
+//!         (self.0, self.0)
+//!     }
+//!     fn matvec(&self, x: &[R], y: &mut [R]) {
+//!         y.copy_from_slice(x);
+//!     }
+//!     fn as_any(&self) -> &dyn std::any::Any {
+//!         self
+//!     }
+//! }
+//!
+//! let op = Arc::new(IdentityOp(4)) as Arc<dyn LinOp<S = R>>;
+//! let b = vec![S::from_real(1.0); 4];
+//! let mut x = vec![S::zero(); 4];
+//! let mut ksp = KspContext::new();
+//! ksp.set_type(SolverType::Gmres)?;
+//! ksp.set_pc_type(PcType::None, None)?;
+//! ksp.set_operators(op, None);
+//! let _stats = ksp.solve(&b, &mut x)?;
+//! # Ok(()) }
 //! ```
-//!
-//! # References
-//! - Saad, Y. (2003). Iterative Methods for Sparse Linear Systems. SIAM.
-//! - PETSc documentation: https://petsc.org/release/docs/manualpages/KSP/
 
 pub mod ksp_context;
 pub use ksp_context::KspContext;

@@ -12,14 +12,24 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
+//! use kryst::prelude::*;
+//! use kryst::utils::tuning::ParameterTuner;
+//! use faer::Mat;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let matrix = Mat::identity(4, 4);
+//! let rhs = vec![1.0; 4];
+//! let max_trials = 4;
+//!
 //! let mut tuner = ParameterTuner::new();
 //! tuner.add_solver_types(vec![SolverType::Cg, SolverType::Gmres]);
 //! tuner.add_pc_types(vec![PcType::Jacobi, PcType::Ilu0]);
 //! tuner.add_tolerances(vec![1e-6, 1e-8, 1e-10]);
 //!
-//! let best_config = tuner.tune_parameters(&matrix, &rhs, max_trials)?;
+//! let (best_config, _results) = tuner.tune_parameters(&matrix, &rhs, max_trials)?;
 //! println!("Best configuration: {:?}", best_config);
+//! # Ok(()) }
 //! ```
 
 use crate::config::options::{KspOptions, PcOptions};

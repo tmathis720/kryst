@@ -64,6 +64,7 @@ pub struct SolveMetrics {
 pub struct SolveMetrics;
 
 /// Statistics from a solve operation.
+#[must_use]
 #[derive(Clone, Debug)]
 pub struct SolveStats<R> {
     /// Number of iterations performed

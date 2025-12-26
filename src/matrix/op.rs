@@ -13,8 +13,24 @@ use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Opaque identifier for an operator's structural pattern.
+///
+/// Bump this when the sparsity pattern or dimensions change. Returning
+/// `StructureId(0)` means "unknown" and forces conservative cache invalidation.
+///
+/// Typical patterns:
+/// - Immutable matrix: keep the ID fixed.
+/// - Re-assemble with a new pattern: bump `StructureId` (and usually `ValuesId`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StructureId(pub u64);
+
+/// Opaque identifier for an operator's numeric values.
+///
+/// Bump this when numeric values change but the structure is unchanged.
+/// Returning `ValuesId(0)` means "unknown" and forces conservative refreshes.
+///
+/// Typical patterns:
+/// - Fixed structure, changing values each step: bump `ValuesId` only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ValuesId(pub u64);
 

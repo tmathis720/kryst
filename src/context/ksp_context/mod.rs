@@ -982,6 +982,20 @@ impl KspContext {
     /// `LinOp::comm()` is the single source of truth for parallel context;
     /// mismatches indicate a caller bug.
     ///
+    /// ## Reuse contract
+    /// - `StructureId` changes trigger symbolic rebuilds (pattern/dimensions).
+    /// - `ValuesId` changes trigger numeric rebuilds when supported/allowed.
+    /// - If both IDs are unchanged, `setup()` is a cheap no-op aside from
+    ///   workspace sizing and bookkeeping.
+    /// - `StructureId(0)` / `ValuesId(0)` mean \"unknown\" and force conservative
+    ///   refreshes. Use wrappers like `CsrOp` / `DenseOp` and call
+    ///   `mark_structure_changed` / `mark_values_changed` after in-place edits.
+    ///
+    /// ## Communicator binding
+    /// `KspContext` becomes bound to the operator communicator once operators
+    /// are set. To override or wrap operator communicators, use
+    /// [`try_set_operators_with_comm`].
+    ///
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(
         &mut self,

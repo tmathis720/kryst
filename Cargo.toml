@@ -21,8 +21,12 @@ exclude = [
     "*.jpeg",
 ]
 
+[package.metadata.docs.rs]
+features = ["mpi", "complex", "backend-faer"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
-doctest = false
+doctest = true
 
 [dependencies]
 rand = "0.8"

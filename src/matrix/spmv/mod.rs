@@ -144,7 +144,7 @@ where
     let row_ptr = a.row_ptr();
     let col_idx = a.col_idx();
     let vals = a.values();
-    let tune = crate::parallel_cfg::parallel_tune();
+    let tune = crate::algebra::parallel_cfg::parallel_tune();
     if nrows < tune.min_rows_spmv {
         return spmv_csr_serial(a, x, y);
     }

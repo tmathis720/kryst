@@ -1,5 +1,9 @@
 //! # Preconditioners
 //!
+//! Most users select a [`PcType`](crate::context::pc_context::PcType) through
+//! [`KspContext`](crate::context::KspContext). Implement the [`Preconditioner`]
+//! trait only when you need a custom operator.
+//!
 //! ## Contract
 //! - [`Preconditioner::apply`] must compute **`y = M^{-1} x`** regardless of [`PcSide`].
 //!   Side is forwarded so PCs *with internal sweep order* (e.g. SOR/SSOR) can choose
@@ -27,14 +31,18 @@
 //! ```no_run
 //! # use kryst::context::ksp_context::{KspContext, SolverType};
 //! # use kryst::context::pc_context::PcType;
+//! # use kryst::matrix::op::DenseOp;
 //! # use faer::Mat;
+//! # use std::sync::Arc;
 //! let a = Mat::<f64>::from_fn(100,100, |i,j| if i==j {4.0} else if (i as isize-j as isize).abs()==1 {-1.0} else {0.0});
-//! let b = vec![1.0; 100];
-//! let mut x = vec![0.0; 100];
+//! let a = Arc::new(DenseOp::new(Arc::new(a)));
+//! # use kryst::algebra::prelude::{KrystScalar, S};
+//! let b = vec![S::from_real(1.0); 100];
+//! let mut x = vec![S::zero(); 100];
 //! let mut ksp = KspContext::new();
 //! ksp.set_type(SolverType::Gmres).unwrap()
 //!    .set_pc_type(PcType::Jacobi, None).unwrap()
-//!    .set_operators(std::sync::Arc::new(a), None);
+//!    .set_operators(a, None);
 //! let _stats = ksp.solve(&b, &mut x).unwrap();
 //! ```
 

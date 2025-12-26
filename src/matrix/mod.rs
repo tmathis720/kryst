@@ -1,5 +1,8 @@
 //! Matrix module: dense and sparse matrix types and traits.
 //!
+//! `LinOp` is the core operator trait used by [`KspContext`](crate::context::KspContext).
+//! Its `StructureId` / `ValuesId` are used to decide when setup can be reused.
+//!
 //! # Real-only helpers vs generic APIs
 //!
 //! - The core `LinOp` trait and most sparse structures are generic over

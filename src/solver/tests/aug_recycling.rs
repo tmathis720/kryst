@@ -16,7 +16,7 @@ fn gmres_configures_recycling_workspace() -> Result<(), KError> {
     let mut x: Vec<R> = vec![R::default(); a.nrows()];
     let mut ws = Workspace::default();
     let comm = UniverseComm::NoComm(NoComm);
-    solver.solve_f64(
+    let _ = solver.solve_f64(
         &a,
         None,
         &b,
