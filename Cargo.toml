@@ -115,6 +115,14 @@ name = "ksp_core"
 harness = false
 
 [[bench]]
+name = "repeated_solves"
+harness = false
+
+[[bench]]
+name = "gmres_variants"
+harness = false
+
+[[bench]]
 name = "iai"
 harness = false
 

@@ -49,6 +49,20 @@ pub struct SolverCounters {
     pub residual_replacements: usize,
 }
 
+#[cfg(feature = "metrics")]
+#[derive(Clone, Debug, Default)]
+pub struct SolveMetrics {
+    pub reductions: usize,
+    pub reduction_wait_nanos: u64,
+    pub matvec_nanos: u64,
+    pub pc_apply_nanos: u64,
+    pub bytes_reduced: usize,
+}
+
+#[cfg(not(feature = "metrics"))]
+#[derive(Clone, Debug, Default)]
+pub struct SolveMetrics;
+
 /// Statistics from a solve operation.
 #[derive(Clone, Debug)]
 pub struct SolveStats<R> {
@@ -66,6 +80,8 @@ pub struct SolveStats<R> {
     pub complex_drift_counts: [usize; 6],
     /// Maximum relative imaginary magnitude observed.
     pub complex_drift_max_rel: R,
+    /// Optional solver timing and reduction metrics.
+    pub metrics: SolveMetrics,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -79,6 +95,7 @@ impl<R: Default> SolveStats<R> {
             complex_drift_events: 0,
             complex_drift_counts: [0; 6],
             complex_drift_max_rel: R::default(),
+            metrics: SolveMetrics::default(),
         }
     }
 

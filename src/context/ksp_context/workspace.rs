@@ -3,8 +3,10 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::core::block::BlockVec;
 use crate::reduction::ReproMode;
+use crate::parallel::ReductionEngine;
 use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
 use crate::solver::gmres::AugmentationPolicy;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
@@ -32,10 +34,11 @@ pub struct Workspace {
     pub tsqr: Option<TsqrWorkspace>,
     pub pipelined_w: Vec<S>,
     pub pipelined_wtmp: Vec<S>,
-    pub pipelined_payload: Vec<S>,
+    pub pipelined_payload: Vec<R>,
     pub gmres_sstep: Option<GmresSStepWorkspace>,
     pub gmres_recycle: RecyclingSpace,
     pub reduction: crate::utils::reduction::ReductOptions,
+    pub reduction_engine: Option<Arc<dyn ReductionEngine>>,
     // Shared communication arenas
     pub send_arena: crate::utils::buffer_pool::BufferPool<u8>,
     pub recv_arena: crate::utils::buffer_pool::BufferPool<u8>,
@@ -53,6 +56,12 @@ pub struct RecyclingSpace {
     rmax: usize,
     cols: usize,
     policy: AugmentationPolicy,
+}
+
+#[derive(Debug)]
+pub enum PipeReduct {
+    Sync { reductions: usize },
+    Async { handle: crate::parallel::ReduceHandle<Vec<R>> },
 }
 
 impl Default for RecyclingSpace {
@@ -341,10 +350,20 @@ impl Workspace {
 
     pub fn set_reduction_options(&mut self, opt: crate::utils::reduction::ReductOptions) {
         self.reduction = opt;
+        self.reduction_engine = None;
+    }
+
+    pub fn set_reduction_engine(&mut self, engine: Arc<dyn ReductionEngine>) {
+        self.reduction_engine = Some(engine);
+    }
+
+    pub fn reduction_engine(&self) -> Option<&Arc<dyn ReductionEngine>> {
+        self.reduction_engine.as_ref()
     }
 
     pub fn set_reduction_mode(&mut self, mode: ReproMode) {
         self.reduction.mode = mode;
+        self.reduction_engine = None;
     }
 
     pub fn reduction_options(&self) -> &crate::utils::reduction::ReductOptions {
@@ -530,38 +549,21 @@ impl Workspace {
     }
 
     #[cfg(not(feature = "complex"))]
-    pub fn pipelined_arnoldi_step(
+    pub fn finish_pipelined_arnoldi(
         &mut self,
         k: usize,
         n: usize,
-        comm: &crate::parallel::UniverseComm,
+        red: &dyn crate::parallel::ReductionEngine,
         policy: ReorthPolicy,
         tol: R,
+        mut glob: Vec<R>,
     ) -> Result<usize, crate::error::KError> {
-        debug_assert!(k < self.m);
-
-        let w = &self.pipelined_w[..n];
         let payload_len = k + 2;
-        let send = {
-            let payload = &mut self.pipelined_payload[..payload_len];
-            for i in 0..=k {
-                let vi = &self.v_mem[i * n..(i + 1) * n];
-                payload[i] = vi.iter().zip(w).map(|(a, b)| a * b).sum();
-            }
-            payload[k + 1] = w.iter().map(|val| val * val).sum();
-            payload.to_vec()
-        };
-        let opt = self.reduction.clone();
-        let (handle, _) = <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::
-            allreduce_n_async(comm, send, &opt)?;
-        let glob =
-            <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::wait_vec(
-                handle,
-            );
+        if glob.len() != payload_len {
+            glob.resize(payload_len, R::zero());
+        }
 
         let mut reductions = 1usize;
-
-        self.pipelined_wtmp[..n].copy_from_slice(w);
 
         let mut sum_h2 = R::zero();
         for i in 0..=k {
@@ -593,26 +595,18 @@ impl Workspace {
         if trigger_reorth {
             reductions += 1;
 
-            let send = {
-                let payload = &mut self.pipelined_payload[..payload_len];
-                for i in 0..=k {
-                    let vi = &self.v_mem[i * n..(i + 1) * n];
-                    payload[i] = vi
-                        .iter()
-                        .zip(&self.pipelined_wtmp[..n])
-                        .map(|(a, b)| a * b)
-                        .sum();
-                }
-                payload[k + 1] = self.pipelined_wtmp[..n].iter().map(|val| val * val).sum();
-                payload.to_vec()
-            };
-            let (handle, _) =
-                <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::
-                    allreduce_n_async(comm, send, &opt)?;
-            let corr =
-                <crate::parallel::UniverseComm as crate::utils::reduction::AllreduceOps>::wait_vec(
-                    handle,
-                );
+            glob.resize(payload_len, R::zero());
+            for i in 0..=k {
+                let vi = &self.v_mem[i * n..(i + 1) * n];
+                glob[i] = vi
+                    .iter()
+                    .zip(&self.pipelined_wtmp[..n])
+                    .map(|(a, b)| a * b)
+                    .sum();
+            }
+            glob[k + 1] = self.pipelined_wtmp[..n].iter().map(|val| val * val).sum();
+
+            let corr = red.iallreduce_sum_vec_r(glob).wait();
 
             let mut delta_norm_sq = R::zero();
             for i in 0..=k {
@@ -637,6 +631,7 @@ impl Workspace {
             if !hnext_sq.is_finite() {
                 hnext_sq = R::zero();
             }
+            glob = corr;
         }
 
         let hnext = hnext_sq.sqrt();
@@ -654,7 +649,91 @@ impl Workspace {
             }
         }
 
+        self.pipelined_payload = glob;
         Ok(reductions)
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn finish_pipelined_arnoldi(
+        &mut self,
+        _k: usize,
+        _n: usize,
+        _red: &dyn crate::parallel::ReductionEngine,
+        _policy: ReorthPolicy,
+        _tol: R,
+        _glob: Vec<R>,
+    ) -> Result<usize, crate::error::KError> {
+        Err(crate::error::KError::NotImplemented(
+            "pipelined GMRES is not yet implemented for complex scalars".into(),
+        ))
+    }
+
+    #[cfg(not(feature = "complex"))]
+    pub fn finish_pipe_reduction(
+        &mut self,
+        pipe: PipeReduct,
+        k: usize,
+        n: usize,
+        red: &dyn crate::parallel::ReductionEngine,
+        policy: ReorthPolicy,
+        tol: R,
+    ) -> Result<usize, crate::error::KError> {
+        match pipe {
+            PipeReduct::Sync { reductions } => Ok(reductions),
+            PipeReduct::Async { handle } => {
+                let glob = handle.wait();
+                self.finish_pipelined_arnoldi(k, n, red, policy, tol, glob)
+            }
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn finish_pipe_reduction(
+        &mut self,
+        _pipe: PipeReduct,
+        _k: usize,
+        _n: usize,
+        _red: &dyn crate::parallel::ReductionEngine,
+        _policy: ReorthPolicy,
+        _tol: R,
+    ) -> Result<usize, crate::error::KError> {
+        Err(crate::error::KError::NotImplemented(
+            "pipelined GMRES is not yet implemented for complex scalars".into(),
+        ))
+    }
+
+    #[cfg(not(feature = "complex"))]
+    pub fn pipelined_arnoldi_step(
+        &mut self,
+        k: usize,
+        n: usize,
+        red: &dyn crate::parallel::ReductionEngine,
+        policy: ReorthPolicy,
+        tol: R,
+    ) -> Result<PipeReduct, crate::error::KError> {
+        debug_assert!(k < self.m);
+
+        let w = &self.pipelined_w[..n];
+        let payload_len = k + 2;
+        let mut payload = std::mem::take(&mut self.pipelined_payload);
+        payload.resize(payload_len, R::zero());
+        for i in 0..=k {
+            let vi = &self.v_mem[i * n..(i + 1) * n];
+            payload[i] = vi.iter().zip(w).map(|(a, b)| a * b).sum();
+        }
+        payload[k + 1] = w.iter().map(|val| val * val).sum();
+
+        let handle = red.iallreduce_sum_vec_r(payload);
+
+        self.pipelined_wtmp[..n].copy_from_slice(w);
+
+        if handle.is_ready() {
+            let payload = handle.wait();
+            let reductions = self.finish_pipelined_arnoldi(k, n, red, policy, tol, payload)?;
+            Ok(PipeReduct::Sync { reductions })
+        } else {
+            Ok(PipeReduct::Async { handle })
+        }
     }
 
     #[cfg(feature = "complex")]
@@ -662,10 +741,10 @@ impl Workspace {
         &mut self,
         k: usize,
         n: usize,
-        _comm: &crate::parallel::UniverseComm,
+        _red: &dyn crate::parallel::ReductionEngine,
         _policy: ReorthPolicy,
         _tol: R,
-    ) -> Result<usize, crate::error::KError> {
+    ) -> Result<PipeReduct, crate::error::KError> {
         let _ = (k, n);
         Err(crate::error::KError::NotImplemented(
             "pipelined GMRES is not yet implemented for complex scalars".into(),

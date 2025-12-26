@@ -19,6 +19,8 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::recompute_true_residual_norm_s;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+#[cfg(feature = "metrics")]
+use crate::utils::convergence::SolveMetrics;
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -135,14 +137,26 @@ impl FgmresSolver {
         self.ensure_workspace(ws, n, block_m);
 
         let mons = monitors.unwrap_or(&[]);
+        #[cfg(feature = "metrics")]
+        let mut metrics = SolveMetrics::default();
 
+        #[cfg(feature = "metrics")]
+        let matvec_start = std::time::Instant::now();
         a.matvec_s(x, &mut ws.tmp1[..n], &mut ws.bridge);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+        }
         for i in 0..n {
             ws.tmp1[i] = b[i] - ws.tmp1[i];
         }
 
         let mut norms = [R::zero(); 2];
         global_nrm2_many_into(comm, &[&ws.tmp1[..n], b], &mut norms);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.bytes_reduced += 2 * std::mem::size_of::<R>();
+        }
         let mut beta0 = norms[0];
         let bnorm = norms[1].max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
@@ -166,6 +180,11 @@ impl FgmresSolver {
         let mut total_iters = 0usize;
         let mut res = beta0;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let red_engine = ws
+            .reduction_engine()
+            .cloned()
+            .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
+        let mut pipeline_reductions = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         for m in mons {
@@ -182,12 +201,20 @@ impl FgmresSolver {
                 recompute_true_residual_norm_s(a, b, x, comm, &mut ws.tmp1[..n], &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-            let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let reductions =
+                end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1
+                    + pipeline_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
                 residual_replacements: 0,
             };
-            return Ok(stats.with_counters(counters));
+            let mut stats = stats.with_counters(counters);
+            #[cfg(feature = "metrics")]
+            {
+                metrics.reductions = reductions;
+                stats.metrics = metrics;
+            }
+            return Ok(stats);
         }
 
         while total_iters < self.maxits {
@@ -206,19 +233,32 @@ impl FgmresSolver {
                         let base = j * n;
                         ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
                         if let Some(pc_ref) = pc.as_deref_mut() {
+                            #[cfg(feature = "metrics")]
+                            let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
                                 pc_side,
                                 &ws.tmp1[..n],
                                 &mut ws.tmp2[..n],
                                 &mut ws.bridge,
                             )?;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.pc_apply_nanos +=
+                                    pc_start.elapsed().as_nanos() as u64;
+                            }
                             ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
                         } else {
                             ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
                         }
 
                         ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                        #[cfg(feature = "metrics")]
+                        let matvec_start = std::time::Instant::now();
                         a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+                        }
 
                         let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
                         hvals.resize(j + 1, S::zero());
@@ -231,6 +271,10 @@ impl FgmresSolver {
                                 pairs.push((vi, tmp2_slice));
                             }
                             global_dot_conj_many_into(comm, pairs.as_slice(), hvals.as_mut_slice());
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.bytes_reduced += (j + 1) * std::mem::size_of::<R>();
+                            }
                         }
                         {
                             let tmp2 = &mut ws.tmp2[..n];
@@ -257,6 +301,10 @@ impl FgmresSolver {
                                     pairs.as_slice(),
                                     corr.as_mut_slice(),
                                 );
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.bytes_reduced += (j + 1) * std::mem::size_of::<R>();
+                                }
                             }
                             {
                                 let tmp2 = &mut ws.tmp2[..n];
@@ -276,6 +324,10 @@ impl FgmresSolver {
                         }
 
                         let hij1 = global_nrm2(comm, &ws.tmp2[..n]);
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.bytes_reduced += std::mem::size_of::<R>();
+                        }
                         *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
 
                         if hij1 > R::default() {
@@ -301,22 +353,72 @@ impl FgmresSolver {
                             let base = j * n;
                             ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
                             if let Some(pc_ref) = pc.as_deref_mut() {
+                                #[cfg(feature = "metrics")]
+                                let pc_start = std::time::Instant::now();
                                 pc_ref.apply_mut_s(
                                     pc_side,
                                     &ws.tmp1[..n],
                                     &mut ws.tmp2[..n],
                                     &mut ws.bridge,
                                 )?;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.pc_apply_nanos +=
+                                        pc_start.elapsed().as_nanos() as u64;
+                                }
                                 ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
                             } else {
                                 ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
                             }
 
                             ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                            #[cfg(feature = "metrics")]
+                            let matvec_start = std::time::Instant::now();
                             a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.matvec_nanos +=
+                                    matvec_start.elapsed().as_nanos() as u64;
+                            }
 
                             ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
-                            ws.pipelined_arnoldi_step(j, n, comm, self.reorth, self.reorth_tol)?;
+                            let pipe = ws.pipelined_arnoldi_step(
+                                j,
+                                n,
+                                red_engine.as_ref(),
+                                self.reorth,
+                                self.reorth_tol,
+                            )?;
+                            let reductions = match pipe {
+                                crate::context::ksp_context::PipeReduct::Sync {
+                                    reductions,
+                                } => reductions,
+                                crate::context::ksp_context::PipeReduct::Async { handle } => {
+                                    #[cfg(feature = "metrics")]
+                                    let wait_start = std::time::Instant::now();
+                                    let glob = handle.wait();
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        metrics.reduction_wait_nanos +=
+                                            wait_start.elapsed().as_nanos() as u64;
+                                    }
+                                    ws.finish_pipelined_arnoldi(
+                                        j,
+                                        n,
+                                        red_engine.as_ref(),
+                                        self.reorth,
+                                        self.reorth_tol,
+                                        glob,
+                                    )?
+                                }
+                            };
+                            pipeline_reductions += reductions;
+                            #[cfg(feature = "metrics")]
+                            {
+                                let payload_len = j + 2;
+                                metrics.bytes_reduced +=
+                                    payload_len * std::mem::size_of::<R>() * reductions;
+                            }
                         }
                     }
                 }
@@ -383,11 +485,21 @@ impl FgmresSolver {
                 break;
             }
 
+            #[cfg(feature = "metrics")]
+            let matvec_start = std::time::Instant::now();
             a.matvec_s(x, &mut ws.tmp1[..n], &mut ws.bridge);
+            #[cfg(feature = "metrics")]
+            {
+                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+            }
             for i in 0..n {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
             beta0 = global_nrm2(comm, &ws.tmp1[..n]);
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
 
             ws.h_mem.fill(S::zero());
             ws.cs.fill(R::default());
@@ -428,12 +540,19 @@ impl FgmresSolver {
             };
         }
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
-        let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+        let reductions =
+            end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
             residual_replacements: 0,
         };
-        Ok(stats.with_counters(counters))
+        let mut stats = stats.with_counters(counters);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.reductions = reductions;
+            stats.metrics = metrics;
+        }
+        Ok(stats)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -71,7 +71,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
 pub use crate::core::block::BlockVec;
-pub use workspace::{GmresSStepWorkspace, GmresSpec, ReorthPolicy, Workspace};
+pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
 
 /// Supported solver types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -511,6 +511,7 @@ impl KspContext {
 
         if let Some(flag) = opts.reproducible {
             self.reproducible = flag;
+            self.reduction_opts.reproducible = flag;
             if flag && opts.threads.is_none() {
                 set_rayon_threads_for_repro(true);
             }
@@ -1230,6 +1231,7 @@ impl KspContext {
         if let Some(w) = self.work.as_mut() {
             // Keep workspace metadata in sync even when reusing allocations.
             w.set_reduction_options(self.reduction_opts.clone());
+            w.set_reduction_engine(amat.comm().reduction_engine(&self.reduction_opts));
 
             // Critical fix: re-run solver-specific workspace setup every setup().
             if let Some(solver) = self.solver.as_mut() {

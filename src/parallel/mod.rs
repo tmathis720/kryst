@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 mod reduce;
 mod reduce_async;
+mod reduce_engine;
 mod repro;
 #[cfg(feature = "mpi")]
 pub use reduce::allreduce_sum_scalar_mpi_sys;
@@ -29,6 +30,7 @@ pub use reduce::{
     set_global_reduction_mode_scoped,
 };
 pub use reduce_async::{ReduceReqReal, ReduceReqScalar, ReduceReqScalars, ReduceReqTuple2};
+pub use reduce_engine::{CommReductionEngine, ReduceHandle, ReductionEngine};
 
 static GLOBAL_REPRO_FLAG: AtomicBool = AtomicBool::new(false);
 

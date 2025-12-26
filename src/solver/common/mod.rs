@@ -347,7 +347,7 @@ pub fn dot2_async<C: AsyncComm + ?Sized>(
 ) -> AsyncDot2 {
     debug_assert_eq!(x1.len(), y1.len());
     debug_assert_eq!(x2.len(), y2.len());
-    let mode = opt.mode;
+    let mode = opt.effective_mode();
     let a: R = dot_local_slice(x1, y1, mode);
     let b: R = dot_local_slice(x2, y2, mode);
     let (handle, local) = comm
@@ -365,7 +365,7 @@ pub fn dot1_async<C: AsyncComm + ?Sized>(
     opt: &ReductOptions,
 ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), crate::error::KError> {
     debug_assert_eq!(x.len(), y.len());
-    let mode = opt.mode;
+    let mode = opt.effective_mode();
     let sum = dot_local_slice(x, y, mode);
     comm.allreduce2_async(sum, R::default(), opt)
 }
@@ -389,7 +389,7 @@ pub fn dot1_async_s<C: AsyncComm + ?Sized>(
 
     #[cfg(feature = "complex")]
     {
-        let mode = opt.mode;
+        let mode = opt.effective_mode();
         let Packet { v: [re, im] } = dot_conj_components(x, y, mode);
         comm.allreduce2_async(re, im, opt)
     }
@@ -409,7 +409,7 @@ pub fn dotn_async<C: AsyncComm + ?Sized>(
     opt: &ReductOptions,
 ) -> AsyncDotN {
     let mut loc = vec![R::default(); pairs.len()];
-    let mode = opt.mode;
+    let mode = opt.effective_mode();
     for (k, (x, y)) in pairs.iter().enumerate() {
         debug_assert_eq!(x.len(), y.len());
         loc[k] = dot_local_slice(x, y, mode);
@@ -426,7 +426,7 @@ pub fn nrm2_async<C: AsyncComm + ?Sized>(
     x: &[f64],
     opt: &ReductOptions,
 ) -> (AllreduceHandle<(R, R)>, R) {
-    let mode = opt.mode;
+    let mode = opt.effective_mode();
     let sumsq: R = dot_local_slice(x, x, mode);
     let (handle, local) = comm
         .allreduce2_async(sumsq, R::default(), opt)
@@ -448,7 +448,7 @@ pub fn nrm2_async_s<C: AsyncComm + ?Sized>(
 
     #[cfg(feature = "complex")]
     {
-        let mode = opt.mode;
+        let mode = opt.effective_mode();
         let Packet { v: [re, im] } = dot_conj_components(x, x, mode);
         let (handle, local) = comm
             .allreduce2_async(re, im, opt)

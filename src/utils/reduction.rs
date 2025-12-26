@@ -38,7 +38,7 @@ fn counter_active_for_current_thread() -> bool {
     TEST_COUNTER_STATE.with(|state| state.borrow().enabled)
 }
 
-fn record_reduction(len: usize) {
+pub(crate) fn record_reduction(len: usize) {
     if !counter_active_for_current_thread() {
         return;
     }
@@ -59,6 +59,41 @@ pub fn install_test_counter(enable: bool) {
         s.wait_pairs = 0;
         s.wait_vecs = 0;
     });
+}
+
+#[inline]
+fn effective_mode(opt: &ReductOptions) -> ReproMode {
+    if opt.reproducible && matches!(opt.mode, ReproMode::Fast) {
+        ReproMode::Deterministic
+    } else {
+        opt.mode
+    }
+}
+
+#[inline]
+fn effective_mode_with_comm(opt: &ReductOptions, comm_repro: bool) -> ReproMode {
+    if comm_repro && matches!(opt.mode, ReproMode::Fast) {
+        ReproMode::Deterministic
+    } else {
+        effective_mode(opt)
+    }
+}
+
+#[inline]
+fn async_allowed(opt: &ReductOptions, comm_repro: bool, comm_size: usize, supports_async: bool) -> bool {
+    if !supports_async || comm_size <= 1 {
+        return false;
+    }
+    if matches!(opt.exec, ReductExec::Sync) {
+        return false;
+    }
+    if opt.reproducible || comm_repro {
+        return false;
+    }
+    !matches!(
+        opt.mode,
+        ReproMode::Deterministic | ReproMode::DeterministicAccurate
+    )
 }
 
 /// Take the current reduction counters, resetting the stored values to zero.
@@ -97,7 +132,7 @@ pub fn repro_mode_is_strict() -> bool {
 }
 
 #[inline]
-fn record_wait_pair() {
+pub(crate) fn record_wait_pair() {
     if counter_active_for_current_thread() {
         TEST_COUNTER_STATE.with(|state| {
             state.borrow_mut().wait_pairs += 1;
@@ -106,7 +141,7 @@ fn record_wait_pair() {
 }
 
 #[inline]
-fn record_wait_vec() {
+pub(crate) fn record_wait_vec() {
     if counter_active_for_current_thread() {
         TEST_COUNTER_STATE.with(|state| {
             state.borrow_mut().wait_vecs += 1;
@@ -136,19 +171,36 @@ pub mod test_hooks {
 }
 
 /// Reduction execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReductExec {
+    Sync,
+    Async,
+}
+
 /// Options that control asynchronous reductions.
 #[derive(Debug, Clone)]
 pub struct ReductOptions {
     pub mode: ReproMode,
+    pub exec: ReductExec,
     pub max_inflight: usize,
+    pub reproducible: bool,
 }
 
 impl Default for ReductOptions {
     fn default() -> Self {
         Self {
             mode: ReproMode::Fast,
+            exec: ReductExec::Async,
             max_inflight: 4,
+            reproducible: false,
         }
+    }
+}
+
+impl ReductOptions {
+    #[inline]
+    pub fn effective_mode(&self) -> ReproMode {
+        effective_mode(self)
     }
 }
 
@@ -379,29 +431,37 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
         &self,
         a: R,
         b: R,
-        _opt: &ReductOptions,
+        opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
         record_reduction(2);
         let (tx, rx) = std::sync::mpsc::channel();
         let local = (a, b);
-        rayon::spawn_fifo(move || {
-            let _ = tx.send(local);
-        });
-        Ok((AllreduceHandle::Rayon { rx }, local))
+        if async_allowed(opt, false, self.size(), true) {
+            rayon::spawn_fifo(move || {
+                let _ = tx.send(local);
+            });
+            Ok((AllreduceHandle::Rayon { rx }, local))
+        } else {
+            Ok((AllreduceHandle::new_ready(local), local))
+        }
     }
 
     fn allreduce_n_async(
         &self,
         data: Vec<R>,
-        _opt: &ReductOptions,
+        opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
         record_reduction(data.len());
         let (tx, rx) = std::sync::mpsc::channel();
         let local = data.clone();
-        rayon::spawn_fifo(move || {
-            let _ = tx.send(data);
-        });
-        Ok((AllreduceHandle::Rayon { rx }, local))
+        if async_allowed(opt, false, self.size(), true) {
+            rayon::spawn_fifo(move || {
+                let _ = tx.send(data);
+            });
+            Ok((AllreduceHandle::Rayon { rx }, local))
+        } else {
+            Ok((AllreduceHandle::new_ready(data), local))
+        }
     }
 
     fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
@@ -447,14 +507,35 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         b: R,
         opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<(R, R)>, (R, R)), KError> {
+        let comm_repro = self.reproducible.load(Ordering::Relaxed);
+        let mode = effective_mode_with_comm(opt, comm_repro);
         if matches!(
-            opt.mode,
+            mode,
             ReproMode::Deterministic | ReproMode::DeterministicAccurate
         ) {
             record_reduction(2);
             let packet = Packet::<2> { v: [a, b] };
-            let reduced = self.allreduce_det(&packet, opt.mode);
+            let reduced = self.allreduce_det(&packet, mode);
             let result = (reduced.v[0], reduced.v[1]);
+            return Ok((AllreduceHandle::new_ready(result), (a, b)));
+        }
+        if !async_allowed(opt, comm_repro, self.size, true) {
+            record_reduction(2);
+            let mut buf = [a, b];
+            let rc = unsafe {
+                mpi::ffi::MPI_Allreduce(
+                    buf.as_ptr() as *const std::ffi::c_void,
+                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    2,
+                    mpi::ffi::RSMPI_DOUBLE,
+                    mpi::ffi::RSMPI_SUM,
+                    self.world.as_raw(),
+                )
+            };
+            if rc != 0 {
+                return Err(KError::SolveError(format!("MPI_Allreduce failed: {rc}")));
+            }
+            let result = (buf[0], buf[1]);
             return Ok((AllreduceHandle::new_ready(result), (a, b)));
         }
         record_reduction(2);
@@ -489,13 +570,33 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         data: Vec<R>,
         opt: &ReductOptions,
     ) -> Result<(AllreduceHandle<Vec<R>>, Vec<R>), KError> {
+        let comm_repro = self.reproducible.load(Ordering::Relaxed);
+        let mode = effective_mode_with_comm(opt, comm_repro);
         if matches!(
-            opt.mode,
+            mode,
             ReproMode::Deterministic | ReproMode::DeterministicAccurate
         ) {
             record_reduction(data.len());
-            let reduced = deterministic_reduce_vec(self, &data, opt.mode);
+            let reduced = deterministic_reduce_vec(self, &data, mode);
             return Ok((AllreduceHandle::new_ready(reduced.clone()), reduced));
+        }
+        if !async_allowed(opt, comm_repro, self.size, true) {
+            record_reduction(data.len());
+            let mut buf = data.clone();
+            let rc = unsafe {
+                mpi::ffi::MPI_Allreduce(
+                    buf.as_ptr() as *const std::ffi::c_void,
+                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    buf.len() as i32,
+                    mpi::ffi::RSMPI_DOUBLE,
+                    mpi::ffi::RSMPI_SUM,
+                    self.world.as_raw(),
+                )
+            };
+            if rc != 0 {
+                return Err(KError::SolveError(format!("MPI_Allreduce failed: {rc}")));
+            }
+            return Ok((AllreduceHandle::new_ready(buf), data));
         }
         record_reduction(data.len());
         let mut buf = data.clone();
