@@ -15,6 +15,8 @@ pub use distributed::DistributedAsm;
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::parallel::Comm;
 use crate::preconditioner::{PcSide, Preconditioner};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::DistCsrOp;
@@ -109,7 +111,7 @@ impl Preconditioner for AsmPc {
         }
 
         let mut serial = self.build_serial();
-        serial.setup(op)?;
+        Preconditioner::setup(&mut serial, op)?;
         self.inner = Some(AsmImpl::Serial(serial));
         Ok(())
     }
