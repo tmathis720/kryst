@@ -1,8 +1,3 @@
-#[cfg(feature = "complex")]
-fn main() {
-    eprintln!("mpi_amg_gmres_demo.rs is unavailable when built with --features complex");
-}
-
 #![cfg(feature = "mpi")]
 //! Large-scale MPI example demonstrating Matrix Market I/O with configurable solvers and preconditioners.
 //!
@@ -28,6 +23,13 @@ fn main() {
 //!   -matrix <path>             Matrix file path [default: examples/e05r0300/e05r0300.mtx]
 //!   -rhs <path>                RHS vector file path [default: examples/e05r0300/e05r0300_rhs1.mtx]
 //!   -help                      Show all available options
+
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("mpi_amg_gmres_demo.rs is unavailable when built with --features complex");
+}
+
+
 
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;

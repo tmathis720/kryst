@@ -4728,6 +4728,10 @@ impl Preconditioner for AMG {
         }
     }
 
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
+    }
+
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;

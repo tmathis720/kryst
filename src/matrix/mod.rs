@@ -33,6 +33,8 @@ pub mod format;
 mod format_impls;
 pub mod op;
 pub mod op_bridge;
+#[cfg(feature = "backend-nalgebra")]
+pub mod op_nalgebra;
 pub mod op_shell;
 pub mod parcsr;
 pub mod sparse;
@@ -72,7 +74,10 @@ pub type Csr = crate::matrix::sparse::CsrMatrix<S>;
 pub type Csc = crate::matrix::csc::CscMatrix<S>;
 
 pub use dist_csr::DistCsrOp;
+pub use format::OpFormat;
 pub use op::{ChangeIds, LinOp, LinOpF64, StructureId, ValuesId};
 #[cfg(feature = "backend-faer")]
 pub use op::{CsrOp, DenseOp, GenericCsrOp};
+#[cfg(feature = "backend-nalgebra")]
+pub use op_nalgebra::NalgebraDenseOp;
 pub use op_shell::MatShell;

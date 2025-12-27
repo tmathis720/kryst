@@ -4,11 +4,13 @@
 //!
 //! ```no_run
 //! # use kryst::context::pc_context::PcFactory;
-//! # use faer::Mat;
+//! # use kryst::matrix::MatShell;
+//! # use std::sync::Arc;
 //! let specs = PcFactory::create_pc_chain_from_str("jacobi->ilut", None).unwrap();
 //! // later, when P is known:
-//! # let p = Mat::<f64>::zeros(10,10);
-//! let chain = PcFactory::construct_deferred_pc_chain(specs, &p).unwrap();
+//! # let p = MatShell::new(10, 10, |x, y| y.copy_from_slice(x));
+//! # let p = Arc::new(p);
+//! let chain = PcFactory::construct_deferred_pc_chain(specs, p.as_ref()).unwrap();
 //! ```
 
 #[cfg(feature = "complex")]
@@ -16,7 +18,7 @@ use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::matrix::convert::materialize_linop_with_hint;
+use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
@@ -55,10 +57,14 @@ impl PcChain {
 impl Preconditioner for PcChain {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
-            let hint = st.required_format();
+            let want = st.required_format();
             let tol = st.preferred_drop_tol_for_format().unwrap_or_default();
-            let view = materialize_linop_with_hint(a, hint, tol)?;
-            st.setup(view.as_ref())?;
+            if want.is_any() || a.format() == want {
+                st.setup(a)?;
+            } else {
+                let view = materialize_ref(a, want, tol)?;
+                st.setup(view.as_ref())?;
+            }
         }
         // Best-effort pre-size TLS buffer for apply hot path
         let (n, _) = a.dims();
@@ -116,13 +122,21 @@ impl Preconditioner for PcChain {
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
-            let hint = st.required_format();
+            let want = st.required_format();
             let tol = st.preferred_drop_tol_for_format().unwrap_or_default();
-            let view = materialize_linop_with_hint(a, hint, tol)?;
-            if st.supports_numeric_update() {
-                st.update_numeric(view.as_ref())?;
+            if want.is_any() || a.format() == want {
+                if st.supports_numeric_update() {
+                    st.update_numeric(a)?;
+                } else {
+                    st.update_symbolic(a)?;
+                }
             } else {
-                st.update_symbolic(view.as_ref())?;
+                let view = materialize_ref(a, want, tol)?;
+                if st.supports_numeric_update() {
+                    st.update_numeric(view.as_ref())?;
+                } else {
+                    st.update_symbolic(view.as_ref())?;
+                }
             }
         }
         Ok(())
@@ -130,10 +144,14 @@ impl Preconditioner for PcChain {
 
     fn update_symbolic(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
-            let hint = st.required_format();
+            let want = st.required_format();
             let tol = st.preferred_drop_tol_for_format().unwrap_or_default();
-            let view = materialize_linop_with_hint(a, hint, tol)?;
-            st.update_symbolic(view.as_ref())?;
+            if want.is_any() || a.format() == want {
+                st.update_symbolic(a)?;
+            } else {
+                let view = materialize_ref(a, want, tol)?;
+                st.update_symbolic(view.as_ref())?;
+            }
         }
         Ok(())
     }

@@ -6,6 +6,7 @@ pub use crate::context::KspContext;
 pub use crate::context::ksp_context::SolverType;
 pub use crate::context::pc_context::PcType;
 pub use crate::matrix::LinOp;
+pub use crate::matrix::OpFormat;
 pub use crate::parallel::{Comm, UniverseComm};
 pub use crate::preconditioner::{PcSide, Preconditioner};
 pub use crate::utils::convergence::{ConvergedReason, SolveStats};

@@ -60,6 +60,10 @@ impl LinOp for ParCsrOp {
     fn comm(&self) -> UniverseComm {
         self.mat.comm.clone()
     }
+
+    fn format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
+    }
 }
 
 impl ParCsrMatrix {

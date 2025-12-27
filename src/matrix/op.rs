@@ -6,6 +6,7 @@ use crate::error::KError;
 use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
 #[cfg(feature = "backend-faer")]
 use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
+use crate::matrix::format::OpFormat;
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{NoComm, UniverseComm};
@@ -100,6 +101,11 @@ pub trait LinOp: Send + Sync + Any {
     /// - PCs obtain their communicator from the operator passed to [`Preconditioner::setup`].
     fn comm(&self) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
+    }
+
+    /// Operator storage format, if known.
+    fn format(&self) -> OpFormat {
+        OpFormat::Any
     }
 }
 
@@ -257,6 +263,9 @@ impl<S: KrystScalar> LinOp for GenericCsrOp<S> {
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
     }
+    fn format(&self) -> OpFormat {
+        OpFormat::Csr
+    }
 }
 
 /// Convenience trait for callers that only operate on real scalars.
@@ -397,6 +406,9 @@ impl LinOp for DenseOp {
     }
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+    fn format(&self) -> OpFormat {
+        OpFormat::Dense
     }
 }
 
@@ -541,6 +553,9 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
     }
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+    fn format(&self) -> OpFormat {
+        OpFormat::Csr
     }
 }
 
@@ -720,6 +735,9 @@ impl<S: KrystScalar> LinOp for Mat<S> {
             ValuesId(0)
         }
     }
+    fn format(&self) -> OpFormat {
+        OpFormat::Dense
+    }
 }
 
 #[cfg(feature = "backend-faer")]
@@ -761,6 +779,9 @@ impl<S: KrystScalar> LinOp for CsrMatrix<S> {
     }
     fn values_id(&self) -> ValuesId {
         ValuesId(0)
+    }
+    fn format(&self) -> OpFormat {
+        OpFormat::Csr
     }
 }
 
@@ -812,6 +833,9 @@ impl<S: KrystScalar> LinOp for CscMatrix<S> {
     fn values_id(&self) -> ValuesId {
         ValuesId(0)
     }
+    fn format(&self) -> OpFormat {
+        OpFormat::Csc
+    }
 }
 /// Wrap any LinOp with a communicator without changing its behavior.
 pub struct WithCommOp<T: LinOp + ?Sized> {
@@ -862,6 +886,10 @@ impl<T: LinOp + ?Sized> LinOp for WithCommOp<T> {
     #[inline]
     fn values_id(&self) -> ValuesId {
         self.inner.values_id()
+    }
+    #[inline]
+    fn format(&self) -> OpFormat {
+        self.inner.format()
     }
     #[inline]
     fn comm(&self) -> UniverseComm {

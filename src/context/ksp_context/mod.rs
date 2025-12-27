@@ -53,8 +53,7 @@ use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
-#[cfg(feature = "backend-faer")]
-use crate::matrix::convert::materialize_linop_with_hint;
+use crate::matrix::backend::materialize;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
@@ -1299,12 +1298,11 @@ impl KspContext {
             self.last_pc_vid = None;
         }
 
-        #[cfg(feature = "backend-faer")]
         if let Some(pc) = self.pc.as_mut() {
             // Pre-convert once to the PC's requested format, preserving communicator.
-            let hint = pc.required_format();
+            let want = pc.required_format();
             let tol = pc.preferred_drop_tol_for_format().unwrap_or_default();
-            let pmat_view = materialize_linop_with_hint(pmat.as_ref(), hint, tol)?;
+            let pmat_view = materialize(pmat.clone(), want, tol)?;
 
             match self.last_pc_sid {
                 None => {
@@ -1361,13 +1359,6 @@ impl KspContext {
                     }
                 }
             }
-        }
-
-        #[cfg(not(feature = "backend-faer"))]
-        if let Some(_pc) = self.pc.as_mut() {
-            return Err(KError::Unsupported(
-                "preconditioner materialization requires the backend-faer feature".into(),
-            ));
         }
 
         let (m, _) = amat.dims();

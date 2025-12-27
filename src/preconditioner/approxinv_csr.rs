@@ -425,8 +425,8 @@ impl Preconditioner for FsaiCsr {
         Ok(())
     }
 
-    fn required_format(&self) -> crate::matrix::format::FormatHint {
-        crate::matrix::format::FormatHint::Csr
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
     }
 }
 
@@ -690,8 +690,8 @@ impl Preconditioner for SpaiCsr {
         Ok(())
     }
 
-    fn required_format(&self) -> crate::matrix::format::FormatHint {
-        crate::matrix::format::FormatHint::Csr
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
     }
 }
 

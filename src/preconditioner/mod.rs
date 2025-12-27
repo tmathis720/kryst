@@ -29,6 +29,7 @@
 //!
 //! ## Examples
 //! ```no_run
+//! # #[cfg(feature = "backend-faer")] {
 //! # use kryst::context::ksp_context::{KspContext, SolverType};
 //! # use kryst::context::pc_context::PcType;
 //! # use kryst::matrix::op::DenseOp;
@@ -44,13 +45,14 @@
 //!    .set_pc_type(PcType::Jacobi, None).unwrap()
 //!    .set_operators(a, None);
 //! let _stats = ksp.solve(&b, &mut x).unwrap();
+//! # }
 //! ```
 
 #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use crate::algebra::prelude::*;
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::error::KError;
-use crate::matrix::format::FormatHint;
+pub use crate::matrix::format::OpFormat;
 use crate::matrix::op::LinOp;
 
 pub mod bridge;
@@ -245,9 +247,9 @@ pub trait Preconditioner: Send + Sync {
     /// Preferred matrix format for `setup`/`update_*` calls.
     ///
     /// Callers will materialize a stable view of the operator in this format once per
-    /// setup/update, preserving the original communicator. Defaults to CSR.
-    fn required_format(&self) -> FormatHint {
-        FormatHint::Csr
+    /// setup/update, preserving the original communicator. Defaults to Any.
+    fn required_format(&self) -> OpFormat {
+        OpFormat::Any
     }
 
     /// Optional numerical drop tolerance to use when creating the preferred format.
@@ -388,9 +390,9 @@ impl Preconditioner for LegacyOpPreconditioner {
         self.setup(a)
     }
 
-    fn required_format(&self) -> FormatHint {
+    fn required_format(&self) -> OpFormat {
         // Legacy bridge adapters expect dense Mat<f64>
-        FormatHint::Dense
+        OpFormat::Dense
     }
 }
 
@@ -494,8 +496,11 @@ pub mod asm_amg;
 pub mod block_jacobi;
 #[cfg(feature = "backend-faer")]
 pub mod builders;
+pub mod builders_none;
 #[cfg(feature = "backend-faer")]
-#[cfg(feature = "backend-faer")]
+pub mod builders_faer;
+#[cfg(feature = "backend-nalgebra")]
+pub mod builders_nalgebra;
 pub mod chain;
 #[cfg(feature = "backend-faer")]
 pub mod chebyshev;
@@ -505,6 +510,8 @@ pub mod deflation;
 pub mod direct;
 #[cfg(feature = "backend-faer")]
 pub mod dist;
+#[cfg(feature = "backend-nalgebra")]
+pub mod nalgebra_direct;
 #[cfg(feature = "backend-faer")]
 pub mod ilu;
 #[cfg(feature = "backend-faer")]
@@ -535,7 +542,6 @@ pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCs
 pub use asm::{AdditiveSchwarz, Asm, AsmBuilder, AsmCombine, AsmConfig, AsmLocalSolver};
 #[cfg(feature = "backend-faer")]
 pub use asm_amg::{AsmAmg, AsmAmgBuilder, TwoLevelConfig, TwoLevelMode};
-#[cfg(feature = "backend-faer")]
 pub use chain::PcChain;
 #[cfg(feature = "backend-faer")]
 pub use chebyshev::{Chebyshev, ChebyshevPre};

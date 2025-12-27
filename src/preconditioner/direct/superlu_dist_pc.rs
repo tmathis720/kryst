@@ -1,5 +1,7 @@
 use crate::algebra::prelude::*;
 use crate::error::KError;
+#[cfg(feature = "superlu_dist")]
+use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
@@ -11,8 +13,6 @@ use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::apply_pc_s;
 
-#[cfg(feature = "superlu_dist")]
-use crate::matrix::sparse::CsrMatrix;
 
 #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
 pub struct SuperLuDistPc {
@@ -37,11 +37,7 @@ impl Preconditioner for SuperLuDistPc {
         #[cfg(feature = "superlu_dist")]
         {
             self.comm = Some(pmat.comm());
-            pmat.as_any()
-                .downcast_ref::<CsrMatrix<f64>>()
-                .ok_or_else(|| {
-                    KError::InvalidInput("SuperLU_DIST PC requires CSR matrix".into())
-                })?;
+            let _ = csr_from_linop(pmat, 0.0)?;
             Ok(())
         }
 
@@ -69,16 +65,11 @@ impl Preconditioner for SuperLuDistPc {
     ) -> Result<(), KError> {
         #[cfg(feature = "superlu_dist")]
         {
-            let a = pmat
-                .as_any()
-                .downcast_ref::<CsrMatrix<f64>>()
-                .ok_or_else(|| {
-                    KError::InvalidInput("SuperLU_DIST PC requires CSR matrix".into())
-                })?;
+            let a = csr_from_linop(pmat, 0.0)?;
             let comm = self.comm.clone().unwrap_or_else(|| pmat.comm());
             #[cfg(not(feature = "complex"))]
             {
-                crate::solver::superlu_dist::solve(a, b, x, &comm)
+                crate::solver::superlu_dist::solve(a.as_ref(), b, x, &comm)
             }
             #[cfg(feature = "complex")]
             {
@@ -91,8 +82,8 @@ impl Preconditioner for SuperLuDistPc {
                 }
                 let mut x_re = vec![0.0; x.len()];
                 let mut x_im = vec![0.0; x.len()];
-                crate::solver::superlu_dist::solve(a, &b_re, &mut x_re, &comm)?;
-                crate::solver::superlu_dist::solve(a, &b_im, &mut x_im, &comm)?;
+                crate::solver::superlu_dist::solve(a.as_ref(), &b_re, &mut x_re, &comm)?;
+                crate::solver::superlu_dist::solve(a.as_ref(), &b_im, &mut x_im, &comm)?;
                 for (xi, (&re, &im)) in x.iter_mut().zip(x_re.iter().zip(x_im.iter())) {
                     *xi = S::from_parts(re, im);
                 }
@@ -108,8 +99,8 @@ impl Preconditioner for SuperLuDistPc {
         }
     }
 
-    fn required_format(&self) -> crate::matrix::format::FormatHint {
-        crate::matrix::format::FormatHint::Csr
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
     }
 }
 

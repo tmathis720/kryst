@@ -436,4 +436,8 @@ impl LinOp for DistCsrOp {
     fn comm(&self) -> UniverseComm {
         self.halo.index.comm.clone()
     }
+
+    fn format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
+    }
 }

@@ -1,4 +1,4 @@
-#![cfg(not(feature = "complex"))]
+#![cfg(all(not(feature = "complex"), feature = "backend-faer"))]
 
 use crate::algebra::prelude::*;
 #[cfg(any(feature = "dense-direct", feature = "superlu_dist"))]

@@ -16,7 +16,7 @@ use crate::preconditioner::amg::AMG;
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{FormatHint, PcCaps, PcSide, Preconditioner};
+use crate::preconditioner::{OpFormat, PcCaps, PcSide, Preconditioner};
 use faer::{Mat, MatRef};
 
 /// Dense coarse space extracted from an AMG hierarchy or provided externally.
@@ -489,7 +489,7 @@ where
         self.refresh_e()
     }
 
-    fn required_format(&self) -> FormatHint {
+    fn required_format(&self) -> OpFormat {
         self.base.required_format()
     }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
-use crate::matrix::format::FormatHint;
+use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
@@ -1134,8 +1134,8 @@ impl Preconditioner for IluCsr {
         Ok(())
     }
 
-    fn required_format(&self) -> FormatHint {
-        FormatHint::Csr
+    fn required_format(&self) -> OpFormat {
+        OpFormat::Csr
     }
 
     fn capabilities(&self) -> PcCaps {

@@ -68,8 +68,8 @@ impl Preconditioner for LuPc {
         }
     }
 
-    fn required_format(&self) -> crate::matrix::format::FormatHint {
-        crate::matrix::format::FormatHint::Dense
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Dense
     }
 }
 

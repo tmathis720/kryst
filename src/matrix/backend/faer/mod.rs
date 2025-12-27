@@ -1,8 +1,13 @@
 //! Faer-backed matrix implementations of the abstraction traits.
 
+use std::sync::Arc;
+
 use crate::algebra::prelude::*;
+use crate::error::KError;
 use crate::matrix::backend::SparseBackend;
 use crate::matrix::csc::CscMatrix;
+use crate::matrix::format::{FormatHint, OpFormat};
+use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 
 pub mod dense;
@@ -43,6 +48,38 @@ where
     fn dense_from_csc(csc: &Self::Csc) -> Self::Dense {
         csc.to_dense()
     }
+}
+
+fn map_format(want: OpFormat) -> Result<FormatHint, KError> {
+    match want {
+        OpFormat::Dense => Ok(FormatHint::Dense),
+        OpFormat::Csr => Ok(FormatHint::Csr),
+        OpFormat::Csc => Ok(FormatHint::Csc),
+        OpFormat::Any | OpFormat::BlockCsr => Err(KError::Unsupported(
+            "faer backend does not support the requested format",
+        )),
+    }
+}
+
+pub fn try_materialize(
+    op: Arc<dyn LinOp<S = S>>,
+    want: OpFormat,
+    drop_tol: R,
+) -> Result<Arc<dyn LinOp<S = S>>, KError> {
+    if want.is_any() {
+        return Ok(op);
+    }
+    let hint = map_format(want)?;
+    crate::matrix::convert::materialize_linop_with_hint(op.as_ref(), hint, drop_tol)
+}
+
+pub fn try_materialize_ref(
+    op: &dyn LinOp<S = S>,
+    want: OpFormat,
+    drop_tol: R,
+) -> Result<Arc<dyn LinOp<S = S>>, KError> {
+    let hint = map_format(want)?;
+    crate::matrix::convert::materialize_linop_with_hint(op, hint, drop_tol)
 }
 
 #[cfg(test)]

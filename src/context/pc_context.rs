@@ -3,11 +3,37 @@ use crate::config::kinds::SorMatSideKind;
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::amg::AMGConfig;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
 
+#[cfg(feature = "backend-faer")]
+use crate::preconditioner::amg::AMGConfig;
+
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Debug)]
+pub struct AMGConfig;
+
+#[cfg(not(feature = "backend-faer"))]
+impl AMGConfig {
+    pub fn try_from_opts(_opts: &PcOptions) -> Result<Self, KError> {
+        Err(KError::Unsupported(
+            "AMG requires backend-faer; enable backend-faer to use AMG options",
+        ))
+    }
+}
+
+#[cfg(feature = "backend-faer")]
 type MatSorSide = crate::preconditioner::sor::MatSorType;
+
+#[cfg(not(feature = "backend-faer"))]
+bitflags::bitflags! {
+    pub struct MatSorSide: u32 {
+        const APPLY_LOWER = 0b0001;
+        const APPLY_UPPER = 0b0010;
+        const SYMMETRIC_SWEEP = 0b0100;
+        const EISENSTAT = 0b1000;
+    }
+}
 
 #[cfg(feature = "backend-faer")]
 type ApproxInvKindAlias = crate::preconditioner::approxinv_csr::ApproxInvKind;
@@ -456,87 +482,29 @@ impl PcFactory {
 
         Ok(())
     }
-    #[cfg(feature = "backend-faer")]
     pub fn create_preconditioner(
         pc_type: PcType,
         options: Option<&PcOptions>,
     ) -> Result<Box<dyn Preconditioner>, KError> {
         let cfg = PcConfig::from_type_and_options(pc_type, options)?;
-        use crate::preconditioner::builders as b;
-        match cfg {
-            PcConfig::None => Ok(Box::new(NoOpPreconditioner)),
-            PcConfig::Jacobi => b::build_jacobi(),
-            PcConfig::BlockJacobi { block } => b::build_block_jacobi(block),
-
-            PcConfig::Ilu0 => b::build_ilu0(),
-            PcConfig::Iluk { level } => b::build_iluk(level),
-            PcConfig::Ilut {
-                drop_tol,
-                max_fill,
-                reordering,
-            } => b::build_ilut(drop_tol, max_fill, reordering),
-            PcConfig::Milu0 => b::build_milu0(),
-
-            PcConfig::Sor {
-                omega,
-                sweeps,
-                mat_side,
-            } => b::build_sor(omega, sweeps, mat_side),
-
-            PcConfig::Chebyshev {
-                degree,
-                eig_lo,
-                eig_hi,
-            } => b::build_chebyshev(degree, eig_lo, eig_hi),
-
-            PcConfig::Asm {
-                overlap,
-                subdomain_hint,
-                block_solver,
-                mode,
-                weighting,
-            } => b::build_asm(overlap, subdomain_hint, block_solver, mode, weighting),
-            PcConfig::Amg { config } => b::build_amg(config),
-            PcConfig::ApproxInv {
-                kind,
-                levels,
-                max_per_col,
-                drop_tol,
-                reg,
-                max_cond,
-                parallel,
-            } => {
-                use crate::preconditioner::approxinv_csr::{ApproxInvParams, FsaiCsr, SpaiCsr};
-                let params = ApproxInvParams {
-                    kind,
-                    levels,
-                    max_per_col,
-                    drop_tol,
-                    reg,
-                    max_cond,
-                    parallel,
-                };
-                match kind {
-                    ApproxInvKindAlias::FSAI => Ok(Box::new(FsaiCsr::new_with_params(params))),
-                    ApproxInvKindAlias::SPAI => Ok(Box::new(SpaiCsr::new_with_params(params))),
-                }
-            }
-
-            PcConfig::Lu => b::build_lu(),
-            PcConfig::Qr => b::build_qr(),
-            #[cfg(feature = "superlu_dist")]
-            PcConfig::SuperLuDist => b::build_superlu_dist(),
+        if let Some(pc) = crate::preconditioner::builders_none::try_build(&cfg)? {
+            return Ok(pc);
         }
-    }
 
-    #[cfg(not(feature = "backend-faer"))]
-    pub fn create_preconditioner(
-        _pc_type: PcType,
-        _options: Option<&PcOptions>,
-    ) -> Result<Box<dyn Preconditioner>, KError> {
-        Err(KError::Unsupported(
-            "backend-faer feature is required to build preconditioners".into(),
-        ))
+        #[cfg(feature = "backend-faer")]
+        if let Some(pc) = crate::preconditioner::builders_faer::try_build(&cfg)? {
+            return Ok(pc);
+        }
+
+        #[cfg(feature = "backend-nalgebra")]
+        if let Some(pc) = crate::preconditioner::builders_nalgebra::try_build(&cfg)? {
+            return Ok(pc);
+        }
+
+        Err(KError::InvalidInput(format!(
+            "Preconditioner {:?} requires a backend that is not enabled/supported for this build",
+            pc_type
+        )))
     }
 
     /// Convenience: build directly from options (when `pc_type` lives inside options)
@@ -592,7 +560,6 @@ impl PcFactory {
         Ok(specs)
     }
 
-    #[cfg(feature = "backend-faer")]
     pub fn construct_deferred_pc_chain(
         specs: Vec<DeferredPcInfo>,
         op: &dyn LinOp<S = S>,
@@ -610,16 +577,6 @@ impl PcFactory {
             stages.push(stage);
         }
         Ok(Box::new(PcChain::new(stages)))
-    }
-
-    #[cfg(not(feature = "backend-faer"))]
-    pub fn construct_deferred_pc_chain(
-        _specs: Vec<DeferredPcInfo>,
-        _op: &dyn LinOp<S = S>,
-    ) -> Result<Box<dyn Preconditioner>, KError> {
-        Err(KError::Unsupported(
-            "backend-faer feature is required to build chained preconditioners".into(),
-        ))
     }
 
     pub fn create_pc_chain(

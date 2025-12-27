@@ -14,12 +14,50 @@ use crate::algebra::scalar::KrystScalar;
 use crate::matrix::backend::SparseBackend;
 use crate::matrix::op::{StructureId, ValuesId};
 
-/// High-level format hints that preconditioners can request.
+/// Backend-neutral operator formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpFormat {
+    Any,
+    Dense,
+    Csr,
+    Csc,
+    BlockCsr,
+}
+
+impl OpFormat {
+    #[inline]
+    pub fn is_any(self) -> bool {
+        matches!(self, OpFormat::Any)
+    }
+}
+
+/// Backend-specific format hints used by conversion helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatHint {
     Csr,
     Dense,
     Csc,
+}
+
+impl From<FormatHint> for OpFormat {
+    fn from(hint: FormatHint) -> Self {
+        match hint {
+            FormatHint::Csr => OpFormat::Csr,
+            FormatHint::Dense => OpFormat::Dense,
+            FormatHint::Csc => OpFormat::Csc,
+        }
+    }
+}
+
+impl OpFormat {
+    pub fn to_format_hint(self) -> Option<FormatHint> {
+        match self {
+            OpFormat::Csr => Some(FormatHint::Csr),
+            OpFormat::Dense => Some(FormatHint::Dense),
+            OpFormat::Csc => Some(FormatHint::Csc),
+            OpFormat::Any | OpFormat::BlockCsr => None,
+        }
+    }
 }
 
 /// Trait for converting matrices into specific formats under a backend.

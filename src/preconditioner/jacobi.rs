@@ -5,6 +5,8 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "backend-faer")]
+use crate::matrix::op::GenericCsrOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
@@ -63,6 +65,30 @@ impl Jacobi {
             return Ok(());
         }
         #[cfg(feature = "backend-faer")]
+        if let Some(generic) = pmat.as_any().downcast_ref::<GenericCsrOp<S>>() {
+            let csr = generic.matrix();
+            let n = csr.nrows.min(csr.ncols);
+            self.diag_inv.resize(n, S::zero());
+            for i in 0..n {
+                let rs = csr.rowptr[i];
+                let re = csr.rowptr[i + 1];
+                let mut aii = S::zero();
+                for p in rs..re {
+                    if csr.colind[p] == i {
+                        aii = csr.values[p];
+                        break;
+                    }
+                }
+                self.diag_inv[i] = if aii.abs() > 1e-14 {
+                    aii.inv()
+                } else {
+                    S::zero()
+                };
+            }
+            self.n = n;
+            return Ok(());
+        }
+        #[cfg(feature = "backend-faer")]
         if let Some(d) = pmat.as_any().downcast_ref::<Mat<S>>() {
             let n = d.nrows().min(d.ncols());
             self.diag_inv.resize(n, S::zero());
@@ -94,6 +120,10 @@ impl Preconditioner for Jacobi {
 
     fn update_numeric(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
         self.recompute(pmat)
+    }
+
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
     }
     fn apply(&self, _side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
         if r.len() != self.n || z.len() != self.n {

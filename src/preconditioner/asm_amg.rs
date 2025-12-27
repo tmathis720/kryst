@@ -150,6 +150,10 @@ impl Preconditioner for AsmAmg {
         Ok(())
     }
 
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
+    }
+
     fn apply(&self, side: PcSide, rhs: &[f64], out: &mut [f64]) -> Result<(), KError> {
         if rhs.len() != out.len() {
             return Err(KError::InvalidInput("AsmAmg apply length mismatch".into()));
