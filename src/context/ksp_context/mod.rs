@@ -1128,6 +1128,28 @@ impl KspContext {
                 a_dims, p_dims
             )));
         }
+        if let (Some(a_layout), Some(p_layout)) = (amat.dist_layout(), pmat.dist_layout()) {
+            if a_layout.global_rows != p_layout.global_rows
+                || a_layout.global_cols != p_layout.global_cols
+            {
+                return Err(KError::InvalidInput(format!(
+                    "Amat/Pmat global dimension mismatch: A=({}x{}), P=({}x{})",
+                    a_layout.global_rows,
+                    a_layout.global_cols,
+                    p_layout.global_rows,
+                    p_layout.global_cols
+                )));
+            }
+            if a_layout.row_start != p_layout.row_start || a_layout.row_end != p_layout.row_end {
+                return Err(KError::InvalidInput(format!(
+                    "Amat/Pmat ownership range mismatch: A=[{},{}), P=[{},{}).",
+                    a_layout.row_start,
+                    a_layout.row_end,
+                    p_layout.row_start,
+                    p_layout.row_end
+                )));
+            }
+        }
         #[cfg(feature = "invariants")]
         log::debug!(
             "set_operators: comm_id={} size={} rank={} A_dims={:?} P_dims={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
