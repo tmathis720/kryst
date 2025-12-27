@@ -187,14 +187,13 @@ pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
 #[cfg(feature = "backend-faer")]
 pub fn build_asm(
     overlap: usize,
-    _hint: Option<usize>,
+    subdomain_hint: Option<usize>,
     block_solver: Option<String>,
     mode: Option<String>,
     weighting: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     // Map the optional block solver string to the enum used by AdditiveSchwarz.
-    use crate::preconditioner::asm::BlockSolverFactory;
-    use crate::preconditioner::asm::{AdditiveSchwarz, AsmMode, Weighting};
+    use crate::preconditioner::asm::{AsmBlockSolver, AsmMode, AsmPc, Weighting};
 
     if block_solver
         .as_deref()
@@ -203,54 +202,51 @@ pub fn build_asm(
         return build_asm_amg(overlap);
     }
 
-    let factory = match block_solver.as_deref() {
-        Some("csr") => BlockSolverFactory::CsrSolver,
-        _ => BlockSolverFactory::LuDense,
+    let block_solver = match block_solver.as_deref() {
+        Some("csr") => AsmBlockSolver::Csr,
+        _ => AsmBlockSolver::LuDense,
     };
 
-    // Construct ASM with empty subdomains (will be partitioned on setup).
-    let mut asm =
-        AdditiveSchwarz::<faer::Mat<f64>, Vec<f64>, f64>::new(overlap, Vec::new(), factory);
+    let mode = match mode.as_deref() {
+        Some("asm") => AsmMode::ASM,
+        Some("ras") => AsmMode::RAS,
+        Some(other) => {
+            return Err(KError::InvalidInput(format!(
+                "unknown pc_asm_mode: {other}"
+            )));
+        }
+        None => AsmMode::ASM,
+    };
 
-    // Mode
-    if let Some(m) = mode.as_deref() {
-        let m = match m {
-            "asm" => AsmMode::ASM,
-            "ras" => AsmMode::RAS,
-            other => {
-                return Err(KError::InvalidInput(format!(
-                    "unknown pc_asm_mode: {other}"
-                )));
+    let weighting = match weighting.as_deref() {
+        Some("none") => Weighting::None,
+        Some("uniform") => Weighting::Uniform,
+        Some("linear") => Weighting::SmoothLinear,
+        Some(s) if s.starts_with("poly:") => {
+            let pstr = &s[5..];
+            let p: u32 = pstr.parse().map_err(|_| {
+                KError::InvalidInput(format!("invalid poly exponent in pc_asm_weighting: {s}"))
+            })?;
+            if p < 2 {
+                return Err(KError::InvalidInput("poly exponent must be >= 2".into()));
             }
-        };
-        asm.set_mode(m);
-    }
+            Weighting::SmoothPoly(p)
+        }
+        Some(other) => {
+            return Err(KError::InvalidInput(format!(
+                "unknown pc_asm_weighting: {other}"
+            )));
+        }
+        None => {
+            if overlap == 0 {
+                Weighting::None
+            } else {
+                Weighting::Uniform
+            }
+        }
+    };
 
-    // Weighting
-    if let Some(w) = weighting.as_deref() {
-        let w = match w {
-            "none" => Weighting::None,
-            "uniform" => Weighting::Uniform,
-            "linear" => Weighting::SmoothLinear,
-            s if s.starts_with("poly:") => {
-                let pstr = &s[5..];
-                let p: u32 = pstr.parse().map_err(|_| {
-                    KError::InvalidInput(format!("invalid poly exponent in pc_asm_weighting: {s}"))
-                })?;
-                if p < 2 {
-                    return Err(KError::InvalidInput("poly exponent must be >= 2".into()));
-                }
-                Weighting::SmoothPoly(p)
-            }
-            other => {
-                return Err(KError::InvalidInput(format!(
-                    "unknown pc_asm_weighting: {other}"
-                )));
-            }
-        };
-        asm.set_weighting(w);
-    }
-
+    let asm = AsmPc::new(overlap, subdomain_hint, block_solver, mode, weighting);
     Ok(Box::new(asm))
 }
 
