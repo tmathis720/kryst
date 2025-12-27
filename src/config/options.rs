@@ -70,6 +70,8 @@ pub struct KspOptions {
     pub restart: Option<usize>,
     /// Reduction mode for global dot products: "fast" | "deterministic" | "deterministic-accurate"
     pub reduction: Option<String>,
+    /// When true, invoke KSP monitors only on rank 0 (MPI).
+    pub ksp_monitor_rank0: Option<bool>,
     /// Enable reproducible reductions regardless of the global mode. When true,
     /// the solver selects deterministic MPI reductions and fixed-order local
     /// kernels; combine with `threads = Some(1)` (or `-ksp_threads 1`) for
@@ -373,6 +375,7 @@ impl Sink for KspOptions {
             "ksp_gmres_happy_breakdown" => set_opt!(&mut self.gmres_happy_breakdown, v),
             "ksp_fgmres_reorthog" => set_opt!(&mut self.fgmres_reorthog, v),
             "ksp_fgmres_happy_breakdown" => set_opt!(&mut self.fgmres_happy_breakdown, v),
+            "ksp_monitor_rank0" => set_opt!(&mut self.ksp_monitor_rank0, v),
             "ksp_reproducible" => set_opt!(&mut self.reproducible, v),
             _ => Err(KError::SolveError(format!("Unknown KSP bool key: {key}"))),
         }
@@ -1020,6 +1023,7 @@ impl KspOptions {
         o!(maxits);
         o!(restart);
         o!(reduction);
+        o!(ksp_monitor_rank0);
         o!(reproducible);
         o!(cg_variant);
 
