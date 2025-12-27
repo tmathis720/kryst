@@ -40,6 +40,29 @@ pub use reduce_engine::{CommReductionEngine, ReduceHandle, ReductionEngine};
 
 static GLOBAL_REPRO_FLAG: AtomicBool = AtomicBool::new(false);
 
+/// Compute contiguous ownership range for a global length.
+///
+/// Returns `(start, end)` for the given rank in `[0, size)`.
+pub fn contiguous_partition(global_len: usize, rank: usize, size: usize) -> (usize, usize) {
+    let base = global_len / size;
+    let rem = global_len % size;
+    let start = rank * base + rank.min(rem);
+    let extra = if rank < rem { 1 } else { 0 };
+    let end = start + base + extra;
+    (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contiguous_partition;
+
+    #[test]
+    fn contiguous_partition_distributes_remainder() {
+        let ranges: Vec<_> = (0..3).map(|rank| contiguous_partition(10, rank, 3)).collect();
+        assert_eq!(ranges, vec![(0, 4), (4, 7), (7, 10)]);
+    }
+}
+
 // Opaque request that can represent multiple backends. Use a `PhantomData`
 // to tie the lifetime when MPI support is disabled.
 pub enum AnyRequest<'a> {

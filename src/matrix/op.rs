@@ -14,6 +14,43 @@ use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// PETSc-like contiguous ownership ranges for distributed operators.
+#[derive(Clone, Debug)]
+pub struct DistLayout {
+    pub global_rows: usize,
+    pub global_cols: usize,
+    pub row_start: usize,
+    pub row_end: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+}
+
+/// Opaque handle returned by a halo exchange start.
+pub struct HaloHandle {
+    inner: Box<dyn Any + Send>,
+}
+
+impl HaloHandle {
+    pub fn new<T: Any + Send>(value: T) -> Self {
+        Self {
+            inner: Box::new(value),
+        }
+    }
+
+    pub fn downcast<T: Any + Send>(self) -> Result<T, Self> {
+        match self.inner.downcast::<T>() {
+            Ok(value) => Ok(*value),
+            Err(inner) => Err(Self { inner }),
+        }
+    }
+}
+
+/// Optional halo exchange capability for vectors living on the operator layout.
+pub trait HaloExchange<S>: Send + Sync {
+    fn begin(&self, x_local: &[S]) -> Result<HaloHandle, KError>;
+    fn end(&self, handle: HaloHandle, x_with_halo: &mut [S]) -> Result<(), KError>;
+}
+
 /// Opaque identifier for an operator's structural pattern.
 ///
 /// Bump this when the sparsity pattern or dimensions change. Returning
@@ -103,6 +140,16 @@ pub trait LinOp: Send + Sync + Any {
         UniverseComm::NoComm(NoComm)
     }
 
+    /// Optional distributed layout metadata for MPI-enabled operators.
+    fn dist_layout(&self) -> Option<&DistLayout> {
+        None
+    }
+
+    /// Optional halo exchange support for operator-aligned vectors.
+    fn halo_exchange(&self) -> Option<&dyn HaloExchange<Self::S>> {
+        None
+    }
+
     /// Operator storage format, if known.
     fn format(&self) -> OpFormat {
         OpFormat::Any
@@ -147,6 +194,7 @@ pub struct GenericCsrOp<S: KrystScalar> {
     plan: ScalarSpmvPlan<S>,
     ids: ChangeIds,
     comm: UniverseComm,
+    layout: Option<DistLayout>,
 }
 
 #[cfg(feature = "backend-faer")]
@@ -163,6 +211,7 @@ impl<S: KrystScalar> GenericCsrOp<S> {
             plan,
             ids,
             comm: UniverseComm::NoComm(NoComm),
+            layout: None,
         }
     }
 
@@ -204,6 +253,12 @@ impl<S: KrystScalar> GenericCsrOp<S> {
     /// Attaches a communicator to the operator, mirroring the legacy API.
     pub fn with_comm(mut self, comm: UniverseComm) -> Self {
         self.comm = comm;
+        self
+    }
+
+    /// Attach a distributed layout to this operator.
+    pub fn with_layout(mut self, layout: DistLayout) -> Self {
+        self.layout = Some(layout);
         self
     }
 
@@ -262,6 +317,9 @@ impl<S: KrystScalar> LinOp for GenericCsrOp<S> {
 
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+    fn dist_layout(&self) -> Option<&DistLayout> {
+        self.layout.as_ref()
     }
     fn format(&self) -> OpFormat {
         OpFormat::Csr
@@ -341,6 +399,7 @@ pub struct DenseOp {
     mat: Arc<Mat<f64>>,
     ids: ChangeIds,
     comm: UniverseComm,
+    layout: Option<DistLayout>,
 }
 #[cfg(feature = "backend-faer")]
 impl DenseOp {
@@ -355,11 +414,17 @@ impl DenseOp {
             mat,
             ids,
             comm: UniverseComm::NoComm(NoComm),
+            layout: None,
         }
     }
     /// Attach a communicator to this operator.
     pub fn with_comm(mut self, comm: UniverseComm) -> Self {
         self.comm = comm;
+        self
+    }
+    /// Attach a distributed layout to this operator.
+    pub fn with_layout(mut self, layout: DistLayout) -> Self {
+        self.layout = Some(layout);
         self
     }
     pub fn mark_structure_changed(&self) {
@@ -406,6 +471,9 @@ impl LinOp for DenseOp {
     }
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+    fn dist_layout(&self) -> Option<&DistLayout> {
+        self.layout.as_ref()
     }
     fn format(&self) -> OpFormat {
         OpFormat::Dense
@@ -472,6 +540,7 @@ pub struct CsrOp<Scalar = S> {
     csr: Arc<CsrMatrix<Scalar>>,
     ids: ChangeIds,
     comm: UniverseComm,
+    layout: Option<DistLayout>,
     #[cfg(feature = "transpose-cache")]
     t_cache: parking_lot::RwLock<Option<(ValuesId, Arc<CscMatrix<Scalar>>)>>,
 }
@@ -485,6 +554,7 @@ impl<Scalar> CsrOp<Scalar> {
             csr,
             ids,
             comm: UniverseComm::NoComm(NoComm),
+            layout: None,
             #[cfg(feature = "transpose-cache")]
             t_cache: parking_lot::RwLock::new(None),
         }
@@ -501,6 +571,11 @@ impl<Scalar> CsrOp<Scalar> {
     /// Attach a communicator to this operator.
     pub fn with_comm(mut self, comm: UniverseComm) -> Self {
         self.comm = comm;
+        self
+    }
+    /// Attach a distributed layout to this operator.
+    pub fn with_layout(mut self, layout: DistLayout) -> Self {
+        self.layout = Some(layout);
         self
     }
 }
@@ -553,6 +628,9 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
     }
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+    fn dist_layout(&self) -> Option<&DistLayout> {
+        self.layout.as_ref()
     }
     fn format(&self) -> OpFormat {
         OpFormat::Csr
@@ -894,6 +972,12 @@ impl<T: LinOp + ?Sized> LinOp for WithCommOp<T> {
     #[inline]
     fn comm(&self) -> UniverseComm {
         self.comm.clone()
+    }
+    fn dist_layout(&self) -> Option<&DistLayout> {
+        self.inner.dist_layout()
+    }
+    fn halo_exchange(&self) -> Option<&dyn HaloExchange<Self::S>> {
+        self.inner.halo_exchange()
     }
 }
 
