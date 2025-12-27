@@ -95,7 +95,7 @@ pub trait LinOp: Send + Sync + Any {
     /// and solvers. Local/dense operators return [`UniverseComm::NoComm`].
     ///
     /// # Invariants
-    /// - `A.comm() == P.comm()` is enforced by [`KspContext::try_set_operators`]
+    /// - `A.comm()` and `P.comm()` must be congruent; enforced by [`KspContext::try_set_operators`]
     ///   (and `set_operators` panics on mismatch).
     /// - PCs obtain their communicator from the operator passed to [`Preconditioner::setup`].
     fn comm(&self) -> UniverseComm {

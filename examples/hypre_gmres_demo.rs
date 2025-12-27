@@ -6,8 +6,14 @@
 //!
 //! to run:
 //! cargo run --example hypre_gmres_demo
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("hypre_gmres_demo.rs is unavailable when built with --features complex");
+}
+
 
 #[cfg(not(feature = "backend-faer"))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("hypre_gmres_demo requires the backend-faer feature.");
 }
@@ -19,6 +25,7 @@ use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};
 use kryst::solver::GmresSolver;
 
 #[cfg(feature = "backend-faer")]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a well-conditioned non-symmetric system
     let a = mat![

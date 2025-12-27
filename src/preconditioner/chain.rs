@@ -28,7 +28,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use std::cell::RefCell;
 
 thread_local! {
-    static TLS_BUF: RefCell<Vec<R>> = const { RefCell::new(Vec::new()) };
+    static TLS_BUF: RefCell<Vec<S>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A simple compositional preconditioner:
@@ -53,20 +53,20 @@ impl PcChain {
 }
 
 impl Preconditioner for PcChain {
-    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
             let hint = st.required_format();
-            let tol = st.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let tol = st.preferred_drop_tol_for_format().unwrap_or_default();
             let view = materialize_linop_with_hint(a, hint, tol)?;
             st.setup(view.as_ref())?;
         }
         // Best-effort pre-size TLS buffer for apply hot path
         let (n, _) = a.dims();
-        TLS_BUF.with(|b| b.borrow_mut().resize(n, R::default()));
+        TLS_BUF.with(|b| b.borrow_mut().resize(n, S::zero()));
         Ok(())
     }
 
-    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if self.stages.is_empty() {
             y.copy_from_slice(x);
             return Ok(());
@@ -77,7 +77,7 @@ impl Preconditioner for PcChain {
         TLS_BUF.with(|b| -> Result<(), KError> {
             let mut tmp = b.borrow_mut();
             if tmp.len() < x.len() {
-                tmp.resize(x.len(), R::default());
+                tmp.resize(x.len(), S::zero());
             }
             tmp.copy_from_slice(x);
             for st in &self.stages {
@@ -88,7 +88,7 @@ impl Preconditioner for PcChain {
         })
     }
 
-    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if self.stages.is_empty() {
             y.copy_from_slice(x);
             return Ok(());
@@ -99,7 +99,7 @@ impl Preconditioner for PcChain {
         TLS_BUF.with(|b| -> Result<(), KError> {
             let mut tmp = b.borrow_mut();
             if tmp.len() < x.len() {
-                tmp.resize(x.len(), R::default());
+                tmp.resize(x.len(), S::zero());
             }
             tmp.copy_from_slice(x);
             for st in self.stages.iter_mut() {
@@ -114,10 +114,10 @@ impl Preconditioner for PcChain {
         self.stages.iter().all(|s| s.supports_numeric_update())
     }
 
-    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
             let hint = st.required_format();
-            let tol = st.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let tol = st.preferred_drop_tol_for_format().unwrap_or_default();
             let view = materialize_linop_with_hint(a, hint, tol)?;
             if st.supports_numeric_update() {
                 st.update_numeric(view.as_ref())?;
@@ -128,10 +128,10 @@ impl Preconditioner for PcChain {
         Ok(())
     }
 
-    fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_symbolic(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         for st in self.stages.iter_mut() {
             let hint = st.required_format();
-            let tol = st.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let tol = st.preferred_drop_tol_for_format().unwrap_or_default();
             let view = materialize_linop_with_hint(a, hint, tol)?;
             st.update_symbolic(view.as_ref())?;
         }

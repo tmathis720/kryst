@@ -9,13 +9,13 @@
 //! ```bash
 //! cargo run --example poisson_spd_ilu0_vs_jacobi --features backend-faer
 //! ```
-
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("poisson_spd_ilu0_vs_jacobi is disabled when the complex feature is enabled.");
 }
 
 #[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("poisson_spd_ilu0_vs_jacobi requires the backend-faer feature.");
     Ok(())
@@ -43,6 +43,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn make_poisson_1d(n: usize) -> Mat<S> {
     Mat::from_fn(n, n, |i, j| {
         if i == j {
@@ -56,6 +57,7 @@ fn make_poisson_1d(n: usize) -> Mat<S> {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn run_cg_with_pc(
     matrix: Arc<Mat<S>>,
     rhs: &[S],
@@ -74,6 +76,7 @@ fn run_cg_with_pc(
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let size = 256;
     let matrix = Arc::new(make_poisson_1d(size));

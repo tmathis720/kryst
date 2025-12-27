@@ -9,13 +9,13 @@
 //! ```bash
 //! cargo run --example setup_reuse_demo
 //! ```
-
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("setup_reuse_demo is disabled when the complex feature is enabled.");
 }
 
 #[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("setup_reuse_demo requires the backend-faer feature.");
 }
@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
     // This is a common pattern in finite difference discretizations
@@ -49,6 +50,7 @@ fn create_test_matrix(n: usize) -> Mat<f64> {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("KSP Context Setup & Workspace Reuse Demo");
     println!("========================================");

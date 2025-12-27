@@ -241,6 +241,7 @@ where
 // Object-safe Preconditioner implementation for the common f64 dense case.
 // This allows KSPs that pass a `&dyn LinOp<S=f64>` to setup/apply ASM without
 // requiring callers to downcast to a concrete matrix type.
+#[cfg(not(feature = "complex"))]
 impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         // Obtain (or convert) a CSR representation from the LinOp using shared converter
@@ -794,6 +795,21 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     }
 }
 
+#[cfg(feature = "complex")]
+impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "ASM does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "ASM does not support complex scalars yet".into(),
+        ))
+    }
+}
+
 impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     fn apply_dense_blocks_legacy(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         if self.subdomains.len() != self.local_blocks.len() {
@@ -1182,10 +1198,17 @@ impl AsmSubdomain {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 enum LocalSolver {
     Ilu(IluCsr),
 }
 
+#[cfg(feature = "complex")]
+enum LocalSolver {
+    Unsupported,
+}
+
+#[cfg(not(feature = "complex"))]
 impl LocalSolver {
     fn from_config(kind: AsmLocalSolver, mat: &Arc<CsrMatrix<f64>>) -> Result<Self, KError> {
         match kind {
@@ -1268,6 +1291,7 @@ impl Asm {
         self.state.as_ref().map(|s| &s.a_fine)
     }
 
+    #[cfg(not(feature = "complex"))]
     fn build_subdomains(&self, csr: &Arc<CsrMatrix<f64>>) -> Result<Vec<AsmSubdomain>, KError> {
         let n = csr.nrows();
         let rp = csr.row_ptr();
@@ -1324,6 +1348,7 @@ impl Asm {
         Ok(subdomains)
     }
 
+    #[cfg(not(feature = "complex"))]
     fn apply_impl(&self, rhs: &[f64], out: &mut [f64]) -> Result<(), KError> {
         let state = self
             .state
@@ -1360,6 +1385,7 @@ impl Asm {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl DynPreconditioner for Asm {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         let csr = csr_from_linop(op, 0.0)?;
@@ -1420,6 +1446,21 @@ impl DynPreconditioner for Asm {
 
     fn capabilities(&self) -> PcCaps {
         PcCaps::default()
+    }
+}
+
+#[cfg(feature = "complex")]
+impl DynPreconditioner for Asm {
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "ASM does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: PcSide, _rhs: &[S], _out: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "ASM does not support complex scalars yet".into(),
+        ))
     }
 }
 

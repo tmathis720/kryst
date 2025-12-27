@@ -370,6 +370,30 @@ impl UniverseComm {
         }
     }
 
+    /// True if using this comm with `other` is safe for collectives and rank-local assumptions.
+    /// For MPI: accept MPI_IDENT or MPI_CONGRUENT (reject MPI_SIMILAR).
+    pub fn congruent(&self, other: &UniverseComm) -> bool {
+        match (self, other) {
+            (UniverseComm::NoComm(_), UniverseComm::NoComm(_)) => true,
+            (UniverseComm::NoComm(_), _) | (_, UniverseComm::NoComm(_)) => false,
+            #[cfg(feature = "mpi")]
+            (UniverseComm::Mpi(a), UniverseComm::Mpi(b)) => a.congruent(b),
+            #[cfg(feature = "rayon")]
+            (UniverseComm::Rayon(a), UniverseComm::Rayon(b)) => a.congruent(b),
+            #[cfg(not(any(feature = "mpi", feature = "rayon")))]
+            (UniverseComm::Serial, UniverseComm::Serial) => true,
+            _ => false,
+        }
+    }
+
+    /// A comm is "trivial" if it cannot participate in multi-rank collectives.
+    pub fn is_trivial(&self) -> bool {
+        match self {
+            UniverseComm::NoComm(_) => true,
+            _ => self.size() == 1,
+        }
+    }
+
     /// Sum a single scalar across all ranks (fast path).
     #[inline]
     pub fn allreduce_sum_scalar(&self, z: S) -> S {

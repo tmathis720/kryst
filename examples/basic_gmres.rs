@@ -1,7 +1,13 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("basic_gmres.rs is unavailable when built with --features complex");
+}
+
 use kryst::matrix::MatShell;
 use kryst::prelude::*;
 use std::sync::Arc;
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = 8;
     let op = MatShell::new(n, n, move |x, y| {

@@ -131,10 +131,12 @@ impl<S> OpSolverAdapter<S> {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 struct OpPcAdapter<'p> {
     inner: &'p dyn Preconditioner,
 }
 
+#[cfg(not(feature = "complex"))]
 impl<'p, 'm> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 'm, Vec<f64>>
     for OpPcAdapter<'p>
 {
@@ -146,6 +148,7 @@ impl<'p, 'm> crate::preconditioner::legacy::Preconditioner<dyn LinOp<S = f64> + 
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl<S> LinearSolver for OpSolverAdapter<S>
 where
     S: for<'a> legacy::LinearSolver<

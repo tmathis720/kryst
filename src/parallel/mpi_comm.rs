@@ -96,6 +96,29 @@ impl MpiComm {
         std::panic::catch_unwind(Self::new).ok()
     }
 
+    pub fn congruent(&self, other: &MpiComm) -> bool {
+        use mpi::topology::CommunicatorRelation;
+
+        matches!(
+            self.world.compare(&other.world),
+            CommunicatorRelation::Identical | CommunicatorRelation::Congruent
+        )
+    }
+
+    pub fn dup(&self) -> Self {
+        let world = self.world.duplicate();
+        let rank = world.rank() as usize;
+        let size = world.size() as usize;
+        let repro = self.reproducible.load(Ordering::Relaxed);
+
+        MpiComm {
+            world,
+            rank,
+            size,
+            reproducible: AtomicBool::new(repro),
+        }
+    }
+
     #[inline]
     pub fn allreduce_sum_real(&self, v: R) -> R {
         use mpi::collective::SystemOperation;

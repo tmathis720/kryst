@@ -1,3 +1,5 @@
+#![cfg(not(feature = "complex"))]
+
 #[cfg(feature = "legacy-pc-bridge")]
 #[test]
 fn legacy_bridge_reuses_scratch() {

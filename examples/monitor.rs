@@ -6,7 +6,6 @@
 //! 3. Use different solver types with monitoring
 //!
 //! Run with: RUST_LOG=trace cargo run --example monitor --features=logging
-
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("monitor example is disabled when the complex feature is enabled.");

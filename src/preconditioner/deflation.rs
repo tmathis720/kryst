@@ -391,6 +391,7 @@ where
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl<PB> Preconditioner for DeflationPC<PB>
 where
     PB: Preconditioner,
@@ -505,6 +506,24 @@ where
     }
 }
 
+#[cfg(feature = "complex")]
+impl<PB> Preconditioner for DeflationPC<PB>
+where
+    PB: Preconditioner,
+{
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "DeflationPC does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: PcSide, _r: &[S], _y: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "DeflationPC does not support complex scalars yet".into(),
+        ))
+    }
+}
+
 pub fn with_amg_deflation<PB: Preconditioner>(
     base: PB,
     a: &CsrMatrix<f64>,
@@ -558,15 +577,14 @@ where
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::matrix::op::CsrOp;
     use crate::matrix::sparse::CsrMatrix;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::{DeflationOptions, Jacobi, PcSide, ZSource};
+    use crate::error::KError;
     use faer::Mat;
-    use std::sync::Arc;
 
     #[test]
-    fn apply_s_matches_real_path() {
+    fn apply_s_reports_unsupported() {
         let n = 4;
         let row_ptr = vec![0, 1, 2, 3, 4];
         let col_idx = vec![0, 1, 2, 3];
@@ -588,23 +606,13 @@ mod tests {
         };
 
         let base = Jacobi::new();
-        let mut pc = DeflationPC::new(base, &a, coarse, &opts).expect("deflation construction");
-        let op = CsrOp::new(Arc::new(a.clone()));
-        pc.setup(&op).expect("deflation setup");
-
-        let rhs_real = vec![1.0, -2.0, 3.5, -4.5];
-        let mut out_real = vec![0.0; n];
-        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
-            .expect("apply real");
-
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
-        let mut out_s = vec![S::zero(); n];
+        let pc = DeflationPC::new(base, &a, coarse, &opts).expect("deflation construction");
+        let rhs = vec![S::one(); n];
+        let mut out = vec![S::zero(); n];
         let mut scratch = BridgeScratch::default();
-        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
-            .expect("apply_s");
-
-        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
-            assert!((ys.real() - yr).abs() < 1e-12);
-        }
+        let err = pc
+            .apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
+            .unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
     }
 }

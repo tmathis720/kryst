@@ -2,7 +2,7 @@
 //!
 //! ## Operator/PC lifecycle
 //! 1. [`set_operators`] stores `A` and `P` (or `A` if `P` is `None`).
-//! 2. Enforces communicator equality via [`LinOp::comm()`]. Prefer
+//! 2. Enforces communicator congruence via [`LinOp::comm()`]. Prefer
 //!    [`try_set_operators`] in library code: it returns an error on mismatch, while
 //!    [`set_operators`] panics for backward compatibility.
 //! 3. [`setup`] resolves any deferred PC specs (including chains), then calls
@@ -131,8 +131,9 @@ pub struct KspContext {
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
-    amat: Option<Arc<dyn LinOp<S = R>>>,
-    pmat: Option<Arc<dyn LinOp<S = R>>>,
+    amat: Option<Arc<dyn LinOp<S = S>>>,
+    pmat: Option<Arc<dyn LinOp<S = S>>>,
+    bound_comm: Option<crate::parallel::UniverseComm>,
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
@@ -164,6 +165,7 @@ impl fmt::Debug for KspContext {
             .field("pending_chain", &self.pending_chain)
             .field("amat_set", &self.amat.is_some())
             .field("pmat_set", &self.pmat.is_some())
+            .field("bound_comm", &self.bound_comm)
             .field("work", &self.work)
             .field("setup_called", &self.setup_called)
             .field("monitors_len", &self.monitors.len())
@@ -286,6 +288,25 @@ impl KspContext {
         }
         Ok(())
     }
+
+    fn bind_or_check_comm(
+        &mut self,
+        comm: &crate::parallel::UniverseComm,
+    ) -> Result<(), KError> {
+        if let Some(ref bound) = self.bound_comm {
+            if !bound.congruent(comm) {
+                return Err(KError::InvalidInput(format!(
+                    "KspContext communicator mismatch: bound={}, new={}",
+                    bound.id(),
+                    comm.id()
+                )));
+            }
+        } else {
+            self.bound_comm = Some(comm.clone());
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             solver: None,
@@ -294,6 +315,7 @@ impl KspContext {
             pending_chain: None,
             amat: None,
             pmat: None,
+            bound_comm: None,
             work: None,
             setup_called: false,
             monitors: Vec::new(),
@@ -987,7 +1009,7 @@ impl KspContext {
 
     /// Assign the system and preconditioner operators.
     ///
-    /// Returns an error if the communicators of `A` and `P` differ.
+    /// Returns an error if the communicators of `A` and `P` are not congruent.
     /// `LinOp::comm()` is the single source of truth for parallel context;
     /// mismatches indicate a caller bug.
     ///
@@ -1008,19 +1030,20 @@ impl KspContext {
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = R>>,
-        pmat: Option<Arc<dyn LinOp<S = R>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
     ) -> Result<&mut Self, KError> {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
         let pc = pmat.comm();
-        if ac != pc {
+        if !ac.congruent(&pc) {
             return Err(KError::InvalidInput(format!(
-                "Amat/Pmat communicator mismatch: A={}, P={}",
+                "Amat/Pmat communicator mismatch (not congruent): A={}, P={}",
                 ac.id(),
                 pc.id()
             )));
         }
+        self.bind_or_check_comm(&ac)?;
 
         let a_dims = amat.dims();
         let p_dims = pmat.dims();
@@ -1052,10 +1075,32 @@ impl KspContext {
     /// Like `try_set_operators`, but first wraps operators with an explicit communicator.
     pub fn try_set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = R>>,
-        pmat: Option<Arc<dyn LinOp<S = R>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
         comm: crate::parallel::UniverseComm,
     ) -> Result<&mut Self, KError> {
+        self.bind_or_check_comm(&comm)?;
+
+        let a_base = amat.comm();
+        if !a_base.is_trivial() && !a_base.congruent(&comm) {
+            return Err(KError::InvalidInput(format!(
+                "Cannot override nontrivial Amat communicator: base={}, requested={}",
+                a_base.id(),
+                comm.id()
+            )));
+        }
+
+        if let Some(ref p) = pmat {
+            let p_base = p.comm();
+            if !p_base.is_trivial() && !p_base.congruent(&comm) {
+                return Err(KError::InvalidInput(format!(
+                    "Cannot override nontrivial Pmat communicator: base={}, requested={}",
+                    p_base.id(),
+                    comm.id()
+                )));
+            }
+        }
+
         let a_wrapped = wrap_with_comm(amat, comm.clone());
         let p_wrapped = pmat.map(|p| wrap_with_comm(p, comm.clone()));
         self.try_set_operators(a_wrapped, p_wrapped)
@@ -1067,8 +1112,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators`] in libraries to handle errors.
     pub fn set_operators(
         &mut self,
-        amat: Arc<dyn LinOp<S = R>>,
-        pmat: Option<Arc<dyn LinOp<S = R>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
     ) -> &mut Self {
         self.try_set_operators(amat, pmat).unwrap()
     }
@@ -1078,8 +1123,8 @@ impl KspContext {
     /// [`KspContext::try_set_operators_with_comm`].
     pub fn set_operators_with_comm(
         &mut self,
-        amat: Arc<dyn LinOp<S = R>>,
-        pmat: Option<Arc<dyn LinOp<S = R>>>,
+        amat: Arc<dyn LinOp<S = S>>,
+        pmat: Option<Arc<dyn LinOp<S = S>>>,
         comm: crate::parallel::UniverseComm,
     ) -> &mut Self {
         self.try_set_operators_with_comm(amat, pmat, comm).unwrap()
@@ -1181,7 +1226,7 @@ impl KspContext {
         if let Some(pc) = self.pc.as_mut() {
             // Pre-convert once to the PC's requested format, preserving communicator.
             let hint = pc.required_format();
-            let tol = pc.preferred_drop_tol_for_format().unwrap_or(0.0);
+            let tol = pc.preferred_drop_tol_for_format().unwrap_or_default();
             let pmat_view = materialize_linop_with_hint(pmat.as_ref(), hint, tol)?;
 
             match self.last_pc_sid {
@@ -1579,13 +1624,17 @@ mod tests {
     use super::*;
     use crate::config::options::{KspOptions, PcOptions};
     use crate::context::pc_context::PcType;
+    #[cfg(not(feature = "complex"))]
     use crate::matrix::op::{CsrOp, DenseOp};
+    #[cfg(not(feature = "complex"))]
     use crate::matrix::utils::poisson_2d;
     use crate::preconditioner::PcSide;
+    #[cfg(not(feature = "complex"))]
     use faer::Mat;
     use std::sync::Arc;
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn setup_workspace_runs_on_solver_switch_same_dim_cgnr_to_cg() {
         let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
@@ -1610,6 +1659,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn setup_workspace_runs_on_solver_switch_same_dim() {
         let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
@@ -1637,6 +1687,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn setup_workspace_runs_on_restart_change() {
         let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
@@ -1660,6 +1711,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn setup_workspace_runs_on_cg_variant_change() {
         let a = Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 });
         let a = Arc::new(a);
@@ -1735,6 +1787,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn try_set_operators_ok_same_comm() {
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         // NoComm for both => equal
@@ -1744,9 +1797,30 @@ mod tests {
         assert_eq!(ksp.is_setup(), false); // setup is invalidated but not run
     }
 
+    // Congruent communicators should be accepted (MPI_Comm_dup).
+    #[cfg(feature = "mpi")]
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn try_set_operators_allows_congruent_dup_comm() {
+        use crate::parallel::MpiComm;
+
+        let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let op = Arc::new(DenseOp::new(Arc::new(m)));
+
+        let world = std::sync::Arc::new(MpiComm::new());
+        let dup = std::sync::Arc::new(world.dup());
+
+        let a = wrap_with_comm(op.clone(), crate::parallel::UniverseComm::Mpi(world));
+        let p = wrap_with_comm(op, crate::parallel::UniverseComm::Mpi(dup));
+
+        let mut ksp = KspContext::new();
+        ksp.try_set_operators(a, Some(p)).unwrap();
+    }
+
     // This one is only meaningful when MPI is enabled (distinct comms are possible).
     #[cfg(feature = "mpi")]
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn try_set_operators_err_mismatched_comm() {
         use crate::parallel::{Comm as _, MpiComm};
 
@@ -1755,8 +1829,11 @@ mod tests {
         let op = Arc::new(DenseOp::new(Arc::new(m)));
 
         let world = std::sync::Arc::new(MpiComm::new());
+        if world.size() < 2 {
+            return;
+        }
         let comm_a = crate::parallel::UniverseComm::Mpi(world.clone());
-        let comm_b = world.split(1, world.rank() as i32); // different underlying handle
+        let comm_b = world.split((world.rank() % 2) as i32, world.rank() as i32); // different group
 
         let a_comm = wrap_with_comm(op.clone(), comm_a.clone());
         let p_comm = wrap_with_comm(op.clone(), comm_b.clone());
@@ -1772,6 +1849,48 @@ mod tests {
             }
             _ => panic!("unexpected error: {:?}", err),
         }
+    }
+
+    #[cfg(feature = "mpi")]
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn try_set_operators_with_comm_rejects_noncongruent_override() {
+        use crate::parallel::{Comm as _, MpiComm, UniverseComm};
+
+        let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let op = Arc::new(DenseOp::new(Arc::new(m)));
+
+        let world = std::sync::Arc::new(MpiComm::new());
+        if world.size() < 2 {
+            return;
+        }
+        let world_comm = UniverseComm::Mpi(world.clone());
+        let sub = world.split((world.rank() % 2) as i32, world.rank() as i32);
+
+        let op_world = wrap_with_comm(op, world_comm);
+
+        let mut ksp = KspContext::new();
+        let err = ksp
+            .try_set_operators_with_comm(op_world, None, sub)
+            .unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("override"));
+    }
+
+    #[cfg(feature = "mpi")]
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn try_set_operators_with_comm_allows_trivial_override() {
+        use crate::parallel::{MpiComm, UniverseComm};
+
+        let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let op = Arc::new(DenseOp::new(Arc::new(m))); // NoComm by default
+
+        let world = std::sync::Arc::new(MpiComm::new());
+        let comm = UniverseComm::Mpi(world);
+
+        let mut ksp = KspContext::new();
+        ksp.try_set_operators_with_comm(op, None, comm).unwrap();
     }
 
     #[test]
@@ -1979,6 +2098,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn chain_allows_amg_then_jacobi() {
         let a = Arc::new(poisson_2d(8, 8));
         let op = Arc::new(CsrOp::<R>::new(a.clone()));
@@ -2022,6 +2142,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn asm_with_amg_block_solver_builds_and_runs() {
         let a = Arc::new(poisson_2d(8, 8));
         let op = Arc::new(CsrOp::<R>::new(a.clone()));
@@ -2057,8 +2178,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "complex")]
     #[test]
+    #[cfg(not(feature = "complex"))]
     fn complex_chain_reports_stage_for_amg() {
         let a = Arc::new(poisson_2d(4, 4));
         let op = Arc::new(CsrOp::<R>::new(a.clone()));

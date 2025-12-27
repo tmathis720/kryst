@@ -22,6 +22,11 @@
 //! - Memory usage profiling with StageGuard
 //!
 //! **Test Matrix:** fidapm11 (FIDAP model, structural problem, 22,294 x 22,294, 623,554 nnz)
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("superlu_dist_demo.rs is unavailable when built with --features complex");
+}
+
 
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{Comm, UniverseComm};
@@ -43,6 +48,7 @@ use std::time::Instant;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
@@ -131,6 +137,7 @@ struct MatrixInfo {
 }
 
 /// Parse matrix name from command line arguments
+#[cfg(not(feature = "complex"))]
 fn parse_matrix_name(args: &[String]) -> String {
     for i in 0..args.len() {
         if args[i] == "--matrix" && i + 1 < args.len() {
@@ -141,11 +148,13 @@ fn parse_matrix_name(args: &[String]) -> String {
 }
 
 /// Parse boolean flag from command line arguments
+#[cfg(not(feature = "complex"))]
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
 
 /// Get available matrices for testing
+#[cfg(not(feature = "complex"))]
 fn get_available_matrices() -> Vec<MatrixInfo> {
     vec![
         MatrixInfo {
@@ -171,6 +180,7 @@ fn get_available_matrices() -> Vec<MatrixInfo> {
 
 /// Load and solve a real Matrix Market problem
 #[cfg(feature = "superlu_dist")]
+#[cfg(not(feature = "complex"))]
 fn example_matrix_market_solve(
     comm: &UniverseComm,
     matrix_name: &str,
@@ -281,6 +291,7 @@ fn example_matrix_market_solve(
 
 /// Demonstrate Phase 7 builder pattern and fluent
 #[cfg(feature = "superlu_dist")]
+#[cfg(not(feature = "complex"))]
 fn example_builder_pattern(
     comm: &UniverseComm,
     _matrix_name: &str,
@@ -410,6 +421,7 @@ fn example_builder_pattern(
 
 /// Demonstrate performance analysis with different configurations
 #[cfg(feature = "superlu_dist")]
+#[cfg(not(feature = "complex"))]
 fn example_performance_analysis(
     comm: &UniverseComm,
     matrix_name: &str,
@@ -550,6 +562,7 @@ fn example_performance_analysis(
 
 /// Demonstrate iterative refinement analysis
 #[cfg(feature = "superlu_dist")]
+#[cfg(not(feature = "complex"))]
 fn example_refinement_analysis(
     comm: &UniverseComm,
     matrix_name: &str,

@@ -39,6 +39,10 @@ impl RayonComm {
         }
         RayonComm
     }
+
+    pub fn congruent(&self, other: &RayonComm) -> bool {
+        super::Comm::size(self) == super::Comm::size(other)
+    }
 }
 
 impl super::Comm for RayonComm {

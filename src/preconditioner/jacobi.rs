@@ -39,7 +39,7 @@ impl Jacobi {
         }
     }
 
-    fn recompute(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn recompute(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
         if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
             let n = csr.nrows().min(csr.ncols());
             self.diag_inv.resize(n, S::zero());
@@ -85,17 +85,17 @@ impl Preconditioner for Jacobi {
         (self.n, self.n)
     }
 
-    fn setup(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
         self.recompute(pmat)
     }
     fn supports_numeric_update(&self) -> bool {
         true
     }
 
-    fn update_numeric(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_numeric(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
         self.recompute(pmat)
     }
-    fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
         if r.len() != self.n || z.len() != self.n {
             return Err(KError::InvalidInput(format!(
                 "Jacobi::apply dimension mismatch: n={}, r.len()={}, z.len()={}",
@@ -107,7 +107,7 @@ impl Preconditioner for Jacobi {
         let z_ptr = AtomicPtr::new(z.as_mut_ptr());
         parallel::par_for_each_index(r.len(), move |i| unsafe {
             let z_ptr = z_ptr.load(Ordering::Relaxed);
-            *z_ptr.add(i) = self.diag_inv[i].real() * r[i];
+            *z_ptr.add(i) = self.diag_inv[i] * r[i];
         });
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -173,7 +173,7 @@ impl KPreconditioner for Jacobi {
     }
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacobi {
     fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
         self.recompute(a)
@@ -183,7 +183,7 @@ impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for Jacob
     }
 }
 
-#[cfg(all(test, feature = "backend-faer"))]
+#[cfg(all(test, feature = "backend-faer", not(feature = "complex")))]
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;

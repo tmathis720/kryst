@@ -1,3 +1,5 @@
+#![cfg(not(feature = "complex"))]
+
 use crate::algebra::prelude::*;
 use crate::assert_vec_close;
 use crate::matrix::op::CsrOp;

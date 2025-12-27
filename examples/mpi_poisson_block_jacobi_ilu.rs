@@ -9,8 +9,14 @@
 //! ```bash
 //! cargo mpirun -n 4 --example mpi_poisson_block_jacobi_ilu --features backend-faer,mpi
 //! ```
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("mpi_poisson_block_jacobi_ilu.rs is unavailable when built with --features complex");
+}
+
 
 #[cfg(not(all(feature = "backend-faer", feature = "mpi", not(feature = "complex"))))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "mpi_poisson_block_jacobi_ilu requires backend-faer + mpi + not(feature = \"complex\")"
@@ -40,6 +46,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 #[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn build_local_poisson_block(n_global: usize, row_start: usize, row_end: usize) -> CsrMatrix<f64> {
     let n_local = row_end - row_start;
     let mut row_ptr = Vec::with_capacity(n_local + 1);
@@ -65,6 +72,7 @@ fn build_local_poisson_block(n_global: usize, row_start: usize, row_end: usize) 
 }
 
 #[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let rank = comm.rank();

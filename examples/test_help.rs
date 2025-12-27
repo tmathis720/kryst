@@ -1,5 +1,11 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("test_help.rs is unavailable when built with --features complex");
+}
+
 use kryst::config::options::PcOptions;
 
+#[cfg(not(feature = "complex"))]
 fn main() {
     let args = vec!["-help"];
 

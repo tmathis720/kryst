@@ -18,11 +18,11 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! struct IdentityOp(usize);
 //! impl LinOp for IdentityOp {
-//!     type S = R;
+//!     type S = S;
 //!     fn dims(&self) -> (usize, usize) {
 //!         (self.0, self.0)
 //!     }
-//!     fn matvec(&self, x: &[R], y: &mut [R]) {
+//!     fn matvec(&self, x: &[S], y: &mut [S]) {
 //!         y.copy_from_slice(x);
 //!     }
 //!     fn as_any(&self) -> &dyn std::any::Any {
@@ -30,7 +30,7 @@
 //!     }
 //! }
 //!
-//! let op = Arc::new(IdentityOp(4)) as Arc<dyn LinOp<S = R>>;
+//! let op = Arc::new(IdentityOp(4)) as Arc<dyn LinOp<S = S>>;
 //! let b = vec![S::from_real(1.0); 4];
 //! let mut x = vec![S::zero(); 4];
 //! let mut ksp = KspContext::new();

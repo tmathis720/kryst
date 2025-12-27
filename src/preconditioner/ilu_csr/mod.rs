@@ -12,6 +12,8 @@ use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
 #[cfg(feature = "complex")]
+use crate::algebra::scalar::S;
+#[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
@@ -1037,6 +1039,7 @@ impl IluCsr {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl Preconditioner for IluCsr {
     fn dims(&self) -> (usize, usize) {
         (self.n, self.n)
@@ -1142,6 +1145,21 @@ impl Preconditioner for IluCsr {
             is_spd: false,
             side_restriction: Some(PcSide::Left),
         }
+    }
+}
+
+#[cfg(feature = "complex")]
+impl Preconditioner for IluCsr {
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "IluCsr does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "IluCsr does not support complex scalars yet".into(),
+        ))
     }
 }
 

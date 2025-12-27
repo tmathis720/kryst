@@ -16,6 +16,7 @@ fn main() {
 }
 
 #[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("convergence_demo requires the backend-faer feature.");
 }
@@ -30,6 +31,7 @@ use kryst::context::pc_context::PcType;
 use std::sync::Arc;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn create_test_matrix(n: usize) -> Mat<f64> {
     // Create a symmetric positive definite tridiagonal matrix
     Mat::from_fn(n, n, |i, j| {
@@ -44,6 +46,7 @@ fn create_test_matrix(n: usize) -> Mat<f64> {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Flexible Convergence & Divergence Tests Demo");
     println!("============================================");

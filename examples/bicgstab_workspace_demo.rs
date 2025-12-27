@@ -10,7 +10,6 @@
 //!
 //! to run:
 //! cargo run --features=logging --example bicgstab_workspace_demo
-
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("bicgstab_workspace_demo is disabled when the complex feature is enabled.");

@@ -136,6 +136,7 @@ impl AsmAmg {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl Preconditioner for AsmAmg {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.asm.setup(op)?;
@@ -219,6 +220,21 @@ impl Preconditioner for AsmAmg {
 
     fn capabilities(&self) -> PcCaps {
         PcCaps::default()
+    }
+}
+
+#[cfg(feature = "complex")]
+impl Preconditioner for AsmAmg {
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AsmAmg does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: PcSide, _rhs: &[S], _out: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AsmAmg does not support complex scalars yet".into(),
+        ))
     }
 }
 

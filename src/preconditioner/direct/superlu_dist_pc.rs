@@ -1,3 +1,4 @@
+use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
@@ -5,8 +6,6 @@ use crate::preconditioner::{PcSide, Preconditioner};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-#[cfg(feature = "complex")]
-use crate::algebra::prelude::*;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
@@ -34,7 +33,7 @@ impl SuperLuDistPc {
 }
 
 impl Preconditioner for SuperLuDistPc {
-    fn setup(&mut self, pmat: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
         #[cfg(feature = "superlu_dist")]
         {
             self.comm = Some(pmat.comm());
@@ -55,7 +54,7 @@ impl Preconditioner for SuperLuDistPc {
         }
     }
 
-    fn apply(&self, _side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
         let _ = (r, z);
         Err(KError::Unsupported(
             "SuperLuDistPc::apply is PREONLY-only; use SolverType::Preonly or call direct_solve",
@@ -64,9 +63,9 @@ impl Preconditioner for SuperLuDistPc {
 
     fn direct_solve(
         &mut self,
-        pmat: &dyn LinOp<S = f64>,
-        b: &[f64],
-        x: &mut [f64],
+        pmat: &dyn LinOp<S = S>,
+        b: &[S],
+        x: &mut [S],
     ) -> Result<(), KError> {
         #[cfg(feature = "superlu_dist")]
         {
@@ -77,7 +76,19 @@ impl Preconditioner for SuperLuDistPc {
                     KError::InvalidInput("SuperLU_DIST PC requires CSR matrix".into())
                 })?;
             let comm = self.comm.clone().unwrap_or_else(|| pmat.comm());
-            crate::solver::superlu_dist::solve(a, b, x, &comm)
+            #[cfg(not(feature = "complex"))]
+            {
+                crate::solver::superlu_dist::solve(a, b, x, &comm)
+            }
+            #[cfg(feature = "complex")]
+            {
+                let mut b_real = vec![0.0; b.len()];
+                let mut x_real = vec![0.0; x.len()];
+                crate::algebra::scalar::copy_scalar_to_real_in(b, &mut b_real);
+                crate::solver::superlu_dist::solve(a, &b_real, &mut x_real, &comm)?;
+                crate::algebra::scalar::copy_real_to_scalar_in(&x_real, x);
+                Ok(())
+            }
         }
         #[cfg(not(feature = "superlu_dist"))]
         {

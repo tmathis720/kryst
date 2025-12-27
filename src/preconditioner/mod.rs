@@ -48,7 +48,7 @@
 
 #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use crate::algebra::prelude::*;
-use crate::algebra::scalar::{KrystScalar, S};
+use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::error::KError;
 use crate::matrix::format::FormatHint;
 use crate::matrix::op::LinOp;
@@ -131,7 +131,7 @@ impl PcReusePolicy {
     }
 }
 
-/// Object-safe preconditioner operating on `f64` slices and [`LinOp`] matrices.
+/// Object-safe preconditioner operating on `S` slices and [`LinOp`] matrices.
 ///
 /// Preconditioners may optionally implement [`direct_solve`], allowing the
 /// preconditioner to act as a stand-alone direct solver (e.g. LU, QR). Only
@@ -157,13 +157,13 @@ pub trait Preconditioner: Send + Sync {
     }
 
     /// Build any factorization/hierarchy once from the system matrix.
-    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError>;
+    fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError>;
 
     /// Apply `M^{-op}` to input vector, writing result to output slice.
     ///
     /// When used with CG and [`PcSide::Left`], this operation must represent an
     /// SPD preconditioner `M` so that `rᵀ M⁻¹ r > 0` holds.
-    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError>;
+    fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError>;
 
     /// Apply `M^{-op}` where the operation (`op`) specifies transpose handling.
     ///
@@ -171,7 +171,7 @@ pub trait Preconditioner: Send + Sync {
     /// requests return [`KError::Unsupported`]. Implementations overriding this
     /// method should ignore the [`PcSide`] argument entirely and instead allow
     /// callers to decide left/right placement by where they invoke the method.
-    fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
         match op {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
             Op::Trans | Op::ConjTrans => {
@@ -184,7 +184,7 @@ pub trait Preconditioner: Send + Sync {
     ///
     /// The default implementation allocates a temporary buffer; performance-
     /// sensitive implementations should override this.
-    fn apply_op_inplace(&self, op: Op, y: &mut [f64]) -> Result<(), KError> {
+    fn apply_op_inplace(&self, op: Op, y: &mut [S]) -> Result<(), KError> {
         let tmp = y.to_vec();
         self.apply_op(op, &tmp, y)
     }
@@ -198,7 +198,7 @@ pub trait Preconditioner: Send + Sync {
     ///
     /// By default, delegates to [`apply`], so existing preconditioners
     /// remain immutable unless they explicitly override this method.
-    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 
@@ -207,7 +207,7 @@ pub trait Preconditioner: Send + Sync {
     /// The `outer_iter` is the total number of iterations completed so far,
     /// and `residual_norm` is the norm of the current (true) residual. The
     /// default implementation does nothing.
-    fn on_restart(&mut self, _outer_iter: usize, _residual_norm: f64) -> Result<(), KError> {
+    fn on_restart(&mut self, _outer_iter: usize, _residual_norm: R) -> Result<(), KError> {
         Ok(())
     }
 
@@ -217,9 +217,9 @@ pub trait Preconditioner: Send + Sync {
     /// that direct solves are not supported by this preconditioner.
     fn direct_solve(
         &mut self,
-        _op: &dyn LinOp<S = f64>,
-        _b: &[f64],
-        _x: &mut [f64],
+        _op: &dyn LinOp<S = S>,
+        _b: &[S],
+        _x: &mut [S],
     ) -> Result<(), KError> {
         Err(KError::SolveError(
             "direct_solve not supported by this preconditioner".into(),
@@ -232,12 +232,12 @@ pub trait Preconditioner: Send + Sync {
     }
 
     /// Pattern unchanged: re-use hierarchy/structure, BUT refresh all numeric data.
-    fn update_numeric(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_numeric(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
         Err(KError::Unsupported("numeric update not supported"))
     }
 
     /// Pattern may have changed: rebuild structure (potentially expensive).
-    fn update_symbolic(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_symbolic(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         // By default, fall back to a full setup
         self.setup(a)
     }
@@ -254,7 +254,7 @@ pub trait Preconditioner: Send + Sync {
     ///
     /// Useful for threshold-based sparsification during conversion (e.g., ILUT).
     /// Return `None` to keep all values (treated as 0.0).
-    fn preferred_drop_tol_for_format(&self) -> Option<f64> {
+    fn preferred_drop_tol_for_format(&self) -> Option<R> {
         None
     }
 }
@@ -349,7 +349,7 @@ impl LegacyOpPreconditioner {
 
 #[cfg(feature = "legacy-pc-bridge")]
 impl Preconditioner for LegacyOpPreconditioner {
-    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         use crate::error::KError;
         let m = a
             .as_any()
@@ -358,7 +358,7 @@ impl Preconditioner for LegacyOpPreconditioner {
         self.inner.setup(m)
     }
 
-    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         use crate::error::KError;
         if x.len() != y.len() {
             return Err(KError::InvalidInput(format!(
@@ -369,14 +369,14 @@ impl Preconditioner for LegacyOpPreconditioner {
         }
         let mut s = self.scratch.lock().unwrap();
         Self::ensure_scratch(&mut s, x.len());
-        s.x.copy_from_slice(x);
+        crate::algebra::scalar::copy_scalar_to_real_in(x, &mut s.x);
         let Scratch { x: x_buf, y: y_buf } = &mut *s;
         self.inner.apply(side, &*x_buf, y_buf)?;
-        y.copy_from_slice(&s.y);
+        crate::algebra::scalar::copy_real_to_scalar_in(&s.y, y);
         Ok(())
     }
 
-    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 
@@ -384,7 +384,7 @@ impl Preconditioner for LegacyOpPreconditioner {
         true
     }
 
-    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         self.setup(a)
     }
 
@@ -449,10 +449,10 @@ impl LegacyOpPreconditioner {
 
 #[cfg(all(not(feature = "legacy-pc-bridge"), feature = "backend-faer"))]
 impl Preconditioner for LegacyOpPreconditioner {
-    fn setup(&mut self, _: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, _: &dyn LinOp<S = S>) -> Result<(), KError> {
         Err(KError::Unsupported("legacy-pc-bridge feature is disabled"))
     }
-    fn apply(&self, _: PcSide, _: &[f64], _: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _: PcSide, _: &[S], _: &mut [S]) -> Result<(), KError> {
         Err(KError::Unsupported("legacy-pc-bridge feature is disabled"))
     }
 }
@@ -471,10 +471,10 @@ impl LegacyOpPreconditioner {
 
 #[cfg(not(feature = "backend-faer"))]
 impl Preconditioner for LegacyOpPreconditioner {
-    fn setup(&mut self, _: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, _: &dyn LinOp<S = S>) -> Result<(), KError> {
         Err(KError::Unsupported("backend-faer feature is disabled"))
     }
-    fn apply(&self, _: PcSide, _: &[f64], _: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _: PcSide, _: &[S], _: &mut [S]) -> Result<(), KError> {
         Err(KError::Unsupported("backend-faer feature is disabled"))
     }
 }

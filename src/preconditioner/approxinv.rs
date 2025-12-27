@@ -322,6 +322,7 @@ where
 }
 
 // === Object-safe Preconditioner implementation (LinOp-aware, f64 only) ===
+#[cfg(not(feature = "complex"))]
 impl<M: 'static + Send + Sync> crate::preconditioner::Preconditioner for ApproxInv<M, Vec<f64>, f64>
 where
     M: MatVec<Vec<f64>>,
@@ -461,6 +462,24 @@ where
 }
 
 #[cfg(feature = "complex")]
+impl<M: 'static + Send + Sync> crate::preconditioner::Preconditioner for ApproxInv<M, Vec<f64>, f64>
+where
+    M: MatVec<Vec<f64>>,
+{
+    fn setup(&mut self, _op: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "ApproxInv does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: crate::preconditioner::PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "ApproxInv does not support complex scalars yet".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "complex")]
 impl<M> KPreconditioner for ApproxInv<M, Vec<f64>, f64>
 where
     M: MatVec<Vec<f64>> + Send + Sync + 'static,
@@ -512,7 +531,7 @@ fn get_row_pattern<M: 'static>(a: &M) -> Option<&dyn crate::core::traits::RowPat
 //        TESTS
 // =====================
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "complex")))]
 mod tests {
     use super::*;
     #[cfg(feature = "complex")]

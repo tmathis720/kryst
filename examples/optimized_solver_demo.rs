@@ -41,6 +41,7 @@ fn main() {
 }
 
 #[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("optimized_solver_demo requires the backend-faer feature.");
 }
@@ -258,6 +259,7 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging if available
     #[cfg(feature = "logging")]

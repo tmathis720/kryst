@@ -1,12 +1,17 @@
 //! HYPRE-Inspired AMG Preconditioner Demo (updated API, no legacy bridge)
 //! to run:
 //! cargo run --example hypre_amg_demo
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("hypre_amg_demo is unavailable when built with --features complex");
+}
 
 use faer::Mat;
 use kryst::error::KError;
 use kryst::preconditioner::amg::{AMGBuilder, CoarsenType, InterpType, RelaxType};
 use kryst::preconditioner::{PcSide, Preconditioner};
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    HYPRE-Inspired AMG Preconditioner Demo");
     println!("============================================================\n");
@@ -22,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Create a 2D Laplacian matrix directly (5-point stencil) and add I for better conditioning.
+#[cfg(not(feature = "complex"))]
 fn create_2d_laplacian(nx: usize, ny: usize) -> Mat<f64> {
     let n = nx * ny;
     let mut a = Mat::zeros(n, n);
@@ -60,6 +66,7 @@ fn create_2d_laplacian(nx: usize, ny: usize) -> Mat<f64> {
 }
 
 /// Create an anisotropic diffusion matrix: strong horizontal (−1), weak vertical (−anisotropy).
+#[cfg(not(feature = "complex"))]
 fn create_anisotropic_matrix(nx: usize, ny: usize, anisotropy: f64) -> Mat<f64> {
     let n = nx * ny;
     let mut a = Mat::zeros(n, n);
@@ -97,6 +104,7 @@ fn create_anisotropic_matrix(nx: usize, ny: usize, anisotropy: f64) -> Mat<f64> 
 }
 
 /// Demonstrate AMG on symmetric positive definite problems (dense Mat + new Preconditioner API)
+#[cfg(not(feature = "complex"))]
 fn demo_symmetric_positive_definite() -> Result<(), KError> {
     println!("Testing AMG on Symmetric Positive Definite Problem");
     println!("--------------------------------------------------");
@@ -146,6 +154,7 @@ fn demo_symmetric_positive_definite() -> Result<(), KError> {
 }
 
 /// Demonstrate AMG on anisotropic problems (dense Mat)
+#[cfg(not(feature = "complex"))]
 fn demo_anisotropic_problem() -> Result<(), KError> {
     println!("   Testing AMG on Anisotropic Problem");
     println!("-------------------------------------");
@@ -176,6 +185,7 @@ fn demo_anisotropic_problem() -> Result<(), KError> {
 }
 
 /// Demonstrate the configuration builder pattern (dense Mat)
+#[cfg(not(feature = "complex"))]
 fn demo_configuration_builder() -> Result<(), KError> {
     println!("    Testing AMG Configuration Builder");
     println!("------------------------------------");
@@ -238,6 +248,7 @@ fn demo_configuration_builder() -> Result<(), KError> {
 }
 
 /// Demonstrate safety features and error handling (dense Mat)
+#[cfg(not(feature = "complex"))]
 fn demo_safety_features() -> Result<(), KError> {
     println!("    Testing AMG Safety Features");
     println!("-------------------------------");

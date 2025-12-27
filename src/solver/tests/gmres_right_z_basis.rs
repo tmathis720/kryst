@@ -1,11 +1,13 @@
 #![cfg(feature = "backend-faer")]
 #[cfg(test)]
+#[cfg(not(feature = "complex"))]
 mod tests_gmres_z_basis {
     use crate::algebra::prelude::*;
     use crate::context::ksp_context::{KspContext, SolverType};
     use crate::error::KError;
     use crate::matrix::op::LinOp;
     use crate::preconditioner::{PcSide, Preconditioner};
+    #[cfg(not(feature = "complex"))]
     use faer::Mat;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,10 +21,10 @@ mod tests_gmres_z_basis {
         }
     }
     impl Preconditioner for CountingIdentityPc {
-        fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
             Ok(())
         }
-        fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
             self.hits.fetch_add(1, Ordering::Relaxed);
             y.copy_from_slice(x);
             Ok(())
@@ -42,8 +44,8 @@ mod tests_gmres_z_basis {
                 R::from(0.2)
             }
         });
-        let b = [R::from(1.0), R::default(), R::default(), R::default()];
-        let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a);
+        let b = [S::from_real(1.0), S::zero(), S::zero(), S::zero()];
+        let amat: Arc<dyn LinOp<S = S>> = Arc::new(a);
 
         // Counting identity PC
         let hits = Arc::new(AtomicUsize::new(0));
@@ -58,7 +60,7 @@ mod tests_gmres_z_basis {
         ksp.rtol = 1e-12; // try to make it finish inside a couple cycles
         ksp.set_pc_box_for_tests(pc);
 
-        let mut x = [R::default(); 4];
+        let mut x = [S::zero(); 4];
         let stats = ksp.solve(&b, &mut x)?;
 
         let w = ksp.debug_workspace().expect("workspace present");

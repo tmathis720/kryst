@@ -1,3 +1,8 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("mpi_gmres.rs is unavailable when built with --features complex");
+}
+
 #[cfg(feature = "mpi")]
 use kryst::matrix::MatShell;
 #[cfg(feature = "mpi")]
@@ -6,11 +11,13 @@ use kryst::prelude::*;
 use std::sync::Arc;
 
 #[cfg(not(feature = "mpi"))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("mpi_gmres requires --features mpi");
 }
 
 #[cfg(feature = "mpi")]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use kryst::parallel::MpiComm;
 

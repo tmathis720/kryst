@@ -7,10 +7,16 @@
 //! ```sh
 //! cargo run --example amg_options_demo -- -ksp_type cg -pc_type ilu -pc_ilu_type ilu0 -pc_ilu_reordering_type rcm
 //! ```
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("amg_options_demo.rs is unavailable when built with --features complex");
+}
+
 
 use kryst::config::options::{KspOptions, PcOptions, parse_all_options};
 use std::env;
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Kryst Comprehensive Preconditioner Options Demonstration");
     println!("=========================================================");
@@ -136,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(feature = "complex"))]
 fn print_configuration(ksp_opts: &KspOptions, pc_opts: &PcOptions) {
     println!("Configuration:");
 

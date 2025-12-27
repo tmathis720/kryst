@@ -10,10 +10,16 @@
 //! ```bash
 //! cargo run --example shell_demo
 //! ```
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("shell_demo.rs is unavailable when built with --features complex");
+}
+
 
 use kryst::core::mat::shell::ShellMat;
 use kryst::core::traits::MatVec;
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Kryst Shell Matrix Demo");
     println!("=======================");
@@ -31,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Demonstrates a simple diagonal matrix defined via shell operations
+#[cfg(not(feature = "complex"))]
 fn diagonal_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
     // Create a 5x5 diagonal matrix with entries [1, 2, 3, 4, 5]
     let diagonal_entries = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -77,6 +84,7 @@ fn diagonal_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Demonstrates a 1D finite difference operator (second derivative) via shell
+#[cfg(not(feature = "complex"))]
 fn finite_difference_shell_demo() -> Result<(), Box<dyn std::error::Error>> {
     let n = 5;
     let h = 1.0 / (n as f64 + 1.0);

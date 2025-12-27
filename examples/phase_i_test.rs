@@ -4,8 +4,14 @@
 //! 1. FGMRES solver can be selected
 //! 2. Deferred PC construction works for matrix-dependent PCs
 //! 3. Command-line parsing works for new ASM/Chebyshev/AMG options
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("phase_i_test.rs is unavailable when built with --features complex");
+}
+
 
 #[cfg(not(feature = "backend-faer"))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("phase_i_test requires the backend-faer feature.");
 }
@@ -20,6 +26,7 @@ use kryst::{
 use std::sync::Arc;
 
 #[cfg(feature = "backend-faer")]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 1: FGMRES solver selection
     println!("=== Test 1: FGMRES solver selection ===");

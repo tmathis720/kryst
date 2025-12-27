@@ -306,6 +306,7 @@ where
 /// when `side` is Left and a preconditioner is provided, `scratch` is used to
 /// hold `z = M^{-1} r`.
 #[inline]
+#[cfg(not(feature = "complex"))]
 pub fn reported_residual_norm(
     side: crate::preconditioner::PcSide,
     pc: Option<&dyn crate::preconditioner::Preconditioner>,

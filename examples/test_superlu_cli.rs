@@ -1,5 +1,11 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("test_superlu_cli.rs is unavailable when built with --features complex");
+}
+
 use kryst::{KspOptions, PcOptions, error::KError};
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), KError> {
     // Test command line parsing for SuperLU_DIST
     let args = vec![

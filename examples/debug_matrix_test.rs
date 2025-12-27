@@ -4,7 +4,6 @@
 //!
 //! to run:
 //! cargo run --example debug_matrix_test
-
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("debug_matrix_test is disabled when the complex feature is enabled.");

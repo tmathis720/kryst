@@ -1,3 +1,8 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("mpi_amg_gmres_demo.rs is unavailable when built with --features complex");
+}
+
 #![cfg(feature = "mpi")]
 //! Large-scale MPI example demonstrating Matrix Market I/O with configurable solvers and preconditioners.
 //!
@@ -37,6 +42,7 @@ use std::time::Instant;
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
 
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize MPI and create communicator
     #[cfg(feature = "mpi")]

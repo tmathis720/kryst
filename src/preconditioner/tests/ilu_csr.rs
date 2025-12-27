@@ -1,3 +1,5 @@
+#![cfg(not(feature = "complex"))]
+
 use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::poisson_2d;

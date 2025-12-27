@@ -7,7 +7,9 @@ use crate::algebra::prelude::*;
 
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(not(feature = "complex"))]
 use crate::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind, IlutParams};
+#[cfg(not(feature = "complex"))]
 use crate::preconditioner::{PcSide, Preconditioner};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +100,7 @@ impl CoarseSolver for CoarseDenseLu {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 pub struct CoarseIlu {
     a: Option<CsrMatrix<f64>>,
     ilu: Option<IluCsr>,
@@ -108,6 +111,12 @@ pub struct CoarseIlu {
     nsetup: usize,
 }
 
+#[cfg(feature = "complex")]
+pub struct CoarseIlu {
+    _private: (),
+}
+
+#[cfg(not(feature = "complex"))]
 impl CoarseIlu {
     pub fn new(tol: f64, maxit: usize, drop_tol: f64, fill_per_row: usize) -> Self {
         Self {
@@ -122,6 +131,14 @@ impl CoarseIlu {
     }
 }
 
+#[cfg(feature = "complex")]
+impl CoarseIlu {
+    pub fn new(_tol: f64, _maxit: usize, _drop_tol: f64, _fill_per_row: usize) -> Self {
+        Self { _private: () }
+    }
+}
+
+#[cfg(not(feature = "complex"))]
 impl CoarseSolver for CoarseIlu {
     fn setup(&mut self, a: &CsrMatrix<f64>) -> Result<(), KError> {
         self.a = Some(a.clone());
@@ -159,5 +176,20 @@ impl CoarseSolver for CoarseIlu {
 
     fn nsetups(&self) -> usize {
         self.nsetup
+    }
+}
+
+#[cfg(feature = "complex")]
+impl CoarseSolver for CoarseIlu {
+    fn setup(&mut self, _a: &CsrMatrix<f64>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AMG coarse ILU does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn solve(&mut self, _b: &[f64], _x: &mut [f64]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AMG coarse ILU does not support complex scalars yet".into(),
+        ))
     }
 }

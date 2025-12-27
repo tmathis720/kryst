@@ -9,7 +9,6 @@
 //! ```bash
 //! cargo run --example convection_diffusion_ilutp --features backend-faer
 //! ```
-
 #[cfg(feature = "complex")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("convection_diffusion_ilutp is not available with the complex feature.");
@@ -17,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("convection_diffusion_ilutp requires the backend-faer feature.");
     Ok(())
@@ -42,6 +42,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn convection_diffusion_1d(n: usize, eps: f64, beta: f64) -> Mat<f64> {
     let h = 1.0 / (n as f64 + 1.0);
     Mat::from_fn(n, n, |i, j| {
@@ -58,6 +59,7 @@ fn convection_diffusion_1d(n: usize, eps: f64, beta: f64) -> Mat<f64> {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn run_gmres_with_pc(
     matrix: Arc<Mat<f64>>,
     rhs: &[f64],
@@ -77,6 +79,7 @@ fn run_gmres_with_pc(
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn Error>> {
     let size = 128;
     let eps = 1e-2;

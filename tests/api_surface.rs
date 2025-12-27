@@ -1,3 +1,5 @@
+#![cfg(not(feature = "complex"))]
+
 use kryst::prelude::*;
 use std::sync::Arc;
 

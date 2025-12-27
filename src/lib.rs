@@ -57,7 +57,7 @@
 //!
 //! ## MPI communicator rules
 //! - `KspContext` is bound to the operator communicator when operators are set.
-//! - `try_set_operators` checks `A.comm() == P.comm()` and dimension congruence.
+//! - `try_set_operators` checks communicator congruence and dimension congruence.
 //! - `try_set_operators_with_comm` wraps operators with an explicit communicator.
 //! - Communicators must be IDENT or CONGRUENT (MPI_Comm_compare semantics).
 //!

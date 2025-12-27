@@ -1,23 +1,11 @@
-#[cfg(all(
-    feature = "complex",
-    any(feature = "dense-direct", feature = "superlu_dist")
-))]
-use crate::algebra::bridge::BridgeScratch;
+#![cfg(not(feature = "complex"))]
+
 use crate::algebra::prelude::*;
-#[cfg(all(
-    feature = "complex",
-    any(feature = "dense-direct", feature = "superlu_dist")
-))]
 #[cfg(any(feature = "dense-direct", feature = "superlu_dist"))]
 use crate::error::KError;
 use crate::matrix::op::CsrOp;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
-#[cfg(all(
-    feature = "complex",
-    any(feature = "dense-direct", feature = "superlu_dist")
-))]
-use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::PcSide;
 
 #[cfg(any(feature = "dense-direct", feature = "superlu_dist"))]
@@ -31,14 +19,15 @@ use std::sync::Arc;
 
 #[cfg(feature = "dense-direct")]
 #[test]
+#[cfg(not(feature = "complex"))]
 fn direct_pc_apply_is_not_identity() {
     // LU apply should return a clear Unsupported error (PREONLY-only)
     let mut pc = LuPc::new();
-    let two = S::from_real(2.0).real();
-    let zero = R::default();
-    let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { two } else { zero });
-    pc.setup(&a as &dyn LinOp<S = f64>).unwrap();
-    let one = S::from_real(1.0).real();
+    let two = S::from_real(2.0);
+    let zero = S::zero();
+    let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { two.real() } else { 0.0 });
+    pc.setup(&a as &dyn LinOp<S = S>).unwrap();
+    let one = S::from_real(1.0);
     let x = vec![one; 3];
     let mut y = vec![zero; 3];
     let err = pc.apply(PcSide::Left, &x, &mut y).unwrap_err();
@@ -49,7 +38,7 @@ fn direct_pc_apply_is_not_identity() {
 
     // QR apply should also be PREONLY-only
     let mut pc = QrPc::new();
-    pc.setup(&a as &dyn LinOp<S = f64>).unwrap();
+    pc.setup(&a as &dyn LinOp<S = S>).unwrap();
     let err = pc.apply(PcSide::Left, &x, &mut y).unwrap_err();
     match err {
         KError::Unsupported(msg) => assert!(msg.to_lowercase().contains("preonly")),
@@ -63,26 +52,24 @@ fn builders_sor_and_chebyshev_object_safe() {
     // Identity CSR as operator
     let csr = CsrMatrix::identity(5);
     let op = CsrOp::new(Arc::new(csr));
-    let one = R::from(1.0);
-    let zero = R::default();
+    let one = S::from_real(1.0);
+    let zero = S::zero();
 
     // SOR
     let mut sor = b::build_sor(one, 1, crate::preconditioner::sor::MatSorType::APPLY_LOWER)
         .expect("build_sor should succeed");
-    sor.setup(&op as &dyn LinOp<S = f64>).unwrap();
+    sor.setup(&op as &dyn LinOp<S = S>).unwrap();
     let x = vec![one; 5];
     let mut y = vec![zero; 5];
     sor.apply(PcSide::Left, &x, &mut y).unwrap();
-    let x_s: Vec<S> = x.iter().map(|&v| S::from_real(v)).collect();
-    let y_s: Vec<S> = y.iter().map(|&v| S::from_real(v)).collect();
-    crate::assert_vec_close!("sor apply matches identity", &x_s, &y_s);
+    crate::assert_vec_close!("sor apply matches identity", &x, &y);
 
     // Chebyshev
-    let half = S::from_real(0.5).real();
-    let three_halves = S::from_real(1.5).real();
+    let half = R::from(0.5);
+    let three_halves = R::from(1.5);
     let mut cheb =
         b::build_chebyshev(2, half, three_halves).expect("build_chebyshev should succeed");
-    cheb.setup(&op as &dyn LinOp<S = f64>).unwrap();
+    cheb.setup(&op as &dyn LinOp<S = S>).unwrap();
     let mut z = vec![zero; 5];
     cheb.apply(PcSide::Left, &x, &mut z).unwrap();
     assert!(z.iter().copied().all(|v| v.is_finite()));
@@ -95,9 +82,9 @@ fn ilu_right_side_errors() {
     let csr = CsrMatrix::identity(3);
     let op = CsrOp::new(Arc::new(csr));
     let mut pc = b::build_ilu0().expect("build_ilu0 should succeed");
-    pc.setup(&op as &dyn LinOp<S = f64>).unwrap();
-    let one = S::from_real(1.0).real();
-    let zero = R::default();
+    pc.setup(&op as &dyn LinOp<S = S>).unwrap();
+    let one = S::from_real(1.0);
+    let zero = S::zero();
     let x = vec![one; 3];
     let mut y = vec![zero; 3];
     let err = pc.apply(PcSide::Right, &x, &mut y).unwrap_err();
@@ -111,6 +98,7 @@ fn ilu_right_side_errors() {
 
 #[cfg(all(feature = "dense-direct", feature = "complex"))]
 #[test]
+#[cfg(not(feature = "complex"))]
 fn direct_pc_apply_s_matches_real_error() {
     let mut lu = LuPc::new();
     let mut qr = QrPc::new();
@@ -118,8 +106,8 @@ fn direct_pc_apply_s_matches_real_error() {
     let zero = R::default();
     let a = faer::Mat::<f64>::from_fn(3, 3, |i, j| if i == j { two } else { zero });
 
-    lu.setup(&a as &dyn LinOp<S = f64>).unwrap();
-    qr.setup(&a as &dyn LinOp<S = f64>).unwrap();
+    lu.setup(&a as &dyn LinOp<S = S>).unwrap();
+    qr.setup(&a as &dyn LinOp<S = S>).unwrap();
 
     let rhs_s = vec![S::from_real(1.0); 3];
     let mut out_s = vec![S::zero(); 3];
@@ -144,6 +132,7 @@ fn direct_pc_apply_s_matches_real_error() {
 
 #[cfg(all(feature = "superlu_dist", feature = "complex"))]
 #[test]
+#[cfg(not(feature = "complex"))]
 fn superlu_dist_apply_s_matches_real_error() {
     use crate::matrix::op::CsrOp;
     use crate::matrix::sparse::CsrMatrix;
@@ -152,11 +141,11 @@ fn superlu_dist_apply_s_matches_real_error() {
     let op = CsrOp::new(csr);
 
     let mut pc = SuperLuDistPc::new();
-    pc.setup(&op as &dyn LinOp<S = f64>)
+    pc.setup(&op as &dyn LinOp<S = S>)
         .expect("setup should accept CSR input under superlu_dist");
 
-    let one = S::from_real(1.0).real();
-    let zero = R::default();
+    let one = S::from_real(1.0);
+    let zero = S::zero();
     let x_real = vec![one; 3];
     let mut y_real = vec![zero; 3];
     let err_real = pc

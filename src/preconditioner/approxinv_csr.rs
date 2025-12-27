@@ -137,37 +137,37 @@ fn csr_find(a: &CsrMatrix<f64>, row: usize, col: usize) -> f64 {
     let cols = &ci[rs..re];
     match cols.binary_search(&col) {
         Ok(k) => vv[rs + k],
-        Err(_) => S::zero().real(),
+        Err(_) => R::default(),
     }
 }
 
 #[inline]
-fn spmv_csr(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+fn spmv_csr(a: &CsrMatrix<f64>, x: &[S], y: &mut [S]) {
     assert_eq!(x.len(), a.ncols());
     assert_eq!(y.len(), a.nrows());
     // clear y
     for yi in y.iter_mut() {
-        *yi = S::zero().real();
+        *yi = S::zero();
     }
     let rp = a.row_ptr();
     let ci = a.col_idx();
     let vv = a.values();
     for i in 0..a.nrows() {
         let (rs, re) = (rp[i], rp[i + 1]);
-        let mut sum = S::zero().real();
+        let mut sum = S::zero();
         for p in rs..re {
-            sum += vv[p] * x[ci[p]];
+            sum += S::from_real(vv[p]) * x[ci[p]];
         }
         y[i] = sum;
     }
 }
 
 #[inline]
-fn spmv_csr_transpose(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+fn spmv_csr_transpose(a: &CsrMatrix<f64>, x: &[S], y: &mut [S]) {
     assert_eq!(x.len(), a.nrows());
     assert_eq!(y.len(), a.ncols());
     for yi in y.iter_mut() {
-        *yi = S::zero().real();
+        *yi = S::zero();
     }
     let rp = a.row_ptr();
     let ci = a.col_idx();
@@ -176,7 +176,7 @@ fn spmv_csr_transpose(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
         let (rs, re) = (rp[i], rp[i + 1]);
         let xi = x[i];
         for p in rs..re {
-            y[ci[p]] += vv[p] * xi;
+            y[ci[p]] += S::from_real(vv[p]) * xi;
         }
     }
 }
@@ -330,9 +330,9 @@ impl FsaiCsr {
 }
 
 impl Preconditioner for FsaiCsr {
-    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         // Always require CSR view
-        let csr = csr_from_linop(a, S::zero().real())?; // no drop on A
+        let csr = csr_from_linop(a, R::default())?; // no drop on A
         let sid = a.structure_id();
         let vid = a.values_id();
 
@@ -355,7 +355,7 @@ impl Preconditioner for FsaiCsr {
         Ok(())
     }
 
-    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         // y = G (G^T x)
         if x.len() != self.g.nrows() || y.len() != self.g.nrows() {
             return Err(KError::InvalidInput(format!(
@@ -366,7 +366,7 @@ impl Preconditioner for FsaiCsr {
             )));
         }
         let n = x.len();
-        let mut t = vec![R::default(); n];
+        let mut t = vec![S::zero(); n];
         spmv_csr_transpose(&self.g, x, &mut t);
         spmv_csr(&self.g, &t, y);
         Ok(())
@@ -376,9 +376,9 @@ impl Preconditioner for FsaiCsr {
         true
     }
 
-    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+    fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         // Re-solve per-column with fixed pattern and write values back into existing G
-        let csr = csr_from_linop(a, S::zero().real())?;
+        let csr = csr_from_linop(a, R::default())?;
         let n = self.g.nrows().min(self.g.ncols());
         let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default());
         let mut b = vec![R::default(); 1];
@@ -582,8 +582,8 @@ impl SpaiCsr {
 }
 
 impl Preconditioner for SpaiCsr {
-    fn setup(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, S::zero().real())?;
+    fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        let csr = csr_from_linop(a, R::default())?;
         let sid = a.structure_id();
         let vid = a.values_id();
 
@@ -603,7 +603,7 @@ impl Preconditioner for SpaiCsr {
         Ok(())
     }
 
-    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if x.len() != self.m.ncols() || y.len() != self.m.nrows() {
             return Err(KError::InvalidInput(format!(
                 "SpaiCsr::apply dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
@@ -621,8 +621,8 @@ impl Preconditioner for SpaiCsr {
         true
     }
 
-    fn update_numeric(&mut self, a: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(a, S::zero().real())?;
+    fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        let csr = csr_from_linop(a, R::default())?;
         let n = self.m.nrows().min(self.m.ncols());
         let rp = csr.row_ptr();
         let ci = csr.col_idx();
@@ -816,19 +816,19 @@ mod tests {
             .build_fsai(&a)
             .expect("fsai build");
 
-        let rhs_real = vec![1.0, 2.0, 3.0];
-        let mut out_real = vec![S::zero().real(); rhs_real.len()];
-        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
-            .expect("fsai apply real");
+        let rhs_s: Vec<S> = [1.0, 2.0, 3.0].iter().copied().map(S::from_real).collect();
+        let mut out_direct = vec![S::zero(); rhs_s.len()];
+        pc.apply(PcSide::Left, &rhs_s, &mut out_direct)
+            .expect("fsai apply direct");
 
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
         let mut out_s = vec![S::zero(); rhs_s.len()];
         let mut scratch = BridgeScratch::default();
         pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
             .expect("fsai apply_s");
 
-        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
-            assert!((ys.real() - yr).abs() < 1e-10);
+        for (direct, bridged) in out_direct.iter().zip(out_s.iter()) {
+            assert!((direct.real() - bridged.real()).abs() < 1e-10);
+            assert!((direct.imag() - bridged.imag()).abs() < 1e-10);
         }
     }
 
@@ -840,19 +840,23 @@ mod tests {
             .build_spai(&a)
             .expect("spai build");
 
-        let rhs_real = vec![1.5, -0.5, 0.25];
-        let mut out_real = vec![S::zero().real(); rhs_real.len()];
-        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
-            .expect("spai apply real");
+        let rhs_s: Vec<S> = [1.5, -0.5, 0.25]
+            .iter()
+            .copied()
+            .map(S::from_real)
+            .collect();
+        let mut out_direct = vec![S::zero(); rhs_s.len()];
+        pc.apply(PcSide::Left, &rhs_s, &mut out_direct)
+            .expect("spai apply direct");
 
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
         let mut out_s = vec![S::zero(); rhs_s.len()];
         let mut scratch = BridgeScratch::default();
         pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
             .expect("spai apply_s");
 
-        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
-            assert!((ys.real() - yr).abs() < 1e-10);
+        for (direct, bridged) in out_direct.iter().zip(out_s.iter()) {
+            assert!((direct.real() - bridged.real()).abs() < 1e-10);
+            assert!((direct.imag() - bridged.imag()).abs() < 1e-10);
         }
     }
 }

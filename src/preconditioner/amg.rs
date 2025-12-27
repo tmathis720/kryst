@@ -4645,6 +4645,7 @@ impl AMG {
     }
 
     // Convenience to avoid trait ambiguity in examples
+    #[cfg(not(feature = "complex"))]
     pub fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         Preconditioner::apply(self, side, x, y)
     }
@@ -4684,7 +4685,7 @@ impl AMG {
         true
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(feature = "complex")))]
     fn spd_probe(&self) -> Result<(), KError> {
         if !self.cfg.require_spd {
             return Ok(());
@@ -4719,6 +4720,7 @@ impl AMG {
 
 // ===== Preconditioner trait (new API) =======================================
 
+#[cfg(not(feature = "complex"))]
 impl Preconditioner for AMG {
     fn dims(&self) -> (usize, usize) {
         if let AmgState::Ready { hierarchy, .. } = &self.state {
@@ -4868,6 +4870,21 @@ impl Preconditioner for AMG {
 }
 
 #[cfg(feature = "complex")]
+impl Preconditioner for AMG {
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AMG does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(&self, _side: PcSide, _r: &[S], _z: &mut [S]) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AMG does not support complex scalars yet".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "complex")]
 impl KPreconditioner for AMG {
     type Scalar = S;
 
@@ -4899,6 +4916,7 @@ impl KPreconditioner for AMG {
 
 // ===== Legacy adapter (unchanged external signature) ========================
 
+#[cfg(not(feature = "complex"))]
 impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for AMG {
     fn setup(&mut self, a: &Mat<f64>) -> Result<(), KError> {
         Preconditioner::setup(self, a)
@@ -7356,7 +7374,7 @@ fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<us
     (r_row_counts, r_col_idx, r_vals, p2r_pos)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "complex")))]
 mod tests {
     use super::*;
     use faer::Mat;

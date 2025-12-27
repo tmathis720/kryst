@@ -1,3 +1,8 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("dense_direct.rs is unavailable when built with --features complex");
+}
+
 // Example: Solve a random SPD system using LU and QR direct solvers from kryst.
 // to run:
 // cargo run --features=dense-direct --example dense_direct
@@ -14,6 +19,7 @@ use kryst::solver::{LuSolver, QrSolver};
 use rand::Rng;
 
 #[cfg(feature = "dense-direct")]
+#[cfg(not(feature = "complex"))]
 fn main() {
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
@@ -49,4 +55,5 @@ fn main() {
 }
 
 #[cfg(not(feature = "dense-direct"))]
+#[cfg(not(feature = "complex"))]
 fn main() {}

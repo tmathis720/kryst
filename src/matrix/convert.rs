@@ -1,4 +1,4 @@
-//! Real-only conversion helpers for `LinOp<S = f64>`.
+//! Real-only conversion helpers for `LinOp<S = S>`.
 //!
 //! These functions are intended for AMG and factorization workflows that
 //! operate on real-valued operators. All APIs here assume `S = f64` and should
@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use faer::Mat;
 
+use crate::algebra::prelude::*;
 use crate::error::KError;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::DistCsrOp;
@@ -23,7 +24,7 @@ use crate::matrix::{
 ///
 /// `where_` is the function name (e.g., "to_csr_cached") and `target` is the
 /// desired target format ("CSR", "CSC", "dense").
-fn unsupported_linop_err(op: &dyn LinOp<S = f64>, where_: &str, target: &str) -> KError {
+fn unsupported_linop_err(op: &dyn LinOp<S = S>, where_: &str, target: &str) -> KError {
     let sid = op.structure_id().0;
     let vid = op.values_id().0;
     let has_ids = sid != 0 || vid != 0;
@@ -69,7 +70,7 @@ fn scalar_csr_to_sparse(matrix: &ScalarCsrMatrix<f64>) -> CsrMatrix<f64> {
 }
 
 /// Try to borrow a CSR matrix if the operator is already CSR.
-pub fn try_as_csr(pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
+pub fn try_as_csr(pmat: &dyn LinOp<S = S>) -> Option<&CsrMatrix<f64>> {
     pmat.as_any().downcast_ref::<CsrMatrix<f64>>()
 }
 
@@ -83,8 +84,8 @@ pub fn try_as_csr(pmat: &dyn LinOp<S = f64>) -> Option<&CsrMatrix<f64>> {
 /// an unsupported `LinOp` type. See message for how to wrap with
 /// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
 pub fn to_csr_cached(
-    pmat: &dyn LinOp<S = f64>,
-    drop_tol: f64,
+    pmat: &dyn LinOp<S = S>,
+    drop_tol: R,
 ) -> Result<Arc<CsrMatrix<f64>>, KError> {
     if let Some(csr) = try_as_csr(pmat) {
         return Ok(Arc::new(csr.clone()));
@@ -112,14 +113,14 @@ pub fn to_csr_cached(
 /// Obtain a CSR matrix from a [`LinOp`], converting and caching if necessary.
 #[inline]
 pub fn csr_from_linop(
-    op: &dyn LinOp<S = f64>,
-    drop_tol: f64,
+    op: &dyn LinOp<S = S>,
+    drop_tol: R,
 ) -> Result<Arc<CsrMatrix<f64>>, KError> {
     to_csr_cached(op, drop_tol)
 }
 
 /// Try to borrow a CSC matrix if the operator is already CSC.
-pub fn try_as_csc(pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
+pub fn try_as_csc(pmat: &dyn LinOp<S = S>) -> Option<&CscMatrix<f64>> {
     pmat.as_any().downcast_ref::<CscMatrix<f64>>()
 }
 
@@ -133,8 +134,8 @@ pub fn try_as_csc(pmat: &dyn LinOp<S = f64>) -> Option<&CscMatrix<f64>> {
 /// an unsupported `LinOp` type. See message for how to wrap with
 /// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
 pub fn to_csc_cached(
-    pmat: &dyn LinOp<S = f64>,
-    drop_tol: f64,
+    pmat: &dyn LinOp<S = S>,
+    drop_tol: R,
 ) -> Result<Arc<CscMatrix<f64>>, KError> {
     if let Some(csc) = try_as_csc(pmat) {
         return Ok(Arc::new(csc.clone()));
@@ -164,8 +165,8 @@ pub fn to_csc_cached(
 /// Obtain a CSC matrix from a [`LinOp`], converting and caching if necessary.
 #[inline]
 pub fn csc_from_linop(
-    op: &dyn LinOp<S = f64>,
-    drop_tol: f64,
+    op: &dyn LinOp<S = S>,
+    drop_tol: R,
 ) -> Result<Arc<CscMatrix<f64>>, KError> {
     to_csc_cached(op, drop_tol)
 }
@@ -178,7 +179,7 @@ pub fn csc_from_linop(
 /// Returns a recoverable `KError::InvalidInput` with guidance when `op` is
 /// an unsupported `LinOp` type. See message for how to wrap with `DenseOp` to
 /// enable cached conversions.
-pub fn dense_from_linop(op: &dyn LinOp<S = f64>) -> Result<Mat<f64>, KError> {
+pub fn dense_from_linop(op: &dyn LinOp<S = S>) -> Result<Mat<f64>, KError> {
     if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.clone());
     }
@@ -207,11 +208,12 @@ pub fn owned_from_mat(mat: &Mat<f64>) -> Mat<f64> {
 /// Convert `op` to a LinOp view with the requested `hint`, preserving communicator.
 /// For Dense, returns an owned `faer::Mat<f64>` so preconditioners can safely factorize.
 /// Only applies to real-valued operators (`S = f64`).
+#[cfg(not(feature = "complex"))]
 pub fn materialize_linop_with_hint(
-    op: &dyn LinOp<S = f64>,
+    op: &dyn LinOp<S = S>,
     hint: FormatHint,
-    drop_tol: f64,
-) -> Result<std::sync::Arc<dyn LinOp<S = f64>>, KError> {
+    drop_tol: R,
+) -> Result<std::sync::Arc<dyn LinOp<S = S>>, KError> {
     let comm = op.comm();
 
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
@@ -325,6 +327,19 @@ pub fn materialize_linop_with_hint(
         op,
         "materialize_linop_with_hint",
         target,
+    ))
+}
+
+/// Real-only conversion helper for complex builds.
+#[cfg(feature = "complex")]
+pub fn materialize_linop_with_hint(
+    op: &dyn LinOp<S = S>,
+    _hint: FormatHint,
+    _drop_tol: R,
+) -> Result<std::sync::Arc<dyn LinOp<S = S>>, KError> {
+    let _ = op;
+    Err(KError::Unsupported(
+        "materialize_linop_with_hint is real-only; complex operators are not supported".into(),
     ))
 }
 

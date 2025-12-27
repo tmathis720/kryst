@@ -24,13 +24,13 @@
 //! # Show all available options
 //! cargo run --example options_demo -- -help
 //! ```
-
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("options_demo is disabled when the complex feature is enabled.");
 }
 
 #[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("options_demo requires the backend-faer feature.");
 }
@@ -47,6 +47,7 @@ use std::env;
 use std::sync::Arc;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();

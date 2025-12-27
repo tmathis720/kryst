@@ -19,16 +19,16 @@ use crate::algebra::prelude::*;
 use crate::core::traits::{MatrixGet, RowPattern};
 #[cfg(feature = "complex")]
 use crate::error::KError;
-#[cfg(not(feature = "dense-direct"))]
+#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::matrix::op::CsrOp;
-#[cfg(not(feature = "dense-direct"))]
+#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::PcSide;
-#[cfg(not(feature = "dense-direct"))]
+#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::preconditioner::Preconditioner; // bring trait into scope for IluCsr::setup/apply
-#[cfg(not(feature = "dense-direct"))]
+#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
@@ -51,7 +51,7 @@ pub struct BlockJacobi {
     /// For each block: (indices, LU solver for the block)
     #[cfg(feature = "dense-direct")]
     pub block_factors: Vec<(Vec<usize>, LuSolver)>, // (indices, LU solver)
-    #[cfg(not(feature = "dense-direct"))]
+    #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
     pub block_factors_ilu: Vec<(Vec<usize>, std::sync::Arc<IluCsr>)>,
 }
 
@@ -109,7 +109,7 @@ impl BlockJacobi {
             self.block_factors.push((block.clone(), lusolver));
         }
     }
-    #[cfg(not(feature = "dense-direct"))]
+    #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
     pub fn setup<M: RowPattern + MatrixGet<f64>>(&mut self, a: &M) {
         self.block_factors_ilu.clear();
         let cfg = IluCsrConfig {
@@ -217,7 +217,7 @@ impl BlockJacobi {
                 }
             }
         }
-        #[cfg(not(feature = "dense-direct"))]
+        #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
         {
             #[cfg(feature = "rayon")]
             {

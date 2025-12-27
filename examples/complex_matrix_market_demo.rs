@@ -234,13 +234,15 @@ mod complex_demo {
         let mut x = vec![S::zero(); problem.local_n];
         let b = &problem.rhs;
 
-        let mut jacobi_pc = if matches!(spec.pc, PcKind::Jacobi) {
-            let mut pc = Jacobi::new();
-            pc.setup(problem.real_pc_matrix.as_ref())?;
-            Some(pc)
-        } else {
-            None
-        };
+        let mut jacobi_pc: Option<Jacobi> = None;
+        if matches!(spec.pc, PcKind::Jacobi) {
+            #[cfg(not(feature = "complex"))]
+            {
+                let mut pc = Jacobi::new();
+                pc.setup(problem.real_pc_matrix.as_ref())?;
+                jacobi_pc = Some(pc);
+            }
+        }
         let pc_opt = jacobi_pc
             .as_mut()
             .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>);

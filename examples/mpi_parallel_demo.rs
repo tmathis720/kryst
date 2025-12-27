@@ -1,3 +1,8 @@
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("mpi_parallel_demo.rs is unavailable when built with --features complex");
+}
+
 use kryst::parallel::Comm;
 use kryst::*; // Import the trait
 
@@ -8,6 +13,7 @@ use kryst::*; // Import the trait
 ///
 /// to run:
 /// cargo mpirun -n 4 --example mpi_parallel_demo
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Kryst MPI-Parallel Communication Demo");
     println!("=====================================");
@@ -25,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Demonstrate basic communicator operations
+#[cfg(not(feature = "complex"))]
 fn example_basic_comm_operations() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n1. Basic Communicator Operations");
     println!("---------------------------------");
@@ -57,6 +64,7 @@ fn example_basic_comm_operations() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Demonstrate parallel inner products with MPI reductions
+#[cfg(not(feature = "complex"))]
 fn example_parallel_inner_products() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n2. Parallel Inner Products");
     println!("---------------------------");
@@ -103,6 +111,7 @@ fn example_parallel_inner_products() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Demonstrate communicator splitting for sub-group operations  
+#[cfg(not(feature = "complex"))]
 fn example_communicator_splitting() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n3. Communicator Splitting");
     println!("--------------------------");

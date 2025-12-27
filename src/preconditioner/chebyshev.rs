@@ -471,6 +471,7 @@ impl ChebyshevPc {
     }
 }
 
+#[cfg(not(feature = "complex"))]
 impl ObjPreconditioner for ChebyshevPc {
     fn dims(&self) -> (usize, usize) {
         (self.n, self.n)
@@ -604,6 +605,26 @@ impl ObjPreconditioner for ChebyshevPc {
 }
 
 #[cfg(feature = "complex")]
+impl ObjPreconditioner for ChebyshevPc {
+    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), crate::error::KError> {
+        Err(KError::Unsupported(
+            "Chebyshev does not support complex scalars yet".into(),
+        ))
+    }
+
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        _x: &[S],
+        _y: &mut [S],
+    ) -> Result<(), crate::error::KError> {
+        Err(KError::Unsupported(
+            "Chebyshev does not support complex scalars yet".into(),
+        ))
+    }
+}
+
+#[cfg(feature = "complex")]
 impl KPreconditioner for ChebyshevPc {
     type Scalar = S;
 
@@ -641,7 +662,7 @@ impl KPreconditioner for ChebyshevPc {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "complex")))]
 mod tests {
     use super::*;
     use crate::core::traits::MatVec;
@@ -740,33 +761,20 @@ mod tests {
 #[cfg(all(test, feature = "complex"))]
 mod complex_tests {
     use super::*;
-    use crate::matrix::op::CsrOp;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::error::KError;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::PcSide;
 
     #[test]
-    fn apply_s_matches_real_path() {
-        let mut pc = ChebyshevPc::new(2, 0.5, 3.0);
-        let row_ptr = vec![0, 2, 4];
-        let col_idx = vec![0, 1, 0, 1];
-        let values = vec![4.0, -1.0, -1.0, 4.0];
-        let csr = Arc::new(CsrMatrix::from_csr(2, 2, row_ptr, col_idx, values));
-        let op = CsrOp::new(csr);
-        pc.setup(&op).expect("chebyshev setup");
-
-        let rhs_real = [1.0, 2.0];
-        let mut out_real = [0.0; 2];
-        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
-            .expect("chebyshev apply real");
-
-        let rhs_s: Vec<S> = rhs_real.iter().copied().map(S::from_real).collect();
-        let mut out_s = vec![S::zero(); rhs_s.len()];
+    fn apply_s_reports_unsupported() {
+        let pc = ChebyshevPc::new(2, 0.5, 3.0);
+        let rhs = vec![S::one(); 2];
+        let mut out = vec![S::zero(); rhs.len()];
         let mut scratch = BridgeScratch::default();
-        pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
-            .expect("chebyshev apply_s");
-
-        for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
-            assert!((ys.real() - yr).abs() < 1e-10);
-        }
+        let err = pc
+            .apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
+            .unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
     }
 }

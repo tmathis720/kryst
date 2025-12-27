@@ -1,11 +1,16 @@
-#![cfg_attr(feature = "complex", allow(dead_code))]
+#[cfg(feature = "complex")]
+fn main() {
+    eprintln!("matrix_market_demo.rs is unavailable when built with --features complex");
+}
 
 #[cfg(not(feature = "backend-faer"))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!("matrix_market_demo requires the backend-faer feature.");
 }
 
 #[cfg(all(feature = "backend-faer", feature = "complex"))]
+#[cfg(not(feature = "complex"))]
 fn main() {
     eprintln!(
         "matrix_market_demo is only available for real-valued builds.\n\
@@ -833,6 +838,7 @@ mod real_demo {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 fn main() -> Result<(), kryst::error::KError> {
     real_demo::run()
 }

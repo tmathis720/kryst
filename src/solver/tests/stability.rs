@@ -1,3 +1,5 @@
+#![cfg(not(feature = "complex"))]
+
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
