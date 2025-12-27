@@ -5,7 +5,7 @@ use crate::error::KError;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use std::collections::HashMap;
 

@@ -3,9 +3,11 @@ use crate::algebra::prelude::*;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::error::KError;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::matrix::convert::{FormatHint, materialize_linop_with_hint};
+use crate::matrix::convert::materialize_linop_with_hint;
+use crate::matrix::format::FormatHint;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::matrix::op::{DistLayout, LinOp, OpFormat, StructureId, ValuesId};
+use crate::matrix::format::OpFormat;
+use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
@@ -46,6 +48,7 @@ pub struct DistributedAsm {
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[derive(Debug)]
 struct DistributedAsmState {
     comm: UniverseComm,
     layout: DistLayout,

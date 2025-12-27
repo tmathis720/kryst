@@ -50,26 +50,30 @@ pub fn alltoallv_u64(comm: &UniverseComm, send: &[Vec<u64>]) -> Result<Vec<Vec<u
         *slot = buf.len() as u64;
     }
 
-    let mut count_bufs = vec![[0u64; 1]; size];
+    let mut recv_count_bufs = vec![[0u64; 1]; size];
+    let count_bufs: Vec<[u64; 1]> = send_counts.iter().map(|&count| [count]).collect();
     let mut reqs = Vec::new();
     for peer in 0..size {
         if peer == rank {
             recv_counts[peer] = send_counts[peer];
             continue;
         }
-        reqs.push(comm.irecv_from_u64(
-            std::slice::from_mut(&mut recv_counts[peer]),
-            peer as i32,
-        ));
+        let buf = unsafe { &mut *recv_count_bufs.as_mut_ptr().add(peer) };
+        reqs.push(comm.irecv_from_u64(buf, peer as i32));
     }
     for peer in 0..size {
         if peer == rank {
             continue;
         }
-        count_bufs[peer][0] = send_counts[peer];
         reqs.push(comm.isend_to_u64(&count_bufs[peer], peer as i32));
     }
     comm.wait_all(&mut reqs);
+    for peer in 0..size {
+        if peer == rank {
+            continue;
+        }
+        recv_counts[peer] = recv_count_bufs[peer][0];
+    }
 
     let mut recv = vec![Vec::new(); size];
     let mut reqs = Vec::new();
@@ -80,7 +84,13 @@ pub fn alltoallv_u64(comm: &UniverseComm, send: &[Vec<u64>]) -> Result<Vec<Vec<u
         }
         let count = recv_counts[peer] as usize;
         recv[peer] = vec![0u64; count];
-        reqs.push(comm.irecv_from_u64(&mut recv[peer], peer as i32));
+    }
+    for peer in 0..size {
+        if peer == rank {
+            continue;
+        }
+        let buf = unsafe { &mut *recv.as_mut_ptr().add(peer) };
+        reqs.push(comm.irecv_from_u64(buf, peer as i32));
     }
     for peer in 0..size {
         if peer == rank {
@@ -109,26 +119,30 @@ pub fn alltoallv_scalar(comm: &UniverseComm, send: &[Vec<R>]) -> Result<Vec<Vec<
         *slot = buf.len() as u64;
     }
 
-    let mut count_bufs = vec![[0u64; 1]; size];
+    let mut recv_count_bufs = vec![[0u64; 1]; size];
+    let count_bufs: Vec<[u64; 1]> = send_counts.iter().map(|&count| [count]).collect();
     let mut reqs = Vec::new();
     for peer in 0..size {
         if peer == rank {
             recv_counts[peer] = send_counts[peer];
             continue;
         }
-        reqs.push(comm.irecv_from_u64(
-            std::slice::from_mut(&mut recv_counts[peer]),
-            peer as i32,
-        ));
+        let buf = unsafe { &mut *recv_count_bufs.as_mut_ptr().add(peer) };
+        reqs.push(comm.irecv_from_u64(buf, peer as i32));
     }
     for peer in 0..size {
         if peer == rank {
             continue;
         }
-        count_bufs[peer][0] = send_counts[peer];
         reqs.push(comm.isend_to_u64(&count_bufs[peer], peer as i32));
     }
     comm.wait_all(&mut reqs);
+    for peer in 0..size {
+        if peer == rank {
+            continue;
+        }
+        recv_counts[peer] = recv_count_bufs[peer][0];
+    }
 
     let mut recv = vec![Vec::new(); size];
     let mut reqs = Vec::new();
@@ -139,7 +153,13 @@ pub fn alltoallv_scalar(comm: &UniverseComm, send: &[Vec<R>]) -> Result<Vec<Vec<
         }
         let count = recv_counts[peer] as usize;
         recv[peer] = vec![R::zero(); count];
-        reqs.push(comm.irecv_from(&mut recv[peer], peer as i32));
+    }
+    for peer in 0..size {
+        if peer == rank {
+            continue;
+        }
+        let buf = unsafe { &mut *recv.as_mut_ptr().add(peer) };
+        reqs.push(comm.irecv_from(buf, peer as i32));
     }
     for peer in 0..size {
         if peer == rank {
