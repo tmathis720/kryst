@@ -40,7 +40,7 @@ pub trait SparseMatrix {
 ///
 /// Callers that mutate the structure must preserve these invariants and invoke
 /// [`CsrMatrix::build_diag_pos`] before relying on diagonal access.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CsrMatrix<T> {
     nrows: usize,
     ncols: usize,

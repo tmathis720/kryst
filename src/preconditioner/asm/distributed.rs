@@ -464,6 +464,15 @@ struct SubdomainSolver {
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
+impl std::fmt::Debug for SubdomainSolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubdomainSolver")
+            .field("cfg", &self.ilu.cfg)
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 impl SubdomainSolver {
     fn new(kind: AsmBlockSolver) -> Result<Self, KError> {
         let _ = kind;

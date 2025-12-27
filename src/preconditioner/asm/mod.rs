@@ -81,7 +81,7 @@ impl Preconditioner for AsmPc {
     fn dims(&self) -> (usize, usize) {
         match &self.inner {
             Some(AsmImpl::Serial(pc)) => pc.dims(),
-            #[cfg(feature = "mpi")]
+            #[cfg(all(feature = "mpi", not(feature = "complex")))]
             Some(AsmImpl::Distributed(pc)) => pc.dims(),
             None => (0, 0),
         }
