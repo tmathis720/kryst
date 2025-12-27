@@ -119,6 +119,7 @@ where
     }
 
     /// Transpose sparse matrix-vector multiply: `y = A^T * x`.
+    /// Uses `A^H` in complex builds.
     ///
     /// Sequential implementation mirroring [`spmv`]. The output slice is fully
     /// overwritten, so callers do not need to zero-initialize it before calling
@@ -134,7 +135,7 @@ where
             let mut acc = T::zero();
             for p in cp[j]..cp[j + 1] {
                 let row = ri[p];
-                acc = acc + vv[p] * x[row];
+                acc = acc + vv[p].conj() * x[row];
             }
             *yj = acc;
         }

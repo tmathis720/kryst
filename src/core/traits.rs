@@ -6,9 +6,9 @@ pub trait MatVec<V> {
     fn matvec(&self, x: &V, y: &mut V);
 }
 
-/// Matrix–transpose–vector product: y ← Aᵗ x.
+/// Matrix–transpose–vector product: y ← Aᵗ x (A^H for complex).
 pub trait MatTransVec<V> {
-    /// Compute y = Aᵗ · x.
+    /// Compute y = Aᵗ · x (or A^H · x in complex builds).
     fn mattransvec(&self, x: &V, y: &mut V);
 }
 
@@ -460,7 +460,7 @@ pub trait KernelOp<T: KrystScalar> {
         comm: &Self::Comm,
     ) -> Result<(), crate::error::KError>;
 
-    /// Transpose matrix-vector product: y = alpha * A^T * x + beta * y
+    /// Transpose matrix-vector product: y = alpha * A^T * x + beta * y (A^H for complex).
     fn kernel_mat_vec_trans(
         &self,
         matrix: &dyn MatVecOp<T>,

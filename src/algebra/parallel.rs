@@ -113,8 +113,7 @@ fn s_sum_abs2_local(x: &[S]) -> R {
         let end = (i + BLK).min(x.len());
         let mut blk = R::default();
         for j in i..end {
-            let a = x[j].abs();
-            blk = blk + a * a;
+            blk = blk + x[j].abs2();
         }
         acc = acc + blk;
         i = end;
@@ -378,8 +377,7 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
             let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
             let mut acc = R::zero();
             for &value in &x[start..end] {
-                let a = value.abs();
-                acc = acc + a * a;
+                acc = acc + value.abs2();
             }
             *slot = acc;
         });
@@ -392,8 +390,7 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
             let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
             let mut acc = R::zero();
             for &value in &x[start..end] {
-                let a = value.abs();
-                acc = acc + a * a;
+                acc = acc + value.abs2();
             }
             parts[cid] = acc;
         }

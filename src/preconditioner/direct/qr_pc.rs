@@ -50,11 +50,20 @@ impl Preconditioner for QrPc {
         }
         #[cfg(feature = "complex")]
         {
-            let mut b_real = vec![0.0; b.len()];
-            let mut x_real = vec![0.0; x.len()];
-            crate::algebra::scalar::copy_scalar_to_real_in(b, &mut b_real);
-            crate::solver::dense_qr::solve(a, &b_real, &mut x_real)?;
-            crate::algebra::scalar::copy_real_to_scalar_in(&x_real, x);
+            let n = b.len();
+            let mut b_re = vec![0.0; n];
+            let mut b_im = vec![0.0; n];
+            for (i, bi) in b.iter().enumerate() {
+                b_re[i] = bi.real();
+                b_im[i] = bi.imag();
+            }
+            let mut x_re = vec![0.0; x.len()];
+            let mut x_im = vec![0.0; x.len()];
+            crate::solver::dense_qr::solve(a, &b_re, &mut x_re)?;
+            crate::solver::dense_qr::solve(a, &b_im, &mut x_im)?;
+            for (xi, (&re, &im)) in x.iter_mut().zip(x_re.iter().zip(x_im.iter())) {
+                *xi = S::from_parts(re, im);
+            }
             Ok(())
         }
     }

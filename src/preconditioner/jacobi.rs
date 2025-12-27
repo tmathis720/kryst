@@ -40,13 +40,13 @@ impl Jacobi {
     }
 
     fn recompute(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
-        if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<f64>>() {
+        if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<S>>() {
             let n = csr.nrows().min(csr.ncols());
             self.diag_inv.resize(n, S::zero());
             for i in 0..n {
                 let rs = csr.row_ptr()[i];
                 let re = csr.row_ptr()[i + 1];
-                let mut aii = 0.0;
+                let mut aii = S::zero();
                 for p in rs..re {
                     if csr.col_idx()[p] == i {
                         aii = csr.values()[p];
@@ -54,7 +54,7 @@ impl Jacobi {
                     }
                 }
                 self.diag_inv[i] = if aii.abs() > 1e-14 {
-                    S::from_real(1.0 / aii)
+                    aii.inv()
                 } else {
                     S::zero()
                 };
@@ -63,13 +63,13 @@ impl Jacobi {
             return Ok(());
         }
         #[cfg(feature = "backend-faer")]
-        if let Some(d) = pmat.as_any().downcast_ref::<Mat<f64>>() {
+        if let Some(d) = pmat.as_any().downcast_ref::<Mat<S>>() {
             let n = d.nrows().min(d.ncols());
             self.diag_inv.resize(n, S::zero());
             for i in 0..n {
                 let aii = d[(i, i)];
                 self.diag_inv[i] = if aii.abs() > 1e-14 {
-                    S::from_real(1.0 / aii)
+                    aii.inv()
                 } else {
                     S::zero()
                 };

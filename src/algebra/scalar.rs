@@ -53,6 +53,7 @@ pub trait KrystScalar:
 
     // Basic ops we need everywhere
     fn abs(self) -> Self::Real; // |z| for complex, |x| for real
+    fn abs2(self) -> Self::Real; // |z|^2 for complex, x^2 for real
     fn conj(self) -> Self; // identity for real
     fn inv(self) -> Self; // 1/self (caller ensures nonzero)
     fn is_finite(self) -> bool;
@@ -99,6 +100,11 @@ impl KrystScalar for f64 {
     #[inline]
     fn abs(self) -> Self::Real {
         f64::abs(self)
+    }
+
+    #[inline]
+    fn abs2(self) -> Self::Real {
+        self * self
     }
 
     #[inline]
@@ -159,6 +165,11 @@ impl KrystScalar for Complex64 {
     #[inline]
     fn abs(self) -> Self::Real {
         self.norm()
+    }
+
+    #[inline]
+    fn abs2(self) -> Self::Real {
+        self.re * self.re + self.im * self.im
     }
 
     #[inline]

@@ -83,6 +83,9 @@ pub fn spmv_scaled_csr<S: KrystScalar>(
 }
 
 /// Computes `y = alpha * A^T * x + beta * y` for a CSR matrix.
+///
+/// In complex builds, this applies the conjugate-transpose (`A^H`) by
+/// conjugating the matrix entries.
 pub fn spmv_t_scaled_csr<S: KrystScalar>(
     m: usize,
     row_ptr: &[usize],
@@ -113,7 +116,7 @@ pub fn spmv_t_scaled_csr<S: KrystScalar>(
         let re = row_ptr[i + 1];
         for p in rs..re {
             let idx = col_idx[p];
-            y[idx] = y[idx] + alpha * vals[p] * xi;
+            y[idx] = y[idx] + alpha * vals[p].conj() * xi;
         }
     }
 }

@@ -23,6 +23,7 @@ pub struct Workspace {
     pub z_mem: Vec<S>,
     // Column-major Hessenberg storage for GMRES/FGMRES
     pub h_mem: Vec<S>,
+    pub givens_col_scratch: Vec<S>,
     pub cs: Vec<R>,
     pub sn: Vec<S>,
     pub g: Vec<S>,
@@ -329,8 +330,8 @@ impl Workspace {
         if spec.need_z {
             ensure_len(&mut self.z_mem, z_len);
         } else {
+            // Keep capacity to avoid allocator churn when need_z toggles.
             self.z_mem.clear();
-            self.z_mem.shrink_to_fit();
         }
         ensure_len(&mut self.h_mem, h_len);
         ensure_len(&mut self.cs, m);
@@ -508,48 +509,43 @@ impl Workspace {
     // --- Hessenberg helpers -----------------------------------------------------
     #[inline]
     pub fn apply_prev_givens_to_col(&mut self, j: usize, upto: usize) {
-        use smallvec::SmallVec;
-
         if upto == 0 {
             return;
         }
 
         let ld = self.ld_h();
         let base = j * ld;
-        let mut hcol: SmallVec<[S; 64]> = SmallVec::with_capacity(upto + 1);
-        for row in 0..=upto {
-            hcol.push(self.h_mem[base + row]);
-        }
+        let len = upto + 1;
+        ensure_len(&mut self.givens_col_scratch, len);
+        self.givens_col_scratch[..len].copy_from_slice(&self.h_mem[base..base + len]);
 
-        apply_prev_givens_to_col(&mut hcol, upto, &self.cs, &self.sn);
+        apply_prev_givens_to_col(
+            &mut self.givens_col_scratch[..len],
+            upto,
+            &self.cs,
+            &self.sn,
+        );
 
-        for (row, val) in hcol.into_iter().enumerate() {
-            self.h_mem[base + row] = val;
-        }
+        self.h_mem[base..base + len].copy_from_slice(&self.givens_col_scratch[..len]);
     }
 
     #[inline]
     pub fn apply_final_givens_and_update_g(&mut self, j: usize) {
-        use smallvec::SmallVec;
-
         let ld = self.ld_h();
         let base = j * ld;
-        let mut hcol: SmallVec<[S; 64]> = SmallVec::with_capacity(j + 2);
-        for row in 0..=j + 1 {
-            hcol.push(self.h_mem[base + row]);
-        }
+        let len = j + 2;
+        ensure_len(&mut self.givens_col_scratch, len);
+        self.givens_col_scratch[..len].copy_from_slice(&self.h_mem[base..base + len]);
 
         apply_new_givens_and_update_g(
-            &mut hcol,
+            &mut self.givens_col_scratch[..len],
             j,
             &mut self.cs[..],
             &mut self.sn[..],
             &mut self.g[..],
         );
 
-        for (row, val) in hcol.into_iter().enumerate() {
-            self.h_mem[base + row] = val;
-        }
+        self.h_mem[base..base + len].copy_from_slice(&self.givens_col_scratch[..len]);
     }
 
     #[cfg(not(feature = "complex"))]
@@ -756,7 +752,9 @@ impl Workspace {
     }
 }
 
-/// Grow vector to `need` length without zeroing. Never shrinks silently.
+/// Ensure vector length is exactly `need`.
+/// Grows by filling new elements with `Default::default()`, or truncates if too long.
+/// Capacity is not reduced.
 #[inline]
 fn ensure_len<T: Copy + Default>(v: &mut Vec<T>, need: usize) {
     if v.len() < need {
@@ -769,7 +767,47 @@ fn ensure_len<T: Copy + Default>(v: &mut Vec<T>, need: usize) {
 #[inline]
 fn ensure_capacity<T>(v: &mut Vec<T>, need: usize) {
     if v.capacity() < need {
-        v.reserve_exact(need - v.capacity());
+        v.reserve(need - v.capacity());
+    }
+}
+
+#[cfg(test)]
+mod ws_tests {
+    use super::*;
+
+    #[test]
+    fn acquire_gmres_does_not_shrink_z_capacity_when_need_z_toggles() {
+        let n = 128;
+        let m = 50;
+
+        let mut ws = Workspace::new(n);
+
+        ws.acquire_gmres(GmresSpec {
+            n,
+            m,
+            need_z: true,
+            block_s: 0,
+        });
+        let cap1 = ws.z_mem.capacity();
+        assert!(cap1 >= n * m);
+
+        ws.acquire_gmres(GmresSpec {
+            n,
+            m,
+            need_z: false,
+            block_s: 0,
+        });
+        let cap2 = ws.z_mem.capacity();
+        assert_eq!(cap2, cap1);
+
+        ws.acquire_gmres(GmresSpec {
+            n,
+            m,
+            need_z: true,
+            block_s: 0,
+        });
+        let cap3 = ws.z_mem.capacity();
+        assert_eq!(cap3, cap1);
     }
 }
 

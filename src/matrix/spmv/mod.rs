@@ -237,7 +237,7 @@ fn t_spmv_csr_parallel_csc<S: KrystScalar>(
         let mut sum = <S as KrystScalar>::zero();
         for p in cp[j]..cp[j + 1] {
             let row = ri[p];
-            let val = unsafe { *vv.get_unchecked(p) };
+            let val = unsafe { *vv.get_unchecked(p) }.conj();
             let xr = unsafe { *x.get_unchecked(row) };
             sum = val.mul_add(xr, sum);
         }
@@ -284,7 +284,7 @@ where
                     let (rs, re) = (rp[i], rp[i + 1]);
                     for p in rs..re {
                         let j = unsafe { *cj.get_unchecked(p) };
-                        let aij = unsafe { *vv.get_unchecked(p) };
+                        let aij = unsafe { *vv.get_unchecked(p) }.conj();
                         unsafe {
                             let slot = y_chunk.get_unchecked_mut(j);
                             *slot = aij.mul_add(xi, *slot);
@@ -325,7 +325,7 @@ where
         let xi = x[i];
         if xi != <S as KrystScalar>::zero() {
             for p in rp[i]..rp[i + 1] {
-                y[cj[p]] = y[cj[p]] + vv[p] * xi;
+                y[cj[p]] = y[cj[p]] + vv[p].conj() * xi;
             }
         }
     }
@@ -461,7 +461,7 @@ where
     spmv_csr_parallel(a, x, y)
 }
 
-/// Serial transpose CSR matvec: `y = A^T * x`.
+/// Serial transpose CSR matvec: `y = A^T * x` (`A^H * x` in complex builds).
 pub fn csr_t_matvec<S, A>(a: &A, x: &[S], y: &mut [S]) -> Result<(), KError>
 where
     S: KrystScalar,
@@ -485,7 +485,7 @@ where
     Ok(())
 }
 
-/// Canonical transpose CSR matvec: `y = A^T * x`.
+/// Canonical transpose CSR matvec: `y = A^T * x` (`A^H * x` in complex builds).
 ///
 /// Uses CSC backend where available, otherwise CSR gather path.
 pub fn csr_t_matvec_par<S, A>(

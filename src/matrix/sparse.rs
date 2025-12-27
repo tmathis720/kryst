@@ -289,6 +289,7 @@ impl<T: KrystScalar> CsrMatrix<T> {
     }
 
     /// Sparse matrix-vector product with transpose: y = alpha * A^T * x + beta * y.
+    /// Uses `A^H` in complex builds.
     pub fn spmv_transpose_scaled(
         &self,
         alpha: T,

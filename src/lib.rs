@@ -65,7 +65,7 @@
 //! | Feature | Enables | Notes |
 //! | --- | --- | --- |
 //! | `mpi` | MPI communication backend | Requires MPI installed; MPI examples run via `mpirun` |
-//! | `complex` | Complex scalar `S` (Complex64) | `KspContext::solve` is not yet implemented; pipelined GMRES/FGMRES are unavailable |
+//! | `complex` | Complex scalar `S` (Complex64) | Classical solvers are supported; pipelined GMRES/FGMRES remain unavailable |
 //! | `backend-faer` | Dense/CSR backends and most PCs | Default feature |
 //!
 //! `S` is the internal scalar alias and `R` is its real partner. In real builds
