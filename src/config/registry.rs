@@ -162,6 +162,13 @@ pub static SPECS: &[Spec] = &[
         doc: "Reduction mode: fast|deterministic",
     },
     Spec {
+        flag: "-ksp_monitor_rank0",
+        key: "ksp_monitor_rank0",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "invoke monitors only on rank 0",
+    },
+    Spec {
         flag: "-ksp_pc_side",
         key: "ksp_pc_side",
         arity: Arity::One,

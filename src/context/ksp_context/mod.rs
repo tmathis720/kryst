@@ -200,6 +200,12 @@ impl FromStr for SolverType {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum MonitorPolicy {
+    AllRanks,
+    Rank0Only,
+}
+
 /// Minimal KSP context holding solver, preconditioner, and operators.
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>>,
@@ -212,6 +218,7 @@ pub struct KspContext {
     work: Option<Workspace>,
     setup_called: bool,
     monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
+    monitor_policy: MonitorPolicy,
     solver_type: Option<SolverType>,
     pub rtol: R,
     pub atol: R,
@@ -244,6 +251,7 @@ impl fmt::Debug for KspContext {
             .field("work", &self.work)
             .field("setup_called", &self.setup_called)
             .field("monitors_len", &self.monitors.len())
+            .field("monitor_policy", &self.monitor_policy)
             .field("solver_type", &self.solver_type)
             .field("rtol", &self.rtol)
             .field("atol", &self.atol)
@@ -394,6 +402,7 @@ impl KspContext {
             work: None,
             setup_called: false,
             monitors: Vec::new(),
+            monitor_policy: MonitorPolicy::AllRanks,
             solver_type: None,
             rtol: 1e-5,
             atol: 1e-50,
@@ -606,6 +615,14 @@ impl KspContext {
             if let Some(ref mut w) = self.work {
                 w.set_reduction_mode(parsed);
             }
+        }
+
+        if let Some(rank0_only) = opts.ksp_monitor_rank0 {
+            self.monitor_policy = if rank0_only {
+                MonitorPolicy::Rank0Only
+            } else {
+                MonitorPolicy::AllRanks
+            };
         }
 
         if let Some(flag) = opts.reproducible {
@@ -1777,6 +1794,21 @@ impl KspContext {
         self.monitors.push(Box::new(f));
     }
 
+    /// Set how monitors are invoked across ranks.
+    pub fn set_monitor_policy(&mut self, policy: MonitorPolicy) -> &mut Self {
+        self.monitor_policy = policy;
+        self
+    }
+
+    /// Add a monitor that only runs on rank 0 (when bound to an MPI communicator).
+    pub fn add_monitor_rank0<F>(&mut self, f: F)
+    where
+        F: Fn(usize, R) + Send + Sync + 'static,
+    {
+        self.monitors.push(Box::new(move |it, r| f(it, r)));
+        self.monitor_policy = MonitorPolicy::Rank0Only;
+    }
+
     /// Return the number of registered monitors.
     pub fn num_monitors(&self) -> usize {
         self.monitors.len()
@@ -1795,6 +1827,17 @@ impl KspContext {
 
     /// Invoke all monitors with the provided iteration and residual.
     pub fn invoke_monitors(&self, iter: usize, residual: R) {
+        let do_call = match self.monitor_policy {
+            MonitorPolicy::AllRanks => true,
+            MonitorPolicy::Rank0Only => self
+                .bound_comm
+                .as_ref()
+                .map(|c| c.rank() == 0)
+                .unwrap_or(true),
+        };
+        if !do_call {
+            return;
+        }
         for m in &self.monitors {
             m(iter, residual);
         }
@@ -2349,6 +2392,40 @@ mod tests {
 
         let mut ksp = KspContext::new();
         ksp.try_set_operators_with_comm(op, None, comm).unwrap();
+    }
+
+    #[cfg(feature = "mpi")]
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn monitor_policy_rank0_only_invokes_on_root() {
+        use crate::parallel::MpiComm;
+
+        let world = std::sync::Arc::new(MpiComm::new());
+        if world.size() < 2 {
+            return;
+        }
+        let comm = crate::parallel::UniverseComm::Mpi(world.clone());
+
+        let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let op = Arc::new(DenseOp::new(Arc::new(m)));
+        let op_comm = wrap_with_comm(op, comm);
+
+        let mut ksp = KspContext::new();
+        ksp.try_set_operators(op_comm, None).unwrap();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_handle = Arc::clone(&counter);
+        ksp.add_monitor_rank0(move |_, _| {
+            counter_handle.fetch_add(1, Ordering::Relaxed);
+        });
+
+        ksp.invoke_monitors(0, 1.0);
+
+        if world.rank() == 0 {
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+        } else {
+            assert_eq!(counter.load(Ordering::Relaxed), 0);
+        }
     }
 
     #[test]
