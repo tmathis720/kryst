@@ -141,14 +141,11 @@ impl RelaxPhase {
 }
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 #[cfg(test)]
-pub static RELAX_CALL_COUNTS: [AtomicUsize; 4] = [
-    AtomicUsize::new(0),
-    AtomicUsize::new(0),
-    AtomicUsize::new(0),
-    AtomicUsize::new(0),
-];
+thread_local! {
+    static RELAX_CALL_COUNTS: Cell<[usize; 4]> = Cell::new([0; 4]);
+}
 #[cfg(test)]
 thread_local! {
     static BUILD_SYMBOLIC_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
@@ -156,17 +153,11 @@ thread_local! {
 
 #[cfg(test)]
 pub fn reset_relax_counts() {
-    for c in &RELAX_CALL_COUNTS {
-        c.store(0, Ordering::SeqCst);
-    }
+    RELAX_CALL_COUNTS.with(|counts| counts.set([0; 4]));
 }
 #[cfg(test)]
 pub fn get_relax_counts() -> [usize; 4] {
-    let mut out = [0; 4];
-    for (i, c) in RELAX_CALL_COUNTS.iter().enumerate() {
-        out[i] = c.load(Ordering::SeqCst);
-    }
-    out
+    RELAX_CALL_COUNTS.with(|counts| counts.get())
 }
 
 // ===== Config + Builder ======================================================
@@ -3990,7 +3981,11 @@ impl AMG {
             .unwrap_or(false);
         #[cfg(test)]
         {
-            RELAX_CALL_COUNTS[phase.ix()].fetch_add(1, Ordering::SeqCst);
+            RELAX_CALL_COUNTS.with(|counts| {
+                let mut data = counts.get();
+                data[phase.ix()] += 1;
+                counts.set(data);
+            });
         }
         let a = &lvl.a;
         match pol.kind[phase.ix()] {

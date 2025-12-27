@@ -59,7 +59,7 @@ fn unsupported_linop_err(op: &dyn LinOp<S = S>, where_: &str, target: &str) -> K
     KError::InvalidInput(help)
 }
 
-fn scalar_csr_to_sparse(matrix: &ScalarCsrMatrix<f64>) -> CsrMatrix<f64> {
+fn scalar_csr_to_sparse<S: KrystScalar>(matrix: &ScalarCsrMatrix<S>) -> CsrMatrix<S> {
     CsrMatrix::from_csr(
         matrix.nrows,
         matrix.ncols,
@@ -69,6 +69,143 @@ fn scalar_csr_to_sparse(matrix: &ScalarCsrMatrix<f64>) -> CsrMatrix<f64> {
     )
 }
 
+#[cfg(feature = "complex")]
+fn csr_to_dense_complex(csr: &CsrMatrix<S>) -> Mat<S> {
+    let m = csr.nrows();
+    let n = csr.ncols();
+    let mut dense = Mat::<S>::zeros(m, n);
+    let rp = csr.row_ptr();
+    let ci = csr.col_idx();
+    let vv = csr.values();
+    for i in 0..m {
+        for p in rp[i]..rp[i + 1] {
+            dense[(i, ci[p])] = vv[p];
+        }
+    }
+    dense
+}
+
+#[cfg(feature = "complex")]
+fn csc_to_dense_complex(csc: &CscMatrix<S>) -> Mat<S> {
+    let m = csc.nrows();
+    let n = csc.ncols();
+    let mut dense = Mat::<S>::zeros(m, n);
+    let cp = csc.col_ptr();
+    let ri = csc.row_idx();
+    let vv = csc.values();
+    for j in 0..n {
+        for p in cp[j]..cp[j + 1] {
+            dense[(ri[p], j)] = vv[p];
+        }
+    }
+    dense
+}
+
+#[cfg(feature = "complex")]
+fn dense_to_csr_complex(dense: &Mat<S>, drop_tol: R) -> CsrMatrix<S> {
+    let nrows = dense.nrows();
+    let ncols = dense.ncols();
+    let mut row_ptr = Vec::with_capacity(nrows + 1);
+    let mut col_idx = Vec::new();
+    let mut values = Vec::new();
+    row_ptr.push(0);
+    for i in 0..nrows {
+        for j in 0..ncols {
+            let v = dense[(i, j)];
+            if v.abs() >= drop_tol {
+                col_idx.push(j);
+                values.push(v);
+            }
+        }
+        row_ptr.push(col_idx.len());
+    }
+    CsrMatrix::from_csr(nrows, ncols, row_ptr, col_idx, values)
+}
+
+#[cfg(feature = "complex")]
+fn dense_to_csc_complex(dense: &Mat<S>, drop_tol: R) -> CscMatrix<S> {
+    let nrows = dense.nrows();
+    let ncols = dense.ncols();
+    let mut col_ptr = Vec::with_capacity(ncols + 1);
+    let mut row_idx = Vec::new();
+    let mut values = Vec::new();
+    col_ptr.push(0);
+    for j in 0..ncols {
+        for i in 0..nrows {
+            let v = dense[(i, j)];
+            if v.abs() >= drop_tol {
+                row_idx.push(i);
+                values.push(v);
+            }
+        }
+        col_ptr.push(row_idx.len());
+    }
+    CscMatrix::from_csc(nrows, ncols, col_ptr, row_idx, values)
+}
+
+#[cfg(feature = "complex")]
+fn csr_to_csc_complex(csr: &CsrMatrix<S>) -> CscMatrix<S> {
+    let m = csr.nrows();
+    let n = csr.ncols();
+    let ap = csr.row_ptr();
+    let aj = csr.col_idx();
+    let av = csr.values();
+    let nnz = av.len();
+
+    let mut col_ptr = vec![0usize; n + 1];
+    for &j in aj {
+        col_ptr[j + 1] += 1;
+    }
+    for j in 0..n {
+        col_ptr[j + 1] += col_ptr[j];
+    }
+
+    let mut next = col_ptr.clone();
+    let mut row_idx = vec![0usize; nnz];
+    let mut values = vec![S::zero(); nnz];
+    for i in 0..m {
+        for p in ap[i]..ap[i + 1] {
+            let j = aj[p];
+            let q = next[j];
+            row_idx[q] = i;
+            values[q] = av[p];
+            next[j] += 1;
+        }
+    }
+    CscMatrix::from_csc(m, n, col_ptr, row_idx, values)
+}
+
+#[cfg(feature = "complex")]
+fn csc_to_csr_complex(csc: &CscMatrix<S>) -> CsrMatrix<S> {
+    let m = csc.nrows();
+    let n = csc.ncols();
+    let cp = csc.col_ptr();
+    let ri = csc.row_idx();
+    let vv = csc.values();
+    let nnz = vv.len();
+
+    let mut row_ptr = vec![0usize; m + 1];
+    for &i in ri {
+        row_ptr[i + 1] += 1;
+    }
+    for i in 0..m {
+        row_ptr[i + 1] += row_ptr[i];
+    }
+
+    let mut next = row_ptr.clone();
+    let mut col_idx = vec![0usize; nnz];
+    let mut values = vec![S::zero(); nnz];
+    for j in 0..n {
+        for p in cp[j]..cp[j + 1] {
+            let i = ri[p];
+            let q = next[i];
+            col_idx[q] = j;
+            values[q] = vv[p];
+            next[i] += 1;
+        }
+    }
+    CsrMatrix::from_csr(m, n, row_ptr, col_idx, values)
+}
 /// Try to borrow a CSR matrix if the operator is already CSR.
 pub fn try_as_csr(pmat: &dyn LinOp<S = S>) -> Option<&CsrMatrix<f64>> {
     pmat.as_any().downcast_ref::<CsrMatrix<f64>>()
@@ -334,12 +471,80 @@ pub fn materialize_linop_with_hint(
 #[cfg(feature = "complex")]
 pub fn materialize_linop_with_hint(
     op: &dyn LinOp<S = S>,
-    _hint: FormatHint,
-    _drop_tol: R,
+    hint: FormatHint,
+    drop_tol: R,
 ) -> Result<std::sync::Arc<dyn LinOp<S = S>>, KError> {
-    let _ = op;
-    Err(KError::Unsupported(
-        "materialize_linop_with_hint is real-only; complex operators are not supported".into(),
+    let comm = op.comm();
+
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
+        return Ok(match hint {
+            FormatHint::Csr => wrap_with_comm(Arc::new(csr.clone()), comm),
+            FormatHint::Csc => {
+                let csc = csr_to_csc_complex(csr);
+                wrap_with_comm(Arc::new(csc), comm)
+            }
+            FormatHint::Dense => {
+                let dense = csr_to_dense_complex(csr);
+                wrap_with_comm(Arc::new(dense), comm)
+            }
+        });
+    }
+
+    if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<S>>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = csc_to_csr_complex(csc);
+                wrap_with_comm(Arc::new(csr), comm)
+            }
+            FormatHint::Csc => wrap_with_comm(Arc::new(csc.clone()), comm),
+            FormatHint::Dense => {
+                let dense = csc_to_dense_complex(csc);
+                wrap_with_comm(Arc::new(dense), comm)
+            }
+        });
+    }
+
+    if let Some(m) = op.as_any().downcast_ref::<Mat<S>>() {
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = dense_to_csr_complex(m, drop_tol);
+                wrap_with_comm(Arc::new(csr), comm)
+            }
+            FormatHint::Csc => {
+                let csc = dense_to_csc_complex(m, drop_tol);
+                wrap_with_comm(Arc::new(csc), comm)
+            }
+            FormatHint::Dense => {
+                let owned = m.clone();
+                wrap_with_comm(Arc::new(owned), comm)
+            }
+        });
+    }
+
+    if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<S>>() {
+        let csr = scalar_csr_to_sparse(generic.matrix());
+        return Ok(match hint {
+            FormatHint::Csr => wrap_with_comm(Arc::new(csr.clone()), comm),
+            FormatHint::Csc => {
+                let csc = csr_to_csc_complex(&csr);
+                wrap_with_comm(Arc::new(csc), comm)
+            }
+            FormatHint::Dense => {
+                let dense = csr_to_dense_complex(&csr);
+                wrap_with_comm(Arc::new(dense), comm)
+            }
+        });
+    }
+
+    let target = match hint {
+        FormatHint::Csr => "CSR",
+        FormatHint::Csc => "CSC",
+        FormatHint::Dense => "dense",
+    };
+    Err(unsupported_linop_err(
+        op,
+        "materialize_linop_with_hint",
+        target,
     ))
 }
 

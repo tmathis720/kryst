@@ -735,30 +735,20 @@ impl LinOpF64 for Mat<f64> {
     }
 }
 
-impl LinOp for CsrMatrix<f64> {
-    type S = f64;
+impl<S: KrystScalar> LinOp for CsrMatrix<S> {
+    type S = S;
     fn dims(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn matvec(&self, x: &[S], y: &mut [S]) {
         self.spmv(x, y);
     }
     fn supports_transpose(&self) -> bool {
         true
     }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.nrows());
-        assert_eq!(y.len(), self.ncols());
-        y.fill(0.0);
-        let rp = self.row_ptr();
-        let ci = self.col_idx();
-        let vv = self.values();
-        for i in 0..self.nrows() {
-            let xi = x[i];
-            for idx in rp[i]..rp[i + 1] {
-                y[ci[idx]] += vv[idx] * xi;
-            }
-        }
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
+        self.spmv_transpose_scaled(S::one(), x, S::zero(), y)
+            .expect("CsrMatrix::t_matvec dimension mismatch");
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -787,46 +777,23 @@ impl LinOpF64 for CsrMatrix<f64> {
 }
 
 #[cfg(feature = "backend-faer")]
-impl LinOp for CscMatrix<f64> {
-    type S = f64;
+impl<S: KrystScalar> LinOp for CscMatrix<S> {
+    type S = S;
 
     fn dims(&self) -> (usize, usize) {
         (self.nrows(), self.ncols())
     }
 
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.ncols());
-        assert_eq!(y.len(), self.nrows());
-        y.fill(0.0);
-        let cp = self.col_ptr();
-        let ri = self.row_idx();
-        let vv = self.values();
-        for j in 0..self.ncols() {
-            let xj = x[j];
-            for p in cp[j]..cp[j + 1] {
-                y[ri[p]] += vv[p] * xj;
-            }
-        }
+    fn matvec(&self, x: &[S], y: &mut [S]) {
+        self.spmv(x, y);
     }
 
     fn supports_transpose(&self) -> bool {
         true
     }
 
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.nrows());
-        assert_eq!(y.len(), self.ncols());
-        y.fill(0.0);
-        let cp = self.col_ptr();
-        let ri = self.row_idx();
-        let vv = self.values();
-        for j in 0..self.ncols() {
-            let mut sum = 0.0;
-            for p in cp[j]..cp[j + 1] {
-                sum += vv[p] * x[ri[p]];
-            }
-            y[j] = sum;
-        }
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
+        CscMatrix::t_matvec(self, x, y);
     }
 
     fn as_any(&self) -> &dyn Any {

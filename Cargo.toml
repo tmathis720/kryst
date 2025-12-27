@@ -22,7 +22,7 @@ exclude = [
 ]
 
 [package.metadata.docs.rs]
-features = ["mpi", "complex", "backend-faer"]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]

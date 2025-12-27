@@ -97,7 +97,12 @@ where
         }
         Self::from_csc(m, n, col_ptr, row_idx, values)
     }
+}
 
+impl<T> CscMatrix<T>
+where
+    T: KrystScalar,
+{
     /// Sparse matrix-vector multiply: `y = A * x`.
     ///
     /// Sequential implementation that updates `y` in place.
@@ -145,7 +150,7 @@ where
 #[cfg(feature = "rayon")]
 impl<T> CscMatrix<T>
 where
-    T: KrystScalar<Real = R>,
+    T: KrystScalar,
 {
     /// Parallel sparse matrix-vector multiply: `y = A * x`.
     ///

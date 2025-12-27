@@ -664,9 +664,6 @@ pub enum SparsityPattern {
     Auto,
 }
 
-/// Placeholder type for API compatibility.
-pub type PC = ();
-
 #[cfg(test)]
 mod tests {
     use super::*;

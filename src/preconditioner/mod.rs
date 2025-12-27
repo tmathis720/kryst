@@ -562,7 +562,7 @@ pub use pivot::{PivotMode, PivotPolicy, PivotScale, PivotSignPolicy, PivotStats}
 pub use tri_solve::TriangularSolve;
 
 /// Unified preconditioner enum for all supported types.
-pub use crate::context::pc_context::{PC, SparsityPattern};
+pub use crate::context::pc_context::SparsityPattern;
 
 #[cfg(test)]
 mod tests;

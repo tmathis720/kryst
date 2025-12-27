@@ -15,24 +15,28 @@
 //! use kryst::prelude::*;
 //! use std::sync::Arc;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! struct IdentityOp(usize);
 //! impl LinOp for IdentityOp {
 //!     type S = S;
+//!
 //!     fn dims(&self) -> (usize, usize) {
 //!         (self.0, self.0)
 //!     }
+//!
 //!     fn matvec(&self, x: &[S], y: &mut [S]) {
 //!         y.copy_from_slice(x);
 //!     }
+//!
 //!     fn as_any(&self) -> &dyn std::any::Any {
 //!         self
 //!     }
 //! }
 //!
-//! let op = Arc::new(IdentityOp(4)) as Arc<dyn LinOp<S = S>>;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let op: Arc<dyn LinOp<S = S>> = Arc::new(IdentityOp(4));
 //! let b = vec![S::from_real(1.0); 4];
 //! let mut x = vec![S::zero(); 4];
+//!
 //! let mut ksp = KspContext::new();
 //! ksp.set_type(SolverType::Gmres)?;
 //! ksp.set_pc_type(PcType::None, None)?;
@@ -44,4 +48,4 @@
 pub mod ksp_context;
 pub use ksp_context::KspContext;
 pub mod pc_context;
-pub use pc_context::{DeferredPcInfo, NoOpPreconditioner, PC, PcFactory, PcType, SparsityPattern};
+pub use pc_context::{DeferredPcInfo, NoOpPreconditioner, PcFactory, PcType, SparsityPattern};
