@@ -404,7 +404,7 @@ impl KspContext {
         if self.pc_side_explicit {
             self.check_pc_side_now(self.pc_side)?
         }
-        self.invalidate_setup();
+        self.invalidate_solver_setup();
         Ok(self)
     }
 
@@ -431,7 +431,7 @@ impl KspContext {
                 self.pending_chain = None;
             }
         }
-        self.invalidate_setup();
+        self.invalidate_pc_setup();
         Ok(self)
     }
 
@@ -463,7 +463,7 @@ impl KspContext {
         self.check_pc_side_now(side)?;
         self.pc_side = side;
         self.pc_side_explicit = true;
-        self.invalidate_setup();
+        self.invalidate_solver_setup();
         Ok(self)
     }
 
@@ -862,7 +862,7 @@ impl KspContext {
                 Self::apply_pcg_pending(&snapshot, s);
             }
         }
-        self.invalidate_setup();
+        self.invalidate_solver_setup();
         Ok(self)
     }
 
@@ -1002,7 +1002,7 @@ impl KspContext {
             self.pc = None;
             self.pending_pc = None;
             self.pending_chain = Some(specs);
-            self.invalidate_setup();
+            self.invalidate_pc_setup();
         }
         Ok(self)
     }
@@ -1068,7 +1068,7 @@ impl KspContext {
         );
         self.amat = Some(amat);
         self.pmat = Some(pmat);
-        self.invalidate_setup();
+        self.invalidate_pc_setup();
         Ok(self)
     }
 
@@ -1132,6 +1132,7 @@ impl KspContext {
 
     pub fn set_pc_reuse_policy(&mut self, policy: PcReusePolicy) -> &mut Self {
         self.pc_reuse = policy;
+        self.invalidate_solver_setup();
         self
     }
 
@@ -1276,7 +1277,7 @@ impl KspContext {
                                 }
                                 pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
-                            } else if values_changed {
+                            } else if !vid_known || values_changed {
                                 pc.update_symbolic(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             }
@@ -1485,7 +1486,11 @@ impl KspContext {
         Ok(r2.sqrt())
     }
 
-    fn invalidate_setup(&mut self) {
+    fn invalidate_solver_setup(&mut self) {
+        self.setup_called = false;
+    }
+
+    fn invalidate_pc_setup(&mut self) {
         self.setup_called = false;
         self.reset_pc_ids();
     }
@@ -1511,6 +1516,7 @@ impl KspContext {
     #[cfg(test)]
     pub fn set_preconditioner(&mut self, pc: Box<dyn Preconditioner>) {
         self.pc = Some(pc);
+        self.invalidate_pc_setup();
     }
 
     /// Invoke all monitors with the provided iteration and residual.
@@ -1526,7 +1532,7 @@ impl KspContext {
         self.atol = atol;
         self.dtol = dtol;
         self.maxits = maxits;
-        self.invalidate_setup();
+        self.invalidate_solver_setup();
         self
     }
 
@@ -1603,7 +1609,7 @@ impl KspContext {
         {
             s.set_restart(restart);
         }
-        self.invalidate_setup();
+        self.invalidate_solver_setup();
     }
 }
 
@@ -1616,6 +1622,7 @@ impl KspContext {
     /// Test-only: inject a preconditioner for controlled testing.
     pub fn set_pc_box_for_tests(&mut self, pc: Box<dyn Preconditioner>) {
         self.pc = Some(pc);
+        self.invalidate_pc_setup();
     }
 }
 
@@ -1631,7 +1638,43 @@ mod tests {
     use crate::preconditioner::PcSide;
     #[cfg(not(feature = "complex"))]
     use faer::Mat;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountingPc {
+        setup_ct: Arc<AtomicUsize>,
+        sym_ct: Arc<AtomicUsize>,
+        num_ct: Arc<AtomicUsize>,
+        supports_num: bool,
+    }
+
+    impl Preconditioner for CountingPc {
+        fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+            self.setup_ct.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+            y.copy_from_slice(x);
+            Ok(())
+        }
+
+        fn supports_numeric_update(&self) -> bool {
+            self.supports_num
+        }
+
+        fn update_symbolic(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+            self.sym_ct.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn update_numeric(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+            self.num_ct.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
 
     #[test]
     #[cfg(not(feature = "complex"))]
@@ -1736,6 +1779,147 @@ mod tests {
         // Pipelined CG requires one additional buffer.
         let ws = ksp.debug_workspace().unwrap();
         assert_eq!(ws.q_s.len(), 5);
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    #[cfg(not(feature = "mat-values-fingerprint"))]
+    fn auto_unknown_valuesid_refreshes_symbolic_when_no_numeric_update() {
+        let setup_ct = Arc::new(AtomicUsize::new(0));
+        let sym_ct = Arc::new(AtomicUsize::new(0));
+        let num_ct = Arc::new(AtomicUsize::new(0));
+
+        let pc = CountingPc {
+            setup_ct: setup_ct.clone(),
+            sym_ct: sym_ct.clone(),
+            num_ct: num_ct.clone(),
+            supports_num: false,
+        };
+
+        let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.5 });
+        let a = Arc::new(a);
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.set_pc_box_for_tests(Box::new(pc));
+        ksp.set_pc_reuse_policy(PcReusePolicy::Auto);
+
+        ksp.setup().unwrap();
+        assert_eq!(setup_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_ct.load(Ordering::Relaxed), 0);
+        assert_eq!(num_ct.load(Ordering::Relaxed), 0);
+
+        ksp.setup().unwrap();
+        assert_eq!(setup_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(num_ct.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn restart_change_does_not_rebuild_pc() {
+        let setup_ct = Arc::new(AtomicUsize::new(0));
+        let sym_ct = Arc::new(AtomicUsize::new(0));
+        let num_ct = Arc::new(AtomicUsize::new(0));
+
+        let pc = CountingPc {
+            setup_ct: setup_ct.clone(),
+            sym_ct: sym_ct.clone(),
+            num_ct: num_ct.clone(),
+            supports_num: false,
+        };
+
+        let a = Arc::new(Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 }));
+        let a = Arc::new(DenseOp::new(a));
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.set_pc_box_for_tests(Box::new(pc));
+
+        ksp.setup().unwrap();
+        assert_eq!(setup_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_ct.load(Ordering::Relaxed), 0);
+        assert_eq!(num_ct.load(Ordering::Relaxed), 0);
+
+        ksp.set_restart(5);
+        ksp.setup().unwrap();
+        assert_eq!(setup_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_ct.load(Ordering::Relaxed), 0);
+        assert_eq!(num_ct.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn tolerances_change_does_not_rebuild_pc() {
+        let setup_ct = Arc::new(AtomicUsize::new(0));
+        let sym_ct = Arc::new(AtomicUsize::new(0));
+        let num_ct = Arc::new(AtomicUsize::new(0));
+
+        let pc = CountingPc {
+            setup_ct: setup_ct.clone(),
+            sym_ct: sym_ct.clone(),
+            num_ct: num_ct.clone(),
+            supports_num: true,
+        };
+
+        let a = Arc::new(Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 }));
+        let a = Arc::new(DenseOp::new(a));
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.set_pc_box_for_tests(Box::new(pc));
+
+        ksp.setup().unwrap();
+        assert_eq!(setup_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_ct.load(Ordering::Relaxed), 0);
+        assert_eq!(num_ct.load(Ordering::Relaxed), 0);
+
+        ksp.set_tolerances(1e-6, 1e-12, 1e8, 1234);
+        ksp.setup().unwrap();
+        assert_eq!(setup_ct.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_ct.load(Ordering::Relaxed), 0);
+        assert_eq!(num_ct.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn operator_change_triggers_pc_refresh() {
+        let setup_ct = Arc::new(AtomicUsize::new(0));
+        let sym_ct = Arc::new(AtomicUsize::new(0));
+        let num_ct = Arc::new(AtomicUsize::new(0));
+
+        let pc = CountingPc {
+            setup_ct: setup_ct.clone(),
+            sym_ct: sym_ct.clone(),
+            num_ct: num_ct.clone(),
+            supports_num: true,
+        };
+
+        let a1 = Arc::new(Mat::<R>::from_fn(3, 3, |i, j| if i == j { 2.0 } else { 0.25 }));
+        let a1 = Arc::new(DenseOp::new(a1));
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a1, None);
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.set_pc_box_for_tests(Box::new(pc));
+
+        ksp.setup().unwrap();
+        let total_before = setup_ct.load(Ordering::Relaxed)
+            + sym_ct.load(Ordering::Relaxed)
+            + num_ct.load(Ordering::Relaxed);
+
+        let a2 = Arc::new(Mat::<R>::from_fn(3, 3, |i, j| if i == j { 3.0 } else { 0.75 }));
+        let a2 = Arc::new(DenseOp::new(a2));
+        ksp.try_set_operators(a2, None).unwrap();
+
+        ksp.setup().unwrap();
+        let total_after = setup_ct.load(Ordering::Relaxed)
+            + sym_ct.load(Ordering::Relaxed)
+            + num_ct.load(Ordering::Relaxed);
+        assert_eq!(total_after, total_before + 1);
     }
 
     #[cfg(feature = "dense-direct")]
