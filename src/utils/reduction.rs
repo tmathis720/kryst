@@ -80,7 +80,12 @@ fn effective_mode_with_comm(opt: &ReductOptions, comm_repro: bool) -> ReproMode 
 }
 
 #[inline]
-fn async_allowed(opt: &ReductOptions, comm_repro: bool, comm_size: usize, supports_async: bool) -> bool {
+fn async_allowed(
+    opt: &ReductOptions,
+    comm_repro: bool,
+    comm_size: usize,
+    supports_async: bool,
+) -> bool {
     if !supports_async || comm_size <= 1 {
         return false;
     }

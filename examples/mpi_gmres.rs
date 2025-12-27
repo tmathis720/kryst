@@ -45,11 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = ksp.solve(&b, &mut x)?;
     println!(
         "rank {}/{}: iters={} reason={:?} final_residual={:.3e}",
-        rank,
-        size,
-        stats.iterations,
-        stats.reason,
-        stats.final_residual
+        rank, size, stats.iterations, stats.reason, stats.final_residual
     );
 
     Ok(())

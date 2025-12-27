@@ -18,9 +18,9 @@ use crate::parallel::{
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::recompute_true_residual_norm_s;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
+use crate::utils::convergence::{ConvergedReason, SolveStats};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -180,11 +180,15 @@ impl FgmresSolver {
         let mut total_iters = 0usize;
         let mut res = beta0;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        #[cfg(not(feature = "complex"))]
         let red_engine = ws
             .reduction_engine()
             .cloned()
             .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
+        #[cfg(not(feature = "complex"))]
         let mut pipeline_reductions = 0usize;
+        #[cfg(feature = "complex")]
+        let pipeline_reductions = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         for m in mons {
@@ -202,8 +206,7 @@ impl FgmresSolver {
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let reductions =
-                end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1
-                    + pipeline_reductions;
+                end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
                 residual_replacements: 0,
@@ -243,8 +246,7 @@ impl FgmresSolver {
                             )?;
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.pc_apply_nanos +=
-                                    pc_start.elapsed().as_nanos() as u64;
+                                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                             }
                             ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
                         } else {
@@ -363,8 +365,7 @@ impl FgmresSolver {
                                 )?;
                                 #[cfg(feature = "metrics")]
                                 {
-                                    metrics.pc_apply_nanos +=
-                                        pc_start.elapsed().as_nanos() as u64;
+                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                                 }
                                 ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
                             } else {
@@ -377,8 +378,7 @@ impl FgmresSolver {
                             a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.matvec_nanos +=
-                                    matvec_start.elapsed().as_nanos() as u64;
+                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                             }
 
                             ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
@@ -390,9 +390,9 @@ impl FgmresSolver {
                                 self.reorth_tol,
                             )?;
                             let reductions = match pipe {
-                                crate::context::ksp_context::PipeReduct::Sync {
-                                    reductions,
-                                } => reductions,
+                                crate::context::ksp_context::PipeReduct::Sync { reductions } => {
+                                    reductions
+                                }
                                 crate::context::ksp_context::PipeReduct::Async { handle } => {
                                     #[cfg(feature = "metrics")]
                                     let wait_start = std::time::Instant::now();

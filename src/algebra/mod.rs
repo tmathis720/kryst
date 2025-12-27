@@ -2,11 +2,7 @@
 
 pub mod blas;
 pub mod bridge;
-#[cfg(any(
-    feature = "backend-faer",
-    feature = "backend-nalgebra",
-    feature = "backend-cgmath"
-))]
+#[cfg(feature = "backend-faer")]
 pub mod dense;
 pub mod parallel;
 pub mod parallel_cfg;

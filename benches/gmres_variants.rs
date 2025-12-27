@@ -22,7 +22,16 @@ fn bench_gmres_variants(c: &mut Criterion) {
         ben.iter(|| {
             x.fill(0.0);
             let _ = solver
-                .solve_f64(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))
+                .solve_f64(
+                    &a,
+                    None,
+                    &b,
+                    &mut x,
+                    PcSide::Left,
+                    &comm,
+                    None,
+                    Some(&mut ws),
+                )
                 .unwrap();
         });
     });
@@ -36,7 +45,16 @@ fn bench_gmres_variants(c: &mut Criterion) {
         ben.iter(|| {
             x.fill(0.0);
             let _ = solver
-                .solve_f64(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))
+                .solve_f64(
+                    &a,
+                    None,
+                    &b,
+                    &mut x,
+                    PcSide::Left,
+                    &comm,
+                    None,
+                    Some(&mut ws),
+                )
                 .unwrap();
         });
     });

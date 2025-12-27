@@ -15,7 +15,7 @@ pub mod profiling;
 pub mod reduction;
 #[cfg(feature = "backend-faer")]
 pub mod reordering;
-#[cfg(feature = "tuning")]
+#[cfg(all(feature = "tuning", not(feature = "complex")))]
 pub mod tuning;
 
 pub use monitor::{Event, Monitor, NullMonitor, TextMonitor};

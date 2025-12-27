@@ -5882,13 +5882,13 @@ fn diag_inv_from_csr_with_floor(
         if floor > 0.0 && aii <= 0.0 {
             aii += floor;
         }
+        if aii.abs() < 1e-14 {
+            return Err(KError::SolveError(format!("near-zero diagonal at row {i}")));
+        }
         if require_positive && aii <= 0.0 {
             return Err(KError::SolveError(format!(
                 "non-positive diagonal at row {i} (value {aii})"
             )));
-        }
-        if aii.abs() < 1e-14 {
-            return Err(KError::SolveError(format!("near-zero diagonal at row {i}")));
         }
         d[i] = 1.0 / aii;
     }

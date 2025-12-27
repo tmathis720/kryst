@@ -9,8 +9,8 @@ fn main() {
 #[cfg(feature = "complex")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use kryst::algebra::bridge::BridgeScratch;
-    use kryst::ops::kpc::KPreconditioner;
     use kryst::ops::klinop::KLinOp;
+    use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{NoComm, UniverseComm};
     use kryst::preconditioner::PcSide;
     use kryst::solver::GmresSolver;

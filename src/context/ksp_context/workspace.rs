@@ -2,8 +2,8 @@ use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::core::block::BlockVec;
-use crate::reduction::ReproMode;
 use crate::parallel::ReductionEngine;
+use crate::reduction::ReproMode;
 use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
 use crate::solver::gmres::AugmentationPolicy;
 use std::sync::Arc;
@@ -60,8 +60,12 @@ pub struct RecyclingSpace {
 
 #[derive(Debug)]
 pub enum PipeReduct {
-    Sync { reductions: usize },
-    Async { handle: crate::parallel::ReduceHandle<Vec<R>> },
+    Sync {
+        reductions: usize,
+    },
+    Async {
+        handle: crate::parallel::ReduceHandle<Vec<R>>,
+    },
 }
 
 impl Default for RecyclingSpace {

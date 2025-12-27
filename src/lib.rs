@@ -98,9 +98,9 @@ pub mod prelude;
 
 pub use crate::algebra::{R, S};
 pub use crate::config::options::{KspOptions, PcOptions};
+pub use crate::context::KspContext;
 pub use crate::context::ksp_context::SolverType;
 pub use crate::context::pc_context::PcType;
-pub use crate::context::KspContext;
 pub use crate::error::KError;
 pub use crate::matrix::LinOp;
 pub use crate::parallel::{Comm, UniverseComm};

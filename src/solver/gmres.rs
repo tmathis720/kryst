@@ -31,9 +31,9 @@ use crate::parallel::{
 };
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -237,6 +237,7 @@ impl GmresSolver {
         ws.g.fill(S::zero());
 
         let mut reduction_count = 0usize;
+        #[cfg(not(feature = "complex"))]
         let red_engine = ws
             .reduction_engine()
             .cloned()
@@ -386,8 +387,7 @@ impl GmresSolver {
                                 reduction_count += 1;
                                 #[cfg(feature = "metrics")]
                                 {
-                                    metrics.bytes_reduced +=
-                                        (k + 1) * std::mem::size_of::<R>();
+                                    metrics.bytes_reduced += (k + 1) * std::mem::size_of::<R>();
                                 }
                             }
                             {
@@ -462,8 +462,7 @@ impl GmresSolver {
                                 reduction_count += 1;
                                 #[cfg(feature = "metrics")]
                                 {
-                                    metrics.bytes_reduced +=
-                                        (k + 1) * std::mem::size_of::<R>();
+                                    metrics.bytes_reduced += (k + 1) * std::mem::size_of::<R>();
                                 }
                             }
                             {

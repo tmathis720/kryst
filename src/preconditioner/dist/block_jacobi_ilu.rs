@@ -1,15 +1,24 @@
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::matrix::dist_csr::DistCsrOp;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::ilu::{Ilu, IluConfig};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::ilut::RowFilterPreconditioner;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::ilutp::Ilutp;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, PcSide};
 
-use super::{DistVec, DistributedPreconditioner, GlobalPcKind, LocalPcKind, MpiPcOptions};
+use super::{DistVec, DistributedPreconditioner};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use super::{GlobalPcKind, LocalPcKind, MpiPcOptions};
 
 /// Distributed block-Jacobi wrapper around a local ILU-like preconditioner.
 ///

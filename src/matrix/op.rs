@@ -430,10 +430,11 @@ impl LinOp for DenseOp {
 /// ## Examples
 /// ```no_run
 /// # // Shell example: enable a bigger pool and lower the cutoff
-/// # std::env::set_var("KRYST_THREADS", "16");
-/// # std::env::set_var("KRYST_PAR_CUTOFF", "2048");
+/// # unsafe { std::env::set_var("KRYST_THREADS", "16"); }
+/// # unsafe { std::env::set_var("KRYST_PAR_CUTOFF", "2048"); }
 /// use kryst::matrix::sparse::CsrMatrix;
 /// use kryst::matrix::op::CsrOp;
+/// use kryst::LinOp;
 /// use std::sync::Arc;
 ///
 /// // Build/own a CSR, then wrap it as a LinOp.

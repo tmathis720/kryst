@@ -4549,7 +4549,7 @@ pub fn solve(
     let mut solver = SuperLuDistSolver::new();
     let mut x_vec = x.to_vec();
     let b_vec = b.to_vec();
-    crate::solver::legacy::LinearSolver::solve(
+    let _ = crate::solver::legacy::LinearSolver::solve(
         &mut solver,
         a,
         None,

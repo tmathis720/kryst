@@ -35,7 +35,9 @@ enum ReduceHandleInner<T> {
     #[cfg(feature = "mpi")]
     MpiVec(MpiVecState<T>),
     #[cfg(feature = "rayon")]
-    Rayon { rx: Receiver<T> },
+    Rayon {
+        rx: Receiver<T>,
+    },
 }
 
 #[cfg(feature = "mpi")]
@@ -226,7 +228,11 @@ impl ReductionEngine for CommReductionEngine {
     }
 
     fn allreduce_sum_s(&self, x: S) -> S {
-        crate::parallel::reduce::allreduce_sum_scalar_with_mode(&self.comm, x, self.effective_mode())
+        crate::parallel::reduce::allreduce_sum_scalar_with_mode(
+            &self.comm,
+            x,
+            self.effective_mode(),
+        )
     }
 
     fn iallreduce_sum_r(&self, x: R) -> ReduceHandle<R> {
@@ -367,7 +373,10 @@ impl UniverseComm {
 }
 
 #[cfg(feature = "mpi")]
-fn mpi_iallreduce_in_place(buf: &mut [R], comm: &mpi::topology::SimpleCommunicator) -> mpi::ffi::MPI_Request {
+fn mpi_iallreduce_in_place(
+    buf: &mut [R],
+    comm: &mpi::topology::SimpleCommunicator,
+) -> mpi::ffi::MPI_Request {
     if buf.is_empty() {
         return unsafe { mpi::ffi::RSMPI_REQUEST_NULL };
     }

@@ -64,7 +64,9 @@ use crate::solver::{
     MinresSolver, PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver,
     PcgVariant,
 };
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::convergence::SolveStats;
+#[cfg(not(feature = "complex"))]
+use crate::utils::convergence::ConvergedReason;
 use crate::utils::reduction::ReductOptions;
 use std::fmt;
 use std::str::FromStr;
@@ -710,6 +712,13 @@ impl KspContext {
                 self.pending_fgmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.fgmres_variant {
+                #[cfg(feature = "complex")]
+                if variant.as_str() == "pipelined" {
+                    return Err(KError::Unsupported(
+                        "pipelined FGMRES is not available for complex scalars".into(),
+                    ));
+                }
+
                 let v = match variant.as_str() {
                     "classical" => crate::solver::fgmres::FgmresVariant::Classical,
                     "pipelined" => crate::solver::fgmres::FgmresVariant::Pipelined,
@@ -1005,21 +1014,22 @@ impl KspContext {
         let pmat = pmat.unwrap_or_else(|| amat.clone());
         let ac = amat.comm();
         let pc = pmat.comm();
-        crate::invariant!(
-            ac == pc,
-            "Amat/Pmat communicator mismatch: A={}, P={}",
-            ac.id(),
-            pc.id()
-        );
+        if ac != pc {
+            return Err(KError::InvalidInput(format!(
+                "Amat/Pmat communicator mismatch: A={}, P={}",
+                ac.id(),
+                pc.id()
+            )));
+        }
 
         let a_dims = amat.dims();
         let p_dims = pmat.dims();
-        crate::invariant!(
-            a_dims == p_dims,
-            "Amat/Pmat dimension mismatch: A={:?}, P={:?}",
-            a_dims,
-            p_dims
-        );
+        if a_dims != p_dims {
+            return Err(KError::InvalidInput(format!(
+                "Amat/Pmat dimension mismatch: A={:?}, P={:?}",
+                a_dims, p_dims
+            )));
+        }
         #[cfg(feature = "invariants")]
         log::debug!(
             "set_operators: comm_id={} size={} rank={} A_dims={:?} P_dims={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
@@ -1107,11 +1117,18 @@ impl KspContext {
 
         let (m, n) = amat.dims();
         let (pm, pn) = pmat.dims();
-        crate::invariant!(m == n, "Amat must be square: got {}x{}", m, n);
-        crate::invariant!(
-            m == pm && n == pn,
-            "Amat/Pmat dimension mismatch during setup: A=({m},{n}), P=({pm},{pn})"
-        );
+        let allow_rect = matches!(self.solver_type, Some(SolverType::Cgnr));
+        if !allow_rect && m != n {
+            return Err(KError::InvalidInput(format!(
+                "Amat must be square: got {}x{}",
+                m, n
+            )));
+        }
+        if m != pm || n != pn {
+            return Err(KError::InvalidInput(format!(
+                "Amat/Pmat dimension mismatch during setup: A=({m},{n}), P=({pm},{pn})"
+            )));
+        }
         #[cfg(feature = "invariants")]
         {
             let comm = amat.comm();
@@ -1276,23 +1293,32 @@ impl KspContext {
         let (m, n) = amat.dims();
         let (pm, pn) = pmat.dims();
 
-        crate::invariant!(m == n, "Amat must be square: got {}x{}", m, n);
-        crate::invariant!(
-            m == pm && n == pn,
-            "Amat/Pmat dimension mismatch: A=({m},{n}), P=({pm},{pn})"
-        );
-        crate::invariant!(
-            b.len() == m,
-            "rhs length {} does not match operator rows {}",
-            b.len(),
-            m
-        );
-        crate::invariant!(
-            x.len() == n,
-            "solution length {} does not match operator cols {}",
-            x.len(),
-            n
-        );
+        let allow_rect = matches!(self.solver_type, Some(SolverType::Cgnr));
+        if !allow_rect && m != n {
+            return Err(KError::InvalidInput(format!(
+                "Amat must be square: got {}x{}",
+                m, n
+            )));
+        }
+        if m != pm || n != pn {
+            return Err(KError::InvalidInput(format!(
+                "Amat/Pmat dimension mismatch: A=({m},{n}), P=({pm},{pn})"
+            )));
+        }
+        if b.len() != m {
+            return Err(KError::InvalidInput(format!(
+                "rhs length {} does not match operator rows {}",
+                b.len(),
+                m
+            )));
+        }
+        if x.len() != n {
+            return Err(KError::InvalidInput(format!(
+                "solution length {} does not match operator cols {}",
+                x.len(),
+                n
+            )));
+        }
         #[cfg(feature = "invariants")]
         {
             let comm = amat.comm();
@@ -1661,6 +1687,7 @@ mod tests {
     }
 
     #[cfg(feature = "dense-direct")]
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn preonly_with_lu_pc_solves() {
         // Simple 2x2 SPD: [2 1; 1 2]
@@ -1984,9 +2011,14 @@ mod tests {
         let n = op.dims().0;
         let b = vec![S::from_real(1.0); n];
         let mut x = vec![S::zero(); n];
-        let stats = ksp.solve(&b, &mut x).unwrap();
-
-        assert!(stats.final_residual.is_finite());
+        match ksp.solve(&b, &mut x) {
+            Ok(stats) => assert!(stats.final_residual.is_finite()),
+            Err(KError::Unsupported(msg)) => {
+                assert!(cfg!(feature = "complex"));
+                assert!(msg.to_lowercase().contains("complex"));
+            }
+            Err(err) => panic!("unexpected error: {err:?}"),
+        }
     }
 
     #[test]
@@ -2015,7 +2047,14 @@ mod tests {
         let n = op.dims().0;
         let b = vec![S::from_real(1.0); n];
         let mut x = vec![S::zero(); n];
-        let _ = ksp.solve(&b, &mut x).unwrap();
+        match ksp.solve(&b, &mut x) {
+            Ok(_) => {}
+            Err(KError::Unsupported(msg)) => {
+                assert!(cfg!(feature = "complex"));
+                assert!(msg.to_lowercase().contains("complex"));
+            }
+            Err(err) => panic!("unexpected error: {err:?}"),
+        }
     }
 
     #[cfg(feature = "complex")]
@@ -2047,7 +2086,13 @@ mod tests {
                 let n = op.dims().0;
                 let b = vec![S::from_real(1.0); n];
                 let mut x = vec![S::zero(); n];
-                let _ = ksp.solve(&b, &mut x).unwrap();
+                match ksp.solve(&b, &mut x) {
+                    Ok(_) => {}
+                    Err(KError::Unsupported(msg)) => {
+                        assert!(msg.to_lowercase().contains("complex"));
+                    }
+                    Err(err) => panic!("unexpected error: {err:?}"),
+                }
             }
             Err(err) => {
                 let msg = err.to_string().to_lowercase();

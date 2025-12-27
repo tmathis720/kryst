@@ -19,9 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]
-use kryst::matrix::CsrMatrix;
-#[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]
 use kryst::error::KError;
+#[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]
+use kryst::matrix::CsrMatrix;
 #[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]
 use kryst::matrix::dist_csr::DistCsrOp;
 #[cfg(all(feature = "backend-faer", feature = "mpi", not(feature = "complex")))]

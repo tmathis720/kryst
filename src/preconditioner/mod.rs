@@ -550,6 +550,7 @@ pub use ilu::Ilu0;
 #[cfg(feature = "backend-faer")]
 pub use ilup::Ilup;
 #[cfg(feature = "backend-faer")]
+#[allow(deprecated)]
 pub use ilut::{Ilut, RowFilterPreconditioner};
 #[cfg(feature = "backend-faer")]
 pub use ilutp::Ilutp;

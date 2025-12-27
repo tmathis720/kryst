@@ -22,8 +22,8 @@
 //! # Examples
 //! ```no_run
 //! // Single-node tuning
-//! std::env::set_var("KRYST_THREADS", "32");      // prefer a bigger pool
-//! std::env::set_var("KRYST_PAR_CUTOFF", "8192"); // only parallelize big SpMVs
+//! unsafe { std::env::set_var("KRYST_THREADS", "32"); }      // prefer a bigger pool
+//! unsafe { std::env::set_var("KRYST_PAR_CUTOFF", "8192"); } // only parallelize big SpMVs
 //!
 //! // Under MPI (e.g., 4 ranks), each rank gets floor(32/4) = 8 threads.
 //! ```
