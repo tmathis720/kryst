@@ -1955,6 +1955,8 @@ mod tests {
     use crate::preconditioner::PcSide;
     #[cfg(not(feature = "complex"))]
     use faer::Mat;
+    #[cfg(feature = "mpi")]
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1991,6 +1993,15 @@ mod tests {
             self.num_ct.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+    }
+
+    #[cfg(feature = "mpi")]
+    fn mpi_test_guard() -> MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("mpi_test_guard poisoned")
     }
 
     #[test]
@@ -2305,6 +2316,7 @@ mod tests {
     fn try_set_operators_allows_congruent_dup_comm() {
         use crate::parallel::MpiComm;
 
+        let _guard = mpi_test_guard();
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let op = Arc::new(DenseOp::new(Arc::new(m)));
 
@@ -2325,6 +2337,7 @@ mod tests {
     fn try_set_operators_err_mismatched_comm() {
         use crate::parallel::{Comm as _, MpiComm};
 
+        let _guard = mpi_test_guard();
         // Build a small dense and wrap with different communicators
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let op = Arc::new(DenseOp::new(Arc::new(m)));
@@ -2358,6 +2371,7 @@ mod tests {
     fn try_set_operators_with_comm_rejects_noncongruent_override() {
         use crate::parallel::{Comm as _, MpiComm, UniverseComm};
 
+        let _guard = mpi_test_guard();
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let op = Arc::new(DenseOp::new(Arc::new(m)));
 
@@ -2384,6 +2398,7 @@ mod tests {
     fn try_set_operators_with_comm_allows_trivial_override() {
         use crate::parallel::{MpiComm, UniverseComm};
 
+        let _guard = mpi_test_guard();
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let op = Arc::new(DenseOp::new(Arc::new(m))); // NoComm by default
 
@@ -2400,6 +2415,7 @@ mod tests {
     fn monitor_policy_rank0_only_invokes_on_root() {
         use crate::parallel::MpiComm;
 
+        let _guard = mpi_test_guard();
         let world = std::sync::Arc::new(MpiComm::new());
         if world.size() < 2 {
             return;
