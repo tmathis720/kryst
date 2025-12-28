@@ -325,13 +325,13 @@ pub fn dense_from_linop(op: &dyn LinOp<S = S>) -> Result<Mat<f64>, KError> {
     }
     if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
-        return Ok(csr.to_dense());
+        return Ok(csr.to_dense()?);
     }
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
-        return Ok(csr.to_dense());
+        return Ok(csr.to_dense()?);
     }
     if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
-        return Ok(csc.to_dense());
+        return Ok(csc.to_dense()?);
     }
     Err(unsupported_linop_err(op, "dense_from_linop", "dense"))
 }
@@ -362,7 +362,7 @@ pub fn materialize_linop_with_hint(
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
-                let dense = csr.to_dense();
+                let dense = csr.to_dense()?;
                 wrap_with_comm(Arc::new(dense), comm)
             }
         });
@@ -377,7 +377,7 @@ pub fn materialize_linop_with_hint(
             }
             FormatHint::Csc => wrap_with_comm(Arc::new(csc.clone()), comm),
             FormatHint::Dense => {
-                let dense = csc.to_dense();
+                let dense = csc.to_dense()?;
                 wrap_with_comm(Arc::new(dense), comm)
             }
         });
@@ -430,7 +430,7 @@ pub fn materialize_linop_with_hint(
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
-                let dense = csr.to_dense();
+                let dense = csr.to_dense()?;
                 wrap_with_comm(Arc::new(dense), comm)
             }
         });
@@ -448,7 +448,7 @@ pub fn materialize_linop_with_hint(
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
-                let dense = local.to_dense();
+                let dense = local.to_dense()?;
                 wrap_with_comm(Arc::new(dense), comm)
             }
         });

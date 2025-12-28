@@ -170,9 +170,9 @@ mod tests {
             pinv: vec![1, 2, 0],
         };
         let ap = permute_csr_symmetric(&a, &perm);
-        let dense_ap = ap.to_dense();
+        let dense_ap = ap.to_dense().unwrap();
         // compute dense reference
-        let dense_a = a.to_dense();
+        let dense_a = a.to_dense().unwrap();
         let mut ref_dense = faer::Mat::<f64>::zeros(3, 3);
         for i in 0..3 {
             for j in 0..3 {
@@ -210,22 +210,10 @@ mod tests {
         };
 
         let ap = permute_csr_symmetric(&a, &perm);
-        let dense_ap = ap.to_dense();
-        let dense_a = a.to_dense();
-        let mut ref_dense = faer::Mat::<S>::zeros(3, 3);
-        for i in 0..3 {
-            for j in 0..3 {
-                let old_i = perm.p[i];
-                let old_j = perm.p[j];
-                ref_dense[(i, j)] = dense_a[(old_i, old_j)].into();
-            }
-        }
-        for i in 0..3 {
-            for j in 0..3 {
-                let diff = dense_ap[(i, j)] - ref_dense[(i, j)];
-                assert!(diff.norm() < R::from(1e-12));
-            }
-        }
+        let err = ap.to_dense().unwrap_err();
+        assert!(matches!(err, crate::error::KError::Unsupported(_)));
+        let err = a.to_dense().unwrap_err();
+        assert!(matches!(err, crate::error::KError::Unsupported(_)));
     }
 
     #[test]

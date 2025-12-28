@@ -29,7 +29,7 @@ where
     type Csc = CscMatrix<S::Real>;
     type Dense = faer::Mat<S::Real>;
 
-    fn csr_from_dense(dense: &Self::Dense, drop_tol: S::Real) -> Self::Csr {
+    fn csr_from_dense(dense: &Self::Dense, drop_tol: S::Real) -> Result<Self::Csr, KError> {
         CsrMatrix::<S::Real>::from_dense(dense, drop_tol)
     }
 
@@ -41,11 +41,11 @@ where
         crate::matrix::backend::faer::format::csc_to_csr(csc)
     }
 
-    fn dense_from_csr(csr: &Self::Csr) -> Self::Dense {
+    fn dense_from_csr(csr: &Self::Csr) -> Result<Self::Dense, KError> {
         csr.to_dense()
     }
 
-    fn dense_from_csc(csc: &Self::Csc) -> Self::Dense {
+    fn dense_from_csc(csc: &Self::Csc) -> Result<Self::Dense, KError> {
         csc.to_dense()
     }
 }

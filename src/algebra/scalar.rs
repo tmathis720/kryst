@@ -1,6 +1,7 @@
 #![allow(clippy::excessive_precision)]
 
 use core::ops::{Add, Div, Mul, Neg, Sub};
+use std::any::TypeId;
 
 #[cfg(feature = "complex")]
 use num_complex::Complex64;
@@ -203,6 +204,20 @@ pub type S = f64;
 
 /// Real partner of `S` (currently always `f64`)
 pub type R = <S as KrystScalar>::Real;
+
+/// Returns true when `T` is the complex scalar type enabled by the `complex` feature.
+#[inline]
+pub fn is_complex_scalar<T: 'static>() -> bool {
+    #[cfg(feature = "complex")]
+    {
+        TypeId::of::<T>() == TypeId::of::<Complex64>()
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        let _ = TypeId::of::<T>();
+        false
+    }
+}
 
 /// Copy the current scalar alias `S` into a contiguous `f64` slice.
 ///

@@ -7806,9 +7806,9 @@ mod tests {
         let mut vals = vec![0.0; pat.col_idx.len()];
         rap_ops::rap_numeric(&pat, &r, &a, &p, &mut vals);
 
-        let ad = a.to_dense();
-        let pd = p.to_dense();
-        let rd = r.to_dense();
+        let ad = a.to_dense().unwrap();
+        let pd = p.to_dense().unwrap();
+        let rd = r.to_dense().unwrap();
         let cd = &rd * &ad * &pd;
 
         let mut cpat = Mat::<f64>::zeros(pat.nrows, pat.ncols);

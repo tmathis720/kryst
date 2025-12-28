@@ -5404,7 +5404,7 @@ mod tests {
         .unwrap();
 
         let mut x_ref = b.clone();
-        let a_dense = matrix.to_dense();
+        let a_dense = matrix.to_dense().unwrap();
         let lu = FullPivLu::new(a_dense.as_ref());
         let x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 3, 1);
         lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
@@ -5444,7 +5444,7 @@ mod tests {
         )
         .unwrap();
         let mut x_ref = b.clone();
-        let a_dense = matrix.to_dense();
+        let a_dense = matrix.to_dense().unwrap();
         let lu = FullPivLu::new(a_dense.as_ref());
         let x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 2, 1);
         lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
@@ -5496,7 +5496,7 @@ mod tests {
         .unwrap();
 
         let mut x_ref = b.clone();
-        let a_dense = matrix.to_dense();
+        let a_dense = matrix.to_dense().unwrap();
         let lu = FullPivLu::new(a_dense.as_ref());
         let x_mat = MatMut::from_column_major_slice_mut(&mut x_ref, 6, 1);
         lu.solve_in_place_with_conj(faer::Conj::No, x_mat);
