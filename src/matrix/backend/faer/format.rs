@@ -62,7 +62,8 @@ where
             drop_tol,
         );
         get_or_insert_csr(key, || {
-            let csr = CsrMatrix::<f64>::from_dense(self, drop_tol);
+            let csr = CsrMatrix::<f64>::from_dense(self, drop_tol)
+                .expect("dense-to-CSR conversion should succeed for real scalars");
             Arc::new(csr)
         })
     }
@@ -79,7 +80,8 @@ where
             drop_tol,
         );
         get_or_insert_csc(key, || {
-            let csc = CscMatrix::<f64>::from_dense(self, drop_tol);
+            let csc = CscMatrix::<f64>::from_dense(self, drop_tol)
+                .expect("dense-to-CSC conversion should succeed for real scalars");
             Arc::new(csc)
         })
     }
@@ -106,7 +108,8 @@ where
             drop_tol,
         );
         get_or_insert_csr(key, || {
-            let csr = CsrMatrix::<f64>::from_dense(inner, drop_tol);
+            let csr = CsrMatrix::<f64>::from_dense(inner, drop_tol)
+                .expect("dense-to-CSR conversion should succeed for real scalars");
             Arc::new(csr)
         })
     }
@@ -124,7 +127,8 @@ where
             drop_tol,
         );
         get_or_insert_csc(key, || {
-            let csc = CscMatrix::<f64>::from_dense(inner, drop_tol);
+            let csc = CscMatrix::<f64>::from_dense(inner, drop_tol)
+                .expect("dense-to-CSC conversion should succeed for real scalars");
             Arc::new(csc)
         })
     }

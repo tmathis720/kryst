@@ -345,7 +345,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     for meta in self.blocks_meta.iter() {
                         let idx = &meta.indices;
                         let a_sub_csr = csr.as_ref().submatrix(idx);
-                        let dense = a_sub_csr.to_dense();
+                        let dense = a_sub_csr.to_dense()?;
                         let mut ksp = LuSolver::new();
                         let _ = ksp.solve(
                             &dense,
@@ -608,7 +608,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     for meta in self.blocks_meta.iter() {
                         let indices = &meta.indices;
                         let a_sub_csr = csr.as_ref().submatrix(indices);
-                        let dense = a_sub_csr.to_dense();
+                        let dense = a_sub_csr.to_dense()?;
                         let mut ksp = LuSolver::new();
                         let _ = ksp.solve(
                             &dense,
@@ -726,7 +726,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     for meta in self.blocks_meta.iter() {
                         let indices = &meta.indices;
                         let a_sub_csr = csr.as_ref().submatrix(indices);
-                        let dense = a_sub_csr.to_dense();
+                        let dense = a_sub_csr.to_dense()?;
                         let mut ksp = LuSolver::new();
                         let _ = ksp.solve(
                             &dense,

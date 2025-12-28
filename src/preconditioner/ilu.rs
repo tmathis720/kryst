@@ -855,8 +855,8 @@ impl Ilu {
     ) -> Result<BlockFactorResult, KError> {
         let block = Self::extract_block_dense(matrix, rows.clone());
         let drop_tol: f64 = 1e-15;
-        let mut l = CsrMatrix::from_dense(&block, drop_tol);
-        let mut u = CsrMatrix::from_dense(&block, drop_tol);
+        let mut l = CsrMatrix::from_dense(&block, drop_tol)?;
+        let mut u = CsrMatrix::from_dense(&block, drop_tol)?;
         let size = block.nrows();
 
         for i in 0..size {
@@ -958,8 +958,8 @@ impl Ilu {
 
         // Convert input matrix to sparse CSR format for L and U factors
         let drop_tol: f64 = 1e-15;
-        let mut l = CsrMatrix::from_dense(matrix, drop_tol);
-        let mut u = CsrMatrix::from_dense(matrix, drop_tol);
+        let mut l = CsrMatrix::from_dense(matrix, drop_tol)?;
+        let mut u = CsrMatrix::from_dense(matrix, drop_tol)?;
 
         // Initialize L as lower triangular with unit diagonal, U as upper triangular
         for i in 0..n {
@@ -1180,8 +1180,8 @@ impl Ilu {
 
         // Convert input matrix to sparse CSR format
         let drop_tol: f64 = 1e-15;
-        let mut l = CsrMatrix::from_dense(matrix, drop_tol);
-        let mut u = CsrMatrix::from_dense(matrix, drop_tol);
+        let mut l = CsrMatrix::from_dense(matrix, drop_tol)?;
+        let mut u = CsrMatrix::from_dense(matrix, drop_tol)?;
 
         // Store original row sums for diagonal correction
         let mut original_row_sums = vec![0.0; n];
@@ -1301,8 +1301,8 @@ impl Ilu {
 
         // Convert to sparse format and cache inverse diagonal
         let drop_tol: f64 = 1e-15;
-        self.l = CsrMatrix::from_dense(&l, drop_tol);
-        self.u = CsrMatrix::from_dense(&u, drop_tol);
+        self.l = CsrMatrix::from_dense(&l, drop_tol)?;
+        self.u = CsrMatrix::from_dense(&u, drop_tol)?;
 
         self.inv_diag_u = (0..n).map(|i| 1.0 / u[(i, i)]).collect();
 
@@ -1376,8 +1376,8 @@ impl Ilu {
 
         // Convert to sparse format and cache inverse diagonal
         let drop_tol: f64 = 1e-15;
-        self.l = CsrMatrix::from_dense(&l, drop_tol);
-        self.u = CsrMatrix::from_dense(&u, drop_tol);
+        self.l = CsrMatrix::from_dense(&l, drop_tol)?;
+        self.u = CsrMatrix::from_dense(&u, drop_tol)?;
 
         self.inv_diag_u = (0..n).map(|i| 1.0 / u[(i, i)]).collect();
 
@@ -2135,7 +2135,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         }
 
         let n = matrix.nrows();
-        let a_csr = CsrMatrix::from_dense(matrix, 1e-15);
+        let a_csr = CsrMatrix::from_dense(matrix, 1e-15)?;
         let original_nnz = a_csr.nnz();
 
         #[cfg(feature = "logging")]

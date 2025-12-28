@@ -72,7 +72,7 @@ impl CoarseDenseLu {
 
 impl CoarseSolver for CoarseDenseLu {
     fn setup(&mut self, a: &CsrMatrix<f64>) -> Result<(), KError> {
-        let dense = a.to_dense();
+        let dense = a.to_dense()?;
         self.a = Some(dense);
         Ok(())
     }

@@ -2,10 +2,12 @@
 //!
 //! The helpers here intentionally assume `f64` matrices (`Mat<f64>`,
 //! `CsrMatrix<f64>`) to keep AMG and factorization paths fast and ergonomic.
-//! In complex builds they operate on the underlying real operator only.
+//! In complex builds these helpers return an error because AMG-oriented paths
+//! are real-only and do not accept complex scalars.
 //! Generic scalar code lives elsewhere in the crate.
 
 use crate::algebra::scalar::KrystScalar;
+use crate::algebra::scalar::is_complex_scalar;
 use crate::error::KError;
 use crate::matrix::dense_api::DenseMatRef;
 use crate::matrix::sparse::CsrMatrix;
@@ -110,7 +112,10 @@ where
 /// Convert dense matrix to sparse format with drop tolerance
 /// This is the foundation for sparse Galerkin products
 #[cfg(feature = "backend-faer")]
-pub fn to_sparse_with_tolerance(matrix: &Mat<f64>, drop_tol: f64) -> CsrMatrix<f64> {
+pub fn to_sparse_with_tolerance(
+    matrix: &Mat<f64>,
+    drop_tol: f64,
+) -> Result<CsrMatrix<f64>, KError> {
     CsrMatrix::from_dense(matrix, drop_tol)
 }
 
@@ -123,8 +128,8 @@ pub fn to_sparse_with_tolerance(matrix: &Mat<f64>, drop_tol: f64) -> CsrMatrix<f
 /// - Column indices stay in ascending order as rows are merged; duplicates
 ///   within a row are collapsed during accumulation before applying `drop_tol`.
 ///
-/// In complex builds, accumulation uses the real component of each product and
-/// values are lifted with `T::from_real`, so imaginary parts remain zero.
+/// This routine is real-only. In complex builds it returns an error rather than
+/// silently discarding imaginary components.
 /// `drop_tol`: entries with |v| <= drop_tol are removed.
 pub fn spgemm_with_drop_tol_generic<T>(
     a: &CsrMatrix<T>,
@@ -134,6 +139,11 @@ pub fn spgemm_with_drop_tol_generic<T>(
 where
     T: KrystScalar<Real = f64>,
 {
+    if is_complex_scalar::<T>() {
+        return Err(KError::Unsupported(
+            "spgemm_with_drop_tol_generic is real-only; complex scalars are unsupported",
+        ));
+    }
     if a.ncols() != b.nrows() {
         return Err(KError::InvalidInput(format!(
             "spgemm: dimension mismatch A is {}x{}, B is {}x{}",
@@ -176,7 +186,7 @@ where
             // Row k of B (since B is CSR, this is B[k,:])
             for jj in bp[k]..bp[k + 1] {
                 let j = bj[jj];
-                let inc = (aik * bv[jj]).real();
+            let inc = (aik * bv[jj]).real();
 
                 if mark[j] != i {
                     mark[j] = i;
@@ -984,6 +994,28 @@ mod tests {
         assert_eq!(c.row_ptr(), &[0, 2, 4]);
         assert_eq!(c.col_idx(), &[0, 1, 0, 1]);
         assert_eq!(c.values(), &[5.0, 12.0, 28.0, 50.0]);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn spgemm_rejects_complex_scalars() {
+        use crate::algebra::prelude::*;
+        let a = CsrMatrix::from_csr(
+            1,
+            1,
+            vec![0, 1],
+            vec![0],
+            vec![S::from_parts(1.0, 0.5)],
+        );
+        let b = CsrMatrix::from_csr(
+            1,
+            1,
+            vec![0, 1],
+            vec![0],
+            vec![S::from_parts(2.0, -1.0)],
+        );
+        let err = spgemm_with_drop_tol_generic(&a, &b, 0.0).unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
     }
 
     #[test]

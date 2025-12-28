@@ -326,12 +326,18 @@ impl<T> CsrMatrix<T>
 where
     T: KrystScalar<Real = f64>,
 {
-    /// Convert to dense faer::Mat with real (f64) entries. Works for any T: KrystScalar.
+    /// Convert to dense faer::Mat with real (f64) entries. Works for real scalars only.
     ///
-    /// In complex builds, this projects the matrix onto its real component;
-    /// imaginary parts are discarded because AMG operates on real operators.
+    /// # Errors
+    /// Returns `KError::Unsupported` when called with complex scalars to avoid
+    /// silently discarding imaginary components.
     #[cfg(feature = "backend-faer")]
-    pub fn to_dense(&self) -> faer::Mat<f64> {
+    pub fn to_dense(&self) -> Result<faer::Mat<f64>, crate::error::KError> {
+        if crate::algebra::scalar::is_complex_scalar::<T>() {
+            return Err(crate::error::KError::Unsupported(
+                "CSR to_dense is real-only; complex scalars are unsupported",
+            ));
+        }
         let mut dense = faer::Mat::zeros(self.nrows, self.ncols);
         for i in 0..self.nrows {
             let (cols, vals) = self.row(i);
@@ -339,17 +345,24 @@ where
                 dense[(i, j)] = v.real();
             }
         }
-        dense
+        Ok(dense)
     }
 
     /// Convert from dense faer::Mat (with real entries) to sparse CSR format with drop tolerance.
-    /// Works for any T: KrystScalar by converting each entry via T::from_real.
+    /// Works for real scalars only by converting each entry via `T::from_real`.
     ///
-    /// When `T` is complex, the imaginary parts of the resulting matrix are
-    /// zero-initialised because the construction lifts real values through
-    /// [`KrystScalar::from_real`].
+    /// # Errors
+    /// Returns `KError::Unsupported` when called with complex scalars.
     #[cfg(feature = "backend-faer")]
-    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Self {
+    pub fn from_dense(
+        dense: &faer::Mat<R>,
+        drop_tol: R,
+    ) -> Result<Self, crate::error::KError> {
+        if crate::algebra::scalar::is_complex_scalar::<T>() {
+            return Err(crate::error::KError::Unsupported(
+                "CSR from_dense is real-only; complex scalars are unsupported",
+            ));
+        }
         let nrows = dense.nrows();
         let ncols = dense.ncols();
         let mut row_ptr = vec![0];
@@ -367,12 +380,15 @@ where
             row_ptr.push(col_idx.len());
         }
 
-        Self::from_csr(nrows, ncols, row_ptr, col_idx, values)
+        Ok(Self::from_csr(nrows, ncols, row_ptr, col_idx, values))
     }
 
     /// Convert from an owned dense `faer::Mat<R>` to sparse CSR format with drop tolerance.
     #[cfg(feature = "backend-faer")]
-    pub fn from_dense_owned(dense: faer::Mat<R>, drop_tol: R) -> Self {
+    pub fn from_dense_owned(
+        dense: faer::Mat<R>,
+        drop_tol: R,
+    ) -> Result<Self, crate::error::KError> {
         Self::from_dense(&dense, drop_tol)
     }
 }
@@ -585,5 +601,23 @@ mod tests {
             vec![1, 0, 0, 1], // unsorted in row 0
             vec![1.0, 1.0, 1.0, 1.0],
         );
+    }
+
+    #[cfg(all(feature = "backend-faer", feature = "complex"))]
+    #[test]
+    fn dense_conversions_reject_complex_scalars() {
+        let csr = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![S::from_parts(1.0, 0.5), S::from_parts(2.0, -1.0), S::one(), S::zero()],
+        );
+        let err = csr.to_dense().unwrap_err();
+        assert!(matches!(err, crate::error::KError::Unsupported(_)));
+
+        let dense = faer::Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let err = CsrMatrix::<S>::from_dense(&dense, 0.0).unwrap_err();
+        assert!(matches!(err, crate::error::KError::Unsupported(_)));
     }
 }

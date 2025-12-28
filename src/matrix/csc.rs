@@ -56,9 +56,17 @@ impl<T> CscMatrix<T>
 where
     T: KrystScalar<Real = R>,
 {
-    /// Convert to dense `faer::Mat` with real entries, discarding any imaginary
-    /// component in complex builds because AMG routines operate on real data.
-    pub fn to_dense(&self) -> faer::Mat<R> {
+    /// Convert to dense `faer::Mat` with real entries. Works for real scalars only.
+    ///
+    /// # Errors
+    /// Returns `KError::Unsupported` when called with complex scalars to avoid
+    /// silently discarding imaginary components.
+    pub fn to_dense(&self) -> Result<faer::Mat<R>, crate::error::KError> {
+        if crate::algebra::scalar::is_complex_scalar::<T>() {
+            return Err(crate::error::KError::Unsupported(
+                "CSC to_dense is real-only; complex scalars are unsupported",
+            ));
+        }
         let m = self.nrows();
         let n = self.ncols();
         let mut dense = faer::Mat::from_fn(m, n, |_, _| R::default());
@@ -71,14 +79,22 @@ where
                 dense[(row, j)] = vv[p].real();
             }
         }
-        dense
+        Ok(dense)
     }
 
     /// Convert from dense `faer::Mat` (with real entries) to CSC format with drop tolerance.
     ///
-    /// When `T` is complex, the imaginary part of each entry is
-    /// zero-initialised by `T::from_real`.
-    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Self {
+    /// # Errors
+    /// Returns `KError::Unsupported` when called with complex scalars.
+    pub fn from_dense(
+        dense: &faer::Mat<R>,
+        drop_tol: R,
+    ) -> Result<Self, crate::error::KError> {
+        if crate::algebra::scalar::is_complex_scalar::<T>() {
+            return Err(crate::error::KError::Unsupported(
+                "CSC from_dense is real-only; complex scalars are unsupported",
+            ));
+        }
         let m = dense.nrows();
         let n = dense.ncols();
         let mut col_ptr = Vec::with_capacity(n + 1);
@@ -95,7 +111,7 @@ where
             }
             col_ptr.push(row_idx.len());
         }
-        Self::from_csc(m, n, col_ptr, row_idx, values)
+        Ok(Self::from_csc(m, n, col_ptr, row_idx, values))
     }
 }
 
@@ -190,5 +206,27 @@ where
             );
 
         y.copy_from_slice(&result);
+    }
+}
+
+#[cfg(all(test, feature = "backend-faer", feature = "complex"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_conversions_reject_complex_scalars() {
+        let csc = CscMatrix::from_csc(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![S::from_parts(1.0, 0.5), S::from_parts(2.0, -1.0), S::one(), S::zero()],
+        );
+        let err = csc.to_dense().unwrap_err();
+        assert!(matches!(err, crate::error::KError::Unsupported(_)));
+
+        let dense = faer::Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let err = CscMatrix::<S>::from_dense(&dense, 0.0).unwrap_err();
+        assert!(matches!(err, crate::error::KError::Unsupported(_)));
     }
 }

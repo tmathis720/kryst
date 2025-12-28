@@ -29,7 +29,7 @@ fn distributed_block_jacobi_ilu_matches_serial() {
     ilu.apply(PcSide::Left, &rhs, &mut serial_out)
         .expect("serial ILU apply");
 
-    let csr = CsrMatrix::from_dense(&mat, 0.0);
+    let csr = CsrMatrix::from_dense(&mat, 0.0).unwrap();
     let part = vec![0, 3];
     let comm = UniverseComm::NoComm(NoComm);
     let dist_op = DistCsrOp::from_local_rows(3, 0, &csr, &part, comm.clone()).unwrap();

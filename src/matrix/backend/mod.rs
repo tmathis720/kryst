@@ -18,7 +18,7 @@ pub trait SparseBackend<S: KrystScalar> {
     type Dense: Send + Sync + 'static;
 
     /// Convert a dense matrix into CSR (with drop tolerance).
-    fn csr_from_dense(dense: &Self::Dense, drop_tol: S::Real) -> Self::Csr;
+    fn csr_from_dense(dense: &Self::Dense, drop_tol: S::Real) -> Result<Self::Csr, KError>;
 
     /// Convert CSR → CSC without densifying.
     fn csc_from_csr(csr: &Self::Csr, drop_tol: S::Real) -> Self::Csc;
@@ -27,10 +27,10 @@ pub trait SparseBackend<S: KrystScalar> {
     fn csr_from_csc(csc: &Self::Csc, drop_tol: S::Real) -> Self::Csr;
 
     /// Convert CSR → dense.
-    fn dense_from_csr(csr: &Self::Csr) -> Self::Dense;
+    fn dense_from_csr(csr: &Self::Csr) -> Result<Self::Dense, KError>;
 
     /// Convert CSC → dense.
-    fn dense_from_csc(csc: &Self::Csc) -> Self::Dense;
+    fn dense_from_csc(csc: &Self::Csc) -> Result<Self::Dense, KError>;
 }
 
 fn unsupported_format_err(want: OpFormat) -> KError {

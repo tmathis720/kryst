@@ -336,7 +336,7 @@ where
         // For simplicity, rebuild on structure change or value change
         if self.last_sid.is_none() || self.last_sid != Some(sid) || self.last_vid != Some(vid) {
             // Build SPAI from dense representation of CSR
-            let a_dense = csr.to_dense();
+            let a_dense = csr.to_dense()?;
             let n = a_dense.nrows();
 
             // Determine n from pattern if manual
