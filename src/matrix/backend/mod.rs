@@ -71,15 +71,15 @@ fn unsupported_format_err(want: OpFormat) -> KError {
 fn backend_format_support() -> BackendFormatSupport {
     #[cfg(feature = "backend-faer")]
     {
-        return crate::matrix::backend::faer::FaerBackend::FORMAT_SUPPORT;
+        return <crate::matrix::backend::faer::FaerBackend as SparseBackend<S>>::FORMAT_SUPPORT;
     }
     #[cfg(feature = "backend-nalgebra")]
     {
-        return crate::matrix::backend::nalgebra::NalgebraBackend::FORMAT_SUPPORT;
+        return <crate::matrix::backend::nalgebra::NalgebraBackend as SparseBackend<S>>::FORMAT_SUPPORT;
     }
     #[cfg(feature = "backend-naive")]
     {
-        return crate::matrix::backend::naive::NaiveBackend::FORMAT_SUPPORT;
+        return <crate::matrix::backend::naive::NaiveBackend as SparseBackend<S>>::FORMAT_SUPPORT;
     }
     BackendFormatSupport::new(false, false, false, false)
 }
