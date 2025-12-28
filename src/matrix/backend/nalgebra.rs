@@ -4,8 +4,49 @@ use std::sync::Arc;
 
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::matrix::format::OpFormat;
+use crate::matrix::backend::SparseBackend;
+use crate::matrix::format::{BackendFormatSupport, OpFormat};
 use crate::matrix::op::LinOp;
+
+/// Marker type for the nalgebra backend.
+pub struct NalgebraBackend;
+
+impl<S> SparseBackend<S> for NalgebraBackend
+where
+    S: KrystScalar<Real = f64>,
+{
+    const FORMAT_SUPPORT: BackendFormatSupport = BackendFormatSupport::new(true, false, false, false);
+
+    type Csr = ();
+    type Csc = ();
+    type Dense = nalgebra::DMatrix<S::Real>;
+
+    fn csr_from_dense(_dense: &Self::Dense, _drop_tol: S::Real) -> Result<Self::Csr, KError> {
+        Err(KError::Unsupported(
+            "nalgebra backend does not support sparse formats",
+        ))
+    }
+
+    fn csc_from_csr(_csr: &Self::Csr, _drop_tol: S::Real) -> Self::Csc {
+        unreachable!("nalgebra backend does not support sparse formats")
+    }
+
+    fn csr_from_csc(_csc: &Self::Csc, _drop_tol: S::Real) -> Self::Csr {
+        unreachable!("nalgebra backend does not support sparse formats")
+    }
+
+    fn dense_from_csr(_csr: &Self::Csr) -> Result<Self::Dense, KError> {
+        Err(KError::Unsupported(
+            "nalgebra backend does not support sparse formats",
+        ))
+    }
+
+    fn dense_from_csc(_csc: &Self::Csc) -> Result<Self::Dense, KError> {
+        Err(KError::Unsupported(
+            "nalgebra backend does not support sparse formats",
+        ))
+    }
+}
 
 pub fn try_materialize(
     op: Arc<dyn LinOp<S = S>>,
