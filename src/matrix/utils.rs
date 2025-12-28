@@ -5,7 +5,8 @@
 //! In complex builds these helpers return an error because AMG-oriented paths
 //! are real-only and do not accept complex scalars.
 //!
-//! Real-only helpers that return `KError::Unsupported` for complex scalars:
+//! Real-only helpers that return `KError::Unsupported` for complex scalars
+//! (with a "real-only; complex scalars are unsupported" message):
 //! - `spgemm_with_drop_tol_generic`
 //! - `spgemm_generic`
 //! - `spgemm_btree_generic`
