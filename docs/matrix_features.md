@@ -32,6 +32,57 @@ the backend.
 | `backend-faer,complex`               | `faer::Mat<Complex64>`   | ✅ scalar only       | ✅ scalar transpose    | ✅                 | SIMD disabled; complex transpose uses scalar gather. |
 | `backend-faer,transpose-cache`       | same as above             | ✅ scalar           | ✅ cached CSC          | ✅                 | CSC cache keyed on `ValuesId` for repeated transposes. |
 
+## Complex scalar guidance
+
+### Complex-safe matrix utilities
+
+The CSR SpMV helpers are scalar-generic and safe to use in complex builds:
+
+- `CsrMatrix::try_spmv`
+- `CsrMatrix::spmv`
+- `CsrMatrix::spmv_scaled`
+- `CsrMatrix::spmv_transpose_scaled` (uses the conjugate transpose in complex builds)
+
+### Opting into complex builds
+
+- Enable the feature at build time: `cargo build --features complex`.
+- When disabling default features, keep the matrix backend: `cargo build --no-default-features --features "backend-faer complex"`.
+- In a `Cargo.toml`, add `features = ["complex"]` under the `kryst` dependency to opt in.
+
+For end-to-end guidance on complex I/O, see `docs/howto/complex-scalars.md`.
+
+### Expected errors for real-only AMG utilities
+
+AMG-oriented helpers in `src/matrix/utils.rs` are real-only. In complex builds they
+return `KError::Unsupported` with a "real-only; complex scalars are unsupported" message:
+
+- `spgemm_with_drop_tol_generic`
+- `spgemm_generic`
+- `spgemm_btree_generic`
+- `sparse_galerkin_product_generic`
+- `rap_btree_generic`
+- `rap_opt_generic`
+
+### Complex-safe usage examples
+
+```rust
+use kryst::algebra::prelude::*;
+use kryst::matrix::sparse::CsrMatrix;
+
+let a = CsrMatrix::from_csr(
+    2,
+    2,
+    vec![0, 2, 4],
+    vec![0, 1, 0, 1],
+    vec![S::from_parts(1.0, 0.0), S::from_parts(2.0, 1.0), S::from_parts(0.0, -1.0), S::from_parts(3.0, 0.0)],
+);
+
+let x = vec![S::from_parts(1.0, 0.5), S::from_parts(-2.0, 0.0)];
+let mut y = vec![S::zero(); 2];
+
+a.spmv_transpose_scaled(S::one(), &x, S::zero(), &mut y).unwrap();
+```
+
 ## CSR invariants
 
 These invariants hold in every configuration and are enforced via
