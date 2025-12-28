@@ -178,13 +178,13 @@ unsafe fn mpi_allreduce_sum_scalar_raw(world: &mpi::topology::SimpleCommunicator
     {
         let send = [z.real(), z.imag()];
         let mut recv = [0.0f64; 2];
-        let datatype = unsafe { ffi::RSMPI_DOUBLE_COMPLEX };
+        let datatype = unsafe { ffi::RSMPI_DOUBLE };
         let op = unsafe { ffi::RSMPI_SUM };
         let status = unsafe {
             ffi::MPI_Allreduce(
                 send.as_ptr() as *const c_void,
                 recv.as_mut_ptr() as *mut c_void,
-                1,
+                2,
                 datatype,
                 op,
                 raw_comm,
