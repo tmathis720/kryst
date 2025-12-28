@@ -197,14 +197,14 @@ impl DistCsrOp {
                     .colmap_owned
                     .get(local_j)
                     .ok_or_else(|| KError::InvalidInput("diag colmap missing entry".into()))?;
-                entries.push((gcol, S::from_real(v)));
+                entries.push((gcol, v));
             }
             for (&ghost_j, &v) in off_cols.iter().zip(off_vals.iter()) {
                 let gcol = *par
                     .colmap_ghost
                     .get(ghost_j)
                     .ok_or_else(|| KError::InvalidInput("ghost colmap missing entry".into()))?;
-                entries.push((gcol, S::from_real(v)));
+                entries.push((gcol, v));
             }
 
             entries.sort_unstable_by_key(|(c, _)| *c);

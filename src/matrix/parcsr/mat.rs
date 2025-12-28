@@ -14,8 +14,8 @@ pub struct ParCsrMatrix {
     pub row_end: usize,
     pub global_n: usize,
     pub global_m: usize,
-    pub a_diag: CsrMatrix<f64>,
-    pub a_off: CsrMatrix<f64>,
+    pub a_diag: CsrMatrix<S>,
+    pub a_off: CsrMatrix<S>,
     pub colmap_owned: Vec<usize>,
     pub colmap_ghost: Vec<usize>,
     pub halo: HaloPlan,
@@ -37,7 +37,7 @@ impl ParCsrOp {
 }
 
 impl LinOp for ParCsrOp {
-    type S = f64;
+    type S = S;
 
     fn dims(&self) -> (usize, usize) {
         (self.mat.local_n(), self.mat.global_m)
@@ -75,10 +75,10 @@ impl ParCsrMatrix {
     /// y = alpha*A*x + beta*y with two-phase halo exchange.
     pub fn spmv_scaled(
         &self,
-        alpha: f64,
-        x_owned: &[f64],
-        beta: f64,
-        y_owned: &mut [f64],
+        alpha: S,
+        x_owned: &[S],
+        beta: S,
+        y_owned: &mut [S],
     ) -> Result<(), KError> {
         if x_owned.len() != self.local_n() || y_owned.len() != self.local_n() {
             return Err(KError::InvalidInput(
@@ -86,9 +86,9 @@ impl ParCsrMatrix {
             ));
         }
 
-        let mut x_ghost: Vec<R> = vec![R::default(); self.colmap_ghost.len()];
-        let mut recv_buf: Vec<R> = vec![R::default(); self.halo.recv_idx.len()];
-        let mut send_buf: Vec<R> = vec![R::default(); self.halo.send_idx.len()];
+        let mut x_ghost: Vec<S> = vec![S::zero(); self.colmap_ghost.len()];
+        let mut recv_buf: Vec<S> = vec![S::zero(); self.halo.recv_idx.len()];
+        let mut send_buf: Vec<S> = vec![S::zero(); self.halo.send_idx.len()];
         let mut reqs = self
             .halo
             .begin_exchange(&self.comm, x_owned, &mut send_buf, &mut recv_buf);
@@ -98,13 +98,13 @@ impl ParCsrMatrix {
         self.comm.wait_all(&mut reqs);
         self.halo.unpack(&recv_buf, &mut x_ghost);
 
-        self.a_off.spmv_scaled(alpha, &x_ghost, 1.0, y_owned)?;
+        self.a_off.spmv_scaled(alpha, &x_ghost, S::one(), y_owned)?;
         Ok(())
     }
 
     /// Convenience wrapper for y = A*x.
-    pub fn spmv(&self, x_owned: &[f64], y_owned: &mut [f64]) -> Result<(), KError> {
-        self.spmv_scaled(1.0, x_owned, 0.0, y_owned)
+    pub fn spmv(&self, x_owned: &[S], y_owned: &mut [S]) -> Result<(), KError> {
+        self.spmv_scaled(S::one(), x_owned, S::zero(), y_owned)
     }
 }
 
@@ -118,7 +118,13 @@ mod tests {
     #[test]
     fn spmv_local_only() {
         // A = diag([2, 3])
-        let a_diag = CsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![0, 1], vec![2.0, 3.0]);
+        let a_diag = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![S::from_real(2.0), S::from_real(3.0)],
+        );
         let a_off = CsrMatrix::from_csr(2, 0, vec![0, 0, 0], Vec::new(), Vec::new());
         let halo = HaloPlan::default();
         let par = ParCsrMatrix {
@@ -133,9 +139,9 @@ mod tests {
             colmap_ghost: Vec::new(),
             halo,
         };
-        let x = vec![R::from(1.0), R::from(2.0)];
-        let mut y = vec![R::default(); 2];
+        let x = vec![S::from_real(1.0), S::from_real(2.0)];
+        let mut y = vec![S::zero(); 2];
         par.spmv(&x, &mut y).unwrap();
-        assert_eq!(y, vec![R::from(2.0), R::from(6.0)]);
+        assert_eq!(y, vec![S::from_real(2.0), S::from_real(6.0)]);
     }
 }

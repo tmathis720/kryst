@@ -37,9 +37,9 @@ impl HaloPlan {
     pub fn begin_exchange<'a>(
         &'a self,
         comm: &'a UniverseComm,
-        x_owned: &[R],
-        send_buf: &'a mut [R],
-        recv_buf: &'a mut [R],
+        x_owned: &[S],
+        send_buf: &'a mut [S],
+        recv_buf: &'a mut [S],
     ) -> Vec<<UniverseComm as Comm>::Request<'a>> {
         assert_eq!(send_buf.len(), self.send_idx.len());
         assert_eq!(recv_buf.len(), self.recv_idx.len());
@@ -47,13 +47,13 @@ impl HaloPlan {
         let mut reqs: Vec<<UniverseComm as Comm>::Request<'a>> = Vec::new();
 
         // Post receives into disjoint slices of recv_buf
-        let mut tail: &mut [R] = recv_buf;
+        let mut tail: &mut [S] = recv_buf;
         for (k, &nb) in self.neighbors.iter().enumerate() {
             let off = self.recv_ptr[k];
             let cnt = self.recv_ptr[k + 1] - off;
             if cnt > 0 {
                 let (chunk, rest) = tail.split_at_mut(cnt);
-                reqs.push(comm.irecv_from(chunk, nb));
+                reqs.push(comm.irecv_from(halo_slice_mut(chunk), nb));
                 tail = rest;
             }
         }
@@ -66,7 +66,7 @@ impl HaloPlan {
             let off = self.send_ptr[k];
             let cnt = self.send_ptr[k + 1] - off;
             if cnt > 0 {
-                reqs.push(comm.isend_to(&send_buf[off..off + cnt], nb));
+                reqs.push(comm.isend_to(halo_slice(&send_buf[off..off + cnt]), nb));
             }
         }
 
@@ -74,7 +74,7 @@ impl HaloPlan {
     }
 
     /// Scatter the received buffer into the ghost slice.
-    pub fn unpack(&self, recv_buf: &[R], x_ghost: &mut [R]) {
+    pub fn unpack(&self, recv_buf: &[S], x_ghost: &mut [S]) {
         assert_eq!(recv_buf.len(), self.recv_idx.len());
         for (p, &idx) in self.recv_idx.iter().enumerate() {
             x_ghost[idx as usize] = recv_buf[p];
@@ -129,5 +129,27 @@ impl From<&HaloIndexPlan> for HaloPlan {
             recv_ptr,
             recv_idx,
         }
+    }
+}
+
+fn halo_slice(buf: &[S]) -> &[R] {
+    #[cfg(feature = "complex")]
+    {
+        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const R, buf.len() * 2) }
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const R, buf.len()) }
+    }
+}
+
+fn halo_slice_mut(buf: &mut [S]) -> &mut [R] {
+    #[cfg(feature = "complex")]
+    {
+        unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut R, buf.len() * 2) }
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut R, buf.len()) }
     }
 }

@@ -84,6 +84,73 @@ fn dist_csr_numeric_update_changes_values_id() {
 }
 
 #[cfg(feature = "complex")]
+#[test]
+fn dist_csr_spmv_complex_values() {
+    #[cfg(feature = "mpi")]
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::try_new().unwrap()));
+    #[cfg(not(feature = "mpi"))]
+    let comm = UniverseComm::NoComm(NoComm);
+
+    let rank = comm.rank();
+    let size = comm.size();
+    let n_per = 3;
+    let n_global = n_per * size;
+    let row_start = rank * n_per;
+
+    let diag = S::from_parts(2.0, 1.0);
+    let off = S::from_parts(-1.0, 0.5);
+
+    let mut row_ptr = Vec::with_capacity(n_per + 1);
+    row_ptr.push(0);
+    let mut col_idx = Vec::new();
+    let mut values: Vec<S> = Vec::new();
+    for i in 0..n_per {
+        let g = row_start + i;
+        if g > 0 {
+            col_idx.push(g - 1);
+            values.push(off);
+        }
+        col_idx.push(g);
+        values.push(diag);
+        if g + 1 < n_global {
+            col_idx.push(g + 1);
+            values.push(off);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    let local = CsrMatrix::from_csr(n_per, n_global, row_ptr, col_idx, values);
+    let part_prefix: Vec<usize> = (0..=size).map(|p| p * n_per).collect();
+    let op = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
+        .unwrap();
+
+    let x_global: Vec<S> = (0..n_global)
+        .map(|i| S::from_parts(i as f64, i as f64 * 0.25))
+        .collect();
+    let x_local = x_global[row_start..row_start + n_per].to_vec();
+    let mut y_local = vec![S::zero(); n_per];
+    op.matvec(&x_local, &mut y_local);
+
+    let packed_local = pack_scalars(&y_local);
+    let mut packed_global = Vec::new();
+    comm.gather(&packed_local, &mut packed_global, 0);
+    if rank == 0 {
+        let y_global = unpack_scalars(&packed_global);
+        let mut y_ref = vec![S::zero(); n_global];
+        for i in 0..n_global {
+            let mut v = diag * x_global[i];
+            if i > 0 {
+                v = v + off * x_global[i - 1];
+            }
+            if i + 1 < n_global {
+                v = v + off * x_global[i + 1];
+            }
+            y_ref[i] = v;
+        }
+        assert_eq!(y_global, y_ref);
+    }
+}
+
+#[cfg(feature = "complex")]
 fn pack_scalars(values: &[S]) -> Vec<f64> {
     let mut out = Vec::with_capacity(values.len() * 2);
     for &v in values {
