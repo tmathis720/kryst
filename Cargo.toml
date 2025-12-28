@@ -50,6 +50,7 @@ rand_distr = "0.4"
 num-complex = { version = "0.4", optional = true }
 faer = { version = "0.22.6", optional = true, default-features = false, features = ["std"] }
 nalgebra = { version = "0.33", optional = true }
+sprs = { version = "0.11", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -92,6 +93,7 @@ complex_ilu = []
 backend-faer = ["dep:faer"]
 backend-nalgebra = ["dep:nalgebra"]
 backend-naive = []
+backend-sprs = ["dep:sprs"]
 nalgebra-explicit-dense = ["backend-nalgebra"]
 
 [[example]]

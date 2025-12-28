@@ -73,15 +73,25 @@ fn backend_format_support() -> BackendFormatSupport {
     {
         return <crate::matrix::backend::faer::FaerBackend as SparseBackend<S>>::FORMAT_SUPPORT;
     }
-    #[cfg(feature = "backend-nalgebra")]
+    #[cfg(not(feature = "backend-faer"))]
     {
-        return <crate::matrix::backend::nalgebra::NalgebraBackend as SparseBackend<S>>::FORMAT_SUPPORT;
+        #[cfg(feature = "backend-sprs")]
+        {
+            return <crate::matrix::backend::sprs::SprsBackend as SparseBackend<S>>::FORMAT_SUPPORT;
+        }
+        #[cfg(all(feature = "backend-nalgebra", not(feature = "backend-sprs")))]
+        {
+            return <crate::matrix::backend::nalgebra::NalgebraBackend as SparseBackend<S>>::FORMAT_SUPPORT;
+        }
+        #[cfg(all(
+            feature = "backend-naive",
+            not(any(feature = "backend-sprs", feature = "backend-nalgebra"))
+        ))]
+        {
+            return <crate::matrix::backend::naive::NaiveBackend as SparseBackend<S>>::FORMAT_SUPPORT;
+        }
+        BackendFormatSupport::new(false, false, false, false)
     }
-    #[cfg(feature = "backend-naive")]
-    {
-        return <crate::matrix::backend::naive::NaiveBackend as SparseBackend<S>>::FORMAT_SUPPORT;
-    }
-    BackendFormatSupport::new(false, false, false, false)
 }
 
 /// Central entry point used by KSP/PCs to request a specific operator format.
@@ -100,6 +110,11 @@ pub fn materialize(
 
     #[cfg(feature = "backend-faer")]
     if let Ok(m) = crate::matrix::backend::faer::try_materialize(op.clone(), want, drop_tol) {
+        return Ok(m);
+    }
+
+    #[cfg(feature = "backend-sprs")]
+    if let Ok(m) = crate::matrix::backend::sprs::try_materialize(op.clone(), want, drop_tol) {
         return Ok(m);
     }
 
@@ -130,6 +145,11 @@ pub fn materialize_ref(
         return Ok(m);
     }
 
+    #[cfg(feature = "backend-sprs")]
+    if let Ok(m) = crate::matrix::backend::sprs::try_materialize_ref(op, want, drop_tol) {
+        return Ok(m);
+    }
+
     #[cfg(feature = "backend-nalgebra")]
     if let Ok(m) = crate::matrix::backend::nalgebra::try_materialize_ref(op, want, drop_tol) {
         return Ok(m);
@@ -153,3 +173,6 @@ pub mod nalgebra;
 
 #[cfg(feature = "backend-naive")]
 pub mod naive;
+
+#[cfg(feature = "backend-sprs")]
+pub mod sprs;
