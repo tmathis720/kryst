@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::op::{LinOp, LinOpF64, StructureId, ValuesId};
+use crate::algebra::prelude::KrystScalar;
 use crate::error::KError;
 
 /// Matrix-free "shell" operator.
-pub struct MatShell<S> {
+pub struct MatShell<S: KrystScalar> {
     m: usize,
     n: usize,
     mv: Arc<dyn Fn(&[S], &mut [S]) + Send + Sync>,
@@ -14,11 +15,11 @@ pub struct MatShell<S> {
     vid: AtomicU64,
 }
 
-impl MatShell<f64> {
+impl<S: KrystScalar> MatShell<S> {
     pub fn new(
         m: usize,
         n: usize,
-        mv: impl Fn(&[f64], &mut [f64]) + Send + Sync + 'static,
+        mv: impl Fn(&[S], &mut [S]) + Send + Sync + 'static,
     ) -> Self {
         Self {
             m,
@@ -32,7 +33,7 @@ impl MatShell<f64> {
 
     pub fn with_transpose(
         mut self,
-        mvt: impl Fn(&[f64], &mut [f64]) + Send + Sync + 'static,
+        mvt: impl Fn(&[S], &mut [S]) + Send + Sync + 'static,
     ) -> Self {
         self.mvt = Some(Arc::new(mvt));
         self
@@ -47,20 +48,20 @@ impl MatShell<f64> {
     }
 }
 
-impl LinOp for MatShell<f64> {
-    type S = f64;
+impl<S: KrystScalar> LinOp for MatShell<S> {
+    type S = S;
 
     fn dims(&self) -> (usize, usize) {
         (self.m, self.n)
     }
 
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn matvec(&self, x: &[S], y: &mut [S]) {
         debug_assert_eq!(x.len(), self.n, "MatShell::matvec x.len mismatch");
         debug_assert_eq!(y.len(), self.m, "MatShell::matvec y.len mismatch");
         (self.mv)(x, y)
     }
 
-    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if x.len() != self.n || y.len() != self.m {
             return Err(KError::InvalidInput(format!(
                 "MatShell::matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
@@ -78,7 +79,7 @@ impl LinOp for MatShell<f64> {
         self.mvt.is_some()
     }
 
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
         debug_assert_eq!(x.len(), self.m, "MatShell::t_matvec x.len mismatch");
         debug_assert_eq!(y.len(), self.n, "MatShell::t_matvec y.len mismatch");
         if let Some(f) = &self.mvt {
@@ -117,7 +118,7 @@ mod tests {
 
     #[test]
     fn mat_shell_try_matvec_reports_dim_mismatch() {
-        let op = MatShell::new(2, 3, |x, y| {
+        let op = MatShell::<f64>::new(2, 3, |x, y| {
             for (yi, xi) in y.iter_mut().zip(x.iter()) {
                 *yi = *xi;
             }

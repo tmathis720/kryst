@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let size = comm.size();
 
     let n = 8;
-    let op = MatShell::new(n, n, move |x, y| {
+    let op = MatShell::<f64>::new(n, n, move |x, y| {
         for i in 0..n {
             let mut sum = 2.0 * x[i];
             if i > 0 {

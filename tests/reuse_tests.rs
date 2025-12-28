@@ -192,11 +192,11 @@ fn denseop_cache_invalidation() {
             R::default()
         }
     }));
-    let op = DenseOp::new(mat);
-    let csr1 = <DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(&op, R::default());
+    let op = DenseOp::<f64>::new(mat);
+    let csr1 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(&op, R::default());
     let p1 = Arc::as_ptr(&csr1);
     op.mark_values_changed();
-    let csr2 = <DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(&op, R::default());
+    let csr2 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(&op, R::default());
     let p2 = Arc::as_ptr(&csr2);
     assert_ne!(p1, p2);
 }
@@ -258,7 +258,7 @@ fn values_id_known_triggers_single_numeric_update() {
             R::default()
         }
     }));
-    let op = Arc::new(DenseOp::new(mat.clone()));
+    let op = Arc::new(DenseOp::<f64>::new(mat.clone()));
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Gmres).unwrap();
     ksp.set_pc_box_for_tests(Box::new(pc));
@@ -281,7 +281,7 @@ fn policy_never_forces_symbolic_update() {
             R::default()
         }
     }));
-    let op = Arc::new(DenseOp::new(mat.clone()));
+    let op = Arc::new(DenseOp::<f64>::new(mat.clone()));
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Gmres).unwrap();
     ksp.set_pc_box_for_tests(Box::new(pc));

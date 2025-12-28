@@ -35,7 +35,7 @@ fn unsupported_linop_err(op: &dyn LinOp<S = S>, where_: &str, target: &str) -> K
     ));
     help.push_str("- Recovery options:\n");
     help.push_str("  • If you have a dense matrix (`faer::Mat<f64>`), wrap it with `DenseOp` so structure/values IDs are tracked and conversions can be cached:\n");
-    help.push_str("      let op = DenseOp::new(Arc::new(mat));\n");
+    help.push_str("      let op = DenseOp::<f64>::new(Arc::new(mat));\n");
     help.push_str(
         "      // after in-place updates: op.mark_values_changed() / op.mark_structure_changed()\n",
     );
@@ -239,8 +239,8 @@ pub fn to_csr_cached(
             mat, drop_tol,
         ));
     }
-    if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp>() {
-        return Ok(<DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(
+    if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp<f64>>() {
+        return Ok(<DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(
             dense_op, drop_tol,
         ));
     }
@@ -291,8 +291,8 @@ pub fn to_csc_cached(
             mat, drop_tol,
         ));
     }
-    if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp>() {
-        return Ok(<DenseOp as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+    if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp<f64>>() {
+        return Ok(<DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
             dense_op, drop_tol,
         ));
     }
@@ -320,7 +320,7 @@ pub fn dense_from_linop(op: &dyn LinOp<S = S>) -> Result<Mat<f64>, KError> {
     if let Some(mat) = op.as_any().downcast_ref::<Mat<f64>>() {
         return Ok(mat.clone());
     }
-    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp<f64>>() {
         return Ok(owned_from_mat(dense_op.inner()));
     }
     if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
@@ -400,16 +400,18 @@ pub fn materialize_linop_with_hint(
         });
     }
 
-    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp>() {
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp<f64>>() {
         return Ok(match hint {
             FormatHint::Csr => {
-                let csr =
-                    <DenseOp as AsFormat<f64, DefaultBackend>>::to_csr_cached(dense_op, drop_tol);
+                let csr = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(
+                    dense_op, drop_tol,
+                );
                 wrap_with_comm(csr, comm)
             }
             FormatHint::Csc => {
-                let csc =
-                    <DenseOp as AsFormat<f64, DefaultBackend>>::to_csc_cached(dense_op, drop_tol);
+                let csc = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+                    dense_op, drop_tol,
+                );
                 wrap_with_comm(csc, comm)
             }
             FormatHint::Dense => {
@@ -557,7 +559,7 @@ mod tests {
     #[test]
     fn to_csr_cached_returns_guidance_on_unsupported_type() {
         // 3x3 shell op that cannot be converted by convert::*.
-        let shell = MatShell::new(3, 3, |x, y| {
+        let shell = MatShell::<f64>::new(3, 3, |x, y| {
             y.copy_from_slice(x);
         });
 
@@ -575,7 +577,7 @@ mod tests {
 
     #[test]
     fn dense_from_linop_guidance() {
-        let shell = MatShell::new(2, 2, |x, y| y.copy_from_slice(x));
+        let shell = MatShell::<f64>::new(2, 2, |x, y| y.copy_from_slice(x));
         let err = dense_from_linop(&shell).err().unwrap();
         let msg = format!("{err:?}");
         assert!(

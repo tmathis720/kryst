@@ -2201,7 +2201,7 @@ mod tests {
         };
 
         let a = Arc::new(Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 }));
-        let a = Arc::new(DenseOp::new(a));
+        let a = Arc::new(DenseOp::<f64>::new(a));
 
         let mut ksp = KspContext::new();
         ksp.set_operators(a, None);
@@ -2235,7 +2235,7 @@ mod tests {
         };
 
         let a = Arc::new(Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 }));
-        let a = Arc::new(DenseOp::new(a));
+        let a = Arc::new(DenseOp::<f64>::new(a));
 
         let mut ksp = KspContext::new();
         ksp.set_operators(a, None);
@@ -2269,7 +2269,7 @@ mod tests {
         };
 
         let a1 = Arc::new(Mat::<R>::from_fn(3, 3, |i, j| if i == j { 2.0 } else { 0.25 }));
-        let a1 = Arc::new(DenseOp::new(a1));
+        let a1 = Arc::new(DenseOp::<f64>::new(a1));
 
         let mut ksp = KspContext::new();
         ksp.set_operators(a1, None);
@@ -2282,7 +2282,7 @@ mod tests {
             + num_ct.load(Ordering::Relaxed);
 
         let a2 = Arc::new(Mat::<R>::from_fn(3, 3, |i, j| if i == j { 3.0 } else { 0.75 }));
-        let a2 = Arc::new(DenseOp::new(a2));
+        let a2 = Arc::new(DenseOp::<f64>::new(a2));
         ksp.try_set_operators(a2, None).unwrap();
 
         ksp.setup().unwrap();
@@ -2345,7 +2345,7 @@ mod tests {
     fn try_set_operators_ok_same_comm() {
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         // NoComm for both => equal
-        let a = Arc::new(DenseOp::new(Arc::new(m)));
+        let a = Arc::new(DenseOp::<f64>::new(Arc::new(m)));
         let mut ksp = KspContext::new();
         ksp.try_set_operators(a.clone(), None).unwrap();
         assert_eq!(ksp.is_setup(), false); // setup is invalidated but not run
@@ -2360,7 +2360,7 @@ mod tests {
 
         let _guard = mpi_test_guard();
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let op = Arc::new(DenseOp::new(Arc::new(m)));
+        let op = Arc::new(DenseOp::<f64>::new(Arc::new(m)));
 
         let world = std::sync::Arc::new(MpiComm::new());
         let dup = std::sync::Arc::new(world.dup());
@@ -2382,7 +2382,7 @@ mod tests {
         let _guard = mpi_test_guard();
         // Build a small dense and wrap with different communicators
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let op = Arc::new(DenseOp::new(Arc::new(m)));
+        let op = Arc::new(DenseOp::<f64>::new(Arc::new(m)));
 
         let world = std::sync::Arc::new(MpiComm::new());
         if world.size() < 2 {
@@ -2415,7 +2415,7 @@ mod tests {
 
         let _guard = mpi_test_guard();
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let op = Arc::new(DenseOp::new(Arc::new(m)));
+        let op = Arc::new(DenseOp::<f64>::new(Arc::new(m)));
 
         let world = std::sync::Arc::new(MpiComm::new());
         if world.size() < 2 {
@@ -2442,7 +2442,7 @@ mod tests {
 
         let _guard = mpi_test_guard();
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let op = Arc::new(DenseOp::new(Arc::new(m))); // NoComm by default
+        let op = Arc::new(DenseOp::<f64>::new(Arc::new(m))); // NoComm by default
 
         let world = std::sync::Arc::new(MpiComm::new());
         let comm = UniverseComm::Mpi(world);
@@ -2465,7 +2465,7 @@ mod tests {
         let comm = crate::parallel::UniverseComm::Mpi(world.clone());
 
         let m = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let op = Arc::new(DenseOp::new(Arc::new(m)));
+        let op = Arc::new(DenseOp::<f64>::new(Arc::new(m)));
         let op_comm = wrap_with_comm(op, comm);
 
         let mut ksp = KspContext::new();

@@ -99,7 +99,7 @@ fn context_smoke_preonly_lu() {
     let mat = Arc::new(Mat::from_fn(2, 2, |i, j| {
         if i == j { 3.0 + i as f64 } else { 0.0 }
     }));
-    let op = Arc::new(DenseOp::new(mat));
+    let op = Arc::new(DenseOp::<f64>::new(mat));
     let b = vec![3.0, 8.0];
     let mut x = vec![0.0; 2];
 

@@ -165,7 +165,7 @@ let n = 100;
 let mat = Mat::<f64>::from_fn(n, n, |i, j| {
     if i == j { 4.0 } else if (i as i32 - j as i32).abs() == 1 { -1.0 } else { 0.0 }
 });
-let a = Arc::new(DenseOp::new(Arc::new(mat)));
+let a = Arc::new(DenseOp::<f64>::new(Arc::new(mat)));
 let rhs = vec![1.0; n];
 let mut solution = vec![0.0; n];
 

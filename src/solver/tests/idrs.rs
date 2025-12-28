@@ -20,7 +20,7 @@ fn idrs_solves_nonsymmetric_system() {
         (2, 2) => R::from(5.0),
         _ => R::default(),
     });
-    let op = DenseOp::new(Arc::new(a));
+    let op = DenseOp::<f64>::new(Arc::new(a));
     let b: Vec<R> = vec![R::from(3.0), R::from(7.0), R::from(4.0)];
     let mut x: Vec<R> = vec![R::default(); 3];
 
