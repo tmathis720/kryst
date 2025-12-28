@@ -189,17 +189,20 @@ impl CommReductionEngine {
                 UniverseComm::NoComm(_) => {}
                 #[cfg(feature = "mpi")]
                 UniverseComm::Mpi(comm) => {
+                    let send = buf.to_vec();
+                    let mut recv = vec![0.0; buf.len()];
                     let rc = unsafe {
                         mpi::ffi::MPI_Allreduce(
-                            buf.as_ptr() as *const std::ffi::c_void,
-                            buf.as_mut_ptr() as *mut std::ffi::c_void,
-                            buf.len() as i32,
+                            send.as_ptr() as *const std::ffi::c_void,
+                            recv.as_mut_ptr() as *mut std::ffi::c_void,
+                            recv.len() as i32,
                             mpi::ffi::RSMPI_DOUBLE,
                             mpi::ffi::RSMPI_SUM,
                             comm.world.as_raw(),
                         )
                     };
                     debug_assert_eq!(rc, 0);
+                    buf.copy_from_slice(&recv);
                 }
                 #[cfg(feature = "rayon")]
                 UniverseComm::Rayon(_) => {}

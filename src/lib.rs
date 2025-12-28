@@ -12,13 +12,14 @@
 //! ```rust,no_run
 //! use kryst::prelude::*;
 //! use kryst::matrix::MatShell;
+//! use kryst::algebra::prelude::KrystScalar;
 //! use std::sync::Arc;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let n = 4;
-//! let a = MatShell::<f64>::new(n, n, move |x, y| {
+//! let a = MatShell::<S>::new(n, n, move |x, y| {
 //!     for i in 0..n {
-//!         let mut sum = 2.0 * x[i];
+//!         let mut sum = S::from_real(2.0) * x[i];
 //!         if i > 0 {
 //!             sum -= x[i - 1];
 //!         }
@@ -28,7 +29,7 @@
 //!         y[i] = sum;
 //!     }
 //! });
-//! let a = Arc::new(a) as Arc<dyn LinOp<S = R>>;
+//! let a = Arc::new(a) as Arc<dyn LinOp<S = S>>;
 //! let b = vec![S::from_real(1.0); n];
 //! let mut x = vec![S::zero(); n];
 //!

@@ -5,10 +5,11 @@
 //! ```no_run
 //! # use kryst::context::pc_context::PcFactory;
 //! # use kryst::matrix::MatShell;
+//! # use kryst::algebra::prelude::S;
 //! # use std::sync::Arc;
 //! let specs = PcFactory::create_pc_chain_from_str("jacobi->ilut", None).unwrap();
 //! // later, when P is known:
-//! # let p = MatShell::<f64>::new(10, 10, |x, y| y.copy_from_slice(x));
+//! # let p = MatShell::<S>::new(10, 10, |x, y| y.copy_from_slice(x));
 //! # let p = Arc::new(p);
 //! let chain = PcFactory::construct_deferred_pc_chain(specs, p.as_ref()).unwrap();
 //! ```

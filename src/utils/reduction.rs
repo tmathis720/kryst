@@ -225,6 +225,7 @@ pub enum AllreduceHandle<T> {
     #[cfg(feature = "mpi")]
     Mpi {
         req: mpi::ffi::MPI_Request,
+        send: Option<Vec<R>>,
         buf: Vec<R>,
         convert: fn(&[R]) -> T,
     },
@@ -247,9 +248,10 @@ impl<T: std::fmt::Debug> std::fmt::Debug for AllreduceHandle<T> {
         match self {
             AllreduceHandle::Ready(val) => f.debug_tuple("Ready").field(val).finish(),
             #[cfg(feature = "mpi")]
-            AllreduceHandle::Mpi { req, buf, .. } => f
+            AllreduceHandle::Mpi { req, send, buf, .. } => f
                 .debug_struct("Mpi")
                 .field("request", req)
+                .field("send", send)
                 .field("buf", buf)
                 .finish(),
             AllreduceHandle::Rayon { .. } => f.debug_struct("Rayon").finish(),
@@ -526,11 +528,12 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         }
         if !async_allowed(opt, comm_repro, self.size, true) {
             record_reduction(2);
-            let mut buf = [a, b];
+            let send = [a, b];
+            let mut recv = [0.0, 0.0];
             let rc = unsafe {
                 mpi::ffi::MPI_Allreduce(
-                    buf.as_ptr() as *const std::ffi::c_void,
-                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    send.as_ptr() as *const std::ffi::c_void,
+                    recv.as_mut_ptr() as *mut std::ffi::c_void,
                     2,
                     mpi::ffi::RSMPI_DOUBLE,
                     mpi::ffi::RSMPI_SUM,
@@ -540,15 +543,16 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
             if rc != 0 {
                 return Err(KError::SolveError(format!("MPI_Allreduce failed: {rc}")));
             }
-            let result = (buf[0], buf[1]);
+            let result = (recv[0], recv[1]);
             return Ok((AllreduceHandle::new_ready(result), (a, b)));
         }
         record_reduction(2);
-        let mut buf = vec![a, b];
+        let send = vec![a, b];
+        let mut buf = vec![0.0, 0.0];
         let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
         let rc = unsafe {
             mpi::ffi::MPI_Iallreduce(
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                send.as_ptr() as *const std::ffi::c_void,
                 buf.as_mut_ptr() as *mut std::ffi::c_void,
                 2,
                 mpi::ffi::RSMPI_DOUBLE,
@@ -563,6 +567,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         Ok((
             AllreduceHandle::Mpi {
                 req,
+                send: Some(send),
                 buf,
                 convert: convert_pair,
             },
@@ -587,12 +592,13 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         }
         if !async_allowed(opt, comm_repro, self.size, true) {
             record_reduction(data.len());
-            let mut buf = data.clone();
+            let send = data;
+            let mut recv = vec![0.0; send.len()];
             let rc = unsafe {
                 mpi::ffi::MPI_Allreduce(
-                    buf.as_ptr() as *const std::ffi::c_void,
-                    buf.as_mut_ptr() as *mut std::ffi::c_void,
-                    buf.len() as i32,
+                    send.as_ptr() as *const std::ffi::c_void,
+                    recv.as_mut_ptr() as *mut std::ffi::c_void,
+                    recv.len() as i32,
                     mpi::ffi::RSMPI_DOUBLE,
                     mpi::ffi::RSMPI_SUM,
                     self.world.as_raw(),
@@ -601,15 +607,17 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
             if rc != 0 {
                 return Err(KError::SolveError(format!("MPI_Allreduce failed: {rc}")));
             }
-            return Ok((AllreduceHandle::new_ready(buf), data));
+            return Ok((AllreduceHandle::new_ready(recv), send));
         }
         record_reduction(data.len());
-        let mut buf = data.clone();
+        let send = data;
+        let local = send.clone();
+        let mut buf = vec![0.0; send.len()];
         let count = buf.len();
         let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
         let rc = unsafe {
             mpi::ffi::MPI_Iallreduce(
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                send.as_ptr() as *const std::ffi::c_void,
                 buf.as_mut_ptr() as *mut std::ffi::c_void,
                 count as i32,
                 mpi::ffi::RSMPI_DOUBLE,
@@ -624,17 +632,18 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         Ok((
             AllreduceHandle::Mpi {
                 req,
+                send: Some(send),
                 buf,
                 convert: |slice| slice.to_vec(),
             },
-            data,
+            local,
         ))
     }
 
     fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
         match h {
             AllreduceHandle::Ready(val) => Some(*val),
-            AllreduceHandle::Mpi { req, buf, convert } => {
+            AllreduceHandle::Mpi { req, buf, convert, .. } => {
                 if mpi_test_request(req) {
                     let result = convert(buf);
                     Some(finalize_handle_pair(h, result))
@@ -649,7 +658,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
     fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>> {
         match h {
             AllreduceHandle::Ready(val) => Some(val.clone()),
-            AllreduceHandle::Mpi { req, buf, convert } => {
+            AllreduceHandle::Mpi { req, buf, convert, .. } => {
                 if mpi_test_request(req) {
                     let result = convert(buf);
                     Some(finalize_handle_vec(h, result))
@@ -665,7 +674,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
-            AllreduceHandle::Mpi { req, buf, convert } => {
+            AllreduceHandle::Mpi { req, buf, convert, .. } => {
                 mpi_wait_request(req);
                 convert(&buf)
             }
@@ -677,7 +686,7 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
-            AllreduceHandle::Mpi { req, buf, convert } => {
+            AllreduceHandle::Mpi { req, buf, convert, .. } => {
                 mpi_wait_request(req);
                 convert(&buf)
             }
