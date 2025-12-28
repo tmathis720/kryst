@@ -64,7 +64,7 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 | Feature | Enables | Notes |
 | --- | --- | --- |
 | `mpi` | MPI communication backend | Requires MPI installed; examples run via `mpirun` |
-| `complex` | Complex scalar `S` | Classical solvers are supported; pipelined GMRES/FGMRES remain unavailable |
+| `complex` | Complex scalar `S` | Classical and pipelined GMRES/FGMRES variants are supported |
 | `backend-faer` | Dense/CSR backends and most PCs | Default feature |
 | backend flags | Direct solvers / matrix backends | e.g. `superlu_dist` (where available) |
 

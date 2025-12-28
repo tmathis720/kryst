@@ -20,9 +20,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::common::ReductCtx;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 
 #[cfg(feature = "logging")]
@@ -150,6 +151,7 @@ impl BiCgStabSolver {
         };
         let work =
             work.ok_or_else(|| KError::InvalidInput("BiCGStab requires a Workspace".into()))?;
+        let red = ReductCtx::new(comm, Some(&*work));
         let need_right = matches!(side, PcSide::Right) && pc.is_some();
         let need_left = matches!(side, PcSide::Left) && pc.is_some();
         let need_z = need_right || need_left;
@@ -190,19 +192,19 @@ impl BiCgStabSolver {
                 r_hat.copy_from_slice(zs);
                 s.copy_from_slice(zs);
                 p.copy_from_slice(zs);
-                global_nrm2(comm, s)
+                red.norm2(s)
             } else {
                 r_hat.copy_from_slice(r);
                 p.copy_from_slice(r);
-                global_nrm2(comm, r)
+                red.norm2(r)
             }
         } else {
             r_hat.copy_from_slice(r);
             p.copy_from_slice(r);
-            global_nrm2(comm, r)
+            red.norm2(r)
         };
 
-        let bnorm = global_nrm2(comm, b).max(1e-32);
+        let bnorm = red.norm2(b).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
         if !mons.is_empty() {
@@ -231,18 +233,18 @@ impl BiCgStabSolver {
 
         for k in 1..=self.maxits {
             let rho = if need_left {
-                global_dot_conj(comm, r_hat, s)
+                red.dot(r_hat, s)
             } else {
-                global_dot_conj(comm, r_hat, r)
+                red.dot(r_hat, r)
             };
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
                 stats.iterations = k - 1;
                 stats.final_residual = if need_left {
-                    global_nrm2(comm, s)
+                    red.norm2(s)
                 } else {
-                    global_nrm2(comm, r)
+                    red.norm2(r)
                 };
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
@@ -291,15 +293,15 @@ impl BiCgStabSolver {
                 }
             }
 
-            let alpha_den = global_dot_conj(comm, r_hat, v);
+            let alpha_den = red.dot(r_hat, v);
             if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {k}");
                 stats.iterations = k - 1;
                 stats.final_residual = if need_left {
-                    global_nrm2(comm, s)
+                    red.norm2(s)
                 } else {
-                    global_nrm2(comm, r)
+                    red.norm2(r)
                 };
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
@@ -316,7 +318,7 @@ impl BiCgStabSolver {
                 }
             }
 
-            let s_norm = global_nrm2(comm, s);
+            let s_norm = red.norm2(s);
             if !mons.is_empty() {
                 for m in mons {
                     m(k, s_norm);
@@ -379,14 +381,14 @@ impl BiCgStabSolver {
 
             let mut omega_reds = [S::zero(), S::zero()];
             let dot_pairs = [(&t[..], &t[..]), (&t[..], &s[..])];
-            global_dot_conj_many_into(comm, &dot_pairs, &mut omega_reds);
+            red.dot_many_into(&dot_pairs, &mut omega_reds);
 
             let omega_den = omega_reds[0];
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
-                stats.final_residual = global_nrm2(comm, s);
+                stats.final_residual = red.norm2(s);
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
@@ -395,7 +397,7 @@ impl BiCgStabSolver {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
-                stats.final_residual = global_nrm2(comm, s);
+                stats.final_residual = red.norm2(s);
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats);
             }
@@ -460,9 +462,9 @@ impl BiCgStabSolver {
             }
 
             let r_norm = if need_left {
-                global_nrm2(comm, s)
+                red.norm2(s)
             } else {
-                global_nrm2(comm, r)
+                red.norm2(r)
             };
             if !mons.is_empty() {
                 for m in mons {
@@ -491,7 +493,7 @@ impl BiCgStabSolver {
             omega_prev = omega;
         }
 
-        let r_norm = global_nrm2(comm, r);
+        let r_norm = red.norm2(r);
         Ok(SolveStats::new(
             self.maxits,
             r_norm,

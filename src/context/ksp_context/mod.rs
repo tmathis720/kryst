@@ -48,7 +48,7 @@
 
 #[cfg(feature = "rayon")]
 use crate::algebra::parallel::set_rayon_threads;
-use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, set_rayon_threads_for_repro};
+use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
 use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
@@ -61,7 +61,7 @@ use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-use crate::parallel::{Comm, set_global_reduction_mode, set_global_reduction_mode_scoped};
+use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
@@ -75,7 +75,9 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 mod workspace;
+mod execution;
 pub use crate::core::block::BlockVec;
+pub use execution::{ExecutionPolicy, ThreadingPolicy};
 pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
 
 #[cfg(feature = "complex")]
@@ -232,6 +234,7 @@ pub struct KspContext {
     last_pc_vid: Option<ValuesId>,
     reduction_opts: ReductOptions,
     reproducible: bool,
+    exec: ExecutionPolicy,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
@@ -265,6 +268,7 @@ impl fmt::Debug for KspContext {
             .field("last_pc_vid", &self.last_pc_vid)
             .field("reduction_opts", &self.reduction_opts)
             .field("reproducible", &self.reproducible)
+            .field("exec", &self.exec)
             .field("pending_gmres", &self.pending_gmres)
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
@@ -346,10 +350,6 @@ impl KspContext {
         }
     }
 
-    fn apply_global_reduction_mode(&self) {
-        set_global_reduction_mode(self.reduction_opts.mode);
-    }
-
     /// Validate that `side` is compatible with `solver_type` (if set).
     /// Mirrors `configure_pc_side()` logic but used at set-time to fail fast.
     fn check_pc_side_now(&self, side: PcSide) -> Result<(), KError> {
@@ -416,10 +416,35 @@ impl KspContext {
             last_pc_vid: None,
             reduction_opts: ReductOptions::default(),
             reproducible: false,
+            exec: ExecutionPolicy::default(),
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
         }
+    }
+
+    #[cfg(feature = "rayon")]
+    pub fn with_thread_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
+        self.exec.threading = ThreadingPolicy::Pool(pool);
+        self
+    }
+
+    pub fn set_execution_policy(&mut self, policy: ExecutionPolicy) -> &mut Self {
+        self.exec = policy;
+        self
+    }
+
+    #[cfg(feature = "rayon")]
+    pub fn set_threads(&mut self, n: usize) -> Result<&mut Self, KError> {
+        self.exec = self.exec.clone().with_threads(n)?;
+        Ok(self)
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    pub fn set_threads(&mut self, _n: usize) -> Result<&mut Self, KError> {
+        Err(KError::Unsupported(
+            "thread pool configuration requires feature=\"rayon\"".into(),
+        ))
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
@@ -561,12 +586,44 @@ impl KspContext {
     /// Configure the KSP context using parsed KSP options.
     pub fn set_from_options(&mut self, opts: &KspOptions) -> Result<&mut Self, KError> {
         #[cfg(feature = "rayon")]
-        if let Some(n) = opts.threads {
-            set_rayon_threads(n);
+        {
+            if let Some(mode) = opts.threads_mode.as_deref() {
+                match mode {
+                    "context" => {}
+                    "global" => {}
+                    "serial" => {
+                        self.exec.threading = ThreadingPolicy::Serial;
+                    }
+                    other => {
+                        return Err(KError::InvalidInput(format!(
+                            "unknown ksp_threads_mode: {other}"
+                        )));
+                    }
+                }
+            }
+
+            if let Some(n) = opts.threads {
+                match opts.threads_mode.as_deref().unwrap_or("context") {
+                    "context" => {
+                        self.exec = self.exec.clone().with_threads(n)?;
+                    }
+                    "serial" => {
+                        self.exec.threading = ThreadingPolicy::Serial;
+                    }
+                    "global" => {
+                        set_rayon_threads(n);
+                    }
+                    other => {
+                        return Err(KError::InvalidInput(format!(
+                            "unknown ksp_threads_mode: {other}"
+                        )));
+                    }
+                }
+            }
         }
 
         #[cfg(all(not(feature = "rayon"), feature = "logging"))]
-        if opts.threads.is_some() {
+        if opts.threads.is_some() || opts.threads_mode.is_some() {
             log::warn!("Ignoring ksp_threads: build without feature=\"rayon\"");
         }
 
@@ -628,9 +685,7 @@ impl KspContext {
         if let Some(flag) = opts.reproducible {
             self.reproducible = flag;
             self.reduction_opts.reproducible = flag;
-            if flag && opts.threads.is_none() {
-                set_rayon_threads_for_repro(true);
-            }
+            self.exec = self.exec.clone().with_reproducible(flag);
         }
 
         let requested_cg_variant = opts.cg_variant.or_else(|| {
@@ -688,13 +743,6 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
-                #[cfg(feature = "complex")]
-                if variant.as_str() == "pipelined" {
-                    return Err(KError::Unsupported(
-                        "pipelined GMRES is not available for complex scalars".into(),
-                    ));
-                }
-
                 let pv = match variant.as_str() {
                     "classical" => PendingGmresVariant::Classical,
                     "pipelined" => PendingGmresVariant::Pipelined,
@@ -745,13 +793,6 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
-                #[cfg(feature = "complex")]
-                if variant.as_str() == "pipelined" {
-                    return Err(KError::Unsupported(
-                        "pipelined GMRES is not available for complex scalars".into(),
-                    ));
-                }
-
                 self.pending_gmres.variant = Some(match variant.as_str() {
                     "classical" => PendingGmresVariant::Classical,
                     "pipelined" => PendingGmresVariant::Pipelined,
@@ -826,13 +867,6 @@ impl KspContext {
                 self.pending_fgmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.fgmres_variant {
-                #[cfg(feature = "complex")]
-                if variant.as_str() == "pipelined" {
-                    return Err(KError::Unsupported(
-                        "pipelined FGMRES is not available for complex scalars".into(),
-                    ));
-                }
-
                 let v = match variant.as_str() {
                     "classical" => crate::solver::fgmres::FgmresVariant::Classical,
                     "pipelined" => crate::solver::fgmres::FgmresVariant::Pipelined,
@@ -877,13 +911,6 @@ impl KspContext {
                 self.pending_fgmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.fgmres_variant {
-                #[cfg(feature = "complex")]
-                if variant.as_str() == "pipelined" {
-                    return Err(KError::Unsupported(
-                        "pipelined FGMRES is not available for complex scalars".into(),
-                    ));
-                }
-
                 self.pending_fgmres.variant = Some(match variant.as_str() {
                     "classical" => crate::solver::fgmres::FgmresVariant::Classical,
                     "pipelined" => crate::solver::fgmres::FgmresVariant::Pipelined,
@@ -1264,8 +1291,11 @@ impl KspContext {
 
     /// Prepare preconditioner and workspace.
     pub fn setup(&mut self) -> Result<(), KError> {
-        let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
+        let exec = self.exec.clone();
+        exec.install(|| self.setup_impl())
+    }
 
+    fn setup_impl(&mut self) -> Result<(), KError> {
         let pmat = self
             .pmat
             .as_ref()
@@ -1427,11 +1457,13 @@ impl KspContext {
 
     /// Solve the linear system using stored operators.
     pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
-        // Make the configured reduction mode active for *every* path
-        let _reduction_mode_guard = set_global_reduction_mode_scoped(self.reduction_opts.mode);
+        let exec = self.exec.clone();
+        exec.install(|| self.solve_impl(b, x))
+    }
 
+    fn solve_impl(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         if !self.setup_called {
-            self.setup()?;
+            self.setup_impl()?;
         }
         let amat = self
             .amat
@@ -1525,7 +1557,6 @@ impl KspContext {
             Some(self.monitors.as_slice())
         };
         let comm = amat_ref.comm();
-        comm.set_reproducible(self.reproducible);
         #[cfg(not(feature = "complex"))]
         {
             let pc = self
@@ -1772,9 +1803,11 @@ impl KspContext {
         }
 
         let comm = mat.comm();
-        comm.set_reproducible(self.reproducible);
-
-        Ok(comm.norm2(&w.tmp1))
+        let red = w
+            .reduction_engine()
+            .cloned()
+            .unwrap_or_else(|| comm.reduction_engine(w.reduction_options()));
+        Ok(red.norm2_s(&w.tmp1))
     }
 
     fn invalidate_solver_setup(&mut self) {
@@ -1955,7 +1988,7 @@ mod tests {
     use crate::preconditioner::PcSide;
     #[cfg(not(feature = "complex"))]
     use faer::Mat;
-    #[cfg(feature = "mpi")]
+    #[cfg(any(feature = "mpi", feature = "rayon"))]
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::sync::{
         Arc,
@@ -2002,6 +2035,15 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("mpi_test_guard poisoned")
+    }
+
+    #[cfg(feature = "rayon")]
+    fn rayon_test_guard() -> MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("rayon_test_guard poisoned")
     }
 
     #[test]
@@ -2557,18 +2599,14 @@ mod tests {
 
     #[cfg(feature = "complex")]
     #[test]
-    fn complex_rejects_pipelined_gmres_at_options_parse_time() {
+    fn complex_accepts_pipelined_gmres_at_options_parse_time() {
         let mut ksp = KspContext::new();
         let opts = KspOptions {
             ksp_type: Some("gmres".into()),
             gmres_variant: Some("pipelined".into()),
             ..Default::default()
         };
-        let err = ksp.set_from_options(&opts).unwrap_err();
-        assert!(matches!(
-            err,
-            KError::Unsupported(_) | KError::NotImplemented(_)
-        ));
+        assert!(ksp.set_from_options(&opts).is_ok());
     }
 
     #[cfg(not(feature = "complex"))]
@@ -2609,7 +2647,7 @@ mod tests {
 
     #[cfg(feature = "complex")]
     #[test]
-    fn fgmres_options_apply_rejects_pipelined_for_complex() {
+    fn fgmres_options_apply_accepts_pipelined_for_complex() {
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Fgmres).unwrap();
 
@@ -2617,7 +2655,7 @@ mod tests {
             fgmres_variant: Some("pipelined".into()),
             ..Default::default()
         };
-        assert!(ksp.set_from_options(&opts).is_err());
+        assert!(ksp.set_from_options(&opts).is_ok());
     }
 
     #[test]
@@ -2646,6 +2684,35 @@ mod tests {
             ws.reduction_options().mode,
             ReproMode::DeterministicAccurate
         ));
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn set_from_options_threads_context_does_not_touch_global_rayon() {
+        let _guard = rayon_test_guard();
+        crate::algebra::parallel::reset_global_rayon_config_calls();
+        let mut ksp = KspContext::new();
+        let opts = KspOptions {
+            threads: Some(4),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        assert_eq!(crate::algebra::parallel::global_rayon_config_calls(), 0);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn set_from_options_threads_global_touches_global_rayon() {
+        let _guard = rayon_test_guard();
+        crate::algebra::parallel::reset_global_rayon_config_calls();
+        let mut ksp = KspContext::new();
+        let opts = KspOptions {
+            threads: Some(2),
+            threads_mode: Some("global".into()),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        assert_eq!(crate::algebra::parallel::global_rayon_config_calls(), 1);
     }
 
     #[test]

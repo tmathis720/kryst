@@ -12,10 +12,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{Comm, UniverseComm, global_dot_conj_many_into, global_nrm2_many_into};
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{self, PcSide, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s};
+use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, ReductCtx};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -128,6 +128,7 @@ impl MinresSolver {
             owned = Workspace::new(n);
             &mut owned
         };
+        let red = ReductCtx::new(comm, Some(&*work));
         let mut buffers = MinresWorkspace::acquire(work, n);
         let MinresWorkspace {
             v_prev,
@@ -154,7 +155,7 @@ impl MinresSolver {
 
         let mut batched_norms = [R::default(); 2];
         let tmp2_view: &[S] = &tmp2[..n];
-        global_nrm2_many_into(comm, &[tmp2_view, b], &mut batched_norms);
+        red.norm2_many_into(&[tmp2_view, b], &mut batched_norms);
         let mut res = batched_norms[0];
         let res0 = res;
         for m in monitors {
@@ -216,7 +217,7 @@ impl MinresSolver {
                 pairs[used] = (tmp2_view, tmp2_view);
                 used += 1;
 
-                global_dot_conj_many_into(comm, &pairs[..used], &mut dot_results[..used]);
+                red.dot_many_into(&pairs[..used], &mut dot_results[..used]);
 
                 let alpha = dot_result_to_real(dot_results[0]);
                 let prev_proj = if k > 1 {
@@ -309,7 +310,15 @@ impl MinresSolver {
                 reason,
                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
             ) {
-                let true_res_check = recompute_true_residual_norm_s(a, b, x, comm, tmp1, scratch);
+                let true_res_check = recompute_true_residual_norm_s(
+                    a,
+                    b,
+                    x,
+                    comm,
+                    red.engine(),
+                    tmp1,
+                    scratch,
+                );
                 let (reason_true, _) = self.conv.check(true_res_check, bnorm, k);
                 if matches!(
                     reason_true,
@@ -331,7 +340,15 @@ impl MinresSolver {
             phi = phi_next;
         }
 
-        let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp1, scratch);
+        let true_res = recompute_true_residual_norm_s(
+            a,
+            b,
+            x,
+            comm,
+            red.engine(),
+            tmp1,
+            scratch,
+        );
 
         let bnorm_eff = bnorm.max(R::from(1e-32));
         let rel = true_res / bnorm_eff;

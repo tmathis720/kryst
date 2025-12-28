@@ -13,10 +13,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, take_or_resize};
+use crate::solver::common::{dot_result_to_real, take_or_resize, ReductCtx};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -76,6 +76,7 @@ impl TfqmrSolver {
                 &mut owned_workspace
             }
         };
+        let red = ReductCtx::new(comm, Some(&*work));
 
         let TfqmrWorkspace {
             r,
@@ -106,7 +107,7 @@ impl TfqmrSolver {
 
         let mut reductions = [S::zero(); 2];
         let initial_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
-        global_dot_conj_many_into(comm, &initial_pairs, &mut reductions);
+        red.dot_many_into(&initial_pairs, &mut reductions);
         let mut rho: S = reductions[0];
         let mut res_sq: R = dot_result_to_real(reductions[1]);
         if res_sq < R::default() {
@@ -146,7 +147,7 @@ impl TfqmrSolver {
                 pc.apply_s(pc_side, tmp_pc, v, scratch)?;
             }
 
-            let sigma: S = global_dot_conj(comm, r_tld, v);
+            let sigma: S = red.dot(r_tld, v);
             if !sigma.is_finite() || sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.final_residual = true_res;
@@ -164,7 +165,7 @@ impl TfqmrSolver {
             for i in 0..n {
                 u[i] = r[i] - alpha * v[i];
             }
-            let u_norm = global_nrm2(comm, u);
+            let u_norm = red.norm2(u);
             let mut tau_local: R = (u_norm * dpold).sqrt();
 
             for mstep in 0..2 {
@@ -190,7 +191,7 @@ impl TfqmrSolver {
                 let src_norm = if mstep == 0 {
                     u_norm
                 } else {
-                    global_nrm2(comm, src)
+                    red.norm2(src)
                 };
                 let psi: R = src_norm / tau_local.max(1e-300);
                 let c: R = 1.0 / (1.0 + psi * psi).sqrt();
@@ -231,7 +232,7 @@ impl TfqmrSolver {
                         tmp_pc.copy_from_slice(&au[..]);
                         pc.apply_s(pc_side, tmp_pc, au, scratch)?;
                     }
-                    true_res = global_nrm2(comm, au);
+                    true_res = red.norm2(au);
                     stats.final_residual = true_res;
                 } else {
                     stats.final_residual = dpest;
@@ -253,7 +254,7 @@ impl TfqmrSolver {
             }
 
             let update_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
-            global_dot_conj_many_into(comm, &update_pairs, &mut reductions);
+            red.dot_many_into(&update_pairs, &mut reductions);
             let rho_new: S = reductions[0];
             if !rho_new.is_finite() || rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
@@ -284,7 +285,7 @@ impl TfqmrSolver {
                     tmp_pc.copy_from_slice(&au[..]);
                     pc.apply_s(pc_side, tmp_pc, au, scratch)?;
                 }
-                true_res = global_nrm2(comm, au);
+                true_res = red.norm2(au);
                 stats.final_residual = true_res;
                 let (reason, s2) = self.conv.check(true_res, res0, 2 * k);
                 stats = s2;

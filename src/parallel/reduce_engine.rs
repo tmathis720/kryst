@@ -1,6 +1,7 @@
+use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 use crate::algebra::prelude::*;
 use crate::parallel::{Comm, UniverseComm};
-use crate::reduction::ReproMode;
+use crate::reduction::{CommDeterministic, Packet, ReproMode};
 use crate::utils::reduction::{ReductExec, ReductOptions, record_reduction};
 use std::sync::Arc;
 
@@ -16,6 +17,12 @@ pub trait ReductionEngine: Send + Sync + std::fmt::Debug {
 
     fn allreduce_sum_r(&self, x: R) -> R;
     fn allreduce_sum_s(&self, x: S) -> S;
+    fn norm2_s(&self, x: &[S]) -> R;
+    fn dot_s(&self, x: &[S], y: &[S]) -> S;
+
+    fn sum_vec_r(&self, buf: Vec<R>) -> Vec<R> {
+        self.iallreduce_sum_vec_r(buf).wait()
+    }
 
     fn iallreduce_sum_r(&self, x: R) -> ReduceHandle<R>;
     fn iallreduce_sum_s(&self, x: S) -> ReduceHandle<S>;
@@ -150,18 +157,14 @@ impl CommReductionEngine {
     }
 
     fn effective_mode(&self) -> ReproMode {
-        let mut mode = self.opts.effective_mode();
-        if self.comm.is_reproducible() && matches!(mode, ReproMode::Fast) {
-            mode = ReproMode::Deterministic;
-        }
-        mode
+        self.opts.effective_mode()
     }
 
     fn async_enabled(&self) -> bool {
         if matches!(self.opts.exec, ReductExec::Sync) {
             return false;
         }
-        if self.opts.reproducible || self.comm.is_reproducible() {
+        if self.opts.reproducible {
             return false;
         }
         if self.comm.size() <= 1 {
@@ -224,15 +227,59 @@ impl ReductionEngine for CommReductionEngine {
     }
 
     fn allreduce_sum_r(&self, x: R) -> R {
-        crate::parallel::reduce::allreduce_sum_real_with_mode(&self.comm, x, self.effective_mode())
+        let mode = self.effective_mode();
+        match mode {
+            ReproMode::Fast => self.comm.allreduce_sum_real(x),
+            _ => {
+                let packet = Packet::<1> { v: [x] };
+                self.comm.allreduce_det(&packet, mode).v[0]
+            }
+        }
     }
 
     fn allreduce_sum_s(&self, x: S) -> S {
-        crate::parallel::reduce::allreduce_sum_scalar_with_mode(
-            &self.comm,
-            x,
-            self.effective_mode(),
-        )
+        let mode = self.effective_mode();
+        match mode {
+            ReproMode::Fast => self.comm.allreduce_sum_scalar(x),
+            _ => {
+                #[cfg(feature = "complex")]
+                {
+                    let packet = Packet::<2> {
+                        v: [x.real(), x.imag()],
+                    };
+                    let reduced = self.comm.allreduce_det(&packet, mode);
+                    S::from_parts(reduced.v[0], reduced.v[1])
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    let packet = Packet::<1> { v: [x.real()] };
+                    let reduced = self.comm.allreduce_det(&packet, mode);
+                    S::from_real(reduced.v[0])
+                }
+            }
+        }
+    }
+
+    fn norm2_s(&self, x: &[S]) -> R {
+        let mode = self.effective_mode();
+        let local = sum_abs2_local_with_mode(x, mode);
+        let global = self.allreduce_sum_r(local);
+        let clamped = if global >= 0.0 { global } else { 0.0 };
+        clamped.sqrt()
+    }
+
+    fn dot_s(&self, x: &[S], y: &[S]) -> S {
+        debug_assert_eq!(x.len(), y.len());
+        let mode = self.effective_mode();
+        let local = dot_conj_local_with_mode(x, y, mode);
+        self.allreduce_sum_s(local)
+    }
+
+    fn sum_vec_r(&self, buf: Vec<R>) -> Vec<R> {
+        record_reduction(buf.len());
+        let mut out = buf;
+        self.reduce_vec_in_place(&mut out);
+        out
     }
 
     fn iallreduce_sum_r(&self, x: R) -> ReduceHandle<R> {

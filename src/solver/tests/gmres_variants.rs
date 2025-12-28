@@ -32,18 +32,6 @@ fn gmres_pipelined_tracks_classical_convergence() -> Result<(), KError> {
 
     let (_x_classic, it_classic, res_classic) =
         solve_with_variant(&a, &b, GmresVariant::Classical, restart)?;
-    if cfg!(feature = "complex") {
-        match solve_with_variant(&a, &b, GmresVariant::Pipelined, restart) {
-            Err(KError::NotImplemented(msg)) => {
-                assert!(msg.contains("Pipelined GMRES is not yet implemented for complex scalars"));
-            }
-            Ok(_) => panic!("pipelined GMRES should report NotImplemented for complex scalars"),
-            Err(err) => return Err(err),
-        }
-        assert!(res_classic <= R::from(1e-8) * bnorm + R::from(1e-10));
-        return Ok(());
-    }
-
     let (_x_pipe, it_pipe, res_pipe) =
         solve_with_variant(&a, &b, GmresVariant::Pipelined, restart)?;
 

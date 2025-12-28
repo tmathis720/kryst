@@ -14,12 +14,11 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{
-    UniverseComm, global_dot_conj_many_into, global_nrm2, global_nrm2_many_into,
-};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
+use crate::solver::common::ReductCtx;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use smallvec::SmallVec;
 
@@ -156,7 +155,7 @@ impl PcaGmresSolver {
         k: usize,
         w: &mut [S],
         hcols: &mut [Vec<S>],
-        comm: &UniverseComm,
+        red: &ReductCtx,
     ) -> R {
         let hcol = &mut hcols[k];
         // First pass
@@ -168,7 +167,7 @@ impl PcaGmresSolver {
             for i in 0..=k {
                 pairs.push((&v_basis[i], w_view));
             }
-            global_dot_conj_many_into(comm, pairs.as_slice(), first_pass.as_mut_slice());
+            red.dot_many_into(pairs.as_slice(), first_pass.as_mut_slice());
         }
         {
             let w_mut = &mut w[..];
@@ -189,7 +188,7 @@ impl PcaGmresSolver {
                 for i in 0..=k {
                     pairs.push((&v_basis[i], w_view));
                 }
-                global_dot_conj_many_into(comm, pairs.as_slice(), corr.as_mut_slice());
+                red.dot_many_into(pairs.as_slice(), corr.as_mut_slice());
             }
             {
                 let w_mut = &mut w[..];
@@ -203,7 +202,7 @@ impl PcaGmresSolver {
                 }
             }
         }
-        let hnorm = global_nrm2(comm, w);
+        let hnorm = red.norm2(w);
         if hcol.len() > k + 1 {
             hcol[k + 1] = S::from_real(hnorm);
             for val in hcol.iter_mut().skip(k + 2) {
@@ -308,6 +307,7 @@ impl PcaGmresSolver {
             &mut owned
         };
         self.ensure_workspace(ws, n);
+        let red = ReductCtx::new(comm, Some(&*ws));
 
         a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
         for i in 0..n {
@@ -317,7 +317,7 @@ impl PcaGmresSolver {
         let (beta0, mut bnorm) = match mode {
             PcaPcMode::None => {
                 let mut norms = [R::zero(); 2];
-                global_nrm2_many_into(comm, &[&ws.tmp1, b], &mut norms);
+                red.norm2_many_into(&[&ws.tmp1, b], &mut norms);
                 let beta = norms[0];
                 let v0 = &mut ws.q_s[0][..];
                 if beta > R::default() {
@@ -333,7 +333,7 @@ impl PcaGmresSolver {
             PcaPcMode::Left => {
                 Self::apply_pc(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
                 let mut norms = [R::zero(); 2];
-                global_nrm2_many_into(comm, &[&ws.tmp2, b], &mut norms);
+                red.norm2_many_into(&[&ws.tmp2, b], &mut norms);
                 let beta = norms[0];
                 let v0 = &mut ws.q_s[0][..];
                 if beta > R::default() {
@@ -348,7 +348,7 @@ impl PcaGmresSolver {
             }
             PcaPcMode::Right => {
                 let mut norms = [R::zero(); 2];
-                global_nrm2_many_into(comm, &[&ws.tmp1, b], &mut norms);
+                red.norm2_many_into(&[&ws.tmp1, b], &mut norms);
                 let beta = norms[0];
                 let v0 = &mut ws.q_s[0][..];
                 if beta > R::default() {
@@ -411,7 +411,8 @@ impl PcaGmresSolver {
                     }
                 }
 
-                let hnorm = self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h_s, comm);
+                let hnorm =
+                    self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h_s, &red);
 
                 let vnext = &mut ws.q_s[k + 1][..];
                 if hnorm > R::default() {
@@ -488,7 +489,7 @@ impl PcaGmresSolver {
             }
             let beta0_new: R = match mode {
                 PcaPcMode::None => {
-                    let beta = global_nrm2(comm, &ws.tmp1);
+                    let beta = red.norm2(&ws.tmp1);
                     let v0 = &mut ws.q_s[0][..];
                     if beta > R::default() {
                         let denom = S::from_real(beta);
@@ -502,7 +503,7 @@ impl PcaGmresSolver {
                 }
                 PcaPcMode::Left => {
                     Self::apply_pc(pc, PcSide::Left, &ws.tmp1, &mut ws.tmp2, &mut ws.bridge)?;
-                    let beta = global_nrm2(comm, &ws.tmp2);
+                    let beta = red.norm2(&ws.tmp2);
                     let v0 = &mut ws.q_s[0][..];
                     if beta > R::default() {
                         let denom = S::from_real(beta);
@@ -515,7 +516,7 @@ impl PcaGmresSolver {
                     beta
                 }
                 PcaPcMode::Right => {
-                    let beta = global_nrm2(comm, &ws.tmp1);
+                    let beta = red.norm2(&ws.tmp1);
                     let v0 = &mut ws.q_s[0][..];
                     if beta > R::default() {
                         let denom = S::from_real(beta);
@@ -553,7 +554,7 @@ impl PcaGmresSolver {
         for i in 0..n {
             ws.tmp1[i] = b[i] - ws.tmp1[i];
         }
-        let true_res: R = global_nrm2(comm, &ws.tmp1);
+        let true_res: R = red.norm2(&ws.tmp1);
         let (_r, mut s) = self.conv.check(true_res, bnorm, total_iters);
         s.iterations = total_iters;
         s.final_residual = true_res;
@@ -648,7 +649,8 @@ mod tests {
         w[1] = S::one();
 
         let comm = UniverseComm::NoComm(NoComm);
-        let hnorm = solver.project_and_normalize(&ws.q_s, 0, &mut w, &mut ws.h_s, &comm);
+        let red = ReductCtx::new(&comm, Some(&ws));
+        let hnorm = solver.project_and_normalize(&ws.q_s, 0, &mut w, &mut ws.h_s, &red);
 
         let tol = ATOL;
         assert!((hnorm - S::one().real()).abs() < tol);

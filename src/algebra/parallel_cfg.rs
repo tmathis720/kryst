@@ -1,4 +1,5 @@
 use once_cell::sync::OnceCell;
+use std::cell::Cell;
 use std::sync::RwLock;
 
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +39,33 @@ pub fn parallel_tune() -> ParallelTune {
         .read()
         .map(|g| *g)
         .unwrap_or_else(|_| ParallelTune::default())
+}
+
+thread_local! {
+    static FORCE_SERIAL: Cell<bool> = Cell::new(false);
+}
+
+pub struct SerialGuard {
+    prev: bool,
+}
+
+impl Drop for SerialGuard {
+    fn drop(&mut self) {
+        FORCE_SERIAL.with(|flag| flag.set(self.prev));
+    }
+}
+
+pub fn force_serial() -> bool {
+    FORCE_SERIAL.with(|flag| flag.get())
+}
+
+pub fn serial_guard(enable: bool) -> SerialGuard {
+    let prev = FORCE_SERIAL.with(|flag| {
+        let prev = flag.get();
+        flag.set(enable);
+        prev
+    });
+    SerialGuard { prev }
 }
 
 /// Configure Rayon for reproducible runs by constraining the global pool.

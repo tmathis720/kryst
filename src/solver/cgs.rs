@@ -19,10 +19,12 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{UniverseComm, global_dot_conj_many_into};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, take_or_resize};
+use crate::solver::common::{
+    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
 #[cfg(feature = "logging")]
@@ -127,6 +129,7 @@ impl CgsSolver {
         let work = work.ok_or_else(|| {
             KError::InvalidInput("CGS requires a Workspace; use KSP or Workspace::new(n)".into())
         })?;
+        let red = ReductCtx::new(comm, Some(&*work));
 
         if b.is_empty() {
             return Ok(SolveStats::new(0, 0.0, ConvergedReason::ConvergedAtol));
@@ -163,7 +166,7 @@ impl CgsSolver {
             (&r_tld[..], &r_tld[..]),
         ];
         let mut dot_results = [S::zero(); 3];
-        global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+        red.dot_many_into(&dot_pairs, &mut dot_results);
         let mut rho = dot_results[0];
         let mut rnorm = norm_from_dot(dot_results[1]);
         let rtld_norm = norm_from_dot(dot_results[2]);
@@ -196,7 +199,7 @@ impl CgsSolver {
 
             let dot_pairs = [(&r_tld[..], &v[..]), (&v[..], &v[..])];
             let mut dot_results = [S::zero(); 2];
-            global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+            red.dot_many_into(&dot_pairs, &mut dot_results);
             let sigma = dot_results[0];
             let sigma_abs = sigma.abs();
             let v_norm = norm_from_dot(dot_results[1]);
@@ -223,7 +226,7 @@ impl CgsSolver {
 
             let dot_pairs = [(&r[..], &r[..]), (&r_tld[..], &r[..])];
             let mut dot_results = [S::zero(); 2];
-            global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+            red.dot_many_into(&dot_pairs, &mut dot_results);
             rnorm = norm_from_dot(dot_results[0]);
             for m in monitors {
                 m(k, rnorm);
@@ -253,7 +256,15 @@ impl CgsSolver {
             }
         }
 
-        let true_res = recompute_true_residual_norm_s(a, b, x, comm, &mut *w, &mut *scratch);
+        let true_res = recompute_true_residual_norm_s(
+            a,
+            b,
+            x,
+            comm,
+            red.engine(),
+            &mut *w,
+            &mut *scratch,
+        );
         Ok(SolveStats::new(
             iters,
             true_res,

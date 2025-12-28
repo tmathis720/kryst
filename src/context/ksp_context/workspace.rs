@@ -339,7 +339,11 @@ impl Workspace {
         ensure_len(&mut self.g, g_len);
         ensure_len(&mut self.pipelined_w, n);
         ensure_len(&mut self.pipelined_wtmp, n);
-        ensure_len(&mut self.pipelined_payload, m + 2);
+        #[cfg(feature = "complex")]
+        let payload_len = 2 * (m + 1) + 1;
+        #[cfg(not(feature = "complex"))]
+        let payload_len = m + 2;
+        ensure_len(&mut self.pipelined_payload, payload_len);
 
         if spec.block_s > 0 {
             ensure_len(&mut self.blk_scratch, n * spec.block_s);
@@ -656,16 +660,109 @@ impl Workspace {
     #[cfg(feature = "complex")]
     pub fn finish_pipelined_arnoldi(
         &mut self,
-        _k: usize,
-        _n: usize,
-        _red: &dyn crate::parallel::ReductionEngine,
-        _policy: ReorthPolicy,
-        _tol: R,
-        _glob: Vec<R>,
+        k: usize,
+        n: usize,
+        red: &dyn crate::parallel::ReductionEngine,
+        policy: ReorthPolicy,
+        tol: R,
+        mut glob: Vec<R>,
     ) -> Result<usize, crate::error::KError> {
-        Err(crate::error::KError::NotImplemented(
-            "pipelined GMRES is not yet implemented for complex scalars".into(),
-        ))
+        let payload_len = 2 * (k + 1) + 1;
+        if glob.len() != payload_len {
+            glob.resize(payload_len, R::zero());
+        }
+
+        let mut reductions = 1usize;
+        let mut sum_h2 = R::zero();
+        for i in 0..=k {
+            let hij = S::from_parts(glob[2 * i], glob[2 * i + 1]);
+            sum_h2 += hij.abs2();
+            let vi = &self.v_mem[i * n..(i + 1) * n];
+            for idx in 0..n {
+                self.pipelined_wtmp[idx] -= hij * vi[idx];
+            }
+            *self.h_at_mut(i, k) = hij;
+        }
+
+        let total_norm_sq = glob[2 * (k + 1)];
+        let mut hnext_sq = (total_norm_sq - sum_h2).max(R::zero());
+        if !hnext_sq.is_finite() {
+            hnext_sq = R::zero();
+        }
+
+        let tol = tol.max(R::zero());
+        let tol_sq = tol * tol;
+        let trigger_reorth = match policy {
+            ReorthPolicy::Never => false,
+            ReorthPolicy::Always => true,
+            ReorthPolicy::IfNeeded => {
+                total_norm_sq > R::zero() && hnext_sq < tol_sq * total_norm_sq
+            }
+        };
+
+        if trigger_reorth {
+            reductions += 1;
+            glob.resize(payload_len, R::zero());
+            for i in 0..=k {
+                let vi = &self.v_mem[i * n..(i + 1) * n];
+                let mut acc = S::zero();
+                for (&a, &b) in vi.iter().zip(&self.pipelined_wtmp[..n]) {
+                    acc = acc + a.conj() * b;
+                }
+                glob[2 * i] = acc.real();
+                glob[2 * i + 1] = acc.imag();
+            }
+            let mut norm_sq = R::zero();
+            for &value in &self.pipelined_wtmp[..n] {
+                norm_sq += value.abs2();
+            }
+            glob[2 * (k + 1)] = norm_sq;
+
+            let corr = red.iallreduce_sum_vec_r(glob).wait();
+
+            let mut delta_norm_sq = R::zero();
+            for i in 0..=k {
+                let delta = S::from_parts(corr[2 * i], corr[2 * i + 1]);
+                delta_norm_sq += delta.abs2();
+                let vi = &self.v_mem[i * n..(i + 1) * n];
+                for idx in 0..n {
+                    self.pipelined_wtmp[idx] -= delta * vi[idx];
+                }
+                let hij = *self.h_at_mut(i, k) + delta;
+                *self.h_at_mut(i, k) = hij;
+            }
+
+            sum_h2 = R::zero();
+            for i in 0..=k {
+                let hij = *self.h_at_mut(i, k);
+                sum_h2 += hij.abs2();
+            }
+
+            let wtmp_norm_sq = corr[2 * (k + 1)];
+            hnext_sq = (wtmp_norm_sq - delta_norm_sq).max(R::zero());
+            if !hnext_sq.is_finite() {
+                hnext_sq = R::zero();
+            }
+            glob = corr;
+        }
+
+        let hnext = hnext_sq.sqrt();
+        *self.h_at_mut(k + 1, k) = S::from_real(hnext);
+
+        let base = (k + 1) * n;
+        if hnext > R::zero() {
+            let inv = S::from_real(hnext.recip());
+            for idx in 0..n {
+                self.v_mem[base + idx] = self.pipelined_wtmp[idx] * inv;
+            }
+        } else {
+            for idx in 0..n {
+                self.v_mem[base + idx] = S::zero();
+            }
+        }
+
+        self.pipelined_payload = glob;
+        Ok(reductions)
     }
 
     #[cfg(not(feature = "complex"))]
@@ -690,16 +787,20 @@ impl Workspace {
     #[cfg(feature = "complex")]
     pub fn finish_pipe_reduction(
         &mut self,
-        _pipe: PipeReduct,
-        _k: usize,
-        _n: usize,
-        _red: &dyn crate::parallel::ReductionEngine,
-        _policy: ReorthPolicy,
-        _tol: R,
+        pipe: PipeReduct,
+        k: usize,
+        n: usize,
+        red: &dyn crate::parallel::ReductionEngine,
+        policy: ReorthPolicy,
+        tol: R,
     ) -> Result<usize, crate::error::KError> {
-        Err(crate::error::KError::NotImplemented(
-            "pipelined GMRES is not yet implemented for complex scalars".into(),
-        ))
+        match pipe {
+            PipeReduct::Sync { reductions } => Ok(reductions),
+            PipeReduct::Async { handle } => {
+                let glob = handle.wait();
+                self.finish_pipelined_arnoldi(k, n, red, policy, tol, glob)
+            }
+        }
     }
 
     #[cfg(not(feature = "complex"))]
@@ -741,14 +842,42 @@ impl Workspace {
         &mut self,
         k: usize,
         n: usize,
-        _red: &dyn crate::parallel::ReductionEngine,
-        _policy: ReorthPolicy,
-        _tol: R,
+        red: &dyn crate::parallel::ReductionEngine,
+        policy: ReorthPolicy,
+        tol: R,
     ) -> Result<PipeReduct, crate::error::KError> {
-        let _ = (k, n);
-        Err(crate::error::KError::NotImplemented(
-            "pipelined GMRES is not yet implemented for complex scalars".into(),
-        ))
+        debug_assert!(k < self.m);
+
+        let w = &self.pipelined_w[..n];
+        let payload_len = 2 * (k + 1) + 1;
+        let mut payload = std::mem::take(&mut self.pipelined_payload);
+        payload.resize(payload_len, R::zero());
+        for i in 0..=k {
+            let vi = &self.v_mem[i * n..(i + 1) * n];
+            let mut acc = S::zero();
+            for (&a, &b) in vi.iter().zip(w) {
+                acc = acc + a.conj() * b;
+            }
+            payload[2 * i] = acc.real();
+            payload[2 * i + 1] = acc.imag();
+        }
+        let mut norm_sq = R::zero();
+        for &value in w.iter() {
+            norm_sq += value.abs2();
+        }
+        payload[2 * (k + 1)] = norm_sq;
+
+        let handle = red.iallreduce_sum_vec_r(payload);
+
+        self.pipelined_wtmp[..n].copy_from_slice(w);
+
+        if handle.is_ready() {
+            let payload = handle.wait();
+            let reductions = self.finish_pipelined_arnoldi(k, n, red, policy, tol, payload)?;
+            Ok(PipeReduct::Sync { reductions })
+        } else {
+            Ok(PipeReduct::Async { handle })
+        }
     }
 }
 

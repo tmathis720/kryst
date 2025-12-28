@@ -8,13 +8,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{
-    UniverseComm, allreduce_sum_scalar_with_mode, global_dot_conj, global_dot_conj_many_into,
-    global_nrm2, global_reduction_mode,
-};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::solver::common::dot_result_to_real;
+use crate::solver::common::{dot_result_to_real, ReductCtx};
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
@@ -23,12 +20,8 @@ use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 use std::cmp::min;
 
-fn reduce_real(comm: &UniverseComm, value: R) -> R {
-    dot_result_to_real(allreduce_sum_scalar_with_mode(
-        comm,
-        S::from_real(value),
-        global_reduction_mode(),
-    ))
+fn reduce_real(red: &ReductCtx, value: R) -> R {
+    red.engine().allreduce_sum_r(value)
 }
 
 #[derive(Clone, Debug)]
@@ -294,14 +287,14 @@ impl IdrsWorkspace {
     fn normalize_column(
         &mut self,
         col_idx: usize,
-        comm: &UniverseComm,
+        red: &ReductCtx,
         stats: &mut IdrsStats,
     ) -> Result<(), KError> {
         let col = self.p_col_mut(col_idx);
         let local = col
             .iter()
             .fold(R::default(), |acc, &val| acc + val.abs() * val.abs());
-        let norm_sq = reduce_real(comm, local);
+        let norm_sq = reduce_real(red, local);
         stats.dots += 1;
         let norm = norm_sq.sqrt();
         if norm <= f64::EPSILON {
@@ -317,7 +310,7 @@ impl IdrsWorkspace {
     fn orthonormalize_column(
         &mut self,
         col_idx: usize,
-        comm: &UniverseComm,
+        red: &ReductCtx,
         stats: &mut IdrsStats,
     ) -> Result<(), KError> {
         let n = self.n;
@@ -326,14 +319,14 @@ impl IdrsWorkspace {
             let (col, _) = tail.split_at_mut(n);
             for k in 0..col_idx {
                 let prev = &prev_cols[k * n..(k + 1) * n];
-                let coeff = global_dot_conj(comm, prev, col);
+                let coeff = red.dot(prev, col);
                 stats.dots += 1;
                 for (entry, &prev_val) in col.iter_mut().zip(prev.iter()) {
                     *entry -= coeff * prev_val;
                 }
             }
         }
-        self.normalize_column(col_idx, comm, stats)
+        self.normalize_column(col_idx, red, stats)
     }
 }
 
@@ -362,11 +355,7 @@ impl IdrsSolver {
         }
     }
 
-    fn build_shadow_space(
-        &mut self,
-        comm: &UniverseComm,
-        stats: &mut IdrsStats,
-    ) -> Result<(), KError> {
+    fn build_shadow_space(&mut self, red: &ReductCtx, stats: &mut IdrsStats) -> Result<(), KError> {
         match &self.opts.p_policy {
             ShadowP::RandomOrthonormal { seed } => {
                 let actual_seed = seed.wrapping_add(self.random_bump);
@@ -379,7 +368,7 @@ impl IdrsSolver {
                             *val = S::from_real(sample);
                         }
                     }
-                    self.ws.orthonormalize_column(j, comm, stats)?;
+                    self.ws.orthonormalize_column(j, red, stats)?;
                 }
             }
             ShadowP::BlockDeflation { partition } => {
@@ -414,7 +403,7 @@ impl IdrsSolver {
                             ));
                         }
                     }
-                    self.ws.normalize_column(col_idx, comm, stats)?;
+                    self.ws.normalize_column(col_idx, red, stats)?;
                 }
             }
             #[cfg(feature = "backend-faer")]
@@ -432,7 +421,7 @@ impl IdrsSolver {
                             dst[i] = S::from_real(p[(i, j)]);
                         }
                     }
-                    self.ws.normalize_column(j, comm, stats)?;
+                    self.ws.normalize_column(j, red, stats)?;
                 }
             }
         }
@@ -442,7 +431,7 @@ impl IdrsSolver {
     fn attempt_breakdown_repair(
         &mut self,
         attempts: &mut usize,
-        comm: &UniverseComm,
+        red: &ReductCtx,
         stats: &mut IdrsStats,
     ) -> Result<bool, KError> {
         if let BreakdownRepair::RegenerateP { max_retries, seed } = self.opts.breakdown_repair {
@@ -452,14 +441,14 @@ impl IdrsSolver {
             *attempts += 1;
             if matches!(self.opts.p_policy, ShadowP::RandomOrthonormal { .. }) {
                 self.random_bump = self.random_bump.wrapping_add(1);
-                self.build_shadow_space(comm, stats)?;
+                self.build_shadow_space(red, stats)?;
             } else {
                 let saved = self.opts.p_policy.clone();
                 self.opts.p_policy = ShadowP::RandomOrthonormal {
                     seed: seed.wrapping_add(*attempts as u64),
                 };
                 self.random_bump = 0;
-                self.build_shadow_space(comm, stats)?;
+                self.build_shadow_space(red, stats)?;
                 self.opts.p_policy = saved;
             }
             return Ok(true);
@@ -467,25 +456,25 @@ impl IdrsSolver {
         Ok(false)
     }
 
-    fn compute_ph_r(&mut self, comm: &UniverseComm, stats: &mut IdrsStats) {
+    fn compute_ph_r(&mut self, red: &ReductCtx, stats: &mut IdrsStats) {
         let n = self.ws.n;
         let s = self.ws.s;
         for j in 0..s {
             let col = self.ws.p_col(j);
-            let dot = global_dot_conj(comm, col, &self.ws.r[..n]);
+            let dot = red.dot(col, &self.ws.r[..n]);
             self.ws.ph_r[j] = dot;
         }
         stats.dots += s;
     }
 
-    fn compute_ph_drn(&mut self, comm: &UniverseComm, stats: &mut IdrsStats) {
+    fn compute_ph_drn(&mut self, red: &ReductCtx, stats: &mut IdrsStats) {
         let n = self.ws.n;
         let s = self.ws.s;
         for i in 0..s {
             let vec = &self.ws.g_hist[i];
             for j in 0..s {
                 let col = self.ws.p_col(j);
-                let dot = global_dot_conj(comm, col, &vec[..n]);
+                let dot = red.dot(col, &vec[..n]);
                 self.ws.ph_drn[i * s + j] = dot;
             }
         }
@@ -588,9 +577,9 @@ impl IdrsSolver {
         Ok(())
     }
 
-    fn omega_value(&self, comm: &UniverseComm, stats: &mut IdrsStats, t: &[S], v: &[S]) -> S {
+    fn omega_value(&self, red: &ReductCtx, stats: &mut IdrsStats, t: &[S], v: &[S]) -> S {
         let mut reductions = [S::zero(); 2];
-        global_dot_conj_many_into(comm, &[(t, v), (t, t)], &mut reductions);
+        red.dot_many_into(&[(t, v), (t, t)], &mut reductions);
         stats.dots += reductions.len();
         let tv = reductions[0];
         let tt = reductions[1];
@@ -604,7 +593,7 @@ impl IdrsSolver {
             let local_vv = v
                 .iter()
                 .fold(R::default(), |acc, &vi| acc + vi.abs() * vi.abs());
-            let vv = reduce_real(comm, local_vv);
+            let vv = reduce_real(red, local_vv);
             stats.dots += 1;
             let denom = (tt_real * vv).sqrt();
             if denom > 0.0 {
@@ -664,6 +653,7 @@ impl IdrsSolver {
         }
 
         self.ws.ensure(n, self.opts.s);
+        let red = ReductCtx::new(comm, None);
         let mut stats = IdrsStats::default();
 
         let monitors = monitors.unwrap_or(&[]);
@@ -691,14 +681,14 @@ impl IdrsSolver {
             self.ws.r[..n].copy_from_slice(&self.ws.r_true[..n]);
         }
 
-        let bnorm = global_nrm2(comm, &b[..n]);
+        let bnorm = red.norm2(&b[..n]);
         stats.dots += 1;
         let norm_scale = if bnorm > R::default() {
             bnorm
         } else {
             S::one().real()
         };
-        let mut res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
+        let mut res_norm = red.norm2(&self.ws.r_true[..n]);
         stats.dots += 1;
         self.monitor(monitors, 0, res_norm);
         if res_norm <= self.opts.tol * norm_scale {
@@ -710,7 +700,7 @@ impl IdrsSolver {
             return Ok(out);
         }
 
-        self.build_shadow_space(comm, &mut stats)?;
+        self.build_shadow_space(&red, &mut stats)?;
 
         for buf in &mut self.ws.d_r {
             buf.fill(S::zero());
@@ -738,19 +728,19 @@ impl IdrsSolver {
                     (&self.ws.v[..n], &self.ws.r[..n]),
                     (&self.ws.v[..n], &self.ws.v[..n]),
                 ];
-                global_dot_conj_many_into(comm, &dot_pairs, &mut reductions);
+                red.dot_many_into(&dot_pairs, &mut reductions);
                 stats.dots += reductions.len();
                 let vr = reductions[0];
                 let vv = reductions[1];
                 if vv.abs() <= f64::EPSILON {
-                    if self.attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)? {
+                    if self.attempt_breakdown_repair(&mut breakdown_attempts, &red, &mut stats)? {
                         continue;
                     }
                     return Err(KError::BreakdownOrIndefinite);
                 }
                 let omega = vr / vv;
                 if omega.abs() <= f64::EPSILON {
-                    if self.attempt_breakdown_repair(&mut breakdown_attempts, comm, &mut stats)? {
+                    if self.attempt_breakdown_repair(&mut breakdown_attempts, &red, &mut stats)? {
                         continue;
                     }
                     return Err(KError::BreakdownOrIndefinite);
@@ -777,7 +767,7 @@ impl IdrsSolver {
 
             self.ws.push_history_from_buffers();
 
-            res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
+            res_norm = red.norm2(&self.ws.r_true[..n]);
             stats.dots += 1;
             self.monitor(monitors, step + 1, res_norm);
             if res_norm <= self.opts.tol * norm_scale {
@@ -796,10 +786,10 @@ impl IdrsSolver {
         while iteration < self.opts.maxit {
             'block: for inner in 0..=self.opts.s {
                 loop {
-                    self.compute_ph_r(comm, &mut stats);
-                    self.compute_ph_drn(comm, &mut stats);
+                    self.compute_ph_r(&red, &mut stats);
+                    self.compute_ph_drn(&red, &mut stats);
                     if self.solve_small_system().is_err() {
-                        if self.attempt_breakdown_repair(&mut attempts, comm, &mut stats)? {
+                        if self.attempt_breakdown_repair(&mut attempts, &red, &mut stats)? {
                             continue 'block;
                         }
                         return Err(KError::BreakdownOrIndefinite);
@@ -822,14 +812,12 @@ impl IdrsSolver {
                                 &mut self.ws.scratch,
                                 &mut stats,
                             )?;
-                            omega_block = self.omega_value(
-                                comm,
-                                &mut stats,
-                                &self.ws.t[..n],
-                                &self.ws.v[..n],
-                            );
+                            omega_block =
+                                self.omega_value(&red, &mut stats, &self.ws.t[..n], &self.ws.v[..n]);
                             if omega_block.abs() <= f64::EPSILON {
-                                if self.attempt_breakdown_repair(&mut attempts, comm, &mut stats)? {
+                                if self
+                                    .attempt_breakdown_repair(&mut attempts, &red, &mut stats)?
+                                {
                                     continue 'block;
                                 }
                                 return Err(KError::BreakdownOrIndefinite);
@@ -923,7 +911,7 @@ impl IdrsSolver {
                         stats.residual_replacements += 1;
                     }
 
-                    res_norm = global_nrm2(comm, &self.ws.r_true[..n]);
+                    res_norm = red.norm2(&self.ws.r_true[..n]);
                     stats.dots += 1;
                     self.monitor(monitors, iteration, res_norm);
                     if res_norm <= self.opts.tol * norm_scale {

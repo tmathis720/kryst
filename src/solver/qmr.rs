@@ -13,12 +13,12 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{
-    UniverseComm, global_dot_conj, global_dot_conj_many_into, global_nrm2, global_nrm2_many_into,
-};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, take_or_resize};
+use crate::solver::common::{
+    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -87,6 +87,7 @@ impl QmrSolver {
                 &mut owned_workspace
             }
         };
+        let red = ReductCtx::new(comm, Some(&*work));
         let buffers = QmrWorkspace::acquire(work, ncols);
         let QmrWorkspace {
             r,
@@ -114,7 +115,7 @@ impl QmrSolver {
 
         let mut norms = [0.0; 2];
         let r_view: &[S] = &r[..];
-        global_nrm2_many_into(comm, &[r_view, b], &mut norms);
+        red.norm2_many_into(&[r_view, b], &mut norms);
         let mut res = norms[0];
         let bnorm = norms[1].max(1e-32);
 
@@ -124,13 +125,21 @@ impl QmrSolver {
 
         let (reason0, mut stats0) = self.conv.check(res, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+            let true_res = recompute_true_residual_norm_s(
+                a,
+                b,
+                x,
+                comm,
+                red.engine(),
+                tmp_true,
+                scratch,
+            );
             stats0.final_residual = true_res;
             return Ok(stats0);
         }
 
         let eps = 1e-300;
-        let mut rho = global_dot_conj(comm, r_tld, r);
+        let mut rho = red.dot(r_tld, r);
         if rho.abs() <= eps {
             return Err(KError::IndefiniteMatrix);
         }
@@ -140,7 +149,7 @@ impl QmrSolver {
                 p.copy_from_slice(r);
                 p_tld.copy_from_slice(r_tld);
             } else {
-                let rho_new = global_dot_conj(comm, r_tld, r);
+                let rho_new = red.dot(r_tld, r);
                 if rho_new.abs() <= eps {
                     return Err(KError::IndefiniteMatrix);
                 }
@@ -160,7 +169,7 @@ impl QmrSolver {
             a.matvec_s(p, v, scratch);
             a.t_matvec_s(p_tld, v_tld, scratch);
 
-            let sigma = global_dot_conj(comm, p_tld, v);
+            let sigma = red.dot(p_tld, v);
             if sigma.abs() <= eps {
                 return Err(KError::IndefiniteMatrix);
             }
@@ -174,7 +183,7 @@ impl QmrSolver {
             let mut reductions = [S::zero(); 2];
             let t_view: &[S] = &t[..];
             let s_view: &[S] = &s[..];
-            global_dot_conj_many_into(comm, &[(t_view, t_view), (t_view, s_view)], &mut reductions);
+            red.dot_many_into(&[(t_view, t_view), (t_view, s_view)], &mut reductions);
             let tt = dot_result_to_real(reductions[0]);
             if tt <= eps || !tt.is_finite() {
                 return Err(KError::IndefiniteMatrix);
@@ -192,20 +201,36 @@ impl QmrSolver {
                 r_tld[i] = si - omega.conj() * ti;
             }
 
-            res = global_nrm2(comm, r);
+            res = red.norm2(r);
             for m in monitors {
                 m(k + 1, res);
             }
 
             let (reason, mut stats) = self.conv.check(res, bnorm, k + 1);
             if !matches!(reason, ConvergedReason::Continued) {
-                let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+                let true_res = recompute_true_residual_norm_s(
+                    a,
+                    b,
+                    x,
+                    comm,
+                    red.engine(),
+                    tmp_true,
+                    scratch,
+                );
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
         }
 
-        let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+        let true_res = recompute_true_residual_norm_s(
+            a,
+            b,
+            x,
+            comm,
+            red.engine(),
+            tmp_true,
+            scratch,
+        );
         Ok(SolveStats::new(
             self.conv.max_iters,
             true_res,

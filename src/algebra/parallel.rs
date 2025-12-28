@@ -10,15 +10,21 @@
 #![allow(clippy::needless_borrow)]
 
 use crate::algebra::prelude::*;
+use crate::reduction::{Kahan, ReproMode, Accum};
 use crate::utils::reduction::repro_mode_is_strict;
 
 #[cfg(feature = "rayon")]
 use rayon::ThreadPoolBuilder;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
+#[cfg(feature = "rayon")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const VEC_CHUNK: usize = 1 << 14;
 const REPRO_CHUNK: usize = 1 << 14;
+
+#[cfg(feature = "rayon")]
+static GLOBAL_RAYON_CONFIG_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// Configure the global Rayon thread pool used by Kryst's parallel kernels.
 ///
@@ -27,7 +33,18 @@ const REPRO_CHUNK: usize = 1 << 14;
 /// effect. Subsequent calls are ignored once the global pool has been initialised.
 #[cfg(feature = "rayon")]
 pub fn set_rayon_threads(n: usize) {
+    GLOBAL_RAYON_CONFIG_CALLS.fetch_add(1, Ordering::Relaxed);
     let _ = ThreadPoolBuilder::new().num_threads(n).build_global();
+}
+
+#[cfg(all(feature = "rayon", test))]
+pub(crate) fn global_rayon_config_calls() -> usize {
+    GLOBAL_RAYON_CONFIG_CALLS.load(Ordering::Relaxed)
+}
+
+#[cfg(all(feature = "rayon", test))]
+pub(crate) fn reset_global_rayon_config_calls() {
+    GLOBAL_RAYON_CONFIG_CALLS.store(0, Ordering::Relaxed);
 }
 
 // -------------------- scalar fallbacks --------------------
@@ -131,7 +148,7 @@ pub fn par_copy(src: &[S], dst: &mut [S]) {
         let n = src.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             src.par_chunks(chunk)
                 .zip(dst.par_chunks_mut(chunk))
                 .for_each(|(s, d)| d.copy_from_slice(s));
@@ -148,7 +165,7 @@ pub fn par_fill_zero(dst: &mut [S]) {
         let n = dst.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             dst.par_chunks_mut(chunk)
                 .for_each(|chunk| s_fill_zero(chunk));
             return;
@@ -164,7 +181,7 @@ pub fn par_scale(alpha: S, y: &mut [S]) {
         let n = y.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             if alpha == S::from_real(1.0) {
                 return;
             }
@@ -190,7 +207,7 @@ pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
     {
         let n = x.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             if alpha == S::zero() {
                 return;
             }
@@ -212,7 +229,7 @@ pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
     {
         let n = x.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             if beta == S::zero() {
                 y.par_iter_mut()
                     .zip(x.par_iter().copied())
@@ -250,7 +267,7 @@ where
     #[cfg(feature = "rayon")]
     {
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
-        if len >= min_len {
+        if len >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             (0..len).into_par_iter().for_each(|i| f(i));
             return;
         }
@@ -262,17 +279,14 @@ where
 }
 
 #[inline]
-pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
+fn dot_conj_local_fast(x: &[S], y: &[S]) -> S {
     debug_assert_eq!(x.len(), y.len());
-    if repro_mode_is_strict() {
-        return dot_conj_local_repro(x, y);
-    }
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             return x
                 .par_chunks(chunk)
                 .zip(y.par_chunks(chunk))
@@ -290,16 +304,13 @@ pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
 }
 
 #[inline]
-pub fn par_sum_abs2_local(x: &[S]) -> R {
-    if repro_mode_is_strict() {
-        return sum_abs2_local_repro(x);
-    }
+fn sum_abs2_local_fast(x: &[S]) -> R {
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
-        if n >= min_len {
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             return x
                 .par_chunks(chunk)
                 .map(|xc| {
@@ -316,6 +327,40 @@ pub fn par_sum_abs2_local(x: &[S]) -> R {
     s_sum_abs2_local(x)
 }
 
+#[inline]
+pub fn par_dot_conj_local(x: &[S], y: &[S]) -> S {
+    if repro_mode_is_strict() {
+        return dot_conj_local_repro(x, y);
+    }
+    dot_conj_local_fast(x, y)
+}
+
+#[inline]
+pub fn par_sum_abs2_local(x: &[S]) -> R {
+    if repro_mode_is_strict() {
+        return sum_abs2_local_repro(x);
+    }
+    sum_abs2_local_fast(x)
+}
+
+#[inline]
+pub fn dot_conj_local_with_mode(x: &[S], y: &[S], mode: ReproMode) -> S {
+    match mode {
+        ReproMode::Fast => dot_conj_local_fast(x, y),
+        ReproMode::Deterministic => dot_conj_local_repro(x, y),
+        ReproMode::DeterministicAccurate => dot_conj_local_repro_accurate(x, y),
+    }
+}
+
+#[inline]
+pub fn sum_abs2_local_with_mode(x: &[S], mode: ReproMode) -> R {
+    match mode {
+        ReproMode::Fast => sum_abs2_local_fast(x),
+        ReproMode::Deterministic => sum_abs2_local_repro(x),
+        ReproMode::DeterministicAccurate => sum_abs2_local_repro_accurate(x),
+    }
+}
+
 /// Deterministic conjugated dot product using fixed chunking.
 pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
     debug_assert_eq!(x.len(), y.len());
@@ -328,16 +373,28 @@ pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
 
     #[cfg(feature = "rayon")]
     {
-        use rayon::prelude::*;
-        parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
-            let start = cid * REPRO_CHUNK;
-            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
-            let mut acc = S::zero();
-            for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
-                acc = acc + xi.conj() * yi;
+        if !crate::algebra::parallel_cfg::force_serial() {
+            use rayon::prelude::*;
+            parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                let mut acc = S::zero();
+                for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                    acc = acc + xi.conj() * yi;
+                }
+                *slot = acc;
+            });
+        } else {
+            for cid in 0..nchunks {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                let mut acc = S::zero();
+                for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                    acc = acc + xi.conj() * yi;
+                }
+                parts[cid] = acc;
             }
-            *slot = acc;
-        });
+        }
     }
 
     #[cfg(not(feature = "rayon"))]
@@ -360,6 +417,104 @@ pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
     total
 }
 
+/// Deterministic conjugated dot product with compensated chunk sums.
+pub fn dot_conj_local_repro_accurate(x: &[S], y: &[S]) -> S {
+    debug_assert_eq!(x.len(), y.len());
+    if x.is_empty() {
+        return S::zero();
+    }
+
+    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let mut parts = vec![S::zero(); nchunks];
+
+    #[cfg(feature = "rayon")]
+    {
+        if !crate::algebra::parallel_cfg::force_serial() {
+            use rayon::prelude::*;
+            parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                #[cfg(feature = "complex")]
+                {
+                    let mut acc_re = Kahan::new();
+                    let mut acc_im = Kahan::new();
+                    for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                        let prod = xi.conj() * yi;
+                        acc_re.add(prod.real());
+                        acc_im.add(prod.imag());
+                    }
+                    *slot = S::from_parts(acc_re.finish(), acc_im.finish());
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    let mut acc = Kahan::new();
+                    for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                        acc.add(xi * yi);
+                    }
+                    *slot = S::from_real(acc.finish());
+                }
+            });
+        } else {
+            for cid in 0..nchunks {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                #[cfg(feature = "complex")]
+                {
+                    let mut acc_re = Kahan::new();
+                    let mut acc_im = Kahan::new();
+                    for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                        let prod = xi.conj() * yi;
+                        acc_re.add(prod.real());
+                        acc_im.add(prod.imag());
+                    }
+                    parts[cid] = S::from_parts(acc_re.finish(), acc_im.finish());
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    let mut acc = Kahan::new();
+                    for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                        acc.add(xi * yi);
+                    }
+                    parts[cid] = S::from_real(acc.finish());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        for cid in 0..nchunks {
+            let start = cid * REPRO_CHUNK;
+            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+            #[cfg(feature = "complex")]
+            {
+                let mut acc_re = Kahan::new();
+                let mut acc_im = Kahan::new();
+                for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                    let prod = xi.conj() * yi;
+                    acc_re.add(prod.real());
+                    acc_im.add(prod.imag());
+                }
+                parts[cid] = S::from_parts(acc_re.finish(), acc_im.finish());
+            }
+            #[cfg(not(feature = "complex"))]
+            {
+                let mut acc = Kahan::new();
+                for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
+                    acc.add(xi * yi);
+                }
+                parts[cid] = S::from_real(acc.finish());
+            }
+        }
+    }
+
+    let mut total = S::zero();
+    for part in parts {
+        total = total + part;
+    }
+    total
+}
+
 /// Deterministic sum of squared magnitudes using fixed chunking.
 pub fn sum_abs2_local_repro(x: &[S]) -> R {
     if x.is_empty() {
@@ -371,16 +526,28 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
 
     #[cfg(feature = "rayon")]
     {
-        use rayon::prelude::*;
-        parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
-            let start = cid * REPRO_CHUNK;
-            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
-            let mut acc = R::zero();
-            for &value in &x[start..end] {
-                acc = acc + value.abs2();
+        if !crate::algebra::parallel_cfg::force_serial() {
+            use rayon::prelude::*;
+            parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                let mut acc = R::zero();
+                for &value in &x[start..end] {
+                    acc = acc + value.abs2();
+                }
+                *slot = acc;
+            });
+        } else {
+            for cid in 0..nchunks {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                let mut acc = R::zero();
+                for &value in &x[start..end] {
+                    acc = acc + value.abs2();
+                }
+                parts[cid] = acc;
             }
-            *slot = acc;
-        });
+        }
     }
 
     #[cfg(not(feature = "rayon"))]
@@ -393,6 +560,61 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
                 acc = acc + value.abs2();
             }
             parts[cid] = acc;
+        }
+    }
+
+    let mut total = R::zero();
+    for part in parts {
+        total = total + part;
+    }
+    total
+}
+
+/// Deterministic sum of squared magnitudes with compensated chunk sums.
+pub fn sum_abs2_local_repro_accurate(x: &[S]) -> R {
+    if x.is_empty() {
+        return R::zero();
+    }
+
+    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let mut parts = vec![R::zero(); nchunks];
+
+    #[cfg(feature = "rayon")]
+    {
+        if !crate::algebra::parallel_cfg::force_serial() {
+            use rayon::prelude::*;
+            parts.par_iter_mut().enumerate().for_each(|(cid, slot)| {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                let mut acc = Kahan::new();
+                for &value in &x[start..end] {
+                    acc.add(value.abs2());
+                }
+                *slot = acc.finish();
+            });
+        } else {
+            for cid in 0..nchunks {
+                let start = cid * REPRO_CHUNK;
+                let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+                let mut acc = Kahan::new();
+                for &value in &x[start..end] {
+                    acc.add(value.abs2());
+                }
+                parts[cid] = acc.finish();
+            }
+        }
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        for cid in 0..nchunks {
+            let start = cid * REPRO_CHUNK;
+            let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
+            let mut acc = Kahan::new();
+            for &value in &x[start..end] {
+                acc.add(value.abs2());
+            }
+            parts[cid] = acc.finish();
         }
     }
 

@@ -288,6 +288,13 @@ pub static SPECS: &[Spec] = &[
         doc: "set Rayon threads",
     },
     Spec {
+        flag: "-ksp_threads_mode",
+        key: "ksp_threads_mode",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "threading mode: context | global | serial",
+    },
+    Spec {
         flag: "-ksp_min_len_vec",
         key: "ksp_min_len_vec",
         arity: Arity::One,

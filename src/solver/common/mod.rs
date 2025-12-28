@@ -3,16 +3,18 @@ pub mod givens;
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::matrix::op::LinOp;
 use crate::ops::klinop::KLinOp;
-use crate::parallel::{Comm, UniverseComm, global_nrm2, global_reduction_mode};
+use crate::parallel::{Comm, ReductionEngine, UniverseComm};
 use crate::reduction::{CommDeterministic, Packet, ReproMode, dot_local_slice};
 #[cfg(feature = "complex")]
 use crate::reduction::{DDP, KahanP, PacketAccum};
 use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
+use crate::context::ksp_context::Workspace;
 
 pub use buffer::take_or_resize;
 
@@ -43,6 +45,113 @@ pub fn dot_result_to_real(global: S) -> R {
     real_part
 }
 
+pub struct ReductCtx {
+    engine: std::sync::Arc<dyn ReductionEngine>,
+    mode: ReproMode,
+}
+
+impl ReductCtx {
+    pub fn new(comm: &UniverseComm, work: Option<&Workspace>) -> Self {
+        match work {
+            Some(w) => {
+                let opts = w.reduction_options();
+                let engine = w
+                    .reduction_engine()
+                    .cloned()
+                    .unwrap_or_else(|| comm.reduction_engine(opts));
+                Self {
+                    engine,
+                    mode: opts.effective_mode(),
+                }
+            }
+            None => {
+                let opts = ReductOptions::default();
+                Self {
+                    engine: comm.reduction_engine(&opts),
+                    mode: opts.effective_mode(),
+                }
+            }
+        }
+    }
+
+    #[inline]
+    pub fn engine(&self) -> &dyn ReductionEngine {
+        self.engine.as_ref()
+    }
+
+    #[inline]
+    pub fn mode(&self) -> ReproMode {
+        self.mode
+    }
+
+    #[inline]
+    pub fn norm2(&self, x: &[S]) -> R {
+        self.engine.norm2_s(x)
+    }
+
+    #[inline]
+    pub fn dot(&self, x: &[S], y: &[S]) -> S {
+        self.engine.dot_s(x, y)
+    }
+
+    pub fn dot_many_into(&self, pairs: &[(&[S], &[S])], out: &mut [S]) {
+        debug_assert_eq!(pairs.len(), out.len());
+        if pairs.is_empty() {
+            return;
+        }
+
+        #[cfg(feature = "complex")]
+        const STRIDE: usize = 2;
+        #[cfg(not(feature = "complex"))]
+        const STRIDE: usize = 1;
+
+        let mut payload = Vec::with_capacity(pairs.len() * STRIDE);
+        for (x, y) in pairs.iter().copied() {
+            let local = dot_conj_local_with_mode(x, y, self.mode);
+            #[cfg(feature = "complex")]
+            {
+                payload.push(local.real());
+                payload.push(local.imag());
+            }
+            #[cfg(not(feature = "complex"))]
+            {
+                payload.push(local.real());
+            }
+        }
+
+        let reduced = self.engine.sum_vec_r(payload);
+        #[cfg(feature = "complex")]
+        {
+            for (slot, chunk) in out.iter_mut().zip(reduced.chunks_exact(STRIDE)) {
+                *slot = S::from_parts(chunk[0], chunk[1]);
+            }
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            for (slot, &value) in out.iter_mut().zip(reduced.iter()) {
+                *slot = S::from_real(value);
+            }
+        }
+    }
+
+    pub fn norm2_many_into(&self, vecs: &[&[S]], out: &mut [R]) {
+        debug_assert_eq!(vecs.len(), out.len());
+        if vecs.is_empty() {
+            return;
+        }
+
+        let mut payload = Vec::with_capacity(vecs.len());
+        for &vec in vecs {
+            payload.push(sum_abs2_local_with_mode(vec, self.mode));
+        }
+        let reduced = self.engine.sum_vec_r(payload);
+        for (slot, value) in out.iter_mut().zip(reduced.iter()) {
+            let clamped = if *value >= 0.0 { *value } else { 0.0 };
+            *slot = clamped.sqrt();
+        }
+    }
+}
+
 /// Recompute the true residual norm ||r||_2 where r = b - A x.
 ///
 /// This uses the provided `comm` for the dot-product reduction so it works in
@@ -54,6 +163,7 @@ pub fn recompute_true_residual_norm<C: Comm + CommDeterministic>(
     x: &[f64],
     comm: &C,
     tmp: &mut [f64], // length = ncols
+    mode: ReproMode,
 ) -> f64 {
     a.matvec(x, tmp);
     let mut local = 0.0;
@@ -61,7 +171,6 @@ pub fn recompute_true_residual_norm<C: Comm + CommDeterministic>(
         tmp[i] = b[i] - tmp[i];
         local += tmp[i] * tmp[i];
     }
-    let mode = global_reduction_mode();
     let summed = if comm.size() == 1 {
         local
     } else {
@@ -81,7 +190,7 @@ pub fn recompute_true_residual_norm<C: Comm + CommDeterministic>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parallel::{NoComm, UniverseComm, set_global_reduction_mode_scoped};
+    use crate::parallel::{NoComm, UniverseComm};
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -238,32 +347,31 @@ mod tests {
         let comm = MockComm::new(2.0, 4.0);
         let mut tmp = vec![0.0; 2];
 
-        {
-            let _guard = set_global_reduction_mode_scoped(ReproMode::Fast);
-            tmp.fill(0.0);
-            let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp);
-            assert!((norm - 2.0_f64.sqrt()).abs() < 1e-12);
-        }
+        tmp.fill(0.0);
+        let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp, ReproMode::Fast);
+        assert!((norm - 2.0_f64.sqrt()).abs() < 1e-12);
         assert_eq!(comm.fast_calls.load(Ordering::Relaxed), 1);
         assert_eq!(comm.det_calls.load(Ordering::Relaxed), 0);
 
         comm.reset();
-        {
-            let _guard = set_global_reduction_mode_scoped(ReproMode::Deterministic);
-            tmp.fill(0.0);
-            let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp);
-            assert!((norm - 2.0).abs() < 1e-12);
-        }
+        tmp.fill(0.0);
+        let norm =
+            recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp, ReproMode::Deterministic);
+        assert!((norm - 2.0).abs() < 1e-12);
         assert_eq!(comm.fast_calls.load(Ordering::Relaxed), 0);
         assert_eq!(comm.det_calls.load(Ordering::Relaxed), 1);
 
         comm.reset();
-        {
-            let _guard = set_global_reduction_mode_scoped(ReproMode::DeterministicAccurate);
-            tmp.fill(0.0);
-            let norm = recompute_true_residual_norm(&op, &b, &x, &comm, &mut tmp);
-            assert!((norm - 2.0).abs() < 1e-12);
-        }
+        tmp.fill(0.0);
+        let norm = recompute_true_residual_norm(
+            &op,
+            &b,
+            &x,
+            &comm,
+            &mut tmp,
+            ReproMode::DeterministicAccurate,
+        );
+        assert!((norm - 2.0).abs() < 1e-12);
         assert_eq!(comm.fast_calls.load(Ordering::Relaxed), 0);
         assert_eq!(comm.det_calls.load(Ordering::Relaxed), 1);
     }
@@ -275,6 +383,7 @@ pub fn recompute_true_residual_norm_s<A>(
     b: &[S],
     x: &[S],
     comm: &UniverseComm,
+    red: &dyn ReductionEngine,
     tmp: &mut [S],
     scratch: &mut BridgeScratch,
 ) -> R
@@ -295,7 +404,8 @@ where
     for i in 0..tmp.len() {
         tmp[i] = b[i] - tmp[i];
     }
-    global_nrm2(comm, tmp)
+    let _ = comm;
+    red.norm2_s(tmp)
 }
 
 /// Compute the residual norm used for iteration monitors (the "reported" norm):

@@ -26,11 +26,10 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{
-    UniverseComm, global_dot_conj_many_into, global_nrm2, global_nrm2_many_into,
-};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
+use crate::solver::common::ReductCtx;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
@@ -168,7 +167,7 @@ impl GmresSolver {
         a: &A,
         b: &[S],
         x: &[S],
-        comm: &UniverseComm,
+        red: &dyn crate::parallel::ReductionEngine,
         tmp: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> R {
@@ -176,7 +175,7 @@ impl GmresSolver {
         for i in 0..tmp.len() {
             tmp[i] = b[i] - tmp[i];
         }
-        global_nrm2(comm, tmp)
+        red.norm2_s(tmp)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -215,6 +214,7 @@ impl GmresSolver {
             &mut owned_ws
         };
         self.ensure_workspace(ws, n, pc_side);
+        let red = ReductCtx::new(comm, Some(&*ws));
 
         let mons = monitors.unwrap_or(&[]);
         #[cfg(feature = "metrics")]
@@ -237,7 +237,6 @@ impl GmresSolver {
         ws.g.fill(S::zero());
 
         let mut reduction_count = 0usize;
-        #[cfg(not(feature = "complex"))]
         let red_engine = ws
             .reduction_engine()
             .cloned()
@@ -259,7 +258,7 @@ impl GmresSolver {
                     ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                 }
                 let mut norms = [R::zero(); 2];
-                global_nrm2_many_into(comm, &[&ws.tmp2[..n], b], &mut norms);
+                red.norm2_many_into(&[&ws.tmp2[..n], b], &mut norms);
                 reduction_count += 1;
                 #[cfg(feature = "metrics")]
                 {
@@ -279,7 +278,7 @@ impl GmresSolver {
             }
             PcSide::Right => {
                 let mut norms = [R::zero(); 2];
-                global_nrm2_many_into(comm, &[&ws.tmp1[..n], b], &mut norms);
+                red.norm2_many_into(&[&ws.tmp1[..n], b], &mut norms);
                 reduction_count += 1;
                 #[cfg(feature = "metrics")]
                 {
@@ -325,7 +324,8 @@ impl GmresSolver {
                 ConvergedReason::ConvergedRtol
             };
             stats.final_residual = res;
-            let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -379,11 +379,7 @@ impl GmresSolver {
                                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                                     pairs.push((vi, tmp2_slice));
                                 }
-                                global_dot_conj_many_into(
-                                    comm,
-                                    pairs.as_slice(),
-                                    hvals.as_mut_slice(),
-                                );
+                                red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
                                 reduction_count += 1;
                                 #[cfg(feature = "metrics")]
                                 {
@@ -402,7 +398,7 @@ impl GmresSolver {
                             for i in 0..=k {
                                 *ws.h_at_mut(i, k) = hvals[i];
                             }
-                            let hnext = global_nrm2(comm, &ws.tmp2[..n]);
+                            let hnext = red.norm2(&ws.tmp2[..n]);
                             reduction_count += 1;
                             #[cfg(feature = "metrics")]
                             {
@@ -454,11 +450,7 @@ impl GmresSolver {
                                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                                     pairs.push((vi, tmp1_slice));
                                 }
-                                global_dot_conj_many_into(
-                                    comm,
-                                    pairs.as_slice(),
-                                    hvals.as_mut_slice(),
-                                );
+                                red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
                                 reduction_count += 1;
                                 #[cfg(feature = "metrics")]
                                 {
@@ -477,7 +469,7 @@ impl GmresSolver {
                             for i in 0..=k {
                                 *ws.h_at_mut(i, k) = hvals[i];
                             }
-                            let hnext = global_nrm2(comm, &ws.tmp1[..n]);
+                            let hnext = red.norm2(&ws.tmp1[..n]);
                             reduction_count += 1;
                             #[cfg(feature = "metrics")]
                             {
@@ -496,164 +488,149 @@ impl GmresSolver {
                         }
                         PcSide::Symmetric => unreachable!(),
                     },
-                    GmresVariant::Pipelined => {
-                        #[cfg(feature = "complex")]
-                        {
-                            return Err(KError::NotImplemented(
-                                "Pipelined GMRES is not yet implemented for complex scalars".into(),
-                            ));
-                        }
-                        #[cfg(not(feature = "complex"))]
-                        {
-                            match pc_side {
-                                PcSide::Left => {
-                                    let vk = &ws.v_mem[k * n..(k + 1) * n];
+                    GmresVariant::Pipelined => match pc_side {
+                        PcSide::Left => {
+                            let vk = &ws.v_mem[k * n..(k + 1) * n];
+                            #[cfg(feature = "metrics")]
+                            let matvec_start = std::time::Instant::now();
+                            a.matvec_s(vk, &mut ws.tmp1, &mut ws.bridge);
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.matvec_nanos +=
+                                    matvec_start.elapsed().as_nanos() as u64;
+                            }
+                            if let Some(pc) = pc {
+                                #[cfg(feature = "metrics")]
+                                let pc_start = std::time::Instant::now();
+                                pc.apply_s(
+                                    PcSide::Left,
+                                    &ws.tmp1[..n],
+                                    ws.pipelined_w.as_mut_slice(),
+                                    &mut ws.bridge,
+                                )?;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.pc_apply_nanos +=
+                                        pc_start.elapsed().as_nanos() as u64;
+                                }
+                            } else {
+                                ws.pipelined_w[..n].copy_from_slice(&ws.tmp1[..n]);
+                            }
+                            let pipe = ws.pipelined_arnoldi_step(
+                                k,
+                                n,
+                                red_engine.as_ref(),
+                                self.reorth,
+                                self.reorth_tol,
+                            )?;
+                            let reductions = match pipe {
+                                crate::context::ksp_context::PipeReduct::Sync { reductions } => {
+                                    reductions
+                                }
+                                crate::context::ksp_context::PipeReduct::Async { handle } => {
                                     #[cfg(feature = "metrics")]
-                                    let matvec_start = std::time::Instant::now();
-                                    a.matvec_s(vk, &mut ws.tmp1, &mut ws.bridge);
+                                    let wait_start = std::time::Instant::now();
+                                    let glob = handle.wait();
                                     #[cfg(feature = "metrics")]
                                     {
-                                        metrics.matvec_nanos +=
-                                            matvec_start.elapsed().as_nanos() as u64;
+                                        metrics.reduction_wait_nanos +=
+                                            wait_start.elapsed().as_nanos() as u64;
                                     }
-                                    if let Some(pc) = pc {
-                                        #[cfg(feature = "metrics")]
-                                        let pc_start = std::time::Instant::now();
-                                        pc.apply_s(
-                                            PcSide::Left,
-                                            &ws.tmp1[..n],
-                                            ws.pipelined_w.as_mut_slice(),
-                                            &mut ws.bridge,
-                                        )?;
-                                        #[cfg(feature = "metrics")]
-                                        {
-                                            metrics.pc_apply_nanos +=
-                                                pc_start.elapsed().as_nanos() as u64;
-                                        }
-                                    } else {
-                                        ws.pipelined_w[..n].copy_from_slice(&ws.tmp1[..n]);
-                                    }
-                                    let pipe = ws.pipelined_arnoldi_step(
+                                    ws.finish_pipelined_arnoldi(
                                         k,
                                         n,
                                         red_engine.as_ref(),
                                         self.reorth,
                                         self.reorth_tol,
-                                    )?;
-                                    let reductions = match pipe {
-                                        crate::context::ksp_context::PipeReduct::Sync {
-                                            reductions,
-                                        } => reductions,
-                                        crate::context::ksp_context::PipeReduct::Async {
-                                            handle,
-                                        } => {
-                                            #[cfg(feature = "metrics")]
-                                            let wait_start = std::time::Instant::now();
-                                            let glob = handle.wait();
-                                            #[cfg(feature = "metrics")]
-                                            {
-                                                metrics.reduction_wait_nanos +=
-                                                    wait_start.elapsed().as_nanos() as u64;
-                                            }
-                                            ws.finish_pipelined_arnoldi(
-                                                k,
-                                                n,
-                                                red_engine.as_ref(),
-                                                self.reorth,
-                                                self.reorth_tol,
-                                                glob,
-                                            )?
-                                        }
-                                    };
-                                    reduction_count += reductions;
-                                    #[cfg(feature = "metrics")]
-                                    {
-                                        let payload_len = k + 2;
-                                        metrics.reductions += reductions;
-                                        metrics.bytes_reduced +=
-                                            payload_len * std::mem::size_of::<R>() * reductions;
-                                    }
+                                        glob,
+                                    )?
                                 }
-                                PcSide::Right => {
-                                    let vk = &ws.v_mem[k * n..(k + 1) * n];
-                                    if let Some(pc) = pc {
-                                        #[cfg(feature = "metrics")]
-                                        let pc_start = std::time::Instant::now();
-                                        pc.apply_s(
-                                            PcSide::Right,
-                                            vk,
-                                            &mut ws.tmp2[..n],
-                                            &mut ws.bridge,
-                                        )?;
-                                        #[cfg(feature = "metrics")]
-                                        {
-                                            metrics.pc_apply_nanos +=
-                                                pc_start.elapsed().as_nanos() as u64;
-                                        }
-                                    } else {
-                                        ws.tmp2[..n].copy_from_slice(vk);
-                                    }
-                                    {
-                                        let (tmp2, zk) = ws.tmp2_and_z_mut(k);
-                                        zk.copy_from_slice(tmp2);
-                                    }
-                                    #[cfg(feature = "metrics")]
-                                    let matvec_start = std::time::Instant::now();
-                                    a.matvec_s(
-                                        &ws.tmp2[..n],
-                                        ws.pipelined_w.as_mut_slice(),
-                                        &mut ws.bridge,
-                                    );
-                                    #[cfg(feature = "metrics")]
-                                    {
-                                        metrics.matvec_nanos +=
-                                            matvec_start.elapsed().as_nanos() as u64;
-                                    }
-                                    let pipe = ws.pipelined_arnoldi_step(
-                                        k,
-                                        n,
-                                        red_engine.as_ref(),
-                                        self.reorth,
-                                        self.reorth_tol,
-                                    )?;
-                                    let reductions = match pipe {
-                                        crate::context::ksp_context::PipeReduct::Sync {
-                                            reductions,
-                                        } => reductions,
-                                        crate::context::ksp_context::PipeReduct::Async {
-                                            handle,
-                                        } => {
-                                            #[cfg(feature = "metrics")]
-                                            let wait_start = std::time::Instant::now();
-                                            let glob = handle.wait();
-                                            #[cfg(feature = "metrics")]
-                                            {
-                                                metrics.reduction_wait_nanos +=
-                                                    wait_start.elapsed().as_nanos() as u64;
-                                            }
-                                            ws.finish_pipelined_arnoldi(
-                                                k,
-                                                n,
-                                                red_engine.as_ref(),
-                                                self.reorth,
-                                                self.reorth_tol,
-                                                glob,
-                                            )?
-                                        }
-                                    };
-                                    reduction_count += reductions;
-                                    #[cfg(feature = "metrics")]
-                                    {
-                                        let payload_len = k + 2;
-                                        metrics.reductions += reductions;
-                                        metrics.bytes_reduced +=
-                                            payload_len * std::mem::size_of::<R>() * reductions;
-                                    }
-                                }
-                                PcSide::Symmetric => unreachable!(),
+                            };
+                            reduction_count += reductions;
+                            #[cfg(feature = "metrics")]
+                            {
+                                let payload_len = ws.pipelined_payload.len();
+                                metrics.reductions += reductions;
+                                metrics.bytes_reduced +=
+                                    payload_len * std::mem::size_of::<R>() * reductions;
                             }
                         }
-                    }
+                        PcSide::Right => {
+                            let vk = &ws.v_mem[k * n..(k + 1) * n];
+                            if let Some(pc) = pc {
+                                #[cfg(feature = "metrics")]
+                                let pc_start = std::time::Instant::now();
+                                pc.apply_s(
+                                    PcSide::Right,
+                                    vk,
+                                    &mut ws.tmp2[..n],
+                                    &mut ws.bridge,
+                                )?;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.pc_apply_nanos +=
+                                        pc_start.elapsed().as_nanos() as u64;
+                                }
+                            } else {
+                                ws.tmp2[..n].copy_from_slice(vk);
+                            }
+                            {
+                                let (tmp2, zk) = ws.tmp2_and_z_mut(k);
+                                zk.copy_from_slice(tmp2);
+                            }
+                            #[cfg(feature = "metrics")]
+                            let matvec_start = std::time::Instant::now();
+                            a.matvec_s(
+                                &ws.tmp2[..n],
+                                ws.pipelined_w.as_mut_slice(),
+                                &mut ws.bridge,
+                            );
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.matvec_nanos +=
+                                    matvec_start.elapsed().as_nanos() as u64;
+                            }
+                            let pipe = ws.pipelined_arnoldi_step(
+                                k,
+                                n,
+                                red_engine.as_ref(),
+                                self.reorth,
+                                self.reorth_tol,
+                            )?;
+                            let reductions = match pipe {
+                                crate::context::ksp_context::PipeReduct::Sync { reductions } => {
+                                    reductions
+                                }
+                                crate::context::ksp_context::PipeReduct::Async { handle } => {
+                                    #[cfg(feature = "metrics")]
+                                    let wait_start = std::time::Instant::now();
+                                    let glob = handle.wait();
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        metrics.reduction_wait_nanos +=
+                                            wait_start.elapsed().as_nanos() as u64;
+                                    }
+                                    ws.finish_pipelined_arnoldi(
+                                        k,
+                                        n,
+                                        red_engine.as_ref(),
+                                        self.reorth,
+                                        self.reorth_tol,
+                                        glob,
+                                    )?
+                                }
+                            };
+                            reduction_count += reductions;
+                            #[cfg(feature = "metrics")]
+                            {
+                                let payload_len = ws.pipelined_payload.len();
+                                metrics.reductions += reductions;
+                                metrics.bytes_reduced +=
+                                    payload_len * std::mem::size_of::<R>() * reductions;
+                            }
+                        }
+                        PcSide::Symmetric => unreachable!(),
+                    },
                     GmresVariant::SStep { .. } => {
                         unreachable!("s-step path should exit before iteration loop")
                     }
@@ -710,7 +687,7 @@ impl GmresSolver {
                     } else {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
-                    let res = global_nrm2(comm, &ws.tmp2[..n]);
+                    let res = red.norm2(&ws.tmp2[..n]);
                     reduction_count += 1;
                     #[cfg(feature = "metrics")]
                     {
@@ -719,7 +696,7 @@ impl GmresSolver {
                     res
                 }
                 PcSide::Right => {
-                    let res = global_nrm2(comm, &ws.tmp1[..n]);
+                    let res = red.norm2(&ws.tmp1[..n]);
                     reduction_count += 1;
                     #[cfg(feature = "metrics")]
                     {
@@ -756,7 +733,7 @@ impl GmresSolver {
                     } else {
                         ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                     }
-                    let beta = global_nrm2(comm, &ws.tmp2[..n]);
+                    let beta = red.norm2(&ws.tmp2[..n]);
                     reduction_count += 1;
                     #[cfg(feature = "metrics")]
                     {
@@ -774,7 +751,7 @@ impl GmresSolver {
                     beta
                 }
                 PcSide::Right => {
-                    let beta = global_nrm2(comm, &ws.tmp1[..n]);
+                    let beta = red.norm2(&ws.tmp1[..n]);
                     reduction_count += 1;
                     #[cfg(feature = "metrics")]
                     {
@@ -805,7 +782,8 @@ impl GmresSolver {
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
         stats.reason = reason;
 
-        let true_res = Self::true_residual_norm(a, b, x, comm, &mut ws.tmp1, &mut ws.bridge);
+        let true_res =
+            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();

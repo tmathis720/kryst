@@ -130,6 +130,8 @@ pub struct KspOptions {
     pub cg_async_min_n: Option<usize>,
     /// Number of Rayon worker threads (requires the `rayon` feature). Ignored otherwise.
     pub threads: Option<usize>,
+    /// Threading mode for Rayon: "context" | "global" | "serial".
+    pub threads_mode: Option<String>,
     pub min_len_vec: Option<usize>,
     pub min_rows_spmv: Option<usize>,
     pub chunk_rows_spmv: Option<usize>,
@@ -451,6 +453,7 @@ impl Sink for KspOptions {
                 &mut self.threads,
                 ensure_ge_1("ksp_threads", parse_as::<usize>(v, spec)?)?
             ),
+            "ksp_threads_mode" => set_opt!(&mut self.threads_mode, v.to_lowercase()),
             "ksp_min_len_vec" => set_opt!(
                 &mut self.min_len_vec,
                 ensure_ge_1("ksp_min_len_vec", parse_as::<usize>(v, spec)?)?
@@ -986,6 +989,9 @@ impl KspOptions {
                 .map_err(|_| KError::SolveError(format!("Invalid KRYST_KSP_THREADS: {v}")))?;
             me.threads = Some(ensure_ge_1("KRYST_KSP_THREADS", n)?);
         }
+        if let Ok(v) = std::env::var("KRYST_KSP_THREADS_MODE") {
+            me.threads_mode = Some(v.to_lowercase());
+        }
         if let Ok(v) = std::env::var("KRYST_KSP_MIN_LEN_VEC") {
             let n: usize = v
                 .parse()
@@ -1065,6 +1071,7 @@ impl KspOptions {
         o!(trust_region);
 
         o!(threads);
+        o!(threads_mode);
         o!(min_len_vec);
         o!(min_rows_spmv);
         o!(chunk_rows_spmv);

@@ -18,7 +18,7 @@
 use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel::{
-    par_axpby, par_axpy, par_copy, par_dot_conj_local, par_sum_abs2_local,
+    dot_conj_local_with_mode, par_axpby, par_axpy, par_copy, sum_abs2_local_with_mode,
 };
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -30,13 +30,10 @@ use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::Comm;
-use crate::parallel::{
-    ReduceReqScalar, ReduceReqScalars, ReduceReqTuple2, UniverseComm, global_dot_conj,
-    global_dot_conj_many_into, global_nrm2,
-};
+use crate::parallel::{ReduceHandle, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::dot_result_to_real;
+use crate::solver::common::{dot_result_to_real, ReductCtx};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use smallvec::SmallVec;
 use std::any::Any;
@@ -402,15 +399,20 @@ impl CgSolver {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("CG");
 
-        enum PapRequest<'a> {
+        enum PapRequest {
             None { p_ap: S, pnorm_sq: Option<R> },
-            Scalar(ReduceReqScalar<'a>),
-            Tuple(ReduceReqTuple2<'a>),
+            Handle {
+                handle: ReduceHandle<Vec<R>>,
+                need_pnorm: bool,
+            },
         }
 
-        enum RhoRequest<'a> {
+        enum RhoRequest {
             None,
-            Scalars(ReduceReqScalars<'a>),
+            Handle {
+                handle: ReduceHandle<Vec<R>>,
+                count: usize,
+            },
         }
 
         if pc_side != PcSide::Left {
@@ -427,6 +429,8 @@ impl CgSolver {
         let work = work.ok_or_else(|| {
             KError::InvalidInput("CG requires a Workspace; use KSP or Workspace::new(n)".into())
         })?;
+        let red = ReductCtx::new(comm, Some(&*work));
+        let red_mode = red.mode();
 
         if b.is_empty() {
             return Ok(Self::attach_drift_stats(SolveStats::new(
@@ -481,7 +485,7 @@ impl CgSolver {
 
             let mut dot_results: SmallVec<[S; 3]> = SmallVec::new();
             dot_results.resize(dot_pairs.len(), S::zero());
-            global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
+            red.dot_many_into(dot_pairs.as_slice(), dot_results.as_mut_slice());
 
             let mut result_idx = 0usize;
             let rho_scalar = dot_results[result_idx];
@@ -511,7 +515,7 @@ impl CgSolver {
             return Err(KError::IndefinitePreconditioner);
         }
         let mut xnorm = if self.trust_region.is_some() {
-            global_nrm2(comm, x)
+            red.norm2(x)
         } else {
             R::zero()
         };
@@ -530,7 +534,7 @@ impl CgSolver {
             }
         }
         if let Some(m) = &self.true_residual_monitor {
-            let true_res = global_nrm2(comm, r);
+            let true_res = red.norm2(r);
             m(0, true_res);
         }
         #[cfg(feature = "logging")]
@@ -543,7 +547,7 @@ impl CgSolver {
         let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut s = s0;
-            s.final_residual = global_nrm2(comm, r);
+            s.final_residual = red.norm2(r);
             if s.final_residual <= zero_floor {
                 s.final_residual = R::zero();
             }
@@ -564,31 +568,38 @@ impl CgSolver {
 
             let async_ok = self.should_use_async(comm, nrows);
             let need_pnorm = self.trust_region.is_some();
-            let local_pap = par_dot_conj_local(p, ap);
+            let local_pap = dot_conj_local_with_mode(p, ap, red_mode);
             let local_pnorm_sq = if need_pnorm {
-                par_sum_abs2_local(p)
+                sum_abs2_local_with_mode(p, red_mode)
             } else {
                 R::zero()
             };
 
-            let mut pap_out = S::zero();
-            let mut pnorm_sq_out = R::zero();
-
             let pap_req = if async_ok {
+                #[cfg(feature = "complex")]
+                let mut payload = Vec::with_capacity(if need_pnorm { 3 } else { 2 });
+                #[cfg(not(feature = "complex"))]
+                let mut payload = Vec::with_capacity(if need_pnorm { 2 } else { 1 });
+                #[cfg(feature = "complex")]
+                {
+                    payload.push(local_pap.real());
+                    payload.push(local_pap.imag());
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    payload.push(local_pap.real());
+                }
                 if need_pnorm {
-                    PapRequest::Tuple(comm.iallreduce_tuple2(
-                        local_pap,
-                        local_pnorm_sq,
-                        &mut pap_out,
-                        &mut pnorm_sq_out,
-                    ))
-                } else {
-                    PapRequest::Scalar(comm.iallreduce_sum_scalar(local_pap, &mut pap_out))
+                    payload.push(local_pnorm_sq);
+                }
+                PapRequest::Handle {
+                    handle: red.engine().iallreduce_sum_vec_r(payload),
+                    need_pnorm,
                 }
             } else {
-                let p_ap = global_dot_conj(comm, p, ap);
+                let p_ap = red.engine().allreduce_sum_s(local_pap);
                 let pnorm_sq = if need_pnorm {
-                    Some(comm.allreduce_sum_real(local_pnorm_sq))
+                    Some(red.engine().allreduce_sum_r(local_pnorm_sq))
                 } else {
                     None
                 };
@@ -600,13 +611,21 @@ impl CgSolver {
 
             let (p_ap_scalar, pnorm_sq_opt) = match pap_req {
                 PapRequest::None { p_ap, pnorm_sq } => (p_ap, pnorm_sq),
-                PapRequest::Scalar(req) => {
-                    req.wait();
-                    (pap_out, None)
-                }
-                PapRequest::Tuple(req) => {
-                    req.wait();
-                    (pap_out, Some(pnorm_sq_out))
+                PapRequest::Handle {
+                    handle,
+                    need_pnorm,
+                } => {
+                    let reduced = handle.wait();
+                    #[cfg(feature = "complex")]
+                    let (p_ap, offset) = (S::from_parts(reduced[0], reduced[1]), 2);
+                    #[cfg(not(feature = "complex"))]
+                    let (p_ap, offset) = (S::from_real(reduced[0]), 1);
+                    let pnorm_sq = if need_pnorm {
+                        Some(reduced[offset])
+                    } else {
+                        None
+                    };
+                    (p_ap, pnorm_sq)
                 }
             };
 
@@ -622,7 +641,8 @@ impl CgSolver {
 
             if let Some(rmax) = self.trust_region {
                 let pnorm = pnorm_opt.unwrap_or_else(|| {
-                    comm.allreduce_sum_real(local_pnorm_sq)
+                    red.engine()
+                        .allreduce_sum_r(local_pnorm_sq)
                         .max(R::zero())
                         .sqrt()
                 });
@@ -633,7 +653,7 @@ impl CgSolver {
                     par_axpy(ap, -step_s, r);
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
-                    stats.final_residual = global_nrm2(comm, r);
+                    stats.final_residual = red.norm2(r);
                     return Ok(Self::attach_drift_stats(stats));
                 }
             }
@@ -641,7 +661,7 @@ impl CgSolver {
             par_axpy(p, alpha_s, x);
             par_axpy(ap, -alpha_s, r);
             if self.trust_region.is_some() {
-                xnorm = global_nrm2(comm, x);
+                xnorm = red.norm2(x);
             }
 
             if let Some(pc) = pc {
@@ -652,26 +672,44 @@ impl CgSolver {
 
             let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
             let want_natural = matches!(self.norm_type, CgNormType::Natural);
-            let local_rz = par_dot_conj_local(r, z);
+            let local_rz = dot_conj_local_with_mode(r, z, red_mode);
 
             let mut dot_results: SmallVec<[S; 3]> = SmallVec::new();
             dot_results.push(local_rz);
             let rho_idx = 0usize;
             let rsq_idx = if want_unpre {
-                dot_results.push(par_dot_conj_local(r, r));
+                dot_results.push(dot_conj_local_with_mode(r, r, red_mode));
                 Some(dot_results.len() - 1)
             } else {
                 None
             };
             let znorm_idx = if want_natural {
-                dot_results.push(par_dot_conj_local(z, z));
+                dot_results.push(dot_conj_local_with_mode(z, z, red_mode));
                 Some(dot_results.len() - 1)
             } else {
                 None
             };
 
             let rho_req = if async_ok {
-                RhoRequest::Scalars(comm.iallreduce_sum_scalars(dot_results.as_mut_slice()))
+                #[cfg(feature = "complex")]
+                let mut payload = Vec::with_capacity(dot_results.len() * 2);
+                #[cfg(not(feature = "complex"))]
+                let mut payload = Vec::with_capacity(dot_results.len());
+                for value in dot_results.iter().copied() {
+                    #[cfg(feature = "complex")]
+                    {
+                        payload.push(value.real());
+                        payload.push(value.imag());
+                    }
+                    #[cfg(not(feature = "complex"))]
+                    {
+                        payload.push(value.real());
+                    }
+                }
+                RhoRequest::Handle {
+                    handle: red.engine().iallreduce_sum_vec_r(payload),
+                    count: dot_results.len(),
+                }
             } else if want_unpre || want_natural {
                 let mut dot_pairs: SmallVec<[(&[S], &[S]); 3]> = SmallVec::new();
                 dot_pairs.push((&r[..], &z[..]));
@@ -681,18 +719,32 @@ impl CgSolver {
                 if want_natural {
                     dot_pairs.push((&z[..], &z[..]));
                 }
-                global_dot_conj_many_into(comm, dot_pairs.as_slice(), dot_results.as_mut_slice());
+                red.dot_many_into(dot_pairs.as_slice(), dot_results.as_mut_slice());
                 RhoRequest::None
             } else {
-                dot_results[rho_idx] = global_dot_conj(comm, r, z);
+                dot_results[rho_idx] = red.dot(r, z);
                 RhoRequest::None
             };
 
             Self::prefetch_like(&p[..]);
             Self::prefetch_like(&x[..]);
 
-            if let RhoRequest::Scalars(req) = rho_req {
-                req.wait();
+            if let RhoRequest::Handle { handle, count } = rho_req {
+                let reduced = handle.wait();
+                #[cfg(feature = "complex")]
+                {
+                    let _ = count;
+                    for (slot, chunk) in dot_results.iter_mut().zip(reduced.chunks_exact(2)) {
+                        *slot = S::from_parts(chunk[0], chunk[1]);
+                    }
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    debug_assert_eq!(reduced.len(), count);
+                    for (slot, value) in dot_results.iter_mut().zip(reduced.into_iter()) {
+                        *slot = S::from_real(value);
+                    }
+                }
             }
 
             let rho_scalar = dot_results[rho_idx];
@@ -740,13 +792,13 @@ impl CgSolver {
                 }
             }
             if let Some(m) = &self.true_residual_monitor {
-                let true_res = global_nrm2(comm, r);
+                let true_res = red.norm2(r);
                 m(k, true_res);
             }
 
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                s.final_residual = global_nrm2(comm, r);
+                s.final_residual = red.norm2(r);
                 if s.final_residual <= zero_floor {
                     s.final_residual = R::zero();
                 }
@@ -759,7 +811,7 @@ impl CgSolver {
             stats.final_residual = res_reported;
         }
 
-        let true_res = global_nrm2(comm, r);
+        let true_res = red.norm2(r);
         Ok(Self::attach_drift_stats(SolveStats::new(
             self.conv.max_iters,
             true_res,
@@ -781,6 +833,8 @@ impl CgSolver {
     where
         A: KLinOp<Scalar = S> + ?Sized,
     {
+        let red = ReductCtx::new(comm, Some(&*work));
+        let red_mode = red.mode();
         let mut buffers = CgPipeWorkspace::acquire(nrows, work);
         let CgPipeWorkspace {
             r,
@@ -812,61 +866,63 @@ impl CgSolver {
         let want_unpre = matches!(self.norm_type, CgNormType::Unpreconditioned);
         let want_natural = matches!(self.norm_type, CgNormType::Natural);
 
-        let mut scalars: SmallVec<[S; 4]> = SmallVec::new();
-        scalars.push(par_dot_conj_local(r, u));
-        let gamma_idx = 0usize;
-        scalars.push(par_dot_conj_local(u, w));
-        let delta_idx = 1usize;
-        let rsq_idx = if want_unpre {
-            scalars.push(par_dot_conj_local(r, r));
-            Some(scalars.len() - 1)
-        } else {
-            None
-        };
-        let znorm_idx = if want_natural {
-            scalars.push(par_dot_conj_local(u, u));
-            Some(scalars.len() - 1)
-        } else {
-            None
+        let (gamma_scalar, delta_scalar, rsq, znorm) = {
+            let mut pairs: SmallVec<[(&[S], &[S]); 4]> = SmallVec::new();
+            pairs.push((r, u));
+            let gamma_idx = 0usize;
+            pairs.push((u, w));
+            let delta_idx = 1usize;
+            let rsq_idx = if want_unpre {
+                pairs.push((r, r));
+                Some(pairs.len() - 1)
+            } else {
+                None
+            };
+            let znorm_idx = if want_natural {
+                pairs.push((u, u));
+                Some(pairs.len() - 1)
+            } else {
+                None
+            };
+            let mut scalars: SmallVec<[S; 4]> = SmallVec::new();
+            scalars.resize(pairs.len(), S::zero());
+            red.dot_many_into(pairs.as_slice(), scalars.as_mut_slice());
+
+            let gamma_scalar = scalars[gamma_idx];
+            debug::record_dot(debug::DotKind::InitialRho, gamma_scalar);
+
+            let delta_scalar = scalars[delta_idx];
+            debug::record_dot(debug::DotKind::PAp, delta_scalar);
+
+            let rsq = rsq_idx.map(|idx| {
+                let value = scalars[idx];
+                debug::record_dot(debug::DotKind::RNorm, value);
+                dot_result_to_real(value)
+            });
+            let znorm = znorm_idx.map(|idx| {
+                let value = scalars[idx];
+                debug::record_dot(debug::DotKind::ZNorm, value);
+                dot_result_to_real(value)
+            });
+            (gamma_scalar, delta_scalar, rsq, znorm)
         };
 
-        comm.allreduce_sum_scalars(scalars.as_mut_slice());
-
-        let gamma_scalar = scalars[gamma_idx];
-        debug::record_dot(debug::DotKind::InitialRho, gamma_scalar);
         let mut rho: R = dot_result_to_real(gamma_scalar);
         if rho <= R::zero() || !rho.is_finite() {
             return Err(KError::IndefinitePreconditioner);
         }
 
-        let delta_scalar = scalars[delta_idx];
-        debug::record_dot(debug::DotKind::PAp, delta_scalar);
         let mut delta: R = dot_result_to_real(delta_scalar);
         if delta <= R::zero() || !delta.is_finite() {
             return Err(KError::IndefiniteMatrix);
         }
         let mut alpha: R = rho / delta;
 
-        let rsq = if let Some(idx) = rsq_idx {
-            let value = scalars[idx];
-            debug::record_dot(debug::DotKind::RNorm, value);
-            Some(dot_result_to_real(value))
-        } else {
-            None
-        };
-        let znorm = if let Some(idx) = znorm_idx {
-            let value = scalars[idx];
-            debug::record_dot(debug::DotKind::ZNorm, value);
-            Some(dot_result_to_real(value))
-        } else {
-            None
-        };
-
         par_copy(u, p);
         par_copy(w, s);
 
         let mut xnorm = if self.trust_region.is_some() {
-            global_nrm2(comm, x)
+            red.norm2(x)
         } else {
             R::zero()
         };
@@ -885,7 +941,7 @@ impl CgSolver {
             }
         }
         if let Some(m) = &self.true_residual_monitor {
-            let true_res = global_nrm2(comm, r);
+            let true_res = red.norm2(r);
             m(0, true_res);
         }
         #[cfg(feature = "logging")]
@@ -896,7 +952,7 @@ impl CgSolver {
         let (reason0, s0) = self.conv.check(res0_reported, res0_reported, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
             let mut s_out = s0;
-            s_out.final_residual = global_nrm2(comm, r);
+            s_out.final_residual = red.norm2(r);
             if s_out.final_residual <= zero_floor {
                 s_out.final_residual = R::zero();
             }
@@ -908,14 +964,15 @@ impl CgSolver {
         for k in 1..=self.conv.max_iters {
             let alpha_s: S = S::from_real(alpha);
             let local_pnorm_sq = if self.trust_region.is_some() {
-                par_sum_abs2_local(p)
+                sum_abs2_local_with_mode(p, red_mode)
             } else {
                 R::zero()
             };
 
             if let Some(rmax) = self.trust_region {
-                let pnorm = comm
-                    .allreduce_sum_real(local_pnorm_sq)
+                let pnorm = red
+                    .engine()
+                    .allreduce_sum_r(local_pnorm_sq)
                     .max(R::zero())
                     .sqrt();
                 if xnorm + alpha.abs() * pnorm > rmax {
@@ -925,7 +982,7 @@ impl CgSolver {
                     par_axpy(s, -step_s, r);
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
-                    stats.final_residual = global_nrm2(comm, r);
+                    stats.final_residual = red.norm2(r);
                     return Ok(Self::attach_drift_stats(stats));
                 }
             }
@@ -933,7 +990,7 @@ impl CgSolver {
             par_axpy(p, alpha_s, x);
             par_axpy(s, -alpha_s, r);
             if self.trust_region.is_some() {
-                xnorm = global_nrm2(comm, x);
+                xnorm = red.norm2(x);
             }
 
             if let Some(pc) = pc {
@@ -944,36 +1001,60 @@ impl CgSolver {
             a.matvec_s(u, &mut w[..], scratch);
 
             let mut tuple: SmallVec<[S; 4]> = SmallVec::new();
-            tuple.push(par_dot_conj_local(r, u));
+            tuple.push(dot_conj_local_with_mode(r, u, red_mode));
             let rho_idx = 0usize;
-            tuple.push(par_dot_conj_local(u, w));
+            tuple.push(dot_conj_local_with_mode(u, w, red_mode));
             let delta_idx = 1usize;
             let rsq_idx = if want_unpre {
-                tuple.push(par_dot_conj_local(r, r));
+                tuple.push(dot_conj_local_with_mode(r, r, red_mode));
                 Some(tuple.len() - 1)
             } else {
                 None
             };
             let znorm_idx = if want_natural {
-                tuple.push(par_dot_conj_local(u, u));
+                tuple.push(dot_conj_local_with_mode(u, u, red_mode));
                 Some(tuple.len() - 1)
             } else {
                 None
             };
 
             let async_ok = self.should_use_async(comm, nrows);
-            let reduce_req = if async_ok {
-                Some(comm.iallreduce_sum_scalars(tuple.as_mut_slice()))
-            } else {
-                None
-            };
+            #[cfg(feature = "complex")]
+            let mut payload = Vec::with_capacity(tuple.len() * 2);
+            #[cfg(not(feature = "complex"))]
+            let mut payload = Vec::with_capacity(tuple.len());
+            for value in tuple.iter().copied() {
+                #[cfg(feature = "complex")]
+                {
+                    payload.push(value.real());
+                    payload.push(value.imag());
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    payload.push(value.real());
+                }
+            }
 
-            if let Some(req) = reduce_req {
+            let reduced = if async_ok {
+                let handle = red.engine().iallreduce_sum_vec_r(payload);
                 Self::prefetch_like(&p[..]);
                 Self::prefetch_like(&x[..]);
-                req.wait();
+                handle.wait()
             } else {
-                comm.allreduce_sum_scalars(tuple.as_mut_slice());
+                red.engine().sum_vec_r(payload)
+            };
+
+            #[cfg(feature = "complex")]
+            {
+                for (slot, chunk) in tuple.iter_mut().zip(reduced.chunks_exact(2)) {
+                    *slot = S::from_parts(chunk[0], chunk[1]);
+                }
+            }
+            #[cfg(not(feature = "complex"))]
+            {
+                for (slot, value) in tuple.iter_mut().zip(reduced.into_iter()) {
+                    *slot = S::from_real(value);
+                }
             }
 
             let rho_scalar = tuple[rho_idx];
@@ -1032,13 +1113,13 @@ impl CgSolver {
                 }
             }
             if let Some(m) = &self.true_residual_monitor {
-                let true_res = global_nrm2(comm, r);
+                let true_res = red.norm2(r);
                 m(k, true_res);
             }
 
             let (reason, mut s_out) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                s_out.final_residual = global_nrm2(comm, r);
+                s_out.final_residual = red.norm2(r);
                 if s_out.final_residual <= zero_floor {
                     s_out.final_residual = R::zero();
                 }
@@ -1062,7 +1143,7 @@ impl CgSolver {
             stats.final_residual = res_reported;
         }
 
-        let true_res = global_nrm2(comm, r);
+        let true_res = red.norm2(r);
         Ok(Self::attach_drift_stats(SolveStats::new(
             self.conv.max_iters,
             true_res,

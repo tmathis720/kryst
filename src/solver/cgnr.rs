@@ -9,10 +9,12 @@ use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
-use crate::parallel::{UniverseComm, global_dot_conj, global_dot_conj_many_into};
+use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, take_or_resize};
+use crate::solver::common::{
+    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -123,6 +125,7 @@ impl CgnrSolver {
         let work = work.ok_or_else(|| {
             KError::InvalidInput("CGNR requires a Workspace; use KSP or Workspace::new(n)".into())
         })?;
+        let red = ReductCtx::new(comm, Some(&*work));
         if b.is_empty() {
             return Ok(SolveStats::new(
                 0,
@@ -163,7 +166,7 @@ impl CgnrSolver {
 
         let dot_pairs = [(&z[..], &zhat[..]), (&r[..], &r[..]), (b, b)];
         let mut dot_results = [S::zero(); 3];
-        global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+        red.dot_many_into(&dot_pairs, &mut dot_results);
         let mut rz = dot_results[0];
         let mut rnow = norm_from_dot(dot_results[1]);
         let bnorm = norm_from_dot(dot_results[2]).max(1e-32);
@@ -174,7 +177,15 @@ impl CgnrSolver {
 
         let (reason0, mut stats0) = self.conv.check(rnow, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+            let true_res = recompute_true_residual_norm_s(
+                a,
+                b,
+                x,
+                comm,
+                red.engine(),
+                tmp_true,
+                scratch,
+            );
             stats0.final_residual = true_res;
             return Ok(stats0);
         }
@@ -184,9 +195,17 @@ impl CgnrSolver {
             iters = k;
 
             a.matvec_s(p, ap, scratch);
-            let denom = dot_result_to_real(global_dot_conj(comm, ap, ap));
+            let denom = dot_result_to_real(red.dot(ap, ap));
             if denom <= R::default() || !denom.is_finite() {
-                let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+                let true_res = recompute_true_residual_norm_s(
+                    a,
+                    b,
+                    x,
+                    comm,
+                    red.engine(),
+                    tmp_true,
+                    scratch,
+                );
                 return Ok(SolveStats::new(
                     k - 1,
                     true_res,
@@ -210,7 +229,7 @@ impl CgnrSolver {
 
             let dot_pairs = [(&z[..], &zhat[..]), (&r[..], &r[..])];
             let mut dot_results = [S::zero(); 2];
-            global_dot_conj_many_into(comm, &dot_pairs, &mut dot_results);
+            red.dot_many_into(&dot_pairs, &mut dot_results);
             let rz_new = dot_results[0];
             rnow = norm_from_dot(dot_results[1]);
 
@@ -220,7 +239,15 @@ impl CgnrSolver {
 
             let (reason, mut stats) = self.conv.check(rnow, bnorm, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+                let true_res = recompute_true_residual_norm_s(
+                    a,
+                    b,
+                    x,
+                    comm,
+                    red.engine(),
+                    tmp_true,
+                    scratch,
+                );
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
@@ -232,7 +259,15 @@ impl CgnrSolver {
             rz = rz_new;
         }
 
-        let true_res = recompute_true_residual_norm_s(a, b, x, comm, tmp_true, scratch);
+        let true_res = recompute_true_residual_norm_s(
+            a,
+            b,
+            x,
+            comm,
+            red.engine(),
+            tmp_true,
+            scratch,
+        );
         Ok(SolveStats::new(
             iters,
             true_res,
