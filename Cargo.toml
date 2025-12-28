@@ -91,6 +91,7 @@ legacy-pc-bridge = []
 complex_ilu = []
 backend-faer = ["dep:faer"]
 backend-nalgebra = ["dep:nalgebra"]
+backend-naive = []
 nalgebra-explicit-dense = ["backend-nalgebra"]
 
 [[example]]

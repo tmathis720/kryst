@@ -6,7 +6,7 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::backend::SparseBackend;
 use crate::matrix::csc::CscMatrix;
-use crate::matrix::format::{FormatHint, OpFormat};
+use crate::matrix::format::{BackendFormatSupport, FormatHint, OpFormat};
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 
@@ -25,6 +25,8 @@ impl<S> SparseBackend<S> for FaerBackend
 where
     S: KrystScalar<Real = f64>,
 {
+    const FORMAT_SUPPORT: BackendFormatSupport = BackendFormatSupport::new(true, true, true, false);
+
     type Csr = CsrMatrix<S::Real>;
     type Csc = CscMatrix<S::Real>;
     type Dense = faer::Mat<S::Real>;

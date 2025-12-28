@@ -1,15 +1,21 @@
 //! Backend implementations for matrix abstractions.
+//!
+//! Each backend declares its format coverage via [`SparseBackend::FORMAT_SUPPORT`]
+//! so new backends must explicitly state which of Dense/CSR/CSC/BlockCSR are
+//! supported before materialization attempts are routed.
 
 use std::sync::Arc;
 
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::matrix::format::OpFormat;
+use crate::matrix::format::{BackendFormatSupport, OpFormat};
 use crate::matrix::op::LinOp;
 
 /// Describes the dense and sparse storage types a backend exposes along with
 /// conversion hooks between them.
 pub trait SparseBackend<S: KrystScalar> {
+    /// Format coverage for this backend. Keep in sync with materialization code.
+    const FORMAT_SUPPORT: BackendFormatSupport;
     /// CSR matrix type for this backend.
     type Csr: Send + Sync + 'static;
     /// CSC matrix type for this backend.
@@ -31,6 +37,16 @@ pub trait SparseBackend<S: KrystScalar> {
 
     /// Convert CSC → dense.
     fn dense_from_csc(csc: &Self::Csc) -> Result<Self::Dense, KError>;
+
+    /// Validate that an [`OpFormat`] is supported by this backend.
+    #[inline]
+    fn ensure_supports(format: OpFormat) -> Result<(), KError> {
+        if Self::FORMAT_SUPPORT.supports(format) {
+            Ok(())
+        } else {
+            Err(unsupported_format_err(format))
+        }
+    }
 }
 
 fn unsupported_format_err(want: OpFormat) -> KError {
@@ -51,6 +67,23 @@ fn unsupported_format_err(want: OpFormat) -> KError {
     }
 }
 
+#[inline]
+fn backend_format_support() -> BackendFormatSupport {
+    #[cfg(feature = "backend-faer")]
+    {
+        return crate::matrix::backend::faer::FaerBackend::FORMAT_SUPPORT;
+    }
+    #[cfg(feature = "backend-nalgebra")]
+    {
+        return crate::matrix::backend::nalgebra::NalgebraBackend::FORMAT_SUPPORT;
+    }
+    #[cfg(feature = "backend-naive")]
+    {
+        return crate::matrix::backend::naive::NaiveBackend::FORMAT_SUPPORT;
+    }
+    BackendFormatSupport::new(false, false, false, false)
+}
+
 /// Central entry point used by KSP/PCs to request a specific operator format.
 pub fn materialize(
     op: Arc<dyn LinOp<S = S>>,
@@ -59,6 +92,10 @@ pub fn materialize(
 ) -> Result<Arc<dyn LinOp<S = S>>, KError> {
     if want.is_any() || op.format() == want {
         return Ok(op);
+    }
+
+    if !backend_format_support().supports(want) {
+        return Err(unsupported_format_err(want));
     }
 
     #[cfg(feature = "backend-faer")]
@@ -81,6 +118,10 @@ pub fn materialize_ref(
     drop_tol: R,
 ) -> Result<Arc<dyn LinOp<S = S>>, KError> {
     if want.is_any() {
+        return Err(unsupported_format_err(want));
+    }
+
+    if !backend_format_support().supports(want) {
         return Err(unsupported_format_err(want));
     }
 
@@ -109,3 +150,6 @@ pub type DefaultBackend = crate::matrix::backend::faer::FaerBackend;
 
 #[cfg(feature = "backend-nalgebra")]
 pub mod nalgebra;
+
+#[cfg(feature = "backend-naive")]
+pub mod naive;

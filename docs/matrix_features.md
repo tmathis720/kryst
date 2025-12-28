@@ -23,6 +23,8 @@ the backend.
 | Features                              | Dense backend           | CSR SpMV            | CSC / transpose        | DistCsrOp / ParCsr | Notes |
 |--------------------------------------|--------------------------|---------------------|------------------------|--------------------|-------|
 | *(none)*                             | traits-only stub         | ✅ scalar           | ✅ via CSR gather      | ✅ (local-only)    | No Faer backend; format helpers fall back to pointer identity. |
+| `backend-nalgebra`                   | `nalgebra::DMatrix`      | ❌                  | ❌                     | ❌                | Dense-only materialization; sparse formats unsupported. |
+| `backend-naive`                      | stub                     | ❌                  | ❌                     | ❌                | Feature-gated backend stub with no materialization support. |
 | `backend-faer`                       | `faer::Mat` + `DenseOp`  | ✅ scalar           | ✅ CSC + gather        | ✅                 | SIMD/rayon disabled; caches rely on change IDs. |
 | `backend-faer,rayon`                 | same as above            | ✅ parallel          | ✅ parallel            | ✅                 | Rayon thresholds govern local parallelism. |
 | `backend-faer,simd`                  | same as above            | ✅ SIMD + scalar     | ✅ scalar transpose    | ✅                 | SIMD path chosen for large CSR, real scalars only. |

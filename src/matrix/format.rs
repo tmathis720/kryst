@@ -1,4 +1,9 @@
 //! Backend-aware format conversion traits and caches.
+//!
+//! Backend implementations advertise their matrix-format coverage via
+//! [`BackendFormatSupport`]. This keeps format conversion expectations explicit
+//! when adding new backends—update the backend's `FORMAT_SUPPORT` and ensure
+//! the `AsFormat` implementations cover the advertised formats.
 //! NOTE: Every conversion cache key includes the operator's [`StructureId`]
 //! and [`ValuesId`]. A value of `0` indicates "unknown" and disables precise
 //! invalidation, so wrappers like [`DenseOp`] / [`CsrOp`] are recommended when
@@ -22,6 +27,36 @@ pub enum OpFormat {
     Csr,
     Csc,
     BlockCsr,
+}
+
+/// Declares which operator formats a backend can materialize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendFormatSupport {
+    pub dense: bool,
+    pub csr: bool,
+    pub csc: bool,
+    pub block_csr: bool,
+}
+
+impl BackendFormatSupport {
+    pub const fn new(dense: bool, csr: bool, csc: bool, block_csr: bool) -> Self {
+        Self {
+            dense,
+            csr,
+            csc,
+            block_csr,
+        }
+    }
+
+    pub const fn supports(self, format: OpFormat) -> bool {
+        match format {
+            OpFormat::Dense => self.dense,
+            OpFormat::Csr => self.csr,
+            OpFormat::Csc => self.csc,
+            OpFormat::BlockCsr => self.block_csr,
+            OpFormat::Any => true,
+        }
+    }
 }
 
 impl OpFormat {
@@ -95,6 +130,11 @@ pub trait AsFormat<S: KrystScalar, B: SparseBackend<S>> {
     /// (e.g., raw `faer::Mat` without `mat-values-fingerprint`).
     fn values_id_for_cache(&self) -> ValuesId {
         ValuesId(0)
+    }
+
+    /// Advertise which formats the backend can materialize for this scalar.
+    fn backend_format_support() -> BackendFormatSupport {
+        B::FORMAT_SUPPORT
     }
 }
 
