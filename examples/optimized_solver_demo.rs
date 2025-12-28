@@ -60,6 +60,10 @@ use kryst::context::pc_context::PcType;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::matrix::op::DenseOp;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::matrix::op::LinOp;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
@@ -146,7 +150,8 @@ fn test_optimal_solver(
     let mut solution = vec![0.0; rhs.len()];
 
     // Convert sparse matrix to dense for KspContext
-    let dense_matrix = matrix.to_dense();
+    let dense_matrix = Arc::new(matrix.to_dense()?);
+    let dense_op: Arc<dyn LinOp<S = f64>> = Arc::new(DenseOp::new(Arc::clone(&dense_matrix)));
     let rhs_vec = rhs.to_vec();
 
     // Try primary configuration
@@ -158,7 +163,7 @@ fn test_optimal_solver(
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
     // provide operator and prepare workspace
-    ksp.set_operators(Arc::new(dense_matrix.clone()), None);
+    ksp.set_operators(Arc::clone(&dense_op), None);
     ksp.setup()?;
 
     let start = Instant::now();
@@ -193,7 +198,7 @@ fn test_optimal_solver(
                 .set_type(st_fb)?
                 .set_pc_type(pc_fb, None)?
                 .set_tolerances(1e-6, 1e-12, 1e3, 1000);
-            ksp_fallback.set_operators(Arc::new(dense_matrix.clone()), None);
+            ksp_fallback.set_operators(Arc::clone(&dense_op), None);
             ksp_fallback.setup()?;
 
             let start_fallback = Instant::now();
@@ -230,20 +235,21 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
 
     if n < 2000 {
         // Only for reasonably sized matrices
-        let dense = matrix.to_dense();
-        for i in 0..n {
-            let diag_val = dense[(i, i)].abs();
-            if diag_val > 0.0 {
-                min_diag = min_diag.min(diag_val);
-            }
-
-            let mut off_diag_sum = 0.0;
-            for j in 0..n {
-                if i != j {
-                    off_diag_sum += dense[(i, j)].abs();
+        if let Ok(dense) = matrix.to_dense() {
+            for i in 0..n {
+                let diag_val = dense[(i, i)].abs();
+                if diag_val > 0.0 {
+                    min_diag = min_diag.min(diag_val);
                 }
+
+                let mut off_diag_sum = 0.0;
+                for j in 0..n {
+                    if i != j {
+                        off_diag_sum += dense[(i, j)].abs();
+                    }
+                }
+                max_off_diag_sum = max_off_diag_sum.max(off_diag_sum);
             }
-            max_off_diag_sum = max_off_diag_sum.max(off_diag_sum);
         }
     }
 

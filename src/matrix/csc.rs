@@ -222,11 +222,17 @@ mod tests {
             vec![0, 1, 0, 1],
             vec![S::from_parts(1.0, 0.5), S::from_parts(2.0, -1.0), S::one(), S::zero()],
         );
-        let err = csc.to_dense().unwrap_err();
+        let err = match csc.to_dense() {
+            Err(err) => err,
+            Ok(_) => panic!("expected complex to_dense to return Err"),
+        };
         assert!(matches!(err, crate::error::KError::Unsupported(_)));
 
         let dense = faer::Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let err = CscMatrix::<S>::from_dense(&dense, 0.0).unwrap_err();
+        let err = match CscMatrix::<S>::from_dense(&dense, 0.0) {
+            Err(err) => err,
+            Ok(_) => panic!("expected complex from_dense to return Err"),
+        };
         assert!(matches!(err, crate::error::KError::Unsupported(_)));
     }
 }
