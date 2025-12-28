@@ -153,3 +153,59 @@ fn halo_slice_mut(buf: &mut [S]) -> &mut [R] {
         unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut R, buf.len()) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel::{NoComm, UniverseComm};
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn halo_pack_unpack_preserves_complex_values() {
+        let halo = HaloPlan {
+            neighbors: vec![1],
+            send_ptr: vec![0, 2],
+            send_idx: vec![0, 2],
+            recv_ptr: vec![0, 2],
+            recv_idx: vec![1, 0],
+        };
+        let x_owned = vec![
+            S::from_parts(1.0, -1.0),
+            S::from_parts(2.0, 0.5),
+            S::from_parts(-3.0, 4.0),
+        ];
+        let mut send_buf = vec![S::zero(); 2];
+        let mut recv_buf = vec![S::zero(); 2];
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let _reqs = halo.begin_exchange(&comm, &x_owned, &mut send_buf, &mut recv_buf);
+        assert_eq!(send_buf, vec![x_owned[0], x_owned[2]]);
+
+        let recv_buf = vec![S::from_parts(5.0, -2.0), S::from_parts(-6.5, 1.25)];
+        let mut x_ghost = vec![S::zero(); 2];
+        halo.unpack(&recv_buf, &mut x_ghost);
+        assert_eq!(x_ghost, vec![recv_buf[1], recv_buf[0]]);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn halo_slice_handles_complex_stride() {
+        let buf = vec![S::from_parts(1.5, -2.0), S::from_parts(3.25, 4.5)];
+        let slice = super::halo_slice(&buf);
+        assert_eq!(slice, &[1.5, -2.0, 3.25, 4.5]);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn halo_slice_mut_writes_complex_stride() {
+        let mut buf = vec![S::zero(); 2];
+        {
+            let slice = super::halo_slice_mut(&mut buf);
+            slice.copy_from_slice(&[1.0, -1.0, 2.0, 3.0]);
+        }
+        assert_eq!(
+            buf,
+            vec![S::from_parts(1.0, -1.0), S::from_parts(2.0, 3.0)]
+        );
+    }
+}
