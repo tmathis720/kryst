@@ -444,14 +444,28 @@ impl LinOp for DenseOp {
         (self.mat.nrows(), self.mat.ncols())
     }
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        let _ = crate::matrix::utils::parallel_mat_vec(&self.mat, x, y);
+        if let Err(err) = self.try_matvec(x, y) {
+            debug_assert!(false, "DenseOp::matvec dimension mismatch: {err}");
+        }
+    }
+    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        crate::matrix::utils::parallel_mat_vec(&self.mat, x, y)
     }
     fn supports_transpose(&self) -> bool {
         true
     }
     fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.mat.nrows());
-        assert_eq!(y.len(), self.mat.ncols());
+        if x.len() != self.mat.nrows() || y.len() != self.mat.ncols() {
+            debug_assert!(
+                false,
+                "DenseOp::t_matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                self.mat.nrows(),
+                self.mat.ncols(),
+                x.len(),
+                y.len()
+            );
+            return;
+        }
         for (j, yj) in y.iter_mut().enumerate().take(self.mat.ncols()) {
             let mut sum = 0.0;
             for (i, xi) in x.iter().enumerate().take(self.mat.nrows()) {
@@ -586,13 +600,29 @@ impl<S: KrystScalar> LinOp for CsrOp<S> {
         (self.csr.nrows(), self.csr.ncols())
     }
     fn matvec(&self, x: &[S], y: &mut [S]) {
+        if let Err(err) = self.try_matvec(x, y) {
+            debug_assert!(false, "CsrOp::matvec dimension mismatch: {err}");
+        }
+    }
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let (m, n) = (self.csr.nrows(), self.csr.ncols());
+        if x.len() != n || y.len() != m {
+            return Err(KError::InvalidInput(format!(
+                "CsrOp::matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                m,
+                n,
+                x.len(),
+                y.len()
+            )));
+        }
         if let Err(err) = crate::matrix::spmv::csr_matvec_par(&*self.csr, x, y) {
             #[cfg(feature = "logging")]
             log::trace!("CsrOp::matvec fallback to serial SpMV: {err}");
             #[cfg(not(feature = "logging"))]
-            let _ = err;
-            (*self.csr).spmv(x, y);
+            let _ = &err;
+            return crate::matrix::spmv::csr_matvec(&*self.csr, x, y);
         }
+        Ok(())
     }
     fn supports_transpose(&self) -> bool {
         true
@@ -700,6 +730,11 @@ impl<S: KrystScalar> LinOp for Mat<S> {
         (self.nrows(), self.ncols())
     }
     fn matvec(&self, x: &[S], y: &mut [S]) {
+        if let Err(err) = self.try_matvec(x, y) {
+            debug_assert!(false, "Mat::matvec dimension mismatch: {err}");
+        }
+    }
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
         let (m, n) = self.dims();
         match (x.len(), y.len()) {
             (nx, my) if nx == n && my == m => {
@@ -754,19 +789,31 @@ impl<S: KrystScalar> LinOp for Mat<S> {
                     y[i] = sum;
                 }
             }
-            (lx, ly) => panic!(
-                "Mat LinOp::matvec dimension mismatch: A is {}x{}, got x.len() = {}, y.len() = {}",
-                m, n, lx, ly
-            ),
+            (lx, ly) => {
+                return Err(KError::InvalidInput(format!(
+                    "Mat::matvec dimension mismatch: A is {}x{}, x.len() = {}, y.len() = {}",
+                    m, n, lx, ly
+                )));
+            }
         }
+        Ok(())
     }
     fn supports_transpose(&self) -> bool {
         true
     }
     fn t_matvec(&self, x: &[S], y: &mut [S]) {
         let (m, n) = self.dims();
-        assert_eq!(x.len(), m, "t_matvec: x must have length m = {}", m);
-        assert_eq!(y.len(), n, "t_matvec: y must have length n = {}", n);
+        if x.len() != m || y.len() != n {
+            debug_assert!(
+                false,
+                "Mat::t_matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                m,
+                n,
+                x.len(),
+                y.len()
+            );
+            return;
+        }
         for j in 0..n {
             let mut sum = S::zero();
             for i in 0..m {
@@ -839,12 +886,16 @@ impl<S: KrystScalar> LinOp for CsrMatrix<S> {
     fn matvec(&self, x: &[S], y: &mut [S]) {
         self.spmv(x, y);
     }
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        self.try_spmv(x, y)
+    }
     fn supports_transpose(&self) -> bool {
         true
     }
     fn t_matvec(&self, x: &[S], y: &mut [S]) {
-        self.spmv_transpose_scaled(S::one(), x, S::zero(), y)
-            .expect("CsrMatrix::t_matvec dimension mismatch");
+        if let Err(err) = self.spmv_transpose_scaled(S::one(), x, S::zero(), y) {
+            debug_assert!(false, "CsrMatrix::t_matvec dimension mismatch: {err}");
+        }
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -992,6 +1043,7 @@ where
 #[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
+    use crate::error::KError;
     use crate::matrix::sparse::CsrMatrix as RealCsrMatrix;
     use crate::matrix::spmv::scalar::spmv_csr_scalar;
 
@@ -1113,5 +1165,15 @@ mod tests {
         for (lhs, rhs) in y.iter().zip(y_ref.iter()) {
             assert!((lhs - rhs).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn csr_op_try_matvec_reports_dim_mismatch() {
+        let csr = Arc::new(CsrMatrix::identity(2));
+        let op = CsrOp::new(csr);
+        let x = vec![1.0, 2.0, 3.0];
+        let mut y = vec![0.0; 2];
+        let err = op.try_matvec(&x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
     }
 }

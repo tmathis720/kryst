@@ -2,6 +2,7 @@
 
 use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, SubmatrixExtract};
+use crate::error::KError;
 use crate::matrix::sparse_api::CsrMatRef;
 
 #[cfg(all(feature = "backend-faer", feature = "simd"))]
@@ -254,7 +255,14 @@ impl<T: KrystScalar> CsrMatrix<T> {
 
     /// Sparse matrix-vector product with default scaling: y = A * x.
     pub fn spmv(&self, x: &[T], y: &mut [T]) {
-        crate::matrix::spmv::csr_matvec(self, x, y).expect("spmv dimension mismatch");
+        if let Err(err) = self.try_spmv(x, y) {
+            debug_assert!(false, "CsrMatrix::spmv dimension mismatch: {err}");
+        }
+    }
+
+    /// Checked sparse matrix-vector product with default scaling: y = A * x.
+    pub fn try_spmv(&self, x: &[T], y: &mut [T]) -> Result<(), KError> {
+        crate::matrix::spmv::csr_matvec(self, x, y)
     }
 
     /// Sparse matrix-vector product: y = alpha * A * x + beta * y.
@@ -264,9 +272,9 @@ impl<T: KrystScalar> CsrMatrix<T> {
         x: &[T],
         beta: T,
         y: &mut [T],
-    ) -> Result<(), crate::error::KError> {
+    ) -> Result<(), KError> {
         if x.len() != self.ncols() || y.len() != self.nrows() {
-            return Err(crate::error::KError::InvalidInput(format!(
+            return Err(KError::InvalidInput(format!(
                 "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len={}",
                 self.nrows(),
                 self.ncols(),
@@ -296,9 +304,9 @@ impl<T: KrystScalar> CsrMatrix<T> {
         x: &[T],
         beta: T,
         y: &mut [T],
-    ) -> Result<(), crate::error::KError> {
+    ) -> Result<(), KError> {
         if x.len() != self.nrows() || y.len() != self.ncols() {
-            return Err(crate::error::KError::InvalidInput(format!(
+            return Err(KError::InvalidInput(format!(
                 "Dimension mismatch in spmv^T: A={}x{}, x.len()={}, y.len()={}",
                 self.nrows(),
                 self.ncols(),
@@ -482,7 +490,14 @@ where
 {
     /// Parallel SpMV using CSR structure directly.
     pub fn spmv_parallel(&self, x: &[T], y: &mut [T]) {
-        crate::matrix::spmv::csr_matvec_par(self, x, y).expect("spmv_parallel dimension mismatch");
+        if let Err(err) = self.try_spmv_parallel(x, y) {
+            debug_assert!(false, "CsrMatrix::spmv_parallel dimension mismatch: {err}");
+        }
+    }
+
+    /// Checked parallel SpMV using CSR structure directly.
+    pub fn try_spmv_parallel(&self, x: &[T], y: &mut [T]) -> Result<(), KError> {
+        crate::matrix::spmv::csr_matvec_par(self, x, y)
     }
 }
 
@@ -619,5 +634,20 @@ mod tests {
         let dense = faer::Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
         let err = CsrMatrix::<S>::from_dense(&dense, 0.0).unwrap_err();
         assert!(matches!(err, crate::error::KError::Unsupported(_)));
+    }
+
+    #[test]
+    fn try_spmv_reports_dim_mismatch() {
+        let m = CsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 2, 3],
+            vec![0, 2, 1],
+            vec![S::one(), S::from_real(2.0), S::from_real(3.0)],
+        );
+        let x = vec![S::one(); 2];
+        let mut y = vec![S::zero(); 2];
+        let err = m.try_spmv(&x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
     }
 }

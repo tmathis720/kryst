@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::op::{LinOp, LinOpF64, StructureId, ValuesId};
+use crate::error::KError;
 
 /// Matrix-free "shell" operator.
 pub struct MatShell<S> {
@@ -54,7 +55,23 @@ impl LinOp for MatShell<f64> {
     }
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        debug_assert_eq!(x.len(), self.n, "MatShell::matvec x.len mismatch");
+        debug_assert_eq!(y.len(), self.m, "MatShell::matvec y.len mismatch");
         (self.mv)(x, y)
+    }
+
+    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        if x.len() != self.n || y.len() != self.m {
+            return Err(KError::InvalidInput(format!(
+                "MatShell::matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                self.m,
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+        (self.mv)(x, y);
+        Ok(())
     }
 
     fn supports_transpose(&self) -> bool {
@@ -62,6 +79,8 @@ impl LinOp for MatShell<f64> {
     }
 
     fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+        debug_assert_eq!(x.len(), self.m, "MatShell::t_matvec x.len mismatch");
+        debug_assert_eq!(y.len(), self.n, "MatShell::t_matvec y.len mismatch");
         if let Some(f) = &self.mvt {
             f(x, y);
         } else {
@@ -89,5 +108,23 @@ impl LinOpF64 for MatShell<f64> {
     #[inline]
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         LinOp::matvec(self, x, y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mat_shell_try_matvec_reports_dim_mismatch() {
+        let op = MatShell::new(2, 3, |x, y| {
+            for (yi, xi) in y.iter_mut().zip(x.iter()) {
+                *yi = *xi;
+            }
+        });
+        let x = vec![1.0, 2.0, 3.0];
+        let mut y = vec![0.0; 1];
+        let err = op.try_matvec(&x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
     }
 }
