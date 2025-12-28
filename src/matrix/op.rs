@@ -446,6 +446,7 @@ impl<S: KrystScalar> LinOp for DenseOp<S> {
     fn matvec(&self, x: &[S], y: &mut [S]) {
         if let Err(err) = self.try_matvec(x, y) {
             debug_assert!(false, "DenseOp::matvec dimension mismatch: {err}");
+            panic!("{err}");
         }
     }
     fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -472,23 +473,9 @@ impl<S: KrystScalar> LinOp for DenseOp<S> {
         true
     }
     fn t_matvec(&self, x: &[S], y: &mut [S]) {
-        if x.len() != self.mat.nrows() || y.len() != self.mat.ncols() {
-            debug_assert!(
-                false,
-                "DenseOp::t_matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
-                self.mat.nrows(),
-                self.mat.ncols(),
-                x.len(),
-                y.len()
-            );
-            return;
-        }
-        for (j, yj) in y.iter_mut().enumerate().take(self.mat.ncols()) {
-            let mut sum = S::zero();
-            for (i, xi) in x.iter().enumerate().take(self.mat.nrows()) {
-                sum = sum + self.mat[(i, j)].conj() * *xi;
-            }
-            *yj = sum;
+        if let Err(err) = try_t_matvec_impl("DenseOp::t_matvec", self.mat.as_ref(), x, y) {
+            debug_assert!(false, "{err}");
+            panic!("{err}");
         }
     }
     fn as_any(&self) -> &dyn Any {
@@ -739,6 +726,33 @@ impl<Scalar: KrystScalar> CsrOp<Scalar> {
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+#[cfg(feature = "backend-faer")]
+fn try_t_matvec_impl<S: KrystScalar>(
+    label: &str,
+    mat: &Mat<S>,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError> {
+    let (m, n) = (mat.nrows(), mat.ncols());
+    if x.len() != m || y.len() != n {
+        return Err(KError::InvalidInput(format!(
+            "{label} dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+            m,
+            n,
+            x.len(),
+            y.len()
+        )));
+    }
+    for j in 0..n {
+        let mut sum = S::zero();
+        for i in 0..m {
+            sum = sum + mat[(i, j)].conj() * x[i];
+        }
+        y[j] = sum;
+    }
+    Ok(())
+}
+
 /// Generic LinOp implementation for Faer dense matrices.
 #[cfg(feature = "backend-faer")]
 impl<S: KrystScalar> LinOp for Mat<S> {
@@ -749,6 +763,7 @@ impl<S: KrystScalar> LinOp for Mat<S> {
     fn matvec(&self, x: &[S], y: &mut [S]) {
         if let Err(err) = self.try_matvec(x, y) {
             debug_assert!(false, "Mat::matvec dimension mismatch: {err}");
+            panic!("{err}");
         }
     }
     fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -819,24 +834,9 @@ impl<S: KrystScalar> LinOp for Mat<S> {
         true
     }
     fn t_matvec(&self, x: &[S], y: &mut [S]) {
-        let (m, n) = self.dims();
-        if x.len() != m || y.len() != n {
-            debug_assert!(
-                false,
-                "Mat::t_matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
-                m,
-                n,
-                x.len(),
-                y.len()
-            );
-            return;
-        }
-        for j in 0..n {
-            let mut sum = S::zero();
-            for i in 0..m {
-                sum = sum + self[(i, j)].conj() * x[i];
-            }
-            y[j] = sum;
+        if let Err(err) = try_t_matvec_impl("Mat::t_matvec", self, x, y) {
+            debug_assert!(false, "{err}");
+            panic!("{err}");
         }
     }
     fn as_any(&self) -> &dyn Any {
@@ -1191,6 +1191,35 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0];
         let mut y = vec![0.0; 2];
         let err = op.try_matvec(&x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn dense_op_reports_dim_mismatch() {
+        let mat = Arc::new(Mat::<f64>::zeros(2, 3));
+        let op = DenseOp::new(mat.clone());
+        let x = vec![1.0; 4];
+        let mut y = vec![0.0; 2];
+        let err = op.try_matvec(&x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
+
+        let x = vec![1.0; 2];
+        let mut y = vec![0.0; 2];
+        let err = try_t_matvec_impl("DenseOp::t_matvec", mat.as_ref(), &x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn mat_reports_dim_mismatch() {
+        let mat = Mat::<f64>::zeros(2, 3);
+        let x = vec![1.0; 3];
+        let mut y = vec![0.0; 1];
+        let err = LinOp::try_matvec(&mat, &x, &mut y).unwrap_err();
+        assert!(matches!(err, KError::InvalidInput(_)));
+
+        let x = vec![1.0; 2];
+        let mut y = vec![0.0; 2];
+        let err = try_t_matvec_impl("Mat::t_matvec", &mat, &x, &mut y).unwrap_err();
         assert!(matches!(err, KError::InvalidInput(_)));
     }
 }
