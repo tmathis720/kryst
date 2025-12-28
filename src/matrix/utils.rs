@@ -4,6 +4,14 @@
 //! `CsrMatrix<f64>`) to keep AMG and factorization paths fast and ergonomic.
 //! In complex builds these helpers return an error because AMG-oriented paths
 //! are real-only and do not accept complex scalars.
+//!
+//! Real-only helpers that return `KError::Unsupported` for complex scalars:
+//! - `spgemm_with_drop_tol_generic`
+//! - `spgemm_generic`
+//! - `spgemm_btree_generic`
+//! - `sparse_galerkin_product_generic`
+//! - `rap_btree_generic`
+//! - `rap_opt_generic`
 //! Generic scalar code lives elsewhere in the crate.
 
 use crate::algebra::scalar::KrystScalar;
@@ -250,6 +258,11 @@ pub fn spgemm_generic<T>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> Result<CsrMatrix
 where
     T: KrystScalar<Real = f64>,
 {
+    if is_complex_scalar::<T>() {
+        return Err(KError::Unsupported(
+            "spgemm_generic is real-only; complex scalars are unsupported",
+        ));
+    }
     spgemm_with_drop_tol_generic(a, b, 1e-12)
 }
 
@@ -476,6 +489,11 @@ where
 {
     use std::collections::BTreeMap;
 
+    if is_complex_scalar::<T>() {
+        return Err(KError::Unsupported(
+            "spgemm_btree_generic is real-only; complex scalars are unsupported",
+        ));
+    }
     if a.ncols() != b.nrows() {
         return Err(KError::InvalidInput(format!(
             "spgemm_btree: dimension mismatch A is {}x{}, B is {}x{}",
@@ -537,6 +555,11 @@ pub fn sparse_galerkin_product_generic<T>(
 where
     T: KrystScalar<Real = f64>,
 {
+    if is_complex_scalar::<T>() {
+        return Err(KError::Unsupported(
+            "sparse_galerkin_product_generic is real-only; complex scalars are unsupported",
+        ));
+    }
     // Step 1: T = A * P
     let ap = spgemm_generic(matrix, interpolation)?;
     // Step 2: C = R * T
@@ -561,6 +584,11 @@ pub fn rap_btree_generic<T>(
 where
     T: KrystScalar<Real = f64>,
 {
+    if is_complex_scalar::<T>() {
+        return Err(KError::Unsupported(
+            "rap_btree_generic is real-only; complex scalars are unsupported",
+        ));
+    }
     let ap = spgemm_btree_generic(matrix, interpolation)?;
     spgemm_btree_generic(restriction, &ap)
 }
@@ -585,6 +613,11 @@ pub fn rap_opt_generic<T>(
 where
     T: KrystScalar<Real = f64>,
 {
+    if is_complex_scalar::<T>() {
+        return Err(KError::Unsupported(
+            "rap_opt_generic is real-only; complex scalars are unsupported",
+        ));
+    }
     sparse_galerkin_product_generic(restriction, matrix, interpolation)
 }
 
@@ -905,6 +938,13 @@ mod tests {
     use super::*;
     use crate::matrix::sparse::CsrMatrix;
     use faer::Mat;
+    #[cfg(feature = "complex")]
+    use crate::algebra::prelude::*;
+
+    #[cfg(feature = "complex")]
+    fn complex_csr(value: S) -> CsrMatrix<S> {
+        CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![value])
+    }
 
     #[test]
     fn test_analyze_matrix_properties() {
@@ -999,22 +1039,57 @@ mod tests {
     #[cfg(feature = "complex")]
     #[test]
     fn spgemm_rejects_complex_scalars() {
-        use crate::algebra::prelude::*;
-        let a = CsrMatrix::from_csr(
-            1,
-            1,
-            vec![0, 1],
-            vec![0],
-            vec![S::from_parts(1.0, 0.5)],
-        );
-        let b = CsrMatrix::from_csr(
-            1,
-            1,
-            vec![0, 1],
-            vec![0],
-            vec![S::from_parts(2.0, -1.0)],
-        );
+        let a = complex_csr(S::from_parts(1.0, 0.5));
+        let b = complex_csr(S::from_parts(2.0, -1.0));
         let err = spgemm_with_drop_tol_generic(&a, &b, 0.0).unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn spgemm_generic_rejects_complex_scalars() {
+        let a = complex_csr(S::from_parts(1.0, 0.5));
+        let b = complex_csr(S::from_parts(2.0, -1.0));
+        let err = spgemm_generic(&a, &b).unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn spgemm_btree_generic_rejects_complex_scalars() {
+        let a = complex_csr(S::from_parts(1.0, 0.5));
+        let b = complex_csr(S::from_parts(2.0, -1.0));
+        let err = spgemm_btree_generic(&a, &b).unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn sparse_galerkin_product_generic_rejects_complex_scalars() {
+        let r = complex_csr(S::from_parts(1.0, 0.0));
+        let a = complex_csr(S::from_parts(2.0, -1.0));
+        let p = complex_csr(S::from_parts(0.5, 0.25));
+        let err = sparse_galerkin_product_generic(&r, &a, &p).unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn rap_btree_generic_rejects_complex_scalars() {
+        let r = complex_csr(S::from_parts(1.0, 0.0));
+        let a = complex_csr(S::from_parts(2.0, -1.0));
+        let p = complex_csr(S::from_parts(0.5, 0.25));
+        let err = rap_btree_generic(&r, &a, &p).unwrap_err();
+        assert!(matches!(err, KError::Unsupported(_)));
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn rap_opt_generic_rejects_complex_scalars() {
+        let r = complex_csr(S::from_parts(1.0, 0.0));
+        let a = complex_csr(S::from_parts(2.0, -1.0));
+        let p = complex_csr(S::from_parts(0.5, 0.25));
+        let err = rap_opt_generic(&r, &a, &p).unwrap_err();
         assert!(matches!(err, KError::Unsupported(_)));
     }
 
