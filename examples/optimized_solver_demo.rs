@@ -151,7 +151,8 @@ fn test_optimal_solver(
 
     // Convert sparse matrix to dense for KspContext
     let dense_matrix = Arc::new(matrix.to_dense()?);
-    let dense_op: Arc<dyn LinOp<S = f64>> = Arc::new(DenseOp::new(Arc::clone(&dense_matrix)));
+    let dense_op: Arc<dyn LinOp<S = f64>> =
+        Arc::new(DenseOp::<f64>::new(Arc::clone(&dense_matrix)));
     let rhs_vec = rhs.to_vec();
 
     // Try primary configuration

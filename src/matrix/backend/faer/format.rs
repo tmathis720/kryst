@@ -95,7 +95,7 @@ where
     }
 }
 
-impl<S> AsFormat<S, DefaultBackend> for DenseOp
+impl<S> AsFormat<S, DefaultBackend> for DenseOp<f64>
 where
     S: KrystScalar<Real = f64>,
 {

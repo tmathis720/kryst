@@ -17,13 +17,13 @@ fn denseop_csc_cache_includes_values_id() {
             R::default()
         }
     });
-    let dop = DenseOp::new(Arc::new(m));
+    let dop = DenseOp::<f64>::new(Arc::new(m));
     // First conversion
-    let c1 = <DenseOp as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
+    let c1 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
     // Mark numeric change (simulate in-place edits)
     dop.mark_values_changed();
     // Second conversion should not hit the same cache entry
-    let c2 = <DenseOp as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
+    let c2 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
 
     // The arcs should be distinct instances because key includes ValuesId
     let p1 = Arc::as_ptr(&c1) as usize;
@@ -50,4 +50,22 @@ fn raw_mat_csc_cache_is_stable_without_values_tracking() {
         p1, p2,
         "Raw Mat should reuse the same CSC when values_id is unknown (0)"
     );
+}
+
+#[test]
+fn denseop_csc_cache_includes_structure_id() {
+    let m = Mat::<R>::from_fn(2, 2, |i, j| {
+        if i == j {
+            S::one().real()
+        } else {
+            R::default()
+        }
+    });
+    let dop = DenseOp::<f64>::new(Arc::new(m));
+    let c1 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
+    dop.mark_structure_changed();
+    let c2 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
+    let p1 = Arc::as_ptr(&c1) as usize;
+    let p2 = Arc::as_ptr(&c2) as usize;
+    assert_ne!(p1, p2, "CSC cache entry not invalidated on structure change");
 }

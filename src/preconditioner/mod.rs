@@ -36,7 +36,7 @@
 //! # use faer::Mat;
 //! # use std::sync::Arc;
 //! let a = Mat::<f64>::from_fn(100,100, |i,j| if i==j {4.0} else if (i as isize-j as isize).abs()==1 {-1.0} else {0.0});
-//! let a = Arc::new(DenseOp::new(Arc::new(a)));
+//! let a = Arc::new(DenseOp::<f64>::new(Arc::new(a)));
 //! # use kryst::algebra::prelude::{KrystScalar, S};
 //! let b = vec![S::from_real(1.0); 100];
 //! let mut x = vec![S::zero(); 100];

@@ -503,7 +503,7 @@ mod tests {
         n: usize,
         f: F,
     ) -> MatShell<f64> {
-        MatShell::new(n, n, f)
+        MatShell::<f64>::new(n, n, f)
     }
 
     #[test]

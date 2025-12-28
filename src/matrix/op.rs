@@ -395,18 +395,18 @@ use faer::Mat;
 /// [`mark_structure_changed`] or [`mark_values_changed`] as appropriate so
 /// cached conversions/preconditioners can detect the new contents.
 #[cfg(feature = "backend-faer")]
-pub struct DenseOp {
-    mat: Arc<Mat<f64>>,
+pub struct DenseOp<S: KrystScalar> {
+    mat: Arc<Mat<S>>,
     ids: ChangeIds,
     comm: UniverseComm,
     layout: Option<DistLayout>,
 }
 #[cfg(feature = "backend-faer")]
-impl DenseOp {
+impl<S: KrystScalar> DenseOp<S> {
     /// Wrap a dense matrix so changes can be tracked via [`mark_structure_changed`] and
     /// [`mark_values_changed`]. This enables correct caching and preconditioner reuse across
     /// nonlinear or time-stepping updates.
-    pub fn new(mat: Arc<Mat<f64>>) -> Self {
+    pub fn new(mat: Arc<Mat<S>>) -> Self {
         let ids = ChangeIds::default();
         ids.bump_structure();
         ids.bump_values();
@@ -433,28 +433,45 @@ impl DenseOp {
     pub fn mark_values_changed(&self) {
         self.ids.bump_values();
     }
-    pub fn inner(&self) -> &Mat<f64> {
+    pub fn inner(&self) -> &Mat<S> {
         &self.mat
     }
 }
 #[cfg(feature = "backend-faer")]
-impl LinOp for DenseOp {
-    type S = f64;
+impl<S: KrystScalar> LinOp for DenseOp<S> {
+    type S = S;
     fn dims(&self) -> (usize, usize) {
         (self.mat.nrows(), self.mat.ncols())
     }
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn matvec(&self, x: &[S], y: &mut [S]) {
         if let Err(err) = self.try_matvec(x, y) {
             debug_assert!(false, "DenseOp::matvec dimension mismatch: {err}");
         }
     }
-    fn try_matvec(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        crate::matrix::utils::parallel_mat_vec(&self.mat, x, y)
+    fn try_matvec(&self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != self.mat.ncols() || y.len() != self.mat.nrows() {
+            return Err(KError::InvalidInput(format!(
+                "DenseOp::matvec dimension mismatch: A={}x{}, x.len()={}, y.len()={}",
+                self.mat.nrows(),
+                self.mat.ncols(),
+                x.len(),
+                y.len()
+            )));
+        }
+        let cols = self.mat.ncols();
+        for (i, yi) in y.iter_mut().enumerate().take(self.mat.nrows()) {
+            let mut sum = S::zero();
+            for j in 0..cols {
+                sum = sum + self.mat[(i, j)] * x[j];
+            }
+            *yi = sum;
+        }
+        Ok(())
     }
     fn supports_transpose(&self) -> bool {
         true
     }
-    fn t_matvec(&self, x: &[f64], y: &mut [f64]) {
+    fn t_matvec(&self, x: &[S], y: &mut [S]) {
         if x.len() != self.mat.nrows() || y.len() != self.mat.ncols() {
             debug_assert!(
                 false,
@@ -467,9 +484,9 @@ impl LinOp for DenseOp {
             return;
         }
         for (j, yj) in y.iter_mut().enumerate().take(self.mat.ncols()) {
-            let mut sum = 0.0;
+            let mut sum = S::zero();
             for (i, xi) in x.iter().enumerate().take(self.mat.nrows()) {
-                sum += self.mat[(i, j)] * *xi;
+                sum = sum + self.mat[(i, j)].conj() * *xi;
             }
             *yj = sum;
         }
@@ -750,7 +767,7 @@ impl<S: KrystScalar> LinOp for Mat<S> {
                 for j in 0..n {
                     let mut sum = S::zero();
                     for i in 0..m {
-                        sum = sum + self[(i, j)] * x[i];
+                        sum = sum + self[(i, j)].conj() * x[i];
                     }
                     y[j] = sum;
                 }
@@ -767,7 +784,7 @@ impl<S: KrystScalar> LinOp for Mat<S> {
                 for j in 0..n {
                     let mut sum = S::zero();
                     for i in 0..m {
-                        sum = sum + self[(i, j)] * tmp[i];
+                        sum = sum + self[(i, j)].conj() * tmp[i];
                     }
                     y[j] = sum;
                 }
@@ -777,7 +794,7 @@ impl<S: KrystScalar> LinOp for Mat<S> {
                 for j in 0..n {
                     let mut sum = S::zero();
                     for i in 0..m {
-                        sum = sum + self[(i, j)] * x[i];
+                        sum = sum + self[(i, j)].conj() * x[i];
                     }
                     tmp[j] = sum;
                 }
@@ -817,7 +834,7 @@ impl<S: KrystScalar> LinOp for Mat<S> {
         for j in 0..n {
             let mut sum = S::zero();
             for i in 0..m {
-                sum = sum + self[(i, j)] * x[i];
+                sum = sum + self[(i, j)].conj() * x[i];
             }
             y[j] = sum;
         }

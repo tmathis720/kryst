@@ -16,7 +16,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let n = 4;
-//! let a = MatShell::new(n, n, move |x, y| {
+//! let a = MatShell::<f64>::new(n, n, move |x, y| {
 //!     for i in 0..n {
 //!         let mut sum = 2.0 * x[i];
 //!         if i > 0 {
