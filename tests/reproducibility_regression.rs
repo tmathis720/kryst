@@ -81,3 +81,20 @@ fn reproducible_history_fixed_threads_parallel() {
         assert_eq!(a.to_bits(), b.to_bits(), "residual mismatch: {a} vs {b}");
     }
 }
+
+#[cfg(feature = "rayon")]
+#[test]
+fn reproducible_history_serial_vs_parallel() {
+    let serial_args = ["-ksp_reproducible", "-ksp_threads", "1"];
+    let parallel_args = ["-ksp_reproducible", "-ksp_threads", "4"];
+    let serial = run_once(&serial_args);
+    let parallel = run_once(&parallel_args);
+    assert_eq!(serial.len(), parallel.len());
+    for (a, b) in serial.iter().zip(parallel.iter()) {
+        let scale = a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() <= 1e-12 * scale,
+            "residual mismatch: {a} vs {b}"
+        );
+    }
+}

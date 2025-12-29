@@ -2,6 +2,8 @@ use crate::parallel::Comm;
 
 #[cfg(feature = "mpi")]
 use crate::parallel::MpiComm;
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReproMode {
@@ -130,9 +132,47 @@ pub fn dot_local_deterministic_parallel(
     _chunk_len: usize,
     mode: ReproMode,
 ) -> f64 {
-    // Placeholder: currently executes serial deterministic dot.
-    // A fully parallel deterministic implementation can be added later.
-    dot_local_slice(u, v, mode)
+    debug_assert_eq!(u.len(), v.len());
+    if u.is_empty() {
+        return 0.0;
+    }
+
+    #[cfg(feature = "rayon")]
+    {
+        let chunk_len = _chunk_len.max(1);
+        let n_chunks = (u.len() + chunk_len - 1) / chunk_len;
+        let partials: Vec<f64> = (0..n_chunks)
+            .into_par_iter()
+            .map(|chunk_idx| {
+                let start = chunk_idx * chunk_len;
+                let end = (start + chunk_len).min(u.len());
+                dot_local_slice(&u[start..end], &v[start..end], mode)
+            })
+            .collect();
+
+        match mode {
+            ReproMode::Fast => partials.into_iter().sum(),
+            ReproMode::Deterministic => {
+                let mut acc = Kahan::new();
+                for value in partials {
+                    acc.add(value);
+                }
+                acc.finish()
+            }
+            ReproMode::DeterministicAccurate => {
+                let mut acc = DD::new();
+                for value in partials {
+                    acc.add(value);
+                }
+                acc.finish()
+            }
+        }
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        dot_local_slice(u, v, mode)
+    }
 }
 
 #[repr(C)]
