@@ -7,7 +7,7 @@ use kryst::matrix::parcsr::builder::partition_rows;
 #[cfg(feature = "mpi")]
 use kryst::matrix::sparse::CsrMatrix;
 #[cfg(feature = "mpi")]
-use kryst::parallel::{MpiComm, UniverseComm};
+use kryst::parallel::{Comm, MpiComm, NoComm, UniverseComm};
 #[cfg(feature = "mpi")]
 use kryst::solver::api::Solver;
 #[cfg(feature = "mpi")]
@@ -127,6 +127,65 @@ fn dist_csr_halo_exchange_matches_tridiagonal() {
         assert!(
             (yi - expected).abs() < 1e-10,
             "rank {}: y[{global_row}] = {yi}, expected {expected}",
+            comm.rank()
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "mpi")]
+fn superlu_dist_matches_serial_tridiagonal() {
+    let Some(comm) = mpi_comm() else {
+        return;
+    };
+    if comm.size() < 2 {
+        eprintln!("skipping MPI test: need at least 2 ranks");
+        return;
+    }
+
+    let n = comm.size() * 3;
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for i in 0..n {
+        if i > 0 {
+            col_idx.push(i - 1);
+            vals.push(-1.0);
+        }
+        col_idx.push(i);
+        vals.push(2.5);
+        if i + 1 < n {
+            col_idx.push(i + 1);
+            vals.push(-1.0);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    let a = CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals);
+    let b: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+
+    let mut solver = SuperLuDistSolver::new();
+    solver.setup(&a, &comm).unwrap();
+    solver.factor(&a).unwrap();
+    let mut x_mpi = vec![0.0; n];
+    solver.solve(&b, &mut x_mpi, &comm).unwrap();
+
+    let mut x_expected = vec![0.0; n];
+    if comm.rank() == 0 {
+        let serial_comm = UniverseComm::NoComm(NoComm);
+        let mut serial_solver = SuperLuDistSolver::new();
+        serial_solver.setup(&a, &serial_comm).unwrap();
+        serial_solver.factor(&a).unwrap();
+        serial_solver
+            .solve(&b, &mut x_expected, &serial_comm)
+            .unwrap();
+    }
+    comm.allreduce_sum_slice(&mut x_expected);
+
+    for (i, (&xi, &xe)) in x_mpi.iter().zip(x_expected.iter()).enumerate() {
+        assert!(
+            (xi - xe).abs() < 1e-9,
+            "rank {}: x[{i}] = {xi}, expected {xe}",
             comm.rank()
         );
     }
