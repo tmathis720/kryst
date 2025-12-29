@@ -31,6 +31,63 @@ the backend.
 | `backend-faer,simd,rayon`            | same as above            | ✅ SIMD + Rayon      | ✅ scalar transpose    | ✅                 | Highest-performance real configuration. |
 | `backend-faer,complex`               | `faer::Mat<Complex64>`   | ✅ scalar only       | ✅ scalar transpose    | ✅                 | SIMD disabled; complex transpose uses scalar gather. |
 | `backend-faer,transpose-cache`       | same as above             | ✅ scalar           | ✅ cached CSC          | ✅                 | CSC cache keyed on `ValuesId` for repeated transposes. |
+| `backend-faer,mpi`                   | same as above            | ✅ scalar           | ✅ scalar transpose    | ✅ distributed      | MPI communicator required for halo exchange and reductions. |
+| `backend-faer,mpi,rayon`             | same as above            | ✅ parallel          | ✅ parallel            | ✅ distributed      | MPI collectives + Rayon local kernels; pin thread count for reproducibility. |
+| `backend-faer,mpi,rayon,complex`     | same as above            | ✅ parallel          | ✅ scalar transpose    | ✅ distributed      | Complex transpose remains scalar; MPI paths support complex scalars. |
+
+## MPI/Rayon capability checklist
+
+Use this checklist when validating MPI/Rayon configurations against the
+documented behavior in the README and matrix module:
+
+- **Features and runtime flags**
+  - `backend-faer` required for CSR/Dense kernels; MPI and Rayon are optional.
+  - `mpi` enables distributed communicators and `DistCsrOp` halo exchange.
+  - `rayon` enables shared-memory parallel kernels and Rayon communicators.
+  - `-ksp_threads <N>` and/or `RAYON_NUM_THREADS=<N>` controls Rayon worker count.
+  - `-ksp_reproducible` forces rank-ordered MPI reductions and fixed-order local kernels.
+
+- **MPI reductions and communicator paths**
+  - `src/parallel/mod.rs` selects MPI vs. Rayon communicator implementations.
+  - `src/parallel/mpi_comm.rs` provides rank-ordered and non-deterministic reductions.
+  - `src/parallel/rayon_comm.rs` mirrors the reduction API for local-only runs.
+
+- **Distributed SpMV and halo exchange**
+  - `DistCsrOp` uses halo exchange in `src/matrix/dist/halo.rs`.
+  - Distributed CSR application in `src/matrix/dist_csr.rs` requires MPI for neighbor exchange.
+
+- **Local SpMV/vector kernels**
+  - Rayon-backed CSR paths live in `src/matrix/spmv/mod.rs`.
+  - Vector kernels used by solvers live in `src/algebra/parallel.rs`.
+
+## MPI/Rayon test matrix plan
+
+Use this plan to validate MPI/Rayon coverage with minimal, targeted tests:
+
+1. **Communicator reductions (MPI vs. Rayon)**
+   - Exercise `Comm::allreduce_sum` and `Comm::allreduce_max` on small vectors.
+   - Compare results between `mpi` builds (`src/parallel/mpi_comm.rs`) and
+     `rayon` builds (`src/parallel/rayon_comm.rs`).
+   - Include a `-ksp_reproducible` run to confirm rank-ordered reductions.
+
+2. **Distributed SpMV (DistCsrOp + halo exchange)**
+   - Build a 2-rank halo case and verify `DistCsrOp::apply` results.
+   - Validate halo buffers populated in `src/matrix/dist/halo.rs` and the
+     distributed CSR apply path in `src/matrix/dist_csr.rs`.
+
+3. **Rayon SpMV + vector kernels**
+   - Run a local CSR SpMV on a moderate-size matrix with `rayon` enabled and
+     verify correctness against the scalar baseline (`src/matrix/spmv/mod.rs`).
+   - Validate parallel dot/axpy paths in `src/algebra/parallel.rs` with
+     multiple thread counts.
+
+## Expected feature combinations
+
+- `backend-faer,rayon`: local parallel kernels only.
+- `backend-faer,mpi`: distributed kernels with scalar local work.
+- `backend-faer,mpi,rayon`: distributed kernels with parallel local work.
+- `backend-faer,mpi,rayon,complex`: distributed complex kernels; transpose
+  gather remains scalar.
 
 ## Complex scalar guidance
 
