@@ -94,6 +94,14 @@ reproducible CI runs.
 | `-ksp_trust_region <radius>` | unset | Enable CG trust-region safeguarding with the provided radius. |
 | `-ksp_reorthog never|ifneeded|always` | `ifneeded` | Control Gram-Schmidt reorthogonalisation in GMRES and FGMRES. |
 
+#### Rayon tuning
+
+Recommended settings for local kernels:
+
+- `-ksp_threads <N>` selects the Rayon worker count used by Kryst kernels (shared-memory only).
+- `KRYST_PAR_CUTOFF=<rows>` controls the minimum CSR row count before parallel SpMV is used
+  (default `4096`); raise it if you see parallel overhead on small problems.
+
 Legacy `-ksp_cg_pipelined` remains available as an alias for
 `-ksp_cg_variant pipelined`. For bit-for-bit reproducibility, combine
 `-ksp_reproducible` with `-ksp_threads 1`. When Rayon is enabled with more

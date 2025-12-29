@@ -84,6 +84,25 @@ pub fn init_global_rayon_pool(mpi_size: usize) -> usize {
     }
 }
 
+/// Initialize the global Rayon pool with an explicit per-rank thread count.
+/// Returns the effective thread count used (after one-time initialization).
+pub fn init_global_rayon_pool_with_threads(threads: usize) -> usize {
+    #[cfg(not(feature = "rayon"))]
+    {
+        let _ = threads;
+        return 1;
+    }
+
+    #[cfg(feature = "rayon")]
+    {
+        *EFFECTIVE_THREADS.get_or_init(|| {
+            let threads = std::cmp::max(1, threads);
+            let _ = ThreadPoolBuilder::new().num_threads(threads).build_global();
+            threads
+        })
+    }
+}
+
 /// Returns how many Rayon threads we are running with (after init).
 pub fn current_rayon_threads() -> usize {
     #[cfg(feature = "rayon")]
