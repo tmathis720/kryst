@@ -46,6 +46,8 @@
 //! selected preconditioner using the preconditioner operator (`P`, or `A` when `P` is `None`).
 //! Use it with direct PCs such as `LU`, `QR`, or `SuperLU_DIST`.
 
+#[cfg(feature = "complex")]
+use crate::algebra::bridge::BridgeScratch;
 #[cfg(feature = "rayon")]
 use crate::algebra::parallel::set_rayon_threads;
 use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
@@ -59,8 +61,6 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 use crate::ops::klinop::KLinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-#[cfg(feature = "complex")]
-use crate::algebra::bridge::BridgeScratch;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
@@ -74,8 +74,8 @@ use crate::utils::reduction::ReductOptions;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-mod workspace;
 mod execution;
+mod workspace;
 pub use crate::core::block::BlockVec;
 pub use execution::{ExecutionPolicy, ThreadingPolicy};
 pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
@@ -337,6 +337,37 @@ impl KspContext {
         }
     }
 
+    fn parse_gmres_variant(label: &str) -> Result<(PendingGmresVariant, Option<usize>), KError> {
+        let (variant, maybe_s) = match label.split_once(':') {
+            Some((v, s)) => (v.trim(), Some(s.trim())),
+            None => (label.trim(), None),
+        };
+        let parsed_variant = match variant {
+            "classical" => PendingGmresVariant::Classical,
+            "pipelined" => PendingGmresVariant::Pipelined,
+            "sstep" => PendingGmresVariant::SStep,
+            other => {
+                return Err(KError::SolveError(format!(
+                    "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined'|'sstep')"
+                )));
+            }
+        };
+        let sstep = if let Some(s) = maybe_s {
+            let val: usize = s.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid ksp_gmres_variant s-step size: {s}"))
+            })?;
+            if val < 1 {
+                return Err(KError::SolveError(
+                    "ksp_gmres_variant s-step size must be >= 1".into(),
+                ));
+            }
+            Some(val)
+        } else {
+            None
+        };
+        Ok((parsed_variant, sstep))
+    }
+
     fn parse_reduction_mode(label: &str) -> Result<ReproMode, KError> {
         match label.to_lowercase().as_str() {
             "fast" => Ok(ReproMode::Fast),
@@ -372,10 +403,7 @@ impl KspContext {
         Ok(())
     }
 
-    fn bind_or_check_comm(
-        &mut self,
-        comm: &crate::parallel::UniverseComm,
-    ) -> Result<(), KError> {
+    fn bind_or_check_comm(&mut self, comm: &crate::parallel::UniverseComm) -> Result<(), KError> {
         if let Some(ref bound) = self.bound_comm {
             if !bound.congruent(comm) {
                 return Err(KError::InvalidInput(format!(
@@ -743,17 +771,11 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
-                let pv = match variant.as_str() {
-                    "classical" => PendingGmresVariant::Classical,
-                    "pipelined" => PendingGmresVariant::Pipelined,
-                    "sstep" => PendingGmresVariant::SStep,
-                    other => {
-                        return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined'|'sstep')"
-                        )));
-                    }
-                };
+                let (pv, sstep) = Self::parse_gmres_variant(variant)?;
                 self.pending_gmres.variant = Some(pv);
+                if let Some(sstep) = sstep {
+                    self.pending_gmres.sstep = Some(sstep);
+                }
             }
             if let Some(sstep) = opts.gmres_sstep {
                 self.pending_gmres.sstep = Some(sstep);
@@ -793,16 +815,11 @@ impl KspContext {
                 self.pending_gmres.happy_breakdown = Some(flag);
             }
             if let Some(ref variant) = opts.gmres_variant {
-                self.pending_gmres.variant = Some(match variant.as_str() {
-                    "classical" => PendingGmresVariant::Classical,
-                    "pipelined" => PendingGmresVariant::Pipelined,
-                    "sstep" => PendingGmresVariant::SStep,
-                    other => {
-                        return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_gmres_variant: {other} (expected 'classical'|'pipelined'|'sstep')"
-                        )));
-                    }
-                });
+                let (pv, sstep) = Self::parse_gmres_variant(variant)?;
+                self.pending_gmres.variant = Some(pv);
+                if let Some(sstep) = sstep {
+                    self.pending_gmres.sstep = Some(sstep);
+                }
             }
             if let Some(sstep) = opts.gmres_sstep {
                 self.pending_gmres.sstep = Some(sstep);
@@ -1187,10 +1204,7 @@ impl KspContext {
             if a_layout.row_start != p_layout.row_start || a_layout.row_end != p_layout.row_end {
                 return Err(KError::InvalidInput(format!(
                     "Amat/Pmat ownership range mismatch: A=[{},{}), P=[{},{}).",
-                    a_layout.row_start,
-                    a_layout.row_end,
-                    p_layout.row_start,
-                    p_layout.row_end
+                    a_layout.row_start, a_layout.row_end, p_layout.row_start, p_layout.row_end
                 )));
             }
         }
@@ -1988,12 +2002,12 @@ mod tests {
     use crate::preconditioner::PcSide;
     #[cfg(not(feature = "complex"))]
     use faer::Mat;
-    #[cfg(any(feature = "mpi", feature = "rayon"))]
-    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    #[cfg(any(feature = "mpi", feature = "rayon"))]
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     struct CountingPc {
         setup_ct: Arc<AtomicUsize>,
@@ -2200,7 +2214,11 @@ mod tests {
             supports_num: false,
         };
 
-        let a = Arc::new(Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 }));
+        let a = Arc::new(Mat::<R>::from_fn(
+            4,
+            4,
+            |i, j| if i == j { 2.0 } else { 0.5 },
+        ));
         let a = Arc::new(DenseOp::<f64>::new(a));
 
         let mut ksp = KspContext::new();
@@ -2234,7 +2252,11 @@ mod tests {
             supports_num: true,
         };
 
-        let a = Arc::new(Mat::<R>::from_fn(4, 4, |i, j| if i == j { 2.0 } else { 0.5 }));
+        let a = Arc::new(Mat::<R>::from_fn(
+            4,
+            4,
+            |i, j| if i == j { 2.0 } else { 0.5 },
+        ));
         let a = Arc::new(DenseOp::<f64>::new(a));
 
         let mut ksp = KspContext::new();
@@ -2268,7 +2290,11 @@ mod tests {
             supports_num: true,
         };
 
-        let a1 = Arc::new(Mat::<R>::from_fn(3, 3, |i, j| if i == j { 2.0 } else { 0.25 }));
+        let a1 = Arc::new(Mat::<R>::from_fn(
+            3,
+            3,
+            |i, j| if i == j { 2.0 } else { 0.25 },
+        ));
         let a1 = Arc::new(DenseOp::<f64>::new(a1));
 
         let mut ksp = KspContext::new();
@@ -2281,7 +2307,11 @@ mod tests {
             + sym_ct.load(Ordering::Relaxed)
             + num_ct.load(Ordering::Relaxed);
 
-        let a2 = Arc::new(Mat::<R>::from_fn(3, 3, |i, j| if i == j { 3.0 } else { 0.75 }));
+        let a2 = Arc::new(Mat::<R>::from_fn(
+            3,
+            3,
+            |i, j| if i == j { 3.0 } else { 0.75 },
+        ));
         let a2 = Arc::new(DenseOp::<f64>::new(a2));
         ksp.try_set_operators(a2, None).unwrap();
 

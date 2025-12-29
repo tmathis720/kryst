@@ -194,6 +194,9 @@ impl GmresSolver {
         A: KLinOp<Scalar = S> + ?Sized,
         P: KPreconditioner<Scalar = S> + ?Sized,
     {
+        if matches!(self.variant, GmresVariant::SStep { .. }) {
+            return self.solve_sstep(a, pc, b, x, pc_side, comm, monitors, work);
+        }
         let (m, n) = a.dims();
         if m != n || b.len() != n || x.len() != n {
             return Err(KError::InvalidInput(
@@ -237,11 +240,6 @@ impl GmresSolver {
         ws.g.fill(S::zero());
 
         let mut reduction_count = 0usize;
-        let red_engine = ws
-            .reduction_engine()
-            .cloned()
-            .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
-
         let mut res: R;
         let (beta, mut bnorm) = match pc_side {
             PcSide::Left => {
@@ -307,12 +305,6 @@ impl GmresSolver {
         res = beta;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
-
-        if matches!(self.variant, GmresVariant::SStep { .. }) {
-            return Err(KError::NotImplemented(
-                "GMRES s-step variant is not yet implemented".into(),
-            ));
-        }
 
         for m in mons {
             m(0, res);
@@ -496,8 +488,7 @@ impl GmresSolver {
                             a.matvec_s(vk, &mut ws.tmp1, &mut ws.bridge);
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.matvec_nanos +=
-                                    matvec_start.elapsed().as_nanos() as u64;
+                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                             }
                             if let Some(pc) = pc {
                                 #[cfg(feature = "metrics")]
@@ -510,8 +501,7 @@ impl GmresSolver {
                                 )?;
                                 #[cfg(feature = "metrics")]
                                 {
-                                    metrics.pc_apply_nanos +=
-                                        pc_start.elapsed().as_nanos() as u64;
+                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                                 }
                             } else {
                                 ws.pipelined_w[..n].copy_from_slice(&ws.tmp1[..n]);
@@ -560,16 +550,10 @@ impl GmresSolver {
                             if let Some(pc) = pc {
                                 #[cfg(feature = "metrics")]
                                 let pc_start = std::time::Instant::now();
-                                pc.apply_s(
-                                    PcSide::Right,
-                                    vk,
-                                    &mut ws.tmp2[..n],
-                                    &mut ws.bridge,
-                                )?;
+                                pc.apply_s(PcSide::Right, vk, &mut ws.tmp2[..n], &mut ws.bridge)?;
                                 #[cfg(feature = "metrics")]
                                 {
-                                    metrics.pc_apply_nanos +=
-                                        pc_start.elapsed().as_nanos() as u64;
+                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                                 }
                             } else {
                                 ws.tmp2[..n].copy_from_slice(vk);
@@ -587,8 +571,7 @@ impl GmresSolver {
                             );
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.matvec_nanos +=
-                                    matvec_start.elapsed().as_nanos() as u64;
+                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                             }
                             let pipe = ws.pipelined_arnoldi_step(
                                 k,
@@ -841,6 +824,572 @@ impl GmresSolver {
             }
             result
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_sstep<A, P>(
+        &mut self,
+        a: &A,
+        pc: Option<&P>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+        P: KPreconditioner<Scalar = S> + ?Sized,
+    {
+        #[cfg(feature = "complex")]
+        {
+            return Err(KError::NotImplemented(
+                "GMRES s-step is not yet implemented for complex scalars".into(),
+            ));
+        }
+
+        let (m, n) = a.dims();
+        if m != n || b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput(
+                "GMRES: dimension mismatch or non-square operator".into(),
+            ));
+        }
+
+        let (block_s, reorth_policy, max_cond) = match self.variant {
+            GmresVariant::SStep {
+                s,
+                reorth,
+                max_cond,
+            } => (s.max(1), reorth, max_cond),
+            _ => unreachable!("solve_sstep called for non s-step variant"),
+        };
+
+        let pc_side = match pc_side {
+            PcSide::Symmetric => PcSide::Left,
+            s => s,
+        };
+
+        let mut owned_ws;
+        let ws = if let Some(w) = work {
+            w
+        } else {
+            owned_ws = Workspace::new(n);
+            &mut owned_ws
+        };
+        self.ensure_workspace(ws, n, pc_side);
+        let red = ReductCtx::new(comm, Some(&*ws));
+
+        let mons = monitors.unwrap_or(&[]);
+        #[cfg(feature = "metrics")]
+        let mut metrics = SolveMetrics::default();
+
+        #[cfg(feature = "metrics")]
+        let matvec_start = std::time::Instant::now();
+        a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+        }
+        for i in 0..n {
+            ws.tmp1[i] = b[i] - ws.tmp1[i];
+        }
+
+        ws.h_mem.fill(S::zero());
+        ws.cs.fill(R::default());
+        ws.sn.fill(S::zero());
+        ws.g.fill(S::zero());
+
+        let mut reduction_count = 0usize;
+        let red_engine = ws
+            .reduction_engine()
+            .cloned()
+            .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
+
+        let mut res: R;
+        let (beta, mut bnorm) = match pc_side {
+            PcSide::Left => {
+                if let Some(pc) = pc {
+                    let tmp2 = &mut ws.tmp2[..n];
+                    #[cfg(feature = "metrics")]
+                    let pc_start = std::time::Instant::now();
+                    pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                    }
+                } else {
+                    ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                }
+                let mut norms = [R::zero(); 2];
+                red.norm2_many_into(&[&ws.tmp2[..n], b], &mut norms);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += 2 * std::mem::size_of::<R>();
+                }
+                let beta = norms[0];
+                if beta > R::default() {
+                    let inv = S::from_real(1.0 / beta);
+                    for val in &mut ws.tmp2[..n] {
+                        *val *= inv;
+                    }
+                    ws.copy_tmp2_into_vcol(0);
+                } else {
+                    ws.v_col(0).fill(S::zero());
+                }
+                (beta, norms[1])
+            }
+            PcSide::Right => {
+                let mut norms = [R::zero(); 2];
+                red.norm2_many_into(&[&ws.tmp1[..n], b], &mut norms);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += 2 * std::mem::size_of::<R>();
+                }
+                let beta = norms[0];
+                if beta > R::default() {
+                    let inv = S::from_real(1.0 / beta);
+                    for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
+                        *dst = src * inv;
+                    }
+                    ws.copy_tmp2_into_vcol(0);
+                } else {
+                    ws.v_col(0).fill(S::zero());
+                }
+                (beta, norms[1])
+            }
+            PcSide::Symmetric => unreachable!(),
+        };
+
+        if matches!(pc_side, PcSide::Right) {
+            if let Some(pc) = pc {
+                let (_, z0) = ws.tmp2_and_z_mut(0);
+                #[cfg(feature = "metrics")]
+                let pc_start = std::time::Instant::now();
+                pc.apply_s(PcSide::Right, ws.v_col(0), z0, &mut ws.bridge)?;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                }
+            } else {
+                let (_, z0) = ws.tmp2_and_z_mut(0);
+                z0.copy_from_slice(ws.v_col(0));
+            }
+        }
+
+        ws.g[0] = S::from_real(beta);
+        bnorm = bnorm.max(1e-32);
+        let thr = self.conv.atol.max(self.conv.rtol * bnorm);
+
+        let mut total_iters = 0usize;
+        res = beta;
+        let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
+
+        for m in mons {
+            m(0, res);
+        }
+        if res <= thr {
+            stats.reason = if res <= self.conv.atol {
+                ConvergedReason::ConvergedAtol
+            } else {
+                ConvergedReason::ConvergedRtol
+            };
+            stats.final_residual = res;
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            stats.final_residual = true_res;
+            let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+            let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+            let reductions = reduction_count + async_reductions;
+            let counters = crate::utils::convergence::SolverCounters {
+                num_global_reductions: reductions,
+                residual_replacements: 0,
+            };
+            let mut stats = stats.with_counters(counters);
+            #[cfg(feature = "metrics")]
+            {
+                metrics.reductions = reductions;
+                stats.metrics = metrics;
+            }
+            return Ok(stats);
+        }
+
+        let sstep = ws
+            .sstep_mut()
+            .ok_or_else(|| KError::InvalidInput("GMRES s-step workspace not configured".into()))?;
+
+        'outer: loop {
+            let mut k_steps = 0usize;
+            let mut k = 0usize;
+            while k < self.restart {
+                let block = block_s.min(self.restart - k);
+                if block == 0 {
+                    break;
+                }
+                sstep.w.resize(n, block);
+                for j in 0..block {
+                    let src = if j == 0 {
+                        &ws.v_mem[k * n..(k + 1) * n]
+                    } else {
+                        sstep.w.col(j - 1)
+                    };
+                    match pc_side {
+                        PcSide::Left => {
+                            #[cfg(feature = "metrics")]
+                            let matvec_start = std::time::Instant::now();
+                            a.matvec_s(src, &mut ws.tmp1, &mut ws.bridge);
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+                            }
+                            if let Some(pc) = pc {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                #[cfg(feature = "metrics")]
+                                let pc_start = std::time::Instant::now();
+                                pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                                }
+                                sstep.w.col_mut(j).copy_from_slice(tmp2);
+                            } else {
+                                sstep.w.col_mut(j).copy_from_slice(&ws.tmp1[..n]);
+                            }
+                        }
+                        PcSide::Right => {
+                            if let Some(pc) = pc {
+                                let tmp2 = &mut ws.tmp2[..n];
+                                #[cfg(feature = "metrics")]
+                                let pc_start = std::time::Instant::now();
+                                pc.apply_s(PcSide::Right, src, tmp2, &mut ws.bridge)?;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                                }
+                            } else {
+                                ws.tmp2[..n].copy_from_slice(src);
+                            }
+                            #[cfg(feature = "metrics")]
+                            let matvec_start = std::time::Instant::now();
+                            a.matvec_s(&ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+                            }
+                            sstep.w.col_mut(j).copy_from_slice(&ws.tmp1[..n]);
+                        }
+                        PcSide::Symmetric => unreachable!(),
+                    }
+                }
+
+                let mut cvals: Vec<S> = vec![S::zero(); (k + 1) * block];
+                {
+                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                        SmallVec::with_capacity((k + 1) * block);
+                    for i in 0..=k {
+                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                        for j in 0..block {
+                            let wj = sstep.w.col(j);
+                            pairs.push((vi, wj));
+                        }
+                    }
+                    red.dot_many_into(pairs.as_slice(), cvals.as_mut_slice());
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
+                    }
+                }
+                for i in 0..=k {
+                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                    for j in 0..block {
+                        let coeff = cvals[i * block + j];
+                        let wj = sstep.w.col_mut(j);
+                        for (w, &vi_j) in wj.iter_mut().zip(vi) {
+                            *w -= coeff * vi_j;
+                        }
+                    }
+                }
+
+                if matches!(reorth_policy, ReorthPolicy::Always) {
+                    let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
+                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                        SmallVec::with_capacity((k + 1) * block);
+                    for i in 0..=k {
+                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                        for j in 0..block {
+                            let wj = sstep.w.col(j);
+                            pairs.push((vi, wj));
+                        }
+                    }
+                    red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
+                    }
+                    for i in 0..=k {
+                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                        for j in 0..block {
+                            let coeff = c2[i * block + j];
+                            let wj = sstep.w.col_mut(j);
+                            for (w, &vi_j) in wj.iter_mut().zip(vi) {
+                                *w -= coeff * vi_j;
+                            }
+                        }
+                    }
+                }
+
+                let mut gram: Vec<S> = vec![S::zero(); block * block];
+                {
+                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                        SmallVec::with_capacity(block * block);
+                    for i in 0..block {
+                        let wi = sstep.w.col(i);
+                        for j in 0..block {
+                            let wj = sstep.w.col(j);
+                            pairs.push((wi, wj));
+                        }
+                    }
+                    red.dot_many_into(pairs.as_slice(), gram.as_mut_slice());
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
+                    }
+                }
+
+                let mut r_block = vec![R::default(); block * block];
+                for (dst, src) in r_block.iter_mut().zip(gram.iter()) {
+                    *dst = src.real();
+                }
+                Self::chol_upper(&mut r_block, block)?;
+                let cond = Self::estimate_triangular_condition(&r_block, block);
+                if cond > max_cond {
+                    return Err(KError::FactorError(
+                        "s-step GMRES: block conditioning exceeds max_cond".into(),
+                    ));
+                }
+                #[cfg(not(feature = "complex"))]
+                {
+                    let w_data = sstep.w.as_mut_slice();
+                    let w_real: &mut [R] = unsafe {
+                        std::slice::from_raw_parts_mut(w_data.as_mut_ptr() as *mut R, w_data.len())
+                    };
+                    Self::triangular_solve_right_upper(&r_block, block, w_real, n);
+                }
+
+                for j in 0..block {
+                    let vj = ws.v_col(k + 1 + j);
+                    vj.copy_from_slice(sstep.w.col(j));
+                }
+
+                if matches!(pc_side, PcSide::Right) {
+                    for j in 0..block {
+                        if let Some(pc) = pc {
+                            let vj = ws.v_col(k + 1 + j);
+                            let (_, zj) = ws.tmp2_and_z_mut(k + 1 + j);
+                            #[cfg(feature = "metrics")]
+                            let pc_start = std::time::Instant::now();
+                            pc.apply_s(PcSide::Right, vj, zj, &mut ws.bridge)?;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                            }
+                        } else {
+                            let vj = ws.v_col(k + 1 + j);
+                            let (_, zj) = ws.tmp2_and_z_mut(k + 1 + j);
+                            zj.copy_from_slice(vj);
+                        }
+                    }
+                }
+
+                for i in 0..=k {
+                    for j in 0..block {
+                        *ws.h_at_mut(i, k + j) = cvals[i * block + j];
+                    }
+                }
+                for i in 0..block {
+                    for j in i..block {
+                        *ws.h_at_mut(k + 1 + i, k + j) = S::from_real(r_block[i * block + j]);
+                    }
+                }
+
+                for j in 0..block {
+                    let col = k + j;
+                    ws.apply_prev_givens_to_col(col, col);
+                    ws.apply_final_givens_and_update_g(col);
+
+                    res = ws.g[col + 1].abs();
+                    total_iters += 1;
+                    k_steps = col + 1;
+
+                    for m in mons {
+                        m(total_iters, res);
+                    }
+
+                    if res <= thr || total_iters >= self.conv.max_iters {
+                        break;
+                    }
+                }
+                if res <= thr || total_iters >= self.conv.max_iters {
+                    break;
+                }
+
+                k += block;
+            }
+
+            if k_steps == 0 {
+                break;
+            }
+
+            let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
+            match pc_side {
+                PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
+                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
+                PcSide::Symmetric => unreachable!(),
+            }
+
+            #[cfg(feature = "metrics")]
+            let matvec_start = std::time::Instant::now();
+            a.matvec_s(x, &mut ws.tmp1, &mut ws.bridge);
+            #[cfg(feature = "metrics")]
+            {
+                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+            }
+            for i in 0..n {
+                ws.tmp1[i] = b[i] - ws.tmp1[i];
+            }
+            res = match pc_side {
+                PcSide::Left => {
+                    if let Some(pc) = pc {
+                        let tmp2 = &mut ws.tmp2[..n];
+                        #[cfg(feature = "metrics")]
+                        let pc_start = std::time::Instant::now();
+                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                        }
+                    } else {
+                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                    }
+                    let res = red.norm2(&ws.tmp2[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    res
+                }
+                PcSide::Right => {
+                    let res = red.norm2(&ws.tmp1[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    res
+                }
+                PcSide::Symmetric => unreachable!(),
+            };
+
+            stats.iterations = total_iters;
+            stats.final_residual = res;
+
+            if res <= thr || total_iters >= self.conv.max_iters {
+                break 'outer;
+            }
+
+            ws.h_mem.fill(S::zero());
+            ws.cs.fill(R::default());
+            ws.sn.fill(S::zero());
+            ws.g.fill(S::zero());
+
+            let beta = match pc_side {
+                PcSide::Left => {
+                    if let Some(pc) = pc {
+                        let tmp2 = &mut ws.tmp2[..n];
+                        #[cfg(feature = "metrics")]
+                        let pc_start = std::time::Instant::now();
+                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                        }
+                    } else {
+                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
+                    }
+                    let beta = red.norm2(&ws.tmp2[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    if beta > R::default() {
+                        let inv = S::from_real(1.0 / beta);
+                        for val in &mut ws.tmp2[..n] {
+                            *val *= inv;
+                        }
+                        ws.copy_tmp2_into_vcol(0);
+                    } else {
+                        ws.v_col(0).fill(S::zero());
+                    }
+                    beta
+                }
+                PcSide::Right => {
+                    let beta = red.norm2(&ws.tmp1[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    if beta > R::default() {
+                        let inv = S::from_real(1.0 / beta);
+                        for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
+                            *dst = src * inv;
+                        }
+                        ws.copy_tmp2_into_vcol(0);
+                    } else {
+                        ws.v_col(0).fill(S::zero());
+                    }
+                    beta
+                }
+                PcSide::Symmetric => unreachable!(),
+            };
+
+            ws.g[0] = S::from_real(beta);
+            res = beta;
+
+            for m in mons {
+                m(total_iters, res);
+            }
+        }
+
+        let (reason, _) = self.conv.check(res, bnorm, total_iters);
+        stats.reason = reason;
+
+        let true_res =
+            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        stats.final_residual = true_res;
+
+        let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+        let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+        let reductions = reduction_count + async_reductions;
+        let counters = crate::utils::convergence::SolverCounters {
+            num_global_reductions: reductions,
+            residual_replacements: 0,
+        };
+        let mut stats = stats.with_counters(counters);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.reductions = reductions;
+            stats.metrics = metrics;
+        }
+        Ok(stats)
     }
 
     #[allow(dead_code)]

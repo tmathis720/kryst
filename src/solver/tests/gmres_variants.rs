@@ -42,29 +42,23 @@ fn gmres_pipelined_tracks_classical_convergence() -> Result<(), KError> {
 }
 
 #[test]
-fn gmres_sstep_reports_not_implemented() {
-    let mut solver = GmresSolver::new(10, 1e-8, 100);
-    solver.set_variant(GmresVariant::SStep {
-        s: 3,
-        reorth: crate::context::ksp_context::ReorthPolicy::IfNeeded,
-        max_cond: 1e8,
-    });
+fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
     let a = util::spd_poisson2d(6);
-    let b: Vec<R> = vec![R::default(); a.nrows()];
-    let mut x: Vec<R> = vec![R::default(); a.nrows()];
-    let mut ws = Workspace::default();
-    let comm = UniverseComm::NoComm(NoComm);
-    let err = solver
-        .solve_f64(
-            &a,
-            None,
-            &b,
-            &mut x,
-            PcSide::Left,
-            &comm,
-            None,
-            Some(&mut ws),
-        )
-        .unwrap_err();
-    assert!(matches!(err, KError::NotImplemented(_)));
+    let b: Vec<R> = util::rhs_random(a.nrows(), 4);
+    let restart = 12;
+    let bnorm: R = util::vec_norm(&b).max(R::from(1e-32));
+
+    let (_x_sstep, _it_sstep, res_sstep) = solve_with_variant(
+        &a,
+        &b,
+        GmresVariant::SStep {
+            s: 3,
+            reorth: crate::context::ksp_context::ReorthPolicy::IfNeeded,
+            max_cond: 1e8,
+        },
+        restart,
+    )?;
+
+    assert!(res_sstep <= R::from(1e-8) * bnorm + R::from(1e-10));
+    Ok(())
 }
