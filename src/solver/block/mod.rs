@@ -28,6 +28,14 @@ pub struct BlockKrylovOptions {
     pub reorth: ReorthPolicy,
     /// Conditioning guard for the Cholesky/QR factorisations.
     pub max_cond: f64,
+    /// Relative tolerance.
+    pub rtol: R,
+    /// Absolute tolerance.
+    pub atol: R,
+    /// Divergence tolerance.
+    pub dtol: R,
+    /// Maximum number of block iterations.
+    pub max_iters: usize,
     /// Selected solver variant.
     pub variant: BlockVariant,
 }
@@ -39,6 +47,10 @@ impl Default for BlockKrylovOptions {
             restart_blocks: 10,
             reorth: ReorthPolicy::IfNeeded,
             max_cond: 1.0e8,
+            rtol: 1.0e-8,
+            atol: 1.0e-12,
+            dtol: 1.0e3,
+            max_iters: 200,
             variant: BlockVariant::Gmres,
         }
     }
