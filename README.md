@@ -74,6 +74,8 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - `rayon` — turn on shared-memory parallel kernels. Combine with `-ksp_threads` to size the worker pool.
 - `complex` — lift internal kernels to `Complex64` while keeping the public API monomorphic on `f64` inputs.
 - `logging` — route internal tracing to the `log` facade for integration with env_logger or similar backends.
+- `backend-faer` + `rayon` + `mpi` — supported for distributed runs with parallel local kernels; see
+  `docs/matrix_features.md` for the expected feature combinations and matrix capabilities.
 
 ### Latency-aware solver knobs
 
@@ -107,6 +109,15 @@ strict reproducibility we recommend pinning Rayon to a single thread via
 `-ksp_threads 1` (or the `RAYON_NUM_THREADS` environment variable); otherwise,
 results remain deterministic for the configured thread count but may differ
 between thread-count configurations.
+
+### Reproducibility recipe (MPI + Rayon)
+
+Use this configuration when validating deterministic reductions:
+
+```bash
+RAYON_NUM_THREADS=1 mpirun -n 4 cargo run --example mpi_parallel_demo --features "mpi rayon" -- \
+  -ksp_reproducible -ksp_threads 1
+```
 
 Each solver also records the number of global reductions performed in
 `SolveStats::counters.num_global_reductions`, making it easy to assert expected
@@ -991,6 +1002,22 @@ cargo test --features "logging"
 
 # Performance testing
 cargo test --release
+```
+
+### MPI/Rayon targeted matrix tests
+
+The matrix feature matrix and MPI/Rayon test plan live in
+`docs/matrix_features.md`. Use them to validate communicator reductions,
+distributed SpMV/halo exchange, and Rayon-local kernels for
+`backend-faer + mpi + rayon` builds.
+
+### Minimal MPI CI recipe
+
+Use the following steps as a minimal MPI validation recipe (local or CI):
+
+```bash
+mpirun -n 2 cargo test --features "mpi backend-faer"
+mpirun -n 2 cargo test --features "mpi rayon backend-faer"
 ```
 
 ### Test Coverage
