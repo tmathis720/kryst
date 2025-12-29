@@ -133,6 +133,10 @@ name = "gmres_variants"
 harness = false
 
 [[bench]]
+name = "mpi_rayon_suite"
+harness = false
+
+[[bench]]
 name = "iai"
 harness = false
 

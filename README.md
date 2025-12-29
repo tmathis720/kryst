@@ -131,6 +131,34 @@ Each solver also records the number of global reductions performed in
 `SolveStats::counters.num_global_reductions`, making it easy to assert expected
 latency costs in automated tests.
 
+### Hybrid MPI + Rayon scaling recipes
+
+Use these rules of thumb when combining MPI ranks with Rayon threads:
+
+- **Throughput-oriented runs**: allocate threads per rank so that
+  `(MPI ranks) × (threads per rank)` matches physical cores. Start with
+  `-ksp_threads 2-4` per rank and adjust based on local cache behavior and
+  kernel mix (SpMV vs. ILU/ASM work).
+- **Reproducibility-oriented runs**: keep `-ksp_reproducible` enabled and
+  fix the thread count per rank (`-ksp_threads 1` or `RAYON_NUM_THREADS=1`).
+  Results remain deterministic for a fixed communicator size and thread count.
+
+Example hybrid runs:
+
+```bash
+# Throughput-oriented: 4 ranks × 4 threads (16 cores total)
+RAYON_NUM_THREADS=4 mpirun -n 4 cargo run --example mpi_parallel_demo --features "mpi rayon" -- \
+  -ksp_threads 4
+
+# Reproducible: 4 ranks × 1 thread
+RAYON_NUM_THREADS=1 mpirun -n 4 cargo run --example mpi_parallel_demo --features "mpi rayon" -- \
+  -ksp_reproducible -ksp_threads 1
+```
+
+For performance studies across MPI-only, Rayon-only, and hybrid builds, run the
+`mpi_rayon_suite` benchmark via `cargo bench` (see `scripts/bench_mpi_rayon.sh`)
+to compare ILU and ASM preconditioner workloads on small/medium/large matrices.
+
 ### Architecture
 - **PETSc-style API**: Unified KSP context for runtime solver selection
 - **Command-line Options**: Complete options database with 50+ parameters
