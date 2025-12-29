@@ -56,7 +56,6 @@
 //! problem types.
 //!
 //! ## Current Limitations
-//! - MPI communication uses placeholder implementation (ready for rsmpi integration)
 //! - Panel factorization uses Rust implementation (can be accelerated with BLAS/LAPACK)
 //! - 3D factorization and look-ahead algorithms are not yet implemented
 //! - ParMETIS integration is stubbed (ready for C library binding)
@@ -77,7 +76,11 @@ use faer::prelude::*;
 use std::collections::HashMap;
 
 #[cfg(feature = "mpi")]
-use mpi::collective::CommunicatorCollectives;
+use mpi::raw::AsRaw;
+#[cfg(feature = "mpi")]
+use std::ffi::c_void;
+#[cfg(feature = "mpi")]
+use std::mem::MaybeUninit;
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
@@ -162,12 +165,13 @@ impl ProcessGrid {
     /// Create a new process grid from communicator with automatic dimension selection
     pub fn new_auto(comm: &UniverseComm) -> Result<Self, KError> {
         let total_procs = comm.size();
-        if total_procs != 1 {
+        if total_procs == 0 {
             return Err(KError::InvalidInput(
-                "Milestone 1 supports only single process (NoComm)".into(),
+                "Process grid requires at least one process".into(),
             ));
         }
-        Self::new_with_dims(comm, 1, 1)
+        let (prows, pcols) = Self::determine_optimal_grid(total_procs);
+        Self::new_with_dims(comm, prows, pcols)
     }
 
     /// Create a new process grid with specified dimensions
@@ -865,6 +869,14 @@ pub struct CommRequest {
     pub error: Option<String>,
 }
 
+#[derive(Debug)]
+struct PendingComm {
+    meta: CommRequest,
+    #[cfg(feature = "mpi")]
+    handle: mpi::ffi::MPI_Request,
+    buffer: Option<Vec<f64>>,
+}
+
 impl CommRequest {
     /// Create a new communication request
     pub fn new(
@@ -927,7 +939,7 @@ pub struct TriangularSolveData {
     /// Communication buffer for receiving data
     pub comm_buffer: Vec<f64>,
     /// Pending nonblocking requests
-    pub pending_requests: Vec<CommRequest>,
+    pending_requests: Vec<PendingComm>,
     /// Block ownership mapping
     pub block_owners: Vec<usize>,
     /// Exact sizes for each diagonal block
@@ -1002,7 +1014,7 @@ impl TriangularSolveData {
         request_id: usize,
         comm: &UniverseComm,
     ) -> Result<(), KError> {
-        let request = CommRequest::new(
+        let mut request = CommRequest::new(
             request_id,
             comm.rank(), // source is this process
             dest_rank,
@@ -1011,12 +1023,55 @@ impl TriangularSolveData {
             data.len(),
         );
 
-        self.pending_requests.push(request);
+        if comm.size() <= 1 {
+            request.mark_completed();
+            self.pending_requests.push(PendingComm {
+                meta: request,
+                #[cfg(feature = "mpi")]
+                handle: unsafe { mpi::ffi::RSMPI_REQUEST_NULL },
+                buffer: None,
+            });
+            return Ok(());
+        }
 
-        #[cfg(feature = "logging")]
-        log::debug!("Started nonblocking send to rank {dest_rank} with tag {tag}");
+        #[cfg(feature = "mpi")]
+        if let Some(world) = comm.as_mpi() {
+            let buffer = data.to_vec();
+            let mut handle = MaybeUninit::<mpi::ffi::MPI_Request>::uninit();
+            let rc = unsafe {
+                mpi::ffi::MPI_Isend(
+                    buffer.as_ptr() as *const c_void,
+                    buffer.len() as i32,
+                    mpi::ffi::RSMPI_DOUBLE,
+                    dest_rank as i32,
+                    tag as i32,
+                    world.as_raw(),
+                    handle.as_mut_ptr(),
+                )
+            };
+            if rc != 0 {
+                request.set_error(format!("MPI_Isend failed with code {rc}"));
+                self.pending_requests.push(PendingComm {
+                    meta: request,
+                    handle: unsafe { mpi::ffi::RSMPI_REQUEST_NULL },
+                    buffer: None,
+                });
+                return Err(KError::SolveError(format!(
+                    "MPI_Isend failed with code {rc}"
+                )));
+            }
+            let handle = unsafe { handle.assume_init() };
+            self.pending_requests.push(PendingComm {
+                meta: request,
+                handle,
+                buffer: Some(buffer),
+            });
+            return Ok(());
+        }
 
-        Ok(())
+        Err(KError::InvalidInput(
+            "MPI communicator required for nonblocking send".into(),
+        ))
     }
 
     /// Start nonblocking receive operation
@@ -1028,7 +1083,7 @@ impl TriangularSolveData {
         request_id: usize,
         comm: &UniverseComm,
     ) -> Result<(), KError> {
-        let request = CommRequest::new(
+        let mut request = CommRequest::new(
             request_id,
             source_rank,
             comm.rank(), // dest is this process
@@ -1037,19 +1092,92 @@ impl TriangularSolveData {
             buffer_size,
         );
 
-        self.pending_requests.push(request);
+        if comm.size() <= 1 {
+            request.mark_completed();
+            self.pending_requests.push(PendingComm {
+                meta: request,
+                #[cfg(feature = "mpi")]
+                handle: unsafe { mpi::ffi::RSMPI_REQUEST_NULL },
+                buffer: None,
+            });
+            return Ok(());
+        }
 
-        #[cfg(feature = "logging")]
-        log::debug!("Started nonblocking recv from rank {source_rank} with tag {tag}");
+        #[cfg(feature = "mpi")]
+        if let Some(world) = comm.as_mpi() {
+            let mut buffer = vec![0.0f64; buffer_size];
+            let mut handle = MaybeUninit::<mpi::ffi::MPI_Request>::uninit();
+            let rc = unsafe {
+                mpi::ffi::MPI_Irecv(
+                    buffer.as_mut_ptr() as *mut c_void,
+                    buffer.len() as i32,
+                    mpi::ffi::RSMPI_DOUBLE,
+                    source_rank as i32,
+                    tag as i32,
+                    world.as_raw(),
+                    handle.as_mut_ptr(),
+                )
+            };
+            if rc != 0 {
+                request.set_error(format!("MPI_Irecv failed with code {rc}"));
+                self.pending_requests.push(PendingComm {
+                    meta: request,
+                    handle: unsafe { mpi::ffi::RSMPI_REQUEST_NULL },
+                    buffer: None,
+                });
+                return Err(KError::SolveError(format!(
+                    "MPI_Irecv failed with code {rc}"
+                )));
+            }
+            let handle = unsafe { handle.assume_init() };
+            self.pending_requests.push(PendingComm {
+                meta: request,
+                handle,
+                buffer: Some(buffer),
+            });
+            return Ok(());
+        }
 
-        Ok(())
+        Err(KError::InvalidInput(
+            "MPI communicator required for nonblocking receive".into(),
+        ))
     }
 
     /// Wait for completion of specific request
-    pub fn wait(&mut self, request_id: usize) -> Result<(), KError> {
-        // In real implementation, this would call MPI_Wait
-        self.pending_requests
-            .retain(|req| req.request_id != request_id);
+    pub fn wait(
+        &mut self,
+        request_id: usize,
+        target: Option<&mut [f64]>,
+    ) -> Result<(), KError> {
+        if let Some(index) = self
+            .pending_requests
+            .iter()
+            .position(|req| req.meta.request_id == request_id)
+        {
+            let mut req = self.pending_requests.remove(index);
+            #[cfg(feature = "mpi")]
+            {
+                if req.meta.completed {
+                    return Ok(());
+                }
+                let rc = unsafe { mpi::ffi::MPI_Wait(&mut req.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+                if rc != 0 {
+                    return Err(KError::SolveError(format!(
+                        "MPI_Wait failed with code {rc}"
+                    )));
+                }
+            }
+            if req.meta.comm_type == CommType::Recv {
+                if let Some(buffer) = req.buffer.take() {
+                    self.comm_buffer.resize(buffer.len(), 0.0);
+                    self.comm_buffer.copy_from_slice(&buffer);
+                    if let Some(target) = target {
+                        target.copy_from_slice(&buffer);
+                    }
+                }
+            }
+            req.meta.mark_completed();
+        }
 
         #[cfg(feature = "logging")]
         log::debug!("Completed communication request {request_id}");
@@ -1072,7 +1200,28 @@ impl TriangularSolveData {
             self.pending_requests.len()
         );
 
-        self.pending_requests.clear();
+        let mut pending = Vec::new();
+        std::mem::swap(&mut pending, &mut self.pending_requests);
+        for mut req in pending {
+            #[cfg(feature = "mpi")]
+            {
+                if !req.meta.completed {
+                    let rc =
+                        unsafe { mpi::ffi::MPI_Wait(&mut req.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+                    if rc != 0 {
+                        return Err(KError::SolveError(format!(
+                            "MPI_Wait failed with code {rc}"
+                        )));
+                    }
+                }
+            }
+            if req.meta.comm_type == CommType::Recv {
+                if let Some(buffer) = req.buffer.take() {
+                    self.comm_buffer.resize(buffer.len(), 0.0);
+                    self.comm_buffer.copy_from_slice(&buffer);
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1149,6 +1298,7 @@ impl DistributedTriangularSolver {
                 // Start nonblocking receive for this block
                 let owner_rank = solve_data.block_owners[block_id];
                 solve_data.irecv(current_block_size, owner_rank, block_id, block_id, comm)?;
+                solve_data.wait(block_id, Some(&mut x[block_start..block_end]))?;
             }
 
             // Apply updates from previously solved blocks
@@ -1157,7 +1307,7 @@ impl DistributedTriangularSolver {
                 if solve_data.block_owners[dep_block] != distribution.grid.my_rank {
                     // Wait for dependency to arrive
                     if overlap_comm {
-                        solve_data.wait(dep_block)?;
+                        solve_data.wait(dep_block, None)?;
                     }
 
                     // Apply update from dependency block
@@ -1174,7 +1324,7 @@ impl DistributedTriangularSolver {
             if !overlap_comm {
                 // Synchronous broadcast of solution block
                 Self::synchronous_broadcast(
-                    &x[block_start..block_end],
+                    &mut x[block_start..block_end],
                     solve_data.block_owners[block_id],
                     block_id,
                     comm,
@@ -1245,7 +1395,7 @@ impl DistributedTriangularSolver {
             for dep_block in dependency_blocks {
                 if solve_data.block_owners[dep_block] != distribution.grid.my_rank {
                     if overlap_comm {
-                        solve_data.wait(dep_block)?;
+                        solve_data.wait(dep_block, None)?;
                     }
                     Self::apply_block_update_backward(
                         &mut x[block_start..block_end],
@@ -1283,12 +1433,13 @@ impl DistributedTriangularSolver {
                 // Start nonblocking receive for this block
                 let owner_rank = solve_data.block_owners[block_id];
                 solve_data.irecv(current_block_size, owner_rank, block_id, block_id, comm)?;
+                solve_data.wait(block_id, Some(&mut x[block_start..block_end]))?;
             }
 
             if !overlap_comm {
                 // Synchronous broadcast of solution block
                 Self::synchronous_broadcast(
-                    &x[block_start..block_end],
+                    &mut x[block_start..block_end],
                     solve_data.block_owners[block_id],
                     block_id,
                     comm,
@@ -1411,21 +1562,32 @@ impl DistributedTriangularSolver {
 
     /// Perform synchronous broadcast operation
     fn synchronous_broadcast(
-        data: &[f64],
+        data: &mut [f64],
         root_rank: usize,
         block_id: usize,
         comm: &UniverseComm,
         comm_pattern: CommPattern,
         #[cfg(feature = "superlu3d")] grid3d: Option<&ProcessGrid3D>,
     ) -> Result<(), KError> {
-        // In real implementation, would use MPI_Bcast or implement custom patterns
         #[cfg(feature = "logging")]
         log::debug!(
             "Synchronous broadcast from rank {root_rank} for block {block_id} using {comm_pattern:?}"
         );
 
-        // Simulate broadcast operation
-        let _ = (data, root_rank, block_id, comm, comm_pattern);
+        let size = comm.size();
+        if size > 1 {
+            let mut reqs = Vec::new();
+            if comm.rank() == root_rank {
+                for rank in 0..size {
+                    if rank != root_rank {
+                        reqs.push(comm.isend_to(data, rank as i32));
+                    }
+                }
+            } else {
+                reqs.push(comm.irecv_from(data, root_rank as i32));
+            }
+            comm.wait_all(&mut reqs);
+        }
 
         #[cfg(feature = "superlu3d")]
         if let Some(g3) = grid3d {
@@ -3877,20 +4039,19 @@ impl SuperLuDistSolver {
 
         self.options.validate(Some(comm))?;
 
-        if comm.size() != 1 {
-            return Err(KError::InvalidInput(
-                "Milestone 1 supports only single process (NoComm)".into(),
-            ));
-        }
-
-        // Milestone 1: single-process grid and no distribution
-        let process_grid = ProcessGrid::new_with_dims(comm, 1, 1)?;
+        let process_grid = if let Some((prows, pcols)) = self.options.process_grid {
+            ProcessGrid::new_with_dims(comm, prows, pcols)?
+        } else {
+            ProcessGrid::new_auto(comm)?
+        };
+        let row_block_size = matrix.nrows().div_ceil(process_grid.prows).max(1);
+        let col_block_size = matrix.ncols().div_ceil(process_grid.pcols).max(1);
         let distribution = BlockCyclicDistribution::new(
             process_grid.clone(),
             matrix.nrows(),
             matrix.ncols(),
-            matrix.nrows().max(1),
-            matrix.ncols().max(1),
+            row_block_size,
+            col_block_size,
         );
 
         let local_matrix = matrix.clone();
@@ -4316,7 +4477,7 @@ impl SuperLuDistSolver {
 
         // Determine communication pattern based on options
         let comm_pattern = CommPattern::PointToPoint;
-        let overlap_comm = false;
+        let overlap_comm = comm.size() > 1;
 
         #[cfg(feature = "logging")]
         if self.options.enabled(1, 1) {
@@ -6419,7 +6580,11 @@ mod tests {
             Some(&grid3d),
         )
         .unwrap();
-        let mut tags: Vec<usize> = solve_data.pending_requests.iter().map(|r| r.tag).collect();
+        let mut tags: Vec<usize> = solve_data
+            .pending_requests
+            .iter()
+            .map(|r| r.meta.tag)
+            .collect();
         tags.sort_unstable();
         let expected = vec![(block_id << 8) + 1, (block_id << 8) + 2];
         assert_eq!(tags, expected);
