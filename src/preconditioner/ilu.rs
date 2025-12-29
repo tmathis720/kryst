@@ -712,6 +712,48 @@ impl Ilu {
         Ok(())
     }
 
+    fn allow_parallel_factorization(&self, n: usize) -> bool {
+        if !self.config.enable_parallel_factorization {
+            return false;
+        }
+        #[cfg(feature = "rayon")]
+        {
+            if crate::algebra::parallel_cfg::force_serial() {
+                return false;
+            }
+            if crate::parallel::threads::current_rayon_threads() <= 1 {
+                return false;
+            }
+            let tune = crate::algebra::parallel_cfg::parallel_tune();
+            return n >= tune.min_rows_ilu_factorization;
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            true
+        }
+    }
+
+    fn allow_parallel_triangular_solve(&self, n: usize) -> bool {
+        if !self.config.enable_parallel_triangular_solve {
+            return false;
+        }
+        #[cfg(feature = "rayon")]
+        {
+            if crate::algebra::parallel_cfg::force_serial() {
+                return false;
+            }
+            if crate::parallel::threads::current_rayon_threads() <= 1 {
+                return false;
+            }
+            let tune = crate::algebra::parallel_cfg::parallel_tune();
+            return n >= tune.min_rows_ilu_triangular;
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            false
+        }
+    }
+
     /// HYPRE-inspired IEEE safety checks
     fn check_ieee_values(matrix: &Mat<f64>) -> Result<(), KError> {
         for i in 0..matrix.nrows() {
@@ -1812,7 +1854,7 @@ impl Ilu {
     /// Exact sparse triangular solve operating in-place on the provided buffer.
     fn solve_triangular_exact(&self, lower: bool, x: &mut [S]) {
         #[cfg(feature = "rayon")]
-        if self.config.enable_parallel_triangular_solve {
+        if self.allow_parallel_triangular_solve(x.len()) {
             if lower {
                 self.solve_triangular_parallel_forward(x);
             } else {
@@ -2176,7 +2218,13 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         let mut parilu_converged = true;
 
         // Perform factorization based on type
-        match (self.config.ilu_type, self.config.par_factor_mode()) {
+        let par_mode = if self.allow_parallel_factorization(n) {
+            self.config.par_factor_mode()
+        } else {
+            ParFactorizationMode::Serial
+        };
+
+        match (self.config.ilu_type, par_mode) {
             (IluType::ILU0, ParFactorizationMode::Serial) => {
                 self.compute_ilu0(matrix)?;
             }
@@ -2223,7 +2271,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         self.setup_time = setup_start.elapsed().as_secs_f64();
 
         #[cfg(feature = "rayon")]
-        if self.config.enable_parallel_triangular_solve {
+        if self.allow_parallel_triangular_solve(n) {
             self.levels_l = build_levels_lower(&self.l);
             self.levels_u = build_levels_upper(&self.u);
         }

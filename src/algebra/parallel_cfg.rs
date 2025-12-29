@@ -10,6 +10,12 @@ pub struct ParallelTune {
     pub min_rows_spmv: usize,
     /// Target chunk size in rows for CSR SpMV (approx).
     pub chunk_rows_spmv: usize,
+    /// Minimum rows to enable Rayon in ILU factorization kernels.
+    pub min_rows_ilu_factorization: usize,
+    /// Minimum rows to enable Rayon in ILU triangular solves.
+    pub min_rows_ilu_triangular: usize,
+    /// Minimum rows to enable Rayon in ASM block application.
+    pub min_rows_asm_apply: usize,
 }
 
 impl Default for ParallelTune {
@@ -18,6 +24,9 @@ impl Default for ParallelTune {
             min_len_vec: 8192,
             min_rows_spmv: 2048,
             chunk_rows_spmv: 512,
+            min_rows_ilu_factorization: 512,
+            min_rows_ilu_triangular: 512,
+            min_rows_asm_apply: 512,
         }
     }
 }
@@ -73,9 +82,7 @@ pub fn set_rayon_threads_for_repro(enable: bool) {
     #[cfg(feature = "rayon")]
     {
         if enable {
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build_global();
+            let _ = crate::parallel::threads::init_global_rayon_pool_with_threads(1);
         }
     }
     let _ = enable;

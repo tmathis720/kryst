@@ -14,8 +14,6 @@ use crate::reduction::{Kahan, ReproMode, Accum};
 use crate::utils::reduction::repro_mode_is_strict;
 
 #[cfg(feature = "rayon")]
-use rayon::ThreadPoolBuilder;
-#[cfg(feature = "rayon")]
 use rayon::prelude::*;
 #[cfg(feature = "rayon")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,7 +32,7 @@ static GLOBAL_RAYON_CONFIG_CALLS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "rayon")]
 pub fn set_rayon_threads(n: usize) {
     GLOBAL_RAYON_CONFIG_CALLS.fetch_add(1, Ordering::Relaxed);
-    let _ = ThreadPoolBuilder::new().num_threads(n).build_global();
+    let _ = crate::parallel::threads::init_global_rayon_pool_with_threads(n);
 }
 
 #[cfg(all(feature = "rayon", test))]
