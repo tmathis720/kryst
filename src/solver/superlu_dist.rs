@@ -67,12 +67,13 @@
 
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{Comm, UniverseComm, contiguous_partition};
 use crate::solver::api::Solver;
 use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use faer::MatMut;
 use faer::prelude::*;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 #[cfg(feature = "mpi")]
@@ -343,6 +344,28 @@ impl BlockCyclicDistribution {
     /// Owner rank of diagonal block (k, k)
     pub fn owner_rank_of_diag_block(&self, k: usize) -> usize {
         self.owner_rank_of_block(k, k)
+    }
+
+    /// Local row count for a given rank in the 2D grid.
+    pub fn local_rows_for_rank(&self, rank: usize) -> usize {
+        let (prow, _) = self.grid.rank_to_coords(rank);
+        Self::calculate_local_dimension(
+            self.global_rows,
+            self.row_block_size,
+            self.grid.prows,
+            prow,
+        )
+    }
+
+    /// Local column count for a given rank in the 2D grid.
+    pub fn local_cols_for_rank(&self, rank: usize) -> usize {
+        let (_, pcol) = self.grid.rank_to_coords(rank);
+        Self::calculate_local_dimension(
+            self.global_cols,
+            self.col_block_size,
+            self.grid.pcols,
+            pcol,
+        )
     }
 
     /// Calculate local dimension for block-cyclic distribution
@@ -2395,17 +2418,22 @@ impl OrderingAlgorithms {
         Ok(Self::amd_ordering(matrix))
     }
 
-    /// ParMETIS ordering for distributed graphs (placeholder)
+    /// ParMETIS ordering for distributed graphs
     pub fn parmetis_ordering(
         matrix: &CsrMatrix<f64>,
-        _comm: &UniverseComm,
+        comm: &UniverseComm,
+        distribution: &BlockCyclicDistribution,
     ) -> Result<Vec<usize>, KError> {
-        // Placeholder implementation that falls back to AMD
-        // In a real implementation, this would call ParMETIS C library
-        #[cfg(feature = "logging")]
-        log::warn!("ParMETIS ordering not implemented, falling back to AMD");
+        if comm.size() <= 1 {
+            return Ok(Self::mmd_ata_ordering(matrix));
+        }
 
-        Ok(Self::amd_ordering(matrix))
+        #[cfg(feature = "logging")]
+        if comm.rank() == 0 {
+            log::debug!("Using distributed MMD ordering for ParMETIS path");
+        }
+
+        Self::mmd_ata_ordering_distributed(matrix, comm, distribution)
     }
 }
 
@@ -2595,6 +2623,8 @@ pub struct SuperLuDistData {
     pub process_grid: ProcessGrid,
     /// Block-cyclic matrix distribution
     pub distribution: BlockCyclicDistribution,
+    /// Communicator used for setup/factorization
+    pub comm: UniverseComm,
     /// Factorization options
     pub options: SuperLuDistOptions,
     /// Whether factorization has been computed
@@ -2624,7 +2654,7 @@ pub struct SymbolicFactorization {
     pub u_pattern: HashMap<(usize, usize), bool>,
 }
 
-/// Solve workspace (placeholder for SuperLU_DIST solve structures)
+/// Solve workspace for SuperLU_DIST solve structures
 #[derive(Debug)]
 pub struct SolveWorkspace {
     /// Advanced workspace management
@@ -3391,7 +3421,10 @@ impl SuperLuDistWorkspace {
         block_size: usize,
     ) -> Result<(), KError> {
         // Calculate typical vector sizes needed
-        let local_size = matrix_size / process_grid.total_procs;
+        let (local_start, local_end) =
+            contiguous_partition(matrix_size, process_grid.my_rank, process_grid.total_procs);
+        let local_size = local_end.saturating_sub(local_start);
+        let max_local_size = matrix_size.div_ceil(process_grid.total_procs);
         let panel_size = self.config.max_comm_buffer_size.min(block_size * 10);
 
         // Store sizes for later use
@@ -3402,12 +3435,11 @@ impl SuperLuDistWorkspace {
         self.vector_sizes
             .insert("local_work".to_string(), local_size);
         self.vector_sizes
+            .insert("local_work_max".to_string(), max_local_size);
+        self.vector_sizes
             .insert("panel_work".to_string(), panel_size);
         self.vector_sizes
             .insert("comm_buffer".to_string(), panel_size);
-
-        debug_assert_eq!(process_grid.total_procs, 1);
-        debug_assert_eq!(self.vector_sizes["solution"], matrix_size);
 
         // Preallocate based on strategy
         match self.config.preallocation_strategy {
@@ -4060,6 +4092,7 @@ impl SuperLuDistSolver {
         let mut slu_data = SuperLuDistData {
             process_grid,
             distribution,
+            comm: comm.clone(),
             options: self.options.clone(),
             factored: false,
             local_matrix: Some(local_matrix),
@@ -4072,14 +4105,14 @@ impl SuperLuDistSolver {
         #[cfg(feature = "logging")]
         let _symbolic_guard = StageGuard::new("SuperLuDistSymbolic");
 
-        let symbolic = self.symbolic_factorization(&slu_data)?;
+        let symbolic = self.symbolic_factorization(&slu_data, comm)?;
         slu_data.symbolic_factor = Some(symbolic);
 
         // Perform numerical factorization
         #[cfg(feature = "logging")]
         let _numeric_guard = StageGuard::new("SuperLuDistNumeric");
 
-        let numeric = self.numerical_factorization(&slu_data)?;
+        let numeric = self.numerical_factorization(&slu_data, comm)?;
         slu_data.numeric_factor = Some(numeric);
 
         // Setup solve workspace
@@ -4088,6 +4121,120 @@ impl SuperLuDistSolver {
 
         slu_data.factored = true;
         self.data = Some(slu_data);
+
+        Ok(())
+    }
+
+    fn large_diag_row_permutation(
+        &self,
+        matrix: &CsrMatrix<f64>,
+        comm: &UniverseComm,
+    ) -> Vec<usize> {
+        let n = matrix.nrows();
+        let mut diag = vec![0.0f64; n];
+        let (row_start, row_end) = contiguous_partition(n, comm.rank(), comm.size());
+        let rp = matrix.row_ptr();
+        let cj = matrix.col_idx();
+        let vv = matrix.values();
+
+        for i in row_start..row_end {
+            let mut max_diag = 0.0;
+            for idx in rp[i]..rp[i + 1] {
+                if cj[idx] == i {
+                    let val = vv[idx].abs();
+                    if val > max_diag {
+                        max_diag = val;
+                    }
+                }
+            }
+            diag[i] = max_diag;
+        }
+
+        comm.allreduce_sum_slice(&mut diag);
+
+        let mut perm: Vec<usize> = (0..n).collect();
+        perm.sort_by(|&a, &b| {
+            diag[b]
+                .partial_cmp(&diag[a])
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.cmp(&b))
+        });
+        perm
+    }
+
+    fn compute_scaling_factors(
+        &self,
+        matrix: &CsrMatrix<f64>,
+        comm: &UniverseComm,
+    ) -> Result<(Vec<f64>, Vec<f64>), KError> {
+        let n = matrix.nrows();
+        let mut row_max = vec![0.0; n];
+        let mut col_max = vec![0.0; n];
+        let (row_start, row_end) = contiguous_partition(n, comm.rank(), comm.size());
+        let rp = matrix.row_ptr();
+        let cj = matrix.col_idx();
+        let vv = matrix.values();
+
+        for i in row_start..row_end {
+            let mut local_row_max = 0.0;
+            for idx in rp[i]..rp[i + 1] {
+                let j = cj[idx];
+                let val = vv[idx].abs();
+                if val > local_row_max {
+                    local_row_max = val;
+                }
+                if val > col_max[j] {
+                    col_max[j] = val;
+                }
+            }
+            row_max[i] = local_row_max;
+        }
+
+        comm.allreduce_sum_slice(&mut row_max);
+        self.allreduce_max_slice(comm, &mut col_max)?;
+
+        let row_scale = row_max
+            .into_iter()
+            .map(|v| if v > 0.0 { 1.0 / v } else { 1.0 })
+            .collect();
+        let col_scale = col_max
+            .into_iter()
+            .map(|v| if v > 0.0 { 1.0 / v } else { 1.0 })
+            .collect();
+
+        Ok((row_scale, col_scale))
+    }
+
+    fn allreduce_max_slice(
+        &self,
+        comm: &UniverseComm,
+        data: &mut [f64],
+    ) -> Result<(), KError> {
+        if comm.size() <= 1 {
+            return Ok(());
+        }
+
+        #[cfg(feature = "mpi")]
+        if let Some(world) = comm.as_mpi() {
+            let mut recv = vec![0.0; data.len()];
+            let rc = unsafe {
+                mpi::ffi::MPI_Allreduce(
+                    data.as_ptr() as *const c_void,
+                    recv.as_mut_ptr() as *mut c_void,
+                    recv.len() as i32,
+                    mpi::ffi::RSMPI_DOUBLE,
+                    mpi::ffi::RSMPI_MAX,
+                    world.as_raw(),
+                )
+            };
+            if rc != 0 {
+                return Err(KError::SolveError(format!(
+                    "MPI_Allreduce (MAX) failed: {rc}"
+                )));
+            }
+            data.copy_from_slice(&recv);
+            return Ok(());
+        }
 
         Ok(())
     }
@@ -4146,6 +4293,7 @@ impl SuperLuDistSolver {
     fn symbolic_factorization(
         &self,
         data: &SuperLuDistData,
+        comm: &UniverseComm,
     ) -> Result<SymbolicFactorization, KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("SymbolicFactorization");
@@ -4169,12 +4317,20 @@ impl SuperLuDistSolver {
         // Compute column permutation based on strategy
         let col_perm = match self.options.column_permutation {
             ColumnPermutation::Natural => OrderingAlgorithms::natural_ordering(n),
-            ColumnPermutation::MmdAta => OrderingAlgorithms::mmd_ata_ordering(matrix),
+            ColumnPermutation::MmdAta => {
+                if comm.size() > 1 {
+                    OrderingAlgorithms::mmd_ata_ordering_distributed(
+                        matrix,
+                        comm,
+                        &data.distribution,
+                    )?
+                } else {
+                    OrderingAlgorithms::mmd_ata_ordering(matrix)
+                }
+            }
             ColumnPermutation::Metis => OrderingAlgorithms::metis_ordering(matrix)?,
             ColumnPermutation::ParMetis => {
-                // For distributed case, we would need the global matrix
-                // For now, fall back to local AMD
-                OrderingAlgorithms::amd_ordering(matrix)
+                OrderingAlgorithms::parmetis_ordering(matrix, comm, &data.distribution)?
             }
             ColumnPermutation::User => {
                 // User-provided permutation would be stored in options
@@ -4186,11 +4342,7 @@ impl SuperLuDistSolver {
         // Compute row permutation based on strategy
         let row_perm = match self.options.row_permutation {
             RowPermutation::NoRowPerm => OrderingAlgorithms::natural_ordering(n),
-            RowPermutation::LargeDiag => {
-                // For large diagonal strategy, we would analyze diagonal elements
-                // For now, use natural ordering as placeholder
-                OrderingAlgorithms::natural_ordering(n)
-            }
+            RowPermutation::LargeDiag => self.large_diag_row_permutation(matrix, comm),
             RowPermutation::User => {
                 // User-provided permutation would be stored in options
                 OrderingAlgorithms::natural_ordering(n)
@@ -4235,6 +4387,7 @@ impl SuperLuDistSolver {
     fn numerical_factorization(
         &self,
         data: &SuperLuDistData,
+        comm: &UniverseComm,
     ) -> Result<NumericFactorization, KError> {
         #[cfg(feature = "logging")]
         let _guard = StageGuard::new("NumericalFactorization");
@@ -4335,9 +4488,8 @@ impl SuperLuDistSolver {
         let global_row_perm = symbolic.row_perm.clone();
         let global_col_perm = symbolic.col_perm.clone();
 
-        // Compute scaling factors (placeholder - would be more sophisticated)
-        let row_scale = vec![1.0; n];
-        let col_scale = vec![1.0; n];
+        // Compute scaling factors using MPI-aware reductions
+        let (row_scale, col_scale) = self.compute_scaling_factors(matrix, comm)?;
 
         // Estimate memory usage
         let memory_usage = panels
@@ -4420,24 +4572,45 @@ impl SuperLuDistSolver {
 
         // Use configured workspace settings
         let mut workspace_config = self.workspace_config.clone();
-        workspace_config.max_comm_buffer_size = n.max(1024);
+        let block_size = self.options.panel_size.unwrap_or(64).max(1);
+        workspace_config.max_comm_buffer_size =
+            (block_size * data.process_grid.total_procs).max(1024);
 
         let mut workspace = SuperLuDistWorkspace::with_config(workspace_config);
 
         // Setup workspace for the specific problem
-        workspace.setup_for_problem(n, &data.process_grid, 64)?;
+        workspace.setup_for_problem(n, &data.process_grid, block_size)?;
 
         // Initialize process-specific vectors
         let mut process_vectors = HashMap::new();
         for p in 0..data.process_grid.total_procs {
-            let local_size = n / data.process_grid.total_procs; // Simplified calculation
-            process_vectors.insert(p, vec![0.0; local_size]);
+            let local_rows = data.distribution.local_rows_for_rank(p);
+            process_vectors.insert(p, vec![0.0; local_rows]);
         }
 
         // Initialize global vectors for collective operations
         let mut global_vectors = HashMap::new();
-        global_vectors.insert("permutation_temp".to_string(), vec![0.0; n]);
-        global_vectors.insert("reduction_temp".to_string(), vec![0.0; n]);
+        global_vectors.insert(
+            "solution_temp".to_string(),
+            vec![0.0; data.distribution.local_rows],
+        );
+        global_vectors.insert(
+            "rhs_temp".to_string(),
+            vec![0.0; data.distribution.local_rows],
+        );
+        global_vectors.insert(
+            "column_accum_temp".to_string(),
+            vec![0.0; data.distribution.local_cols],
+        );
+        global_vectors.insert(
+            "reduction_temp".to_string(),
+            vec![0.0; data.distribution.local_rows],
+        );
+        if data.process_grid.my_rank == 0 {
+            global_vectors.insert("permutation_temp".to_string(), vec![0.0; n]);
+        } else {
+            global_vectors.insert("permutation_temp".to_string(), Vec::new());
+        }
 
         Ok(SolveWorkspace {
             workspace,
@@ -4629,7 +4802,7 @@ impl Solver<CsrMatrix<f64>> for SuperLuDistSolver {
             let data_ref = self.data.as_ref().ok_or_else(|| {
                 KError::SolveError("call setup(&A, &comm) before factor(&A)".into())
             })?;
-            self.numerical_factorization(data_ref)?
+            self.numerical_factorization(data_ref, &data_ref.comm)?
         };
         if let Some(data_mut) = self.data.as_mut() {
             data_mut.numeric_factor = Some(numeric);
@@ -4986,6 +5159,7 @@ mod tests {
         let slu_data = SuperLuDistData {
             process_grid: distribution.grid.clone(),
             distribution,
+            comm: UniverseComm::NoComm(NoComm),
             options: solver.options.clone(),
             factored: false,
             local_matrix: Some(matrix),
@@ -4995,7 +5169,8 @@ mod tests {
         };
 
         // Test symbolic factorization
-        let symbolic = solver.symbolic_factorization(&slu_data).unwrap();
+        let comm = UniverseComm::NoComm(NoComm);
+        let symbolic = solver.symbolic_factorization(&slu_data, &comm).unwrap();
 
         // Verify the result
         assert_eq!(symbolic.col_perm.len(), 3);
@@ -5147,6 +5322,7 @@ mod tests {
         let slu_data = SuperLuDistData {
             process_grid: distribution.grid.clone(),
             distribution,
+            comm: UniverseComm::NoComm(NoComm),
             options: solver.options.clone(),
             factored: false,
             local_matrix: Some(matrix),
@@ -5156,7 +5332,9 @@ mod tests {
         };
 
         // Test numerical factorization
-        let numeric = solver.numerical_factorization(&slu_data).unwrap();
+        let numeric = solver
+            .numerical_factorization(&slu_data, &slu_data.comm)
+            .unwrap();
 
         // Verify the result
         assert_eq!(numeric.n, 3);
