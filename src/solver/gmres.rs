@@ -509,7 +509,7 @@ impl GmresSolver {
                             let pipe = ws.pipelined_arnoldi_step(
                                 k,
                                 n,
-                                red_engine.as_ref(),
+                                red.engine(),
                                 self.reorth,
                                 self.reorth_tol,
                             )?;
@@ -529,7 +529,7 @@ impl GmresSolver {
                                     ws.finish_pipelined_arnoldi(
                                         k,
                                         n,
-                                        red_engine.as_ref(),
+                                        red.engine(),
                                         self.reorth,
                                         self.reorth_tol,
                                         glob,
@@ -576,7 +576,7 @@ impl GmresSolver {
                             let pipe = ws.pipelined_arnoldi_step(
                                 k,
                                 n,
-                                red_engine.as_ref(),
+                                red.engine(),
                                 self.reorth,
                                 self.reorth_tol,
                             )?;
@@ -596,7 +596,7 @@ impl GmresSolver {
                                     ws.finish_pipelined_arnoldi(
                                         k,
                                         n,
-                                        red_engine.as_ref(),
+                                        red.engine(),
                                         self.reorth,
                                         self.reorth_tol,
                                         glob,
@@ -964,18 +964,18 @@ impl GmresSolver {
         };
 
         if matches!(pc_side, PcSide::Right) {
+            let v0: &[S] = &ws.v_mem[0..n];
+            let z0: &mut [S] = &mut ws.z_mem[0..n];
             if let Some(pc) = pc {
-                let (_, z0) = ws.tmp2_and_z_mut(0);
                 #[cfg(feature = "metrics")]
                 let pc_start = std::time::Instant::now();
-                pc.apply_s(PcSide::Right, ws.v_col(0), z0, &mut ws.bridge)?;
+                pc.apply_s(PcSide::Right, v0, z0, &mut ws.bridge)?;
                 #[cfg(feature = "metrics")]
                 {
                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                 }
             } else {
-                let (_, z0) = ws.tmp2_and_z_mut(0);
-                z0.copy_from_slice(ws.v_col(0));
+                z0.copy_from_slice(v0);
             }
         }
 
@@ -1017,9 +1017,9 @@ impl GmresSolver {
             return Ok(stats);
         }
 
-        let sstep = ws
-            .sstep_mut()
-            .ok_or_else(|| KError::InvalidInput("GMRES s-step workspace not configured".into()))?;
+        // Local block workspace buffer (column-major n x block).
+        // This avoids borrowing ws.sstep_mut() for the entire solve and fixes all borrow conflicts.
+        let mut w_block: Vec<S> = Vec::new();
 
         'outer: loop {
             let mut k_steps = 0usize;
@@ -1029,13 +1029,21 @@ impl GmresSolver {
                 if block == 0 {
                     break;
                 }
-                sstep.w.resize(n, block);
+                // Resize W (n x block), column-major.
+                w_block.resize(n * block, S::zero());
+
+                // Build W columns: w_j = (M^{-1} A)^{j+1} v_k   (Left)
+                //              or  w_j = A (M^{-1} w_{j-1})     (Right)
                 for j in 0..block {
-                    let src = if j == 0 {
+                    // src is either v_k (j==0) or previous W column (j>0).
+                    let (prev_cols, cur_and_rest) = w_block.split_at_mut(j * n);
+                    let src: &[S] = if j == 0 {
                         &ws.v_mem[k * n..(k + 1) * n]
                     } else {
-                        sstep.w.col(j - 1)
+                        &prev_cols[(j - 1) * n..j * n]
                     };
+                    let wj: &mut [S] = &mut cur_and_rest[0..n];
+
                     match pc_side {
                         PcSide::Left => {
                             #[cfg(feature = "metrics")]
@@ -1045,6 +1053,7 @@ impl GmresSolver {
                             {
                                 metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                             }
+
                             if let Some(pc) = pc {
                                 let tmp2 = &mut ws.tmp2[..n];
                                 #[cfg(feature = "metrics")]
@@ -1054,9 +1063,9 @@ impl GmresSolver {
                                 {
                                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                                 }
-                                sstep.w.col_mut(j).copy_from_slice(tmp2);
+                                wj.copy_from_slice(tmp2);
                             } else {
-                                sstep.w.col_mut(j).copy_from_slice(&ws.tmp1[..n]);
+                                wj.copy_from_slice(&ws.tmp1[..n]);
                             }
                         }
                         PcSide::Right => {
@@ -1072,6 +1081,7 @@ impl GmresSolver {
                             } else {
                                 ws.tmp2[..n].copy_from_slice(src);
                             }
+
                             #[cfg(feature = "metrics")]
                             let matvec_start = std::time::Instant::now();
                             a.matvec_s(&ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
@@ -1079,7 +1089,8 @@ impl GmresSolver {
                             {
                                 metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                             }
-                            sstep.w.col_mut(j).copy_from_slice(&ws.tmp1[..n]);
+
+                            wj.copy_from_slice(&ws.tmp1[..n]);
                         }
                         PcSide::Symmetric => unreachable!(),
                     }
@@ -1092,7 +1103,7 @@ impl GmresSolver {
                     for i in 0..=k {
                         let vi = &ws.v_mem[i * n..(i + 1) * n];
                         for j in 0..block {
-                            let wj = sstep.w.col(j);
+                            let wj = &w_block[j * n..(j + 1) * n];
                             pairs.push((vi, wj));
                         }
                     }
@@ -1102,40 +1113,44 @@ impl GmresSolver {
                     {
                         metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                     }
-                }
+                } // pairs dropped here; we can safely mutate w_block next.
+                // W <- W - V C
                 for i in 0..=k {
                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                     for j in 0..block {
                         let coeff = cvals[i * block + j];
-                        let wj = sstep.w.col_mut(j);
+                        let wj = &mut w_block[j * n..(j + 1) * n];
                         for (w, &vi_j) in wj.iter_mut().zip(vi) {
                             *w -= coeff * vi_j;
                         }
                     }
                 }
 
+                // Optional second pass reorthogonalization.
                 if matches!(reorth_policy, ReorthPolicy::Always) {
                     let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
-                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
-                        SmallVec::with_capacity((k + 1) * block);
-                    for i in 0..=k {
-                        let vi = &ws.v_mem[i * n..(i + 1) * n];
-                        for j in 0..block {
-                            let wj = sstep.w.col(j);
-                            pairs.push((vi, wj));
-                        }
-                    }
-                    red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
                     {
-                        metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
-                    }
+                        let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                            SmallVec::with_capacity((k + 1) * block);
+                        for i in 0..=k {
+                            let vi = &ws.v_mem[i * n..(i + 1) * n];
+                            for j in 0..block {
+                                let wj = &w_block[j * n..(j + 1) * n];
+                                pairs.push((vi, wj));
+                            }
+                        }
+                        red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
+                        reduction_count += 1;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
+                        }
+                    } // pairs dropped
                     for i in 0..=k {
                         let vi = &ws.v_mem[i * n..(i + 1) * n];
                         for j in 0..block {
                             let coeff = c2[i * block + j];
-                            let wj = sstep.w.col_mut(j);
+                            let wj = &mut w_block[j * n..(j + 1) * n];
                             for (w, &vi_j) in wj.iter_mut().zip(vi) {
                                 *w -= coeff * vi_j;
                             }
@@ -1143,14 +1158,15 @@ impl GmresSolver {
                     }
                 }
 
+                // Gram = W^T W, size block x block
                 let mut gram: Vec<S> = vec![S::zero(); block * block];
                 {
                     let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
                         SmallVec::with_capacity(block * block);
                     for i in 0..block {
-                        let wi = sstep.w.col(i);
+                        let wi = &w_block[i * n..(i + 1) * n];
                         for j in 0..block {
-                            let wj = sstep.w.col(j);
+                            let wj = &w_block[j * n..(j + 1) * n];
                             pairs.push((wi, wj));
                         }
                     }
@@ -1161,6 +1177,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
                     }
                 }
+
 
                 let mut r_block = vec![R::default(); block * block];
                 for (dst, src) in r_block.iter_mut().zip(gram.iter()) {
@@ -1173,25 +1190,30 @@ impl GmresSolver {
                         "s-step GMRES: block conditioning exceeds max_cond".into(),
                     ));
                 }
+                // W <- W * R^{-1}   (solve X R = W in-place for X)
                 #[cfg(not(feature = "complex"))]
                 {
-                    let w_data = sstep.w.as_mut_slice();
+                    let w_data = w_block.as_mut_slice();
                     let w_real: &mut [R] = unsafe {
                         std::slice::from_raw_parts_mut(w_data.as_mut_ptr() as *mut R, w_data.len())
                     };
                     Self::triangular_solve_right_upper(&r_block, block, w_real, n);
                 }
 
+                // Store new basis vectors V_{k+1..k+block} from the orthonormalized block W.
                 for j in 0..block {
-                    let vj = ws.v_col(k + 1 + j);
-                    vj.copy_from_slice(sstep.w.col(j));
+                    let dst = &mut ws.v_mem[(k + 1 + j) * n..(k + 2 + j) * n];
+                    let src = &w_block[j * n..(j + 1) * n];
+                    dst.copy_from_slice(src);
                 }
 
+
+                // For Right preconditioning, also build Z columns for these new V columns.
                 if matches!(pc_side, PcSide::Right) {
                     for j in 0..block {
+                        let vj: &[S] = &ws.v_mem[(k + 1 + j) * n..(k + 2 + j) * n];
+                        let zj: &mut [S] = &mut ws.z_mem[(k + 1 + j) * n..(k + 2 + j) * n];
                         if let Some(pc) = pc {
-                            let vj = ws.v_col(k + 1 + j);
-                            let (_, zj) = ws.tmp2_and_z_mut(k + 1 + j);
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc.apply_s(PcSide::Right, vj, zj, &mut ws.bridge)?;
@@ -1200,13 +1222,12 @@ impl GmresSolver {
                                 metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
                             }
                         } else {
-                            let vj = ws.v_col(k + 1 + j);
-                            let (_, zj) = ws.tmp2_and_z_mut(k + 1 + j);
                             zj.copy_from_slice(vj);
                         }
                     }
                 }
 
+                // Fill the Hessenberg block: upper part is C, lower part is R from Cholesky.
                 for i in 0..=k {
                     for j in 0..block {
                         *ws.h_at_mut(i, k + j) = cvals[i * block + j];

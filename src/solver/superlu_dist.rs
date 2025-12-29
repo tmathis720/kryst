@@ -75,6 +75,7 @@ use faer::MatMut;
 use faer::prelude::*;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use mpi::collective::CommunicatorCollectives;
 
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
@@ -5729,7 +5730,7 @@ mod tests {
             .set_column_permutation(ColumnPermutation::Natural)
             .set_row_permutation(RowPermutation::NoRowPerm);
         let comm = UniverseComm::NoComm(NoComm);
-        crate::solver::legacy::LinearSolver::solve(
+        let _ = crate::solver::legacy::LinearSolver::solve(
             &mut solver,
             &matrix,
             None,
@@ -5770,7 +5771,7 @@ mod tests {
             .set_column_permutation(ColumnPermutation::Natural)
             .set_row_permutation(RowPermutation::NoRowPerm);
         let comm = UniverseComm::NoComm(NoComm);
-        crate::solver::legacy::LinearSolver::solve(
+        let _ = crate::solver::legacy::LinearSolver::solve(
             &mut solver,
             &matrix,
             None,
@@ -5821,7 +5822,7 @@ mod tests {
         let mut x = vec![0.0; 6];
         let mut solver = SuperLuDistSolver::new();
         let comm = UniverseComm::NoComm(NoComm);
-        crate::solver::legacy::LinearSolver::solve(
+        let _ = crate::solver::legacy::LinearSolver::solve(
             &mut solver,
             &matrix,
             None,
@@ -5861,7 +5862,7 @@ mod tests {
             .set_static_pivoting(true)
             .set_diagonal_pivot_threshold(1e-8);
         let comm = UniverseComm::NoComm(NoComm);
-        crate::solver::legacy::LinearSolver::solve(
+        let _ = crate::solver::legacy::LinearSolver::solve(
             &mut solver,
             &matrix,
             None,

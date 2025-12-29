@@ -4,6 +4,7 @@
 use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::algebra::prelude::S;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::UniverseComm;
@@ -20,7 +21,7 @@ use crate::parallel::{global_dot_conj, global_nrm2, global_nrm2_many};
 #[cfg(feature = "backend-faer")]
 use faer::linalg::solvers::{FullPivLu, SolveCore};
 #[cfg(feature = "backend-faer")]
-use faer::{Conj, Mat, MatMut};
+use faer::{Conj, MatMut, MatRef};
 #[cfg(feature = "backend-faer")]
 use super::arnoldi::block_arnoldi_step;
 
@@ -28,6 +29,15 @@ use super::arnoldi::block_arnoldi_step;
 pub struct BlockGmresSolver {
     pub options: BlockKrylovOptions,
 }
+
+// Conjugation helper for building normal equations:
+#[cfg(feature = "complex")]
+#[inline]
+fn conj_s(x: S) -> S { x.conj() }
+
+#[cfg(not(feature = "complex"))]
+#[inline]
+fn conj_s(x: S) -> S { x }
 
 impl BlockGmresSolver {
     pub fn new(options: BlockKrylovOptions) -> Self {
@@ -44,10 +54,10 @@ impl LinearSolver for BlockGmresSolver {
 
     fn solve(
         &mut self,
-        a: &dyn crate::matrix::op::LinOp<S = f64>,
+        a: &dyn crate::matrix::op::LinOp<S = S>,
         pc: Option<&mut dyn Preconditioner>,
-        b: &[f64],
-        x: &mut [f64],
+        b: &[S],
+        x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
@@ -131,7 +141,7 @@ impl LinearSolver for BlockGmresSolver {
             let mut basis: Vec<BlockVec> = Vec::with_capacity(restart + 1);
             let total_rows = (restart + 1) * p;
             let total_cols = restart * p;
-            let mut h_full = vec![0.0; total_rows * total_cols];
+            let mut h_full: Vec<S> = vec![0.0.into(); total_rows * total_cols];
 
             while iterations < self.options.max_iters {
                 let mut v0 = r_block.clone();
@@ -139,7 +149,7 @@ impl LinearSolver for BlockGmresSolver {
                 basis.clear();
                 basis.push(v0);
                 for val in &mut h_full {
-                    *val = 0.0;
+                    *val = 0.0.into();
                 }
 
                 let mut x_cycle = x_block.clone();
@@ -178,9 +188,9 @@ impl LinearSolver for BlockGmresSolver {
                     }
                     basis.push(w_block.clone());
 
-                    let h_slice = extract_h(&h_full, total_rows, rows_h, cols_h);
-                    let g_slice = build_g(rows_h, p, &beta);
-                    let y_slice = solve_normal_eq(&h_slice, rows_h, cols_h, &g_slice, p)?;
+                    let h_slice: Vec<S> = extract_h(&h_full, total_rows, rows_h, cols_h);
+                    let g_slice: Vec<S> = build_g(rows_h, p, &beta);
+                    let y_slice: Vec<S> = solve_normal_eq(&h_slice, rows_h, cols_h, &g_slice, p)?;
 
                     update_solution(
                         &mut x_cycle,
@@ -232,7 +242,7 @@ impl LinearSolver for BlockGmresSolver {
 }
 
 #[cfg(feature = "backend-faer")]
-fn fill_block_from_slice(block: &mut BlockVec, data: &[f64]) -> Result<(), KError> {
+fn fill_block_from_slice(block: &mut BlockVec, data: &[S]) -> Result<(), KError> {
     let n = block.nrows();
     let p = block.ncols();
     if data.len() == n {
@@ -254,7 +264,7 @@ fn fill_block_from_slice(block: &mut BlockVec, data: &[f64]) -> Result<(), KErro
 }
 
 #[cfg(feature = "backend-faer")]
-fn write_block_to_slice(block: &BlockVec, data: &mut [f64]) -> Result<(), KError> {
+fn write_block_to_slice(block: &BlockVec, data: &mut [S]) -> Result<(), KError> {
     let n = block.nrows();
     let p = block.ncols();
     if data.len() == n && p == 1 {
@@ -272,7 +282,7 @@ fn write_block_to_slice(block: &BlockVec, data: &mut [f64]) -> Result<(), KError
 
 #[cfg(feature = "backend-faer")]
 fn compute_residual(
-    a: &dyn crate::matrix::op::LinOp<S = f64>,
+    a: &dyn crate::matrix::op::LinOp<S = S>,
     b: &BlockVec,
     x: &BlockVec,
     r: &mut BlockVec,
@@ -313,11 +323,11 @@ fn block_qr(
     block: &mut BlockVec,
     comm: &UniverseComm,
     work: &mut Workspace,
-) -> Result<Vec<f64>, KError> {
+) -> Result<Vec<S>, KError> {
     let p = block.ncols();
     let n = block.nrows();
-    let mut r = vec![0.0; p * p];
-    work.blk_scratch.resize(n, 0.0);
+    let mut r: Vec<S> = vec![0.0.into(); p * p];
+    work.blk_scratch.resize(n, 0.0.into());
     let col_buf = &mut work.blk_scratch[..n];
     for j in 0..p {
         col_buf.copy_from_slice(block.col(j));
@@ -335,7 +345,7 @@ fn block_qr(
                 "block GMRES: dependent block encountered".into(),
             ));
         }
-        r[j * p + j] = norm;
+        r[j * p + j] = norm.into();
         let inv = 1.0 / norm;
         let col_mut = block.col_mut(j);
         for (dst, &src) in col_mut.iter_mut().zip(col_buf.iter()) {
@@ -346,8 +356,8 @@ fn block_qr(
 }
 
 #[cfg(feature = "backend-faer")]
-fn extract_h(h_full: &[f64], ld: usize, rows: usize, cols: usize) -> Vec<f64> {
-    let mut h = vec![0.0; rows * cols];
+fn extract_h(h_full: &[S], ld: usize, rows: usize, cols: usize) -> Vec<S> {
+    let mut h: Vec<S> = vec![0.0.into(); rows * cols];
     for col in 0..cols {
         for row in 0..rows {
             h[row + col * rows] = h_full[row + col * ld];
@@ -357,8 +367,8 @@ fn extract_h(h_full: &[f64], ld: usize, rows: usize, cols: usize) -> Vec<f64> {
 }
 
 #[cfg(feature = "backend-faer")]
-fn build_g(rows: usize, p: usize, beta: &[f64]) -> Vec<f64> {
-    let mut g = vec![0.0; rows * p];
+fn build_g(rows: usize, p: usize, beta: &[S]) -> Vec<S> {
+    let mut g: Vec<S> = vec![0.0.into(); rows * p];
     for row in 0..p {
         for col in 0..p {
             g[row + col * rows] = beta[row * p + col];
@@ -369,36 +379,36 @@ fn build_g(rows: usize, p: usize, beta: &[f64]) -> Vec<f64> {
 
 #[cfg(feature = "backend-faer")]
 fn solve_normal_eq(
-    h: &[f64],
+    h: &[S],
     rows: usize,
     cols: usize,
-    g: &[f64],
+    g: &[S],
     p: usize,
-) -> Result<Vec<f64>, KError> {
-    let mut ht_h = vec![0.0; cols * cols];
-    let mut ht_g = vec![0.0; cols * p];
+) -> Result<Vec<S>, KError> {
+    let mut ht_h = vec![0.0.into(); cols * cols];
+    let mut ht_g = vec![0.0.into(); cols * p];
     for col_i in 0..cols {
         for col_j in 0..cols {
-            let mut sum = 0.0;
+            let mut sum: S = 0.0.into();
             for row in 0..rows {
                 let h_i = h[row + col_i * rows];
                 let h_j = h[row + col_j * rows];
-                sum += h_i * h_j;
+                sum += conj_s(h_i) * h_j; // H^H H
             }
             ht_h[col_i + col_j * cols] = sum;
         }
         for rhs in 0..p {
-            let mut sum = 0.0;
+            let mut sum: S = 0.0.into();
             for row in 0..rows {
                 let h_i = h[row + col_i * rows];
                 let g_val = g[row + rhs * rows];
-                sum += h_i * g_val;
+                sum += conj_s(h_i) * g_val; // H^H g
             }
             ht_g[col_i + rhs * cols] = sum;
         }
     }
-    let a = Mat::from_column_major_slice(&ht_h, cols, cols);
-    let lu = FullPivLu::new(a.as_ref());
+    let a = MatRef::from_column_major_slice(&ht_h, cols, cols);
+    let lu = FullPivLu::new(a);
     let mut y = ht_g;
     let y_mat = MatMut::from_column_major_slice_mut(&mut y, cols, p);
     lu.solve_in_place_with_conj(Conj::No, y_mat);
@@ -410,7 +420,7 @@ fn update_solution(
     x_out: &mut BlockVec,
     x_base: &BlockVec,
     basis: &[BlockVec],
-    y: &[f64],
+    y: &[S],
     rows_y: usize,
 ) {
     let n = x_out.nrows();
@@ -423,7 +433,7 @@ fn update_solution(
             let x_col = x_out.col_mut(rhs);
             for r in 0..p {
                 let coeff = y[block_idx * p + r + rhs * rows_y];
-                if coeff == 0.0 {
+                if coeff == 0.0.into() {
                     continue;
                 }
                 let v_col = v.col(r);

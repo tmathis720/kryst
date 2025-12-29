@@ -8,6 +8,7 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::ops::wrap::as_s_op;
 use crate::solver::LinearSolver;
 use crate::solver::bicgstab::BiCgStabSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
@@ -77,13 +78,16 @@ impl LinearSolver for BlockBicgstabSolver {
         let mut local_ws = Workspace::default();
         let work = work.unwrap_or(&mut local_ws);
 
+        // Bridge dyn LinOp<S=f64> -> KLinOp via F64AsSOp wrapper.
+        let op = as_s_op(a);
+
         let mut b_block = BlockVec::new(ncols, p);
         fill_block_from_slice(&mut b_block, b)?;
         let mut x_block = BlockVec::new(ncols, p);
         fill_block_from_slice(&mut x_block, x)?;
 
         let mut max_iters = 0usize;
-        let mut max_residual = 0.0;
+        let mut max_residual: f64 = 0.0;
         let mut reason = ConvergedReason::ConvergedRtol;
         let mut counters = SolverCounters::default();
 
@@ -92,7 +96,7 @@ impl LinearSolver for BlockBicgstabSolver {
             solver.atol = self.options.atol;
             solver.dtol = self.options.dtol;
             let stats = solver.solve(
-                a,
+                &op,
                 None,
                 b_block.col(col),
                 x_block.col_mut(col),

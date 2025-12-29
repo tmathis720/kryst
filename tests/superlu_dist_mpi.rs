@@ -1,3 +1,4 @@
+#![cfg(feature = "superlu_dist")]
 #[cfg(feature = "mpi")]
 use kryst::matrix::dist_csr::DistCsrOp;
 #[cfg(feature = "mpi")]
