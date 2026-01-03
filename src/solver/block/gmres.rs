@@ -7,6 +7,8 @@ use crate::algebra::prelude::*;
 use crate::algebra::prelude::S;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
+use crate::ops::klinop::KLinOp;
+use crate::ops::wrap::as_s_op;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
@@ -54,10 +56,10 @@ impl LinearSolver for BlockGmresSolver {
 
     fn solve(
         &mut self,
-        a: &dyn crate::matrix::op::LinOp<S = S>,
+        a: &dyn crate::matrix::op::LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
-        b: &[S],
-        x: &mut [S],
+        b: &[f64],
+        x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
@@ -108,6 +110,8 @@ impl LinearSolver for BlockGmresSolver {
             let mons = monitors.unwrap_or(&[]);
             let mut local_ws = Workspace::default();
             let work = work.unwrap_or(&mut local_ws);
+            let op = as_s_op(a);
+            let mut scratch = crate::algebra::bridge::BridgeScratch::new();
 
             let mut b_block = BlockVec::new(ncols, p);
             fill_block_from_slice(&mut b_block, b)?;
@@ -116,7 +120,14 @@ impl LinearSolver for BlockGmresSolver {
 
             let mut r_block = BlockVec::new(ncols, p);
             let mut ax_block = BlockVec::new(ncols, p);
-            compute_residual(a, &b_block, &x_block, &mut r_block, &mut ax_block);
+            compute_residual(
+                &op,
+                &b_block,
+                &x_block,
+                &mut r_block,
+                &mut ax_block,
+                &mut scratch,
+            );
 
             let bnorm = block_norm_max(&b_block, comm);
             let mut rnorm = block_norm_max(&r_block, comm);
@@ -160,7 +171,7 @@ impl LinearSolver for BlockGmresSolver {
                     for col in 0..p {
                         let vj_col = vj.col(col);
                         let w_col = w_block.col_mut(col);
-                        a.matvec(vj_col, w_col);
+                        op.matvec_s(vj_col, w_col, &mut scratch);
                     }
                     let arnoldi = block_arnoldi_step(&basis, &mut w_block, comm, work, self.options.max_cond)?;
 
@@ -200,7 +211,14 @@ impl LinearSolver for BlockGmresSolver {
                         cols_h,
                     );
 
-                    compute_residual(a, &b_block, &x_cycle, &mut r_block, &mut ax_block);
+                    compute_residual(
+                        &op,
+                        &b_block,
+                        &x_cycle,
+                        &mut r_block,
+                        &mut ax_block,
+                        &mut scratch,
+                    );
                     rnorm = block_norm_max(&r_block, comm);
                     iterations += 1;
                     for m in mons {
@@ -221,7 +239,14 @@ impl LinearSolver for BlockGmresSolver {
                 }
 
                 x_block = x_cycle;
-                compute_residual(a, &b_block, &x_block, &mut r_block, &mut ax_block);
+                compute_residual(
+                    &op,
+                    &b_block,
+                    &x_block,
+                    &mut r_block,
+                    &mut ax_block,
+                    &mut scratch,
+                );
                 rnorm = block_norm_max(&r_block, comm);
                 let (iter_reason, iter_stats) = conv.check(rnorm, bnorm, iterations);
                 reason = iter_reason;
@@ -242,7 +267,7 @@ impl LinearSolver for BlockGmresSolver {
 }
 
 #[cfg(feature = "backend-faer")]
-fn fill_block_from_slice(block: &mut BlockVec, data: &[S]) -> Result<(), KError> {
+fn fill_block_from_slice(block: &mut BlockVec, data: &[f64]) -> Result<(), KError> {
     let n = block.nrows();
     let p = block.ncols();
     if data.len() == n {
@@ -251,7 +276,7 @@ fn fill_block_from_slice(block: &mut BlockVec, data: &[S]) -> Result<(), KError>
                 "block GMRES expects a full block for block_size > 1".into(),
             ));
         }
-        block.as_mut_slice().copy_from_slice(data);
+        copy_real_block(data, block.as_mut_slice());
         return Ok(());
     }
     if data.len() != n * p {
@@ -259,16 +284,16 @@ fn fill_block_from_slice(block: &mut BlockVec, data: &[S]) -> Result<(), KError>
             "block GMRES expects column-major block storage".into(),
         ));
     }
-    block.as_mut_slice().copy_from_slice(data);
+    copy_real_block(data, block.as_mut_slice());
     Ok(())
 }
 
 #[cfg(feature = "backend-faer")]
-fn write_block_to_slice(block: &BlockVec, data: &mut [S]) -> Result<(), KError> {
+fn write_block_to_slice(block: &BlockVec, data: &mut [f64]) -> Result<(), KError> {
     let n = block.nrows();
     let p = block.ncols();
     if data.len() == n && p == 1 {
-        data.copy_from_slice(block.as_slice());
+        copy_block_to_real(block.as_slice(), data);
         return Ok(());
     }
     if data.len() != n * p {
@@ -276,24 +301,25 @@ fn write_block_to_slice(block: &BlockVec, data: &mut [S]) -> Result<(), KError> 
             "block GMRES expects column-major block storage".into(),
         ));
     }
-    data.copy_from_slice(block.as_slice());
+    copy_block_to_real(block.as_slice(), data);
     Ok(())
 }
 
 #[cfg(feature = "backend-faer")]
-fn compute_residual(
-    a: &dyn crate::matrix::op::LinOp<S = S>,
+fn compute_residual<A: KLinOp<Scalar = S> + ?Sized>(
+    a: &A,
     b: &BlockVec,
     x: &BlockVec,
     r: &mut BlockVec,
     ax: &mut BlockVec,
+    scratch: &mut crate::algebra::bridge::BridgeScratch,
 ) {
     let p = b.ncols();
     let n = b.nrows();
     for col in 0..p {
         let xcol = x.col(col);
         let axcol = ax.col_mut(col);
-        a.matvec(xcol, axcol);
+        a.matvec_s(xcol, axcol, scratch);
     }
     for col in 0..p {
         let bcol = b.col(col);
@@ -316,6 +342,30 @@ fn block_norm_max(block: &BlockVec, comm: &UniverseComm) -> f64 {
     norms
         .into_iter()
         .fold(0.0_f64, |acc, val| acc.max(val))
+}
+
+#[cfg(feature = "backend-faer")]
+#[cfg(feature = "complex")]
+fn copy_real_block(src: &[f64], dst: &mut [S]) {
+    crate::algebra::bridge::copy_real_into_scalar(src, dst);
+}
+
+#[cfg(feature = "backend-faer")]
+#[cfg(not(feature = "complex"))]
+fn copy_real_block(src: &[f64], dst: &mut [S]) {
+    dst.copy_from_slice(src);
+}
+
+#[cfg(feature = "backend-faer")]
+#[cfg(feature = "complex")]
+fn copy_block_to_real(src: &[S], dst: &mut [f64]) {
+    crate::algebra::bridge::copy_scalar_to_real_in(src, dst);
+}
+
+#[cfg(feature = "backend-faer")]
+#[cfg(not(feature = "complex"))]
+fn copy_block_to_real(src: &[S], dst: &mut [f64]) {
+    dst.copy_from_slice(src);
 }
 
 #[cfg(feature = "backend-faer")]

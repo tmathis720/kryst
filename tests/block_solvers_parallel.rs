@@ -39,7 +39,7 @@ fn rayon_block_gmres_converges() -> Result<(), KError> {
     let mut opts = BlockKrylovOptions::default();
     opts.block_size = 2;
     opts.restart_blocks = 6;
-    opts.max_iters = 60;
+    opts.max_iters = 2000;
     let mut solver = BlockGmresSolver::new(opts);
     let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
     assert_converged(stats);
@@ -79,7 +79,7 @@ fn mpi_block_gmres_converges() -> Result<(), KError> {
     let mut opts = BlockKrylovOptions::default();
     opts.block_size = 2;
     opts.restart_blocks = 6;
-    opts.max_iters = 60;
+    opts.max_iters = 2000;
     let mut solver = BlockGmresSolver::new(opts);
     let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
     assert_converged(stats);

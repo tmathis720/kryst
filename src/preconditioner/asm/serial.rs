@@ -20,6 +20,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::PcCaps;
 use crate::preconditioner::Preconditioner as DynPreconditioner;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
@@ -793,7 +794,7 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         let indices = &meta.indices;
                         let r_blk: Vec<R> = indices.iter().map(|&i| x[i]).collect();
                         let mut x_blk = vec![R::zero(); indices.len()];
-                        let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
+                        let _ = ilu.apply_local(&r_blk, &mut x_blk);
                         match self.asm_mode {
                             AsmMode::ASM => {
                                 if matches!(self.weighting, Weighting::None) {

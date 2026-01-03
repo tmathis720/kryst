@@ -724,6 +724,10 @@ impl Ilu {
             if crate::parallel::threads::current_rayon_threads() <= 1 {
                 return false;
             }
+            let chunk_size = self.config.parallel_chunk_size.max(1);
+            if chunk_size == 1 {
+                return true;
+            }
             let tune = crate::algebra::parallel_cfg::parallel_tune();
             return n >= tune.min_rows_ilu_factorization;
         }

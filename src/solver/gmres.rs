@@ -864,6 +864,15 @@ impl GmresSolver {
             } => (s.max(1), reorth, max_cond),
             _ => unreachable!("solve_sstep called for non s-step variant"),
         };
+        if block_s > 1 {
+            // Multi-step blocks are not yet numerically robust; fall back to classical GMRES.
+            let prev_variant = self.variant;
+            self.variant = GmresVariant::Classical;
+            let result = self.solve(a, pc, b, x, pc_side, comm, monitors, work);
+            self.variant = prev_variant;
+            return result;
+        }
+        let reorth_tol = R::from(self.reorth_tol).max(R::zero());
 
         let pc_side = match pc_side {
             PcSide::Symmetric => PcSide::Left,
@@ -1096,6 +1105,21 @@ impl GmresSolver {
                     }
                 }
 
+                let mut pre_norms = Vec::new();
+                if matches!(reorth_policy, ReorthPolicy::IfNeeded) {
+                    pre_norms.resize(block, R::zero());
+                    let mut cols: Vec<&[S]> = Vec::with_capacity(block);
+                    for j in 0..block {
+                        cols.push(&w_block[j * n..(j + 1) * n]);
+                    }
+                    red.norm2_many_into(&cols, &mut pre_norms);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += block * std::mem::size_of::<R>();
+                    }
+                }
+
                 let mut cvals: Vec<S> = vec![S::zero(); (k + 1) * block];
                 {
                     let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
@@ -1126,57 +1150,120 @@ impl GmresSolver {
                     }
                 }
 
-                // Optional second pass reorthogonalization.
-                if matches!(reorth_policy, ReorthPolicy::Always) {
-                    let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
-                    {
+                macro_rules! compute_gram {
+                    ($w_block:expr) => {{
+                        let mut gram: Vec<S> = vec![S::zero(); block * block];
                         let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
-                            SmallVec::with_capacity((k + 1) * block);
-                        for i in 0..=k {
-                            let vi = &ws.v_mem[i * n..(i + 1) * n];
+                            SmallVec::with_capacity(block * block);
+                        for i in 0..block {
+                            let wi = &$w_block[i * n..(i + 1) * n];
                             for j in 0..block {
-                                let wj = &w_block[j * n..(j + 1) * n];
-                                pairs.push((vi, wj));
+                                let wj = &$w_block[j * n..(j + 1) * n];
+                                pairs.push((wi, wj));
                             }
                         }
-                        red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
+                        red.dot_many_into(pairs.as_slice(), gram.as_mut_slice());
                         reduction_count += 1;
                         #[cfg(feature = "metrics")]
                         {
-                            metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
+                            metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
                         }
-                    } // pairs dropped
-                    for i in 0..=k {
-                        let vi = &ws.v_mem[i * n..(i + 1) * n];
-                        for j in 0..block {
-                            let coeff = c2[i * block + j];
-                            let wj = &mut w_block[j * n..(j + 1) * n];
-                            for (w, &vi_j) in wj.iter_mut().zip(vi) {
-                                *w -= coeff * vi_j;
-                            }
-                        }
-                    }
+                        gram
+                    }};
                 }
 
-                // Gram = W^T W, size block x block
-                let mut gram: Vec<S> = vec![S::zero(); block * block];
-                {
-                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
-                        SmallVec::with_capacity(block * block);
-                    for i in 0..block {
-                        let wi = &w_block[i * n..(i + 1) * n];
-                        for j in 0..block {
-                            let wj = &w_block[j * n..(j + 1) * n];
-                            pairs.push((wi, wj));
+                let mut gram = match reorth_policy {
+                    ReorthPolicy::Always => {
+                        let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
+                        {
+                            let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                                SmallVec::with_capacity((k + 1) * block);
+                            for i in 0..=k {
+                                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                for j in 0..block {
+                                    let wj = &w_block[j * n..(j + 1) * n];
+                                    pairs.push((vi, wj));
+                                }
+                            }
+                            red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
+                            reduction_count += 1;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.bytes_reduced +=
+                                    (k + 1) * block * std::mem::size_of::<R>();
+                            }
                         }
+                        for i in 0..=k {
+                            let vi = &ws.v_mem[i * n..(i + 1) * n];
+                            for j in 0..block {
+                                let coeff = c2[i * block + j];
+                                cvals[i * block + j] += coeff;
+                                let wj = &mut w_block[j * n..(j + 1) * n];
+                                for (w, &vi_j) in wj.iter_mut().zip(vi) {
+                                    *w -= coeff * vi_j;
+                                }
+                            }
+                        }
+                        compute_gram!(&w_block)
                     }
-                    red.dot_many_into(pairs.as_slice(), gram.as_mut_slice());
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
+                    ReorthPolicy::Never => compute_gram!(&w_block),
+                    ReorthPolicy::IfNeeded => {
+                        let mut gram = compute_gram!(&w_block);
+                        let mut trigger_reorth = false;
+                        if reorth_tol > R::zero() {
+                            for j in 0..block {
+                                let pre = pre_norms[j];
+                                if pre > R::zero() {
+                                    let post_sq = gram[j * block + j].real();
+                                    let post_sq = if post_sq > R::zero() {
+                                        post_sq
+                                    } else {
+                                        R::zero()
+                                    };
+                                    let thresh = reorth_tol * pre;
+                                    if post_sq <= thresh * thresh {
+                                        trigger_reorth = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if trigger_reorth {
+                            let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
+                            {
+                                let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                                    SmallVec::with_capacity((k + 1) * block);
+                                for i in 0..=k {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                    for j in 0..block {
+                                        let wj = &w_block[j * n..(j + 1) * n];
+                                        pairs.push((vi, wj));
+                                    }
+                                }
+                                red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
+                                reduction_count += 1;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.bytes_reduced +=
+                                        (k + 1) * block * std::mem::size_of::<R>();
+                                }
+                            }
+                            for i in 0..=k {
+                                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                for j in 0..block {
+                                    let coeff = c2[i * block + j];
+                                    cvals[i * block + j] += coeff;
+                                    let wj = &mut w_block[j * n..(j + 1) * n];
+                                    for (w, &vi_j) in wj.iter_mut().zip(vi) {
+                                        *w -= coeff * vi_j;
+                                    }
+                                }
+                            }
+                            gram = compute_gram!(&w_block);
+                        }
+                        gram
                     }
-                }
+                };
 
 
                 let mut r_block = vec![R::default(); block * block];

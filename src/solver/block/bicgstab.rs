@@ -126,7 +126,7 @@ fn fill_block_from_slice(block: &mut BlockVec, data: &[f64]) -> Result<(), KErro
                 "block BiCGSTAB expects a full block for block_size > 1".into(),
             ));
         }
-        block.as_mut_slice().copy_from_slice(data);
+        copy_real_block(data, block.as_mut_slice());
         return Ok(());
     }
     if data.len() != n * p {
@@ -134,7 +134,7 @@ fn fill_block_from_slice(block: &mut BlockVec, data: &[f64]) -> Result<(), KErro
             "block BiCGSTAB expects column-major block storage".into(),
         ));
     }
-    block.as_mut_slice().copy_from_slice(data);
+    copy_real_block(data, block.as_mut_slice());
     Ok(())
 }
 
@@ -142,7 +142,7 @@ fn write_block_to_slice(block: &BlockVec, data: &mut [f64]) -> Result<(), KError
     let n = block.nrows();
     let p = block.ncols();
     if data.len() == n && p == 1 {
-        data.copy_from_slice(block.as_slice());
+        copy_block_to_real(block.as_slice(), data);
         return Ok(());
     }
     if data.len() != n * p {
@@ -150,8 +150,28 @@ fn write_block_to_slice(block: &BlockVec, data: &mut [f64]) -> Result<(), KError
             "block BiCGSTAB expects column-major block storage".into(),
         ));
     }
-    data.copy_from_slice(block.as_slice());
+    copy_block_to_real(block.as_slice(), data);
     Ok(())
+}
+
+#[cfg(feature = "complex")]
+fn copy_real_block(src: &[f64], dst: &mut [S]) {
+    crate::algebra::bridge::copy_real_into_scalar(src, dst);
+}
+
+#[cfg(not(feature = "complex"))]
+fn copy_real_block(src: &[f64], dst: &mut [S]) {
+    dst.copy_from_slice(src);
+}
+
+#[cfg(feature = "complex")]
+fn copy_block_to_real(src: &[S], dst: &mut [f64]) {
+    crate::algebra::bridge::copy_scalar_to_real_in(src, dst);
+}
+
+#[cfg(not(feature = "complex"))]
+fn copy_block_to_real(src: &[S], dst: &mut [f64]) {
+    dst.copy_from_slice(src);
 }
 
 fn combine_reason(current: ConvergedReason, next: ConvergedReason) -> ConvergedReason {
