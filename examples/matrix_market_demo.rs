@@ -322,6 +322,7 @@ mod real_demo {
         let stats = ksp.solve(&problem.rhs, &mut x)?;
         problem.comm.barrier();
         let elapsed = start.elapsed().as_secs_f64();
+        let true_residual = true_residual_norm(problem, &x)?;
 
         let converged = matches!(
             stats.reason,
@@ -341,7 +342,7 @@ mod real_demo {
         Ok(ResultRow {
             method: spec.name.to_string(),
             iterations: stats.iterations,
-            residual: stats.final_residual,
+            residual: true_residual,
             time_secs: elapsed,
             converged,
             reductions,
@@ -381,9 +382,9 @@ mod real_demo {
         }
 
         specs.push(RunSpec {
-            name: "FGMRES(50) + ILUT (R)",
+            name: "FGMRES(50) + ILUT (L)",
             solver: SolverType::Fgmres,
-            pc_side: PcSide::Right,
+            pc_side: PcSide::Left,
             pc: PcConfigSpec::Type {
                 pc_type: PcType::Ilut,
                 options: Some(ilut_options()),
@@ -391,13 +392,17 @@ mod real_demo {
             setup: Some(fgmres_hook()),
         });
 
-        specs.push(RunSpec {
-            name: "FGMRES(50) + AMG (R)",
-            solver: SolverType::Fgmres,
-            pc_side: PcSide::Right,
-            pc: PcConfigSpec::Builder(amg_builder(false)),
-            setup: Some(fgmres_hook()),
-        });
+        if !analysis.has_diag_zeros {
+            specs.push(RunSpec {
+                name: "FGMRES(50) + AMG (L)",
+                solver: SolverType::Fgmres,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Builder(amg_builder(false)),
+                setup: Some(fgmres_hook()),
+            });
+        } else {
+            notes.push("AMG disabled due to near-zero or missing diagonal entries.");
+        }
 
         specs.push(RunSpec {
             name: "TFQMR + ILUT (L)",
@@ -459,8 +464,8 @@ mod real_demo {
 
     fn ilut_options() -> PcOptions {
         let mut opts = PcOptions::default();
-        opts.ilut_drop_tol = Some(1e-3);
-        opts.ilut_max_fill = Some(20);
+        opts.ilut_drop_tol = Some(1e-4);
+        opts.ilut_max_fill = Some(50);
         opts.ilu_reordering = Some("amd".into());
         opts
     }
@@ -520,6 +525,61 @@ mod real_demo {
             approx_symmetric,
             has_diag_zeros,
         }
+    }
+
+    fn repair_diagonal_csr(a: &CsrMatrix<f64>, tol: f64, tau: f64) -> (CsrMatrix<f64>, usize) {
+        let nrows = a.nrows();
+        let ncols = a.ncols();
+
+        let mut rp: Vec<usize> = Vec::with_capacity(nrows + 1);
+        let mut ci: Vec<usize> = Vec::with_capacity(a.nnz() + nrows);
+        let mut vv: Vec<f64> = Vec::with_capacity(a.nnz() + nrows);
+
+        rp.push(0);
+        let mut fixed = 0usize;
+
+        for i in 0..nrows {
+            let (cols, vals) = a.row(i);
+
+            let row_abs_sum: f64 = vals.iter().map(|x| x.abs()).sum();
+            let repl = (tau * row_abs_sum).max(tol);
+
+            let mut diag_handled = false;
+
+            for (&c, &v) in cols.iter().zip(vals.iter()) {
+                if !diag_handled && i < ncols && c > i {
+                    ci.push(i);
+                    vv.push(repl);
+                    fixed += 1;
+                    diag_handled = true;
+                }
+
+                if c == i {
+                    let new_v = if v.abs() <= tol {
+                        fixed += 1;
+                        repl
+                    } else {
+                        v
+                    };
+                    ci.push(c);
+                    vv.push(new_v);
+                    diag_handled = true;
+                } else {
+                    ci.push(c);
+                    vv.push(v);
+                }
+            }
+
+            if !diag_handled && i < ncols {
+                ci.push(i);
+                vv.push(repl);
+                fixed += 1;
+            }
+
+            rp.push(ci.len());
+        }
+
+        (CsrMatrix::from_csr(nrows, ncols, rp, ci, vv), fixed)
     }
 
     fn estimate_symmetry(matrix: &CsrMatrix<f64>, tol: f64, max_checks: usize) -> bool {
@@ -608,7 +668,12 @@ mod real_demo {
         if rank == 0 {
             let mat_mm = read_matrix_market(mat_path)?;
             let rhs_mm = read_matrix_market(rhs_path)?;
-            matrix_root = Some(mat_mm.to_csr_matrix()?);
+            let csr = mat_mm.to_csr_matrix()?;
+            let (csr_fixed, fixed) = repair_diagonal_csr(&csr, 1e-14, 1e-8);
+            if fixed > 0 {
+                eprintln!("(info) repaired {fixed} diagonal entries (|diag|<=1e-14 or missing).");
+            }
+            matrix_root = Some(csr_fixed);
             rhs_root = Some(rhs_mm.to_vector()?);
         }
 
@@ -667,6 +732,17 @@ mod real_demo {
             backend_descr: "CSR (serial)".into(),
         };
         Ok((problem, analysis))
+    }
+
+    fn true_residual_norm(problem: &Problem, x: &[f64]) -> Result<f64, KError> {
+        let mut ax = vec![0.0; problem.local_n];
+        problem.op.try_matvec(x, &mut ax)?;
+        let mut r2_local = 0.0;
+        for i in 0..problem.local_n {
+            let ri = problem.rhs[i] - ax[i];
+            r2_local += ri * ri;
+        }
+        Ok(problem.comm.all_reduce_f64(r2_local).sqrt())
     }
 
     #[cfg(feature = "mpi")]
