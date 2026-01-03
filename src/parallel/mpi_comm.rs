@@ -210,10 +210,11 @@ impl MpiComm {
             return OwnedMpiRequest::new(handle);
         }
 
+        let send = buf.to_vec();
         let mut handle = MaybeUninit::<mpi::ffi::MPI_Request>::uninit();
         let rc = unsafe {
             mpi::ffi::MPI_Iallreduce(
-                mpi::ffi::RSMPI_IN_PLACE,
+                send.as_ptr() as *const c_void,
                 buf.as_mut_ptr() as *mut c_void,
                 buf.len() as i32,
                 mpi::ffi::RSMPI_DOUBLE,
@@ -224,7 +225,7 @@ impl MpiComm {
         };
         debug_assert_eq!(rc, 0);
         let handle = unsafe { handle.assume_init() };
-        OwnedMpiRequest::new(handle)
+        OwnedMpiRequest::new(handle).with_keepalive(send)
     }
 
     pub(crate) fn immediate_allreduce_sum(&self, send: &[R], recv: &mut [R]) -> OwnedMpiRequest {
