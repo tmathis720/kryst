@@ -433,7 +433,7 @@ fn mpi_iallreduce_in_place(
     let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
     let rc = unsafe {
         mpi::ffi::MPI_Iallreduce(
-            buf.as_ptr() as *const std::ffi::c_void,
+            mpi::ffi::RSMPI_IN_PLACE,
             buf.as_mut_ptr() as *mut std::ffi::c_void,
             buf.len() as i32,
             mpi::ffi::RSMPI_DOUBLE,
