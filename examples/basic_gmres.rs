@@ -1,3 +1,4 @@
+// run with `cargo run --example basic_gmres`
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("basic_gmres.rs is unavailable when built with --features complex");

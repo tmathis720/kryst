@@ -260,6 +260,26 @@ impl DistCsrOp {
         )
     }
 
+    /// Extract the owned diagonal block as a CSR matrix (local rows/cols only).
+    pub fn local_block_csr(&self) -> CsrMatrix<S> {
+        let n = self.n_local;
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+        for row in 0..n {
+            for idx in self.row_ptr[row]..self.row_ptr[row + 1] {
+                let gcol = self.col_idx[idx];
+                if gcol >= self.row_start && gcol < self.row_end {
+                    col_idx.push(gcol - self.row_start);
+                    vals.push(self.vals[idx]);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+        CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+    }
+
     #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
     /// Extract the owned diagonal block as a dense matrix (real builds only).
     pub fn local_block_dense(&self) -> Mat<f64> {

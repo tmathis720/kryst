@@ -291,6 +291,9 @@ impl Preconditioner for DistributedAsm {
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 fn materialize_local_csr(op: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<f64>>, KError> {
+    if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+        return Ok(Arc::new(dist.local_matrix()));
+    }
     let mat = materialize_linop_with_hint(op, FormatHint::Csr, 0.0)?;
     if let Some(csr) = mat.as_any().downcast_ref::<CsrMatrix<f64>>() {
         return Ok(Arc::new(csr.clone()));

@@ -25,7 +25,7 @@ mod real_demo {
     //! that are relevant for driven-cavity style matrices.
     //!
     //! to run:
-    //! cargo mpirun -n 2 --features=mpi --example matrix_market_demo
+    //! cargo mpirun -n 2 --features=mpi,rayon,simd,dense-direct,faer-backend --example matrix_market_demo
     //! or for serial:
     //! cargo run --example matrix_market_demo
     //! (ensure the example is built with the "mpi" feature for MPI runs)
@@ -356,11 +356,21 @@ mod real_demo {
 
         if is_parallel {
             notes.push(
-            "Distributed ILUT/AMG/SuperLU_DIST support is pending; falling back to Jacobi/none PCs for now.",
-        );
+                "MPI runs use local diagonal blocks for ILUT/AMG preconditioners (block-Jacobi style).",
+            );
+        }
+
+        if analysis.approx_symmetric && !analysis.has_diag_zeros {
             specs.push(RunSpec {
-                name: "BiCGStab + Jacobi (L)",
-                solver: SolverType::BiCgStab,
+                name: "PCG(pipelined) + AMG (L)",
+                solver: SolverType::Pcg,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Builder(amg_builder(true)),
+                setup: Some(pcg_pipelined_hook()),
+            });
+            specs.push(RunSpec {
+                name: "PCG + Jacobi (L)",
+                solver: SolverType::Pcg,
                 pc_side: PcSide::Left,
                 pc: PcConfigSpec::Type {
                     pc_type: PcType::Jacobi,
@@ -368,102 +378,80 @@ mod real_demo {
                 },
                 setup: None,
             });
+        }
 
-            specs.push(RunSpec {
-                name: "BiCGStab + None (L)",
-                solver: SolverType::BiCgStab,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::None,
-                    options: None,
-                },
-                setup: None,
-            });
+        specs.push(RunSpec {
+            name: "FGMRES(50) + ILUT (R)",
+            solver: SolverType::Fgmres,
+            pc_side: PcSide::Right,
+            pc: PcConfigSpec::Type {
+                pc_type: PcType::Ilut,
+                options: Some(ilut_options()),
+            },
+            setup: Some(fgmres_hook()),
+        });
 
-            if analysis.approx_symmetric && !analysis.has_diag_zeros {
+        specs.push(RunSpec {
+            name: "FGMRES(50) + AMG (R)",
+            solver: SolverType::Fgmres,
+            pc_side: PcSide::Right,
+            pc: PcConfigSpec::Builder(amg_builder(false)),
+            setup: Some(fgmres_hook()),
+        });
+
+        specs.push(RunSpec {
+            name: "TFQMR + ILUT (L)",
+            solver: SolverType::Tfqmr,
+            pc_side: PcSide::Left,
+            pc: PcConfigSpec::Type {
+                pc_type: PcType::Ilut,
+                options: Some(ilut_options()),
+            },
+            setup: None,
+        });
+
+        specs.push(RunSpec {
+            name: "BiCGStab + ILUT (L)",
+            solver: SolverType::BiCgStab,
+            pc_side: PcSide::Left,
+            pc: PcConfigSpec::Type {
+                pc_type: PcType::Ilut,
+                options: Some(ilut_options()),
+            },
+            setup: None,
+        });
+
+        if !is_parallel {
+            if cfg!(feature = "dense-direct") {
                 specs.push(RunSpec {
-                    name: "PCG + Jacobi (L)",
-                    solver: SolverType::Pcg,
+                    name: "PREONLY + Dense LU",
+                    solver: SolverType::Preonly,
                     pc_side: PcSide::Left,
                     pc: PcConfigSpec::Type {
-                        pc_type: PcType::Jacobi,
+                        pc_type: PcType::Lu,
+                        options: None,
+                    },
+                    setup: None,
+                });
+            } else {
+                notes.push("Dense LU requires the dense-direct feature.");
+            }
+
+            #[cfg(feature = "superlu_dist")]
+            {
+                specs.push(RunSpec {
+                    name: "PREONLY + SuperLU_DIST",
+                    solver: SolverType::Preonly,
+                    pc_side: PcSide::Left,
+                    pc: PcConfigSpec::Type {
+                        pc_type: PcType::SuperLuDist,
                         options: None,
                     },
                     setup: None,
                 });
             }
         } else {
-            if analysis.approx_symmetric && !analysis.has_diag_zeros {
-                specs.push(RunSpec {
-                    name: "PCG(pipelined) + AMG (L)",
-                    solver: SolverType::Pcg,
-                    pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Builder(amg_builder(true)),
-                    setup: Some(pcg_pipelined_hook()),
-                });
-                specs.push(RunSpec {
-                    name: "PCG + Jacobi (L)",
-                    solver: SolverType::Pcg,
-                    pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Type {
-                        pc_type: PcType::Jacobi,
-                        options: None,
-                    },
-                    setup: None,
-                });
-            }
-
-            specs.push(RunSpec {
-                name: "FGMRES(50) + ILUT (R)",
-                solver: SolverType::Fgmres,
-                pc_side: PcSide::Right,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Ilut,
-                    options: Some(ilut_options()),
-                },
-                setup: Some(fgmres_hook()),
-            });
-
-            specs.push(RunSpec {
-                name: "FGMRES(50) + AMG (R)",
-                solver: SolverType::Fgmres,
-                pc_side: PcSide::Right,
-                pc: PcConfigSpec::Builder(amg_builder(false)),
-                setup: Some(fgmres_hook()),
-            });
-
-            specs.push(RunSpec {
-                name: "TFQMR + ILUT (L)",
-                solver: SolverType::Tfqmr,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Ilut,
-                    options: Some(ilut_options()),
-                },
-                setup: None,
-            });
-
-            specs.push(RunSpec {
-                name: "BiCGStab + ILUT (L)",
-                solver: SolverType::BiCgStab,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Ilut,
-                    options: Some(ilut_options()),
-                },
-                setup: None,
-            });
-
-            specs.push(RunSpec {
-                name: "PREONLY + Dense LU",
-                solver: SolverType::Preonly,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Lu,
-                    options: None,
-                },
-                setup: None,
-            });
+            notes.push("Direct solvers are skipped for MPI runs (require global matrices).");
         }
 
         MenuPlan { specs, notes }

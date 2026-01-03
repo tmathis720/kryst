@@ -244,6 +244,11 @@ pub fn to_csr_cached(
             dense_op, drop_tol,
         ));
     }
+    #[cfg(not(feature = "complex"))]
+    if let Some(dist) = pmat.as_any().downcast_ref::<DistCsrOp>() {
+        let csr = dist.local_block_csr();
+        return Ok(Arc::new(csr));
+    }
     Err(unsupported_linop_err(pmat, "to_csr_cached", "CSR"))
 }
 
@@ -296,6 +301,13 @@ pub fn to_csc_cached(
             dense_op, drop_tol,
         ));
     }
+    #[cfg(not(feature = "complex"))]
+    if let Some(dist) = pmat.as_any().downcast_ref::<DistCsrOp>() {
+        let csr = dist.local_block_csr();
+        return Ok(<CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
+            &csr, drop_tol,
+        ));
+    }
     Err(unsupported_linop_err(pmat, "to_csc_cached", "CSC"))
 }
 
@@ -332,6 +344,11 @@ pub fn dense_from_linop(op: &dyn LinOp<S = S>) -> Result<Mat<f64>, KError> {
     }
     if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
         return Ok(csc.to_dense()?);
+    }
+    #[cfg(not(feature = "complex"))]
+    if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+        let csr = dist.local_block_csr();
+        return Ok(csr.to_dense()?);
     }
     Err(unsupported_linop_err(op, "dense_from_linop", "dense"))
 }
@@ -440,7 +457,7 @@ pub fn materialize_linop_with_hint(
 
     #[cfg(not(feature = "complex"))]
     if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-        let local = dist.local_matrix();
+        let local = dist.local_block_csr();
         return Ok(match hint {
             FormatHint::Csr => wrap_with_comm(Arc::new(local.clone()), comm),
             FormatHint::Csc => {

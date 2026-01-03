@@ -1,3 +1,5 @@
+// run with `cargo run --example complex_gmres --features complex`
+
 #[cfg(feature = "complex")]
 use kryst::prelude::*;
 
