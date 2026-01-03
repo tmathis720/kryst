@@ -54,6 +54,7 @@ struct MpiScalarState<T> {
     buf: [R; 2],
     len: usize,
     convert: fn(&[R]) -> T,
+    keepalive: Option<Vec<R>>,
     complete: bool,
 }
 
@@ -63,6 +64,7 @@ struct MpiVecState<T> {
     req: mpi::ffi::MPI_Request,
     buf: Vec<R>,
     convert: fn(Vec<R>) -> T,
+    keepalive: Option<Vec<R>>,
     complete: bool,
 }
 
@@ -84,12 +86,14 @@ impl<T> ReduceHandle<T> {
             ReduceHandleInner::MpiScalar(mut state) => {
                 mpi_wait_request(&mut state.req);
                 state.complete = true;
+                state.keepalive = None;
                 (state.convert)(&state.buf[..state.len])
             }
             #[cfg(feature = "mpi")]
             ReduceHandleInner::MpiVec(mut state) => {
                 mpi_wait_request(&mut state.req);
                 state.complete = true;
+                state.keepalive = None;
                 let buf = std::mem::take(&mut state.buf);
                 (state.convert)(buf)
             }
@@ -107,6 +111,7 @@ impl<T: Copy> ReduceHandle<T> {
             ReduceHandleInner::MpiScalar(state) => {
                 if mpi_test_request(&mut state.req) {
                     state.complete = true;
+                    state.keepalive = None;
                     let result = (state.convert)(&state.buf[..state.len]);
                     self.inner = ReduceHandleInner::Ready(result);
                     Some(result)
@@ -295,13 +300,14 @@ impl ReductionEngine for CommReductionEngine {
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 let mut buf = [x, R::default()];
-                let req = mpi_iallreduce_in_place(&mut buf[..1], &comm.world);
+                let (req, keepalive) = mpi_iallreduce_in_place(&mut buf[..1], &comm.world);
                 ReduceHandle {
                     inner: ReduceHandleInner::MpiScalar(MpiScalarState {
                         req,
                         buf,
                         len: 1,
                         convert: |slice| slice[0],
+                        keepalive,
                         complete: false,
                     }),
                 }
@@ -342,7 +348,7 @@ impl ReductionEngine for CommReductionEngine {
                 let len = 2usize;
                 #[cfg(not(feature = "complex"))]
                 let len = 1usize;
-                let req = mpi_iallreduce_in_place(&mut buf[..len], &comm.world);
+                let (req, keepalive) = mpi_iallreduce_in_place(&mut buf[..len], &comm.world);
                 ReduceHandle {
                     inner: ReduceHandleInner::MpiScalar(MpiScalarState {
                         req,
@@ -358,6 +364,7 @@ impl ReductionEngine for CommReductionEngine {
                                 S::from_real(slice[0])
                             }
                         },
+                        keepalive,
                         complete: false,
                     }),
                 }
@@ -390,12 +397,13 @@ impl ReductionEngine for CommReductionEngine {
             #[cfg(feature = "mpi")]
             UniverseComm::Mpi(comm) => {
                 let mut buf = buf;
-                let req = mpi_iallreduce_in_place(buf.as_mut_slice(), &comm.world);
+                let (req, keepalive) = mpi_iallreduce_in_place(buf.as_mut_slice(), &comm.world);
                 ReduceHandle {
                     inner: ReduceHandleInner::MpiVec(MpiVecState {
                         req,
                         buf,
                         convert: |v| v,
+                        keepalive,
                         complete: false,
                     }),
                 }
@@ -426,14 +434,15 @@ impl UniverseComm {
 fn mpi_iallreduce_in_place(
     buf: &mut [R],
     comm: &mpi::topology::SimpleCommunicator,
-) -> mpi::ffi::MPI_Request {
+) -> (mpi::ffi::MPI_Request, Option<Vec<R>>) {
     if buf.is_empty() {
-        return unsafe { mpi::ffi::RSMPI_REQUEST_NULL };
+        return (unsafe { mpi::ffi::RSMPI_REQUEST_NULL }, None);
     }
+    let send = buf.to_vec();
     let mut req: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
     let rc = unsafe {
         mpi::ffi::MPI_Iallreduce(
-            mpi::ffi::RSMPI_IN_PLACE,
+            send.as_ptr() as *const std::ffi::c_void,
             buf.as_mut_ptr() as *mut std::ffi::c_void,
             buf.len() as i32,
             mpi::ffi::RSMPI_DOUBLE,
@@ -443,7 +452,7 @@ fn mpi_iallreduce_in_place(
         )
     };
     debug_assert_eq!(rc, 0);
-    req
+    (req, Some(send))
 }
 
 #[cfg(feature = "mpi")]
