@@ -20,17 +20,26 @@ use mpi::raw::AsRaw;
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
 use std::ffi::c_void;
-use std::mem::MaybeUninit;
+use std::mem::{size_of, MaybeUninit};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub struct OwnedMpiRequest {
     pub(crate) handle: mpi::ffi::MPI_Request,
+    _keepalive: Option<Vec<R>>,
 }
 
 impl OwnedMpiRequest {
     pub(crate) fn new(handle: mpi::ffi::MPI_Request) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            _keepalive: None,
+        }
+    }
+
+    pub(crate) fn with_keepalive(mut self, buf: Vec<R>) -> Self {
+        self._keepalive = Some(buf);
+        self
     }
 
     pub(crate) fn wait(&mut self) {
@@ -195,6 +204,29 @@ impl MpiComm {
         buf.copy_from_slice(&recv);
     }
 
+    pub(crate) fn immediate_allreduce_sum_in_place(&self, buf: &mut [R]) -> OwnedMpiRequest {
+        if buf.is_empty() {
+            let handle = unsafe { mpi::ffi::RSMPI_REQUEST_NULL };
+            return OwnedMpiRequest::new(handle);
+        }
+
+        let mut handle = MaybeUninit::<mpi::ffi::MPI_Request>::uninit();
+        let rc = unsafe {
+            mpi::ffi::MPI_Iallreduce(
+                mpi::ffi::RSMPI_IN_PLACE,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as i32,
+                mpi::ffi::RSMPI_DOUBLE,
+                mpi::ffi::RSMPI_SUM,
+                self.world.as_raw(),
+                handle.as_mut_ptr(),
+            )
+        };
+        debug_assert_eq!(rc, 0);
+        let handle = unsafe { handle.assume_init() };
+        OwnedMpiRequest::new(handle)
+    }
+
     pub(crate) fn immediate_allreduce_sum(&self, send: &[R], recv: &mut [R]) -> OwnedMpiRequest {
         if send.is_empty() {
             let handle = unsafe { mpi::ffi::RSMPI_REQUEST_NULL };
@@ -203,10 +235,30 @@ impl MpiComm {
 
         debug_assert_eq!(send.len(), recv.len());
 
+        let send_ptr = send.as_ptr() as usize;
+        let recv_ptr = recv.as_ptr() as usize;
+        let nbytes = send.len() * size_of::<R>();
+        let overlap = {
+            let send_hi = send_ptr + nbytes;
+            let recv_hi = recv_ptr + nbytes;
+            send_ptr < recv_hi && recv_ptr < send_hi
+        };
+
+        if overlap && send_ptr == recv_ptr {
+            return self.immediate_allreduce_sum_in_place(recv);
+        }
+
+        let (send_ptr_void, keepalive) = if overlap {
+            let tmp = send.to_vec();
+            (tmp.as_ptr() as *const c_void, Some(tmp))
+        } else {
+            (send.as_ptr() as *const c_void, None)
+        };
+
         let mut handle = MaybeUninit::<mpi::ffi::MPI_Request>::uninit();
         let rc = unsafe {
             mpi::ffi::MPI_Iallreduce(
-                send.as_ptr() as *const c_void,
+                send_ptr_void,
                 recv.as_mut_ptr() as *mut c_void,
                 send.len() as i32,
                 mpi::ffi::RSMPI_DOUBLE,
@@ -217,7 +269,12 @@ impl MpiComm {
         };
         debug_assert_eq!(rc, 0);
         let handle = unsafe { handle.assume_init() };
-        OwnedMpiRequest::new(handle)
+        let req = OwnedMpiRequest::new(handle);
+        if let Some(tmp) = keepalive {
+            req.with_keepalive(tmp)
+        } else {
+            req
+        }
     }
 }
 

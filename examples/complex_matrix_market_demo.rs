@@ -171,7 +171,7 @@ mod complex_demo {
     struct Problem {
         op: Arc<dyn KLinOp<Scalar = S>>,
         rhs: Vec<S>,
-        real_pc_matrix: Arc<SparseCsrMatrix<f64>>,
+        csr_for_pc: Arc<SparseCsrMatrix<S>>,
         local_n: usize,
         global_n: usize,
         comm: UniverseComm,
@@ -236,12 +236,9 @@ mod complex_demo {
 
         let mut jacobi_pc: Option<Jacobi> = None;
         if matches!(spec.pc, PcKind::Jacobi) {
-            #[cfg(not(feature = "complex"))]
-            {
-                let mut pc = Jacobi::new();
-                pc.setup(problem.real_pc_matrix.as_ref())?;
-                jacobi_pc = Some(pc);
-            }
+            let mut pc = Jacobi::new();
+            pc.setup(problem.csr_for_pc.as_ref())?;
+            jacobi_pc = Some(pc);
         }
         let pc_opt = jacobi_pc
             .as_mut()
@@ -292,23 +289,14 @@ mod complex_demo {
     fn load_problem_complex(mat_path: &Path, comm: &UniverseComm) -> Result<Problem, KError> {
         let mm = read_matrix_market(mat_path)?;
         let csr_sparse: SparseCsrMatrix<S> = mm.to_csr_matrix_scalar()?;
+        let nrows = csr_sparse.nrows();
+        let ncols = csr_sparse.ncols();
+        let row_ptr = csr_sparse.row_ptr().to_vec();
+        let col_idx = csr_sparse.col_idx().to_vec();
+        let values = csr_sparse.values().to_vec();
+        let csr_for_pc = Arc::new(csr_sparse);
 
-        let real_values: Vec<f64> = csr_sparse.values().iter().map(|v| v.real()).collect();
-        let csr_real = SparseCsrMatrix::from_csr(
-            csr_sparse.nrows(),
-            csr_sparse.ncols(),
-            csr_sparse.row_ptr().to_vec(),
-            csr_sparse.col_idx().to_vec(),
-            real_values,
-        );
-
-        let csr_scalar = ScalarCsrMatrix::new(
-            csr_sparse.nrows(),
-            csr_sparse.ncols(),
-            csr_sparse.row_ptr().to_vec(),
-            csr_sparse.col_idx().to_vec(),
-            csr_sparse.values().to_vec(),
-        );
+        let csr_scalar = ScalarCsrMatrix::new(nrows, ncols, row_ptr, col_idx, values);
         let csr_arc = Arc::new(csr_scalar);
 
         let op = GenericCsrOp::new(csr_arc.clone(), &SpmvTuning::default()).with_comm(comm.clone());
@@ -327,11 +315,15 @@ mod complex_demo {
         Ok(Problem {
             op: op_arc,
             rhs,
-            real_pc_matrix: Arc::new(csr_real),
-            local_n: csr_sparse.nrows(),
-            global_n: csr_sparse.nrows(),
+            csr_for_pc,
+            local_n: nrows,
+            global_n: nrows,
             comm: comm.clone(),
-            backend_descr: "Generic CSR (complex, serial)".into(),
+            backend_descr: if comm.size() > 1 {
+                "Generic CSR (complex, replicated)".into()
+            } else {
+                "Generic CSR (complex, serial)".into()
+            },
         })
     }
 
