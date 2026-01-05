@@ -57,6 +57,7 @@ fn default_apply_mut_forwards_to_apply() {
 }
 
 mod asm_amg;
+mod block_jacobi;
 mod classical;
 mod coarsen;
 mod deflation;

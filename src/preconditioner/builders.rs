@@ -4,6 +4,7 @@ use crate::preconditioner::amg::AMGConfig;
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{
     Preconditioner,
+    block_jacobi::BlockJacobi,
     asm::{AsmCombine, AsmConfig, AsmLocalSolver},
     asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
     jacobi::Jacobi,
@@ -28,9 +29,24 @@ pub fn build_block_jacobi(block: usize) -> Result<Box<dyn Preconditioner>, KErro
     if block <= 1 {
         return build_jacobi();
     }
-    Err(KError::NotImplemented(
-        "BlockJacobi not yet implemented".into(),
-    ))
+    #[cfg(feature = "complex")]
+    {
+        return Err(KError::Unsupported(
+            "BlockJacobi is not supported for complex scalars".into(),
+        ));
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        let pc = BlockJacobi {
+            blocks: Vec::new(),
+            block_size: block,
+            #[cfg(feature = "dense-direct")]
+            block_factors: Vec::new(),
+            #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
+            block_factors_ilu: Vec::new(),
+        };
+        Ok(Box::new(pc))
+    }
 }
 
 /// Build an SOR preconditioner.

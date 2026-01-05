@@ -631,6 +631,10 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.sor_mat_side, v.to_lowercase())
             }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
+            "pc_jacobi_block_size" => {
+                let val = ensure_ge_1("pc_jacobi_block_size", parse_as::<usize>(v, spec)?)?;
+                set_opt!(&mut self.jacobi_block_size, val)
+            }
             "pc_ilu_type" => {
                 set_opt!(&mut self.ilu_type, v.to_lowercase())?;
                 self.update_ilu_kind();
@@ -1312,6 +1316,13 @@ impl PcOptions {
         }
         if let Ok(v) = std::env::var("KRYST_PC_LOCAL") {
             me.pc_local = Some(v.to_lowercase());
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_JACOBI_BLOCK_SIZE") {
+            me.jacobi_block_size = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!(
+                    "Invalid KRYST_PC_JACOBI_BLOCK_SIZE: {v}"
+                ))
+            })?);
         }
         if let Ok(v) = std::env::var("KRYST_PC_ILU_LEVELS") {
             me.ilu_level =
