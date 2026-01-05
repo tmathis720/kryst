@@ -57,12 +57,16 @@ use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::backend::materialize;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::matrix::DistCsrOp;
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind, MpiPcOptions};
 use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
@@ -235,6 +239,7 @@ pub struct KspContext {
     reduction_opts: ReductOptions,
     reproducible: bool,
     exec: ExecutionPolicy,
+    pending_mpi_pc: Option<PendingMpiPc>,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
@@ -269,6 +274,7 @@ impl fmt::Debug for KspContext {
             .field("reduction_opts", &self.reduction_opts)
             .field("reproducible", &self.reproducible)
             .field("exec", &self.exec)
+            .field("pending_mpi_pc", &self.pending_mpi_pc)
             .field("pending_gmres", &self.pending_gmres)
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
@@ -309,6 +315,12 @@ struct PendingFgmres {
 struct PendingPcg {
     pipelined: Option<bool>,
     replace_every: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingMpiPc {
+    mpi_opts: MpiPcOptions,
+    pc_opts: PcOptions,
 }
 
 impl Default for KspContext {
@@ -445,6 +457,7 @@ impl KspContext {
             reduction_opts: ReductOptions::default(),
             reproducible: false,
             exec: ExecutionPolicy::default(),
+            pending_mpi_pc: None,
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
@@ -1140,6 +1153,10 @@ impl KspContext {
             self.pending_chain = Some(specs);
             self.invalidate_pc_setup();
         }
+        self.pending_mpi_pc = Some(PendingMpiPc {
+            mpi_opts: pc_opts.mpi_pc_options()?,
+            pc_opts: pc_opts.clone(),
+        });
         Ok(self)
     }
 
@@ -1356,6 +1373,25 @@ impl KspContext {
         }
 
         if self.pc.is_none() {
+            #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+            {
+                if let Some(ref pending) = self.pending_mpi_pc
+                    && pending.mpi_opts.global_pc != GlobalPcKind::None
+                {
+                    let dist_op = pmat
+                        .as_any()
+                        .downcast_ref::<DistCsrOp>()
+                        .or_else(|| amat.as_any().downcast_ref::<DistCsrOp>());
+                    if let Some(dist_op) = dist_op
+                        && dist_op.comm().size() > 1
+                    {
+                        let pc = self.build_mpi_global_pc(pending, dist_op)?;
+                        self.pc = Some(pc);
+                        self.pending_pc = None;
+                        self.pending_chain = None;
+                    }
+                }
+            }
             if let Some(specs) = self.pending_chain.take() {
                 let chain = PcFactory::construct_deferred_pc_chain(specs, pmat.as_ref())?;
                 self.pc = Some(chain);
@@ -1831,6 +1867,28 @@ impl KspContext {
     fn invalidate_pc_setup(&mut self) {
         self.setup_called = false;
         self.reset_pc_ids();
+    }
+
+    #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+    fn build_mpi_global_pc(
+        &self,
+        pending: &PendingMpiPc,
+        dist_op: &DistCsrOp,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        match pending.mpi_opts.global_pc {
+            GlobalPcKind::BlockJacobi => {
+                let builder = DistPcBuilder::BlockJacobi {
+                    opts: pending.mpi_opts.clone(),
+                };
+                Ok(Box::new(DistPcAdapter::build(dist_op, builder)?))
+            }
+            GlobalPcKind::Asm => {
+                PcFactory::create_preconditioner(PcType::Asm, Some(&pending.pc_opts))
+            }
+            GlobalPcKind::None => Err(KError::InvalidInput(
+                "pc_global=none should not build a global PC".into(),
+            )),
+        }
     }
 
     /// Add an iteration monitor callback.

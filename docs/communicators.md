@@ -27,6 +27,22 @@ specific MPI communicator.
 - For subcommunicator solves, build the subcomm first, then create the KSP and operators on it.
 - Avoid mixing `WORLD` operators with subcomm KSPs.
 
+## MPI-global preconditioning (`-pc_global`)
+
+MPI-global preconditioners are selected via `PcOptions::mpi_pc_options()` and only activate when
+`Amat`/`Pmat` is a `DistCsrOp` on a communicator with size > 1. When those conditions are met,
+`pc_global` overrides the local `pc_type` path and builds a distributed preconditioner:
+
+- `pc_global=block_jacobi` → `preconditioner::dist::build_block_jacobi_pc` with `pc_local` selecting
+  the local ILU/ILUT/ILUTP block solver.
+- `pc_global=asm` → `preconditioner::asm::AsmPc`, which dispatches to the distributed ASM path
+  when a distributed layout is present.
+
+Supported combinations:
+
+- Distributed operators: `DistCsrOp` with `UniverseComm` size > 1.
+- Local operators or size-1 communicators: ignore `pc_global` and use the standard `pc_type` path.
+
 ## Common errors
 
 - Communicator mismatch: `Amat.comm()` and `Pmat.comm()` are not congruent.

@@ -6,9 +6,14 @@
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
-use crate::preconditioner::PcSide;
+use crate::preconditioner::{PcSide, Preconditioner};
 use crate::preconditioner::ilu::IluConfig;
 use std::str::FromStr;
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::algebra::scalar::S;
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::matrix::DistCsrOp;
 
 /// Global distributed preconditioner modes exposed to CLI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +161,123 @@ impl DistVec {
     /// Number of entries owned by this rank.
     pub fn local_len(&self) -> usize {
         self.local.len()
+    }
+}
+
+/// Builder configuration for distributed preconditioner adapters.
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+#[derive(Clone, Debug)]
+pub enum DistPcBuilder {
+    BlockJacobi { opts: MpiPcOptions },
+}
+
+/// Adapter bridging a `DistributedPreconditioner` to the `Preconditioner` trait.
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+pub struct DistPcAdapter {
+    comm: UniverseComm,
+    row_offset: usize,
+    global_len: usize,
+    local_len: usize,
+    inner: Box<dyn DistributedPreconditioner<Scalar = f64>>,
+    builder: DistPcBuilder,
+}
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+impl DistPcAdapter {
+    pub fn build(dist_op: &DistCsrOp, builder: DistPcBuilder) -> Result<Self, KError> {
+        let inner = build_dist_pc(dist_op, &builder)?;
+        Ok(Self::new(dist_op, inner, builder))
+    }
+
+    fn new(
+        dist_op: &DistCsrOp,
+        inner: Box<dyn DistributedPreconditioner<Scalar = f64>>,
+        builder: DistPcBuilder,
+    ) -> Self {
+        let comm = dist_op.comm();
+        let row_offset = dist_op.local_row_offset();
+        let global_len = dist_op.n_global;
+        let local_len = dist_op.local_nrows();
+        Self {
+            comm,
+            row_offset,
+            global_len,
+            local_len,
+            inner,
+            builder,
+        }
+    }
+
+    fn rebuild(&mut self, dist_op: &DistCsrOp) -> Result<(), KError> {
+        self.inner = build_dist_pc(dist_op, &self.builder)?;
+        self.comm = dist_op.comm();
+        self.row_offset = dist_op.local_row_offset();
+        self.global_len = dist_op.n_global;
+        self.local_len = dist_op.local_nrows();
+        Ok(())
+    }
+}
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+impl Preconditioner for DistPcAdapter {
+    fn dims(&self) -> (usize, usize) {
+        (self.local_len, self.local_len)
+    }
+
+    fn setup(&mut self, op: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
+        let dist_op = op
+            .as_any()
+            .downcast_ref::<DistCsrOp>()
+            .ok_or_else(|| {
+                KError::InvalidInput("distributed PC requires a DistCsrOp".into())
+            })?;
+        self.rebuild(dist_op)
+    }
+
+    fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != self.local_len || y.len() != self.local_len {
+            return Err(KError::InvalidInput(
+                "distributed PC apply length mismatch".into(),
+            ));
+        }
+        let mut dist_vec = DistVec::new(
+            self.comm.clone(),
+            self.row_offset,
+            self.global_len,
+            x.to_vec(),
+        );
+        self.inner.apply_global(side, &mut dist_vec)?;
+        y.copy_from_slice(dist_vec.local_view());
+        Ok(())
+    }
+
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        self.apply(side, x, y)
+    }
+}
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+fn build_dist_pc(
+    dist_op: &DistCsrOp,
+    builder: &DistPcBuilder,
+) -> Result<Box<dyn DistributedPreconditioner<Scalar = f64>>, KError> {
+    match builder {
+        DistPcBuilder::BlockJacobi { opts } => {
+            #[cfg(feature = "backend-faer")]
+            {
+                let pc = build_block_jacobi_pc(dist_op, opts)?
+                    .ok_or_else(|| KError::InvalidInput("block-Jacobi PC not constructed".into()))?;
+                Ok(pc)
+            }
+            #[cfg(not(feature = "backend-faer"))]
+            {
+                let _ = dist_op;
+                let _ = opts;
+                Err(KError::Unsupported(
+                    "block-Jacobi distributed PC requires backend-faer".into(),
+                ))
+            }
+        }
     }
 }
 
