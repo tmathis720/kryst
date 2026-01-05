@@ -21,6 +21,12 @@ impl QrPc {
 
 impl Preconditioner for QrPc {
     fn setup(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if pmat.comm().size() > 1 {
+            return Err(KError::Unsupported(
+                "QR PC is local-only under MPI; use SuperLU_DIST (feature superlu_dist) or a distributed preconditioner."
+                    .into(),
+            ));
+        }
         pmat.as_any()
             .downcast_ref::<Mat<f64>>()
             .ok_or_else(|| KError::InvalidInput("QR PC requires faer::Mat<f64>".into()))?;
