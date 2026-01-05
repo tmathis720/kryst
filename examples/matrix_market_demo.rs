@@ -360,6 +360,7 @@ mod real_demo {
                 "MPI runs use local diagonal blocks for ILUT/AMG preconditioners (block-Jacobi style).",
             );
         }
+        notes.push("FGMRES entries are right-preconditioned in this demo.");
 
         if analysis.approx_symmetric && !analysis.has_diag_zeros {
             specs.push(RunSpec {
@@ -382,9 +383,9 @@ mod real_demo {
         }
 
         specs.push(RunSpec {
-            name: "FGMRES(50) + ILUT (L)",
+            name: "FGMRES(50) + ILUT (R)",
             solver: SolverType::Fgmres,
-            pc_side: PcSide::Left,
+            pc_side: PcSide::Right,
             pc: PcConfigSpec::Type {
                 pc_type: PcType::Ilut,
                 options: Some(ilut_options()),
@@ -394,9 +395,9 @@ mod real_demo {
 
         if !analysis.has_diag_zeros {
             specs.push(RunSpec {
-                name: "FGMRES(50) + AMG (L)",
+                name: "FGMRES(50) + AMG (R)",
                 solver: SolverType::Fgmres,
-                pc_side: PcSide::Left,
+                pc_side: PcSide::Right,
                 pc: PcConfigSpec::Builder(amg_builder(false)),
                 setup: Some(fgmres_hook()),
             });
