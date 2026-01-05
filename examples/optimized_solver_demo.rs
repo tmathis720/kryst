@@ -141,12 +141,26 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
 
 /// Test a solver configuration and return detailed results
 #[cfg(not(feature = "complex"))]
+// Use the true residual to gauge accuracy in the original system rather than preconditioned space.
+fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) -> f64 {
+    let mut ax = vec![0.0; rhs.len()];
+    op.matvec(solution, &mut ax);
+    let mut norm_sq = 0.0;
+    for (b, ax_i) in rhs.iter().zip(ax.iter()) {
+        let r = b - ax_i;
+        norm_sq += r * r;
+    }
+    norm_sq.sqrt()
+}
+
+/// Test a solver configuration and return detailed results
+#[cfg(not(feature = "complex"))]
 fn test_optimal_solver(
     matrix: &CsrMatrix<f64>,
     rhs: &[f64],
     config: &OptimalConfig,
     _matrix_name: &str,
-) -> Result<(usize, f64, f64, bool, String), Box<dyn std::error::Error>> {
+) -> Result<(usize, f64, f64, f64, bool, String), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
 
     // Convert sparse matrix to dense for KspContext
@@ -173,7 +187,8 @@ fn test_optimal_solver(
 
     match result {
         Ok(stats) => {
-            let converged = stats.final_residual < 1e-6;
+            let true_residual = true_residual_norm(dense_op.as_ref(), &rhs_vec, &solution);
+            let converged = true_residual < 1e-6;
             let method_used = format!(
                 "{} + {}",
                 config.solver.to_uppercase(),
@@ -181,6 +196,7 @@ fn test_optimal_solver(
             );
             Ok((
                 stats.iterations,
+                true_residual,
                 stats.final_residual,
                 solve_time,
                 converged,
@@ -206,7 +222,9 @@ fn test_optimal_solver(
             let stats_fallback = ksp_fallback.solve(&rhs_vec, &mut solution_fallback)?;
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
 
-            let converged = stats_fallback.final_residual < 1e-6;
+            let true_residual =
+                true_residual_norm(dense_op.as_ref(), &rhs_vec, &solution_fallback);
+            let converged = true_residual < 1e-6;
             let method_used = format!(
                 "{} + {} (fallback)",
                 config.fallback_solver.to_uppercase(),
@@ -214,6 +232,7 @@ fn test_optimal_solver(
             );
             Ok((
                 stats_fallback.iterations,
+                true_residual,
                 stats_fallback.final_residual,
                 solve_time_fallback,
                 converged,
@@ -372,10 +391,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     println!(
-        "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} {}",
-        "Matrix", "Iters", "Residual", "Time(s)", "Status", "Method", "Performance vs Benchmark"
+        "{:<15} {:<8} {:<12} {:<12} {:<10} {:<8} {:<25} {}",
+        "Matrix",
+        "Iters",
+        "TrueRes",
+        "PrecRes",
+        "Time(s)",
+        "Status",
+        "Method",
+        "Performance vs Benchmark"
     );
-    println!("{}", "=".repeat(95));
+    println!("{}", "=".repeat(107));
 
     for (matrix_name, _description) in test_matrices {
         let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -438,7 +464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Test with optimal configuration
         match test_optimal_solver(&matrix, &rhs, &config, matrix_name) {
-            Ok((iters, residual, time, converged, method)) => {
+            Ok((iters, true_residual, prec_residual, time, converged, method)) => {
                 let status = if converged { "✓" } else { "✗" };
 
                 // Compare with benchmark expectations
@@ -451,8 +477,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 println!(
-                    "{:<15} {:<8} {:<12.2e} {:<10.3} {:<8} {:<25} {}",
-                    matrix_name, iters, residual, time, status, method, iter_performance
+                    "{:<15} {:<8} {:<12.2e} {:<12.2e} {:<10.3} {:<8} {:<25} {}",
+                    matrix_name,
+                    iters,
+                    true_residual,
+                    prec_residual,
+                    time,
+                    status,
+                    method,
+                    iter_performance
                 );
 
                 // Additional diagnostics for interesting cases
