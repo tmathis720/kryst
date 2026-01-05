@@ -33,6 +33,8 @@ use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 use faer::Mat;
+#[cfg(feature = "mpi")]
+use crate::parallel::Comm;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
