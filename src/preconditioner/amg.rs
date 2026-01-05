@@ -4734,6 +4734,14 @@ impl Preconditioner for AMG {
 
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
+        if op.as_any().downcast_ref::<crate::matrix::DistCsrOp>().is_some()
+            && op.comm().size() > 1
+        {
+            return Err(KError::Unsupported(
+                "AMG is local-only under MPI when using DistCsrOp. Use ASM, Block-Jacobi, or PC chaining instead. Roadmap: distributed coarsening across ranks, a distributed Galerkin triple product (RAP), and a coarse-level solve using matrix::dist and matrix::dist::spmv_dist."
+                    .into(),
+            ));
+        }
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         #[cfg(debug_assertions)]
         debug_check_csr(csr.as_ref(), "setup csr");

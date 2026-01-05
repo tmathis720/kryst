@@ -44,6 +44,11 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Enhanced Chebyshev**: Matrix-aware polynomial preconditioning with automatic eigenvalue estimation
 - **Smoothed AMG**: Configurable pre- and post-smoothing parameters (`amg_nu_pre`, `amg_nu_post`)
 
+#### MPI support notes
+- **MPI-local (per-rank)**: AMG, Chebyshev, SOR/SSOR, ILU/ILUT/ILUP/ILUTP, Approximate Inverse, LU/QR (dense-direct). These operate on the local block of a distributed matrix.
+- **Distributed-capable**: ASM over `DistCsrOp`, Block Jacobi on `DistCsrOp`, and `SuperLU_DIST` (when the `superlu_dist` feature is enabled).
+- **PC-Chaining** works on MPI, but each preconditioner in the chain keeps its local vs distributed behavior.
+
 ### Monitoring & Automation
 
 - **Iteration Monitoring**: Real-time convergence tracking with `IterationMonitor`
