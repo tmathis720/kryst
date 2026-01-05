@@ -63,6 +63,7 @@ mod deflation;
 mod direct_apply;
 mod ilu_csr;
 mod ilu_history;
+mod jacobi;
 mod legacy_bridge;
 mod near_nullspace;
 mod nodal;

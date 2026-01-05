@@ -3,6 +3,8 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel;
 use crate::algebra::prelude::*;
 use crate::error::KError;
+#[cfg(not(feature = "complex"))]
+use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "backend-faer")]
@@ -41,27 +43,31 @@ impl Jacobi {
         }
     }
 
+    fn fill_diag_from_csr(&mut self, csr: &CsrMatrix<S>) {
+        let n = csr.nrows().min(csr.ncols());
+        self.diag_inv.resize(n, S::zero());
+        for i in 0..n {
+            let rs = csr.row_ptr()[i];
+            let re = csr.row_ptr()[i + 1];
+            let mut aii = S::zero();
+            for p in rs..re {
+                if csr.col_idx()[p] == i {
+                    aii = csr.values()[p];
+                    break;
+                }
+            }
+            self.diag_inv[i] = if aii.abs() > 1e-14 {
+                aii.inv()
+            } else {
+                S::zero()
+            };
+        }
+        self.n = n;
+    }
+
     fn recompute(&mut self, pmat: &dyn LinOp<S = S>) -> Result<(), KError> {
         if let Some(csr) = pmat.as_any().downcast_ref::<CsrMatrix<S>>() {
-            let n = csr.nrows().min(csr.ncols());
-            self.diag_inv.resize(n, S::zero());
-            for i in 0..n {
-                let rs = csr.row_ptr()[i];
-                let re = csr.row_ptr()[i + 1];
-                let mut aii = S::zero();
-                for p in rs..re {
-                    if csr.col_idx()[p] == i {
-                        aii = csr.values()[p];
-                        break;
-                    }
-                }
-                self.diag_inv[i] = if aii.abs() > 1e-14 {
-                    aii.inv()
-                } else {
-                    S::zero()
-                };
-            }
-            self.n = n;
+            self.fill_diag_from_csr(csr);
             return Ok(());
         }
         #[cfg(feature = "backend-faer")]
@@ -101,6 +107,12 @@ impl Jacobi {
                 };
             }
             self.n = n;
+            return Ok(());
+        }
+        #[cfg(not(feature = "complex"))]
+        {
+            let csr = csr_from_linop(pmat, 0.0)?;
+            self.fill_diag_from_csr(&csr);
             return Ok(());
         }
         Err(KError::InvalidInput("Jacobi needs Dense or CSR".into()))
