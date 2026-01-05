@@ -8,6 +8,9 @@
 //! SSOR applies both forward and backward sweeps for improved convergence. This implementation supports various sweep types
 //! and options via bitflags, and can be used as a preconditioner for Krylov solvers.
 //!
+//! Note: multi-color sweeps execute per-color in parallel and are an approximation to classical Gauss–Seidel; they may
+//! converge differently from sequential sweeps.
+//!
 //! # Usage
 //!
 //! - Create a `Sor` preconditioner with the desired parameters (ω, sweeps, etc).
@@ -21,6 +24,7 @@
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
+use crate::algebra::parallel;
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
@@ -34,11 +38,13 @@ use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
 use crate::preconditioner::{PcSide, legacy::Preconditioner};
+use crate::utils::coloring::{build_blocks_from_colors, csr_distance2_coloring};
 use bitflags::bitflags;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 bitflags! {
     /// Bitflags for SOR sweep types and options.
@@ -54,6 +60,7 @@ bitflags! {
         const LOCAL_BACKWARD_SWEEP     = 0b000_10000;
         const LOCAL_SYMMETRIC_SWEEP    = Self::LOCAL_FORWARD_SWEEP.bits() | Self::LOCAL_BACKWARD_SWEEP.bits();
         const EISENSTAT                = 0b0010_0000;
+        const COLOR_SWEEP              = 0b0100_0000;
     }
 }
 
@@ -248,6 +255,8 @@ pub struct SorPc {
     fshift: f64,
     a_csr: Option<Arc<CsrMatrix<f64>>>,
     inv_diag: Vec<R>,
+    color_of: Vec<usize>,
+    color_blocks: Vec<Vec<usize>>,
     n: usize,
     scratch: Mutex<Vec<R>>, // reuse for symmetric sweep without heap activity
 }
@@ -261,6 +270,8 @@ impl SorPc {
             fshift,
             a_csr: None,
             inv_diag: Vec::new(),
+            color_of: Vec::new(),
+            color_blocks: Vec::new(),
             n: 0,
             scratch: Mutex::new(Vec::new()),
         }
@@ -294,6 +305,16 @@ impl SorPc {
         Ok(())
     }
 
+    fn ensure_coloring(&mut self, a: &CsrMatrix<f64>) {
+        if self.mat_side.contains(MatSorType::COLOR_SWEEP) {
+            self.color_of = csr_distance2_coloring(a);
+            self.color_blocks = build_blocks_from_colors(&self.color_of);
+        } else {
+            self.color_of.clear();
+            self.color_blocks.clear();
+        }
+    }
+
     #[inline]
     fn forward_sweep(&self, a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
         let n = self.n;
@@ -316,6 +337,41 @@ impl SorPc {
             let xi = x[i];
             let yi = (xi - sigma) * self.inv_diag[i];
             y[i] = yi;
+        }
+    }
+
+    #[inline]
+    fn forward_sweep_color(&self, a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+        let n = self.n;
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let eisenstat = self.mat_side.contains(MatSorType::EISENSTAT);
+        let color_of = &self.color_of;
+        for (color, bucket) in self.color_blocks.iter().enumerate() {
+            let y_ptr = AtomicPtr::new(y.as_mut_ptr());
+            parallel::par_for_each_index(bucket.len(), |k| unsafe {
+                let i = *bucket.get_unchecked(k);
+                let mut sigma = 0.0;
+                let rs = *rp.get_unchecked(i);
+                let re = *rp.get_unchecked(i + 1);
+                let y_ptr = y_ptr.load(Ordering::Relaxed);
+                for p in rs..re {
+                    let j = *cj.get_unchecked(p);
+                    if j >= n || j == i {
+                        continue;
+                    }
+                    let color_j = *color_of.get_unchecked(j);
+                    if color_j < color {
+                        sigma = f64::mul_add(*vv.get_unchecked(p), *y_ptr.add(j), sigma);
+                    } else if !eisenstat && color_j > color {
+                        sigma = f64::mul_add(*vv.get_unchecked(p), *x.get_unchecked(j), sigma);
+                    }
+                }
+                let xi = *x.get_unchecked(i);
+                let yi = (xi - sigma) * *self.inv_diag.get_unchecked(i);
+                *y_ptr.add(i) = yi;
+            });
         }
     }
 
@@ -343,6 +399,40 @@ impl SorPc {
             y[ii] = (1.0 - self.omega) * xi + self.omega * yi;
         }
     }
+
+    #[inline]
+    fn backward_sweep_color(&self, a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+        let n = self.n;
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let eisenstat = self.mat_side.contains(MatSorType::EISENSTAT);
+        let color_of = &self.color_of;
+        for color in (0..self.color_blocks.len()).rev() {
+            let bucket = &self.color_blocks[color];
+            let y_ptr = AtomicPtr::new(y.as_mut_ptr());
+            parallel::par_for_each_index(bucket.len(), |k| unsafe {
+                let i = *bucket.get_unchecked(k);
+                let mut sigma = 0.0;
+                let rs = *rp.get_unchecked(i);
+                let re = *rp.get_unchecked(i + 1);
+                let y_ptr = y_ptr.load(Ordering::Relaxed);
+                for p in rs..re {
+                    let j = *cj.get_unchecked(p);
+                    if j >= n || j == i {
+                        continue;
+                    }
+                    let color_j = *color_of.get_unchecked(j);
+                    if color_j > color || (!eisenstat && color_j < color) {
+                        sigma = f64::mul_add(*vv.get_unchecked(p), *y_ptr.add(j), sigma);
+                    }
+                }
+                let xi = *x.get_unchecked(i);
+                let yi = (xi - sigma) * *self.inv_diag.get_unchecked(i);
+                *y_ptr.add(i) = (1.0 - self.omega) * xi + self.omega * yi;
+            });
+        }
+    }
 }
 
 #[cfg(not(feature = "complex"))]
@@ -350,7 +440,9 @@ impl ObjPreconditioner for SorPc {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         let csr = csr_from_linop(op, 0.0)?;
         self.a_csr = Some(csr.clone());
-        self.ensure_inv_diag(&csr)
+        self.ensure_inv_diag(&csr)?;
+        self.ensure_coloring(&csr);
+        Ok(())
     }
 
     fn supports_numeric_update(&self) -> bool {
@@ -361,7 +453,9 @@ impl ObjPreconditioner for SorPc {
         // Re-extract CSR (values may have changed) and recompute inverse diagonal
         let csr = csr_from_linop(op, 0.0)?;
         self.a_csr = Some(csr.clone());
-        self.ensure_inv_diag(&csr)
+        self.ensure_inv_diag(&csr)?;
+        self.ensure_coloring(&csr);
+        Ok(())
     }
 
     fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
@@ -378,20 +472,42 @@ impl ObjPreconditioner for SorPc {
             match (side, self.mat_side) {
                 (_, s) if s.contains(MatSorType::SYMMETRIC_SWEEP) => {
                     // forward then backward using scratch
-                    self.forward_sweep(a, x, y);
+                    if s.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty() {
+                        self.forward_sweep_color(a, x, y);
+                    } else {
+                        self.forward_sweep(a, x, y);
+                    }
                     let mut s = self.scratch.lock().unwrap();
                     s.copy_from_slice(y);
-                    self.backward_sweep(a, &s, y);
+                    if self.mat_side.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty()
+                    {
+                        self.backward_sweep_color(a, &s, y);
+                    } else {
+                        self.backward_sweep(a, &s, y);
+                    }
                 }
                 (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_LOWER) => {
-                    self.forward_sweep(a, x, y);
+                    if s.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty() {
+                        self.forward_sweep_color(a, x, y);
+                    } else {
+                        self.forward_sweep(a, x, y);
+                    }
                 }
                 (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_UPPER) => {
-                    self.backward_sweep(a, x, y);
+                    if s.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty() {
+                        self.backward_sweep_color(a, x, y);
+                    } else {
+                        self.backward_sweep(a, x, y);
+                    }
                 }
                 _ => {
                     // default to forward if unspecified
-                    self.forward_sweep(a, x, y);
+                    if self.mat_side.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty()
+                    {
+                        self.forward_sweep_color(a, x, y);
+                    } else {
+                        self.forward_sweep(a, x, y);
+                    }
                 }
             }
         }
@@ -470,5 +586,37 @@ mod tests {
             .apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
             .unwrap_err();
         assert!(matches!(err, KError::Unsupported(_)));
+    }
+}
+
+#[cfg(all(test, not(feature = "complex")))]
+mod tests_color_sweep {
+    use super::*;
+    use crate::matrix::op::LinOp;
+    use crate::matrix::sparse::CsrMatrix;
+
+    #[test]
+    fn color_sweep_reduces_residual() {
+        let row_ptr = vec![0, 2, 5, 7];
+        let col_idx = vec![0, 1, 0, 1, 2, 1, 2];
+        let values = vec![4.0, -1.0, -1.0, 4.0, -1.0, -1.0, 4.0];
+        let a = CsrMatrix::from_csr(3, 3, row_ptr, col_idx, values);
+        let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER | MatSorType::COLOR_SWEEP, 0.0);
+        pc.setup(&a).unwrap();
+
+        let b = vec![1.0; 3];
+        let mut y = vec![0.0; 3];
+        pc.apply(PcSide::Left, &b, &mut y).unwrap();
+
+        let mut ay = vec![0.0; 3];
+        LinOp::matvec(&a, &y, &mut ay);
+        let mut r_norm = 0.0;
+        let mut b_norm = 0.0;
+        for i in 0..3 {
+            let ri = b[i] - ay[i];
+            r_norm += ri * ri;
+            b_norm += b[i] * b[i];
+        }
+        assert!(r_norm.sqrt() < b_norm.sqrt());
     }
 }
