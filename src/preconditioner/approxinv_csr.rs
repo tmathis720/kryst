@@ -253,19 +253,13 @@ impl FsaiCsr {
 
         // 2) For each column, solve (A_SS + reg I) g = e_i|_S
         let mut trips: Vec<(usize, usize, R)> = Vec::new();
-        let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default()); // resized per column
-        let mut b = vec![R::default(); 1];
-
-        for i in 0..n {
-            let s = &pat[i];
+        let solve_column = |s: &[usize], i: usize| -> (Vec<(usize, usize, R)>, Vec<usize>) {
             let m = s.len();
             if m == 0 {
-                continue;
+                return (Vec::new(), Vec::new());
             }
-            if a_ss.nrows() != m || a_ss.ncols() != m {
-                a_ss = Mat::<R>::from_fn(m, m, |_, _| R::default());
-                b.resize(m, R::default());
-            }
+            let mut a_ss = Mat::<R>::from_fn(m, m, |_, _| R::default());
+            let mut b = vec![R::default(); m];
             // A_SS
             for p in 0..m {
                 for q in 0..=p {
@@ -279,15 +273,10 @@ impl FsaiCsr {
                 a_ss[(d, d)] += cfg.reg;
             }
             // b = e_i restricted to S
-            for k in 0..m {
-                b[k] = R::default();
-            }
             if let Ok(pos) = s.binary_search(&i) {
                 b[pos] = S::one().real();
             } else {
-                // enforce presence
-                // should not happen as we inserted i
-                continue;
+                return (Vec::new(), Vec::new());
             }
 
             // Solve using QR (robust for SPD + reg)
@@ -301,20 +290,52 @@ impl FsaiCsr {
             let thr = cfg.drop_tol * norm2.max(1e-32);
 
             // track kept rows for this column to pin structure for updates
+            let mut col_trips: Vec<(usize, usize, R)> = Vec::with_capacity(m);
             let mut kept: Vec<usize> = Vec::with_capacity(m);
             for (k, &row) in s.iter().enumerate() {
                 let val = sol[(k, 0)];
                 if val.abs() >= thr {
-                    trips.push((row, i, val)); // lower rows only ensured by pattern
+                    col_trips.push((row, i, val)); // lower rows only ensured by pattern
                     kept.push(row);
                 }
             }
-            // Overwrite pattern with kept rows to preserve numeric update structure
-            // (still guaranteed sorted and lower-triangular)
-            // Safety: `pat[i]` is small.
-            let mut kept_sorted = kept;
-            kept_sorted.sort_unstable();
-            pat[i] = kept_sorted;
+            kept.sort_unstable();
+            (col_trips, kept)
+        };
+
+        if cfg.parallel {
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                let pat_snapshot = pat.clone();
+                let mut results: Vec<(usize, Vec<(usize, usize, R)>, Vec<usize>)> = pat_snapshot
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let (col_trips, kept) = solve_column(s, i);
+                        (i, col_trips, kept)
+                    })
+                    .collect();
+                results.sort_by_key(|(i, _, _)| *i);
+                for (i, mut col_trips, kept) in results {
+                    trips.append(&mut col_trips);
+                    pat[i] = kept;
+                }
+            }
+            #[cfg(not(feature = "rayon"))]
+            {
+                for i in 0..n {
+                    let (mut col_trips, kept) = solve_column(&pat[i], i);
+                    trips.append(&mut col_trips);
+                    pat[i] = kept;
+                }
+            }
+        } else {
+            for i in 0..n {
+                let (mut col_trips, kept) = solve_column(&pat[i], i);
+                trips.append(&mut col_trips);
+                pat[i] = kept;
+            }
         }
 
         // 3) Assemble CSR from triplets
@@ -487,15 +508,12 @@ impl SpaiCsr {
         let ci = a.col_idx();
         let vv = a.values();
 
-        // Thread-local scratch (single-threaded here)
-        let mut idx_in_s: Vec<i32> = vec![-1; n]; // map global col -> local pos or -1
-        for j in 0..n {
-            let s = &pat[j];
+        let solve_column = |s: &[usize], j: usize| -> (Vec<(usize, usize, R)>, Vec<usize>) {
             let m = s.len();
             if m == 0 {
-                continue;
+                return (Vec::new(), Vec::new());
             }
-            // map
+            let mut idx_in_s: Vec<i32> = vec![-1; n]; // map global col -> local pos or -1
             for (pos, &g) in s.iter().enumerate() {
                 idx_in_s[g] = pos as i32;
             }
@@ -553,21 +571,52 @@ impl SpaiCsr {
             }
             norm2 = norm2.sqrt();
             let thr = cfg.drop_tol * norm2.max(1e-32);
+            let mut col_trips: Vec<(usize, usize, R)> = Vec::with_capacity(m);
             let mut kept: Vec<usize> = Vec::with_capacity(m);
             for (k, &row) in s.iter().enumerate() {
                 let val = sol[(k, 0)];
                 if val.abs() >= thr {
-                    trips.push((row, j, val));
+                    col_trips.push((row, j, val));
                     kept.push(row);
                 }
             }
-            // clear map for all original entries in s
-            for &g in s.iter() {
-                idx_in_s[g] = -1;
-            }
-            // Pin pattern to kept rows to preserve update structure
             kept.sort_unstable();
-            pat[j] = kept;
+            (col_trips, kept)
+        };
+
+        if cfg.parallel {
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                let pat_snapshot = pat.clone();
+                let mut results: Vec<(usize, Vec<(usize, usize, R)>, Vec<usize>)> = pat_snapshot
+                    .par_iter()
+                    .enumerate()
+                    .map(|(j, s)| {
+                        let (col_trips, kept) = solve_column(s, j);
+                        (j, col_trips, kept)
+                    })
+                    .collect();
+                results.sort_by_key(|(j, _, _)| *j);
+                for (j, mut col_trips, kept) in results {
+                    trips.append(&mut col_trips);
+                    pat[j] = kept;
+                }
+            }
+            #[cfg(not(feature = "rayon"))]
+            {
+                for j in 0..n {
+                    let (mut col_trips, kept) = solve_column(&pat[j], j);
+                    trips.append(&mut col_trips);
+                    pat[j] = kept;
+                }
+            }
+        } else {
+            for j in 0..n {
+                let (mut col_trips, kept) = solve_column(&pat[j], j);
+                trips.append(&mut col_trips);
+                pat[j] = kept;
+            }
         }
 
         let m = assemble_csr(n, n, &mut trips);
@@ -858,5 +907,44 @@ mod tests {
             assert!((direct.real() - bridged.real()).abs() < 1e-10);
             assert!((direct.imag() - bridged.imag()).abs() < 1e-10);
         }
+    }
+
+    fn assert_csr_close(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) {
+        assert_eq!(a.nrows(), b.nrows());
+        assert_eq!(a.ncols(), b.ncols());
+        assert_eq!(a.row_ptr(), b.row_ptr());
+        assert_eq!(a.col_idx(), b.col_idx());
+        assert_eq!(a.values().len(), b.values().len());
+        for (va, vb) in a.values().iter().zip(b.values().iter()) {
+            assert!((va - vb).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn approxinv_parallel_toggle_matches() {
+        let a = poisson_1d_matrix();
+        let fsai_seq = ApproxInvBuilder::new(ApproxInvKind::FSAI)
+            .levels(1)
+            .parallel(false)
+            .build_fsai(&a)
+            .expect("fsai seq build");
+        let fsai_par = ApproxInvBuilder::new(ApproxInvKind::FSAI)
+            .levels(1)
+            .parallel(true)
+            .build_fsai(&a)
+            .expect("fsai par build");
+        assert_csr_close(&fsai_seq.g, &fsai_par.g);
+
+        let spai_seq = ApproxInvBuilder::new(ApproxInvKind::SPAI)
+            .levels(1)
+            .parallel(false)
+            .build_spai(&a)
+            .expect("spai seq build");
+        let spai_par = ApproxInvBuilder::new(ApproxInvKind::SPAI)
+            .levels(1)
+            .parallel(true)
+            .build_spai(&a)
+            .expect("spai par build");
+        assert_csr_close(&spai_seq.m, &spai_par.m);
     }
 }
