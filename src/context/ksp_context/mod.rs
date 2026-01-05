@@ -67,7 +67,7 @@ use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
-use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind, MpiPcOptions};
+use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
 use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
