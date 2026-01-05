@@ -265,6 +265,90 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     (density, condition_estimate, is_well_conditioned)
 }
 
+#[cfg(not(feature = "complex"))]
+fn repair_diagonal_csr(a: &CsrMatrix<f64>, tol: f64, tau: f64) -> (CsrMatrix<f64>, usize) {
+    let nrows = a.nrows();
+    let ncols = a.ncols();
+
+    let mut rp: Vec<usize> = Vec::with_capacity(nrows + 1);
+    let mut ci: Vec<usize> = Vec::with_capacity(a.nnz() + nrows);
+    let mut vv: Vec<f64> = Vec::with_capacity(a.nnz() + nrows);
+
+    rp.push(0);
+    let mut fixed = 0usize;
+
+    for i in 0..nrows {
+        let (cols, vals) = a.row(i);
+        let row_abs_sum: f64 = vals.iter().map(|x| x.abs()).sum();
+        let repl = (tau * row_abs_sum).max(tol);
+        let mut diag_handled = false;
+
+        for (&c, &v) in cols.iter().zip(vals.iter()) {
+            if !diag_handled && i < ncols && c > i {
+                ci.push(i);
+                vv.push(repl);
+                fixed += 1;
+                diag_handled = true;
+            }
+
+            if c == i {
+                let new_v = if v.abs() <= tol {
+                    fixed += 1;
+                    repl
+                } else {
+                    v
+                };
+                ci.push(c);
+                vv.push(new_v);
+                diag_handled = true;
+            } else {
+                ci.push(c);
+                vv.push(v);
+            }
+        }
+
+        if !diag_handled && i < ncols {
+            ci.push(i);
+            vv.push(repl);
+            fixed += 1;
+        }
+
+        rp.push(ci.len());
+    }
+
+    (CsrMatrix::from_csr(nrows, ncols, rp, ci, vv), fixed)
+}
+
+#[cfg(not(feature = "complex"))]
+fn detect_diag_issues(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
+    let n = matrix.nrows().min(matrix.ncols());
+    let limit = n.min(max_rows);
+    for i in 0..limit {
+        match lookup(matrix, i, i) {
+            Some(val) if val.abs() > tol => continue,
+            _ => return true,
+        }
+    }
+    false
+}
+
+#[cfg(not(feature = "complex"))]
+fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
+    if row >= matrix.nrows() {
+        return None;
+    }
+    let (cols, vals) = matrix.row(row);
+    for (&c, &v) in cols.iter().zip(vals.iter()) {
+        if c == col {
+            return Some(v);
+        }
+        if c > col {
+            break;
+        }
+    }
+    None
+}
+
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -321,10 +405,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Convert to Kryst formats
         let matrix = matrix_data.to_csr_matrix()?;
+        let (matrix, repaired) = repair_diagonal_csr(&matrix, 1e-14, 1e-8);
+        if repaired > 0 {
+            println!(
+                "    → Repaired {repaired} diagonal entries (|diag|<=1e-14 or missing)."
+            );
+        }
+        let diag_issues = detect_diag_issues(&matrix, 1e-14, 20_000);
         let rhs = rhs_data.to_vector()?;
 
         // Get optimal configuration for this matrix
-        let config = get_optimal_config(matrix_name);
+        let mut config = get_optimal_config(matrix_name);
+        if diag_issues && config.preconditioner == "amg" {
+            println!(
+                "    → AMG disabled due to diagonal issues; using {} preconditioner.",
+                config.fallback_pc
+            );
+            config.preconditioner = config.fallback_pc;
+        }
 
         // Analyze matrix properties
         let (density, condition_est, is_well_conditioned) = analyze_matrix_properties(&matrix);
