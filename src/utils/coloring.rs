@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use crate::matrix::sparse::CsrMatrix;
+
 /// Extract adjacency list from a matrix pattern: adj[i] = { j | A[i,j] ≠ 0 or A[j,i] ≠ 0 }
 pub fn extract_adjacency<F>(n: usize, is_nz: F) -> Vec<Vec<usize>>
 where
@@ -71,6 +73,30 @@ pub fn build_blocks_from_colors(colors: &[usize]) -> Vec<Vec<usize>> {
         blocks[c].push(i);
     }
     blocks
+}
+
+/// Compute a distance-2 coloring for a CSR matrix graph (based on sparsity).
+///
+/// The resulting colors are suitable for parallel Gauss–Seidel-style sweeps
+/// where nodes in the same color have no direct adjacency.
+pub fn csr_distance2_coloring<T>(a: &CsrMatrix<T>) -> Vec<usize> {
+    let n = a.nrows().min(a.ncols());
+    let mut adj_sets = vec![HashSet::new(); n];
+    for i in 0..n {
+        let (cols, _) = a.row(i);
+        for &j in cols {
+            if j < n && j != i {
+                adj_sets[i].insert(j);
+                adj_sets[j].insert(i);
+            }
+        }
+    }
+    let adj: Vec<Vec<usize>> = adj_sets
+        .into_iter()
+        .map(|set| set.into_iter().collect())
+        .collect();
+    let dist2 = distance2_neighbors(&adj);
+    greedy_distance2_coloring(&dist2)
 }
 
 #[cfg(test)]
