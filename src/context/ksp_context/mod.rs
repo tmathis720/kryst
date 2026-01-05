@@ -54,6 +54,7 @@ use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
 use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
+use crate::preconditioner::dist::MpiPcOptions;
 use crate::error::KError;
 use crate::matrix::backend::materialize;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};

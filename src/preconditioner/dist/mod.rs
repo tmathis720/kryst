@@ -14,6 +14,8 @@ use std::str::FromStr;
 use crate::algebra::scalar::S;
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 use crate::matrix::DistCsrOp;
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::matrix::op::LinOp;
 
 /// Global distributed preconditioner modes exposed to CLI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +97,7 @@ impl Default for MpiPcOptions {
 }
 
 /// Distributed preconditioners expose an MPI-friendly apply API.
-pub trait DistributedPreconditioner {
+pub trait DistributedPreconditioner: Send + Sync {
     type Scalar;
 
     /// Apply the distributed preconditioner to a global vector.
