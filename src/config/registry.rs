@@ -337,6 +337,13 @@ pub static SPECS: &[Spec] = &[
         kind: ValueKind::Str,
         doc: "local ILU variant for block Jacobi: ilu | ilut | ilutp",
     },
+    Spec {
+        flag: "-pc_jacobi_block_size",
+        key: "pc_jacobi_block_size",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "block size for block-Jacobi preconditioner",
+    },
     // Approximate inverse (CSR) options
     Spec {
         flag: "-pc_approxinv_kind",

@@ -348,7 +348,9 @@ impl PcConfig {
             Qr => PcConfig::Qr,
             #[cfg(feature = "superlu_dist")]
             SuperLuDist => PcConfig::SuperLuDist,
-            BlockJacobi => unreachable!(),
+            BlockJacobi => PcConfig::BlockJacobi {
+                block: o.jacobi_block_size.unwrap_or(1),
+            },
         })
     }
 }

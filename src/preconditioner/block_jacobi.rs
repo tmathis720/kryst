@@ -17,17 +17,16 @@ use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_t
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::core::traits::{MatrixGet, RowPattern};
-#[cfg(feature = "complex")]
 use crate::error::KError;
 #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::matrix::op::CsrOp;
-#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
+#[cfg(not(feature = "complex"))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::PcSide;
-#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
-use crate::preconditioner::Preconditioner; // bring trait into scope for IluCsr::setup/apply
+#[cfg(not(feature = "complex"))]
+use crate::preconditioner::Preconditioner;
 #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
@@ -48,6 +47,8 @@ use faer::Mat;
 pub struct BlockJacobi {
     /// List of block index sets (each block is a list of row/column indices)
     pub blocks: Vec<Vec<usize>>,
+    /// Contiguous block size (used to construct blocks when none are provided).
+    pub block_size: usize,
     /// For each block: (indices, LU solver for the block)
     #[cfg(feature = "dense-direct")]
     pub block_factors: Vec<(Vec<usize>, LuSolver)>, // (indices, LU solver)
@@ -65,6 +66,19 @@ impl BlockJacobi {
             .max()
             .map_or(0, |idx| idx + 1);
         (n, n)
+    }
+
+    fn ensure_blocks(&mut self, n: usize) {
+        if !self.blocks.is_empty() || n == 0 {
+            return;
+        }
+        let block = self.block_size.max(1);
+        let mut start = 0;
+        while start < n {
+            let end = (start + block).min(n);
+            self.blocks.push((start..end).collect());
+            start = end;
+        }
     }
 
     /// Setup the Block-Jacobi preconditioner by factorizing each block.
@@ -134,6 +148,107 @@ impl BlockJacobi {
                     if row.contains(&j) {
                         col_idx.push(jj);
                         values.push(a.get(i, j));
+                    }
+                }
+                row_ptr.push(col_idx.len());
+            }
+            let csr =
+                std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
+            let mut ilu = IluCsr::new_with_config(cfg.clone());
+            let op = CsrOp::new(csr.clone());
+            let _ = ilu.setup(&op);
+            self.block_factors_ilu
+                .push((block.clone(), std::sync::Arc::new(ilu)));
+        }
+    }
+    #[cfg(feature = "dense-direct")]
+    fn setup_from_dense(&mut self, a: &Mat<f64>) {
+        self.block_factors.clear();
+        for block in &self.blocks {
+            let n = block.len();
+            let mut data = vec![R::zero(); n * n];
+            for (ii, &i) in block.iter().enumerate() {
+                for (jj, &j) in block.iter().enumerate() {
+                    data[jj * n + ii] = a[(i, j)];
+                }
+            }
+            let amat = Mat::from_fn(n, n, |i, j| data[j * n + i]);
+            let mut lusolver = LuSolver::new();
+            let _ = lusolver.solve(
+                &amat,
+                None,
+                &vec![R::zero(); n],
+                &mut vec![R::zero(); n],
+                PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            );
+            self.block_factors.push((block.clone(), lusolver));
+        }
+    }
+    #[cfg(feature = "dense-direct")]
+    fn setup_from_csr_dense(&mut self, a: &CsrMatrix<f64>) {
+        self.block_factors.clear();
+        for block in &self.blocks {
+            let n = block.len();
+            let mut data = vec![R::zero(); n * n];
+            let mut map = std::collections::HashMap::with_capacity(n);
+            for (local, &global) in block.iter().enumerate() {
+                map.insert(global, local);
+            }
+            for (ii, &i) in block.iter().enumerate() {
+                let (cols, vals) = a.row(i);
+                for (&col, &val) in cols.iter().zip(vals.iter()) {
+                    if let Some(&jj) = map.get(&col) {
+                        data[jj * n + ii] = val;
+                    }
+                }
+            }
+            let amat = Mat::from_fn(n, n, |i, j| data[j * n + i]);
+            let mut lusolver = LuSolver::new();
+            let _ = lusolver.solve(
+                &amat,
+                None,
+                &vec![R::zero(); n],
+                &mut vec![R::zero(); n],
+                PcSide::Left,
+                &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                None,
+            );
+            self.block_factors.push((block.clone(), lusolver));
+        }
+    }
+    #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
+    fn setup_from_csr_ilu(&mut self, a: &CsrMatrix<f64>) {
+        self.block_factors_ilu.clear();
+        let cfg = IluCsrConfig {
+            kind: IluKind::Ilu0,
+            pivot: PivotStrategy::DiagonalPerturbation,
+            pivot_threshold: 1e-12,
+            diag_perturb_factor: 1e-10,
+            level_sched: cfg!(feature = "rayon"),
+            numeric_update_fixed: true,
+            logging: 0,
+            reordering: ReorderingOptions::default(),
+        };
+        for block in &self.blocks {
+            let n = block.len();
+            let mut map = std::collections::HashMap::with_capacity(n);
+            for (local, &global) in block.iter().enumerate() {
+                map.insert(global, local);
+            }
+            let mut row_ptr = Vec::with_capacity(n + 1);
+            let mut col_idx = Vec::new();
+            let mut values = Vec::new();
+            row_ptr.push(0);
+            for &i in block {
+                let (cols, vals) = a.row(i);
+                for (&col, &val) in cols.iter().zip(vals.iter()) {
+                    if let Some(&jj) = map.get(&col) {
+                        col_idx.push(jj);
+                        values.push(val);
                     }
                 }
                 row_ptr.push(col_idx.len());
@@ -257,6 +372,71 @@ impl BlockJacobi {
     }
 }
 
+#[cfg(not(feature = "complex"))]
+impl Preconditioner for BlockJacobi {
+    fn dims(&self) -> (usize, usize) {
+        self.dims()
+    }
+
+    fn setup(&mut self, a: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
+        if let Some(dist) = a.as_any().downcast_ref::<crate::matrix::DistCsrOp>() {
+            let n_local = dist.local_nrows();
+            self.ensure_blocks(n_local);
+            #[cfg(feature = "dense-direct")]
+            {
+                let local = dist.local_block_dense();
+                self.setup_from_dense(&local);
+                return Ok(());
+            }
+            #[cfg(not(feature = "dense-direct"))]
+            {
+                let local = dist.local_block_csr();
+                self.setup_from_csr_ilu(&local);
+                return Ok(());
+            }
+        }
+
+        #[cfg(feature = "dense-direct")]
+        {
+            if let Some(mat) = a.as_any().downcast_ref::<Mat<f64>>() {
+                self.ensure_blocks(mat.nrows());
+                self.setup_from_dense(mat);
+                return Ok(());
+            }
+            if let Some(dense_op) = a.as_any().downcast_ref::<crate::matrix::op::DenseOp<f64>>() {
+                let mat = dense_op.inner();
+                self.ensure_blocks(mat.nrows());
+                self.setup_from_dense(mat);
+                return Ok(());
+            }
+        }
+
+        let csr = crate::matrix::convert::csr_from_linop(a, 0.0)?;
+        self.ensure_blocks(csr.nrows());
+        #[cfg(feature = "dense-direct")]
+        {
+            self.setup_from_csr_dense(&csr);
+        }
+        #[cfg(not(feature = "dense-direct"))]
+        {
+            self.setup_from_csr_ilu(&csr);
+        }
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(format!(
+                "BlockJacobi::apply dimension mismatch: x.len()={}, y.len()={}",
+                x.len(),
+                y.len()
+            )));
+        }
+        BlockJacobi::apply(self, x, y);
+        Ok(())
+    }
+}
+
 #[cfg(feature = "complex")]
 impl KPreconditioner for BlockJacobi {
     type Scalar = S;
@@ -364,28 +544,12 @@ mod tests {
         }
     }
 
-    // Only provide the real-valued Preconditioner impl when `S = f64`
-    #[cfg(not(feature = "complex"))]
-    impl crate::preconditioner::Preconditioner for BlockJacobi {
-        fn dims(&self) -> (usize, usize) {
-            Self::dims(self)
-        }
-
-        fn setup(&mut self, _a: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
-            Ok(())
-        }
-
-        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-            BlockJacobi::apply(self, x, y);
-            Ok(())
-        }
-    }
-
     #[cfg(all(feature = "complex", feature = "dense-direct"))]
     #[test]
     fn apply_s_matches_real_path() {
         let mut pc = BlockJacobi {
             blocks: vec![vec![0], vec![1]],
+            block_size: 0,
             #[cfg(feature = "dense-direct")]
             block_factors: Vec::new(),
             #[cfg(not(feature = "dense-direct"))]
