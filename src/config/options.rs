@@ -1963,7 +1963,7 @@ mod tests {
     fn sample_args_for(spec: &Spec) -> Vec<String> {
         let mut out = vec![spec.flag.to_string()];
         match spec.arity {
-            Arity::Zero => {}
+            Arity::Zero | Arity::OptionalBool => {}
             Arity::One => {
                 let v = match spec.key {
                     // KSP strings with “known good” values

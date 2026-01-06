@@ -117,6 +117,7 @@ impl Ilutp {
             workspace: IlutpWorkspace::new(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
+            conditioning: ConditioningOptions::default(),
         }
     }
 

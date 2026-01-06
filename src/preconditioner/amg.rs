@@ -34,7 +34,6 @@ use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 use crate::utils::conditioning::{apply_csr_transforms, ConditioningOptions};
 use faer::Mat;
-#[cfg(feature = "mpi")]
 use crate::parallel::Comm;
 
 #[cfg(feature = "rayon")]

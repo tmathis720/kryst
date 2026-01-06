@@ -16,6 +16,7 @@ use crate::error::KError;
 #[derive(Copy, Clone, Debug)]
 pub enum Arity {
     Zero, // presence toggles true (also supports explicit true/false/1/0)
+    OptionalBool, // presence toggles true but behaves like Zero; flagged explicitly in the registry
     One,
     Two,
 }
@@ -84,7 +85,7 @@ impl Registry {
             };
 
             match spec.arity {
-                Arity::Zero => {
+                Arity::Zero | Arity::OptionalBool => {
                     // presence implies true; allow optional explicit bool token
                     let val = match args.get(i + 1).map(|s| s.to_lowercase()) {
                         Some(ref s) if is_bool_literal(s) => {
@@ -132,7 +133,7 @@ impl Registry {
         let mut out = String::new();
         for s in items {
             let ar = match s.arity {
-                Arity::Zero => "",
+                Arity::Zero | Arity::OptionalBool => "",
                 Arity::One => " <val>",
                 Arity::Two => " <a> <b>",
             };

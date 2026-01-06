@@ -682,9 +682,10 @@ fn apply_csr_scale(a: &mut CsrMatrix<f64>, dir: ScaleDirection, norm: ScaleNorm)
     match dir {
         ScaleDirection::Row => {
             let row_norms = row_norms_csr(a, norm);
-            let row_ptr = a.row_ptr();
+            let nrows = a.nrows();
+            let row_ptr = a.row_ptr().to_vec();
             let values = a.values_mut();
-            for i in 0..a.nrows() {
+            for i in 0..nrows {
                 let scale = row_norms[i];
                 if scale == 0.0 {
                     continue;
@@ -696,7 +697,7 @@ fn apply_csr_scale(a: &mut CsrMatrix<f64>, dir: ScaleDirection, norm: ScaleNorm)
         }
         ScaleDirection::Col => {
             let col_norms = col_norms_csr(a, norm);
-            let col_idx = a.col_idx();
+            let col_idx = a.col_idx().to_vec();
             let values = a.values_mut();
             for p in 0..values.len() {
                 let scale = col_norms[col_idx[p]];
