@@ -403,7 +403,11 @@ impl KspContext {
     /// Validate that `side` is compatible with `solver_type` (if set).
     /// Mirrors `configure_pc_side()` logic but used at set-time to fail fast.
     fn check_pc_side_now(&self, side: PcSide) -> Result<(), KError> {
-        let normalized = Self::effective_side_for_solver(side, st);
+        let normalized = if let Some(st) = self.solver_type {
+            Self::effective_side_for_solver(side, st)
+        } else {
+            side
+        };
         if let Some(st) = self.solver_type {
             if let Some(required) = st.required_pc_side() {
                 if normalized != required {
@@ -1979,7 +1983,7 @@ impl KspContext {
                 .and_then(|s| s.as_any_mut().downcast_mut::<PcaGmresSolver>())
             {
                 s.pc_mode = match side {
-                    PcSide::Left => PcaPcMode::Left,
+                    PcSide::Left | PcSide::Symmetric => PcaPcMode::Left,
                     PcSide::Right => PcaPcMode::Right,
                 };
             }

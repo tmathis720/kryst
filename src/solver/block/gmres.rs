@@ -483,7 +483,7 @@ fn update_solution(
             let x_col = x_out.col_mut(rhs);
             for r in 0..p {
                 let coeff = y[block_idx * p + r + rhs * rows_y];
-                if coeff == 0.0.into() {
+                if coeff == S::zero() {
                     continue;
                 }
                 let v_col = v.col(r);
