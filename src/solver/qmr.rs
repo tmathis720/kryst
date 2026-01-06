@@ -53,12 +53,8 @@ impl QmrSolver {
     where
         A: KLinOp<Scalar = S> + ?Sized,
     {
-        if matches!(pc_side, PcSide::Symmetric) {
-            return Err(KError::InvalidInput(
-                "QMR: symmetric preconditioning not supported".to_string(),
-            ));
-        }
         let _ = pc; // Preconditioning support is not wired yet.
+        let _ = pc_side;
 
         let (m, ncols) = a.dims();
         if m != ncols {

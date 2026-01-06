@@ -425,16 +425,16 @@ pub fn reported_residual_norm(
     comm: &UniverseComm,
 ) -> f64 {
     match side {
-        crate::preconditioner::PcSide::Left => {
+        crate::preconditioner::PcSide::Left | crate::preconditioner::PcSide::Symmetric => {
             if let Some(m) = pc {
-                let _ = m.apply(crate::preconditioner::PcSide::Left, r_true, scratch);
+                let _ = m.apply(side, r_true, scratch);
                 comm.dot(scratch, scratch).sqrt()
             } else {
                 // no PC: Left semantics degrade to ||r||
                 comm.dot(r_true, r_true).sqrt()
             }
         }
-        crate::preconditioner::PcSide::Right | crate::preconditioner::PcSide::Symmetric => {
+        crate::preconditioner::PcSide::Right => {
             comm.dot(r_true, r_true).sqrt()
         }
     }

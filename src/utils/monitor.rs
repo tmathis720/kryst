@@ -61,6 +61,37 @@ impl Monitor for NullMonitor {
     fn on_event(&self, _: Event<'_>) {}
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResidualSnapshot {
+    pub true_residual: R,
+    pub preconditioned_residual: R,
+    pub recurrence_residual: Option<R>,
+}
+
+#[inline]
+pub fn log_residuals(iteration: usize, solver: &str, snapshot: ResidualSnapshot) {
+    #[cfg(feature = "logging")]
+    {
+        if log::log_enabled!(log::Level::Info) {
+            match snapshot.recurrence_residual {
+                Some(recur) => log::info!(
+                    "{solver}: it {iteration:>4}  true={:.3e}  prec={:.3e}  recur={:.3e}",
+                    snapshot.true_residual,
+                    snapshot.preconditioned_residual,
+                    recur,
+                ),
+                None => log::info!(
+                    "{solver}: it {iteration:>4}  true={:.3e}  prec={:.3e}",
+                    snapshot.true_residual,
+                    snapshot.preconditioned_residual,
+                ),
+            }
+        }
+    }
+    #[cfg(not(feature = "logging"))]
+    let _ = (iteration, solver, snapshot);
+}
+
 pub struct TextMonitor {
     pub rank0: bool,
 }
