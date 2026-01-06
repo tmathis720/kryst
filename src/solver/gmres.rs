@@ -826,7 +826,8 @@ impl GmresSolver {
                         ws.v_col(0).fill(S::zero());
                     }
                     beta
-                };
+                }
+            };
 
             ws.g[0] = S::from_real(beta);
             res = beta;
