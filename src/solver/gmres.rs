@@ -206,7 +206,6 @@ impl GmresSolver {
         }
 
         let pc_apply_side = pc_side;
-        let pc_apply_side = pc_side;
         let pc_side = match pc_side {
             PcSide::Symmetric => PcSide::Left,
             s => s,
@@ -990,6 +989,7 @@ impl GmresSolver {
         }
         let reorth_tol = R::from(self.reorth_tol).max(R::zero());
 
+        let pc_apply_side = pc_side;
         let pc_side = match pc_side {
             PcSide::Symmetric => PcSide::Left,
             s => s,
@@ -1256,6 +1256,7 @@ impl GmresSolver {
 
                             wj.copy_from_slice(&ws.tmp1[..n]);
                         }
+                    }
                 }
 
                 let mut pre_norms = Vec::new();
@@ -1551,7 +1552,8 @@ impl GmresSolver {
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
             match pc_side {
                 PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
-                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),            }
+                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
+            }
 
             #[cfg(feature = "metrics")]
             let matvec_start = std::time::Instant::now();
