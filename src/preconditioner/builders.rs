@@ -14,6 +14,7 @@ use crate::preconditioner::{
 use crate::preconditioner::chebyshev::ChebyshevPc;
 use crate::preconditioner::sor::SorPc;
 use crate::utils::conditioning::ConditioningOptions;
+use crate::preconditioner::ilu_csr::ReorderingOptions;
 
 #[cfg(feature = "superlu_dist")]
 use crate::preconditioner::direct::SuperLuDistPc;

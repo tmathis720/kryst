@@ -107,13 +107,6 @@ pub(crate) fn permutation_from_order(order: Vec<usize>) -> Permutation {
     Permutation { p: order, pinv }
 }
 
-    let mut pinv = vec![0; n];
-    for (new, &old) in order.iter().enumerate() {
-        pinv[old] = new;
-    }
-    Permutation { p: order, pinv }
-}
-
 pub(crate) fn build_symmetric_adj_from_csr<T>(a: &CsrMatrix<T>) -> Vec<Vec<usize>> {
     let n = a.nrows();
     let rp = a.row_ptr();

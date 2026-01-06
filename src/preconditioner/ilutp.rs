@@ -122,7 +122,7 @@ fn apply_reordering(
     }
     if !reordering.symmetric {
         return Err(KError::Unsupported(
-            "Ilutp only supports symmetric reordering".to_string(),
+            "Ilutp only supports symmetric reordering",
         ));
     }
 
@@ -443,7 +443,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
         } else {
             matrix
         };
-        let (matrix, perm) = apply_reordering(matrix, self.reordering)?;
+        let (matrix, perm) = apply_reordering(matrix, self.reordering.clone())?;
         self.perm = perm;
         self.compute_factorization(&matrix)?;
         self.setup_time = start.elapsed().as_secs_f64();
