@@ -244,7 +244,7 @@ impl GmresSolver {
         let mut reduction_count = 0usize;
         let mut res: R;
         let (beta, mut bnorm) = match pc_side {
-            PcSide::Left => {
+            PcSide::Left | PcSide::Symmetric => {
                 if let Some(pc) = pc {
                     let tmp2 = &mut ws.tmp2[..n];
                     #[cfg(feature = "metrics")]
@@ -382,7 +382,7 @@ impl GmresSolver {
             for k in 0..self.restart {
                 match self.variant {
                     GmresVariant::Classical => match pc_side {
-                        PcSide::Left => {
+                        PcSide::Left | PcSide::Symmetric => {
                             let vk = &ws.v_mem[k * n..(k + 1) * n];
                             #[cfg(feature = "metrics")]
                             let matvec_start = std::time::Instant::now();
@@ -521,7 +521,7 @@ impl GmresSolver {
                             }
                         }                    },
                     GmresVariant::Pipelined => match pc_side {
-                        PcSide::Left => {
+                        PcSide::Left | PcSide::Symmetric => {
                             let vk = &ws.v_mem[k * n..(k + 1) * n];
                             #[cfg(feature = "metrics")]
                             let matvec_start = std::time::Instant::now();
@@ -720,8 +720,9 @@ impl GmresSolver {
 
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
             match pc_side {
-                PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
-                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),            }
+                PcSide::Left | PcSide::Symmetric => Self::axpy_update_vcols(x, ws, k_steps, &y),
+                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
+            }
 
             #[cfg(feature = "metrics")]
             let matvec_start = std::time::Instant::now();
@@ -734,7 +735,7 @@ impl GmresSolver {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
             res = match pc_side {
-                PcSide::Left => {
+                PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
@@ -779,7 +780,7 @@ impl GmresSolver {
             ws.g.fill(S::zero());
 
             let beta = match pc_side {
-                PcSide::Left => {
+                PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
@@ -1034,7 +1035,7 @@ impl GmresSolver {
 
         let mut res: R;
         let (beta, mut bnorm) = match pc_side {
-            PcSide::Left => {
+            PcSide::Left | PcSide::Symmetric => {
                 if let Some(pc) = pc {
                     let tmp2 = &mut ws.tmp2[..n];
                     #[cfg(feature = "metrics")]
@@ -1211,7 +1212,7 @@ impl GmresSolver {
                     let wj: &mut [S] = &mut cur_and_rest[0..n];
 
                     match pc_side {
-                        PcSide::Left => {
+                        PcSide::Left | PcSide::Symmetric => {
                             #[cfg(feature = "metrics")]
                             let matvec_start = std::time::Instant::now();
                             a.matvec_s(src, &mut ws.tmp1, &mut ws.bridge);
@@ -1325,7 +1326,7 @@ impl GmresSolver {
                             metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
                         }
                         gram
-                    };
+                    }};
                 }
 
                 let mut gram = match reorth_policy {
@@ -1553,7 +1554,7 @@ impl GmresSolver {
 
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
             match pc_side {
-                PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
+                PcSide::Left | PcSide::Symmetric => Self::axpy_update_vcols(x, ws, k_steps, &y),
                 PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
             }
 
@@ -1568,7 +1569,7 @@ impl GmresSolver {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
             res = match pc_side {
-                PcSide::Left => {
+                PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
@@ -1597,7 +1598,8 @@ impl GmresSolver {
                         metrics.bytes_reduced += std::mem::size_of::<R>();
                     }
                     res
-                };
+                }
+            };
 
             stats.iterations = total_iters;
             stats.final_residual = res;
@@ -1612,7 +1614,7 @@ impl GmresSolver {
             ws.g.fill(S::zero());
 
             let beta = match pc_side {
-                PcSide::Left => {
+                PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
@@ -1881,6 +1883,7 @@ impl GmresSolver {
             ReorthPolicy::Never
         };
     }
+
 
     pub fn set_reorth_policy(&mut self, policy: ReorthPolicy) {
         self.reorth = policy;
