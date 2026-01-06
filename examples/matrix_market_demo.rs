@@ -33,6 +33,7 @@ mod real_demo {
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Instant;
+    use std::env;
 
     use faer::Mat;
 
@@ -355,31 +356,16 @@ mod real_demo {
         let mut specs = Vec::new();
         let mut notes = Vec::new();
 
+        let enable_stress_solvers = stress_solvers_enabled();
+
         if is_parallel {
             notes.push(
                 "MPI runs use local diagonal blocks for ILUT/AMG preconditioners (block-Jacobi style).",
             );
         }
         notes.push("FGMRES entries are right-preconditioned in this demo.");
-
-        if analysis.approx_symmetric && !analysis.has_diag_zeros {
-            specs.push(RunSpec {
-                name: "PCG(pipelined) + AMG (L)",
-                solver: SolverType::Pcg,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Builder(amg_builder(true)),
-                setup: Some(pcg_pipelined_hook()),
-            });
-            specs.push(RunSpec {
-                name: "PCG + Jacobi (L)",
-                solver: SolverType::Pcg,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Jacobi,
-                    options: None,
-                },
-                setup: None,
-            });
+        if !enable_stress_solvers {
+            notes.push("Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.");
         }
 
         specs.push(RunSpec {
@@ -405,27 +391,52 @@ mod real_demo {
             notes.push("AMG disabled due to near-zero or missing diagonal entries.");
         }
 
-        specs.push(RunSpec {
-            name: "TFQMR + ILUT (L)",
-            solver: SolverType::Tfqmr,
-            pc_side: PcSide::Left,
-            pc: PcConfigSpec::Type {
-                pc_type: PcType::Ilut,
-                options: Some(ilut_options()),
-            },
-            setup: None,
-        });
+        if analysis.approx_symmetric && !analysis.has_diag_zeros {
+            specs.push(RunSpec {
+                name: "PCG(pipelined) + AMG (L)",
+                solver: SolverType::Pcg,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Builder(amg_builder(true)),
+                setup: Some(pcg_pipelined_hook()),
+            });
+            specs.push(RunSpec {
+                name: "PCG + Jacobi (L)",
+                solver: SolverType::Pcg,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::Jacobi,
+                    options: None,
+                },
+                setup: None,
+            });
+        }
 
-        specs.push(RunSpec {
-            name: "BiCGStab + ILUT (L)",
-            solver: SolverType::BiCgStab,
-            pc_side: PcSide::Left,
-            pc: PcConfigSpec::Type {
-                pc_type: PcType::Ilut,
-                options: Some(ilut_options()),
-            },
-            setup: None,
-        });
+        if enable_stress_solvers {
+            notes.push(
+                "TFQMR/BiCGStab entries are stress tests for weak preconditioners or indefinite systems.",
+            );
+            specs.push(RunSpec {
+                name: "TFQMR + ILUT (L)",
+                solver: SolverType::Tfqmr,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::Ilut,
+                    options: Some(ilut_options()),
+                },
+                setup: None,
+            });
+
+            specs.push(RunSpec {
+                name: "BiCGStab + ILUT (L)",
+                solver: SolverType::BiCgStab,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::Ilut,
+                    options: Some(ilut_options()),
+                },
+                setup: None,
+            });
+        }
 
         if !is_parallel {
             if cfg!(feature = "dense-direct") {
@@ -461,6 +472,16 @@ mod real_demo {
         }
 
         MenuPlan { specs, notes }
+    }
+
+    fn stress_solvers_enabled() -> bool {
+        match env::var("KRYST_ENABLE_STRESS_SOLVERS") {
+            Ok(value) => matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            Err(_) => false,
+        }
     }
 
     fn ilut_options() -> PcOptions {
