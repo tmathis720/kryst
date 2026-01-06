@@ -20,6 +20,7 @@ use super::{AsmBlockSolver, AsmMode, Weighting};
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
+use crate::utils::conditioning::ConditioningOptions;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::preconditioner::{PcSide, Preconditioner};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
@@ -488,6 +489,7 @@ impl SubdomainSolver {
             numeric_update_fixed: true,
             logging: 0,
             reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
         };
         Ok(Self {
             ilu: IluCsr::new_with_config(cfg),

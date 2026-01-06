@@ -32,6 +32,7 @@ use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
+use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
 use crate::utils::metrics::{Counters, SolveTimer};
 use faer::Mat;
 use std::cmp::Ordering;
@@ -63,6 +64,8 @@ pub struct Ilutp {
     setup_time: f64,
     /// Solve timing counters
     solve_ctrs: Counters,
+    /// Optional conditioning transforms applied before factorization.
+    conditioning: ConditioningOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +132,12 @@ impl Ilutp {
             workspace: IlutpWorkspace::new(),
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
+            conditioning: ConditioningOptions::default(),
         }
+    }
+
+    pub fn set_conditioning(&mut self, conditioning: ConditioningOptions) {
+        self.conditioning = conditioning;
     }
 
     /// Set the maximum fill-in per row.
@@ -338,6 +346,15 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
     fn setup(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let start = Instant::now();
         self.solve_ctrs = Counters::new();
+        let mut conditioned = None;
+        let matrix = if self.conditioning.is_active() {
+            let mut local = matrix.clone();
+            apply_dense_transforms("ILUTP", &mut local, &self.conditioning)?;
+            conditioned = Some(local);
+            conditioned.as_ref().unwrap()
+        } else {
+            matrix
+        };
         self.compute_factorization(matrix)?;
         self.setup_time = start.elapsed().as_secs_f64();
         Ok(())

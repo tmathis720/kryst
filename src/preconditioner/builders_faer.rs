@@ -12,14 +12,27 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         PcConfig::Jacobi => b::build_jacobi().map(Some),
         PcConfig::BlockJacobi { block } => b::build_block_jacobi(*block).map(Some),
 
-        PcConfig::Ilu0 => b::build_ilu0().map(Some),
-        PcConfig::Iluk { level } => b::build_iluk(*level).map(Some),
+        PcConfig::Ilu0 { conditioning } => {
+            b::build_ilu0_with_conditioning(conditioning.clone()).map(Some)
+        }
+        PcConfig::Iluk { level, conditioning } => {
+            b::build_iluk_with_conditioning(*level, conditioning.clone()).map(Some)
+        }
         PcConfig::Ilut {
             drop_tol,
             max_fill,
             reordering,
-        } => b::build_ilut(*drop_tol, *max_fill, reordering.clone()).map(Some),
-        PcConfig::Milu0 => b::build_milu0().map(Some),
+            conditioning,
+        } => b::build_ilut_with_conditioning(
+            *drop_tol,
+            *max_fill,
+            reordering.clone(),
+            conditioning.clone(),
+        )
+        .map(Some),
+        PcConfig::Milu0 { conditioning } => {
+            b::build_milu0_with_conditioning(conditioning.clone()).map(Some)
+        }
 
         PcConfig::Sor {
             omega,
@@ -47,7 +60,14 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             weighting.clone(),
         )
         .map(Some),
-        PcConfig::Amg { config } => b::build_amg(config.clone()).map(Some),
+        PcConfig::Amg {
+            config,
+            conditioning,
+        } => {
+            let mut cfg = config.clone();
+            cfg.conditioning = conditioning.clone();
+            b::build_amg(cfg).map(Some)
+        }
         PcConfig::ApproxInv {
             kind,
             levels,

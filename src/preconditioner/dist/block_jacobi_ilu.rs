@@ -15,6 +15,7 @@ use crate::preconditioner::ilutp::Ilutp;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, PcSide};
+use crate::utils::conditioning::ConditioningOptions;
 
 use super::{DistVec, DistributedPreconditioner};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -108,8 +109,10 @@ pub fn build_block_jacobi_ilut_pc(
     dist_op: &DistCsrOp,
     fill: usize,
     drop_tol: f64,
+    conditioning: ConditioningOptions,
 ) -> Result<BlockJacobiLocalPc<RowFilterPreconditioner>, KError> {
     let mut pc = RowFilterPreconditioner::new(fill, S::from_real(drop_tol));
+    pc.set_conditioning(conditioning);
     let local = dist_op.local_block_dense();
     LegacyPreconditioner::setup(&mut pc, &local)?;
     Ok(BlockJacobiLocalPc::new(
@@ -125,8 +128,10 @@ pub fn build_block_jacobi_ilutp_pc(
     max_fill: usize,
     drop_tol: f64,
     perm_tol: f64,
+    conditioning: ConditioningOptions,
 ) -> Result<BlockJacobiLocalPc<Ilutp>, KError> {
     let mut pc = Ilutp::with_params(max_fill, drop_tol, perm_tol);
+    pc.set_conditioning(conditioning);
     let local = dist_op.local_block_dense();
     LegacyPreconditioner::setup(&mut pc, &local)?;
     Ok(BlockJacobiLocalPc::new(
@@ -150,12 +155,14 @@ pub fn build_block_jacobi_pc(
                     dist_op,
                     opts.ilut_fill,
                     opts.ilut_drop_tol,
+                    opts.conditioning.clone(),
                 )?),
                 LocalPcKind::Ilutp => Box::new(build_block_jacobi_ilutp_pc(
                     dist_op,
                     opts.ilutp_max_fill,
                     opts.ilutp_drop_tol,
                     opts.ilutp_perm_tol,
+                    opts.conditioning.clone(),
                 )?),
             };
             Ok(Some(wrapper))

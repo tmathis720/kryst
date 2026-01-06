@@ -4,6 +4,7 @@ use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
 
 #[cfg(feature = "backend-faer")]
@@ -154,16 +155,22 @@ pub enum PcConfig {
     BlockJacobi {
         block: usize,
     },
-    Ilu0,
+    Ilu0 {
+        conditioning: ConditioningOptions,
+    },
     Iluk {
         level: usize,
+        conditioning: ConditioningOptions,
     },
     Ilut {
         drop_tol: R,
         max_fill: usize,
         reordering: Option<String>,
+        conditioning: ConditioningOptions,
     },
-    Milu0,
+    Milu0 {
+        conditioning: ConditioningOptions,
+    },
     Sor {
         omega: R,
         sweeps: usize,
@@ -183,6 +190,7 @@ pub enum PcConfig {
     },
     Amg {
         config: AMGConfig,
+        conditioning: ConditioningOptions,
     },
     ApproxInv {
         kind: ApproxInvKindAlias,
@@ -208,6 +216,7 @@ impl PcConfig {
         use PcType::*;
         let default_opts = PcOptions::default();
         let o = opts.unwrap_or(&default_opts);
+        let conditioning = o.conditioning_options()?;
         Ok(match pc_type {
             None => PcConfig::None,
 
@@ -216,45 +225,60 @@ impl PcConfig {
                 _ => PcConfig::Jacobi,
             },
 
-            Ilu0 => PcConfig::Ilu0,
+            Ilu0 => PcConfig::Ilu0 {
+                conditioning: conditioning.clone(),
+            },
 
             Ilu => match o.ilu_variant.as_deref() {
                 Some("ilu0") | Option::None
                     if o.ilu_level.is_none() && o.ilut_drop_tol.is_none() =>
                 {
-                    PcConfig::Ilu0
+                    PcConfig::Ilu0 {
+                        conditioning: conditioning.clone(),
+                    }
                 }
                 Some("iluk") | Option::None if o.ilu_level.is_some() => {
                     let level = o.ilu_level.ok_or_else(|| {
                         KError::InvalidInput("iluk requires PcOptions.ilu_level".into())
                     })?;
-                    PcConfig::Iluk { level }
+                    PcConfig::Iluk {
+                        level,
+                        conditioning: conditioning.clone(),
+                    }
                 }
                 Some("ilut") | Option::None if o.ilut_drop_tol.is_some() => PcConfig::Ilut {
                     drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
                     max_fill: o.ilut_max_fill.unwrap_or(20),
                     reordering: o.ilu_reordering.clone(),
+                    conditioning: conditioning.clone(),
                 },
-                Some("milu0") => PcConfig::Milu0,
+                Some("milu0") => PcConfig::Milu0 {
+                    conditioning: conditioning.clone(),
+                },
                 Some(other) => {
                     return Err(KError::InvalidInput(format!(
                         "unknown ilu_variant: {other}"
                     )));
                 }
-                Option::None => PcConfig::Ilu0,
+                Option::None => PcConfig::Ilu0 {
+                    conditioning: conditioning.clone(),
+                },
             },
             Ilut => PcConfig::Ilut {
                 drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
                 max_fill: o.ilut_max_fill.unwrap_or(20),
                 reordering: o.ilu_reordering.clone(),
+                conditioning: conditioning.clone(),
             },
             Ilutp => PcConfig::Ilut {
                 drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
                 max_fill: o.ilut_max_fill.unwrap_or(20),
                 reordering: o.ilu_reordering.clone(),
+                conditioning: conditioning.clone(),
             },
             Ilup => PcConfig::Iluk {
                 level: o.ilu_level.unwrap_or(0),
+                conditioning: conditioning.clone(),
             },
 
             Sor => {
@@ -307,7 +331,10 @@ impl PcConfig {
             },
             Amg => {
                 let cfg = AMGConfig::try_from_opts(o)?;
-                PcConfig::Amg { config: cfg }
+                PcConfig::Amg {
+                    config: cfg,
+                    conditioning: conditioning.clone(),
+                }
             }
 
             ApproxInverse => {

@@ -31,6 +31,7 @@ use crate::preconditioner::Preconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
+use crate::utils::conditioning::ConditioningOptions;
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 #[cfg(feature = "dense-direct")]
@@ -135,6 +136,7 @@ impl BlockJacobi {
             numeric_update_fixed: true,
             logging: 0,
             reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
         };
         for block in &self.blocks {
             let n = block.len();
@@ -232,6 +234,7 @@ impl BlockJacobi {
             numeric_update_fixed: true,
             logging: 0,
             reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
         };
         for block in &self.blocks {
             let n = block.len();
