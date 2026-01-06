@@ -2,6 +2,7 @@
 
 pub mod buffer_pool;
 pub mod coloring;
+pub mod conditioning;
 pub mod convergence;
 pub mod invariants;
 #[cfg(feature = "backend-faer")]

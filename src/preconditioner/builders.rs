@@ -13,6 +13,7 @@ use crate::preconditioner::{
 
 use crate::preconditioner::chebyshev::ChebyshevPc;
 use crate::preconditioner::sor::SorPc;
+use crate::utils::conditioning::ConditioningOptions;
 
 #[cfg(feature = "superlu_dist")]
 use crate::preconditioner::direct::SuperLuDistPc;
@@ -113,6 +114,12 @@ pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {
 // ---- ILU family builders -------------------------------------------------
 
 pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
+    build_ilu0_with_conditioning(ConditioningOptions::default())
+}
+
+pub fn build_ilu0_with_conditioning(
+    conditioning: ConditioningOptions,
+) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
     };
@@ -125,12 +132,20 @@ pub fn build_ilu0() -> Result<Box<dyn Preconditioner>, KError> {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning,
     };
     let pc = IluCsr::new_with_config(cfg);
     Ok(Box::new(pc))
 }
 
 pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
+    build_iluk_with_conditioning(level, ConditioningOptions::default())
+}
+
+pub fn build_iluk_with_conditioning(
+    level: usize,
+    conditioning: ConditioningOptions,
+) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
     };
@@ -143,6 +158,7 @@ pub fn build_iluk(level: usize) -> Result<Box<dyn Preconditioner>, KError> {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning,
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
@@ -151,6 +167,15 @@ pub fn build_ilut(
     drop_tol: f64,
     max_fill: usize,
     _reordering: Option<String>,
+) -> Result<Box<dyn Preconditioner>, KError> {
+    build_ilut_with_conditioning(drop_tol, max_fill, _reordering, ConditioningOptions::default())
+}
+
+pub fn build_ilut_with_conditioning(
+    drop_tol: f64,
+    max_fill: usize,
+    _reordering: Option<String>,
+    conditioning: ConditioningOptions,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, IlutParams, PivotPolicy, PivotStrategy, Pivoting,
@@ -177,11 +202,18 @@ pub fn build_ilut(
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning,
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
 }
 
 pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
+    build_milu0_with_conditioning(ConditioningOptions::default())
+}
+
+pub fn build_milu0_with_conditioning(
+    conditioning: ConditioningOptions,
+) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
     };
@@ -194,6 +226,7 @@ pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning,
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
 }

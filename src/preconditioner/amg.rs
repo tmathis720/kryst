@@ -32,6 +32,7 @@ use crate::preconditioner::bridge::{
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
+use crate::utils::conditioning::{apply_csr_transforms, ConditioningOptions};
 use faer::Mat;
 #[cfg(feature = "mpi")]
 use crate::parallel::Comm;
@@ -369,6 +370,7 @@ pub struct AMGConfig {
     pub flexible_pc_sweeps: usize,
     pub mixed_precision: Option<MixedPrecision>,
     pub mixed_storage: MixedStorage,
+    pub conditioning: ConditioningOptions,
 }
 
 impl Default for AMGConfig {
@@ -473,6 +475,7 @@ impl Default for AMGConfig {
             flexible_pc_sweeps: 1,
             mixed_precision: None,
             mixed_storage: MixedStorage::Cached,
+            conditioning: ConditioningOptions::default(),
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -679,6 +682,7 @@ impl AMGConfig {
                 cfg.logging_level = cfg.logging_level.max(2);
             }
         }
+        cfg.conditioning = opts.conditioning_options()?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -4745,13 +4749,21 @@ impl Preconditioner for AMG {
             ));
         }
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
+        let csr = if self.cfg.conditioning.is_active() {
+            let mut local = (*csr).clone();
+            apply_csr_transforms("AMG", &mut local, &self.cfg.conditioning)?;
+            Arc::new(local)
+        } else {
+            csr
+        };
+        let csr_ref = csr.as_ref();
         #[cfg(debug_assertions)]
-        debug_check_csr(csr.as_ref(), "setup csr");
+        debug_check_csr(csr_ref, "setup csr");
         let sid = op.structure_id();
         let vid = op.values_id();
-        let pattern_hash = csr_pattern_hash(&csr);
+        let pattern_hash = csr_pattern_hash(csr_ref);
 
-        self.ensure_symbolic_structure(csr.as_ref(), sid, pattern_hash)?;
+        self.ensure_symbolic_structure(csr_ref, sid, pattern_hash)?;
 
         let need_numeric = match &self.state {
             AmgState::Ready { last_values_id, .. } => *last_values_id != vid,
@@ -4760,7 +4772,7 @@ impl Preconditioner for AMG {
         };
 
         if need_numeric {
-            self.refresh_numeric_ready(csr.as_ref(), sid, vid, pattern_hash)?;
+            self.refresh_numeric_ready(csr_ref, sid, vid, pattern_hash)?;
         }
 
         self.csr = Some(csr.clone());

@@ -8,6 +8,7 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
 use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
+use crate::utils::conditioning::{apply_csr_transforms, ConditioningOptions};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
@@ -102,6 +103,7 @@ pub struct IluCsrConfig {
     pub numeric_update_fixed: bool,
     pub logging: usize,
     pub reordering: ReorderingOptions,
+    pub conditioning: ConditioningOptions,
 }
 
 impl Default for IluCsrConfig {
@@ -115,6 +117,7 @@ impl Default for IluCsrConfig {
             numeric_update_fixed: true,
             logging: 0,
             reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
         }
     }
 }
@@ -1048,6 +1051,15 @@ impl Preconditioner for IluCsr {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         let drop = 0.0; // use full numerical content by default
         let a: Arc<CsrMatrix<f64>> = csr_from_linop(op, drop)?;
+        let mut conditioned = None;
+        let a = if self.cfg.conditioning.is_active() {
+            let mut local = (*a).clone();
+            apply_csr_transforms("ILU/ILUT", &mut local, &self.cfg.conditioning)?;
+            conditioned = Some(local);
+            conditioned.as_ref().unwrap()
+        } else {
+            a.as_ref()
+        };
         let sid = op.structure_id();
         let vid = op.values_id();
 

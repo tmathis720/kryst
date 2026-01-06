@@ -21,6 +21,7 @@ use crate::preconditioner::ilu::{
 use crate::preconditioner::ilu_options::{
     IluKind, IluOptions, IterativeSetupType, Overlay, PivotPolicy, ReorderingType, TriSolveType,
 };
+use crate::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm};
 
 fn env_bool(key: &str) -> Option<bool> {
     std::env::var(key)
@@ -319,6 +320,16 @@ pub struct PcOptions {
     // AMG
     /// AMG smoother name.
     pub amg_smoother: Option<String>,
+    /// Conditioning: fix tiny/missing diagonal entries.
+    pub pc_fixdiag: Option<bool>,
+    /// Conditioning: shift diagonal by a constant.
+    pub pc_shift_diag: Option<f64>,
+    /// Conditioning: inject tau * row_norm into diagonal.
+    pub pc_diag_inject_tau: Option<f64>,
+    /// Conditioning: scale matrix rows/columns.
+    pub pc_scale: Option<String>,
+    /// Conditioning: scaling norm ("1" or "inf").
+    pub pc_scale_norm: Option<String>,
 }
 
 /// Side enum kept as-is.
@@ -513,6 +524,7 @@ impl Sink for PcOptions {
             }
             // Approximate inverse (CSR) options
             "pc_approxinv_parallel" => set_opt!(&mut self.approxinv_parallel, v),
+            "pc_fixdiag" => set_opt!(&mut self.pc_fixdiag, v),
             _ => Err(KError::SolveError(format!("Unknown PC bool key: {key}"))),
         }
     }
@@ -631,6 +643,12 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.sor_mat_side, v.to_lowercase())
             }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
+            "pc_shift_diag" => set_opt!(&mut self.pc_shift_diag, parse_as::<f64>(v, spec)?),
+            "pc_diag_inject_tau" => {
+                set_opt!(&mut self.pc_diag_inject_tau, parse_as::<f64>(v, spec)?)
+            }
+            "pc_scale" => set_opt!(&mut self.pc_scale, v.to_lowercase()),
+            "pc_scale_norm" => set_opt!(&mut self.pc_scale_norm, v.to_lowercase()),
             "pc_jacobi_block_size" => {
                 let val = ensure_ge_1("pc_jacobi_block_size", parse_as::<usize>(v, spec)?)?;
                 set_opt!(&mut self.jacobi_block_size, val)
@@ -1432,6 +1450,26 @@ impl PcOptions {
         if let Ok(v) = std::env::var("KRYST_PC_SCALING") {
             me.scaling = Some(v.to_lowercase());
         }
+        if let Ok(v) = std::env::var("KRYST_PC_FIXDIAG") {
+            let l = v.to_lowercase();
+            me.pc_fixdiag = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SHIFT_DIAG") {
+            me.pc_shift_diag = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_SHIFT_DIAG: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_DIAG_INJECT_TAU") {
+            me.pc_diag_inject_tau = Some(v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_PC_DIAG_INJECT_TAU: {v}"))
+            })?);
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SCALE") {
+            me.pc_scale = Some(v.to_lowercase());
+        }
+        if let Ok(v) = std::env::var("KRYST_PC_SCALE_NORM") {
+            me.pc_scale_norm = Some(v.to_lowercase());
+        }
         if let Ok(v) = std::env::var("KRYST_PC_SOR_OMEGA") {
             me.sor_omega = Some(
                 v.parse()
@@ -1572,6 +1610,11 @@ impl PcOptions {
 
         o!(pc_chain);
         o!(chain);
+        o!(pc_fixdiag);
+        o!(pc_shift_diag);
+        o!(pc_diag_inject_tau);
+        o!(pc_scale);
+        o!(pc_scale_norm);
 
         o!(sor_omega);
         o!(sor_sweeps);
@@ -1710,6 +1753,26 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 }
 
 impl PcOptions {
+    pub fn conditioning_options(&self) -> Result<ConditioningOptions, KError> {
+        let mut opts = ConditioningOptions::default();
+        if let Some(v) = self.pc_fixdiag {
+            opts.fix_diag = v;
+        }
+        if let Some(v) = self.pc_shift_diag {
+            opts.shift_diag = Some(v);
+        }
+        if let Some(v) = self.pc_diag_inject_tau {
+            opts.diag_inject_tau = Some(v);
+        }
+        if let Some(ref v) = self.pc_scale {
+            opts.scale = Some(ScaleDirection::from_str(v)?);
+        }
+        if let Some(ref v) = self.pc_scale_norm {
+            opts.scale_norm = ScaleNorm::from_str(v)?;
+        }
+        Ok(opts)
+    }
+
     /// Convert CLI-style options into MPI-specific preconditioner configuration.
     pub fn mpi_pc_options(&self) -> Result<MpiPcOptions, KError> {
         let global = self
@@ -1729,6 +1792,7 @@ impl PcOptions {
         opts.global_pc = global;
         opts.local_pc = local;
         opts.ilu_config = build_ilu_config(self)?;
+        opts.conditioning = self.conditioning_options()?;
 
         opts.ilut_fill = self.ilut_max_fill.unwrap_or(opts.ilut_fill);
         if let Some(drop_tol) = self.ilut_drop_tol {
@@ -1819,6 +1883,8 @@ fn build_ilu_config(opts: &PcOptions) -> Result<IluConfig, KError> {
     if let Some(omega) = opts.ilu_parilu_omega {
         config.parilu_omega = omega;
     }
+
+    config.conditioning = opts.conditioning_options()?;
 
     Ok(config)
 }

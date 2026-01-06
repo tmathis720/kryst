@@ -24,6 +24,9 @@ use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
+use crate::utils::conditioning::{
+    ConditioningOptions, ScaleDirection, ScaleNorm, log_conditioning,
+};
 use std::sync::Mutex;
 
 /// Sparse row structure for storing L/U factors.
@@ -99,6 +102,7 @@ pub struct RowFilterPreconditioner {
     pub u: Vec<SparseRow>,
     pub n: usize,
     workspace: RowFilterWorkspace,
+    conditioning: ConditioningOptions,
 }
 
 /// Deprecated name; this type is *not* a true ILUT factorization.
@@ -118,7 +122,12 @@ impl RowFilterPreconditioner {
             u: Vec::new(),
             n: 0,
             workspace: RowFilterWorkspace::new(),
+            conditioning: ConditioningOptions::default(),
         }
+    }
+
+    pub fn set_conditioning(&mut self, conditioning: ConditioningOptions) {
+        self.conditioning = conditioning;
     }
 }
 
@@ -178,14 +187,89 @@ where
     /// Partitions each row into L (j < i) and U (j >= i).
     fn setup(&mut self, a: &M) -> Result<(), KError> {
         let n = a.nrows();
+        let ncols = a.ncols();
         self.n = n;
         self.l = vec![SparseRow::new(); n];
         self.u = vec![SparseRow::new(); n];
+        if self.conditioning.is_active() {
+            log_conditioning("ILUT", &self.conditioning);
+        }
+        let mut row_norms = vec![0.0; n];
+        let mut col_norms = vec![0.0; ncols];
+        let want_row_norms =
+            self.conditioning.diag_inject_tau.is_some()
+                || matches!(
+                    self.conditioning.scale,
+                    Some(ScaleDirection::Row) | Some(ScaleDirection::Both)
+                );
+        let want_col_norms =
+            matches!(self.conditioning.scale, Some(ScaleDirection::Col) | Some(ScaleDirection::Both));
+        if want_row_norms || want_col_norms {
+            for i in 0..n {
+                for j in 0..ncols {
+                    let val = a[(i, j)].abs();
+                    if want_row_norms {
+                        match self.conditioning.scale_norm {
+                            ScaleNorm::One => row_norms[i] += val,
+                            ScaleNorm::Inf => row_norms[i] = row_norms[i].max(val),
+                        }
+                    }
+                    if want_col_norms {
+                        match self.conditioning.scale_norm {
+                            ScaleNorm::One => col_norms[j] += val,
+                            ScaleNorm::Inf => col_norms[j] = col_norms[j].max(val),
+                        }
+                    }
+                }
+            }
+        }
         for i in 0..n {
             let mut row = vec![];
             // Gather all nonzero entries in row i
-            for j in 0..n {
-                let val = a[(i, j)];
+            for j in 0..ncols {
+                let mut val = a[(i, j)];
+                if i == j {
+                    if self.conditioning.fix_diag && val.abs() <= self.conditioning.tiny_threshold {
+                        let phase = if val == S::zero() {
+                            S::from_real(1.0)
+                        } else {
+                            val / S::from_real(val.abs())
+                        };
+                        val = phase * S::from_real(self.conditioning.tiny_threshold);
+                    }
+                    if let Some(shift) = self.conditioning.shift_diag {
+                        val += S::from_real(shift);
+                    }
+                    if let Some(tau) = self.conditioning.diag_inject_tau {
+                        val += S::from_real(tau * row_norms[i]);
+                    }
+                }
+                if let Some(scale) = self.conditioning.scale {
+                    match scale {
+                        ScaleDirection::Row => {
+                            let denom = row_norms[i];
+                            if denom != 0.0 {
+                                val /= S::from_real(denom);
+                            }
+                        }
+                        ScaleDirection::Col => {
+                            let denom = col_norms[j];
+                            if denom != 0.0 {
+                                val /= S::from_real(denom);
+                            }
+                        }
+                        ScaleDirection::Both => {
+                            let denom_row = row_norms[i];
+                            if denom_row != 0.0 {
+                                val /= S::from_real(denom_row);
+                            }
+                            let denom_col = col_norms[j];
+                            if denom_col != 0.0 {
+                                val /= S::from_real(denom_col);
+                            }
+                        }
+                    }
+                }
                 if val != S::zero() {
                     row.push((j, val));
                 }

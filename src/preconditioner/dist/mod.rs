@@ -8,6 +8,7 @@ use crate::error::KError;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::preconditioner::ilu::IluConfig;
+use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
 
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
@@ -72,6 +73,7 @@ pub struct MpiPcOptions {
     pub global_pc: GlobalPcKind,
     pub local_pc: LocalPcKind,
     pub ilu_config: IluConfig,
+    pub conditioning: ConditioningOptions,
     pub ilut_fill: usize,
     pub ilut_drop_tol: f64,
     pub ilut_perm_tol: f64,
@@ -86,6 +88,7 @@ impl Default for MpiPcOptions {
             global_pc: GlobalPcKind::None,
             local_pc: LocalPcKind::Ilu,
             ilu_config: IluConfig::default(),
+            conditioning: ConditioningOptions::default(),
             ilut_fill: 10,
             ilut_drop_tol: 1e-4,
             ilut_perm_tol: 0.1,

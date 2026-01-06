@@ -8,6 +8,7 @@ use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, IlutParams, PivotPolicy, PivotStrategy, Pivoting,
     ReorderingKind, ReorderingOptions,
 };
+use crate::utils::conditioning::ConditioningOptions;
 
 fn tridiag_csr(n: usize, a: R, b: R, c: R) -> CsrMatrix<R> {
     // main diag b, subdiag a, superdiag c
@@ -48,6 +49,7 @@ fn ilu0_single_rank_matches_serial_ref() {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
     };
     let mut cfg_par = cfg_serial.clone();
     cfg_par.level_sched = cfg!(feature = "rayon");
@@ -96,6 +98,7 @@ fn iluk_basic_pivots_nonzero() {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -141,6 +144,7 @@ fn ilut_basic_and_numeric_update_keeps_pattern() {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -219,6 +223,7 @@ fn milu0_preserves_row_sums() {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -272,6 +277,7 @@ fn ilu0_with_rcm_setup() {
             symmetric: true,
             deterministic: true,
         },
+        conditioning: ConditioningOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).unwrap();
@@ -301,6 +307,7 @@ fn ilu_csr_apply_s_matches_real_path() {
         numeric_update_fixed: true,
         logging: 0,
         reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
     };
     let mut pc = IluCsr::new_with_config(cfg);
     pc.setup(&a).expect("ilu setup");

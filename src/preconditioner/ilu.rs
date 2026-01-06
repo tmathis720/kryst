@@ -54,6 +54,7 @@ use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve};
+use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
@@ -199,6 +200,8 @@ pub struct IluConfig {
     pub parilu_tol: Real,
     /// Relaxation factor for ParILU fixed-point updates
     pub parilu_omega: Real,
+    /// Optional conditioning transforms applied before factorization.
+    pub conditioning: ConditioningOptions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +253,7 @@ impl Default for IluConfig {
             parilu_min_iters: 0,
             parilu_tol: 1e-2,
             parilu_omega: 1.0,
+            conditioning: ConditioningOptions::default(),
         }
     }
 }
@@ -2179,6 +2183,16 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
                 info!("ILU: IEEE safety checks passed");
             }
         }
+
+        let mut conditioned = None;
+        let matrix = if self.config.conditioning.is_active() {
+            let mut local = matrix.clone();
+            apply_dense_transforms("ILU", &mut local, &self.config.conditioning)?;
+            conditioned = Some(local);
+            conditioned.as_ref().unwrap()
+        } else {
+            matrix
+        };
 
         let n = matrix.nrows();
         let a_csr = CsrMatrix::from_dense(matrix, 1e-15)?;

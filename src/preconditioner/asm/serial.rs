@@ -24,6 +24,7 @@ use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
+use crate::utils::conditioning::ConditioningOptions;
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
@@ -330,6 +331,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         numeric_update_fixed: true,
                         logging: 0,
                         reordering: ReorderingOptions::default(),
+                        conditioning: ConditioningOptions::default(),
                     };
                     for meta in self.blocks_meta.iter() {
                         let idx = &meta.indices;
@@ -373,6 +375,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     numeric_update_fixed: true,
                     logging: 0,
                     reordering: ReorderingOptions::default(),
+                    conditioning: ConditioningOptions::default(),
                 };
                 for meta in self.blocks_meta.iter() {
                     let idx = &meta.indices;
@@ -564,6 +567,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         numeric_update_fixed: true,
                         logging: 0,
                         reordering: ReorderingOptions::default(),
+                        conditioning: ConditioningOptions::default(),
                     };
                     for meta in self.blocks_meta.iter() {
                         let indices = &meta.indices;
@@ -586,6 +590,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     numeric_update_fixed: true,
                     logging: 0,
                     reordering: ReorderingOptions::default(),
+                    conditioning: ConditioningOptions::default(),
                 };
                 for meta in self.blocks_meta.iter() {
                     let indices = &meta.indices;
@@ -682,6 +687,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                         numeric_update_fixed: true,
                         logging: 0,
                         reordering: ReorderingOptions::default(),
+                        conditioning: ConditioningOptions::default(),
                     };
                     for meta in self.blocks_meta.iter() {
                         let indices = &meta.indices;
@@ -704,6 +710,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     numeric_update_fixed: true,
                     logging: 0,
                     reordering: ReorderingOptions::default(),
+                    conditioning: ConditioningOptions::default(),
                 };
                 for meta in self.blocks_meta.iter() {
                     let indices = &meta.indices;
@@ -1241,6 +1248,7 @@ impl LocalSolver {
                     numeric_update_fixed: true,
                     logging: 0,
                     reordering: ReorderingOptions::default(),
+                    conditioning: ConditioningOptions::default(),
                 };
                 let mut ilu = IluCsr::new_with_config(cfg);
                 let op = CsrOp::new(mat.clone());
