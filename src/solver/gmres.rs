@@ -1254,7 +1254,7 @@ impl GmresSolver {
                             }
 
                             wj.copy_from_slice(&ws.tmp1[..n]);
-                        }                    }
+                        }
                 }
 
                 let mut pre_norms = Vec::new();
