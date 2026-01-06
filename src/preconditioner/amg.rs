@@ -3503,6 +3503,7 @@ impl AMG {
         Ok(())
     }
 
+    #[cfg(not(feature = "complex"))]
     fn ilu0_smooth(
         omega: f64,
         level: &AMGLevel,
@@ -3538,6 +3539,21 @@ impl AMG {
         Ok(())
     }
 
+    #[cfg(feature = "complex")]
+    fn ilu0_smooth(
+        _omega: f64,
+        _level: &AMGLevel,
+        _r: &[f64],
+        _z: &mut [f64],
+        _sweeps: usize,
+        _ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AMG ILU0 smoother requires real scalars".into(),
+        ))
+    }
+
+    #[cfg(not(feature = "complex"))]
     fn ras_smooth(
         omega: f64,
         level: &AMGLevel,
@@ -3571,6 +3587,20 @@ impl AMG {
             }
         }
         Ok(())
+    }
+
+    #[cfg(feature = "complex")]
+    fn ras_smooth(
+        _omega: f64,
+        _level: &AMGLevel,
+        _r: &[f64],
+        _z: &mut [f64],
+        _sweeps: usize,
+        _ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        Err(KError::Unsupported(
+            "AMG RAS smoother requires real scalars".into(),
+        ))
     }
 
     fn apply_chebyshev(
@@ -4442,6 +4472,7 @@ impl AMG {
                     work,
                 )
             }
+            #[cfg(not(feature = "complex"))]
             RelaxType::Ilu0 => {
                 let ilu = lvl
                     .ilu0
@@ -4451,6 +4482,11 @@ impl AMG {
                     .expect("ILU0 mutex poisoned")
                     .apply(PcSide::Left, r, out)
             }
+            #[cfg(feature = "complex")]
+            RelaxType::Ilu0 => Err(KError::Unsupported(
+                "AMG ILU0 smoother requires real scalars".into(),
+            )),
+            #[cfg(not(feature = "complex"))]
             RelaxType::Ras => {
                 let ras = lvl
                     .ras
@@ -4460,6 +4496,10 @@ impl AMG {
                     .expect("RAS mutex poisoned")
                     .apply(PcSide::Left, r, out)
             }
+            #[cfg(feature = "complex")]
+            RelaxType::Ras => Err(KError::Unsupported(
+                "AMG RAS smoother requires real scalars".into(),
+            )),
             RelaxType::Fsai => {
                 let data = lvl
                     .fsai
@@ -6554,6 +6594,7 @@ fn update_level_caches(
     Ok(())
 }
 
+#[cfg(not(feature = "complex"))]
 fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
     let mut cfg = IluCsrConfig::default();
     cfg.kind = IluKind::Ilu0;
@@ -6570,6 +6611,14 @@ fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
     Ok(())
 }
 
+#[cfg(feature = "complex")]
+fn build_ilu0_cache(_level: &mut AMGLevel) -> Result<(), KError> {
+    Err(KError::Unsupported(
+        "AMG ILU0 cache requires real scalars".into(),
+    ))
+}
+
+#[cfg(not(feature = "complex"))]
 fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
     let cfg = AsmConfig {
         overlap: 1,
@@ -6585,6 +6634,13 @@ fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
     Preconditioner::setup(&mut ras, &op)?;
     level.ras = Some(Mutex::new(ras));
     Ok(())
+}
+
+#[cfg(feature = "complex")]
+fn build_ras_cache(_level: &mut AMGLevel) -> Result<(), KError> {
+    Err(KError::Unsupported(
+        "AMG RAS cache requires real scalars".into(),
+    ))
 }
 
 fn cast_slice_to_f32(src: &[f64]) -> Vec<f32> {
