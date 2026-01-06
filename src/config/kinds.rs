@@ -87,12 +87,31 @@ simple_kind! {
 
 // pc_amg_interp_type
 simple_kind! {
-    pub enum AmgInterpKind { Classical => "classical", Direct => "direct", Multipass => "multipass", Extended => "extended", Standard => "standard" }
+    pub enum AmgInterpKind {
+        Classical => "classical",
+        Direct => "direct",
+        Multipass => "multipass",
+        Extended => "extended",
+        Standard => "standard",
+        He => "he",
+    }
 }
 
 // pc_amg_relax_type
 simple_kind! {
-    pub enum AmgRelaxKind { Jacobi => "jacobi", Gs => "gs", Gsr => "gsr", Sgs => "sgs", Hgs => "hgs", L1Jacobi => "l1jacobi", Chebyshev => "chebyshev" }
+    pub enum AmgRelaxKind {
+        Jacobi => "jacobi",
+        Gs => "gs",
+        Gsr => "gsr",
+        Sgs => "sgs",
+        Hgs => "hgs",
+        L1Jacobi => "l1jacobi",
+        Chebyshev => "chebyshev",
+        ChebyshevSafe => "chebyshev_safe",
+        SafeguardedGs => "safegs",
+        Ilu0 => "ilu0",
+        Ras => "ras",
+    }
 }
 
 // pc_asm_block_solver

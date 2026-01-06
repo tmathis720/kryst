@@ -17,6 +17,7 @@ pub enum CoarseSolve {
     CG,
     DirectDense,
     ILU,
+    Smoother,
 }
 
 pub trait CoarseSolver {

@@ -25,16 +25,20 @@ use crate::matrix::{
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+use crate::parallel::Comm;
+use crate::preconditioner::asm::{Asm, AsmCombine, AsmConfig, AsmLocalSolver};
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
+use crate::preconditioner::ilu_csr::{
+    IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
-use crate::utils::conditioning::{apply_csr_transforms, ConditioningOptions};
+use crate::utils::conditioning::{ConditioningOptions, apply_csr_transforms};
 use faer::Mat;
-use crate::parallel::Comm;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -91,6 +95,7 @@ pub enum InterpType {
     Multipass,
     Extended,
     Standard,
+    HE,
 }
 
 /// Response when rank diagnostics flag interpolation issues.
@@ -112,6 +117,10 @@ pub enum RelaxType {
     HybridGaussSeidel,
     L1Jacobi,
     Chebyshev,
+    ChebyshevSafe,
+    SafeguardedGaussSeidel,
+    Ilu0,
+    Ras,
     Fsai,
 }
 
@@ -562,6 +571,10 @@ impl AMGConfig {
             AmgRelaxKind::Hgs => RelaxType::HybridGaussSeidel,
             AmgRelaxKind::L1Jacobi => RelaxType::L1Jacobi,
             AmgRelaxKind::Chebyshev => RelaxType::Chebyshev,
+            AmgRelaxKind::ChebyshevSafe => RelaxType::ChebyshevSafe,
+            AmgRelaxKind::SafeguardedGs => RelaxType::SafeguardedGaussSeidel,
+            AmgRelaxKind::Ilu0 => RelaxType::Ilu0,
+            AmgRelaxKind::Ras => RelaxType::Ras,
         };
         self.relax_type = relax;
         for phase in RelaxPhase::ALL {
@@ -711,6 +724,7 @@ fn map_interp(kind: AmgInterpKind) -> InterpType {
         AmgInterpKind::Multipass => InterpType::Multipass,
         AmgInterpKind::Extended => InterpType::Extended,
         AmgInterpKind::Standard => InterpType::Standard,
+        AmgInterpKind::He => InterpType::HE,
     }
 }
 
@@ -1202,7 +1216,7 @@ impl Default for AMGBuilder {
 // ===== Workspace, levels & hierarchy ========================================
 
 fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<(), KError> {
-    if !matches!(coarse_solver, CoarseSolve::CG | CoarseSolve::ILU)
+    if matches!(coarse_solver, CoarseSolve::DirectDense)
         && cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0
     {
         return Err(KError::InvalidInput(
@@ -1218,6 +1232,10 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             | RelaxType::SymmetricGaussSeidel
             | RelaxType::L1Jacobi
             | RelaxType::Chebyshev
+            | RelaxType::ChebyshevSafe
+            | RelaxType::SafeguardedGaussSeidel
+            | RelaxType::Ilu0
+            | RelaxType::Ras
             | RelaxType::Fsai => {}
             _ => {
                 return Err(KError::InvalidInput(format!(
@@ -1326,7 +1344,12 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
 
         for phase in [RelaxPhase::Fine, RelaxPhase::Down, RelaxPhase::Up] {
             match cfg.grid_relax_type[phase.ix()] {
-                RelaxType::GaussSeidelBackward | RelaxType::HybridGaussSeidel => {
+                RelaxType::GaussSeidelBackward
+                | RelaxType::HybridGaussSeidel
+                | RelaxType::SafeguardedGaussSeidel
+                | RelaxType::Ilu0
+                | RelaxType::Ras
+                | RelaxType::ChebyshevSafe => {
                     return Err(KError::InvalidInput(
                         "SPD mode does not support asymmetric Gauss-Seidel variants".into(),
                     ));
@@ -1544,8 +1567,14 @@ struct AMGLevel {
     d_sqrt_inv: Option<Vec<f64>>,
     /// 1 / (\sum_j |a_ij|) for L1-Jacobi
     l1_inv: Option<Vec<f64>>,
+    /// diag(A_l)^{-1} with safeguards for poor diagonals (optional)
+    diag_inv_safe: Option<Vec<f64>>,
+    /// diag(A_l)^{-1/2} derived from safeguarded diagonal (optional)
+    d_sqrt_inv_safe: Option<Vec<f64>>,
     /// Cached spectral bounds for Chebyshev smoother
     cheb: Option<ChebData>,
+    /// Cached spectral bounds for safeguarded Chebyshev smoother
+    cheb_safe: Option<ChebData>,
     /// fine->coarse aggregate id used to rebuild P values (SA numeric refresh)
     agg_of: Vec<usize>,
     /// coarse/fine flags for classical interpolation
@@ -1574,6 +1603,8 @@ struct AMGLevel {
     r_vals_scratch: Option<Vec<f64>>,
     #[allow(clippy::redundant_allocation)]
     coarse_solver: Option<Mutex<Box<dyn CoarseSolver + Send>>>,
+    ilu0: Option<Mutex<IluCsr>>,
+    ras: Option<Mutex<Asm>>,
     fsai: Option<FsaiData>,
     a_vals_f32: Option<Vec<f32>>,
     diag_inv_f32: Option<Vec<f32>>,
@@ -2569,9 +2600,35 @@ impl AMG {
 
     fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<Box<AmgHierarchy>, KError> {
         // Build the full hierarchy from scratch (symbolic + numeric)
-        let (hier, stats) = build_hierarchy(fine, &mut self.cfg)?;
+        let mut cfg = self.cfg.clone();
+        let primary = build_hierarchy(fine, &mut cfg);
+        let (hier, stats, used_cfg) = match primary {
+            Ok((hier, stats)) => (hier, stats, cfg),
+            Err(primary_err) => {
+                let mut fallback_cfg = cfg.clone();
+                fallback_cfg.coarsen_type = CoarsenType::RS;
+                fallback_cfg.interp_type = InterpType::Classical;
+                match build_hierarchy(fine, &mut fallback_cfg) {
+                    Ok((hier, stats)) => (hier, stats, fallback_cfg),
+                    Err(fallback_err) => {
+                        let mut smoother_cfg = cfg.clone();
+                        smoother_cfg.coarse_solve = CoarseSolve::Smoother;
+                        match build_smoother_only_hierarchy(fine, &mut smoother_cfg) {
+                            Ok((hier, stats)) => (hier, stats, smoother_cfg),
+                            Err(_) => {
+                                return Err(KError::InvalidInput(format!(
+                                    "AMG setup failed: {primary_err}; fallback failed: {fallback_err}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        };
         #[cfg(test)]
         BUILD_SYMBOLIC_COUNT.with(|c| c.set(c.get() + 1));
+        self.cfg = used_cfg;
+        self.cycle_policy = Self::make_cycle_policy(&self.cfg);
         self.stats = stats;
         Ok(Box::new(hier))
     }
@@ -2646,11 +2703,21 @@ impl AMG {
 
         // Update finest A_0 and diag(A_0)^{-1}
         h.levels[0].a = fine.clone();
-        h.levels[0].diag_inv = diag_inv_from_csr_cfg(&h.levels[0].a, &self.cfg)?;
-
         let need_l1 = self.cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
         let need_cheb = self.cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
+        let need_cheb_safe = self.cfg.grid_relax_type.contains(&RelaxType::ChebyshevSafe);
+        let need_safe_diag = self
+            .cfg
+            .grid_relax_type
+            .contains(&RelaxType::SafeguardedGaussSeidel)
+            || need_cheb_safe;
+        let need_ilu0 = self.cfg.grid_relax_type.contains(&RelaxType::Ilu0);
+        let need_ras = self.cfg.grid_relax_type.contains(&RelaxType::Ras);
+        let allow_safeguard = need_safe_diag || need_ilu0 || need_ras;
         let need_fsai = self.cfg.grid_relax_type.contains(&RelaxType::Fsai);
+
+        h.levels[0].diag_inv =
+            diag_inv_from_csr_cfg_fallback(&h.levels[0].a, &self.cfg, allow_safeguard)?;
         let mut trials_current = make_trial_matrix(&self.cfg, h.levels[0].a.nrows())?;
         let mut diag_stats: Vec<AmgLevelStats> = Vec::new();
         diag_stats.push(AmgLevelStats {
@@ -2676,6 +2743,7 @@ impl AMG {
                 let params = ClassicalParams {
                     variant: match self.cfg.interp_type {
                         InterpType::Direct => ClassicalVariant::Direct,
+                        InterpType::HE => ClassicalVariant::HE,
                         InterpType::Standard | InterpType::Classical | InterpType::Extended => {
                             ClassicalVariant::Standard
                         }
@@ -2997,7 +3065,8 @@ impl AMG {
                     }
                 }
                 h.levels[l + 1].a = a_coarse;
-                h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&h.levels[l + 1].a, &self.cfg)?;
+                h.levels[l + 1].diag_inv =
+                    diag_inv_from_csr_cfg_fallback(&h.levels[l + 1].a, &self.cfg, allow_safeguard)?;
                 #[cfg(debug_assertions)]
                 debug_check_csr(&h.levels[l + 1].a, "coarse A");
                 trials_current = trials_next;
@@ -3043,7 +3112,8 @@ impl AMG {
                         }
                     }
                 }
-                h.levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&a_coarse, &self.cfg)?;
+                h.levels[l + 1].diag_inv =
+                    diag_inv_from_csr_cfg_fallback(&a_coarse, &self.cfg, allow_safeguard)?;
                 h.levels[l + 1].a = a_coarse;
                 trials_current = None;
             }
@@ -3076,7 +3146,17 @@ impl AMG {
         });
         for lvl in 0..=h.coarsest_ix() {
             let recompute = self.cfg.chebyshev_recompute_esteig || h.levels[lvl].cheb.is_none();
-            update_level_caches(&self.cfg, &mut h.levels[lvl], need_l1, need_cheb, recompute)?;
+            update_level_caches(
+                &self.cfg,
+                &mut h.levels[lvl],
+                need_l1,
+                need_cheb,
+                need_safe_diag,
+                need_cheb_safe,
+                need_ilu0,
+                need_ras,
+                recompute,
+            )?;
             if need_fsai {
                 let level = &mut h.levels[lvl];
                 if level.fsai.is_none() {
@@ -3419,6 +3499,76 @@ impl AMG {
         for _ in 0..sweeps {
             Self::gs_forward(omega, a, diag_inv, r, z, 1)?;
             Self::gs_backward(omega, a, diag_inv, r, z, 1)?;
+        }
+        Ok(())
+    }
+
+    fn ilu0_smooth(
+        omega: f64,
+        level: &AMGLevel,
+        r: &[f64],
+        z: &mut [f64],
+        sweeps: usize,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if sweeps == 0 {
+            return Ok(());
+        }
+        let ilu = level
+            .ilu0
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("ILU0 cache missing".into()))?;
+        let n = level.a.nrows();
+        ws.ensure(n);
+        for _ in 0..sweeps {
+            level.a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
+            for i in 0..n {
+                ws.residual[i] = r[i] - ws.work[i];
+            }
+            ws.temp[..n].fill(R::default());
+            ilu.lock().expect("ILU0 mutex poisoned").apply(
+                PcSide::Left,
+                &ws.residual[..n],
+                &mut ws.temp[..n],
+            )?;
+            for i in 0..n {
+                z[i] += omega * ws.temp[i];
+            }
+        }
+        Ok(())
+    }
+
+    fn ras_smooth(
+        omega: f64,
+        level: &AMGLevel,
+        r: &[f64],
+        z: &mut [f64],
+        sweeps: usize,
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        if sweeps == 0 {
+            return Ok(());
+        }
+        let ras = level
+            .ras
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("RAS cache missing".into()))?;
+        let n = level.a.nrows();
+        ws.ensure(n);
+        for _ in 0..sweeps {
+            level.a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
+            for i in 0..n {
+                ws.residual[i] = r[i] - ws.work[i];
+            }
+            ws.temp[..n].fill(R::default());
+            ras.lock().expect("RAS mutex poisoned").apply(
+                PcSide::Left,
+                &ws.residual[..n],
+                &mut ws.temp[..n],
+            )?;
+            for i in 0..n {
+                z[i] += omega * ws.temp[i];
+            }
         }
         Ok(())
     }
@@ -4008,6 +4158,17 @@ impl AMG {
                     Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k)
                 }
             }
+            RelaxType::SafeguardedGaussSeidel => {
+                let diag = lvl
+                    .diag_inv_safe
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("Safeguarded GS cache missing".into()))?;
+                if matches!(where_, RelaxWhere::Pre) {
+                    Self::gs_forward(1.0, a, diag, rhs, sol, k)
+                } else {
+                    Self::gs_backward(1.0, a, diag, rhs, sol, k)
+                }
+            }
             RelaxType::GaussSeidelBackward => Self::gs_backward(1.0, a, &lvl.diag_inv, rhs, sol, k),
             RelaxType::SymmetricGaussSeidel => Self::sym_gs(1.0, a, &lvl.diag_inv, rhs, sol, k),
             RelaxType::L1Jacobi => {
@@ -4036,6 +4197,27 @@ impl AMG {
                 }
                 Ok(())
             }
+            RelaxType::ChebyshevSafe => {
+                if use_mp_smooth {
+                    return Err(KError::InvalidInput(
+                        "ChebyshevSafe does not support mixed-precision smoothing".into(),
+                    ));
+                }
+                let cheb = lvl
+                    .cheb_safe
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("ChebyshevSafe cache missing".into()))?;
+                let diag = lvl.diag_inv_safe.as_ref().ok_or_else(|| {
+                    KError::InvalidInput("ChebyshevSafe diag cache missing".into())
+                })?;
+                let degree = cfg.chebyshev_degree.max(1);
+                for _ in 0..k {
+                    Self::apply_chebyshev(a, diag, rhs, sol, degree, cheb, ws)?;
+                }
+                Ok(())
+            }
+            RelaxType::Ilu0 => Self::ilu0_smooth(pol.omega, lvl, rhs, sol, k, ws),
+            RelaxType::Ras => Self::ras_smooth(pol.omega, lvl, rhs, sol, k, ws),
             RelaxType::Fsai => {
                 let data = lvl
                     .fsai
@@ -4091,6 +4273,13 @@ impl AMG {
             RelaxType::GaussSeidel => {
                 Self::gs_forward(1.0, &lvl.a, &lvl.diag_inv, rhs, sol, sweeps)
             }
+            RelaxType::SafeguardedGaussSeidel => {
+                let diag = lvl
+                    .diag_inv_safe
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("Safeguarded GS cache missing".into()))?;
+                Self::gs_forward(1.0, &lvl.a, diag, rhs, sol, sweeps)
+            }
             RelaxType::GaussSeidelBackward => {
                 Self::gs_backward(1.0, &lvl.a, &lvl.diag_inv, rhs, sol, sweeps)
             }
@@ -4115,6 +4304,22 @@ impl AMG {
                 }
                 Ok(())
             }
+            RelaxType::ChebyshevSafe => {
+                let cheb = lvl
+                    .cheb_safe
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("ChebyshevSafe cache missing".into()))?;
+                let diag = lvl.diag_inv_safe.as_ref().ok_or_else(|| {
+                    KError::InvalidInput("ChebyshevSafe diag cache missing".into())
+                })?;
+                let degree = cfg.chebyshev_degree.max(1);
+                for _ in 0..sweeps {
+                    Self::apply_chebyshev(&lvl.a, diag, rhs, sol, degree, cheb, ws)?;
+                }
+                Ok(())
+            }
+            RelaxType::Ilu0 => Self::ilu0_smooth(cfg.jacobi_omega, lvl, rhs, sol, sweeps, ws),
+            RelaxType::Ras => Self::ras_smooth(cfg.jacobi_omega, lvl, rhs, sol, sweeps, ws),
             RelaxType::Fsai => {
                 let data = lvl
                     .fsai
@@ -4169,6 +4374,13 @@ impl AMG {
                 Ok(())
             }
             RelaxType::GaussSeidel => Self::gs_forward(1.0, &lvl.a, &lvl.diag_inv, r, out, 1),
+            RelaxType::SafeguardedGaussSeidel => {
+                let diag = lvl
+                    .diag_inv_safe
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("Safeguarded GS cache missing".into()))?;
+                Self::gs_forward(1.0, &lvl.a, diag, r, out, 1)
+            }
             RelaxType::GaussSeidelBackward => {
                 Self::gs_backward(1.0, &lvl.a, &lvl.diag_inv, r, out, 1)
             }
@@ -4205,6 +4417,48 @@ impl AMG {
                     temp,
                     work,
                 )
+            }
+            RelaxType::ChebyshevSafe => {
+                let cheb = lvl
+                    .cheb_safe
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("ChebyshevSafe cache missing".into()))?;
+                let diag = lvl.diag_inv_safe.as_ref().ok_or_else(|| {
+                    KError::InvalidInput("ChebyshevSafe diag cache missing".into())
+                })?;
+                let bounds = ChebBounds {
+                    lam_max: cheb.lambda_max,
+                    lam_min: cheb.lambda_min,
+                };
+                chebyshev::chebyshev_smooth_csr(
+                    &lvl.a,
+                    diag,
+                    r,
+                    out,
+                    self.cfg.chebyshev_degree.max(1),
+                    &bounds,
+                    residual,
+                    temp,
+                    work,
+                )
+            }
+            RelaxType::Ilu0 => {
+                let ilu = lvl
+                    .ilu0
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("ILU0 cache missing".into()))?;
+                ilu.lock()
+                    .expect("ILU0 mutex poisoned")
+                    .apply(PcSide::Left, r, out)
+            }
+            RelaxType::Ras => {
+                let ras = lvl
+                    .ras
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("RAS cache missing".into()))?;
+                ras.lock()
+                    .expect("RAS mutex poisoned")
+                    .apply(PcSide::Left, r, out)
             }
             RelaxType::Fsai => {
                 let data = lvl
@@ -4372,6 +4626,19 @@ impl AMG {
         if level == lc {
             with_timing(prof, &mut lv.coarse_solve, || {
                 let n = a.nrows();
+                if matches!(h.coarse_solve, CoarseSolve::Smoother) {
+                    ws.ensure(n);
+                    return Self::apply_relax(
+                        pol,
+                        RelaxPhase::Coarsest,
+                        RelaxWhere::Pre,
+                        &h.levels[level],
+                        rhs,
+                        sol,
+                        ws,
+                        &self.cfg,
+                    );
+                }
                 let prefer_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
                     || n <= self.cfg.max_coarse_size;
                 if prefer_dense {
@@ -4404,6 +4671,7 @@ impl AMG {
                             }
                         }
                         CoarseSolve::DirectDense => unreachable!(),
+                        CoarseSolve::Smoother => unreachable!(),
                     }
                 }
             })?;
@@ -4739,7 +5007,10 @@ impl Preconditioner for AMG {
 
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
-        if op.as_any().downcast_ref::<crate::matrix::DistCsrOp>().is_some()
+        if op
+            .as_any()
+            .downcast_ref::<crate::matrix::DistCsrOp>()
+            .is_some()
             && op.comm().size() > 1
         {
             return Err(KError::Unsupported(
@@ -4964,12 +5235,20 @@ fn build_hierarchy(
 
     let need_l1 = cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
     let need_cheb = cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
+    let need_cheb_safe = cfg.grid_relax_type.contains(&RelaxType::ChebyshevSafe);
+    let need_safe_diag = cfg
+        .grid_relax_type
+        .contains(&RelaxType::SafeguardedGaussSeidel)
+        || need_cheb_safe;
+    let need_ilu0 = cfg.grid_relax_type.contains(&RelaxType::Ilu0);
+    let need_ras = cfg.grid_relax_type.contains(&RelaxType::Ras);
+    let allow_safeguard = need_safe_diag || need_ilu0 || need_ras;
     let need_fsai = cfg.grid_relax_type.contains(&RelaxType::Fsai);
 
     // Level 0 (finest)
     let mut lt0 = LevelSetupTiming::default();
     let t = tic();
-    let diag0 = diag_inv_from_csr_cfg(&a_cur, cfg)?;
+    let diag0 = diag_inv_from_csr_cfg_fallback(&a_cur, cfg, allow_safeguard)?;
     if do_stats {
         lt0.diag = toc(t);
         lt0.total = lt0.diag;
@@ -4992,7 +5271,10 @@ fn build_hierarchy(
         diag_inv: diag0,
         d_sqrt_inv: None,
         l1_inv: None,
+        diag_inv_safe: None,
+        d_sqrt_inv_safe: None,
         cheb: None,
+        cheb_safe: None,
         agg_of: (0..a_cur.nrows()).collect(),
         is_c: Vec::new(),
         cf: None,
@@ -5008,6 +5290,8 @@ fn build_hierarchy(
         r_col_idx: None,
         r_vals_scratch: None,
         coarse_solver: None,
+        ilu0: None,
+        ras: None,
         fsai: None,
         a_vals_f32: None,
         diag_inv_f32: None,
@@ -5017,7 +5301,17 @@ fn build_hierarchy(
         fsai_gt_vals_f32: None,
     };
     let mut l0 = l0;
-    update_level_caches(cfg, &mut l0, need_l1, need_cheb, true)?;
+    update_level_caches(
+        cfg,
+        &mut l0,
+        need_l1,
+        need_cheb,
+        need_safe_diag,
+        need_cheb_safe,
+        need_ilu0,
+        need_ras,
+        true,
+    )?;
     if need_fsai {
         let strength0 = if cfg.fsai_use_strength {
             Some(Strength::from_csr(
@@ -5030,6 +5324,11 @@ fn build_hierarchy(
         };
         l0.fsai = Some(fsai_build_for_level(cfg, &l0.a, strength0.as_ref())?);
         refresh_mixed_precision_shadows(cfg, &mut l0);
+    }
+    #[cfg(feature = "simd")]
+    {
+        let tuning = utils::default_spmv_tuning();
+        build_level_spmv_plans(&mut l0, &tuning);
     }
     #[cfg(feature = "simd")]
     build_level_spmv_plans(&mut l0, &spmv_tuning);
@@ -5193,7 +5492,7 @@ fn build_hierarchy(
             comp_of: comp_opt.clone(),
         };
         let block_size_next = tp.num_functions.max(1);
-        let d = diag_inv_from_csr_cfg(&a_cur, cfg)?;
+        let d = diag_inv_from_csr_cfg_fallback(&a_cur, cfg, allow_safeguard)?;
         let diag_weights: Vec<f64> = d
             .iter()
             .map(|&inv| {
@@ -5238,6 +5537,7 @@ fn build_hierarchy(
                         | InterpType::Standard
                         | InterpType::Extended
                         | InterpType::Classical
+                        | InterpType::HE
                 ) {
                     let extended = matches!(cfg.interp_type, InterpType::Extended);
                     let (pat, cf) = classical_pattern(&a_cur, &s_sym, &is_c, extended);
@@ -5245,6 +5545,7 @@ fn build_hierarchy(
                     let params = ClassicalParams {
                         variant: match cfg.interp_type {
                             InterpType::Direct => ClassicalVariant::Direct,
+                            InterpType::HE => ClassicalVariant::HE,
                             InterpType::Standard | InterpType::Classical | InterpType::Extended => {
                                 ClassicalVariant::Standard
                             }
@@ -5529,7 +5830,7 @@ fn build_hierarchy(
             }
         }
         let diag_inv_coarse = with_timing(do_stats, &mut lt.diag, || {
-            diag_inv_from_csr_cfg(&a_coarse, cfg)
+            diag_inv_from_csr_cfg_fallback(&a_coarse, cfg, allow_safeguard)
         })?;
         lt.total = lt.strength
             + lt.aggregate
@@ -5588,7 +5889,10 @@ fn build_hierarchy(
             diag_inv: diag_inv_coarse,
             d_sqrt_inv: None,
             l1_inv: None,
+            diag_inv_safe: None,
+            d_sqrt_inv_safe: None,
             cheb: None,
+            cheb_safe: None,
             agg_of: (0..a_cur.nrows()).collect(),
             is_c: Vec::new(),
             cf: None,
@@ -5608,6 +5912,8 @@ fn build_hierarchy(
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
+            ilu0: None,
+            ras: None,
             fsai: None,
             a_vals_f32: None,
             diag_inv_f32: None,
@@ -5616,7 +5922,17 @@ fn build_hierarchy(
             fsai_g_vals_f32: None,
             fsai_gt_vals_f32: None,
         };
-        update_level_caches(cfg, &mut next_level, need_l1, need_cheb, true)?;
+        update_level_caches(
+            cfg,
+            &mut next_level,
+            need_l1,
+            need_cheb,
+            need_safe_diag,
+            need_cheb_safe,
+            need_ilu0,
+            need_ras,
+            true,
+        )?;
         if need_fsai {
             let strength_coarse = if cfg.fsai_use_strength {
                 Some(Strength::from_csr(
@@ -5726,8 +6042,142 @@ fn build_hierarchy(
     Ok((hier, stats_opt))
 }
 
+fn build_smoother_only_hierarchy(
+    fine: &CsrMatrix<f64>,
+    cfg: &mut AMGConfig,
+) -> Result<(AmgHierarchy, Option<AmgStats>), KError> {
+    let allow_safeguard = cfg
+        .grid_relax_type
+        .contains(&RelaxType::SafeguardedGaussSeidel)
+        || cfg.grid_relax_type.contains(&RelaxType::ChebyshevSafe)
+        || cfg.grid_relax_type.contains(&RelaxType::Ilu0)
+        || cfg.grid_relax_type.contains(&RelaxType::Ras);
+    let need_l1 = cfg.grid_relax_type.contains(&RelaxType::L1Jacobi);
+    let need_cheb = cfg.grid_relax_type.contains(&RelaxType::Chebyshev);
+    let need_cheb_safe = cfg.grid_relax_type.contains(&RelaxType::ChebyshevSafe);
+    let need_safe_diag = cfg
+        .grid_relax_type
+        .contains(&RelaxType::SafeguardedGaussSeidel)
+        || need_cheb_safe;
+    let need_ilu0 = cfg.grid_relax_type.contains(&RelaxType::Ilu0);
+    let need_ras = cfg.grid_relax_type.contains(&RelaxType::Ras);
+    let need_fsai = cfg.grid_relax_type.contains(&RelaxType::Fsai);
+
+    let diag0 = diag_inv_from_csr_cfg_fallback(fine, cfg, allow_safeguard)?;
+    let layout0 = if cfg.nodal == NodalMode::Nodal {
+        Some(DofLayout::new(fine.nrows(), cfg.block_size))
+    } else {
+        None
+    };
+    let l0_num_functions = cfg
+        .near_nullspace
+        .as_ref()
+        .map(|nns| nns.basis.len().max(1))
+        .or_else(|| layout0.as_ref().map(|layout| layout.block_size.max(1)))
+        .unwrap_or_else(|| cfg.num_functions.max(1));
+    let mut l0 = AMGLevel {
+        a: fine.clone(),
+        p: CsrMatrix::identity(fine.nrows()),
+        r: CsrMatrix::identity(fine.nrows()),
+        diag_inv: diag0,
+        d_sqrt_inv: None,
+        l1_inv: None,
+        diag_inv_safe: None,
+        d_sqrt_inv_safe: None,
+        cheb: None,
+        cheb_safe: None,
+        agg_of: (0..fine.nrows()).collect(),
+        is_c: Vec::new(),
+        cf: None,
+        p2r_pos: Vec::new(),
+        num_functions: l0_num_functions,
+        row_basis: None,
+        layout: layout0,
+        nns: cfg.near_nullspace.as_ref().map(|nns| nns.basis.clone()),
+        a_next_pat: None,
+        a_next_pat_ng: None,
+        rap_full2ng_pos: None,
+        r_row_ptr: None,
+        r_col_idx: None,
+        r_vals_scratch: None,
+        coarse_solver: None,
+        ilu0: None,
+        ras: None,
+        fsai: None,
+        a_vals_f32: None,
+        diag_inv_f32: None,
+        d_sqrt_inv_f32: None,
+        l1_inv_f32: None,
+        fsai_g_vals_f32: None,
+        fsai_gt_vals_f32: None,
+    };
+    update_level_caches(
+        cfg,
+        &mut l0,
+        need_l1,
+        need_cheb,
+        need_safe_diag,
+        need_cheb_safe,
+        need_ilu0,
+        need_ras,
+        true,
+    )?;
+    if need_fsai {
+        let strength0 = if cfg.fsai_use_strength {
+            Some(Strength::from_csr(
+                &l0.a,
+                cfg.strong_threshold,
+                cfg.normalize_strength,
+            ))
+        } else {
+            None
+        };
+        l0.fsai = Some(fsai_build_for_level(cfg, &l0.a, strength0.as_ref())?);
+        refresh_mixed_precision_shadows(cfg, &mut l0);
+    }
+
+    let hier = AmgHierarchy {
+        policy: RelaxPolicy {
+            kind: cfg.grid_relax_type,
+            sweeps: cfg.num_grid_sweeps,
+            omega: cfg.jacobi_omega,
+        },
+        coarse_solve: CoarseSolve::Smoother,
+        levels: vec![l0],
+    };
+
+    let stats_opt = if cfg.logging_level > 0 {
+        let mut stats = AmgStats::from_hierarchy(&hier);
+        stats.levels = vec![LevelStats {
+            level: 0,
+            n: fine.nrows(),
+            nnz_a: fine.nnz(),
+            nnz_p: 0,
+            nnz_r: 0,
+            max_row_sum_a: max_row_sum_abs(fine),
+            eff_nnz_a: Some(eff_nnz(fine, cfg.stats_eps)),
+        }];
+        stats.diagnostics = vec![AmgLevelStats {
+            p_min_col_norm: 0.0,
+            p_cond_sketched: 0.0,
+            galerkin_worst_rel: 0.0,
+        }];
+        Some(stats)
+    } else {
+        None
+    };
+
+    Ok((hier, stats_opt))
+}
+
 fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<(), KError> {
     if let Some(target) = cfg.non_galerkin.oc_target {
+        let allow_safeguard = cfg
+            .grid_relax_type
+            .contains(&RelaxType::SafeguardedGaussSeidel)
+            || cfg.grid_relax_type.contains(&RelaxType::ChebyshevSafe)
+            || cfg.grid_relax_type.contains(&RelaxType::Ilu0)
+            || cfg.grid_relax_type.contains(&RelaxType::Ras);
         let mut trials_current = make_trial_matrix(cfg, levels[0].a.nrows())?;
         for _ in 0..cfg.non_galerkin.oc_max_iter {
             let oc = operator_complexity_estimate(levels);
@@ -5827,7 +6277,8 @@ fn enforce_oc_target(levels: &mut Vec<AMGLevel>, cfg: &mut AMGConfig) -> Result<
                     levels[l].a_next_pat_ng = Some(ng_pat.clone());
                     levels[l].rap_full2ng_pos = Some(full2ng);
                     levels[l + 1].a = a_ng;
-                    levels[l + 1].diag_inv = diag_inv_from_csr_cfg(&levels[l + 1].a, cfg)?;
+                    levels[l + 1].diag_inv =
+                        diag_inv_from_csr_cfg_fallback(&levels[l + 1].a, cfg, allow_safeguard)?;
                     trials_current = trials_next;
                 } else {
                     trials_current = None;
@@ -5942,6 +6393,42 @@ fn diag_inv_from_csr_cfg(a: &CsrMatrix<f64>, cfg: &AMGConfig) -> Result<Vec<f64>
     diag_inv_from_csr_with_floor(a, floor, cfg.require_spd)
 }
 
+fn diag_inv_from_csr_safeguarded(a: &CsrMatrix<f64>) -> Vec<f64> {
+    let n = a.nrows();
+    let mut inv = vec![0.0; n];
+    let row_ptr = a.row_ptr();
+    let col_idx = a.col_idx();
+    let vals = a.values();
+    for i in 0..n {
+        let rs = row_ptr[i];
+        let re = row_ptr[i + 1];
+        let mut diag = 0.0;
+        let mut row_sum = 0.0;
+        for p in rs..re {
+            let v = vals[p];
+            row_sum += v.abs();
+            if col_idx[p] == i {
+                diag = v.abs();
+            }
+        }
+        let denom = diag.max(row_sum).max(1e-30);
+        inv[i] = 1.0 / denom;
+    }
+    inv
+}
+
+fn diag_inv_from_csr_cfg_fallback(
+    a: &CsrMatrix<f64>,
+    cfg: &AMGConfig,
+    allow_safeguard: bool,
+) -> Result<Vec<f64>, KError> {
+    match diag_inv_from_csr_cfg(a, cfg) {
+        Ok(v) => Ok(v),
+        Err(err) if allow_safeguard && !cfg.require_spd => Ok(diag_inv_from_csr_safeguarded(a)),
+        Err(err) => Err(err),
+    }
+}
+
 fn diag_inv_from_csr(a: &CsrMatrix<f64>) -> Result<Vec<f64>, KError> {
     diag_inv_from_csr_with_floor(a, 0.0, false)
 }
@@ -6007,6 +6494,10 @@ fn update_level_caches(
     level: &mut AMGLevel,
     need_l1: bool,
     need_cheb: bool,
+    need_safe_diag: bool,
+    need_cheb_safe: bool,
+    need_ilu0: bool,
+    need_ras: bool,
     recompute_cheb: bool,
 ) -> Result<(), KError> {
     if need_l1 {
@@ -6025,7 +6516,74 @@ fn update_level_caches(
         level.d_sqrt_inv = None;
         level.cheb = None;
     }
+    if need_safe_diag {
+        let diag_safe = diag_inv_from_csr_safeguarded(&level.a);
+        level.diag_inv_safe = Some(diag_safe);
+    } else {
+        level.diag_inv_safe = None;
+    }
+    if need_cheb_safe {
+        let diag_safe = level
+            .diag_inv_safe
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("ChebyshevSafe cache missing".into()))?;
+        let mut d_sqrt = vec![0.0; diag_safe.len()];
+        for (dst, &d) in d_sqrt.iter_mut().zip(diag_safe.iter()) {
+            *dst = if d > 0.0 { d.sqrt() } else { 0.0 };
+        }
+        if recompute_cheb || level.cheb_safe.is_none() {
+            let cheb = compute_cheb_data(cfg, &level.a, diag_safe, &d_sqrt)?;
+            level.cheb_safe = Some(cheb);
+        }
+        level.d_sqrt_inv_safe = Some(d_sqrt);
+    } else {
+        level.d_sqrt_inv_safe = None;
+        level.cheb_safe = None;
+    }
+    if need_ilu0 {
+        build_ilu0_cache(level)?;
+    } else {
+        level.ilu0 = None;
+    }
+    if need_ras {
+        build_ras_cache(level)?;
+    } else {
+        level.ras = None;
+    }
     refresh_mixed_precision_shadows(cfg, level);
+    Ok(())
+}
+
+fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
+    let mut cfg = IluCsrConfig::default();
+    cfg.kind = IluKind::Ilu0;
+    cfg.pivot = PivotStrategy::DiagonalPerturbation;
+    cfg.pivot_threshold = 1e-12;
+    cfg.diag_perturb_factor = 1e-10;
+    cfg.level_sched = false;
+    cfg.reordering = ReorderingOptions::default();
+    cfg.conditioning = ConditioningOptions::default();
+    let mut ilu = IluCsr::new_with_config(cfg);
+    let op = crate::matrix::op::CsrOp::new(Arc::new(level.a.clone()));
+    ilu.setup(&op)?;
+    level.ilu0 = Some(Mutex::new(ilu));
+    Ok(())
+}
+
+fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
+    let cfg = AsmConfig {
+        overlap: 1,
+        combine: AsmCombine::Restricted,
+        local_solver: AsmLocalSolver::ILU,
+        local_sweeps: 1,
+        weight_partition_of_unity: false,
+        deterministic: true,
+        nparts: None,
+    };
+    let mut ras = Asm::with_config(cfg);
+    let op = crate::matrix::op::CsrOp::new(Arc::new(level.a.clone()));
+    Preconditioner::setup(&mut ras, &op)?;
+    level.ras = Some(Mutex::new(ras));
     Ok(())
 }
 
@@ -7567,7 +8125,10 @@ mod tests {
             diag_inv: vec![1.0],
             d_sqrt_inv: None,
             l1_inv: None,
+            diag_inv_safe: None,
+            d_sqrt_inv_safe: None,
             cheb: None,
+            cheb_safe: None,
             agg_of: vec![0],
             is_c: Vec::new(),
             cf: None,
@@ -7583,6 +8144,8 @@ mod tests {
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
+            ilu0: None,
+            ras: None,
             fsai: None,
             a_vals_f32: None,
             diag_inv_f32: None,
@@ -7608,7 +8171,10 @@ mod tests {
             diag_inv: diag_inv_from_csr(a).unwrap(),
             d_sqrt_inv: None,
             l1_inv: None,
+            diag_inv_safe: None,
+            d_sqrt_inv_safe: None,
             cheb: None,
+            cheb_safe: None,
             agg_of: vec![0; n.max(1)],
             is_c: Vec::new(),
             cf: None,
@@ -7624,6 +8190,8 @@ mod tests {
             r_col_idx: None,
             r_vals_scratch: None,
             coarse_solver: None,
+            ilu0: None,
+            ras: None,
             fsai: None,
             a_vals_f32: None,
             diag_inv_f32: None,
