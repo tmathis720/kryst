@@ -15,9 +15,10 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         PcConfig::Ilu0 { conditioning } => {
             b::build_ilu0_with_conditioning(conditioning.clone()).map(Some)
         }
-        PcConfig::Iluk { level, conditioning } => {
-            b::build_iluk_with_conditioning(*level, conditioning.clone()).map(Some)
-        }
+        PcConfig::Iluk {
+            level,
+            conditioning,
+        } => b::build_iluk_with_conditioning(*level, conditioning.clone()).map(Some),
         PcConfig::Ilut {
             drop_tol,
             max_fill,
@@ -26,6 +27,20 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         } => b::build_ilut_with_conditioning(
             *drop_tol,
             *max_fill,
+            reordering.clone(),
+            conditioning.clone(),
+        )
+        .map(Some),
+        PcConfig::Ilutp {
+            drop_tol,
+            max_fill,
+            perm_tol,
+            reordering,
+            conditioning,
+        } => b::build_ilutp_with_conditioning(
+            *max_fill,
+            *drop_tol,
+            *perm_tol,
             reordering.clone(),
             conditioning.clone(),
         )
@@ -77,7 +92,9 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             max_cond,
             parallel,
         } => {
-            use crate::preconditioner::approxinv_csr::{ApproxInvKind, ApproxInvParams, FsaiCsr, SpaiCsr};
+            use crate::preconditioner::approxinv_csr::{
+                ApproxInvKind, ApproxInvParams, FsaiCsr, SpaiCsr,
+            };
             let params = ApproxInvParams {
                 kind: *kind,
                 levels: *levels,

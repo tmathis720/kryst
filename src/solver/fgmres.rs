@@ -14,12 +14,14 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::LinearSolver;
 use crate::solver::common::{recompute_true_residual_norm_s, ReductCtx};
+use crate::solver::LinearSolver;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
-use crate::utils::monitor::{log_residuals, ResidualSnapshot};
+use crate::utils::monitor::{
+    log_krylov_stagnation, log_residuals, stagnation_detected, ResidualSnapshot,
+};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -228,16 +230,15 @@ impl FgmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            let true_res =
-                recompute_true_residual_norm_s(
-                    a,
-                    b,
-                    x,
-                    comm,
-                    red.engine(),
-                    &mut ws.tmp1[..n],
-                    &mut ws.bridge,
-                );
+            let true_res = recompute_true_residual_norm_s(
+                a,
+                b,
+                x,
+                comm,
+                red.engine(),
+                &mut ws.tmp1[..n],
+                &mut ws.bridge,
+            );
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let reductions =
@@ -254,6 +255,9 @@ impl FgmresSolver {
             }
             return Ok(stats);
         }
+
+        let mut stagnation_residuals: Vec<R> = Vec::with_capacity(6);
+        let stagnation_threshold = S::from_real(0.95).real();
 
         while total_iters < self.maxits {
             let m_this = if self.preallocate {
@@ -484,6 +488,23 @@ impl FgmresSolver {
                     },
                 );
 
+                stagnation_residuals.push(res);
+                if stagnation_residuals.len() > 6 {
+                    stagnation_residuals.remove(0);
+                }
+                if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
+                    let action = match self.variant {
+                        FgmresVariant::Pipelined => {
+                            self.variant = FgmresVariant::Classical;
+                            "switching to classical restart"
+                        }
+                        _ => "restarting FGMRES",
+                    };
+                    log_krylov_stagnation("FGMRES", total_iters, res, action);
+                    stagnation_residuals.clear();
+                    break;
+                }
+
                 let res0 = beta0;
                 let (reason, sstats) = crate::utils::convergence::Convergence {
                     rtol: self.rtol,
@@ -576,16 +597,15 @@ impl FgmresSolver {
 
         stats.iterations = total_iters;
 
-        let true_res =
-            recompute_true_residual_norm_s(
-                a,
-                b,
-                x,
-                comm,
-                red.engine(),
-                &mut ws.tmp1[..n],
-                &mut ws.bridge,
-            );
+        let true_res = recompute_true_residual_norm_s(
+            a,
+            b,
+            x,
+            comm,
+            red.engine(),
+            &mut ws.tmp1[..n],
+            &mut ws.bridge,
+        );
         stats.final_residual = true_res;
 
         if matches!(stats.reason, ConvergedReason::Continued) {

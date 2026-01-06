@@ -32,10 +32,10 @@
 //! # Ok(()) }
 //! ```
 
-use crate::config::options::{KspOptions, PcOptions};
-use crate::context::KspContext;
+use crate::config::options::PcOptions;
 use crate::context::ksp_context::SolverType;
 use crate::context::pc_context::PcType;
+use crate::context::KspContext;
 use crate::error::KError;
 use crate::utils::monitor::IterationMonitor;
 use faer::Mat;
@@ -107,6 +107,51 @@ pub struct ParameterTuner {
 }
 
 impl ParameterTuner {
+    fn split_chain_tokens(chain: &str) -> Vec<&str> {
+        let normalized = chain.replace("->", ",").replace('+', ",");
+        normalized
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    fn build_chain_stage_options(token: &str, config: &ParameterConfig) -> PcOptions {
+        let mut stage = PcOptions {
+            pc_type: Some(token.trim().to_string()),
+            ..Default::default()
+        };
+        if token.eq_ignore_ascii_case("ras") {
+            stage.asm_mode = Some("ras".to_string());
+        }
+        if token.contains("amg") {
+            stage.amg_levels = config.amg_levels;
+            stage.amg_strength_threshold = config.amg_strength_threshold;
+            stage.amg_nu_pre = config.amg_nu_pre;
+            stage.amg_nu_post = config.amg_nu_post;
+        }
+        if token.contains("chebyshev") {
+            stage.chebyshev_degree = config.chebyshev_degree;
+            stage.chebyshev_lambda_min = config.chebyshev_lambda_min;
+            stage.chebyshev_lambda_max = config.chebyshev_lambda_max;
+        }
+        stage
+    }
+
+    fn build_chain_candidates(chain: &str, config: &ParameterConfig) -> Vec<Vec<PcOptions>> {
+        chain
+            .split("||")
+            .map(|candidate| candidate.trim())
+            .filter(|candidate| !candidate.is_empty())
+            .map(|candidate| {
+                Self::split_chain_tokens(candidate)
+                    .into_iter()
+                    .map(|token| Self::build_chain_stage_options(token, config))
+                    .collect()
+            })
+            .collect()
+    }
+
     fn estimate_memory_usage(
         matrix: &Mat<f64>,
         rhs: &[f64],
@@ -309,34 +354,8 @@ impl ParameterTuner {
 
         // Configure preconditioner
         if let Some(ref chain) = config.pc_chain {
-            // Build a structured chain from the configuration
-            let stages: Vec<PcOptions> = chain
-                .split("->")
-                .map(|token| {
-                    let mut stage = PcOptions {
-                        pc_type: Some(token.trim().to_string()),
-                        ..Default::default()
-                    };
-                    if token.contains("amg") {
-                        stage.amg_levels = config.amg_levels;
-                        stage.amg_strength_threshold = config.amg_strength_threshold;
-                        stage.amg_nu_pre = config.amg_nu_pre;
-                        stage.amg_nu_post = config.amg_nu_post;
-                    }
-                    if token.contains("chebyshev") {
-                        stage.chebyshev_degree = config.chebyshev_degree;
-                        stage.chebyshev_lambda_min = config.chebyshev_lambda_min;
-                        stage.chebyshev_lambda_max = config.chebyshev_lambda_max;
-                    }
-                    stage
-                })
-                .collect();
-
-            let pc_opts = PcOptions {
-                chain: Some(stages),
-                ..Default::default()
-            };
-            ksp.set_from_all_options(&KspOptions::default(), &pc_opts)?;
+            let candidates = Self::build_chain_candidates(chain, config);
+            ksp.set_pc_chain_candidates_from_options(candidates)?;
         } else {
             // Single preconditioner with options
             let mut pc_opts = PcOptions::default();

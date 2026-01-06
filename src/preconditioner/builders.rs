@@ -3,18 +3,18 @@ use crate::preconditioner::amg::AMGConfig;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{
-    Preconditioner,
-    block_jacobi::BlockJacobi,
     asm::{AsmCombine, AsmConfig, AsmLocalSolver},
     asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
+    block_jacobi::BlockJacobi,
     jacobi::Jacobi,
     sor::MatSorType,
+    Preconditioner,
 };
 
 use crate::preconditioner::chebyshev::ChebyshevPc;
+use crate::preconditioner::ilu_csr::ReorderingOptions;
 use crate::preconditioner::sor::SorPc;
 use crate::utils::conditioning::ConditioningOptions;
-use crate::preconditioner::ilu_csr::ReorderingOptions;
 
 #[cfg(feature = "superlu_dist")]
 use crate::preconditioner::direct::SuperLuDistPc;
@@ -169,7 +169,12 @@ pub fn build_ilut(
     max_fill: usize,
     _reordering: Option<String>,
 ) -> Result<Box<dyn Preconditioner>, KError> {
-    build_ilut_with_conditioning(drop_tol, max_fill, _reordering, ConditioningOptions::default())
+    build_ilut_with_conditioning(
+        drop_tol,
+        max_fill,
+        _reordering,
+        ConditioningOptions::default(),
+    )
 }
 
 pub fn build_ilut_with_conditioning(
@@ -206,6 +211,51 @@ pub fn build_ilut_with_conditioning(
         conditioning,
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
+}
+
+pub fn build_ilutp(
+    max_fill: usize,
+    drop_tol: f64,
+    perm_tol: f64,
+    reordering: Option<String>,
+) -> Result<Box<dyn Preconditioner>, KError> {
+    build_ilutp_with_conditioning(
+        max_fill,
+        drop_tol,
+        perm_tol,
+        reordering,
+        ConditioningOptions::default(),
+    )
+}
+
+pub fn build_ilutp_with_conditioning(
+    max_fill: usize,
+    drop_tol: f64,
+    perm_tol: f64,
+    reordering: Option<String>,
+    conditioning: ConditioningOptions,
+) -> Result<Box<dyn Preconditioner>, KError> {
+    #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
+    {
+        use crate::preconditioner::ilutp::Ilutp;
+        use crate::preconditioner::{legacy::Preconditioner as LegacyPc, LegacyOpPreconditioner};
+
+        let mut pc = Ilutp::with_params(max_fill, drop_tol, perm_tol);
+        if let Some(reordering) = reordering {
+            let reordering = parse_reordering_options(Some(reordering))?;
+            pc.set_reordering(reordering);
+        }
+        pc.set_conditioning(conditioning);
+        let legacy: Box<dyn LegacyPc<faer::Mat<f64>, Vec<f64>> + Send + Sync> = Box::new(pc);
+        return Ok(Box::new(LegacyOpPreconditioner::new(legacy)));
+    }
+    #[cfg(not(all(feature = "legacy-pc-bridge", feature = "backend-faer")))]
+    {
+        let _ = (max_fill, drop_tol, perm_tol, reordering, conditioning);
+        Err(KError::Unsupported(
+            "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\"".into(),
+        ))
+    }
 }
 
 pub fn build_milu0() -> Result<Box<dyn Preconditioner>, KError> {
@@ -245,7 +295,7 @@ fn parse_reordering_options(reordering: Option<String>) -> Result<ReorderingOpti
         other => {
             return Err(KError::InvalidInput(format!(
                 "unknown ILU reordering: {other}"
-            )))
+            )));
         }
     };
     Ok(opts)

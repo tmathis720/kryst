@@ -92,6 +92,37 @@ pub fn log_residuals(iteration: usize, solver: &str, snapshot: ResidualSnapshot)
     let _ = (iteration, solver, snapshot);
 }
 
+#[inline]
+pub fn stagnation_detected(recent: &[R], threshold: R) -> bool {
+    if recent.len() < 2 {
+        return false;
+    }
+    let mut ratios = Vec::with_capacity(recent.len() - 1);
+    for window in recent.windows(2) {
+        let prev = window[0];
+        let cur = window[1];
+        if prev <= R::default() {
+            return false;
+        }
+        ratios.push(cur / prev);
+    }
+    let sum = ratios.iter().copied().sum::<R>();
+    let avg = sum / S::from_real(ratios.len() as f64).real();
+    avg > threshold
+}
+
+#[inline]
+pub fn log_krylov_stagnation(solver: &str, iteration: usize, residual: R, action: &str) {
+    #[cfg(feature = "logging")]
+    if log::log_enabled!(log::Level::Warn) {
+        log::warn!(
+            "{solver}: stagnation detected at it {iteration} (res={residual:.3e}); {action}"
+        );
+    }
+    #[cfg(not(feature = "logging"))]
+    let _ = (solver, iteration, residual, action);
+}
+
 pub struct TextMonitor {
     pub rank0: bool,
 }

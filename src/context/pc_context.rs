@@ -100,7 +100,7 @@ impl FromStr for PcType {
             "ilup" => Ok(PcType::Ilup),
             "block_jacobi" => Ok(PcType::BlockJacobi),
             "sor" => Ok(PcType::Sor),
-            "asm" => Ok(PcType::Asm),
+            "asm" | "ras" => Ok(PcType::Asm),
             "chebyshev" => Ok(PcType::Chebyshev),
             "amg" => Ok(PcType::Amg),
             "approxinv" | "approxinverse" => Ok(PcType::ApproxInverse),
@@ -165,6 +165,13 @@ pub enum PcConfig {
     Ilut {
         drop_tol: R,
         max_fill: usize,
+        reordering: Option<String>,
+        conditioning: ConditioningOptions,
+    },
+    Ilutp {
+        drop_tol: R,
+        max_fill: usize,
+        perm_tol: R,
         reordering: Option<String>,
         conditioning: ConditioningOptions,
     },
@@ -270,9 +277,10 @@ impl PcConfig {
                 reordering: o.ilu_reordering.clone(),
                 conditioning: conditioning.clone(),
             },
-            Ilutp => PcConfig::Ilut {
-                drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
-                max_fill: o.ilut_max_fill.unwrap_or(20),
+            Ilutp => PcConfig::Ilutp {
+                drop_tol: o.ilutp_drop_tol.unwrap_or(1e-4),
+                max_fill: o.ilutp_max_fill.unwrap_or(10),
+                perm_tol: o.ilutp_perm_tol.unwrap_or(0.1),
                 reordering: o.ilu_reordering.clone(),
                 conditioning: conditioning.clone(),
             },
@@ -403,6 +411,15 @@ impl PcConfig {
 pub struct PcFactory;
 
 impl PcFactory {
+    fn split_chain_tokens(chain: &str) -> Vec<&str> {
+        let normalized = chain.replace("->", ",").replace('+', ",");
+        normalized
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     #[inline]
     fn is_direct(pc: PcType) -> bool {
         match pc {
@@ -569,13 +586,13 @@ impl PcFactory {
         opts: Option<&PcOptions>,
     ) -> Result<Vec<DeferredPcInfo>, KError> {
         let mut specs = Vec::new();
-        for token in chain
-            .split("->")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
+        for token in Self::split_chain_tokens(chain) {
             let pct = PcType::from_str(token)?;
-            let stage_opts = opts.cloned();
+            let mut stage_opts = opts.cloned();
+            if token.eq_ignore_ascii_case("ras") {
+                stage_opts.get_or_insert_with(PcOptions::default).asm_mode =
+                    Some("ras".to_string());
+            }
             specs.push(DeferredPcInfo {
                 pc_type: pct,
                 options: stage_opts,
@@ -587,6 +604,27 @@ impl PcFactory {
         // validate
         Self::validate_chain_specs(&specs)?;
         Ok(specs)
+    }
+
+    /// Parse a string containing fallback chains separated by `||`.
+    ///
+    /// Example: `"amg||ras+ilutp"` tries AMG first, then RAS+ILUTP on setup failure.
+    pub fn create_pc_chain_candidates_from_str(
+        chain: &str,
+        opts: Option<&PcOptions>,
+    ) -> Result<Vec<Vec<DeferredPcInfo>>, KError> {
+        let mut candidates = Vec::new();
+        for candidate in chain
+            .split("||")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            candidates.push(Self::create_pc_chain_from_str(candidate, opts)?);
+        }
+        if candidates.is_empty() {
+            return Err(KError::InvalidInput("empty PC chain".into()));
+        }
+        Ok(candidates)
     }
 
     pub fn construct_deferred_pc_chain(
@@ -748,5 +786,24 @@ mod tests {
         let specs = PcFactory::create_pc_chain_from_str("ilu->ilu", Some(&opts))
             .expect("duplicates allowed with warning by default");
         assert!(!specs.is_empty());
+    }
+
+    #[test]
+    fn chain_fallback_parses_candidates_and_aliases() {
+        let opts = crate::config::options::PcOptions::default();
+        let candidates =
+            PcFactory::create_pc_chain_candidates_from_str("amg||ras+ilutp", Some(&opts))
+                .expect("fallback parse");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0][0].pc_type, PcType::Amg);
+        assert_eq!(candidates[1][0].pc_type, PcType::Asm);
+        assert_eq!(candidates[1][1].pc_type, PcType::Ilutp);
+        assert_eq!(
+            candidates[1][0]
+                .options
+                .as_ref()
+                .and_then(|o| o.asm_mode.as_deref()),
+            Some("ras")
+        );
     }
 }
