@@ -328,7 +328,7 @@ pub static SPECS: &[Spec] = &[
         key: "pc_global",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "distributed preconditioner: none | block-jacobi | asm",
+        doc: "distributed preconditioner: none | block-jacobi | asm | ras",
     },
     Spec {
         flag: "-pc_local",

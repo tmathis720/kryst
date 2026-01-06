@@ -81,6 +81,15 @@ impl DistributedAsm {
             last_vid: None,
         }
     }
+
+    pub fn new_ras(
+        overlap: usize,
+        subdomain_hint: Option<usize>,
+        block_solver: AsmBlockSolver,
+        weighting: Weighting,
+    ) -> Self {
+        Self::new(overlap, subdomain_hint, block_solver, AsmMode::RAS, weighting)
+    }
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]

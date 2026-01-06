@@ -167,8 +167,8 @@ pub fn build_block_jacobi_pc(
             };
             Ok(Some(wrapper))
         }
-        GlobalPcKind::Asm => Err(KError::NotImplemented(
-            "ASM distributed preconditioner is not implemented".into(),
+        GlobalPcKind::Asm | GlobalPcKind::Ras => Err(KError::NotImplemented(
+            "block-Jacobi builder does not apply to ASM/RAS distributed preconditioners".into(),
         )),
     }
 }

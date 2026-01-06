@@ -7,7 +7,7 @@ use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
-use crate::utils::permutation::{Permutation, permute_csr_symmetric, rcm_csr};
+use crate::utils::permutation::{Permutation, amd_csr, permute_csr_symmetric, rcm_csr};
 use crate::utils::conditioning::{apply_csr_transforms, ConditioningOptions};
 
 #[cfg(feature = "complex")]
@@ -126,6 +126,7 @@ impl Default for IluCsrConfig {
 pub enum ReorderingKind {
     None,
     Rcm,
+    Amd,
 }
 
 #[derive(Clone, Debug)]
@@ -1071,6 +1072,7 @@ impl Preconditioner for IluCsr {
             let perm = match self.cfg.reordering.kind {
                 ReorderingKind::None => Permutation::identity(a.nrows()),
                 ReorderingKind::Rcm => rcm_csr(&a),
+                ReorderingKind::Amd => amd_csr(&a),
             };
             let a_perm = if self.cfg.reordering.symmetric {
                 permute_csr_symmetric(&a, &perm)

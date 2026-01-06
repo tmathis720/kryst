@@ -29,6 +29,19 @@ mod real_demo {
     //! or for serial:
     //! cargo run --example matrix_market_demo
     //! (ensure the example is built with the "mpi" feature for MPI runs)
+    //!
+    //! Example MPI recipe using FGMRES + RAS(overlap) + ILUTP:
+    //! ```bash
+    //! cargo mpirun -n 4 --example matrix_market_demo --features backend-faer,mpi -- \
+    //!   -ksp_type fgmres \
+    //!   -pc_global ras \
+    //!   -pc_asm_overlap 1 \
+    //!   -pc_asm_weighting uniform \
+    //!   -pc_local ilutp \
+    //!   -pc_ilutp_max_fill 20 \
+    //!   -pc_ilutp_drop_tol 1e-4 \
+    //!   -pc_ilutp_perm_tol 0.1
+    //! ```
 
     use std::path::Path;
     use std::sync::Arc;
