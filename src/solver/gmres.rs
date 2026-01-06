@@ -763,7 +763,8 @@ impl GmresSolver {
                         metrics.bytes_reduced += std::mem::size_of::<R>();
                     }
                     res
-                };
+                }
+            };
 
             stats.iterations = total_iters;
             stats.final_residual = res;
@@ -1658,7 +1659,8 @@ impl GmresSolver {
                         ws.v_col(0).fill(S::zero());
                     }
                     beta
-                };
+                }
+            };
 
             ws.g[0] = S::from_real(beta);
             res = beta;
