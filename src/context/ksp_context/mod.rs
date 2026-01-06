@@ -25,9 +25,9 @@
 //! | Solver            | Allowed sides   | Notes                                                   |
 //! |-------------------|-----------------|---------------------------------------------------------|
 //! | `CG`, `PCG`       | Left only       | Requires HPD `A` and HPD left preconditioner `M`.       |
-//! | `FGMRES`          | Right only      | Flexible right-only pipeline.                           |
+//! | `FGMRES`          | Right only      | Flexible right-only pipeline (`Symmetric` treated as right). |
 //! | `PCA-GMRES`       | Left or Right   | Mapped to [`PcaPcMode`] during setup.                   |
-//! | All other solvers | Left or Right   | `Symmetric` is normalized to `Left` before dispatch.    |
+//! | All other solvers | Left or Right   | `Symmetric` behaves like left but is passed to PCs.     |
 //!
 //! Incompatible combinations return [`KError::InvalidInput`] during configuration.
 //!
@@ -332,10 +332,16 @@ impl Default for KspContext {
 
 impl KspContext {
     #[inline]
-    fn normalize_side(side: PcSide) -> PcSide {
-        match side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
+    fn effective_side_for_solver(side: PcSide, solver_type: SolverType) -> PcSide {
+        match solver_type {
+            SolverType::Fgmres => match side {
+                PcSide::Symmetric => PcSide::Right,
+                s => s,
+            },
+            _ => match side {
+                PcSide::Symmetric => PcSide::Left,
+                s => s,
+            },
         }
     }
 
@@ -397,7 +403,7 @@ impl KspContext {
     /// Validate that `side` is compatible with `solver_type` (if set).
     /// Mirrors `configure_pc_side()` logic but used at set-time to fail fast.
     fn check_pc_side_now(&self, side: PcSide) -> Result<(), KError> {
-        let normalized = Self::normalize_side(side);
+        let normalized = Self::effective_side_for_solver(side, st);
         if let Some(st) = self.solver_type {
             if let Some(required) = st.required_pc_side() {
                 if normalized != required {
@@ -491,7 +497,7 @@ impl KspContext {
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
         if let Some(required) = solver_type.required_pc_side() {
-            let normalized = Self::normalize_side(self.pc_side);
+            let normalized = Self::effective_side_for_solver(self.pc_side, solver_type);
             if self.pc_side_explicit {
                 if normalized != required {
                     return Err(KError::InvalidInput(format!(
@@ -989,7 +995,7 @@ impl KspContext {
         let mut pcg_pending_updated = false;
         if let Some(variant) = requested_cg_variant {
             if matches!(variant, CgVariant::Pipelined)
-                && Self::normalize_side(self.pc_side) != PcSide::Left
+                && Self::effective_side_for_solver(self.pc_side, SolverType::Pcg) != PcSide::Left
             {
                 return Err(KError::InvalidInput(
                     "Pipelined PCG requires left preconditioning".into(),
@@ -1961,11 +1967,10 @@ impl KspContext {
 
     /// Configure the underlying solver based on the requested preconditioning side.
     fn configure_pc_side(&mut self) -> Result<(), KError> {
-        // Treat symmetric as left; only specialized PCs interpret it differently.
-        let side = match self.pc_side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
-        };
+        let side = self
+            .solver_type
+            .map(|st| Self::effective_side_for_solver(self.pc_side, st))
+            .unwrap_or(self.pc_side);
 
         if let Some(SolverType::PcaGmres) = self.solver_type {
             if let Some(s) = self
@@ -1976,7 +1981,6 @@ impl KspContext {
                 s.pc_mode = match side {
                     PcSide::Left => PcaPcMode::Left,
                     PcSide::Right => PcaPcMode::Right,
-                    PcSide::Symmetric => unreachable!(),
                 };
             }
         }

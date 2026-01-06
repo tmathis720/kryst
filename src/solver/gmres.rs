@@ -33,6 +33,7 @@ use crate::solver::common::ReductCtx;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::utils::monitor::{log_residuals, ResidualSnapshot};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -204,6 +205,8 @@ impl GmresSolver {
             ));
         }
 
+        let pc_apply_side = pc_side;
+        let pc_apply_side = pc_side;
         let pc_side = match pc_side {
             PcSide::Symmetric => PcSide::Left,
             s => s,
@@ -247,7 +250,7 @@ impl GmresSolver {
                     let tmp2 = &mut ws.tmp2[..n];
                     #[cfg(feature = "metrics")]
                     let pc_start = std::time::Instant::now();
-                    pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                     #[cfg(feature = "metrics")]
                     {
                         metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -294,7 +297,6 @@ impl GmresSolver {
                 }
                 (beta, norms[1])
             }
-            PcSide::Symmetric => unreachable!(),
         };
 
         ws.g[0] = S::from_real(beta);
@@ -309,6 +311,47 @@ impl GmresSolver {
         for m in mons {
             m(0, res);
         }
+        let true_res =
+            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        reduction_count += 1;
+        #[cfg(feature = "metrics")]
+        {
+            metrics.bytes_reduced += std::mem::size_of::<R>();
+        }
+        let precond_res = if let Some(pc) = pc {
+            let tmp2 = &mut ws.tmp2[..n];
+            #[cfg(feature = "metrics")]
+            let pc_start = std::time::Instant::now();
+            pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+            }
+            let norm = red.norm2(&ws.tmp2[..n]);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            norm
+        } else {
+            let norm = red.norm2(&ws.tmp1[..n]);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            norm
+        };
+        log_residuals(
+            0,
+            "GMRES",
+            ResidualSnapshot {
+                true_residual: true_res,
+                preconditioned_residual: precond_res,
+                recurrence_residual: Some(res),
+            },
+        );
         if res <= thr {
             stats.reason = if res <= self.conv.atol {
                 ConvergedReason::ConvergedAtol
@@ -353,7 +396,7 @@ impl GmresSolver {
                                 let tmp2 = &mut ws.tmp2[..n];
                                 #[cfg(feature = "metrics")]
                                 let pc_start = std::time::Instant::now();
-                                pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                                 #[cfg(feature = "metrics")]
                                 {
                                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -413,7 +456,7 @@ impl GmresSolver {
                                 let tmp2 = &mut ws.tmp2[..n];
                                 #[cfg(feature = "metrics")]
                                 let pc_start = std::time::Instant::now();
-                                pc.apply_s(PcSide::Right, vk, tmp2, &mut ws.bridge)?;
+                                pc.apply_s(pc_apply_side, vk, tmp2, &mut ws.bridge)?;
                                 #[cfg(feature = "metrics")]
                                 {
                                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -477,9 +520,7 @@ impl GmresSolver {
                             } else {
                                 ws.v_col(k + 1).fill(S::zero());
                             }
-                        }
-                        PcSide::Symmetric => unreachable!(),
-                    },
+                        }                    },
                     GmresVariant::Pipelined => match pc_side {
                         PcSide::Left => {
                             let vk = &ws.v_mem[k * n..(k + 1) * n];
@@ -550,7 +591,7 @@ impl GmresSolver {
                             if let Some(pc) = pc {
                                 #[cfg(feature = "metrics")]
                                 let pc_start = std::time::Instant::now();
-                                pc.apply_s(PcSide::Right, vk, &mut ws.tmp2[..n], &mut ws.bridge)?;
+                                pc.apply_s(pc_apply_side, vk, &mut ws.tmp2[..n], &mut ws.bridge)?;
                                 #[cfg(feature = "metrics")]
                                 {
                                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -611,9 +652,7 @@ impl GmresSolver {
                                 metrics.bytes_reduced +=
                                     payload_len * std::mem::size_of::<R>() * reductions;
                             }
-                        }
-                        PcSide::Symmetric => unreachable!(),
-                    },
+                        }                    },
                     GmresVariant::SStep { .. } => {
                         unreachable!("s-step path should exit before iteration loop")
                     }
@@ -629,6 +668,47 @@ impl GmresSolver {
                 for m in mons {
                     m(total_iters, res);
                 }
+                let true_res =
+                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                let precond_res = if let Some(pc) = pc {
+                    let tmp2 = &mut ws.tmp2[..n];
+                    #[cfg(feature = "metrics")]
+                    let pc_start = std::time::Instant::now();
+                    pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                    }
+                    let norm = red.norm2(&ws.tmp2[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    norm
+                } else {
+                    let norm = red.norm2(&ws.tmp1[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    norm
+                };
+                log_residuals(
+                    total_iters,
+                    "GMRES",
+                    ResidualSnapshot {
+                        true_residual: true_res,
+                        preconditioned_residual: precond_res,
+                        recurrence_residual: Some(res),
+                    },
+                );
 
                 if res <= thr || total_iters >= self.conv.max_iters {
                     break;
@@ -642,9 +722,7 @@ impl GmresSolver {
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
             match pc_side {
                 PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
-                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
-                PcSide::Symmetric => unreachable!(),
-            }
+                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),            }
 
             #[cfg(feature = "metrics")]
             let matvec_start = std::time::Instant::now();
@@ -662,7 +740,7 @@ impl GmresSolver {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
                         let pc_start = std::time::Instant::now();
-                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                         #[cfg(feature = "metrics")]
                         {
                             metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -686,9 +764,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += std::mem::size_of::<R>();
                     }
                     res
-                }
-                PcSide::Symmetric => unreachable!(),
-            };
+                };
 
             stats.iterations = total_iters;
             stats.final_residual = res;
@@ -708,7 +784,7 @@ impl GmresSolver {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
                         let pc_start = std::time::Instant::now();
-                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                         #[cfg(feature = "metrics")]
                         {
                             metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -750,9 +826,7 @@ impl GmresSolver {
                         ws.v_col(0).fill(S::zero());
                     }
                     beta
-                }
-                PcSide::Symmetric => unreachable!(),
-            };
+                };
 
             ws.g[0] = S::from_real(beta);
             res = beta;
@@ -760,6 +834,47 @@ impl GmresSolver {
             for m in mons {
                 m(total_iters, res);
             }
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            let precond_res = if let Some(pc) = pc {
+                let tmp2 = &mut ws.tmp2[..n];
+                #[cfg(feature = "metrics")]
+                let pc_start = std::time::Instant::now();
+                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                }
+                let norm = red.norm2(&ws.tmp2[..n]);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                norm
+            } else {
+                let norm = red.norm2(&ws.tmp1[..n]);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                norm
+            };
+            log_residuals(
+                total_iters,
+                "GMRES",
+                ResidualSnapshot {
+                    true_residual: true_res,
+                    preconditioned_residual: precond_res,
+                    recurrence_residual: Some(res),
+                },
+            );
         }
 
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
@@ -922,7 +1037,7 @@ impl GmresSolver {
                     let tmp2 = &mut ws.tmp2[..n];
                     #[cfg(feature = "metrics")]
                     let pc_start = std::time::Instant::now();
-                    pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                     #[cfg(feature = "metrics")]
                     {
                         metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -968,9 +1083,7 @@ impl GmresSolver {
                     ws.v_col(0).fill(S::zero());
                 }
                 (beta, norms[1])
-            }
-            PcSide::Symmetric => unreachable!(),
-        };
+            };
 
         if matches!(pc_side, PcSide::Right) {
             let v0: &[S] = &ws.v_mem[0..n];
@@ -978,7 +1091,7 @@ impl GmresSolver {
             if let Some(pc) = pc {
                 #[cfg(feature = "metrics")]
                 let pc_start = std::time::Instant::now();
-                pc.apply_s(PcSide::Right, v0, z0, &mut ws.bridge)?;
+                pc.apply_s(pc_apply_side, v0, z0, &mut ws.bridge)?;
                 #[cfg(feature = "metrics")]
                 {
                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -1000,6 +1113,47 @@ impl GmresSolver {
         for m in mons {
             m(0, res);
         }
+        let true_res =
+            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        reduction_count += 1;
+        #[cfg(feature = "metrics")]
+        {
+            metrics.bytes_reduced += std::mem::size_of::<R>();
+        }
+        let precond_res = if let Some(pc) = pc {
+            let tmp2 = &mut ws.tmp2[..n];
+            #[cfg(feature = "metrics")]
+            let pc_start = std::time::Instant::now();
+            pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+            }
+            let norm = red.norm2(&ws.tmp2[..n]);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            norm
+        } else {
+            let norm = red.norm2(&ws.tmp1[..n]);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            norm
+        };
+        log_residuals(
+            0,
+            "GMRES(s-step)",
+            ResidualSnapshot {
+                true_residual: true_res,
+                preconditioned_residual: precond_res,
+                recurrence_residual: Some(res),
+            },
+        );
         if res <= thr {
             stats.reason = if res <= self.conv.atol {
                 ConvergedReason::ConvergedAtol
@@ -1067,7 +1221,7 @@ impl GmresSolver {
                                 let tmp2 = &mut ws.tmp2[..n];
                                 #[cfg(feature = "metrics")]
                                 let pc_start = std::time::Instant::now();
-                                pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                                 #[cfg(feature = "metrics")]
                                 {
                                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -1082,7 +1236,7 @@ impl GmresSolver {
                                 let tmp2 = &mut ws.tmp2[..n];
                                 #[cfg(feature = "metrics")]
                                 let pc_start = std::time::Instant::now();
-                                pc.apply_s(PcSide::Right, src, tmp2, &mut ws.bridge)?;
+                                pc.apply_s(pc_apply_side, src, tmp2, &mut ws.bridge)?;
                                 #[cfg(feature = "metrics")]
                                 {
                                     metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -1100,9 +1254,7 @@ impl GmresSolver {
                             }
 
                             wj.copy_from_slice(&ws.tmp1[..n]);
-                        }
-                        PcSide::Symmetric => unreachable!(),
-                    }
+                        }                    }
                 }
 
                 let mut pre_norms = Vec::new();
@@ -1169,7 +1321,7 @@ impl GmresSolver {
                             metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
                         }
                         gram
-                    }};
+                    };
                 }
 
                 let mut gram = match reorth_policy {
@@ -1303,7 +1455,7 @@ impl GmresSolver {
                         if let Some(pc) = pc {
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
-                            pc.apply_s(PcSide::Right, vj, zj, &mut ws.bridge)?;
+                            pc.apply_s(pc_apply_side, vj, zj, &mut ws.bridge)?;
                             #[cfg(feature = "metrics")]
                             {
                                 metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -1338,6 +1490,47 @@ impl GmresSolver {
                     for m in mons {
                         m(total_iters, res);
                     }
+                    let true_res =
+                        Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    let precond_res = if let Some(pc) = pc {
+                        let tmp2 = &mut ws.tmp2[..n];
+                        #[cfg(feature = "metrics")]
+                        let pc_start = std::time::Instant::now();
+                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                        }
+                        let norm = red.norm2(&ws.tmp2[..n]);
+                        reduction_count += 1;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.bytes_reduced += std::mem::size_of::<R>();
+                        }
+                        norm
+                    } else {
+                        let norm = red.norm2(&ws.tmp1[..n]);
+                        reduction_count += 1;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.bytes_reduced += std::mem::size_of::<R>();
+                        }
+                        norm
+                    };
+                    log_residuals(
+                        total_iters,
+                        "GMRES(s-step)",
+                        ResidualSnapshot {
+                            true_residual: true_res,
+                            preconditioned_residual: precond_res,
+                            recurrence_residual: Some(res),
+                        },
+                    );
 
                     if res <= thr || total_iters >= self.conv.max_iters {
                         break;
@@ -1357,9 +1550,7 @@ impl GmresSolver {
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
             match pc_side {
                 PcSide::Left => Self::axpy_update_vcols(x, ws, k_steps, &y),
-                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
-                PcSide::Symmetric => unreachable!(),
-            }
+                PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),            }
 
             #[cfg(feature = "metrics")]
             let matvec_start = std::time::Instant::now();
@@ -1377,7 +1568,7 @@ impl GmresSolver {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
                         let pc_start = std::time::Instant::now();
-                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                         #[cfg(feature = "metrics")]
                         {
                             metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -1401,9 +1592,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += std::mem::size_of::<R>();
                     }
                     res
-                }
-                PcSide::Symmetric => unreachable!(),
-            };
+                };
 
             stats.iterations = total_iters;
             stats.final_residual = res;
@@ -1423,7 +1612,7 @@ impl GmresSolver {
                         let tmp2 = &mut ws.tmp2[..n];
                         #[cfg(feature = "metrics")]
                         let pc_start = std::time::Instant::now();
-                        pc.apply_s(PcSide::Left, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
                         #[cfg(feature = "metrics")]
                         {
                             metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
@@ -1465,9 +1654,7 @@ impl GmresSolver {
                         ws.v_col(0).fill(S::zero());
                     }
                     beta
-                }
-                PcSide::Symmetric => unreachable!(),
-            };
+                };
 
             ws.g[0] = S::from_real(beta);
             res = beta;
@@ -1475,6 +1662,47 @@ impl GmresSolver {
             for m in mons {
                 m(total_iters, res);
             }
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            let precond_res = if let Some(pc) = pc {
+                let tmp2 = &mut ws.tmp2[..n];
+                #[cfg(feature = "metrics")]
+                let pc_start = std::time::Instant::now();
+                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                }
+                let norm = red.norm2(&ws.tmp2[..n]);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                norm
+            } else {
+                let norm = red.norm2(&ws.tmp1[..n]);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                norm
+            };
+            log_residuals(
+                total_iters,
+                "GMRES(s-step)",
+                ResidualSnapshot {
+                    true_residual: true_res,
+                    preconditioned_residual: precond_res,
+                    recurrence_residual: Some(res),
+                },
+            );
         }
 
         let (reason, _) = self.conv.check(res, bnorm, total_iters);

@@ -145,6 +145,7 @@ impl BiCgStabSolver {
         }
         let mons = monitors.unwrap_or(&[]);
 
+        let pc_apply_side = pc_side;
         let side = match pc_side {
             PcSide::Symmetric => PcSide::Left,
             s => s,
@@ -185,7 +186,7 @@ impl BiCgStabSolver {
         let res0 = if need_left {
             if let Some(zs) = z_s.as_deref_mut() {
                 if let Some(pc) = pc {
-                    pc.apply_s(PcSide::Left, r, zs, &mut *scratch)?;
+                    pc.apply_s(pc_apply_side, r, zs, &mut *scratch)?;
                 } else {
                     zs.copy_from_slice(r);
                 }
@@ -267,7 +268,7 @@ impl BiCgStabSolver {
 
             if need_left {
                 let yp_ref: &mut [S] = if let (Some(pc), Some(zp)) = (pc, z_p.as_deref_mut()) {
-                    pc.apply_s(PcSide::Left, p, zp, &mut *scratch)?;
+                    pc.apply_s(pc_apply_side, p, zp, &mut *scratch)?;
                     zp
                 } else {
                     p
@@ -277,14 +278,14 @@ impl BiCgStabSolver {
                     .expect("workspace: missing v_raw buffer");
                 a.matvec_s(&*yp_ref, vr, &mut *scratch);
                 if let Some(pc) = pc {
-                    pc.apply_s(PcSide::Left, vr, v, &mut *scratch)?;
+                    pc.apply_s(pc_apply_side, vr, v, &mut *scratch)?;
                 } else {
                     v.copy_from_slice(vr);
                 }
             } else {
                 match (side, pc, z_p.as_deref_mut()) {
                     (PcSide::Right, Some(pc), Some(zp)) => {
-                        pc.apply_s(PcSide::Right, p, zp, &mut *scratch)?;
+                        pc.apply_s(pc_apply_side, p, zp, &mut *scratch)?;
                         a.matvec_s(zp, &mut v[..], &mut *scratch);
                     }
                     _ => {
@@ -362,7 +363,7 @@ impl BiCgStabSolver {
             if need_left {
                 let zs = z_s.as_deref_mut().expect("workspace: missing z_s buffer");
                 if let Some(pc) = pc {
-                    pc.apply_s(PcSide::Left, s, zs, &mut *scratch)?;
+                    pc.apply_s(pc_apply_side, s, zs, &mut *scratch)?;
                 } else {
                     zs.copy_from_slice(s);
                 }
@@ -370,7 +371,7 @@ impl BiCgStabSolver {
             } else {
                 match (side, pc, z_s.as_deref_mut()) {
                     (PcSide::Right, Some(pc), Some(zs)) => {
-                        pc.apply_s(PcSide::Right, s, zs, &mut *scratch)?;
+                        pc.apply_s(pc_apply_side, s, zs, &mut *scratch)?;
                         a.matvec_s(zs, &mut t[..], &mut *scratch);
                     }
                     _ => {
@@ -447,7 +448,7 @@ impl BiCgStabSolver {
                 }
                 if let Some(zs) = z_s.as_deref_mut() {
                     if let Some(pc) = pc {
-                        pc.apply_s(PcSide::Left, r, zs, &mut *scratch)?;
+                        pc.apply_s(pc_apply_side, r, zs, &mut *scratch)?;
                     } else {
                         zs.copy_from_slice(r);
                     }

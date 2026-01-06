@@ -393,7 +393,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         Ok(())
     }
 
-    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         if x.len() != y.len() {
             return Err(KError::InvalidInput(format!(
                 "ASM apply: x/y length mismatch: {} vs {}",
@@ -411,7 +411,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
             // Legacy/fallback path hit when callers used the generic setup routine
             // instead of the LinOp-aware one. We still have `subdomains` and
             // `local_blocks` populated, so reuse that data directly.
-            return self.apply_dense_blocks_legacy(x, y);
+            return self.apply_dense_blocks_legacy(side, x, y);
         }
 
         #[cfg(feature = "rayon")]
@@ -438,7 +438,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                                     None,
                                     &r_blk,
                                     &mut x_blk,
-                                    PcSide::Left,
+                                    side,
                                     &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                                     None,
                                     None,
@@ -459,7 +459,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                                 let indices = &meta.indices;
                                 let r_blk: Vec<R> = indices.iter().map(|&i| x[i]).collect();
                                 let mut x_blk = vec![R::zero(); indices.len()];
-                                let _ = ilu.apply(PcSide::Left, &r_blk, &mut x_blk);
+                                let _ = ilu.apply(side, &r_blk, &mut x_blk);
                                 (
                                     indices.clone(),
                                     x_blk,
@@ -498,13 +498,13 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                     }
                 }
             } else {
-                self.apply_blocks_serial(x, y)?;
+                self.apply_blocks_serial(side, x, y)?;
             }
         }
 
         #[cfg(not(feature = "rayon"))]
         {
-            self.apply_blocks_serial(x, y)?;
+            self.apply_blocks_serial(side, x, y)?;
         }
 
         Ok(())
@@ -739,7 +739,7 @@ impl ObjPreconditioner for AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
 }
 
 impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
-    fn apply_blocks_serial(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_blocks_serial(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         match self.block_solver_factory {
             BlockSolverFactory::LuDense => {
                 self.blocks_meta
@@ -755,7 +755,7 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                             None,
                             &r_blk,
                             &mut x_blk,
-                            PcSide::Left,
+                            side,
                             &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                             None,
                             None,
@@ -825,7 +825,12 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         Ok(())
     }
 
-    fn apply_dense_blocks_legacy(&self, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_dense_blocks_legacy(
+        &self,
+        side: PcSide,
+        x: &[f64],
+        y: &mut [f64],
+    ) -> Result<(), KError> {
         if self.subdomains.len() != self.local_blocks.len() {
             return Err(KError::InvalidInput(
                 "ASM legacy apply: subdomains/local_blocks length mismatch".into(),
@@ -840,7 +845,7 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
                 None,
                 &r_blk,
                 &mut x_blk,
-                PcSide::Left,
+                side,
                 &crate::parallel::UniverseComm::NoComm(crate::parallel::NoComm),
                 None,
                 None,

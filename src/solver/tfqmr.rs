@@ -62,6 +62,7 @@ impl TfqmrSolver {
             return Err(KError::InvalidInput("TFQMR size mismatch".to_string()));
         }
 
+        let pc_apply_side = pc_side;
         if pc_side == PcSide::Symmetric {
             pc_side = PcSide::Left;
         }
@@ -100,7 +101,7 @@ impl TfqmrSolver {
 
         if let Some(pc) = pc {
             tmp_pc.copy_from_slice(&r[..]);
-            pc.apply_s(pc_side, tmp_pc, r, scratch)?;
+            pc.apply_s(pc_apply_side, tmp_pc, r, scratch)?;
         }
 
         r_tld.copy_from_slice(r);
@@ -144,7 +145,7 @@ impl TfqmrSolver {
             a.matvec_s(yv, v, scratch);
             if let Some(pc) = pc {
                 tmp_pc.copy_from_slice(&v[..]);
-                pc.apply_s(pc_side, tmp_pc, v, scratch)?;
+                pc.apply_s(pc_apply_side, tmp_pc, v, scratch)?;
             }
 
             let sigma: S = red.dot(r_tld, v);
@@ -181,7 +182,7 @@ impl TfqmrSolver {
                 a.matvec_s(tmp_pc, au, scratch);
                 if let Some(pc) = pc {
                     tmp_pc.copy_from_slice(&au[..]);
-                    pc.apply_s(pc_side, tmp_pc, au, scratch)?;
+                    pc.apply_s(pc_apply_side, tmp_pc, au, scratch)?;
                 }
                 for i in 0..n {
                     r[i] -= alpha * au[i];
@@ -230,7 +231,7 @@ impl TfqmrSolver {
                     }
                     if let Some(pc) = pc {
                         tmp_pc.copy_from_slice(&au[..]);
-                        pc.apply_s(pc_side, tmp_pc, au, scratch)?;
+                        pc.apply_s(pc_apply_side, tmp_pc, au, scratch)?;
                     }
                     true_res = red.norm2(au);
                     stats.final_residual = true_res;
@@ -283,7 +284,7 @@ impl TfqmrSolver {
                 }
                 if let Some(pc) = pc {
                     tmp_pc.copy_from_slice(&au[..]);
-                    pc.apply_s(pc_side, tmp_pc, au, scratch)?;
+                    pc.apply_s(pc_apply_side, tmp_pc, au, scratch)?;
                 }
                 true_res = red.norm2(au);
                 stats.final_residual = true_res;

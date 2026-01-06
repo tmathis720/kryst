@@ -19,6 +19,7 @@ use crate::solver::common::{recompute_true_residual_norm_s, ReductCtx};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::monitor::{log_residuals, ResidualSnapshot};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -114,10 +115,12 @@ impl FgmresSolver {
             ));
         }
 
-        let pc_side = match pc_side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
-        };
+        let pc_apply_side = pc_side;
+        if matches!(pc_side, PcSide::Left) {
+            return Err(KError::InvalidInput(
+                "FGMRES requires right or symmetric preconditioning".into(),
+            ));
+        }
 
         let block_m = if self.preallocate {
             self.restart.min(self.maxits)
@@ -189,6 +192,35 @@ impl FgmresSolver {
         for m in mons {
             m(0, res);
         }
+        let true_res = recompute_true_residual_norm_s(
+            a,
+            b,
+            x,
+            comm,
+            red.engine(),
+            &mut ws.tmp1[..n],
+            &mut ws.bridge,
+        );
+        let precond_res = if let Some(pc) = pc.as_deref_mut() {
+            pc.apply_mut_s(
+                pc_apply_side,
+                &ws.tmp1[..n],
+                &mut ws.tmp2[..n],
+                &mut ws.bridge,
+            )?;
+            red.norm2(&ws.tmp2[..n])
+        } else {
+            red.norm2(&ws.tmp1[..n])
+        };
+        log_residuals(
+            0,
+            "FGMRES",
+            ResidualSnapshot {
+                true_residual: true_res,
+                preconditioned_residual: precond_res,
+                recurrence_residual: Some(res),
+            },
+        );
         if res <= thr {
             stats.final_residual = res;
             stats.reason = if res <= self.atol {
@@ -242,7 +274,7 @@ impl FgmresSolver {
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
-                                pc_side,
+                                pc_apply_side,
                                 &ws.tmp1[..n],
                                 &mut ws.tmp2[..n],
                                 &mut ws.bridge,
@@ -348,7 +380,7 @@ impl FgmresSolver {
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
-                                pc_side,
+                                pc_apply_side,
                                 &ws.tmp1[..n],
                                 &mut ws.tmp2[..n],
                                 &mut ws.bridge,
@@ -422,6 +454,35 @@ impl FgmresSolver {
                 for m in mons {
                     m(total_iters, res);
                 }
+                let true_res = recompute_true_residual_norm_s(
+                    a,
+                    b,
+                    x,
+                    comm,
+                    red.engine(),
+                    &mut ws.tmp1[..n],
+                    &mut ws.bridge,
+                );
+                let precond_res = if let Some(pc) = pc.as_deref_mut() {
+                    pc.apply_mut_s(
+                        pc_apply_side,
+                        &ws.tmp1[..n],
+                        &mut ws.tmp2[..n],
+                        &mut ws.bridge,
+                    )?;
+                    red.norm2(&ws.tmp2[..n])
+                } else {
+                    red.norm2(&ws.tmp1[..n])
+                };
+                log_residuals(
+                    total_iters,
+                    "FGMRES",
+                    ResidualSnapshot {
+                        true_residual: true_res,
+                        preconditioned_residual: precond_res,
+                        recurrence_residual: Some(res),
+                    },
+                );
 
                 let res0 = beta0;
                 let (reason, sstats) = crate::utils::convergence::Convergence {
