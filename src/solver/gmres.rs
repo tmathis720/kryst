@@ -1084,7 +1084,8 @@ impl GmresSolver {
                     ws.v_col(0).fill(S::zero());
                 }
                 (beta, norms[1])
-            };
+            }
+        };
 
         if matches!(pc_side, PcSide::Right) {
             let v0: &[S] = &ws.v_mem[0..n];
