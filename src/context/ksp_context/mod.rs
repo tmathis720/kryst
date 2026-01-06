@@ -54,20 +54,20 @@ use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
 use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
-use crate::preconditioner::dist::MpiPcOptions;
 use crate::error::KError;
-use crate::matrix::backend::materialize;
-use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 use crate::matrix::DistCsrOp;
+use crate::matrix::backend::materialize;
+use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
-use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+use crate::preconditioner::dist::MpiPcOptions;
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
+use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
@@ -213,12 +213,44 @@ pub enum MonitorPolicy {
     Rank0Only,
 }
 
+#[derive(Clone, Debug)]
+struct PcChainPlan {
+    candidates: Vec<Vec<DeferredPcInfo>>,
+    active: usize,
+}
+
+impl PcChainPlan {
+    fn new(candidates: Vec<Vec<DeferredPcInfo>>) -> Result<Self, KError> {
+        if candidates.is_empty() {
+            return Err(KError::InvalidInput("empty PC chain".into()));
+        }
+        Ok(Self {
+            candidates,
+            active: 0,
+        })
+    }
+
+    fn active_specs(&self) -> &[DeferredPcInfo] {
+        &self.candidates[self.active]
+    }
+
+    fn advance(&mut self) -> bool {
+        if self.active + 1 < self.candidates.len() {
+            self.active += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Minimal KSP context holding solver, preconditioner, and operators.
 pub struct KspContext {
     solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>>,
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
-    pub(crate) pending_chain: Option<Vec<DeferredPcInfo>>,
+    pc_spec: Option<DeferredPcInfo>,
+    pub(crate) pc_chain_plan: Option<PcChainPlan>,
     amat: Option<Arc<dyn LinOp<S = S>>>,
     pmat: Option<Arc<dyn LinOp<S = S>>>,
     bound_comm: Option<crate::parallel::UniverseComm>,
@@ -253,7 +285,8 @@ impl fmt::Debug for KspContext {
             .field("solver", &self.solver.as_ref().map(|_| "set"))
             .field("pc", &self.pc.as_ref().map(|_| "set"))
             .field("pending_pc", &self.pending_pc)
-            .field("pending_chain", &self.pending_chain)
+            .field("pc_spec", &self.pc_spec)
+            .field("pc_chain_plan", &self.pc_chain_plan)
             .field("amat_set", &self.amat.is_some())
             .field("pmat_set", &self.pmat.is_some())
             .field("bound_comm", &self.bound_comm)
@@ -446,7 +479,8 @@ impl KspContext {
             solver: None,
             pc: None,
             pending_pc: None,
-            pending_chain: None,
+            pc_spec: None,
+            pc_chain_plan: None,
             amat: None,
             pmat: None,
             bound_comm: None,
@@ -579,17 +613,18 @@ impl KspContext {
         pc_type: PcType,
         opts: Option<&PcOptions>,
     ) -> Result<&mut Self, KError> {
+        let spec = PcFactory::create_deferred_pc(pc_type, opts.cloned())?;
+        self.pc_spec = Some(spec.clone());
         match PcFactory::create_preconditioner(pc_type, opts) {
             Ok(pc) => {
                 self.pc = Some(pc);
                 self.pending_pc = None;
-                self.pending_chain = None;
+                self.pc_chain_plan = None;
             }
             Err(_) => {
-                let spec = PcFactory::create_deferred_pc(pc_type, opts.cloned())?;
                 self.pc = None;
                 self.pending_pc = Some(spec);
-                self.pending_chain = None;
+                self.pc_chain_plan = None;
             }
         }
         self.invalidate_pc_setup();
@@ -599,6 +634,30 @@ impl KspContext {
     pub fn set_pc_type_from_str(&mut self, pc_type: &str) -> Result<&mut Self, KError> {
         let pct = PcType::from_str(pc_type)?;
         self.set_pc_type(pct, None)
+    }
+
+    fn set_pc_chain_candidates_from_specs(
+        &mut self,
+        candidates: Vec<Vec<DeferredPcInfo>>,
+    ) -> Result<&mut Self, KError> {
+        self.pc = None;
+        self.pending_pc = None;
+        self.pc_spec = None;
+        self.pc_chain_plan = Some(PcChainPlan::new(candidates)?);
+        self.invalidate_pc_setup();
+        Ok(self)
+    }
+
+    /// Configure a preconditioner chain with fallback candidates.
+    pub fn set_pc_chain_candidates_from_options(
+        &mut self,
+        candidates: Vec<Vec<PcOptions>>,
+    ) -> Result<&mut Self, KError> {
+        let specs = candidates
+            .into_iter()
+            .map(|chain| PcFactory::create_deferred_pc_chain_from_options(&chain))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.set_pc_chain_candidates_from_specs(specs)
     }
 
     /// Convenience for PREONLY: set solver type and a direct PC in one call.
@@ -1158,11 +1217,11 @@ impl KspContext {
             self.set_pc_side_from_str(side)?;
         }
         if let Some(ref chain_opts) = pc_opts.chain {
-            let specs = PcFactory::create_deferred_pc_chain_from_options(chain_opts)?;
-            self.pc = None;
-            self.pending_pc = None;
-            self.pending_chain = Some(specs);
-            self.invalidate_pc_setup();
+            self.set_pc_chain_candidates_from_options(vec![chain_opts.clone()])?;
+        } else if let Some(ref chain_str) = pc_opts.pc_chain {
+            let candidates =
+                PcFactory::create_pc_chain_candidates_from_str(chain_str, Some(pc_opts))?;
+            self.set_pc_chain_candidates_from_specs(candidates)?;
         }
         self.pending_mpi_pc = Some(PendingMpiPc {
             mpi_opts: pc_opts.mpi_pc_options()?,
@@ -1324,6 +1383,171 @@ impl KspContext {
         self.last_pc_vid = None;
     }
 
+    fn tune_ilutp_options(opts: &mut PcOptions, attempt: usize) -> bool {
+        let mut changed = false;
+        let current_fill = opts.ilutp_max_fill.unwrap_or(10);
+        let next_fill = (current_fill.saturating_mul(2)).min(200);
+        if next_fill > current_fill {
+            opts.ilutp_max_fill = Some(next_fill);
+            changed = true;
+        }
+
+        let current_perm = opts.ilutp_perm_tol.unwrap_or(0.0);
+        let next_perm = match attempt {
+            1 if current_perm < 0.1 => 0.1,
+            2 if current_perm < 0.2 => 0.2,
+            _ if current_perm < 0.5 => 0.5,
+            _ => current_perm,
+        };
+        if next_perm > current_perm {
+            opts.ilutp_perm_tol = Some(next_perm);
+            changed = true;
+        }
+
+        if opts.ilu_reordering.is_none() {
+            opts.ilu_reordering = Some("rcm".to_string());
+            changed = true;
+        }
+
+        changed
+    }
+
+    fn tune_ilutp_options_in_chain(specs: &mut [DeferredPcInfo], attempt: usize) -> bool {
+        let mut changed = false;
+        for spec in specs {
+            if spec.pc_type == PcType::Ilutp {
+                let opts = spec.options.get_or_insert_with(PcOptions::default);
+                if Self::tune_ilutp_options(opts, attempt) {
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    fn try_setup_chain_plan(
+        &mut self,
+        pmat: Arc<dyn LinOp<S = S>>,
+        sid: StructureId,
+        vid: ValuesId,
+    ) -> Result<(), KError> {
+        let Some(plan) = self.pc_chain_plan.as_mut() else {
+            return Ok(());
+        };
+
+        let mut last_err = None;
+        while plan.active < plan.candidates.len() {
+            let mut specs = plan.active_specs().to_vec();
+            let mut attempt = 0usize;
+            loop {
+                let mut chain =
+                    match PcFactory::construct_deferred_pc_chain(specs.clone(), pmat.as_ref()) {
+                        Ok(chain) => chain,
+                        Err(err) => {
+                            last_err = Some(err);
+                            break;
+                        }
+                    };
+                let want = chain.required_format();
+                let tol = chain.preferred_drop_tol_for_format().unwrap_or_default();
+                let pmat_view = materialize(pmat.clone(), want, tol)?;
+                match chain.setup(pmat_view.as_ref()) {
+                    Ok(()) => {
+                        self.pc = Some(chain);
+                        plan.candidates[plan.active] = specs;
+                        self.last_pc_sid = Some(sid);
+                        self.last_pc_vid = Some(vid);
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        last_err = Some(err);
+                        attempt += 1;
+                        let mut tuned = specs.clone();
+                        if attempt <= 3 && Self::tune_ilutp_options_in_chain(&mut tuned, attempt) {
+                            log::warn!(
+                                "PC chain setup failed; retrying with tuned ILUTP options (attempt {attempt})"
+                            );
+                            specs = tuned;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if !plan.advance() {
+                break;
+            }
+            if let Some(ref err) = last_err {
+                log::warn!("PC chain setup failed: {err}; falling back to next candidate");
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            KError::SolveError("PC chain setup failed: no viable candidates".into())
+        }))
+    }
+
+    fn retry_ilutp_setup(
+        &mut self,
+        pmat: Arc<dyn LinOp<S = S>>,
+        sid: StructureId,
+        vid: ValuesId,
+        err: KError,
+    ) -> Result<(), KError> {
+        let Some(mut spec) = self.pc_spec.clone() else {
+            return Err(err);
+        };
+        if spec.pc_type != PcType::Ilutp {
+            return Err(err);
+        }
+
+        for attempt in 1..=3 {
+            let opts = spec.options.get_or_insert_with(PcOptions::default);
+            if !Self::tune_ilutp_options(opts, attempt) {
+                break;
+            }
+            log::warn!("ILUTP setup failed; retrying with tuned options (attempt {attempt})");
+            let mut pc = PcFactory::construct_deferred_preconditioner(spec.clone(), pmat.as_ref())?;
+            let want = pc.required_format();
+            let tol = pc.preferred_drop_tol_for_format().unwrap_or_default();
+            let pmat_view = materialize(pmat.clone(), want, tol)?;
+            if pc.setup(pmat_view.as_ref()).is_ok() {
+                self.pc = Some(pc);
+                self.pc_spec = Some(spec);
+                self.last_pc_sid = Some(sid);
+                self.last_pc_vid = Some(vid);
+                return Ok(());
+            }
+        }
+
+        Err(err)
+    }
+
+    fn handle_pc_setup_failure(
+        &mut self,
+        err: KError,
+        pmat: Arc<dyn LinOp<S = S>>,
+        sid: StructureId,
+        vid: ValuesId,
+    ) -> Result<(), KError> {
+        if self.pc_chain_plan.is_some() {
+            self.pc = None;
+            self.reset_pc_ids();
+            return self
+                .try_setup_chain_plan(pmat.clone(), sid, vid)
+                .map_err(|fallback_err| {
+                    KError::SolveError(format!(
+                        "PC setup failed: {err}; fallback failed: {fallback_err}"
+                    ))
+                });
+        }
+        if self.retry_ilutp_setup(pmat, sid, vid, err).is_ok() {
+            return Ok(());
+        }
+        Err(err)
+    }
+
     pub fn last_pc_sid(&self) -> Option<StructureId> {
         self.last_pc_sid
     }
@@ -1399,16 +1623,15 @@ impl KspContext {
                         let pc = self.build_mpi_global_pc(pending, dist_op)?;
                         self.pc = Some(pc);
                         self.pending_pc = None;
-                        self.pending_chain = None;
+                        self.pc_chain_plan = None;
                     }
                 }
             }
-            if let Some(specs) = self.pending_chain.take() {
-                let chain = PcFactory::construct_deferred_pc_chain(specs, pmat.as_ref())?;
-                self.pc = Some(chain);
-            } else if let Some(spec) = self.pending_pc.take() {
-                let pc = PcFactory::construct_deferred_preconditioner(spec, pmat.as_ref())?;
-                self.pc = Some(pc);
+            if self.pc_chain_plan.is_none() {
+                if let Some(spec) = self.pending_pc.take() {
+                    let pc = PcFactory::construct_deferred_preconditioner(spec, pmat.as_ref())?;
+                    self.pc = Some(pc);
+                }
             }
         }
 
@@ -1428,6 +1651,12 @@ impl KspContext {
             self.last_pc_vid = None;
         }
 
+        if self.pc.is_none() {
+            if self.pc_chain_plan.is_some() {
+                self.try_setup_chain_plan(pmat.clone(), sid, vid)?;
+            }
+        }
+
         if let Some(pc) = self.pc.as_mut() {
             // Pre-convert once to the PC's requested format, preserving communicator.
             let want = pc.required_format();
@@ -1436,12 +1665,16 @@ impl KspContext {
 
             match self.last_pc_sid {
                 None => {
-                    pc.setup(pmat_view.as_ref())?;
+                    if let Err(err) = pc.setup(pmat_view.as_ref()) {
+                        return self.handle_pc_setup_failure(err, pmat.clone(), sid, vid);
+                    }
                     self.last_pc_sid = Some(sid);
                     self.last_pc_vid = Some(vid);
                 }
                 Some(old_sid) if old_sid != sid => {
-                    pc.update_symbolic(pmat_view.as_ref())?;
+                    if let Err(err) = pc.update_symbolic(pmat_view.as_ref()) {
+                        return self.handle_pc_setup_failure(err, pmat.clone(), sid, vid);
+                    }
                     self.last_pc_sid = Some(sid);
                     self.last_pc_vid = Some(vid);
                 }
@@ -1451,7 +1684,14 @@ impl KspContext {
                     match self.pc_reuse {
                         PcReusePolicy::Never => {
                             if !vid_known || values_changed {
-                                pc.update_symbolic(pmat_view.as_ref())?;
+                                if let Err(err) = pc.update_symbolic(pmat_view.as_ref()) {
+                                    return self.handle_pc_setup_failure(
+                                        err,
+                                        pmat.clone(),
+                                        sid,
+                                        vid,
+                                    );
+                                }
                                 self.last_pc_vid = Some(vid);
                             }
                         }
@@ -1465,7 +1705,14 @@ impl KspContext {
                                 pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             } else if !vid_known || values_changed {
-                                pc.update_symbolic(pmat_view.as_ref())?;
+                                if let Err(err) = pc.update_symbolic(pmat_view.as_ref()) {
+                                    return self.handle_pc_setup_failure(
+                                        err,
+                                        pmat.clone(),
+                                        sid,
+                                        vid,
+                                    );
+                                }
                                 self.last_pc_vid = Some(vid);
                             }
                         }
@@ -1482,7 +1729,14 @@ impl KspContext {
                                 pc.update_numeric(pmat_view.as_ref())?;
                                 self.last_pc_vid = Some(vid);
                             } else if !vid_known || values_changed {
-                                pc.update_symbolic(pmat_view.as_ref())?;
+                                if let Err(err) = pc.update_symbolic(pmat_view.as_ref()) {
+                                    return self.handle_pc_setup_failure(
+                                        err,
+                                        pmat.clone(),
+                                        sid,
+                                        vid,
+                                    );
+                                }
                                 self.last_pc_vid = Some(vid);
                             }
                         }

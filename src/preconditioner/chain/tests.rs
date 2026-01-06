@@ -51,8 +51,7 @@ fn pc_chain_applies_in_sequence() {
         y,
         [
             (S::from_real(3.0) + S::from_real(1.0)) * S::from_real(2.0) + S::from_real(1.0),
-            (S::from_real(-1.0) + S::from_real(1.0)) * S::from_real(2.0)
-                + S::from_real(1.0),
+            (S::from_real(-1.0) + S::from_real(1.0)) * S::from_real(2.0) + S::from_real(1.0),
         ]
     );
 }
@@ -60,13 +59,17 @@ fn pc_chain_applies_in_sequence() {
 #[test]
 #[cfg(not(feature = "complex"))]
 fn deferred_chain_constructs_in_setup() {
+    use crate::config::options::{KspOptions, PcOptions};
     use crate::context::ksp_context::KspContext;
-    use crate::context::pc_context::PcFactory;
     use crate::matrix::op::LinOp;
 
-    let specs = PcFactory::create_pc_chain_from_str("jacobi->jacobi", None).unwrap();
     let mut ksp = KspContext::new();
-    ksp.pending_chain = Some(specs);
+    let pc_opts = PcOptions {
+        pc_chain: Some("jacobi->jacobi".to_string()),
+        ..Default::default()
+    };
+    ksp.set_from_all_options(&KspOptions::default(), &pc_opts)
+        .unwrap();
 
     let a = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
     let aop: Arc<dyn LinOp<S = S>> = Arc::new(a);

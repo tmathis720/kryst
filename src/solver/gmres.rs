@@ -28,12 +28,14 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::LinearSolver;
 use crate::solver::common::ReductCtx;
+use crate::solver::LinearSolver;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-use crate::utils::monitor::{log_residuals, ResidualSnapshot};
+use crate::utils::monitor::{
+    log_krylov_stagnation, log_residuals, stagnation_detected, ResidualSnapshot,
+};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -377,6 +379,9 @@ impl GmresSolver {
             return Ok(stats);
         }
 
+        let mut stagnation_residuals: Vec<R> = Vec::with_capacity(6);
+        let stagnation_threshold = S::from_real(0.95).real();
+
         'outer: loop {
             let mut k_steps = 0usize;
             for k in 0..self.restart {
@@ -519,7 +524,8 @@ impl GmresSolver {
                             } else {
                                 ws.v_col(k + 1).fill(S::zero());
                             }
-                        }                    },
+                        }
+                    },
                     GmresVariant::Pipelined => match pc_side {
                         PcSide::Left | PcSide::Symmetric => {
                             let vk = &ws.v_mem[k * n..(k + 1) * n];
@@ -651,7 +657,8 @@ impl GmresSolver {
                                 metrics.bytes_reduced +=
                                     payload_len * std::mem::size_of::<R>() * reductions;
                             }
-                        }                    },
+                        }
+                    },
                     GmresVariant::SStep { .. } => {
                         unreachable!("s-step path should exit before iteration loop")
                     }
@@ -708,6 +715,23 @@ impl GmresSolver {
                         recurrence_residual: Some(res),
                     },
                 );
+
+                stagnation_residuals.push(res);
+                if stagnation_residuals.len() > 6 {
+                    stagnation_residuals.remove(0);
+                }
+                if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
+                    let action = match self.variant {
+                        GmresVariant::Pipelined => {
+                            self.variant = GmresVariant::Classical;
+                            "switching to classical restart"
+                        }
+                        _ => "restarting GMRES",
+                    };
+                    log_krylov_stagnation("GMRES", total_iters, res, action);
+                    stagnation_residuals.clear();
+                    break;
+                }
 
                 if res <= thr || total_iters >= self.conv.max_iters {
                     break;
@@ -1295,7 +1319,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                     }
                 } // pairs dropped here; we can safely mutate w_block next.
-                // W <- W - V C
+                  // W <- W - V C
                 for i in 0..=k {
                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                     for j in 0..block {
@@ -1346,8 +1370,7 @@ impl GmresSolver {
                             reduction_count += 1;
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.bytes_reduced +=
-                                    (k + 1) * block * std::mem::size_of::<R>();
+                                metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                             }
                         }
                         for i in 0..=k {
@@ -1422,7 +1445,6 @@ impl GmresSolver {
                     }
                 };
 
-
                 let mut r_block = vec![R::default(); block * block];
                 for (dst, src) in r_block.iter_mut().zip(gram.iter()) {
                     *dst = src.real();
@@ -1450,7 +1472,6 @@ impl GmresSolver {
                     let src = &w_block[j * n..(j + 1) * n];
                     dst.copy_from_slice(src);
                 }
-
 
                 // For Right preconditioning, also build Z columns for these new V columns.
                 if matches!(pc_side, PcSide::Right) {
@@ -1495,8 +1516,14 @@ impl GmresSolver {
                     for m in mons {
                         m(total_iters, res);
                     }
-                    let true_res =
-                        Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                    let true_res = Self::true_residual_norm(
+                        a,
+                        b,
+                        x,
+                        red.engine(),
+                        &mut ws.tmp1,
+                        &mut ws.bridge,
+                    );
                     reduction_count += 1;
                     #[cfg(feature = "metrics")]
                     {
@@ -1883,7 +1910,6 @@ impl GmresSolver {
             ReorthPolicy::Never
         };
     }
-
 
     pub fn set_reorth_policy(&mut self, policy: ReorthPolicy) {
         self.reorth = policy;
