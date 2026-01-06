@@ -174,7 +174,7 @@ pub fn build_ilut(
 pub fn build_ilut_with_conditioning(
     drop_tol: f64,
     max_fill: usize,
-    _reordering: Option<String>,
+    reordering: Option<String>,
     conditioning: ConditioningOptions,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
@@ -201,7 +201,7 @@ pub fn build_ilut_with_conditioning(
         // For ILUT, fast numeric update requires fixed pattern. Let callers override later if needed.
         numeric_update_fixed: true,
         logging: 0,
-        reordering: ReorderingOptions::default(),
+        reordering: parse_reordering_options(reordering)?,
         conditioning,
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
@@ -229,6 +229,25 @@ pub fn build_milu0_with_conditioning(
         conditioning,
     };
     Ok(Box::new(IluCsr::new_with_config(cfg)))
+}
+
+fn parse_reordering_options(reordering: Option<String>) -> Result<ReorderingOptions, KError> {
+    use crate::preconditioner::ilu_csr::{ReorderingKind, ReorderingOptions};
+    let mut opts = ReorderingOptions::default();
+    let Some(kind) = reordering else {
+        return Ok(opts);
+    };
+    opts.kind = match kind.to_lowercase().as_str() {
+        "none" | "natural" => ReorderingKind::None,
+        "rcm" => ReorderingKind::Rcm,
+        "amd" => ReorderingKind::Amd,
+        other => {
+            return Err(KError::InvalidInput(format!(
+                "unknown ILU reordering: {other}"
+            )))
+        }
+    };
+    Ok(opts)
 }
 
 // ---- ASM / AMG stubs -----------------------------------------------------

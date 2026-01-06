@@ -1896,6 +1896,11 @@ impl KspContext {
             GlobalPcKind::Asm => {
                 PcFactory::create_preconditioner(PcType::Asm, Some(&pending.pc_opts))
             }
+            GlobalPcKind::Ras => {
+                let mut opts = pending.pc_opts.clone();
+                opts.asm_mode = Some("ras".to_string());
+                PcFactory::create_preconditioner(PcType::Asm, Some(&opts))
+            }
             GlobalPcKind::None => Err(KError::InvalidInput(
                 "pc_global=none should not build a global PC".into(),
             )),

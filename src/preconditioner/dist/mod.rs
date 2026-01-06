@@ -25,8 +25,10 @@ pub enum GlobalPcKind {
     None,
     /// Block-Jacobi wrapping a local ILU-like solver.
     BlockJacobi,
-    /// Additive Schwarz (not implemented yet).
+    /// Additive Schwarz.
     Asm,
+    /// Restricted additive Schwarz (RAS).
+    Ras,
 }
 
 impl FromStr for GlobalPcKind {
@@ -37,6 +39,7 @@ impl FromStr for GlobalPcKind {
             "none" => Ok(GlobalPcKind::None),
             "block-jacobi" | "blockjacobi" | "block_jacobi" => Ok(GlobalPcKind::BlockJacobi),
             "asm" => Ok(GlobalPcKind::Asm),
+            "ras" => Ok(GlobalPcKind::Ras),
             other => Err(KError::InvalidInput(format!(
                 "Unknown pc_global value: {other}"
             ))),

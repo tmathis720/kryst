@@ -61,6 +61,15 @@ impl AsmPc {
         }
     }
 
+    pub fn ras(
+        overlap: usize,
+        subdomain_hint: Option<usize>,
+        block_solver: AsmBlockSolver,
+        weighting: Weighting,
+    ) -> Self {
+        Self::new(overlap, subdomain_hint, block_solver, AsmMode::RAS, weighting)
+    }
+
     fn build_serial(&self) -> AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
         let factory = match self.block_solver {
             AsmBlockSolver::LuDense => BlockSolverFactory::LuDense,

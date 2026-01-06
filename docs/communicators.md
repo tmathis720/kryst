@@ -37,11 +37,26 @@ MPI-global preconditioners are selected via `PcOptions::mpi_pc_options()` and on
   the local ILU/ILUT/ILUTP block solver.
 - `pc_global=asm` → `preconditioner::asm::AsmPc`, which dispatches to the distributed ASM path
   when a distributed layout is present.
+- `pc_global=ras` → `preconditioner::asm::AsmPc` with restricted additive Schwarz mode enabled.
 
 Supported combinations:
 
 - Distributed operators: `DistCsrOp` with `UniverseComm` size > 1.
 - Local operators or size-1 communicators: ignore `pc_global` and use the standard `pc_type` path.
+
+### Example: FGMRES + RAS + ILUTP (MPI)
+
+```bash
+cargo mpirun -n 4 --example matrix_market_demo --features backend-faer,mpi -- \
+  -ksp_type fgmres \
+  -pc_global ras \
+  -pc_asm_overlap 1 \
+  -pc_asm_weighting uniform \
+  -pc_local ilutp \
+  -pc_ilutp_max_fill 20 \
+  -pc_ilutp_drop_tol 1e-4 \
+  -pc_ilutp_perm_tol 0.1
+```
 
 ## Common errors
 

@@ -32,6 +32,8 @@ use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
+use crate::preconditioner::ilu_csr::{ReorderingKind, ReorderingOptions};
+use crate::utils::permutation::{Permutation, amd_from_adj, rcm_from_adj};
 use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
 use crate::utils::metrics::{Counters, SolveTimer};
 use faer::Mat;
@@ -66,6 +68,10 @@ pub struct Ilutp {
     solve_ctrs: Counters,
     /// Optional conditioning transforms applied before factorization.
     conditioning: ConditioningOptions,
+    /// Reordering configuration for local factorization.
+    reordering: ReorderingOptions,
+    /// Permutation applied before factorization.
+    perm: Permutation,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +110,68 @@ impl IlutpWorkspace {
     }
 }
 
+fn apply_reordering(
+    matrix: &Mat<f64>,
+    reordering: ReorderingOptions,
+) -> Result<(Mat<f64>, Permutation), KError> {
+    let n = matrix.nrows();
+    if n != matrix.ncols() {
+        return Err(KError::InvalidInput(
+            "Matrix must be square for ILUTP".to_string(),
+        ));
+    }
+    if !reordering.symmetric {
+        return Err(KError::Unsupported(
+            "Ilutp only supports symmetric reordering".to_string(),
+        ));
+    }
+
+    let perm = match reordering.kind {
+        ReorderingKind::None => Permutation::identity(n),
+        ReorderingKind::Rcm => {
+            let mut adj = dense_adj_from_matrix(matrix);
+            rcm_from_adj(&mut adj)
+        }
+        ReorderingKind::Amd => {
+            let mut adj = dense_adj_from_matrix(matrix);
+            amd_from_adj(&mut adj)
+        }
+    };
+
+    if matches!(reordering.kind, ReorderingKind::None) {
+        Ok((matrix.clone(), perm))
+    } else {
+        Ok((permute_dense_symmetric(matrix, &perm), perm))
+    }
+}
+
+fn dense_adj_from_matrix(matrix: &Mat<f64>) -> Vec<Vec<usize>> {
+    let n = matrix.nrows();
+    let mut adj = vec![Vec::new(); n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if matrix[(i, j)] != 0.0 || matrix[(j, i)] != 0.0 {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+        }
+    }
+    adj
+}
+
+fn permute_dense_symmetric(matrix: &Mat<f64>, perm: &Permutation) -> Mat<f64> {
+    let n = matrix.nrows();
+    let mut result = Mat::zeros(n, n);
+    for i in 0..n {
+        let old_i = perm.p[i];
+        for j in 0..n {
+            let old_j = perm.p[j];
+            result[(i, j)] = matrix[(old_i, old_j)];
+        }
+    }
+    result
+}
+
 impl Ilutp {
     /// Create a new ILUTP preconditioner with default parameters.
     pub fn new() -> Self {
@@ -118,6 +186,8 @@ impl Ilutp {
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
             conditioning: ConditioningOptions::default(),
+            reordering: ReorderingOptions::default(),
+            perm: Permutation::identity(0),
         }
     }
 
@@ -134,11 +204,17 @@ impl Ilutp {
             setup_time: 0.0,
             solve_ctrs: Counters::new(),
             conditioning: ConditioningOptions::default(),
+            reordering: ReorderingOptions::default(),
+            perm: Permutation::identity(0),
         }
     }
 
     pub fn set_conditioning(&mut self, conditioning: ConditioningOptions) {
         self.conditioning = conditioning;
+    }
+
+    pub fn set_reordering(&mut self, reordering: ReorderingOptions) {
+        self.reordering = reordering;
     }
 
     /// Set the maximum fill-in per row.
@@ -328,10 +404,21 @@ impl Ilutp {
         }
 
         let _timer = SolveTimer::start(&self.solve_ctrs);
-        let mut temp_guard = self.workspace.borrow_buf(n);
-        let temp = &mut temp_guard[..n];
-        self.forward_solve(input, temp)?;
-        self.backward_solve(temp, output)?;
+        if matches!(self.reordering.kind, ReorderingKind::None) {
+            let mut temp_guard = self.workspace.borrow_buf(n);
+            let temp = &mut temp_guard[..n];
+            self.forward_solve(input, temp)?;
+            self.backward_solve(temp, output)?;
+        } else {
+            let mut perm_input = vec![0.0; n];
+            self.perm.apply_vec(input, &mut perm_input);
+            let mut temp_guard = self.workspace.borrow_buf(n);
+            let temp = &mut temp_guard[..n];
+            self.forward_solve(&perm_input, temp)?;
+            let mut perm_output = vec![0.0; n];
+            self.backward_solve(temp, &mut perm_output)?;
+            self.perm.apply_vec_t(&perm_output, output);
+        }
         Ok(())
     }
 }
@@ -356,7 +443,9 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilutp {
         } else {
             matrix
         };
-        self.compute_factorization(matrix)?;
+        let (matrix, perm) = apply_reordering(matrix, self.reordering)?;
+        self.perm = perm;
+        self.compute_factorization(&matrix)?;
         self.setup_time = start.elapsed().as_secs_f64();
         Ok(())
     }

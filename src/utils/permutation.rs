@@ -78,8 +78,34 @@ pub fn permute_csr_symmetric<T: KrystScalar>(a: &CsrMatrix<T>, perm: &Permutatio
 pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
     let n = a.nrows();
     let mut adj = build_symmetric_adj_from_csr(a);
-    let mut order = cuthill_mckee_from_adj(&mut adj);
+    rcm_from_adj(&mut adj)
+}
+
+/// Approximate minimum degree ordering for a symmetric graph given by CSR matrix.
+pub fn amd_csr<T>(a: &CsrMatrix<T>) -> Permutation {
+    let mut adj = build_symmetric_adj_from_csr(a);
+    amd_from_adj(&mut adj)
+}
+
+pub(crate) fn rcm_from_adj(adj: &mut [Vec<usize>]) -> Permutation {
+    let mut order = cuthill_mckee_from_adj(adj);
     order.reverse();
+    permutation_from_order(order)
+}
+
+pub(crate) fn amd_from_adj(adj: &mut [Vec<usize>]) -> Permutation {
+    let order = minimum_degree_order(adj);
+    permutation_from_order(order)
+}
+
+pub(crate) fn permutation_from_order(order: Vec<usize>) -> Permutation {
+    let n = order.len();
+    let mut pinv = vec![0; n];
+    for (new, &old) in order.iter().enumerate() {
+        pinv[old] = new;
+    }
+    Permutation { p: order, pinv }
+}
 
     let mut pinv = vec![0; n];
     for (new, &old) in order.iter().enumerate() {
@@ -88,7 +114,7 @@ pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
     Permutation { p: order, pinv }
 }
 
-fn build_symmetric_adj_from_csr<T>(a: &CsrMatrix<T>) -> Vec<Vec<usize>> {
+pub(crate) fn build_symmetric_adj_from_csr<T>(a: &CsrMatrix<T>) -> Vec<Vec<usize>> {
     let n = a.nrows();
     let rp = a.row_ptr();
     let cj = a.col_idx();
@@ -104,6 +130,37 @@ fn build_symmetric_adj_from_csr<T>(a: &CsrMatrix<T>) -> Vec<Vec<usize>> {
         }
     }
     adj
+}
+
+fn minimum_degree_order(adj: &mut [Vec<usize>]) -> Vec<usize> {
+    let n = adj.len();
+    for neighbors in adj.iter_mut() {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
+
+    let mut active = vec![true; n];
+    let mut order = Vec::with_capacity(n);
+
+    for _ in 0..n {
+        let mut min_node = None;
+        let mut min_degree = usize::MAX;
+        for i in 0..n {
+            if !active[i] {
+                continue;
+            }
+            let degree = adj[i].iter().filter(|&&j| active[j]).count();
+            if degree < min_degree {
+                min_degree = degree;
+                min_node = Some(i);
+            }
+        }
+        let node = min_node.expect("minimum degree ordering requires at least one node");
+        active[node] = false;
+        order.push(node);
+    }
+
+    order
 }
 
 pub(crate) fn cuthill_mckee_from_adj(adj: &mut [Vec<usize>]) -> Vec<usize> {
