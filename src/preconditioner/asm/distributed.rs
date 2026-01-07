@@ -20,6 +20,7 @@ use crate::matrix::op::CsrOp;
     feature = "legacy-pc-bridge"
 ))]
 use crate::matrix::op::DenseOp;
+use std::collections::{HashMap, HashSet};
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::sparse::CsrMatrix;
