@@ -18,7 +18,7 @@ pub static SPECS: &[Spec] = &[
         key: "ksp_type",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "cg, gmres, bicgstab, ...",
+        doc: "cg, gmres, minres, lsqr, lsmr, bicgstab, ...",
     },
     Spec {
         flag: "-ksp_rtol",

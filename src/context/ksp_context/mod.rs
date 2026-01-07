@@ -168,6 +168,8 @@ pub enum SolverType {
     Cgs,
     Pcg,
     Minres,
+    Lsqr,
+    Lsmr,
     PcaGmres,
     Qmr,
     Tfqmr,
@@ -179,7 +181,11 @@ impl SolverType {
     #[inline]
     pub fn required_pc_side(self) -> Option<PcSide> {
         match self {
-            SolverType::Cg | SolverType::Pcg => Some(PcSide::Left),
+            SolverType::Cg
+            | SolverType::Pcg
+            | SolverType::Minres
+            | SolverType::Lsqr
+            | SolverType::Lsmr => Some(PcSide::Left),
             _ => None,
         }
     }
@@ -198,6 +204,8 @@ impl FromStr for SolverType {
             "cgs" => Ok(SolverType::Cgs),
             "pcg" => Ok(SolverType::Pcg),
             "minres" => Ok(SolverType::Minres),
+            "lsqr" => Ok(SolverType::Lsqr),
+            "lsmr" => Ok(SolverType::Lsmr),
             "pca_gmres" | "pcagmres" => Ok(SolverType::PcaGmres),
             "qmr" => Ok(SolverType::Qmr),
             "tfqmr" => Ok(SolverType::Tfqmr),
@@ -575,6 +583,14 @@ impl KspContext {
                 s
             })),
             SolverType::Minres => Some(Box::new(MinresSolver::new(self.rtol, self.maxits))),
+            SolverType::Lsqr => Some(Box::new(crate::solver::LsqrSolver::new(
+                self.rtol,
+                self.maxits,
+            ))),
+            SolverType::Lsmr => Some(Box::new(crate::solver::LsmrSolver::new(
+                self.rtol,
+                self.maxits,
+            ))),
             SolverType::PcaGmres => {
                 let mut s = PcaGmresSolver::new(self.restart, 1, 1, self.rtol, self.maxits);
                 s.pc_mode = crate::solver::PcaPcMode::Left;
@@ -1575,7 +1591,10 @@ impl KspContext {
 
         let (m, n) = amat.dims();
         let (pm, pn) = pmat.dims();
-        let allow_rect = matches!(self.solver_type, Some(SolverType::Cgnr));
+        let allow_rect = matches!(
+            self.solver_type,
+            Some(SolverType::Cgnr | SolverType::Lsqr | SolverType::Lsmr)
+        );
         if !allow_rect && m != n {
             return Err(KError::InvalidInput(format!(
                 "Amat must be square: got {}x{}",
@@ -1793,7 +1812,10 @@ impl KspContext {
         let (m, n) = amat.dims();
         let (pm, pn) = pmat.dims();
 
-        let allow_rect = matches!(self.solver_type, Some(SolverType::Cgnr));
+        let allow_rect = matches!(
+            self.solver_type,
+            Some(SolverType::Cgnr | SolverType::Lsqr | SolverType::Lsmr)
+        );
         if !allow_rect && m != n {
             return Err(KError::InvalidInput(format!(
                 "Amat must be square: got {}x{}",
@@ -2025,6 +2047,38 @@ impl KspContext {
                         .as_any_mut()
                         .downcast_mut::<MinresSolver>()
                         .ok_or_else(|| KError::SolveError("MINRES solver missing".into()))?;
+                    s.solve_k(
+                        &op,
+                        pc_k.as_deref(),
+                        b,
+                        x,
+                        self.pc_side,
+                        &comm,
+                        monitors,
+                        work,
+                    )?
+                }
+                SolverType::Lsqr => {
+                    let s = solver
+                        .as_any_mut()
+                        .downcast_mut::<crate::solver::LsqrSolver>()
+                        .ok_or_else(|| KError::SolveError("LSQR solver missing".into()))?;
+                    s.solve_k(
+                        &op,
+                        pc_k.as_deref(),
+                        b,
+                        x,
+                        self.pc_side,
+                        &comm,
+                        monitors,
+                        work,
+                    )?
+                }
+                SolverType::Lsmr => {
+                    let s = solver
+                        .as_any_mut()
+                        .downcast_mut::<crate::solver::LsmrSolver>()
+                        .ok_or_else(|| KError::SolveError("LSMR solver missing".into()))?;
                     s.solve_k(
                         &op,
                         pc_k.as_deref(),

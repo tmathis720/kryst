@@ -222,6 +222,10 @@ pub mod pcg;
 pub use pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
 pub mod minres;
 pub use minres::MinresSolver;
+pub mod lsmr;
+pub use lsmr::LsmrSolver;
+pub mod lsqr;
+pub use lsqr::LsqrSolver;
 // Dense direct modules are gated; opt-in via `dense-direct`.
 #[cfg(feature = "dense-direct")]
 pub mod dense_lu;
