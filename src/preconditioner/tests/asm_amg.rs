@@ -10,11 +10,11 @@ use crate::preconditioner::{
 };
 use std::sync::Arc;
 
-fn identity(n: usize) -> CsrMatrix<R> {
+pub(super) fn identity(n: usize) -> CsrMatrix<R> {
     CsrMatrix::identity(n)
 }
 
-fn poisson_1d(n: usize) -> CsrMatrix<R> {
+pub(super) fn poisson_1d(n: usize) -> CsrMatrix<R> {
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::new();
     let mut values = Vec::new();
