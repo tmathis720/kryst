@@ -96,12 +96,14 @@ mod real_demo {
     struct ResultRow {
         method: String,
         iterations: usize,
-        residual: f64,
+        residual_reported: f64,
+        residual_true: f64,
         time_secs: f64,
         converged: bool,
         reductions: usize,
         reason: ConvergedReason,
         dof_per_sec: f64,
+        diagnostic_note: Option<String>,
     }
 
     enum PcConfigSpec {
@@ -263,18 +265,23 @@ mod real_demo {
                                 "{:<34} {:>8} {:>12.2e} {:>10.3} {:>12} {:>10}",
                                 row.method,
                                 row.iterations,
-                                row.residual,
+                                row.residual_true,
                                 row.time_secs,
                                 row.reductions,
                                 status
                             );
+                            emit_residual_warning(&row);
                             if row.converged {
                                 println!(
                                     "    → {:.2e} DOF/s (reason: {:?})",
                                     row.dof_per_sec, row.reason
                                 );
                             } else {
-                                println!("    → stopped with {:?}", row.reason);
+                                if let Some(note) = row.diagnostic_note.as_deref() {
+                                    println!("    → stopped with {:?} ({note})", row.reason);
+                                } else {
+                                    println!("    → stopped with {:?}", row.reason);
+                                }
                             }
                         }
                     }
@@ -339,6 +346,7 @@ mod real_demo {
         problem.comm.barrier();
         let elapsed = start.elapsed().as_secs_f64();
         let true_residual = true_residual_norm(problem, &x)?;
+        let reported_residual = stats.final_residual;
 
         let converged = matches!(
             stats.reason,
@@ -347,6 +355,11 @@ mod real_demo {
                 | ConvergedReason::ConvergedHappyBreakdown
                 | ConvergedReason::ConvergedTrustRegion
         );
+        let diagnostic_note = if converged {
+            None
+        } else {
+            diagnostic_note(stats.reason).map(|note| note.to_string())
+        };
 
         let reductions = stats.counters.num_global_reductions;
         let dof_per_sec = if elapsed > 0.0 {
@@ -358,12 +371,14 @@ mod real_demo {
         Ok(ResultRow {
             method: spec.name.to_string(),
             iterations: stats.iterations,
-            residual: true_residual,
+            residual_reported: reported_residual,
+            residual_true: true_residual,
             time_secs: elapsed,
             converged,
             reductions,
             reason: stats.reason,
             dof_per_sec,
+            diagnostic_note,
         })
     }
 
@@ -893,6 +908,39 @@ mod real_demo {
             r2_local += ri * ri;
         }
         Ok(problem.comm.all_reduce_f64(r2_local).sqrt())
+    }
+
+    fn diagnostic_note(reason: ConvergedReason) -> Option<&'static str> {
+        match reason {
+            ConvergedReason::DivergedMaxIts => Some("maximum iterations reached"),
+            ConvergedReason::DivergedDtol => Some("residual exceeded divergence tolerance"),
+            ConvergedReason::Continued => Some("solver exited without convergence"),
+            _ => None,
+        }
+    }
+
+    fn emit_residual_warning(row: &ResultRow) {
+        const RESIDUAL_WARN_RATIO: f64 = 10.0;
+        if let Some(ratio) = residual_ratio(row.residual_reported, row.residual_true) {
+            if ratio >= RESIDUAL_WARN_RATIO {
+                println!(
+                    "    ⚠ residual mismatch: reported {:.2e}, true {:.2e} (ratio {:.1}x)",
+                    row.residual_reported, row.residual_true, ratio
+                );
+            }
+        }
+    }
+
+    fn residual_ratio(reported: f64, true_residual: f64) -> Option<f64> {
+        let reported = reported.abs();
+        let true_residual = true_residual.abs();
+        if reported == 0.0 && true_residual == 0.0 {
+            return None;
+        }
+        if reported == 0.0 || true_residual == 0.0 {
+            return Some(f64::INFINITY);
+        }
+        Some((reported / true_residual).max(true_residual / reported))
     }
 
     #[cfg(feature = "mpi")]
