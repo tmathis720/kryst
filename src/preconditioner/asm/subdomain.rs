@@ -1,31 +1,31 @@
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::algebra::prelude::*;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::error::KError;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::matrix::sparse::CsrMatrix;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::parallel::{Comm, UniverseComm};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use std::collections::HashMap;
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use super::comm_plan::alltoallv_u64;
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 #[derive(Debug, Clone)]
 pub struct RemoteRow {
     pub cols: Vec<usize>,
-    pub vals: Vec<R>,
+    pub vals: Vec<S>,
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 pub fn request_remote_rows(
     comm: &UniverseComm,
     ownership: &[(usize, usize)],
     row_start: usize,
     row_end: usize,
-    local: &CsrMatrix<f64>,
+    local: &CsrMatrix<S>,
     requests: &[usize],
 ) -> Result<HashMap<usize, RemoteRow>, KError> {
     if requests.is_empty() {
@@ -79,14 +79,14 @@ pub fn request_remote_rows(
     Ok(out)
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 pub fn build_subdomain_csr(
     subdofs: &[usize],
     row_start: usize,
     row_end: usize,
-    local: &CsrMatrix<f64>,
+    local: &CsrMatrix<S>,
     remote_rows: &HashMap<usize, RemoteRow>,
-) -> Result<CsrMatrix<f64>, KError> {
+) -> Result<CsrMatrix<S>, KError> {
     let n = subdofs.len();
     let mut map = HashMap::with_capacity(n * 2);
     for (i, &g) in subdofs.iter().enumerate() {
@@ -127,21 +127,22 @@ pub fn build_subdomain_csr(
     Ok(CsrMatrix::from_csr(n, n, rowptr, colind, values))
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
-fn pack_row(dst: &mut Vec<u64>, row: usize, cols: &[usize], vals: &[R]) {
+#[cfg(feature = "mpi")]
+fn pack_row(dst: &mut Vec<u64>, row: usize, cols: &[usize], vals: &[S]) {
     dst.push(row as u64);
     dst.push(cols.len() as u64);
     for &col in cols {
         dst.push(col as u64);
     }
     for &val in vals {
-        dst.push(val.to_bits());
+        pack_scalar(val, dst);
     }
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn unpack_rows(buf: &[u64], out: &mut HashMap<usize, RemoteRow>) -> Result<(), KError> {
     let mut idx = 0;
+    let words = scalar_words();
     while idx < buf.len() {
         if idx + 2 > buf.len() {
             return Err(KError::InvalidInput("corrupt packed row buffer".into()));
@@ -157,20 +158,21 @@ fn unpack_rows(buf: &[u64], out: &mut HashMap<usize, RemoteRow>) -> Result<(), K
             .map(|&v| v as usize)
             .collect::<Vec<_>>();
         idx += nnz;
-        if idx + nnz > buf.len() {
+        if idx + nnz * words > buf.len() {
             return Err(KError::InvalidInput("corrupt packed row buffer".into()));
         }
-        let vals = buf[idx..idx + nnz]
-            .iter()
-            .map(|&v| f64::from_bits(v))
-            .collect::<Vec<_>>();
-        idx += nnz;
+        let mut vals = Vec::with_capacity(nnz);
+        for _ in 0..nnz {
+            let end = idx + words;
+            vals.push(unpack_scalar(&buf[idx..end])?);
+            idx = end;
+        }
         out.insert(row, RemoteRow { cols, vals });
     }
     Ok(())
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
     let mut lo = 0usize;
     let mut hi = ownership.len().saturating_sub(1);
@@ -189,4 +191,48 @@ fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
         }
     }
     lo.min(ownership.len().saturating_sub(1))
+}
+
+#[cfg(feature = "mpi")]
+fn scalar_words() -> usize {
+    #[cfg(feature = "complex")]
+    {
+        2
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        1
+    }
+}
+
+#[cfg(feature = "mpi")]
+fn pack_scalar(value: S, dst: &mut Vec<u64>) {
+    dst.push(value.real().to_bits());
+    #[cfg(feature = "complex")]
+    dst.push(value.imag().to_bits());
+}
+
+#[cfg(feature = "mpi")]
+fn unpack_scalar(words: &[u64]) -> Result<S, KError> {
+    #[cfg(feature = "complex")]
+    {
+        if words.len() != 2 {
+            return Err(KError::InvalidInput(
+                "corrupt packed row buffer".into(),
+            ));
+        }
+        Ok(S::from_parts(
+            f64::from_bits(words[0]),
+            f64::from_bits(words[1]),
+        ))
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        if words.len() != 1 {
+            return Err(KError::InvalidInput(
+                "corrupt packed row buffer".into(),
+            ));
+        }
+        Ok(S::from_real(f64::from_bits(words[0])))
+    }
 }
