@@ -76,6 +76,7 @@ mod real_demo {
 
     #[derive(Clone, Copy, Debug, Default)]
     struct Analysis {
+        nrows: usize,
         nnz: usize,
         density: f64,
         approx_symmetric: bool,
@@ -373,6 +374,7 @@ mod real_demo {
         let enable_stress_solvers = stress_solvers_enabled();
         let spd_confident =
             analysis.approx_symmetric && analysis.diag_positive && !analysis.has_diag_zeros;
+        let tiny_matrix = analysis.nrows <= tiny_matrix_threshold();
 
         if is_parallel {
             notes.push(
@@ -455,51 +457,42 @@ mod real_demo {
                 setup: None,
             });
         } else if analysis.approx_symmetric {
-            let minres_pc = if is_parallel {
-                PcConfigSpec::Type {
-                    pc_type: PcType::Asm,
-                    options: Some(asm_ilutp_options()),
-                }
-            } else {
-                PcConfigSpec::Type {
-                    pc_type: PcType::BlockJacobi,
-                    options: Some(block_jacobi_ilut_options()),
-                }
-            };
             specs.push(RunSpec {
-                name: if is_parallel {
-                    "MINRES + RAS/ASM + ILUTP (L)"
-                } else {
-                    "MINRES + Block-Jacobi + ILUT (L)"
-                },
+                name: "MINRES + RAS/ASM + ILUTP (L)",
                 solver: SolverType::Minres,
                 pc_side: PcSide::Left,
-                pc: minres_pc,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::Asm,
+                    options: Some(asm_ilutp_options()),
+                },
                 setup: None,
             });
         }
 
-        if is_parallel {
-            specs.push(RunSpec {
-                name: "GMRES(50) + RAS/ASM + ILUTP (L)",
-                solver: SolverType::Gmres,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Asm,
-                    options: Some(asm_ilutp_options()),
-                },
-                setup: Some(gmres_hook()),
-            });
-            specs.push(RunSpec {
-                name: "GMRES(50) + Block-Jacobi + ILUT",
-                solver: SolverType::Gmres,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::BlockJacobi,
-                    options: Some(block_jacobi_ilut_options()),
-                },
-                setup: Some(gmres_hook()),
-            });
+        if !analysis.approx_symmetric {
+            if tiny_matrix {
+                specs.push(RunSpec {
+                    name: "GMRES(50) + Block-Jacobi + ILU0 (L)",
+                    solver: SolverType::Gmres,
+                    pc_side: PcSide::Left,
+                    pc: PcConfigSpec::Type {
+                        pc_type: PcType::BlockJacobi,
+                        options: Some(block_jacobi_ilu0_options()),
+                    },
+                    setup: Some(gmres_hook()),
+                });
+            } else {
+                specs.push(RunSpec {
+                    name: "GMRES(50) + RAS/ASM + ILUTP (L)",
+                    solver: SolverType::Gmres,
+                    pc_side: PcSide::Left,
+                    pc: PcConfigSpec::Type {
+                        pc_type: PcType::Asm,
+                        options: Some(asm_ilutp_options()),
+                    },
+                    setup: Some(gmres_hook()),
+                });
+            }
         }
 
         if enable_stress_solvers {
@@ -595,11 +588,9 @@ mod real_demo {
         opts
     }
 
-    fn block_jacobi_ilut_options() -> PcOptions {
+    fn block_jacobi_ilu0_options() -> PcOptions {
         let mut opts = PcOptions::default();
-        opts.pc_local = Some("ilut".into());
-        opts.ilut_drop_tol = Some(1e-4);
-        opts.ilut_max_fill = Some(20);
+        opts.pc_local = Some("ilu0".into());
         opts
     }
 
@@ -661,12 +652,17 @@ mod real_demo {
         let has_diag_zeros = detect_diag_issues(matrix, 1e-14, 20_000);
         let diag_positive = !detect_nonpositive_diag(matrix, 1e-14, 20_000);
         Analysis {
+            nrows,
             nnz,
             density,
             approx_symmetric,
             has_diag_zeros,
             diag_positive,
         }
+    }
+
+    fn tiny_matrix_threshold() -> usize {
+        2_000
     }
 
     fn repair_diagonal_csr(a: &CsrMatrix<f64>, tol: f64, tau: f64) -> (CsrMatrix<f64>, usize) {
