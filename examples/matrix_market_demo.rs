@@ -371,7 +371,8 @@ mod real_demo {
         let mut notes = Vec::new();
 
         let enable_stress_solvers = stress_solvers_enabled();
-        let spd_heuristic = analysis.approx_symmetric && analysis.diag_positive;
+        let spd_confident =
+            analysis.approx_symmetric && analysis.diag_positive && !analysis.has_diag_zeros;
 
         if is_parallel {
             notes.push(
@@ -386,9 +387,9 @@ mod real_demo {
         if !enable_stress_solvers {
             notes.push("Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.");
         }
-        if analysis.approx_symmetric && !spd_heuristic {
+        if analysis.approx_symmetric && !spd_confident {
             notes.push(
-                "Approximate symmetry detected, but SPD heuristic failed; offering MINRES instead of CG.",
+                "Approximate symmetry detected, but SPD is not confident; offering MINRES instead of CG.",
             );
         }
 
@@ -433,7 +434,7 @@ mod real_demo {
             notes.push("AMG entries are skipped for MPI runs (use ASM/RAS instead).");
         }
 
-        if spd_heuristic {
+        if spd_confident {
             if !is_parallel {
                 specs.push(RunSpec {
                     name: "PCG(pipelined) + AMG (L)",
@@ -453,7 +454,7 @@ mod real_demo {
                 },
                 setup: None,
             });
-        } else if analysis.approx_symmetric && !analysis.has_diag_zeros {
+        } else if analysis.approx_symmetric {
             let minres_pc = if is_parallel {
                 PcConfigSpec::Type {
                     pc_type: PcType::Asm,
