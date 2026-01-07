@@ -1,57 +1,50 @@
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use super::{AsmBlockSolver, AsmInnerPc, AsmMode, Weighting};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::algebra::prelude::*;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::error::KError;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::matrix::DistCsrOp;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::convert::materialize_linop_with_hint;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::format::FormatHint;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::matrix::format::OpFormat;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::matrix::op::CsrOp;
 #[cfg(all(
     feature = "mpi",
-    not(feature = "complex"),
     feature = "backend-faer",
     feature = "legacy-pc-bridge"
 ))]
 use crate::matrix::op::DenseOp;
+#[cfg(feature = "mpi")]
 use std::collections::{HashMap, HashSet};
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::matrix::sparse::CsrMatrix;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::parallel::{Comm, UniverseComm, contiguous_partition};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
+use crate::preconditioner::builders::build_jacobi;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::preconditioner::builders::{
     build_ilut_with_conditioning, build_ilutp_with_conditioning, build_ilu0_with_conditioning,
-    build_jacobi,
 };
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
-#[cfg(all(
-    feature = "mpi",
-    not(feature = "complex"),
-    feature = "backend-faer",
-    feature = "legacy-pc-bridge"
-))]
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
-use std::collections::{HashMap, HashSet};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use std::sync::Arc;
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use super::comm_plan::{CommPlan, alltoallv_u64};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 use super::subdomain::{RemoteRow, build_subdomain_csr, request_remote_rows};
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 #[derive(Debug)]
 pub struct DistributedAsm {
     overlap: usize,
@@ -65,21 +58,21 @@ pub struct DistributedAsm {
     last_vid: Option<ValuesId>,
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 #[derive(Debug)]
 struct DistributedAsmState {
     comm: UniverseComm,
     layout: DistLayout,
-    local_csr: Arc<CsrMatrix<f64>>,
+    local_csr: Arc<CsrMatrix<S>>,
     subdofs: Vec<usize>,
     sub_map: HashMap<usize, usize>,
     comm_plan: CommPlan,
-    sub_csr: Arc<CsrMatrix<f64>>,
+    sub_csr: Arc<CsrMatrix<S>>,
     solver: SubdomainSolver,
     weights: Option<Vec<R>>,
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 impl DistributedAsm {
     pub fn new(
         overlap: usize,
@@ -120,7 +113,7 @@ impl DistributedAsm {
     }
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 impl Preconditioner for DistributedAsm {
     fn dims(&self) -> (usize, usize) {
         self.state
@@ -332,21 +325,27 @@ impl Preconditioner for DistributedAsm {
     }
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
-fn materialize_local_csr(op: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<f64>>, KError> {
+#[cfg(feature = "mpi")]
+fn materialize_local_csr(op: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<S>>, KError> {
     if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
         return Ok(Arc::new(dist.local_matrix()));
     }
-    let mat = materialize_linop_with_hint(op, FormatHint::Csr, 0.0)?;
-    if let Some(csr) = mat.as_any().downcast_ref::<CsrMatrix<f64>>() {
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
         return Ok(Arc::new(csr.clone()));
+    }
+    #[cfg(not(feature = "complex"))]
+    {
+        let mat = materialize_linop_with_hint(op, FormatHint::Csr, 0.0)?;
+        if let Some(csr) = mat.as_any().downcast_ref::<CsrMatrix<f64>>() {
+            return Ok(Arc::new(csr.clone()));
+        }
     }
     Err(KError::Unsupported(
         "Distributed ASM requires a CSR materializable operator".into(),
     ))
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn dist_layout_from_op(op: &dyn LinOp<S = S>) -> Option<DistLayout> {
     if let Some(layout) = op.dist_layout() {
         return Some(layout.clone());
@@ -364,7 +363,7 @@ fn dist_layout_from_op(op: &dyn LinOp<S = S>) -> Option<DistLayout> {
     None
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn build_ownership(layout: &DistLayout, size: usize) -> Vec<(usize, usize)> {
     let mut ownership = Vec::with_capacity(size);
     for rank in 0..size {
@@ -373,9 +372,9 @@ fn build_ownership(layout: &DistLayout, size: usize) -> Vec<(usize, usize)> {
     ownership
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn build_overlap_set(
-    local: &CsrMatrix<f64>,
+    local: &CsrMatrix<S>,
     layout: &DistLayout,
     ownership: &[(usize, usize)],
     overlap: usize,
@@ -437,7 +436,7 @@ fn build_overlap_set(
     Ok((subdofs, remote_rows))
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn build_comm_plan(
     comm: &UniverseComm,
     ownership: &[(usize, usize)],
@@ -483,7 +482,7 @@ fn build_comm_plan(
     })
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn build_ras_weights(
     layout: &DistLayout,
     comm_plan: &CommPlan,
@@ -512,7 +511,7 @@ fn build_ras_weights(
     )
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
     let mut lo = 0usize;
     let mut hi = ownership.len().saturating_sub(1);
@@ -533,14 +532,14 @@ fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
     lo.min(ownership.len().saturating_sub(1))
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 enum SubdomainSolver {
     Csr(Box<dyn Preconditioner>),
     #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
     Dense(Box<dyn Preconditioner>),
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 impl std::fmt::Debug for SubdomainSolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
@@ -557,7 +556,7 @@ impl std::fmt::Debug for SubdomainSolver {
     }
 }
 
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[cfg(feature = "mpi")]
 impl SubdomainSolver {
     fn new(block_solver: AsmBlockSolver, inner_pc: AsmInnerPc) -> Result<Self, KError> {
         let conditioning = ConditioningOptions::default();
@@ -579,63 +578,92 @@ impl SubdomainSolver {
                 })
             }
             AsmInnerPc::Ilu0 => {
-                if matches!(block_solver, AsmBlockSolver::LuDense) {
+                #[cfg(feature = "complex")]
+                {
                     return Err(KError::Unsupported(
-                        "dense ASM block solver does not support ilu0; use pc_asm_block_solver=csr"
-                            .into(),
+                        "ILU0 is not available for complex ASM blocks".into(),
                     ));
                 }
-                let pc = build_ilu0_with_conditioning(conditioning)?;
-                Ok(SubdomainSolver::Csr(pc))
+                #[cfg(not(feature = "complex"))]
+                {
+                    if matches!(block_solver, AsmBlockSolver::LuDense) {
+                        return Err(KError::Unsupported(
+                            "dense ASM block solver does not support ilu0; use pc_asm_block_solver=csr"
+                                .into(),
+                        ));
+                    }
+                    let pc = build_ilu0_with_conditioning(conditioning)?;
+                    Ok(SubdomainSolver::Csr(pc))
+                }
             }
             AsmInnerPc::Ilut { drop_tol, max_fill } => {
-                if matches!(block_solver, AsmBlockSolver::LuDense) {
+                #[cfg(feature = "complex")]
+                {
                     return Err(KError::Unsupported(
-                        "dense ASM block solver does not support ilut; use pc_asm_block_solver=csr"
-                            .into(),
+                        "ILUT is not available for complex ASM blocks".into(),
                     ));
                 }
-                let pc = build_ilut_with_conditioning(
-                    drop_tol,
-                    max_fill,
-                    None,
-                    conditioning,
-                )?;
-                Ok(SubdomainSolver::Csr(pc))
+                #[cfg(not(feature = "complex"))]
+                {
+                    if matches!(block_solver, AsmBlockSolver::LuDense) {
+                        return Err(KError::Unsupported(
+                            "dense ASM block solver does not support ilut; use pc_asm_block_solver=csr"
+                                .into(),
+                        ));
+                    }
+                    let pc = build_ilut_with_conditioning(
+                        drop_tol,
+                        max_fill,
+                        None,
+                        conditioning,
+                    )?;
+                    Ok(SubdomainSolver::Csr(pc))
+                }
             }
             AsmInnerPc::Ilutp {
                 drop_tol,
                 max_fill,
                 perm_tol,
             } => {
-                if matches!(block_solver, AsmBlockSolver::Csr) {
+                #[cfg(feature = "complex")]
+                {
                     return Err(KError::Unsupported(
-                        "ILUTP requires dense ASM blocks; use pc_asm_block_solver=ludense".into(),
+                        "ILUTP is not available for complex ASM blocks".into(),
                     ));
                 }
-                let pc = build_ilutp_with_conditioning(
-                    max_fill,
-                    drop_tol,
-                    perm_tol,
-                    None,
-                    conditioning,
-                )?;
-                #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+                #[cfg(not(feature = "complex"))]
                 {
-                    Ok(SubdomainSolver::Dense(pc))
-                }
-                #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
-                {
-                    let _ = pc;
-                    Err(KError::Unsupported(
-                        "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\"".into(),
-                    ))
+                    if matches!(block_solver, AsmBlockSolver::Csr) {
+                        return Err(KError::Unsupported(
+                            "ILUTP requires dense ASM blocks; use pc_asm_block_solver=ludense"
+                                .into(),
+                        ));
+                    }
+                    let pc = build_ilutp_with_conditioning(
+                        max_fill,
+                        drop_tol,
+                        perm_tol,
+                        None,
+                        conditioning,
+                    )?;
+                    #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+                    {
+                        Ok(SubdomainSolver::Dense(pc))
+                    }
+                    #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
+                    {
+                        let _ = pc;
+                        Err(KError::Unsupported(
+                            "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\""
+                                .into(),
+                        ))
+                    }
                 }
             }
         }
     }
 
-    fn setup(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
+    fn setup(&mut self, mat: &Arc<CsrMatrix<S>>) -> Result<(), KError> {
         match self {
             SubdomainSolver::Csr(pc) => {
                 let op = CsrOp::new(mat.clone());
@@ -658,7 +686,7 @@ impl SubdomainSolver {
         }
     }
 
-    fn update_numeric(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
+    fn update_numeric(&mut self, mat: &Arc<CsrMatrix<S>>) -> Result<(), KError> {
         match self {
             SubdomainSolver::Csr(pc) => {
                 let op = CsrOp::new(mat.clone());
