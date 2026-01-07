@@ -26,10 +26,10 @@ use crate::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::parallel::{Comm, UniverseComm, contiguous_partition};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::preconditioner::Jacobi;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::preconditioner::ilu_csr::{
-    IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
+use crate::preconditioner::builders::{
+    build_ilut_with_conditioning, build_ilutp_with_conditioning, build_ilu0_with_conditioning,
+    build_jacobi,
 };
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::preconditioner::{PcSide, Preconditioner};
@@ -40,7 +40,6 @@ use crate::utils::conditioning::ConditioningOptions;
     feature = "backend-faer",
     feature = "legacy-pc-bridge"
 ))]
-use faer::Mat;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use std::collections::{HashMap, HashSet};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
@@ -534,27 +533,22 @@ fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-enum SubdomainSolverKind {
+enum SubdomainSolver {
     Csr(Box<dyn Preconditioner>),
     #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
     Dense(Box<dyn Preconditioner>),
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-struct SubdomainSolver {
-    kind: SubdomainSolverKind,
-}
-
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
 impl std::fmt::Debug for SubdomainSolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            SubdomainSolverKind::Csr(_) => f
+        match &self {
+            SubdomainSolver::Csr(_) => f
                 .debug_struct("SubdomainSolver")
                 .field("backend", &"csr")
                 .finish(),
             #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
-            SubdomainSolverKind::Dense(_) => f
+            SubdomainSolver::Dense(_) => f
                 .debug_struct("SubdomainSolver")
                 .field("backend", &"dense")
                 .finish(),
@@ -565,22 +559,24 @@ impl std::fmt::Debug for SubdomainSolver {
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 impl SubdomainSolver {
     fn new(block_solver: AsmBlockSolver, inner_pc: AsmInnerPc) -> Result<Self, KError> {
+        let conditioning = ConditioningOptions::default();
         match inner_pc {
-            AsmInnerPc::Jacobi => Ok(Self {
-                kind: match block_solver {
+            AsmInnerPc::Jacobi => {
+                let pc = build_jacobi()?;
+                Ok(match block_solver {
                     AsmBlockSolver::LuDense => {
                         #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
                         {
-                            SubdomainSolverKind::Dense(Box::new(Jacobi::new()))
+                            SubdomainSolver::Dense(pc)
                         }
                         #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
                         {
-                            SubdomainSolverKind::Csr(Box::new(Jacobi::new()))
+                            SubdomainSolver::Csr(pc)
                         }
                     }
-                    AsmBlockSolver::Csr => SubdomainSolverKind::Csr(Box::new(Jacobi::new())),
-                },
-            }),
+                    AsmBlockSolver::Csr => SubdomainSolver::Csr(pc),
+                })
+            }
             AsmInnerPc::Ilu0 => {
                 if matches!(block_solver, AsmBlockSolver::LuDense) {
                     return Err(KError::Unsupported(
@@ -588,20 +584,8 @@ impl SubdomainSolver {
                             .into(),
                     ));
                 }
-                let cfg = IluCsrConfig {
-                    kind: IluKind::Ilu0,
-                    pivot: PivotStrategy::DiagonalPerturbation,
-                    pivot_threshold: 1e-12,
-                    diag_perturb_factor: 1e-10,
-                    level_sched: cfg!(feature = "rayon"),
-                    numeric_update_fixed: true,
-                    logging: 0,
-                    reordering: ReorderingOptions::default(),
-                    conditioning: ConditioningOptions::default(),
-                };
-                Ok(Self {
-                    kind: SubdomainSolverKind::Csr(Box::new(IluCsr::new_with_config(cfg))),
-                })
+                let pc = build_ilu0_with_conditioning(conditioning)?;
+                Ok(SubdomainSolver::Csr(pc))
             }
             AsmInnerPc::Ilut { drop_tol, max_fill } => {
                 if matches!(block_solver, AsmBlockSolver::LuDense) {
@@ -610,31 +594,13 @@ impl SubdomainSolver {
                             .into(),
                     ));
                 }
-                let params = crate::preconditioner::ilu_csr::IlutParams {
-                    droptol_abs: drop_tol,
-                    droptol_rel: 0.0,
-                    p_l: max_fill,
-                    p_u: max_fill,
-                    early_drop: true,
-                    pivot: crate::preconditioner::ilu_csr::PivotPolicy::DiagonalPerturbation,
-                    pivot_tau: 1e-12,
-                    reproducible_order: true,
-                    pivoting: crate::preconditioner::ilu_csr::Pivoting::None,
-                };
-                let cfg = IluCsrConfig {
-                    kind: IluKind::Ilut { params },
-                    pivot: PivotStrategy::DiagonalPerturbation,
-                    pivot_threshold: 1e-12,
-                    diag_perturb_factor: 1e-10,
-                    level_sched: cfg!(feature = "rayon"),
-                    numeric_update_fixed: true,
-                    logging: 0,
-                    reordering: ReorderingOptions::default(),
-                    conditioning: ConditioningOptions::default(),
-                };
-                Ok(Self {
-                    kind: SubdomainSolverKind::Csr(Box::new(IluCsr::new_with_config(cfg))),
-                })
+                let pc = build_ilut_with_conditioning(
+                    drop_tol,
+                    max_fill,
+                    None,
+                    conditioning,
+                )?;
+                Ok(SubdomainSolver::Csr(pc))
             }
             AsmInnerPc::Ilutp {
                 drop_tol,
@@ -646,22 +612,20 @@ impl SubdomainSolver {
                         "ILUTP requires dense ASM blocks; use pc_asm_block_solver=ludense".into(),
                     ));
                 }
+                let pc = build_ilutp_with_conditioning(
+                    max_fill,
+                    drop_tol,
+                    perm_tol,
+                    None,
+                    conditioning,
+                )?;
                 #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
                 {
-                    use crate::preconditioner::ilutp::Ilutp;
-                    use crate::preconditioner::{
-                        LegacyOpPreconditioner, legacy::Preconditioner as LegacyPc,
-                    };
-                    let pc = Ilutp::with_params(max_fill, drop_tol, perm_tol);
-                    let legacy: Box<dyn LegacyPc<Mat<f64>, Vec<f64>> + Send + Sync> = Box::new(pc);
-                    Ok(Self {
-                        kind: SubdomainSolverKind::Dense(Box::new(LegacyOpPreconditioner::new(
-                            legacy,
-                        ))),
-                    })
+                    Ok(SubdomainSolver::Dense(pc))
                 }
                 #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
                 {
+                    let _ = pc;
                     Err(KError::Unsupported(
                         "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\"".into(),
                     ))
@@ -671,13 +635,13 @@ impl SubdomainSolver {
     }
 
     fn setup(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
-        match &mut self.kind {
-            SubdomainSolverKind::Csr(pc) => {
+        match self {
+            SubdomainSolver::Csr(pc) => {
                 let op = CsrOp::new(mat.clone());
                 pc.setup(&op)
             }
             #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
-            SubdomainSolverKind::Dense(pc) => {
+            SubdomainSolver::Dense(pc) => {
                 let dense = mat.to_dense()?;
                 let op = DenseOp::new(Arc::new(dense));
                 pc.setup(&op)
@@ -686,21 +650,21 @@ impl SubdomainSolver {
     }
 
     fn solve(&self, rhs: &[S], x: &mut [S]) -> Result<(), KError> {
-        match &self.kind {
-            SubdomainSolverKind::Csr(pc) => pc.apply(PcSide::Left, rhs, x),
+        match self {
+            SubdomainSolver::Csr(pc) => pc.apply(PcSide::Left, rhs, x),
             #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
-            SubdomainSolverKind::Dense(pc) => pc.apply(PcSide::Left, rhs, x),
+            SubdomainSolver::Dense(pc) => pc.apply(PcSide::Left, rhs, x),
         }
     }
 
     fn update_numeric(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
-        match &mut self.kind {
-            SubdomainSolverKind::Csr(pc) => {
+        match self {
+            SubdomainSolver::Csr(pc) => {
                 let op = CsrOp::new(mat.clone());
                 pc.update_numeric(&op)
             }
             #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
-            SubdomainSolverKind::Dense(pc) => {
+            SubdomainSolver::Dense(pc) => {
                 let dense = mat.to_dense()?;
                 let op = DenseOp::new(Arc::new(dense));
                 pc.update_numeric(&op)
@@ -709,10 +673,10 @@ impl SubdomainSolver {
     }
 
     fn supports_numeric_update(&self) -> bool {
-        match &self.kind {
-            SubdomainSolverKind::Csr(pc) => pc.supports_numeric_update(),
+        match self {
+            SubdomainSolver::Csr(pc) => pc.supports_numeric_update(),
             #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
-            SubdomainSolverKind::Dense(pc) => pc.supports_numeric_update(),
+            SubdomainSolver::Dense(pc) => pc.supports_numeric_update(),
         }
     }
 }
