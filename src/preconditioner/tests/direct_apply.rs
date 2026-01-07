@@ -77,7 +77,7 @@ fn builders_sor_and_chebyshev_object_safe() {
 
 #[test]
 #[cfg(not(feature = "complex"))]
-fn ilu_right_side_errors() {
+fn ilu_right_side_matches_left() {
     use crate::matrix::op::CsrOp;
     let csr = CsrMatrix::identity(3);
     let op = CsrOp::new(Arc::new(csr));
@@ -86,14 +86,11 @@ fn ilu_right_side_errors() {
     let one = S::from_real(1.0);
     let zero = S::zero();
     let x = vec![one; 3];
-    let mut y = vec![zero; 3];
-    let err = pc.apply(PcSide::Right, &x, &mut y).unwrap_err();
-    match err {
-        crate::error::KError::InvalidInput(msg) => {
-            assert!(msg.to_lowercase().contains("left only"))
-        }
-        _ => panic!("expected InvalidInput error"),
-    }
+    let mut y_left = vec![zero; 3];
+    let mut y_right = vec![zero; 3];
+    pc.apply(PcSide::Left, &x, &mut y_left).unwrap();
+    pc.apply(PcSide::Right, &x, &mut y_right).unwrap();
+    crate::assert_vec_close!("ilu right matches left", &y_left, &y_right);
 }
 
 #[cfg(all(feature = "dense-direct", feature = "complex"))]
