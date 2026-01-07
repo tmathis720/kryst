@@ -67,12 +67,14 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             block_solver,
             mode,
             weighting,
+            inner_pc,
         } => b::build_asm(
             *overlap,
             *subdomain_hint,
             block_solver.clone(),
             mode.clone(),
             weighting.clone(),
+            *inner_pc,
         )
         .map(Some),
         PcConfig::Amg {

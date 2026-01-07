@@ -1,31 +1,32 @@
 //! Additive Schwarz preconditioner (ASM) module.
 
-mod serial;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 mod comm_plan;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-mod subdomain;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
 mod distributed;
+mod serial;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+mod subdomain;
 
-pub use serial::*;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 pub use distributed::DistributedAsm;
+pub use serial::*;
 
 use crate::algebra::prelude::*;
 use crate::error::KError;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::DistCsrOp;
 use crate::matrix::op::LinOp;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::parallel::Comm;
 use crate::preconditioner::{PcSide, Preconditioner};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::matrix::DistCsrOp;
 
 /// High-level ASM preconditioner that dispatches to serial or distributed implementations.
 pub struct AsmPc {
     overlap: usize,
     subdomain_hint: Option<usize>,
     block_solver: AsmBlockSolver,
+    inner_pc: AsmInnerPc,
     mode: AsmMode,
     weighting: Weighting,
     inner: Option<AsmImpl>,
@@ -43,11 +44,27 @@ pub enum AsmBlockSolver {
     Csr,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum AsmInnerPc {
+    Jacobi,
+    Ilu0,
+    Ilut {
+        drop_tol: f64,
+        max_fill: usize,
+    },
+    Ilutp {
+        drop_tol: f64,
+        max_fill: usize,
+        perm_tol: f64,
+    },
+}
+
 impl AsmPc {
     pub fn new(
         overlap: usize,
         subdomain_hint: Option<usize>,
         block_solver: AsmBlockSolver,
+        inner_pc: AsmInnerPc,
         mode: AsmMode,
         weighting: Weighting,
     ) -> Self {
@@ -55,6 +72,7 @@ impl AsmPc {
             overlap,
             subdomain_hint,
             block_solver,
+            inner_pc,
             mode,
             weighting,
             inner: None,
@@ -65,9 +83,17 @@ impl AsmPc {
         overlap: usize,
         subdomain_hint: Option<usize>,
         block_solver: AsmBlockSolver,
+        inner_pc: AsmInnerPc,
         weighting: Weighting,
     ) -> Self {
-        Self::new(overlap, subdomain_hint, block_solver, AsmMode::RAS, weighting)
+        Self::new(
+            overlap,
+            subdomain_hint,
+            block_solver,
+            inner_pc,
+            AsmMode::RAS,
+            weighting,
+        )
     }
 
     fn build_serial(&self) -> AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
@@ -75,8 +101,11 @@ impl AsmPc {
             AsmBlockSolver::LuDense => BlockSolverFactory::LuDense,
             AsmBlockSolver::Csr => BlockSolverFactory::CsrSolver,
         };
-        let mut asm =
-            AdditiveSchwarz::<faer::Mat<f64>, Vec<f64>, f64>::new(self.overlap, Vec::new(), factory);
+        let mut asm = AdditiveSchwarz::<faer::Mat<f64>, Vec<f64>, f64>::new(
+            self.overlap,
+            Vec::new(),
+            factory,
+        );
         asm.set_mode(self.mode);
         asm.set_weighting(self.weighting);
         if let Some(hint) = self.subdomain_hint {
@@ -99,13 +128,14 @@ impl Preconditioner for AsmPc {
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
         #[cfg(all(feature = "mpi", not(feature = "complex")))]
         {
-            let has_layout = op.dist_layout().is_some()
-                || op.as_any().downcast_ref::<DistCsrOp>().is_some();
+            let has_layout =
+                op.dist_layout().is_some() || op.as_any().downcast_ref::<DistCsrOp>().is_some();
             if op.comm().size() > 1 && has_layout {
                 let mut dist = DistributedAsm::new(
                     self.overlap,
                     self.subdomain_hint,
                     self.block_solver,
+                    self.inner_pc,
                     self.mode,
                     self.weighting,
                 );
