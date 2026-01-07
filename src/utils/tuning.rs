@@ -107,12 +107,14 @@ pub struct ParameterTuner {
 }
 
 impl ParameterTuner {
-    fn split_chain_tokens(chain: &str) -> Vec<&str> {
-        let normalized = chain.replace("->", ",").replace('+', ",");
-        normalized
+    fn split_chain_tokens(chain: &str) -> Vec<String> {
+        chain
+            .replace("->", ",")
+            .replace('+', ",")
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
+            .map(|token| token.to_string())
             .collect()
     }
 
@@ -146,7 +148,7 @@ impl ParameterTuner {
             .map(|candidate| {
                 Self::split_chain_tokens(candidate)
                     .into_iter()
-                    .map(|token| Self::build_chain_stage_options(token, config))
+                    .map(|token| Self::build_chain_stage_options(&token, config))
                     .collect()
             })
             .collect()

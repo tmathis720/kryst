@@ -411,12 +411,14 @@ impl PcConfig {
 pub struct PcFactory;
 
 impl PcFactory {
-    fn split_chain_tokens(chain: &str) -> Vec<&str> {
-        let normalized = chain.replace("->", ",").replace('+', ",");
-        normalized
+    fn split_chain_tokens(chain: &str) -> Vec<String> {
+        chain
+            .replace("->", ",")
+            .replace('+', ",")
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
+            .map(|token| token.to_string())
             .collect()
     }
 
@@ -587,7 +589,7 @@ impl PcFactory {
     ) -> Result<Vec<DeferredPcInfo>, KError> {
         let mut specs = Vec::new();
         for token in Self::split_chain_tokens(chain) {
-            let pct = PcType::from_str(token)?;
+            let pct = PcType::from_str(&token)?;
             let mut stage_opts = opts.cloned();
             if token.eq_ignore_ascii_case("ras") {
                 stage_opts.get_or_insert_with(PcOptions::default).asm_mode =

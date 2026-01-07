@@ -1542,7 +1542,7 @@ impl KspContext {
                     ))
                 });
         }
-        if self.retry_ilutp_setup(pmat, sid, vid, err).is_ok() {
+        if self.retry_ilutp_setup(pmat, sid, vid, err.clone()).is_ok() {
             return Ok(());
         }
         Err(err)
@@ -1565,10 +1565,12 @@ impl KspContext {
         let pmat = self
             .pmat
             .as_ref()
+            .cloned()
             .ok_or_else(|| KError::InvalidInput("Pmat not set".into()))?;
         let amat = self
             .amat
             .as_ref()
+            .cloned()
             .ok_or_else(|| KError::InvalidInput("Amat not set".into()))?;
 
         let (m, n) = amat.dims();
@@ -1640,7 +1642,7 @@ impl KspContext {
             if id.0 != 0 {
                 id
             } else {
-                StructureId(Arc::as_ptr(pmat) as *const () as usize as u64)
+                StructureId(Arc::as_ptr(&pmat) as *const () as usize as u64)
             }
         };
         let vid = pmat.values_id();
