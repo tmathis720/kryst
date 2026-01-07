@@ -3,6 +3,7 @@ use crate::config::kinds::SorMatSideKind;
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::preconditioner::asm::AsmInnerPc;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
@@ -194,6 +195,7 @@ pub enum PcConfig {
         block_solver: Option<String>,
         mode: Option<String>,
         weighting: Option<String>,
+        inner_pc: AsmInnerPc,
     },
     Amg {
         config: AMGConfig,
@@ -336,6 +338,24 @@ impl PcConfig {
                 block_solver: o.asm_block_solver.clone(),
                 mode: o.asm_mode.clone(),
                 weighting: o.asm_weighting.clone(),
+                inner_pc: match o.asm_inner_pc.as_deref() {
+                    Some("jacobi") => AsmInnerPc::Jacobi,
+                    Some("ilut") => AsmInnerPc::Ilut {
+                        drop_tol: o.ilut_drop_tol.unwrap_or(1e-4),
+                        max_fill: o.ilut_max_fill.unwrap_or(20),
+                    },
+                    Some("ilutp") => AsmInnerPc::Ilutp {
+                        drop_tol: o.ilutp_drop_tol.unwrap_or(1e-4),
+                        max_fill: o.ilutp_max_fill.unwrap_or(10),
+                        perm_tol: o.ilutp_perm_tol.unwrap_or(0.1),
+                    },
+                    Some("ilu") | Some("ilu0") | None => AsmInnerPc::Ilu0,
+                    Some(other) => {
+                        return Err(KError::InvalidInput(format!(
+                            "unknown pc_asm_inner_pc: {other}"
+                        )));
+                    }
+                },
             },
             Amg => {
                 let cfg = AMGConfig::try_from_opts(o)?;

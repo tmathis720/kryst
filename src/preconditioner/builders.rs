@@ -3,12 +3,12 @@ use crate::preconditioner::amg::AMGConfig;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{
+    Preconditioner,
     asm::{AsmCombine, AsmConfig, AsmLocalSolver},
     asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
     block_jacobi::BlockJacobi,
     jacobi::Jacobi,
     sor::MatSorType,
-    Preconditioner,
 };
 
 use crate::preconditioner::chebyshev::ChebyshevPc;
@@ -238,7 +238,7 @@ pub fn build_ilutp_with_conditioning(
     #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
     {
         use crate::preconditioner::ilutp::Ilutp;
-        use crate::preconditioner::{legacy::Preconditioner as LegacyPc, LegacyOpPreconditioner};
+        use crate::preconditioner::{LegacyOpPreconditioner, legacy::Preconditioner as LegacyPc};
 
         let mut pc = Ilutp::with_params(max_fill, drop_tol, perm_tol);
         if let Some(reordering) = reordering {
@@ -310,9 +310,10 @@ pub fn build_asm(
     block_solver: Option<String>,
     mode: Option<String>,
     weighting: Option<String>,
+    inner_pc: AsmInnerPc,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     // Map the optional block solver string to the enum used by AdditiveSchwarz.
-    use crate::preconditioner::asm::{AsmBlockSolver, AsmMode, AsmPc, Weighting};
+    use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmMode, AsmPc, Weighting};
 
     if block_solver
         .as_deref()
@@ -365,7 +366,14 @@ pub fn build_asm(
         }
     };
 
-    let asm = AsmPc::new(overlap, subdomain_hint, block_solver, mode, weighting);
+    let asm = AsmPc::new(
+        overlap,
+        subdomain_hint,
+        block_solver,
+        inner_pc,
+        mode,
+        weighting,
+    );
     Ok(Box::new(asm))
 }
 
@@ -376,6 +384,7 @@ pub fn build_asm(
     _block_solver: Option<String>,
     _mode: Option<String>,
     _weighting: Option<String>,
+    _inner_pc: crate::preconditioner::asm::AsmInnerPc,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     Err(KError::Unsupported(
         "ASM builder requires the backend-faer feature".to_string(),

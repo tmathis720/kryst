@@ -1,30 +1,46 @@
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
+use super::{AsmBlockSolver, AsmInnerPc, AsmMode, Weighting};
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::algebra::prelude::*;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::error::KError;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::DistCsrOp;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::convert::materialize_linop_with_hint;
 use crate::matrix::format::FormatHint;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::format::OpFormat;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::op::CsrOp;
+#[cfg(all(
+    feature = "mpi",
+    not(feature = "complex"),
+    feature = "backend-faer",
+    feature = "legacy-pc-bridge"
+))]
+use crate::matrix::op::DenseOp;
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::matrix::DistCsrOp;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::parallel::{Comm, UniverseComm, contiguous_partition};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
-use super::{AsmBlockSolver, AsmMode, Weighting};
+use crate::preconditioner::Jacobi;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
-use crate::utils::conditioning::ConditioningOptions;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::preconditioner::{PcSide, Preconditioner};
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::matrix::op::CsrOp;
+use crate::utils::conditioning::ConditioningOptions;
+#[cfg(all(
+    feature = "mpi",
+    not(feature = "complex"),
+    feature = "backend-faer",
+    feature = "legacy-pc-bridge"
+))]
+use faer::Mat;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use std::collections::{HashMap, HashSet};
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
@@ -41,6 +57,7 @@ pub struct DistributedAsm {
     overlap: usize,
     subdomain_hint: Option<usize>,
     block_solver: AsmBlockSolver,
+    inner_pc: AsmInnerPc,
     mode: AsmMode,
     weighting: Weighting,
     state: Option<DistributedAsmState>,
@@ -59,6 +76,7 @@ struct DistributedAsmState {
     comm_plan: CommPlan,
     sub_csr: Arc<CsrMatrix<f64>>,
     solver: SubdomainSolver,
+    weights: Option<Vec<R>>,
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
@@ -67,6 +85,7 @@ impl DistributedAsm {
         overlap: usize,
         subdomain_hint: Option<usize>,
         block_solver: AsmBlockSolver,
+        inner_pc: AsmInnerPc,
         mode: AsmMode,
         weighting: Weighting,
     ) -> Self {
@@ -74,6 +93,7 @@ impl DistributedAsm {
             overlap,
             subdomain_hint,
             block_solver,
+            inner_pc,
             mode,
             weighting,
             state: None,
@@ -86,9 +106,17 @@ impl DistributedAsm {
         overlap: usize,
         subdomain_hint: Option<usize>,
         block_solver: AsmBlockSolver,
+        inner_pc: AsmInnerPc,
         weighting: Weighting,
     ) -> Self {
-        Self::new(overlap, subdomain_hint, block_solver, AsmMode::RAS, weighting)
+        Self::new(
+            overlap,
+            subdomain_hint,
+            block_solver,
+            inner_pc,
+            AsmMode::RAS,
+            weighting,
+        )
     }
 }
 
@@ -97,7 +125,12 @@ impl Preconditioner for DistributedAsm {
     fn dims(&self) -> (usize, usize) {
         self.state
             .as_ref()
-            .map(|s| (s.layout.row_end - s.layout.row_start, s.layout.row_end - s.layout.row_start))
+            .map(|s| {
+                (
+                    s.layout.row_end - s.layout.row_start,
+                    s.layout.row_end - s.layout.row_start,
+                )
+            })
             .unwrap_or((0, 0))
     }
 
@@ -122,13 +155,8 @@ impl Preconditioner for DistributedAsm {
 
         let ownership = build_ownership(&layout, comm.size());
 
-        let (subdofs, remote_rows) = build_overlap_set(
-            &local_csr,
-            &layout,
-            &ownership,
-            self.overlap,
-            &comm,
-        )?;
+        let (subdofs, remote_rows) =
+            build_overlap_set(&local_csr, &layout, &ownership, self.overlap, &comm)?;
         let mut remote_rows = remote_rows;
 
         let missing: Vec<usize> = subdofs
@@ -158,14 +186,12 @@ impl Preconditioner for DistributedAsm {
         )?);
 
         let comm_plan = build_comm_plan(&comm, &ownership, &subdofs)?;
-        let sub_map = subdofs
-            .iter()
-            .enumerate()
-            .map(|(i, &g)| (g, i))
-            .collect();
+        let sub_map = subdofs.iter().enumerate().map(|(i, &g)| (g, i)).collect();
 
-        let mut solver = SubdomainSolver::new(self.block_solver)?;
+        let mut solver = SubdomainSolver::new(self.block_solver, self.inner_pc)?;
         solver.setup(&sub_csr)?;
+
+        let weights = build_ras_weights(&layout, &comm_plan, self.weighting);
 
         self.last_sid = Some(op.structure_id());
         self.last_vid = Some(op.values_id());
@@ -178,6 +204,7 @@ impl Preconditioner for DistributedAsm {
             comm_plan,
             sub_csr,
             solver,
+            weights,
         });
         Ok(())
     }
@@ -232,7 +259,13 @@ impl Preconditioner for DistributedAsm {
                     .sub_map
                     .get(&g)
                     .expect("subdomain map missing owned entry");
-                y[local_idx] = sol[sub_idx];
+                let weight = state
+                    .weights
+                    .as_ref()
+                    .and_then(|w| w.get(local_idx))
+                    .copied()
+                    .unwrap_or(1.0);
+                y[local_idx] = weight * sol[sub_idx];
             }
         }
 
@@ -451,6 +484,35 @@ fn build_comm_plan(
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
+fn build_ras_weights(
+    layout: &DistLayout,
+    comm_plan: &CommPlan,
+    weighting: Weighting,
+) -> Option<Vec<R>> {
+    if !matches!(weighting, Weighting::Uniform) {
+        return None;
+    }
+    let n_local = layout.row_end - layout.row_start;
+    if n_local == 0 {
+        return Some(Vec::new());
+    }
+    let mut cover_count = vec![1usize; n_local];
+    for export in &comm_plan.exports {
+        for &g in export {
+            if g >= layout.row_start && g < layout.row_end {
+                cover_count[g - layout.row_start] += 1;
+            }
+        }
+    }
+    Some(
+        cover_count
+            .into_iter()
+            .map(|count| 1.0 / (count as R))
+            .collect(),
+    )
+}
+
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
     let mut lo = 0usize;
     let mut hi = ownership.len().saturating_sub(1);
@@ -472,54 +534,185 @@ fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
+enum SubdomainSolverKind {
+    Csr(Box<dyn Preconditioner>),
+    #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+    Dense(Box<dyn Preconditioner>),
+}
+
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 struct SubdomainSolver {
-    ilu: IluCsr,
+    kind: SubdomainSolverKind,
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 impl std::fmt::Debug for SubdomainSolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SubdomainSolver")
-            .field("cfg", &self.ilu.cfg)
-            .finish()
+        match &self.kind {
+            SubdomainSolverKind::Csr(_) => f
+                .debug_struct("SubdomainSolver")
+                .field("backend", &"csr")
+                .finish(),
+            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            SubdomainSolverKind::Dense(_) => f
+                .debug_struct("SubdomainSolver")
+                .field("backend", &"dense")
+                .finish(),
+        }
     }
 }
 
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 impl SubdomainSolver {
-    fn new(kind: AsmBlockSolver) -> Result<Self, KError> {
-        let _ = kind;
-        let cfg = IluCsrConfig {
-            kind: IluKind::Ilu0,
-            pivot: PivotStrategy::DiagonalPerturbation,
-            pivot_threshold: 1e-12,
-            diag_perturb_factor: 1e-10,
-            level_sched: cfg!(feature = "rayon"),
-            numeric_update_fixed: true,
-            logging: 0,
-            reordering: ReorderingOptions::default(),
-            conditioning: ConditioningOptions::default(),
-        };
-        Ok(Self {
-            ilu: IluCsr::new_with_config(cfg),
-        })
+    fn new(block_solver: AsmBlockSolver, inner_pc: AsmInnerPc) -> Result<Self, KError> {
+        match inner_pc {
+            AsmInnerPc::Jacobi => Ok(Self {
+                kind: match block_solver {
+                    AsmBlockSolver::LuDense => {
+                        #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+                        {
+                            SubdomainSolverKind::Dense(Box::new(Jacobi::new()))
+                        }
+                        #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
+                        {
+                            SubdomainSolverKind::Csr(Box::new(Jacobi::new()))
+                        }
+                    }
+                    AsmBlockSolver::Csr => SubdomainSolverKind::Csr(Box::new(Jacobi::new())),
+                },
+            }),
+            AsmInnerPc::Ilu0 => {
+                if matches!(block_solver, AsmBlockSolver::LuDense) {
+                    return Err(KError::Unsupported(
+                        "dense ASM block solver does not support ilu0; use pc_asm_block_solver=csr"
+                            .into(),
+                    ));
+                }
+                let cfg = IluCsrConfig {
+                    kind: IluKind::Ilu0,
+                    pivot: PivotStrategy::DiagonalPerturbation,
+                    pivot_threshold: 1e-12,
+                    diag_perturb_factor: 1e-10,
+                    level_sched: cfg!(feature = "rayon"),
+                    numeric_update_fixed: true,
+                    logging: 0,
+                    reordering: ReorderingOptions::default(),
+                    conditioning: ConditioningOptions::default(),
+                };
+                Ok(Self {
+                    kind: SubdomainSolverKind::Csr(Box::new(IluCsr::new_with_config(cfg))),
+                })
+            }
+            AsmInnerPc::Ilut { drop_tol, max_fill } => {
+                if matches!(block_solver, AsmBlockSolver::LuDense) {
+                    return Err(KError::Unsupported(
+                        "dense ASM block solver does not support ilut; use pc_asm_block_solver=csr"
+                            .into(),
+                    ));
+                }
+                let params = crate::preconditioner::ilu_csr::IlutParams {
+                    droptol_abs: drop_tol,
+                    droptol_rel: 0.0,
+                    p_l: max_fill,
+                    p_u: max_fill,
+                    early_drop: true,
+                    pivot: crate::preconditioner::ilu_csr::PivotPolicy::DiagonalPerturbation,
+                    pivot_tau: 1e-12,
+                    reproducible_order: true,
+                    pivoting: crate::preconditioner::ilu_csr::Pivoting::None,
+                };
+                let cfg = IluCsrConfig {
+                    kind: IluKind::Ilut { params },
+                    pivot: PivotStrategy::DiagonalPerturbation,
+                    pivot_threshold: 1e-12,
+                    diag_perturb_factor: 1e-10,
+                    level_sched: cfg!(feature = "rayon"),
+                    numeric_update_fixed: true,
+                    logging: 0,
+                    reordering: ReorderingOptions::default(),
+                    conditioning: ConditioningOptions::default(),
+                };
+                Ok(Self {
+                    kind: SubdomainSolverKind::Csr(Box::new(IluCsr::new_with_config(cfg))),
+                })
+            }
+            AsmInnerPc::Ilutp {
+                drop_tol,
+                max_fill,
+                perm_tol,
+            } => {
+                if matches!(block_solver, AsmBlockSolver::Csr) {
+                    return Err(KError::Unsupported(
+                        "ILUTP requires dense ASM blocks; use pc_asm_block_solver=ludense".into(),
+                    ));
+                }
+                #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+                {
+                    use crate::preconditioner::ilutp::Ilutp;
+                    use crate::preconditioner::{
+                        LegacyOpPreconditioner, legacy::Preconditioner as LegacyPc,
+                    };
+                    let pc = Ilutp::with_params(max_fill, drop_tol, perm_tol);
+                    let legacy: Box<dyn LegacyPc<Mat<f64>, Vec<f64>> + Send + Sync> = Box::new(pc);
+                    Ok(Self {
+                        kind: SubdomainSolverKind::Dense(Box::new(LegacyOpPreconditioner::new(
+                            legacy,
+                        ))),
+                    })
+                }
+                #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
+                {
+                    Err(KError::Unsupported(
+                        "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\"".into(),
+                    ))
+                }
+            }
+        }
     }
 
     fn setup(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
-        let op = CsrOp::new(mat.clone());
-        self.ilu.setup(&op)
+        match &mut self.kind {
+            SubdomainSolverKind::Csr(pc) => {
+                let op = CsrOp::new(mat.clone());
+                pc.setup(&op)
+            }
+            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            SubdomainSolverKind::Dense(pc) => {
+                let dense = mat.to_dense()?;
+                let op = DenseOp::new(Arc::new(dense));
+                pc.setup(&op)
+            }
+        }
     }
 
     fn solve(&self, rhs: &[S], x: &mut [S]) -> Result<(), KError> {
-        self.ilu.apply(PcSide::Left, rhs, x)
+        match &self.kind {
+            SubdomainSolverKind::Csr(pc) => pc.apply(PcSide::Left, rhs, x),
+            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            SubdomainSolverKind::Dense(pc) => pc.apply(PcSide::Left, rhs, x),
+        }
     }
 
     fn update_numeric(&mut self, mat: &Arc<CsrMatrix<f64>>) -> Result<(), KError> {
-        let op = CsrOp::new(mat.clone());
-        self.ilu.update_numeric(&op)
+        match &mut self.kind {
+            SubdomainSolverKind::Csr(pc) => {
+                let op = CsrOp::new(mat.clone());
+                pc.update_numeric(&op)
+            }
+            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            SubdomainSolverKind::Dense(pc) => {
+                let dense = mat.to_dense()?;
+                let op = DenseOp::new(Arc::new(dense));
+                pc.update_numeric(&op)
+            }
+        }
     }
 
     fn supports_numeric_update(&self) -> bool {
-        self.ilu.supports_numeric_update()
+        match &self.kind {
+            SubdomainSolverKind::Csr(pc) => pc.supports_numeric_update(),
+            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            SubdomainSolverKind::Dense(pc) => pc.supports_numeric_update(),
+        }
     }
 }
