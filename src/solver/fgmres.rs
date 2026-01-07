@@ -117,12 +117,10 @@ impl FgmresSolver {
             ));
         }
 
-        let pc_apply_side = pc_side;
-        if matches!(pc_side, PcSide::Left) {
-            return Err(KError::InvalidInput(
-                "FGMRES requires right or symmetric preconditioning".into(),
-            ));
-        }
+        let pc_apply_side = match pc_side {
+            PcSide::Right => PcSide::Right,
+            PcSide::Left | PcSide::Symmetric => PcSide::Right,
+        };
 
         let block_m = if self.preallocate {
             self.restart.min(self.maxits)
@@ -686,7 +684,7 @@ impl LinearSolver for FgmresSolver {
 
     fn setup_workspace(&mut self, w: &mut Workspace) {
         // Pre-size the GMRES-family buffers during KSP setup using the workspace dimension.
-        // FGMRES requires right preconditioning, so always request Z storage here.
+        // FGMRES uses right-preconditioned Arnoldi; left/symmetric inputs map to right.
         let n = w.n();
         if n == 0 {
             return;
