@@ -349,7 +349,7 @@ impl PcConfig {
                         max_fill: o.ilutp_max_fill.unwrap_or(10),
                         perm_tol: o.ilutp_perm_tol.unwrap_or(0.1),
                     },
-                    Some("ilu") | Some("ilu0") | None => AsmInnerPc::Ilu0,
+                    Some("ilu") | Some("ilu0") | std::option::Option::None => AsmInnerPc::Ilu0,
                     Some(other) => {
                         return Err(KError::InvalidInput(format!(
                             "unknown pc_asm_inner_pc: {other}"
