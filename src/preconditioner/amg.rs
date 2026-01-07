@@ -18,6 +18,7 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{
     convert::csr_from_linop,
     dense_api::DenseMatRef,
+    DistCsrOp,
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
@@ -25,7 +26,7 @@ use crate::matrix::{
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::parallel::Comm;
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::asm::{Asm, AsmCombine, AsmConfig, AsmLocalSolver};
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
@@ -2385,6 +2386,216 @@ fn csr_pattern_hash(a: &CsrMatrix<f64>) -> u64 {
     hasher.finish()
 }
 
+fn gather_dist_csr(
+    dist: &DistCsrOp,
+    root: usize,
+) -> Result<Option<CsrMatrix<f64>>, KError> {
+    let comm = dist.comm();
+    let rank = comm.rank();
+    let size = comm.size();
+    let row_part = dist.row_partition();
+    if row_part.len() != size + 1 {
+        return Err(KError::InvalidInput(
+            "distributed row partition is inconsistent with communicator size".into(),
+        ));
+    }
+    let local = dist.local_matrix();
+    let local_row_ptr = local.row_ptr().to_vec();
+    let local_col_idx = local.col_idx().to_vec();
+    let local_vals = local.values().to_vec();
+    let local_nnz = local_col_idx.len() as u64;
+    let mut nnz_counts = Vec::new();
+    comm.gather(&[local_nnz], &mut nnz_counts, root);
+
+    if rank != root {
+        let row_ptr_u64: Vec<u64> = local_row_ptr.iter().map(|&v| v as u64).collect();
+        let col_idx_u64: Vec<u64> = local_col_idx.iter().map(|&v| v as u64).collect();
+        let mut reqs = Vec::new();
+        reqs.push(comm.isend_to_u64(&row_ptr_u64, root as i32));
+        reqs.push(comm.isend_to_u64(&col_idx_u64, root as i32));
+        reqs.push(comm.isend_to(&local_vals, root as i32));
+        comm.wait_all(&mut reqs);
+        return Ok(None);
+    }
+
+    let mut recv_row_ptr_u64: Vec<Vec<u64>> = vec![Vec::new(); size];
+    let mut recv_col_idx_u64: Vec<Vec<u64>> = vec![Vec::new(); size];
+    let mut recv_vals: Vec<Vec<f64>> = vec![Vec::new(); size];
+    let mut reqs = Vec::new();
+    for r in 0..size {
+        if r == root {
+            continue;
+        }
+        let n_local = row_part[r + 1] - row_part[r];
+        let nnz = *nnz_counts.get(r).unwrap_or(&0) as usize;
+        recv_row_ptr_u64[r] = vec![0u64; n_local + 1];
+        recv_col_idx_u64[r] = vec![0u64; nnz];
+        recv_vals[r] = vec![0.0; nnz];
+        reqs.push(comm.irecv_from_u64(
+            recv_row_ptr_u64[r].as_mut_slice(),
+            r as i32,
+        ));
+        reqs.push(comm.irecv_from_u64(
+            recv_col_idx_u64[r].as_mut_slice(),
+            r as i32,
+        ));
+        reqs.push(comm.irecv_from(recv_vals[r].as_mut_slice(), r as i32));
+    }
+    comm.wait_all(&mut reqs);
+
+    let mut row_ptrs: Vec<Vec<usize>> = vec![Vec::new(); size];
+    let mut col_idxs: Vec<Vec<usize>> = vec![Vec::new(); size];
+    let mut vals: Vec<Vec<f64>> = vec![Vec::new(); size];
+    row_ptrs[root] = local_row_ptr;
+    col_idxs[root] = local_col_idx;
+    vals[root] = local_vals;
+    for r in 0..size {
+        if r == root {
+            continue;
+        }
+        row_ptrs[r] = recv_row_ptr_u64[r].iter().map(|&v| v as usize).collect();
+        col_idxs[r] = recv_col_idx_u64[r].iter().map(|&v| v as usize).collect();
+        vals[r] = recv_vals[r].clone();
+    }
+
+    let n_global = dist.n_global;
+    let mut row_nnz = vec![0usize; n_global];
+    for r in 0..size {
+        let row_start = row_part[r];
+        let n_local = row_part[r + 1] - row_part[r];
+        if n_local + 1 != row_ptrs[r].len() {
+            return Err(KError::InvalidInput(format!(
+                "rank {r} row_ptr length mismatch: expected {}, got {}",
+                n_local + 1,
+                row_ptrs[r].len()
+            )));
+        }
+        for i in 0..n_local {
+            let nnz = row_ptrs[r][i + 1] - row_ptrs[r][i];
+            row_nnz[row_start + i] = nnz;
+        }
+    }
+    let mut row_ptr_global = vec![0usize; n_global + 1];
+    for i in 0..n_global {
+        row_ptr_global[i + 1] = row_ptr_global[i] + row_nnz[i];
+    }
+    let total_nnz = row_ptr_global[n_global];
+    let mut col_idx_global = vec![0usize; total_nnz];
+    let mut vals_global = vec![0.0f64; total_nnz];
+    let mut next_pos = row_ptr_global.clone();
+    for r in 0..size {
+        let row_start = row_part[r];
+        let n_local = row_part[r + 1] - row_part[r];
+        for i in 0..n_local {
+            let global_row = row_start + i;
+            let mut slot = next_pos[global_row];
+            let rs = row_ptrs[r][i];
+            let re = row_ptrs[r][i + 1];
+            for p in rs..re {
+                col_idx_global[slot] = col_idxs[r][p];
+                vals_global[slot] = vals[r][p];
+                slot += 1;
+            }
+            next_pos[global_row] = slot;
+        }
+    }
+
+    Ok(Some(CsrMatrix::from_csr(
+        n_global,
+        n_global,
+        row_ptr_global,
+        col_idx_global,
+        vals_global,
+    )))
+}
+
+fn gather_vector(
+    comm: &UniverseComm,
+    row_part: &[usize],
+    root: usize,
+    local: &[f64],
+) -> Result<Option<Vec<f64>>, KError> {
+    let rank = comm.rank();
+    let size = comm.size();
+    if row_part.len() != size + 1 {
+        return Err(KError::InvalidInput(
+            "distributed row partition is inconsistent with communicator size".into(),
+        ));
+    }
+    let (start, end) = (row_part[rank], row_part[rank + 1]);
+    if local.len() != end.saturating_sub(start) {
+        return Err(KError::InvalidInput(
+            "distributed vector length does not match local row partition".into(),
+        ));
+    }
+    if rank != root {
+        let mut reqs = vec![comm.isend_to(local, root as i32)];
+        comm.wait_all(&mut reqs);
+        return Ok(None);
+    }
+    let n_global = *row_part.last().unwrap_or(&0);
+    let mut global = vec![0.0f64; n_global];
+    global[start..end].copy_from_slice(local);
+    let mut reqs = Vec::new();
+    for r in 0..size {
+        if r == root {
+            continue;
+        }
+        let rs = row_part[r];
+        let re = row_part[r + 1];
+        reqs.push(comm.irecv_from(&mut global[rs..re], r as i32));
+    }
+    comm.wait_all(&mut reqs);
+    Ok(Some(global))
+}
+
+fn scatter_vector(
+    comm: &UniverseComm,
+    row_part: &[usize],
+    root: usize,
+    global: Option<&[f64]>,
+    local_out: &mut [f64],
+) -> Result<(), KError> {
+    let rank = comm.rank();
+    let size = comm.size();
+    if row_part.len() != size + 1 {
+        return Err(KError::InvalidInput(
+            "distributed row partition is inconsistent with communicator size".into(),
+        ));
+    }
+    let (start, end) = (row_part[rank], row_part[rank + 1]);
+    if local_out.len() != end.saturating_sub(start) {
+        return Err(KError::InvalidInput(
+            "distributed vector length does not match local row partition".into(),
+        ));
+    }
+    if rank == root {
+        let global = global.ok_or_else(|| {
+            KError::InvalidInput("root rank missing global vector for scatter".into())
+        })?;
+        if global.len() < *row_part.last().unwrap_or(&0) {
+            return Err(KError::InvalidInput(
+                "global vector length does not match distributed partition".into(),
+            ));
+        }
+        local_out.copy_from_slice(&global[start..end]);
+        let mut reqs = Vec::new();
+        for r in 0..size {
+            if r == root {
+                continue;
+            }
+            let rs = row_part[r];
+            let re = row_part[r + 1];
+            reqs.push(comm.isend_to(&global[rs..re], r as i32));
+        }
+        comm.wait_all(&mut reqs);
+        return Ok(());
+    }
+    let mut reqs = vec![comm.irecv_from(local_out, root as i32)];
+    comm.wait_all(&mut reqs);
+    Ok(())
+}
+
 #[cfg(debug_assertions)]
 fn debug_check_csr(a: &CsrMatrix<f64>, name: &str) {
     let row_ptr = a.row_ptr();
@@ -2482,6 +2693,36 @@ impl AmgState {
     }
 }
 
+#[derive(Clone)]
+struct DistAmgInfo {
+    comm: UniverseComm,
+    root: usize,
+    row_part: Arc<Vec<usize>>,
+    n_global: usize,
+}
+
+impl DistAmgInfo {
+    fn local_range(&self) -> (usize, usize) {
+        let rank = self.comm.rank();
+        let start = self
+            .row_part
+            .get(rank)
+            .copied()
+            .unwrap_or_default();
+        let end = self
+            .row_part
+            .get(rank + 1)
+            .copied()
+            .unwrap_or(start);
+        (start, end)
+    }
+
+    fn local_nrows(&self) -> usize {
+        let (start, end) = self.local_range();
+        end.saturating_sub(start)
+    }
+}
+
 // ===== Main AMG object =======================================================
 
 pub struct AMG {
@@ -2491,6 +2732,7 @@ pub struct AMG {
     cfg: AMGConfig,
     stats: Option<AmgStats>,
     runtime: Mutex<AmgRuntime>,
+    dist: Option<DistAmgInfo>,
 }
 
 impl Default for AMG {
@@ -2503,6 +2745,7 @@ impl Default for AMG {
             cfg,
             stats: None,
             runtime: Mutex::new(AmgRuntime::default()),
+            dist: None,
         }
     }
 }
@@ -2631,6 +2874,128 @@ impl AMG {
         self.cycle_policy = Self::make_cycle_policy(&self.cfg);
         self.stats = stats;
         Ok(Box::new(hier))
+    }
+
+    fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
+        let comm = dist.comm();
+        let rank = comm.rank();
+        let row_part = dist.row_partition();
+        let root = 0usize;
+        self.dist = Some(DistAmgInfo {
+            comm: comm.clone(),
+            root,
+            row_part: row_part.clone(),
+            n_global: dist.n_global,
+        });
+        let global = gather_dist_csr(dist, root)?;
+        if rank != root {
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            self.csr = None;
+            return Ok(());
+        }
+        let mut fine = global.ok_or_else(|| {
+            KError::InvalidInput("root rank missing assembled CSR matrix".into())
+        })?;
+        if self.cfg.conditioning.is_active() {
+            apply_csr_transforms("AMG", &mut fine, &self.cfg.conditioning)?;
+        }
+        let sid = dist.structure_id();
+        let vid = dist.values_id();
+        let pattern_hash = csr_pattern_hash(&fine);
+        let hierarchy = self.build_symbolic(&fine)?;
+        self.state = AmgState::Ready {
+            hierarchy,
+            last_structure_id: sid,
+            last_values_id: vid,
+            pattern_hash,
+        };
+        self.csr = Some(Arc::new(fine));
+        if self.cfg.logging_level >= 2
+            && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref()
+        {
+            print_setup_tables(s);
+        }
+        #[cfg(debug_assertions)]
+        if self.cfg.require_spd {
+            self.spd_probe()?;
+        }
+        Ok(())
+    }
+
+    fn apply_local(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
+        if r.len() != z.len() {
+            return Err(KError::InvalidInput(format!(
+                "AMG.apply: r/z size mismatch: {} vs {}",
+                r.len(),
+                z.len()
+            )));
+        }
+        if self.cfg.require_spd && side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "AMG in SPD mode supports only Left preconditioning for CG-safe use".into(),
+            ));
+        }
+        let h = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy,
+            _ => {
+                return Err(KError::InvalidInput("AMG not set up".into()));
+            }
+        };
+        let mut ws = AMGWorkspace::new(h.finest().a.nrows());
+        let do_prof = self.cfg.logging_level >= 2;
+        if do_prof {
+            let mut cyc = CycleTimings::default();
+            let t_all = tic();
+            z.fill(R::default());
+            self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
+            cyc.total_cycle = toc(t_all);
+            cyc.cycle_type = self.cfg.cycle_type;
+            cyc.kcycle = self.cfg.kcycle.clone();
+            if let Ok(mut rt) = self.runtime.lock() {
+                rt.last_cycle = Some(cyc.clone());
+            }
+            if self.cfg.print_level >= 2 {
+                print_cycle_table(&cyc);
+            }
+        } else {
+            z.fill(R::default());
+            self.cycle(0, r, z, &mut ws)?;
+        }
+        Ok(())
+    }
+
+    fn apply_dist(
+        &self,
+        side: PcSide,
+        r: &[f64],
+        z: &mut [f64],
+        dist: &DistAmgInfo,
+    ) -> Result<(), KError> {
+        let comm = &dist.comm;
+        let root = dist.root;
+        let row_part = dist.row_part.as_ref();
+        let rank = comm.rank();
+        let global_r = gather_vector(comm, row_part, root, r)?;
+        let mut global_z = if rank == root {
+            vec![0.0f64; dist.n_global]
+        } else {
+            Vec::new()
+        };
+        if rank == root {
+            let rhs = global_r.as_ref().ok_or_else(|| {
+                KError::InvalidInput("root rank missing gathered RHS".into())
+            })?;
+            self.apply_local(side, rhs, &mut global_z)?;
+        }
+        let global_ref = if rank == root {
+            Some(global_z.as_slice())
+        } else {
+            None
+        };
+        scatter_vector(comm, row_part, root, global_ref, z)?;
+        Ok(())
     }
 
     fn ensure_symbolic_structure(
@@ -5031,6 +5396,10 @@ impl AMG {
 #[cfg(not(feature = "complex"))]
 impl Preconditioner for AMG {
     fn dims(&self) -> (usize, usize) {
+        if let Some(dist) = &self.dist {
+            let n = dist.local_nrows();
+            return (n, n);
+        }
         if let AmgState::Ready { hierarchy, .. } = &self.state {
             let n = hierarchy.finest().a.nrows();
             (n, n)
@@ -5047,17 +5416,12 @@ impl Preconditioner for AMG {
 
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
-        if op
-            .as_any()
-            .downcast_ref::<crate::matrix::DistCsrOp>()
-            .is_some()
-            && op.comm().size() > 1
-        {
-            return Err(KError::Unsupported(
-                "AMG is local-only under MPI when using DistCsrOp. Use ASM, Block-Jacobi, or PC chaining instead. Roadmap: distributed coarsening across ranks, a distributed Galerkin triple product (RAP), and a coarse-level solve using matrix::dist and matrix::dist::spmv_dist."
-                    .into(),
-            ));
+        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+            if op.comm().size() > 1 {
+                return self.setup_dist(dist);
+            }
         }
+        self.dist = None;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let csr = if self.cfg.conditioning.is_active() {
             let mut local = (*csr).clone();
@@ -5100,45 +5464,12 @@ impl Preconditioner for AMG {
     }
 
     fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
-        if r.len() != z.len() {
-            return Err(KError::InvalidInput(format!(
-                "AMG.apply: r/z size mismatch: {} vs {}",
-                r.len(),
-                z.len()
-            )));
-        }
-        if self.cfg.require_spd && side != PcSide::Left {
-            return Err(KError::InvalidInput(
-                "AMG in SPD mode supports only Left preconditioning for CG-safe use".into(),
-            ));
-        }
-        let h = match &self.state {
-            AmgState::Ready { hierarchy, .. } => hierarchy,
-            _ => {
-                return Err(KError::InvalidInput("AMG not set up".into()));
+        if let Some(dist) = &self.dist {
+            if dist.comm.size() > 1 {
+                return self.apply_dist(side, r, z, dist);
             }
-        };
-        let mut ws = AMGWorkspace::new(h.finest().a.nrows());
-        let do_prof = self.cfg.logging_level >= 2;
-        if do_prof {
-            let mut cyc = CycleTimings::default();
-            let t_all = tic();
-            z.fill(R::default());
-            self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
-            cyc.total_cycle = toc(t_all);
-            cyc.cycle_type = self.cfg.cycle_type;
-            cyc.kcycle = self.cfg.kcycle.clone();
-            if let Ok(mut rt) = self.runtime.lock() {
-                rt.last_cycle = Some(cyc.clone());
-            }
-            if self.cfg.print_level >= 2 {
-                print_cycle_table(&cyc);
-            }
-        } else {
-            z.fill(R::default());
-            self.cycle(0, r, z, &mut ws)?;
         }
-        Ok(())
+        self.apply_local(side, r, z)
     }
 
     fn capabilities(&self) -> PcCaps {
@@ -5156,6 +5487,12 @@ impl Preconditioner for AMG {
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
+        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+            if op.comm().size() > 1 {
+                return self.setup_dist(dist);
+            }
+        }
+        self.dist = None;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let sid = op.structure_id();
         let vid = op.values_id();
@@ -5174,6 +5511,12 @@ impl Preconditioner for AMG {
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
+        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+            if op.comm().size() > 1 {
+                return self.setup_dist(dist);
+            }
+        }
+        self.dist = None;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let sid = op.structure_id();
         let vid = op.values_id();
