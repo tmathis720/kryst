@@ -2886,29 +2886,84 @@ impl AMG {
         let rank = comm.rank();
         let row_part = dist.row_partition();
         let root = 0usize;
+        // Distributed setup is root-centric: we gather the global matrix, build the
+        // hierarchy on rank 0, and keep non-root ranks in an uninitialized state.
+        // Validation that depends on distributed apply (e.g., SPD probing) is disabled
+        // under MPI because apply_dist is collective. Errors are synchronized so all
+        // ranks return the same failure before any iteration starts.
         self.dist = Some(DistAmgInfo {
             comm: comm.clone(),
             root,
             row_part: row_part.clone(),
             n_global: dist.n_global,
         });
-        let global = gather_dist_csr(dist, root)?;
+        let prev_cfg = self.cfg.clone();
+        let mut local_err: Option<KError> = None;
+        let mut setup_state: Option<(
+            CsrMatrix<f64>,
+            Box<AmgHierarchy>,
+            StructureId,
+            ValuesId,
+            u64,
+        )> = None;
+        let global = match gather_dist_csr(dist, root) {
+            Ok(global) => global,
+            Err(err) => {
+                local_err = Some(err);
+                None
+            }
+        };
+        if local_err.is_none() && rank == root {
+            match global {
+                Some(mut fine) => {
+                    let cfg = self.cfg.clone();
+                    if cfg.conditioning.is_active() {
+                        if let Err(err) = apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
+                        {
+                            local_err = Some(err);
+                        }
+                    }
+                    if local_err.is_none() {
+                        let sid = dist.structure_id();
+                        let vid = dist.values_id();
+                        let pattern_hash = csr_pattern_hash(&fine);
+                        match self.build_symbolic(&fine) {
+                            Ok(hierarchy) => {
+                                setup_state =
+                                    Some((fine, hierarchy, sid, vid, pattern_hash));
+                            }
+                            Err(err) => local_err = Some(err),
+                        }
+                    }
+                }
+                None => {
+                    local_err = Some(KError::InvalidInput(
+                        "root rank missing assembled CSR matrix".into(),
+                    ));
+                }
+            }
+        }
+        let local_success = if local_err.is_none() { 1.0 } else { 0.0 };
+        let success_sum = comm.all_reduce_f64(local_success);
+        if (success_sum - comm.size() as f64).abs() > 0.0 {
+            self.cfg = prev_cfg;
+            self.cycle_policy = Self::make_cycle_policy(&self.cfg);
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            self.csr = None;
+            return Err(KError::InvalidInput(
+                "AMG distributed setup failed on at least one rank".into(),
+            ));
+        }
         if rank != root {
             self.state = AmgState::Uninitialized;
             self.stats = None;
             self.csr = None;
             return Ok(());
         }
-        let mut fine = global.ok_or_else(|| {
-            KError::InvalidInput("root rank missing assembled CSR matrix".into())
-        })?;
-        if self.cfg.conditioning.is_active() {
-            apply_csr_transforms("AMG", &mut fine, &self.cfg.conditioning)?;
-        }
-        let sid = dist.structure_id();
-        let vid = dist.values_id();
-        let pattern_hash = csr_pattern_hash(&fine);
-        let hierarchy = self.build_symbolic(&fine)?;
+        let (fine, hierarchy, sid, vid, pattern_hash) = setup_state.ok_or_else(
+            || KError::InvalidInput("AMG distributed setup missing hierarchy state".into()),
+        )?;
         self.state = AmgState::Ready {
             hierarchy,
             last_structure_id: sid,
@@ -2921,10 +2976,6 @@ impl AMG {
             && let Some(s) = self.stats.as_ref()
         {
             print_setup_tables(s);
-        }
-        #[cfg(all(debug_assertions, not(feature = "complex")))]
-        if self.cfg.require_spd {
-            self.spd_probe()?;
         }
         Ok(())
     }
