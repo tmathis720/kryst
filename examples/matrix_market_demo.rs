@@ -373,18 +373,30 @@ mod real_demo {
 
         if is_parallel {
             notes.push(
-                "MPI runs use local diagonal blocks for ILUT/AMG preconditioners (block-Jacobi style).",
+                "MPI runs avoid AMG and right-preconditioned ILUT/ILUTP; prefer ASM/RAS + ILUTP (L).",
             );
+            notes.push(
+                "MPI block-Jacobi/ASM entries use local subdomains instead of global coarsening.",
+            );
+        } else {
+            notes.push("FGMRES entries are right-preconditioned in this demo.");
         }
-        notes.push("FGMRES entries are right-preconditioned in this demo.");
         if !enable_stress_solvers {
             notes.push("Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.");
         }
 
         specs.push(RunSpec {
-            name: "FGMRES(50) + ILUT (R)",
+            name: if is_parallel {
+                "FGMRES(50) + ILUT (L)"
+            } else {
+                "FGMRES(50) + ILUT (R)"
+            },
             solver: SolverType::Fgmres,
-            pc_side: PcSide::Right,
+            pc_side: if is_parallel {
+                PcSide::Left
+            } else {
+                PcSide::Right
+            },
             pc: PcConfigSpec::Type {
                 pc_type: PcType::Ilut,
                 options: Some(ilut_options()),
@@ -392,7 +404,7 @@ mod real_demo {
             setup: Some(fgmres_hook()),
         });
 
-        if !analysis.has_diag_zeros {
+        if !is_parallel && !analysis.has_diag_zeros {
             specs.push(RunSpec {
                 name: "FGMRES(50) + AMG (R)",
                 solver: SolverType::Fgmres,
@@ -400,18 +412,22 @@ mod real_demo {
                 pc: PcConfigSpec::Builder(amg_builder(false)),
                 setup: Some(fgmres_hook()),
             });
-        } else {
+        } else if !is_parallel {
             notes.push("AMG disabled due to near-zero or missing diagonal entries.");
+        } else {
+            notes.push("AMG entries are skipped for MPI runs (use ASM/RAS instead).");
         }
 
         if analysis.approx_symmetric && !analysis.has_diag_zeros {
-            specs.push(RunSpec {
-                name: "PCG(pipelined) + AMG (L)",
-                solver: SolverType::Pcg,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Builder(amg_builder(true)),
-                setup: Some(pcg_pipelined_hook()),
-            });
+            if !is_parallel {
+                specs.push(RunSpec {
+                    name: "PCG(pipelined) + AMG (L)",
+                    solver: SolverType::Pcg,
+                    pc_side: PcSide::Left,
+                    pc: PcConfigSpec::Builder(amg_builder(true)),
+                    setup: Some(pcg_pipelined_hook()),
+                });
+            }
             specs.push(RunSpec {
                 name: "PCG + Jacobi (L)",
                 solver: SolverType::Pcg,
@@ -421,6 +437,29 @@ mod real_demo {
                     options: None,
                 },
                 setup: None,
+            });
+        }
+
+        if is_parallel {
+            specs.push(RunSpec {
+                name: "FGMRES(50) + RAS/ASM + ILUTP (L)",
+                solver: SolverType::Fgmres,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::Asm,
+                    options: Some(asm_ilutp_options()),
+                },
+                setup: Some(fgmres_hook()),
+            });
+            specs.push(RunSpec {
+                name: "FGMRES(50) + Block-Jacobi + ILUT",
+                solver: SolverType::Fgmres,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::BlockJacobi,
+                    options: Some(block_jacobi_ilut_options()),
+                },
+                setup: Some(fgmres_hook()),
             });
         }
 
@@ -502,6 +541,26 @@ mod real_demo {
         opts.ilut_drop_tol = Some(1e-4);
         opts.ilut_max_fill = Some(50);
         opts.ilu_reordering = Some("amd".into());
+        opts
+    }
+
+    fn asm_ilutp_options() -> PcOptions {
+        let mut opts = PcOptions::default();
+        opts.asm_mode = Some("ras".into());
+        opts.asm_overlap = Some(1);
+        opts.asm_weighting = Some("uniform".into());
+        opts.asm_inner_pc = Some("ilutp".into());
+        opts.ilutp_max_fill = Some(20);
+        opts.ilutp_drop_tol = Some(1e-4);
+        opts.ilutp_perm_tol = Some(0.1);
+        opts
+    }
+
+    fn block_jacobi_ilut_options() -> PcOptions {
+        let mut opts = PcOptions::default();
+        opts.pc_local = Some("ilut".into());
+        opts.ilut_drop_tol = Some(1e-4);
+        opts.ilut_max_fill = Some(20);
         opts
     }
 
