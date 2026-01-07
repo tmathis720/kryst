@@ -394,11 +394,15 @@ mod real_demo {
 
         specs.push(RunSpec {
             name: if is_parallel {
-                "FGMRES(50) + ILUT (L)"
+                "GMRES(50) + ILUT (L)"
             } else {
                 "FGMRES(50) + ILUT (R)"
             },
-            solver: SolverType::Fgmres,
+            solver: if is_parallel {
+                SolverType::Gmres
+            } else {
+                SolverType::Fgmres
+            },
             pc_side: if is_parallel {
                 PcSide::Left
             } else {
@@ -408,7 +412,11 @@ mod real_demo {
                 pc_type: PcType::Ilut,
                 options: Some(ilut_options()),
             },
-            setup: Some(fgmres_hook()),
+            setup: if is_parallel {
+                Some(gmres_hook())
+            } else {
+                Some(fgmres_hook())
+            },
         });
 
         if !is_parallel && !analysis.has_diag_zeros {
@@ -472,24 +480,24 @@ mod real_demo {
 
         if is_parallel {
             specs.push(RunSpec {
-                name: "FGMRES(50) + RAS/ASM + ILUTP (L)",
-                solver: SolverType::Fgmres,
+                name: "GMRES(50) + RAS/ASM + ILUTP (L)",
+                solver: SolverType::Gmres,
                 pc_side: PcSide::Left,
                 pc: PcConfigSpec::Type {
                     pc_type: PcType::Asm,
                     options: Some(asm_ilutp_options()),
                 },
-                setup: Some(fgmres_hook()),
+                setup: Some(gmres_hook()),
             });
             specs.push(RunSpec {
-                name: "FGMRES(50) + Block-Jacobi + ILUT",
-                solver: SolverType::Fgmres,
+                name: "GMRES(50) + Block-Jacobi + ILUT",
+                solver: SolverType::Gmres,
                 pc_side: PcSide::Left,
                 pc: PcConfigSpec::Type {
                     pc_type: PcType::BlockJacobi,
                     options: Some(block_jacobi_ilut_options()),
                 },
-                setup: Some(fgmres_hook()),
+                setup: Some(gmres_hook()),
             });
         }
 
@@ -611,6 +619,13 @@ mod real_demo {
             opts.fgmres_variant = Some("pipelined".into());
             opts.fgmres_reorth = Some("ifneeded".into());
             ksp.set_from_options(&opts)?;
+            Ok(())
+        })
+    }
+
+    fn gmres_hook() -> SolverConfigurator {
+        Arc::new(|ksp: &mut KspContext| {
+            ksp.set_restart(50);
             Ok(())
         })
     }
