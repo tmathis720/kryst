@@ -38,6 +38,8 @@ MPI-global preconditioners are selected via `PcOptions::mpi_pc_options()` and on
 - `pc_global=asm` → `preconditioner::asm::AsmPc`, which dispatches to the distributed ASM path
   when a distributed layout is present.
 - `pc_global=ras` → `preconditioner::asm::AsmPc` with restricted additive Schwarz mode enabled.
+  It reuses the existing `pc_asm_*` options (overlap, weighting, subdomain sizing, etc.) rather
+  than introducing separate `pc_global`-specific flags.
 
 Supported combinations:
 

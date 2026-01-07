@@ -1788,6 +1788,16 @@ impl PcOptions {
             .transpose()?
             .unwrap_or(LocalPcKind::Ilu);
 
+        if let GlobalPcKind::Ras = global {
+            if let Some(mode) = self.asm_mode.as_deref()
+                && mode != "ras"
+            {
+                return Err(KError::InvalidInput(format!(
+                    "pc_global=ras requires pc_asm_mode=ras (got {mode})"
+                )));
+            }
+        }
+
         let mut opts = MpiPcOptions::default();
         opts.global_pc = global;
         opts.local_pc = local;

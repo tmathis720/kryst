@@ -179,6 +179,14 @@ impl Preconditioner for DistributedAsm {
         )?);
 
         let comm_plan = build_comm_plan(&comm, &ownership, &subdofs)?;
+        let imported_rows: usize = comm_plan.imports.iter().map(|rows| rows.len()).sum();
+        log::info!(
+            "distributed RAS ASM setup: rank={} overlap={} imported_rows={} local_subdomain_nnz={}",
+            comm.rank(),
+            self.overlap,
+            imported_rows,
+            sub_csr.nnz()
+        );
         let sub_map = subdofs.iter().enumerate().map(|(i, &g)| (g, i)).collect();
 
         let mut solver = SubdomainSolver::new(self.block_solver, self.inner_pc)?;
