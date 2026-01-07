@@ -393,9 +393,6 @@ mod real_demo {
 
         if is_parallel {
             notes.push(
-                "MPI runs avoid AMG and right-preconditioned ILUT/ILUTP; prefer ASM/RAS + ILUTP (L).",
-            );
-            notes.push(
                 "MPI block-Jacobi/ASM entries use local subdomains instead of global coarsening.",
             );
         } else {
@@ -437,30 +434,56 @@ mod real_demo {
             },
         });
 
-        if !is_parallel && !analysis.has_diag_zeros {
+        if !analysis.has_diag_zeros {
             specs.push(RunSpec {
-                name: "FGMRES(50) + AMG (R)",
-                solver: SolverType::Fgmres,
-                pc_side: PcSide::Right,
-                pc: PcConfigSpec::Builder(amg_builder(false)),
-                setup: Some(fgmres_hook()),
+                name: if is_parallel {
+                    "GMRES(50) + AMG (L)"
+                } else {
+                    "FGMRES(50) + AMG (R)"
+                },
+                solver: if is_parallel {
+                    SolverType::Gmres
+                } else {
+                    SolverType::Fgmres
+                },
+                pc_side: if is_parallel {
+                    PcSide::Left
+                } else {
+                    PcSide::Right
+                },
+                pc: if is_parallel {
+                    PcConfigSpec::Type {
+                        pc_type: PcType::Amg,
+                        options: None,
+                    }
+                } else {
+                    PcConfigSpec::Builder(amg_builder(false))
+                },
+                setup: if is_parallel {
+                    Some(gmres_hook())
+                } else {
+                    Some(fgmres_hook())
+                },
             });
-        } else if !is_parallel {
-            notes.push("AMG disabled due to near-zero or missing diagonal entries.");
         } else {
-            notes.push("AMG entries are skipped for MPI runs (use ASM/RAS instead).");
+            notes.push("AMG disabled due to near-zero or missing diagonal entries.");
         }
 
         if spd_confident {
-            if !is_parallel {
-                specs.push(RunSpec {
-                    name: "PCG(pipelined) + AMG (L)",
-                    solver: SolverType::Pcg,
-                    pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Builder(amg_builder(true)),
-                    setup: Some(pcg_pipelined_hook()),
-                });
-            }
+            specs.push(RunSpec {
+                name: "PCG(pipelined) + AMG (L)",
+                solver: SolverType::Pcg,
+                pc_side: PcSide::Left,
+                pc: if is_parallel {
+                    PcConfigSpec::Type {
+                        pc_type: PcType::Amg,
+                        options: None,
+                    }
+                } else {
+                    PcConfigSpec::Builder(amg_builder(true))
+                },
+                setup: Some(pcg_pipelined_hook()),
+            });
             specs.push(RunSpec {
                 name: "PCG + Jacobi (L)",
                 solver: SolverType::Pcg,
