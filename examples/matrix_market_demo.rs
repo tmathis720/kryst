@@ -80,6 +80,7 @@ mod real_demo {
         density: f64,
         approx_symmetric: bool,
         has_diag_zeros: bool,
+        diag_positive: bool,
     }
 
     struct Problem {
@@ -370,6 +371,7 @@ mod real_demo {
         let mut notes = Vec::new();
 
         let enable_stress_solvers = stress_solvers_enabled();
+        let spd_heuristic = analysis.approx_symmetric && analysis.diag_positive;
 
         if is_parallel {
             notes.push(
@@ -383,6 +385,11 @@ mod real_demo {
         }
         if !enable_stress_solvers {
             notes.push("Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.");
+        }
+        if analysis.approx_symmetric && !spd_heuristic {
+            notes.push(
+                "Approximate symmetry detected, but SPD heuristic failed; offering MINRES instead of CG.",
+            );
         }
 
         specs.push(RunSpec {
@@ -418,7 +425,7 @@ mod real_demo {
             notes.push("AMG entries are skipped for MPI runs (use ASM/RAS instead).");
         }
 
-        if analysis.approx_symmetric && !analysis.has_diag_zeros {
+        if spd_heuristic {
             if !is_parallel {
                 specs.push(RunSpec {
                     name: "PCG(pipelined) + AMG (L)",
@@ -436,6 +443,29 @@ mod real_demo {
                     pc_type: PcType::Jacobi,
                     options: None,
                 },
+                setup: None,
+            });
+        } else if analysis.approx_symmetric && !analysis.has_diag_zeros {
+            let minres_pc = if is_parallel {
+                PcConfigSpec::Type {
+                    pc_type: PcType::Asm,
+                    options: Some(asm_ilutp_options()),
+                }
+            } else {
+                PcConfigSpec::Type {
+                    pc_type: PcType::BlockJacobi,
+                    options: Some(block_jacobi_ilut_options()),
+                }
+            };
+            specs.push(RunSpec {
+                name: if is_parallel {
+                    "MINRES + RAS/ASM + ILUTP (L)"
+                } else {
+                    "MINRES + Block-Jacobi + ILUT (L)"
+                },
+                solver: SolverType::Minres,
+                pc_side: PcSide::Left,
+                pc: minres_pc,
                 setup: None,
             });
         }
@@ -613,11 +643,13 @@ mod real_demo {
         };
         let approx_symmetric = estimate_symmetry(matrix, 1e-12, 2_000);
         let has_diag_zeros = detect_diag_issues(matrix, 1e-14, 20_000);
+        let diag_positive = !detect_nonpositive_diag(matrix, 1e-14, 20_000);
         Analysis {
             nnz,
             density,
             approx_symmetric,
             has_diag_zeros,
+            diag_positive,
         }
     }
 
@@ -707,6 +739,18 @@ mod real_demo {
         for i in 0..limit {
             match lookup(matrix, i, i) {
                 Some(val) if val.abs() > tol => continue,
+                _ => return true,
+            }
+        }
+        false
+    }
+
+    fn detect_nonpositive_diag(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
+        let n = matrix.nrows().min(matrix.ncols());
+        let limit = n.min(max_rows);
+        for i in 0..limit {
+            match lookup(matrix, i, i) {
+                Some(val) if val > tol => continue,
                 _ => return true,
             }
         }
