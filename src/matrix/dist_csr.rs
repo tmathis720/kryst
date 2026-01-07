@@ -301,6 +301,11 @@ impl DistCsrOp {
         self.row_start
     }
 
+    /// Return the global row partition used by the distributed operator.
+    pub fn row_partition(&self) -> Arc<Vec<usize>> {
+        self.halo.index.row_part.clone()
+    }
+
     /// Number of local rows stored on this rank.
     pub fn local_nrows(&self) -> usize {
         self.n_local
