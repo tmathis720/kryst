@@ -18,10 +18,11 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::{
     convert::csr_from_linop,
     dense_api::DenseMatRef,
-    DistCsrOp,
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
+#[cfg(not(feature = "complex"))]
+use crate::matrix::DistCsrOp;
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
@@ -2386,6 +2387,7 @@ fn csr_pattern_hash(a: &CsrMatrix<f64>) -> u64 {
     hasher.finish()
 }
 
+#[cfg(not(feature = "complex"))]
 fn gather_dist_csr(
     dist: &DistCsrOp,
     root: usize,
@@ -2421,7 +2423,6 @@ fn gather_dist_csr(
     let mut recv_row_ptr_u64: Vec<Vec<u64>> = vec![Vec::new(); size];
     let mut recv_col_idx_u64: Vec<Vec<u64>> = vec![Vec::new(); size];
     let mut recv_vals: Vec<Vec<f64>> = vec![Vec::new(); size];
-    let mut reqs = Vec::new();
     for r in 0..size {
         if r == root {
             continue;
@@ -2431,6 +2432,7 @@ fn gather_dist_csr(
         recv_row_ptr_u64[r] = vec![0u64; n_local + 1];
         recv_col_idx_u64[r] = vec![0u64; nnz];
         recv_vals[r] = vec![0.0; nnz];
+        let mut reqs = Vec::with_capacity(3);
         reqs.push(comm.irecv_from_u64(
             recv_row_ptr_u64[r].as_mut_slice(),
             r as i32,
@@ -2440,8 +2442,8 @@ fn gather_dist_csr(
             r as i32,
         ));
         reqs.push(comm.irecv_from(recv_vals[r].as_mut_slice(), r as i32));
+        comm.wait_all(&mut reqs);
     }
-    comm.wait_all(&mut reqs);
 
     let mut row_ptrs: Vec<Vec<usize>> = vec![Vec::new(); size];
     let mut col_idxs: Vec<Vec<usize>> = vec![Vec::new(); size];
@@ -2509,6 +2511,7 @@ fn gather_dist_csr(
     )))
 }
 
+#[cfg(not(feature = "complex"))]
 fn gather_vector(
     comm: &UniverseComm,
     row_part: &[usize],
@@ -2536,19 +2539,20 @@ fn gather_vector(
     let n_global = *row_part.last().unwrap_or(&0);
     let mut global = vec![0.0f64; n_global];
     global[start..end].copy_from_slice(local);
-    let mut reqs = Vec::new();
     for r in 0..size {
         if r == root {
             continue;
         }
         let rs = row_part[r];
         let re = row_part[r + 1];
+        let mut reqs = Vec::with_capacity(1);
         reqs.push(comm.irecv_from(&mut global[rs..re], r as i32));
+        comm.wait_all(&mut reqs);
     }
-    comm.wait_all(&mut reqs);
     Ok(Some(global))
 }
 
+#[cfg(not(feature = "complex"))]
 fn scatter_vector(
     comm: &UniverseComm,
     row_part: &[usize],
@@ -2876,6 +2880,7 @@ impl AMG {
         Ok(Box::new(hier))
     }
 
+    #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
         let comm = dist.comm();
         let rank = comm.rank();
@@ -2917,7 +2922,7 @@ impl AMG {
         {
             print_setup_tables(s);
         }
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(feature = "complex")))]
         if self.cfg.require_spd {
             self.spd_probe()?;
         }
@@ -2966,6 +2971,7 @@ impl AMG {
         Ok(())
     }
 
+    #[cfg(not(feature = "complex"))]
     fn apply_dist(
         &self,
         side: PcSide,
