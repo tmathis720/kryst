@@ -921,6 +921,26 @@ impl AMGBuilder {
         self.cfg.require_spd = on;
         self
     }
+    pub fn verify_p_rank(mut self, on: bool) -> Self {
+        self.cfg.verify_p_rank = on;
+        self
+    }
+    pub fn rank_cond_threshold(mut self, v: f64) -> Self {
+        self.cfg.rank_cond_threshold = v;
+        self
+    }
+    pub fn rank_min_col_norm(mut self, v: f64) -> Self {
+        self.cfg.rank_min_col_norm = v;
+        self
+    }
+    pub fn verify_galerkin(mut self, on: bool) -> Self {
+        self.cfg.verify_galerkin = on;
+        self
+    }
+    pub fn galerkin_rel_tol(mut self, v: f64) -> Self {
+        self.cfg.galerkin_rel_tol = v;
+        self
+    }
     pub fn spd_diag_floor(mut self, eps: f64) -> Self {
         self.cfg.spd_diag_floor = eps.max(0.0);
         self
@@ -2388,6 +2408,162 @@ fn csr_pattern_hash(a: &CsrMatrix<f64>) -> u64 {
 }
 
 #[cfg(not(feature = "complex"))]
+fn pack_message_u64(message: &str) -> (u64, Vec<u64>) {
+    let bytes = message.as_bytes();
+    let len = bytes.len();
+    if len == 0 {
+        return (0, Vec::new());
+    }
+    let words = (len + 7) / 8;
+    let mut data = vec![0u64; words];
+    for (idx, &b) in bytes.iter().enumerate() {
+        let word = idx / 8;
+        let shift = (idx % 8) * 8;
+        data[word] |= (b as u64) << shift;
+    }
+    (len as u64, data)
+}
+
+#[cfg(not(feature = "complex"))]
+fn unpack_message_u64(words: &[u64], len: usize) -> String {
+    if len == 0 {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity(len);
+    for (i, &word) in words.iter().enumerate() {
+        let base = i * 8;
+        for j in 0..8 {
+            let idx = base + j;
+            if idx >= len {
+                break;
+            }
+            bytes.push(((word >> (j * 8)) & 0xFF) as u8);
+        }
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[cfg(not(feature = "complex"))]
+fn broadcast_message<C: Comm>(comm: &C, root: usize, message: Option<String>) -> String {
+    let rank = comm.rank();
+    let size = comm.size();
+    if size <= 1 {
+        return message.unwrap_or_default();
+    }
+    if rank == root {
+        let msg = message.unwrap_or_default();
+        let (len, data) = pack_message_u64(&msg);
+        let len_buf = [len];
+        let mut reqs = Vec::new();
+        for r in 0..size {
+            if r == root {
+                continue;
+            }
+            reqs.push(comm.isend_to_u64(&len_buf, r as i32));
+        }
+        comm.wait_all(&mut reqs);
+        if len > 0 {
+            let mut data_reqs = Vec::new();
+            for r in 0..size {
+                if r == root {
+                    continue;
+                }
+                data_reqs.push(comm.isend_to_u64(&data, r as i32));
+            }
+            comm.wait_all(&mut data_reqs);
+        }
+        msg
+    } else {
+        let mut len_buf = [0u64];
+        let mut reqs = vec![comm.irecv_from_u64(&mut len_buf, root as i32)];
+        comm.wait_all(&mut reqs);
+        let len = len_buf[0] as usize;
+        if len == 0 {
+            return String::new();
+        }
+        let words = (len + 7) / 8;
+        let mut data = vec![0u64; words];
+        let mut data_reqs = vec![comm.irecv_from_u64(&mut data, root as i32)];
+        comm.wait_all(&mut data_reqs);
+        unpack_message_u64(&data, len)
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+fn collect_error_message<C: Comm>(
+    comm: &C,
+    root: usize,
+    local_message: Option<String>,
+) -> String {
+    let rank = comm.rank();
+    let size = comm.size();
+    let local = local_message.unwrap_or_default();
+    if size <= 1 {
+        return local;
+    }
+    let (len, data) = pack_message_u64(&local);
+    if rank != root {
+        let len_buf = [len];
+        let mut reqs = vec![comm.isend_to_u64(&len_buf, root as i32)];
+        comm.wait_all(&mut reqs);
+        if len > 0 {
+            let mut data_reqs = vec![comm.isend_to_u64(&data, root as i32)];
+            comm.wait_all(&mut data_reqs);
+        }
+        return broadcast_message(comm, root, None);
+    }
+
+    let mut len_bufs = vec![0u64; size];
+    let mut len_reqs = Vec::new();
+    for r in 0..size {
+        if r == root {
+            continue;
+        }
+        len_reqs.push(comm.irecv_from_u64(
+            std::slice::from_mut(&mut len_bufs[r]),
+            r as i32,
+        ));
+    }
+    comm.wait_all(&mut len_reqs);
+
+    let mut data_bufs: Vec<Vec<u64>> = vec![Vec::new(); size];
+    let mut data_reqs = Vec::new();
+    for r in 0..size {
+        if r == root {
+            continue;
+        }
+        let msg_len = len_bufs[r] as usize;
+        if msg_len == 0 {
+            continue;
+        }
+        let words = (msg_len + 7) / 8;
+        data_bufs[r] = vec![0u64; words];
+        data_reqs.push(comm.irecv_from_u64(data_bufs[r].as_mut_slice(), r as i32));
+    }
+    comm.wait_all(&mut data_reqs);
+
+    let mut messages = vec![String::new(); size];
+    messages[root] = local;
+    for r in 0..size {
+        if r == root {
+            continue;
+        }
+        let msg_len = len_bufs[r] as usize;
+        if msg_len == 0 {
+            continue;
+        }
+        messages[r] = unpack_message_u64(&data_bufs[r], msg_len);
+    }
+    let chosen = messages
+        .iter()
+        .enumerate()
+        .find(|(_, msg)| !msg.is_empty())
+        .map(|(_, msg)| msg.clone())
+        .unwrap_or_default();
+    broadcast_message(comm, root, Some(chosen))
+}
+
+#[cfg(not(feature = "complex"))]
 fn gather_dist_csr(
     dist: &DistCsrOp,
     root: usize,
@@ -2898,7 +3074,14 @@ impl AMG {
             n_global: dist.n_global,
         });
         let prev_cfg = self.cfg.clone();
-        let mut local_err: Option<KError> = None;
+        let mut local_stage: Option<&'static str> = None;
+        let mut local_detail: Option<String> = None;
+        let mut record_error = |stage: &'static str, err: KError| {
+            if local_stage.is_none() {
+                local_stage = Some(stage);
+                local_detail = Some(err.to_string());
+            }
+        };
         let mut setup_state: Option<(
             CsrMatrix<f64>,
             Box<AmgHierarchy>,
@@ -2906,53 +3089,93 @@ impl AMG {
             ValuesId,
             u64,
         )> = None;
+        let mut setup_profile: Option<&'static str> = None;
         let global = match gather_dist_csr(dist, root) {
             Ok(global) => global,
             Err(err) => {
-                local_err = Some(err);
+                record_error("gather_dist_csr", err);
                 None
             }
         };
-        if local_err.is_none() && rank == root {
+        if local_stage.is_none() && rank == root {
             match global {
                 Some(mut fine) => {
                     let cfg = self.cfg.clone();
                     if cfg.conditioning.is_active() {
                         if let Err(err) = apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
                         {
-                            local_err = Some(err);
+                            record_error("conditioning", err);
                         }
                     }
-                    if local_err.is_none() {
+                    if local_stage.is_none() {
                         let sid = dist.structure_id();
                         let vid = dist.values_id();
                         let pattern_hash = csr_pattern_hash(&fine);
                         match self.build_symbolic(&fine) {
                             Ok(hierarchy) => {
+                                setup_profile = Some("strict");
                                 setup_state =
                                     Some((fine, hierarchy, sid, vid, pattern_hash));
                             }
-                            Err(err) => local_err = Some(err),
+                            Err(primary_err) => {
+                                let mut permissive_cfg = prev_cfg.clone();
+                                permissive_cfg.require_spd = false;
+                                permissive_cfg.verify_galerkin = false;
+                                permissive_cfg.verify_p_rank = false;
+                                permissive_cfg.interp_type = InterpType::Classical;
+                                self.cfg = permissive_cfg;
+                                match self.build_symbolic(&fine) {
+                                    Ok(hierarchy) => {
+                                        setup_profile = Some("permissive");
+                                        setup_state =
+                                            Some((fine, hierarchy, sid, vid, pattern_hash));
+                                    }
+                                    Err(fallback_err) => {
+                                        self.cfg = prev_cfg.clone();
+                                        record_error(
+                                            "build_symbolic",
+                                            KError::InvalidInput(format!(
+                                                "strict setup failed: {primary_err}; permissive fallback failed: {fallback_err}"
+                                            )),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 None => {
-                    local_err = Some(KError::InvalidInput(
-                        "root rank missing assembled CSR matrix".into(),
-                    ));
+                    record_error(
+                        "gather_dist_csr",
+                        KError::InvalidInput("root rank missing assembled CSR matrix".into()),
+                    );
                 }
             }
         }
-        let local_success = if local_err.is_none() { 1.0 } else { 0.0 };
-        let success_sum = comm.all_reduce_f64(local_success);
-        if (success_sum - comm.size() as f64).abs() > 0.0 {
+        let local_failure = if local_stage.is_none() { 0.0 } else { 1.0 };
+        let failure_sum = comm.all_reduce_f64(local_failure);
+        if failure_sum > 0.0 {
+            let local_message = local_stage.map(|stage| {
+                let detail = local_detail
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                format!("stage={stage}: {detail}")
+            });
+            let error_message = collect_error_message(comm, root, local_message);
             self.cfg = prev_cfg;
             self.cycle_policy = Self::make_cycle_policy(&self.cfg);
             self.state = AmgState::Uninitialized;
             self.stats = None;
             self.csr = None;
             return Err(KError::InvalidInput(
-                "AMG distributed setup failed on at least one rank".into(),
+                format!(
+                    "AMG distributed setup failed: {}",
+                    if error_message.is_empty() {
+                        "unknown error".to_string()
+                    } else {
+                        error_message
+                    }
+                ),
             ));
         }
         if rank != root {
@@ -2971,6 +3194,12 @@ impl AMG {
             pattern_hash,
         };
         self.csr = Some(Arc::new(fine));
+        if let Some(profile) = setup_profile
+            && profile == "permissive"
+            && self.cfg.print_level >= 1
+        {
+            println!("AMG distributed setup succeeded using permissive configuration.");
+        }
         if self.cfg.logging_level >= 2
             && self.cfg.print_level >= 1
             && let Some(s) = self.stats.as_ref()
