@@ -336,6 +336,22 @@ mod real_demo {
             hook(&mut ksp)?;
         }
 
+        if matches!(spec.solver, SolverType::Pcg) {
+            let progress_every = pcg_progress_every();
+            if progress_every > 0 {
+                let progress_start = Instant::now();
+                ksp.add_monitor_rank0(move |iter, residual| {
+                    if iter > 0 && iter % progress_every == 0 {
+                        let elapsed = progress_start.elapsed().as_secs_f64();
+                        println!(
+                            "    [pcg] iter {iter:4} | reported residual {:.2e} | {:.2}s elapsed",
+                            residual, elapsed
+                        );
+                    }
+                });
+            }
+        }
+
         ksp.set_tolerances(1e-8, 1e-12, 1e8, 1000);
         ksp.set_operators(problem.op.clone(), None);
 
@@ -470,20 +486,45 @@ mod real_demo {
         }
 
         if spd_confident {
-            specs.push(RunSpec {
-                name: "PCG(pipelined) + AMG (L)",
-                solver: SolverType::Pcg,
-                pc_side: PcSide::Left,
-                pc: if is_parallel {
-                    PcConfigSpec::Type {
-                        pc_type: PcType::Amg,
-                        options: None,
-                    }
+            if is_parallel {
+                if mpi_pcg_amg_enabled() {
+                    notes.push(
+                        "MPI PCG(pipelined)+AMG uses a root-assembled AMG apply; expect slow iterations.",
+                    );
+                    specs.push(RunSpec {
+                        name: "PCG(pipelined) + AMG (L)",
+                        solver: SolverType::Pcg,
+                        pc_side: PcSide::Left,
+                        pc: PcConfigSpec::Type {
+                            pc_type: PcType::Amg,
+                            options: None,
+                        },
+                        setup: Some(pcg_pipelined_hook()),
+                    });
                 } else {
-                    PcConfigSpec::Builder(amg_builder(true))
-                },
-                setup: Some(pcg_pipelined_hook()),
-            });
+                    notes.push(
+                        "Skipping MPI PCG(pipelined)+AMG; select PCG + ASM/ILUTP for a local preconditioner (set KRYST_ENABLE_MPI_PCG_AMG=1 to force AMG).",
+                    );
+                }
+                specs.push(RunSpec {
+                    name: "PCG(pipelined) + ASM/ILUTP (L)",
+                    solver: SolverType::Pcg,
+                    pc_side: PcSide::Left,
+                    pc: PcConfigSpec::Type {
+                        pc_type: PcType::Asm,
+                        options: Some(asm_ilutp_options()),
+                    },
+                    setup: Some(pcg_pipelined_hook()),
+                });
+            } else {
+                specs.push(RunSpec {
+                    name: "PCG(pipelined) + AMG (L)",
+                    solver: SolverType::Pcg,
+                    pc_side: PcSide::Left,
+                    pc: PcConfigSpec::Builder(amg_builder(true)),
+                    setup: Some(pcg_pipelined_hook()),
+                });
+            }
             specs.push(RunSpec {
                 name: "PCG + Jacobi (L)",
                 solver: SolverType::Pcg,
@@ -603,6 +644,28 @@ mod real_demo {
                 "1" | "true" | "yes" | "on"
             ),
             Err(_) => false,
+        }
+    }
+
+    fn mpi_pcg_amg_enabled() -> bool {
+        match env::var("KRYST_ENABLE_MPI_PCG_AMG") {
+            Ok(value) => matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            Err(_) => false,
+        }
+    }
+
+    fn pcg_progress_every() -> usize {
+        match env::var("KRYST_PCG_PROGRESS_EVERY") {
+            Ok(value) => value
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|&v| v > 0)
+                .unwrap_or(25),
+            Err(_) => 25,
         }
     }
 
