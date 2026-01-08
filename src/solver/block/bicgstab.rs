@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
@@ -43,7 +44,7 @@ impl LinearSolver for BlockBicgstabSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         if pc.is_some() {

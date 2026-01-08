@@ -17,6 +17,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -27,6 +28,7 @@ use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
+use crate::solver::common::call_monitors;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::common::ReductCtx;
 use crate::solver::LinearSolver;
@@ -190,7 +192,7 @@ impl GmresSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -309,8 +311,15 @@ impl GmresSolver {
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
-        for m in mons {
-            m(0, res);
+        if call_monitors(mons, 0, res, reduction_count) {
+            let counters = crate::utils::convergence::SolverCounters {
+                num_global_reductions: reduction_count,
+                residual_replacements: 0,
+            };
+            return Ok(
+                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
+            );
         }
         let true_res =
             Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
@@ -671,8 +680,15 @@ impl GmresSolver {
                 total_iters += 1;
                 k_steps = k + 1;
 
-                for m in mons {
-                    m(total_iters, res);
+                if call_monitors(mons, total_iters, res, reduction_count) {
+                    let counters = crate::utils::convergence::SolverCounters {
+                        num_global_reductions: reduction_count,
+                        residual_replacements: 0,
+                    };
+                    return Ok(
+                        SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                            .with_counters(counters),
+                    );
                 }
                 let true_res =
                     Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
@@ -857,8 +873,15 @@ impl GmresSolver {
             ws.g[0] = S::from_real(beta);
             res = beta;
 
-            for m in mons {
-                m(total_iters, res);
+            if call_monitors(mons, total_iters, res, reduction_count) {
+                let counters = crate::utils::convergence::SolverCounters {
+                    num_global_reductions: reduction_count,
+                    residual_replacements: 0,
+                };
+                return Ok(
+                    SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                        .with_counters(counters),
+                );
             }
             let true_res =
                 Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
@@ -935,7 +958,7 @@ impl GmresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -976,7 +999,7 @@ impl GmresSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -1138,8 +1161,15 @@ impl GmresSolver {
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
-        for m in mons {
-            m(0, res);
+        if call_monitors(mons, 0, res, reduction_count) {
+            let counters = crate::utils::convergence::SolverCounters {
+                num_global_reductions: reduction_count,
+                residual_replacements: 0,
+            };
+            return Ok(
+                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
+            );
         }
         let true_res =
             Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
@@ -1513,8 +1543,15 @@ impl GmresSolver {
                     total_iters += 1;
                     k_steps = col + 1;
 
-                    for m in mons {
-                        m(total_iters, res);
+                    if call_monitors(mons, total_iters, res, reduction_count) {
+                        let counters = crate::utils::convergence::SolverCounters {
+                            num_global_reductions: reduction_count,
+                            residual_replacements: 0,
+                        };
+                        return Ok(
+                            SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                                .with_counters(counters),
+                        );
                     }
                     let true_res = Self::true_residual_norm(
                         a,
@@ -1694,8 +1731,15 @@ impl GmresSolver {
             ws.g[0] = S::from_real(beta);
             res = beta;
 
-            for m in mons {
-                m(total_iters, res);
+            if call_monitors(mons, total_iters, res, reduction_count) {
+                let counters = crate::utils::convergence::SolverCounters {
+                    num_global_reductions: reduction_count,
+                    residual_replacements: 0,
+                };
+                return Ok(
+                    SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                        .with_counters(counters),
+                );
             }
             let true_res =
                 Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
@@ -1889,7 +1933,7 @@ impl LinearSolver for GmresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)

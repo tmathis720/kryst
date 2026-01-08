@@ -4,6 +4,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -47,7 +48,7 @@ impl QmrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -116,7 +117,7 @@ impl QmrSolver {
         let bnorm = norms[1].max(1e-32);
 
         for m in monitors {
-            m(0, res);
+            let _ = m(0, res, 0);
         }
 
         let (reason0, mut stats0) = self.conv.check(res, bnorm, 0);
@@ -199,7 +200,7 @@ impl QmrSolver {
 
             res = red.norm2(r);
             for m in monitors {
-                m(k + 1, res);
+                let _ = m(k + 1, res, 0);
             }
 
             let (reason, mut stats) = self.conv.check(res, bnorm, k + 1);
@@ -243,7 +244,7 @@ impl QmrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -261,7 +262,7 @@ impl QmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -304,7 +305,7 @@ impl QmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -335,7 +336,7 @@ impl LinearSolver for QmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         let pc = pc.map(|m| m as &dyn PreconditionerF64);

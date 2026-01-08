@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -110,7 +111,7 @@ impl LsmrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -214,7 +215,7 @@ impl LsmrSolver {
         let mut normr = beta;
         let res0 = beta;
         for m in monitors {
-            m(0, normr);
+            let _ = m(0, normr, 0);
         }
         log_residuals(
             0,
@@ -310,7 +311,7 @@ impl LsmrSolver {
             normr = (d + (betad - taud) * (betad - taud) + betadd * betadd).sqrt();
 
             for m in monitors {
-                m(k, normr);
+                let _ = m(k, normr, 0);
             }
 
             a.matvec_s(x, av, scratch);
@@ -378,7 +379,7 @@ impl LsmrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -396,7 +397,7 @@ impl LsmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -455,7 +456,7 @@ impl LinearSolver for LsmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let pc = pc.map(|m| m as &dyn PreconditionerF64);

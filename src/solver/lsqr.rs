@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -88,7 +89,7 @@ impl LsqrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -176,7 +177,7 @@ impl LsqrSolver {
         let res0 = beta;
         let mut res = beta;
         for m in monitors {
-            m(0, res);
+            let _ = m(0, res, 0);
         }
         log_residuals(
             0,
@@ -241,7 +242,7 @@ impl LsqrSolver {
 
             res = phi_bar.abs();
             for m in monitors {
-                m(k, res);
+                let _ = m(k, res, 0);
             }
 
             a.matvec_s(x, av, scratch);
@@ -309,7 +310,7 @@ impl LsqrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -327,7 +328,7 @@ impl LsqrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -386,7 +387,7 @@ impl LinearSolver for LsqrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let pc = pc.map(|m| m as &dyn PreconditionerF64);

@@ -1,4 +1,5 @@
 use crate::matrix::sparse::CsrMatrix;
+use crate::solver::MonitorCallback;
 use crate::parallel::UniverseComm;
 use crate::solver::api::Solver as CanonicalSolver;
 use crate::solver::legacy;
@@ -31,7 +32,7 @@ impl<'a, S: CanonicalSolver<CsrMatrix<f64>, f64, Error = KError>>
         x: &mut Vec<f64>,
         _pc_side: crate::preconditioner::PcSide,
         _comm: &UniverseComm,
-        _monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        _monitors: Option<&[Box<MonitorCallback<Self::Scalar>>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         self.inner.setup(a, self.comm)?;

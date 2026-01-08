@@ -5,12 +5,21 @@
 //! underlying solver types and traits for advanced use, custom pipelines, or testing.
 
 use crate::context::ksp_context::Workspace;
+use crate::solver::MonitorCallback;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::convergence::SolveStats;
 use std::any::Any;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorAction {
+    Continue,
+    Stop,
+}
+
+pub type MonitorCallback<R> = dyn Fn(usize, R, usize) -> MonitorAction + Send + Sync;
 
 pub mod api;
 pub use api::Solver;
@@ -37,7 +46,7 @@ pub trait LinearSolver: Send + Any {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error>;
 }
@@ -46,6 +55,7 @@ pub trait LinearSolver: Send + Any {
 pub mod legacy {
     use crate::algebra::prelude::KrystScalar;
     use crate::preconditioner::legacy::Preconditioner;
+    use crate::solver::MonitorCallback;
     use crate::utils::convergence::SolveStats;
 
     pub trait LinearSolver<M: ?Sized, V> {
@@ -60,7 +70,7 @@ pub mod legacy {
             x: &mut V,
             pc_side: crate::preconditioner::PcSide,
             comm: &crate::parallel::UniverseComm,
-            monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+            monitors: Option<&[Box<MonitorCallback<Self::Scalar>>]>,
             work: Option<&mut crate::context::ksp_context::Workspace>,
         ) -> Result<SolveStats<Self::Scalar>, Self::Error>;
 
@@ -89,7 +99,7 @@ pub mod legacy {
             x: &mut V,
             pc_side: crate::preconditioner::PcSide,
             comm: &crate::parallel::UniverseComm,
-            monitors: &[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>],
+            monitors: &[Box<MonitorCallback<Self::Scalar>>],
         ) -> Result<SolveStats<Self::Scalar>, Self::Error>
         where
             Self: Sized,
@@ -177,7 +187,7 @@ where
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         let mut x_vec = x.to_vec();

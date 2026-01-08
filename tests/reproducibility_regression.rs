@@ -6,6 +6,7 @@ use kryst::matrix::op::{CsrOp, LinOp};
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
+use kryst::solver::MonitorAction;
 use std::sync::{Arc, Mutex};
 
 fn make_spd_operator(comm: &UniverseComm, n: usize) -> Arc<dyn LinOp<S = f64>> {
@@ -49,10 +50,11 @@ fn run_once(args: &[&str]) -> Vec<f64> {
     let history = Arc::new(Mutex::new(Vec::new()));
     let history_clone = Arc::clone(&history);
     ksp.clear_monitors();
-    ksp.add_monitor(move |_iter, residual| {
+    ksp.add_monitor(move |_iter, residual, _reductions| {
         if let Ok(mut guard) = history_clone.lock() {
             guard.push(residual);
         }
+        MonitorAction::Continue
     });
 
     ksp.solve(&rhs, &mut x).unwrap();

@@ -24,6 +24,8 @@ use kryst::context::pc_context::PcType;
 #[cfg(not(feature = "complex"))]
 use kryst::utils::convergence::ConvergedReason;
 #[cfg(not(feature = "complex"))]
+use kryst::solver::MonitorAction;
+#[cfg(not(feature = "complex"))]
 use std::sync::Arc;
 
 #[cfg(feature = "logging")]
@@ -82,8 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_tolerances(1e-8, 1e-12, 1e3, 100);
 
     // Add a monitor to track convergence
-    ksp.add_monitor(move |iter, residual| {
+    ksp.add_monitor(move |iter, residual, _reductions| {
         println!("  Iteration {}: residual = {:.3e}", iter, residual);
+        MonitorAction::Continue
     });
 
     let mut x = vec![0.0; n]; // Zero initial guess
@@ -113,11 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_pc_type(PcType::Jacobi, None)?
         .set_tolerances(1e-8, 1e-12, 1e3, 100);
 
-    ksp2.add_monitor(move |iter, residual| {
+    ksp2.add_monitor(move |iter, residual, _reductions| {
         if iter % 5 == 0 || iter < 5 {
             // Print every 5th iteration
             println!("  Iteration {}: residual = {:.3e}", iter, residual);
         }
+        MonitorAction::Continue
     });
 
     let mut x2 = vec![0.0; n];

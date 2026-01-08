@@ -36,6 +36,7 @@ use kryst::context::ksp_context::KspContext;
 use kryst::matrix::op::{CsrOp, wrap_with_comm};
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{Comm, UniverseComm};
+use kryst::solver::MonitorAction;
 use kryst::utils::matrix_market::{read_matrix_market, write_vector_market};
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -181,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitor_data = Arc::new(Mutex::new(Vec::<(usize, f64)>::new()));
     let monitor_data_clone = monitor_data.clone();
 
-    let monitor = Box::new(move |iter: usize, residual: f64| {
+    let monitor = Box::new(move |iter: usize, residual: f64, _reductions: usize| {
         if let Ok(mut data) = monitor_data_clone.lock() {
             data.push((iter, residual));
             // Print every 10th iteration for rank 0 to avoid spam
@@ -189,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("    Iteration {:4}: residual = {:.6e}", iter, residual);
             }
         }
+        MonitorAction::Continue
     });
 
     // Setup KSP with monitoring and workspace optimization

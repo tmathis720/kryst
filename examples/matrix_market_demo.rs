@@ -43,9 +43,10 @@ mod real_demo {
     //!   -pc_ilutp_perm_tol 0.1
     //! ```
 
+    use std::collections::VecDeque;
     use std::env;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     use faer::Mat;
@@ -65,6 +66,7 @@ mod real_demo {
     use kryst::parallel::{Comm, UniverseComm};
     use kryst::preconditioner::amg::{AMG, CoarsenType, InterpType, RelaxType};
     use kryst::preconditioner::{PcSide, Preconditioner};
+    use kryst::solver::MonitorAction;
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -353,20 +355,44 @@ mod real_demo {
             hook(&mut ksp)?;
         }
 
-        if matches!(spec.solver, SolverType::Pcg) {
-            let progress_every = pcg_progress_every();
-            if progress_every > 0 {
-                let progress_start = Instant::now();
-                ksp.add_monitor_rank0(move |iter, residual| {
-                    if iter > 0 && iter % progress_every == 0 {
-                        let elapsed = progress_start.elapsed().as_secs_f64();
-                        println!(
-                            "    [pcg] iter {iter:4} | reported residual {:.2e} | {:.2}s elapsed",
-                            residual, elapsed
-                        );
+        let progress_every = progress_every();
+        let early_stop = early_stop_config();
+        let early_stop_note = Arc::new(Mutex::new(None));
+        if progress_every > 0 || early_stop.window > 0 {
+            let method = spec.name;
+            let progress_start = Instant::now();
+            let stop_note_handle = Arc::clone(&early_stop_note);
+            let history: Arc<Mutex<VecDeque<f64>>> =
+                Arc::new(Mutex::new(VecDeque::with_capacity(early_stop.window.max(1))));
+            ksp.add_monitor_rank0(move |iter, residual, reductions| {
+                if progress_every > 0 && iter > 0 && iter % progress_every == 0 {
+                    let elapsed = progress_start.elapsed().as_secs_f64();
+                    println!(
+                        "    [{method}] iter {iter:4} | reported residual {:.2e} | reductions {reductions:>6} | {:.2}s elapsed",
+                        residual, elapsed
+                    );
+                }
+                if early_stop.window > 0 && iter > 0 && residual.is_finite() {
+                    let mut hist = history.lock().unwrap();
+                    hist.push_back(residual.abs());
+                    if hist.len() > early_stop.window {
+                        hist.pop_front();
                     }
-                });
-            }
+                    if hist.len() == early_stop.window {
+                        let oldest = hist.front().copied().unwrap_or(0.0);
+                        if oldest > 0.0 && residual.abs() > oldest * early_stop.growth_factor {
+                            let mut note = stop_note_handle.lock().unwrap();
+                            *note = Some(format!(
+                                "residual grew {:.1}x over {} iters; consider switching preconditioners (e.g., RAS/ASM+ILUTP or AMG).",
+                                residual.abs() / oldest,
+                                early_stop.window
+                            ));
+                            return MonitorAction::Stop;
+                        }
+                    }
+                }
+                MonitorAction::Continue
+            });
         }
 
         ksp.set_tolerances(1e-8, 1e-12, 1e8, 1000);
@@ -391,7 +417,11 @@ mod real_demo {
         let diagnostic_note = if converged {
             None
         } else {
-            diagnostic_note(stats.reason).map(|note| note.to_string())
+            early_stop_note
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| diagnostic_note(stats.reason).map(|note| note.to_string()))
         };
 
         let reductions = stats.counters.num_global_reductions;
@@ -429,6 +459,7 @@ mod real_demo {
         let spd_probe_ok = spd_probe.is_spd;
         let relax_amg = !analysis.approx_symmetric || !spd_probe.is_spd;
         let tiny_matrix = analysis.nrows <= tiny_matrix_threshold();
+        let nonsymmetric = !analysis.approx_symmetric || !spd_probe.is_symmetric;
 
         if is_parallel {
             notes.push(
@@ -438,6 +469,14 @@ mod real_demo {
         } else {
             notes.push("FGMRES entries are right-preconditioned in this demo.".to_string());
         }
+        let (ilut_fill, ilut_drop) = ilut_defaults(analysis);
+        notes.push(format!(
+            "ILUT defaults (size-based): max_fill={ilut_fill}, drop_tol={ilut_drop:.1e}."
+        ));
+        notes.push(format!(
+            "ILU0 defaults (size-based): reordering={}.",
+            ilu0_reordering(analysis)
+        ));
         if !enable_stress_solvers {
             notes.push(
                 "Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.".to_string(),
@@ -462,6 +501,44 @@ mod real_demo {
                 );
             }
         }
+        if spd_probe.is_symmetric && !spd_probe.is_spd {
+            notes.push(
+                "Symmetric-but-indefinite probe; adding a MINRES + AMG(Chebyshev) option."
+                    .to_string(),
+            );
+        }
+
+        if nonsymmetric {
+            notes.push(
+                "Default nonsymmetric choice: GMRES/FGMRES + RAS/ASM + ILUTP.".to_string(),
+            );
+            specs.push(RunSpec {
+                name: if is_parallel {
+                    "GMRES(50) + RAS/ASM + ILUTP (L)"
+                } else {
+                    "FGMRES(50) + RAS/ASM + ILUTP (R)"
+                },
+                solver: if is_parallel {
+                    SolverType::Gmres
+                } else {
+                    SolverType::Fgmres
+                },
+                pc_side: if is_parallel {
+                    PcSide::Left
+                } else {
+                    PcSide::Right
+                },
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::Asm,
+                    options: Some(asm_ilutp_options()),
+                },
+                setup: if is_parallel {
+                    Some(gmres_hook())
+                } else {
+                    Some(fgmres_hook())
+                },
+            });
+        }
 
         specs.push(RunSpec {
             name: if is_parallel {
@@ -481,7 +558,7 @@ mod real_demo {
             },
             pc: PcConfigSpec::Type {
                 pc_type: PcType::Ilut,
-                options: Some(ilut_options()),
+                options: Some(ilut_options(analysis)),
             },
             setup: if is_parallel {
                 Some(gmres_hook())
@@ -615,32 +692,42 @@ mod real_demo {
                 },
                 setup: None,
             });
+            if spd_probe.is_symmetric && !spd_probe.is_spd {
+                if !analysis.has_diag_zeros {
+                    specs.push(RunSpec {
+                        name: "MINRES + AMG(Chebyshev) (L)",
+                        solver: SolverType::Minres,
+                        pc_side: PcSide::Left,
+                        pc: if is_parallel {
+                            PcConfigSpec::Type {
+                                pc_type: PcType::Amg,
+                                options: Some(amg_relaxed_options()),
+                            }
+                        } else {
+                            PcConfigSpec::Builder(amg_builder(false, true))
+                        },
+                        setup: None,
+                    });
+                } else {
+                    notes.push(
+                        "Skipping AMG(Chebyshev) for symmetric-indefinite case due to diagonal issues."
+                            .to_string(),
+                    );
+                }
+            }
         }
 
-        if !analysis.approx_symmetric {
-            if tiny_matrix {
-                specs.push(RunSpec {
-                    name: "GMRES(50) + Block-Jacobi + ILU0 (L)",
-                    solver: SolverType::Gmres,
-                    pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Type {
-                        pc_type: PcType::BlockJacobi,
-                        options: Some(block_jacobi_ilu0_options()),
-                    },
-                    setup: Some(gmres_hook()),
-                });
-            } else {
-                specs.push(RunSpec {
-                    name: "GMRES(50) + RAS/ASM + ILUTP (L)",
-                    solver: SolverType::Gmres,
-                    pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Type {
-                        pc_type: PcType::Asm,
-                        options: Some(asm_ilutp_options()),
-                    },
-                    setup: Some(gmres_hook()),
-                });
-            }
+        if nonsymmetric && tiny_matrix {
+            specs.push(RunSpec {
+                name: "GMRES(50) + Block-Jacobi + ILU0 (L)",
+                solver: SolverType::Gmres,
+                pc_side: PcSide::Left,
+                pc: PcConfigSpec::Type {
+                    pc_type: PcType::BlockJacobi,
+                    options: Some(block_jacobi_ilu0_options(analysis)),
+                },
+                setup: Some(gmres_hook()),
+            });
         }
 
         if enable_stress_solvers {
@@ -654,7 +741,7 @@ mod real_demo {
                 pc_side: PcSide::Left,
                 pc: PcConfigSpec::Type {
                     pc_type: PcType::Ilut,
-                    options: Some(ilut_options()),
+                    options: Some(ilut_options(analysis)),
                 },
                 setup: None,
             });
@@ -665,7 +752,7 @@ mod real_demo {
                 pc_side: PcSide::Left,
                 pc: PcConfigSpec::Type {
                     pc_type: PcType::Ilut,
-                    options: Some(ilut_options()),
+                    options: Some(ilut_options(analysis)),
                 },
                 setup: None,
             });
@@ -777,15 +864,41 @@ mod real_demo {
         }
     }
 
-    fn pcg_progress_every() -> usize {
-        match env::var("KRYST_PCG_PROGRESS_EVERY") {
-            Ok(value) => value
+    #[derive(Clone, Copy, Debug)]
+    struct EarlyStopConfig {
+        window: usize,
+        growth_factor: f64,
+    }
+
+    fn progress_every() -> usize {
+        let value = env::var("KRYST_PROGRESS_EVERY")
+            .ok()
+            .or_else(|| env::var("KRYST_PCG_PROGRESS_EVERY").ok());
+        match value {
+            Some(value) => value
                 .trim()
                 .parse::<usize>()
                 .ok()
                 .filter(|&v| v > 0)
                 .unwrap_or(25),
-            Err(_) => 25,
+            None => 25,
+        }
+    }
+
+    fn early_stop_config() -> EarlyStopConfig {
+        let window = env::var("KRYST_EARLY_STOP_WINDOW")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(12);
+        let growth_factor = env::var("KRYST_EARLY_STOP_FACTOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|&v| v.is_finite() && v > 1.0)
+            .unwrap_or(5.0);
+        EarlyStopConfig {
+            window,
+            growth_factor,
         }
     }
 
@@ -819,10 +932,19 @@ mod real_demo {
         opts
     }
 
-    fn ilut_options() -> PcOptions {
+    fn ilut_defaults(analysis: &Analysis) -> (usize, f64) {
+        match analysis.nrows {
+            0..=2_000 => (8, 1e-5),
+            2_001..=20_000 => (20, 5e-4),
+            _ => (40, 1e-3),
+        }
+    }
+
+    fn ilut_options(analysis: &Analysis) -> PcOptions {
+        let (max_fill, drop_tol) = ilut_defaults(analysis);
         let mut opts = PcOptions::default();
-        opts.ilut_drop_tol = Some(1e-4);
-        opts.ilut_max_fill = Some(50);
+        opts.ilut_drop_tol = Some(drop_tol);
+        opts.ilut_max_fill = Some(max_fill);
         opts.ilu_reordering = Some("amd".into());
         opts
     }
@@ -839,9 +961,18 @@ mod real_demo {
         opts
     }
 
-    fn block_jacobi_ilu0_options() -> PcOptions {
+    fn ilu0_reordering(analysis: &Analysis) -> &'static str {
+        if analysis.nrows <= tiny_matrix_threshold() {
+            "natural"
+        } else {
+            "amd"
+        }
+    }
+
+    fn block_jacobi_ilu0_options(analysis: &Analysis) -> PcOptions {
         let mut opts = PcOptions::default();
         opts.pc_local = Some("ilu0".into());
+        opts.ilu_reordering = Some(ilu0_reordering(analysis).into());
         opts
     }
 
@@ -1162,6 +1293,9 @@ mod real_demo {
         match reason {
             ConvergedReason::DivergedMaxIts => Some("maximum iterations reached"),
             ConvergedReason::DivergedDtol => Some("residual exceeded divergence tolerance"),
+            ConvergedReason::StoppedByMonitor => {
+                Some("stopped early due to residual growth (monitor)")
+            }
             ConvergedReason::Continued => Some("solver exited without convergence"),
             _ => None,
         }

@@ -71,8 +71,8 @@ use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MinresSolver, PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver,
-    PcgVariant, QmrSolver, TfqmrSolver,
+    MinresSolver, MonitorAction, MonitorCallback, PCG_PIPELINED_DEFAULT_REPLACE_EVERY,
+    PcaGmresSolver, PcaPcMode, PcgSolver, PcgVariant, QmrSolver, TfqmrSolver,
 };
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::utils::reduction::ReductOptions;
@@ -264,7 +264,7 @@ pub struct KspContext {
     bound_comm: Option<crate::parallel::UniverseComm>,
     work: Option<Workspace>,
     setup_called: bool,
-    monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>>,
+    monitors: Vec<Box<MonitorCallback<R>>>,
     monitor_policy: MonitorPolicy,
     solver_type: Option<SolverType>,
     pub rtol: R,
@@ -2214,7 +2214,7 @@ impl KspContext {
     /// Add an iteration monitor callback.
     pub fn add_monitor<F>(&mut self, f: F)
     where
-        F: Fn(usize, R) + Send + Sync + 'static,
+        F: Fn(usize, R, usize) -> MonitorAction + Send + Sync + 'static,
     {
         self.monitors.push(Box::new(f));
     }
@@ -2228,9 +2228,9 @@ impl KspContext {
     /// Add a monitor that only runs on rank 0 (when bound to an MPI communicator).
     pub fn add_monitor_rank0<F>(&mut self, f: F)
     where
-        F: Fn(usize, R) + Send + Sync + 'static,
+        F: Fn(usize, R, usize) -> MonitorAction + Send + Sync + 'static,
     {
-        self.monitors.push(Box::new(move |it, r| f(it, r)));
+        self.monitors.push(Box::new(move |it, r, reds| f(it, r, reds)));
         self.monitor_policy = MonitorPolicy::Rank0Only;
     }
 
@@ -2251,7 +2251,7 @@ impl KspContext {
     }
 
     /// Invoke all monitors with the provided iteration and residual.
-    pub fn invoke_monitors(&self, iter: usize, residual: R) {
+    pub fn invoke_monitors(&self, iter: usize, residual: R, reductions: usize) {
         let do_call = match self.monitor_policy {
             MonitorPolicy::AllRanks => true,
             MonitorPolicy::Rank0Only => self
@@ -2264,7 +2264,7 @@ impl KspContext {
             return;
         }
         for m in &self.monitors {
-            m(iter, residual);
+            let _ = m(iter, residual, reductions);
         }
     }
 
@@ -2873,11 +2873,12 @@ mod tests {
 
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_handle = Arc::clone(&counter);
-        ksp.add_monitor_rank0(move |_, _| {
+        ksp.add_monitor_rank0(move |_, _, _| {
             counter_handle.fetch_add(1, Ordering::Relaxed);
+            crate::solver::MonitorAction::Continue
         });
 
-        ksp.invoke_monitors(0, 1.0);
+        ksp.invoke_monitors(0, 1.0, 0);
 
         if world.rank() == 0 {
             assert_eq!(counter.load(Ordering::Relaxed), 1);

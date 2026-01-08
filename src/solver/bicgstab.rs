@@ -11,6 +11,8 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
+use crate::solver::common::call_monitors;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -128,7 +130,7 @@ impl BiCgStabSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -208,10 +210,8 @@ impl BiCgStabSolver {
         let bnorm = red.norm2(b).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
-        if !mons.is_empty() {
-            for m in mons {
-                m(0, res0);
-            }
+        if call_monitors(mons, 0, res0, 0) {
+            return Ok(SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor));
         }
         if res0 <= thr {
             let reason = if res0 <= self.atol {
@@ -320,10 +320,8 @@ impl BiCgStabSolver {
             }
 
             let s_norm = red.norm2(s);
-            if !mons.is_empty() {
-                for m in mons {
-                    m(k, s_norm);
-                }
+            if call_monitors(mons, k, s_norm, 0) {
+                return Ok(SolveStats::new(k, s_norm, ConvergedReason::StoppedByMonitor));
             }
             if s_norm <= thr {
                 if need_left {
@@ -467,10 +465,8 @@ impl BiCgStabSolver {
             } else {
                 red.norm2(r)
             };
-            if !mons.is_empty() {
-                for m in mons {
-                    m(k, r_norm);
-                }
+            if call_monitors(mons, k, r_norm, 0) {
+                return Ok(SolveStats::new(k, r_norm, ConvergedReason::StoppedByMonitor));
             }
 
             if r_norm <= thr {
@@ -511,7 +507,7 @@ impl BiCgStabSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -565,7 +561,7 @@ impl LinearSolver for BiCgStabSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)

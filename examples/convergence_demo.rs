@@ -28,6 +28,8 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::solver::MonitorAction;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -97,10 +99,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
     ksp2.set_operators(Arc::new(a.clone()), None);
     // Add a simple monitor that prints iteration and residual every iteration
-    ksp2.add_monitor(|iter, residual| {
+    ksp2.add_monitor(|iter, residual, _reductions| {
         if iter % 5 == 0 || iter < 3 {
             println!("    monitor: iter={} residual={:.2e}", iter, residual);
         }
+        MonitorAction::Continue
     });
     ksp2.setup()?;
 
@@ -185,11 +188,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_pc_type(PcType::Jacobi, None)?
         .set_tolerances(1e-8, 1e-12, 1e3, 1000);
     ksp5.set_operators(Arc::new(a.clone()), None);
-    ksp5.add_monitor(|iter, residual| {
+    ksp5.add_monitor(|iter, residual, _reductions| {
         println!(
             "    monitor (before clear): iter={} residual={:.2e}",
             iter, residual
         );
+        MonitorAction::Continue
     });
     // Clear monitors and show that none are invoked
     ksp5.clear_monitors();
