@@ -43,10 +43,10 @@ mod real_demo {
     //!   -pc_ilutp_perm_tol 0.1
     //! ```
 
+    use std::env;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Instant;
-    use std::env;
 
     use faer::Mat;
 
@@ -89,6 +89,7 @@ mod real_demo {
         rhs: Vec<f64>,
         local_n: usize,
         global_n: usize,
+        global_row_start: usize,
         comm: UniverseComm,
         backend_descr: String,
     }
@@ -124,7 +125,15 @@ mod real_demo {
 
     struct MenuPlan {
         specs: Vec<RunSpec>,
-        notes: Vec<&'static str>,
+        notes: Vec<String>,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct SpdProbe {
+        xax: f64,
+        symmetry_residual: f64,
+        is_symmetric: bool,
+        is_spd: bool,
     }
 
     fn is_comm_parallel(comm: &UniverseComm, size: usize) -> bool {
@@ -227,6 +236,7 @@ mod real_demo {
 
             let rhs_norm_sq_local: f64 = problem.rhs.iter().map(|x| x * x).sum();
             let rhs_norm = problem.comm.all_reduce_f64(rhs_norm_sq_local).sqrt();
+            let spd_probe = spd_probe(&problem)?;
 
             if rank == 0 {
                 println!("=== {descr} — {} ===", problem.backend_descr);
@@ -243,13 +253,20 @@ mod real_demo {
                 );
                 println!("‖rhs‖₂ = {:.3e}", rhs_norm);
                 println!(
+                    "SPD probe: xᵀAx = {:.3e}, symmetry residual {:.2e} (symmetric: {}, SPD: {})",
+                    spd_probe.xax,
+                    spd_probe.symmetry_residual,
+                    yes_no(spd_probe.is_symmetric),
+                    yes_no(spd_probe.is_spd)
+                );
+                println!(
                     "{:<34} {:>8} {:>12} {:>10} {:>12} {:>10}",
                     "Method", "Iters", "Residual", "Time(s)", "Reductions", "Status"
                 );
                 println!("{}", "-".repeat(92));
             }
 
-            let menu_plan = build_menu(&analysis, is_parallel);
+            let menu_plan = build_menu(&analysis, &spd_probe, is_parallel)?;
             if rank == 0 {
                 for note in &menu_plan.notes {
                     println!("ℹ {note}");
@@ -398,29 +415,51 @@ mod real_demo {
         })
     }
 
-    fn build_menu(analysis: &Analysis, is_parallel: bool) -> MenuPlan {
+    fn build_menu(
+        analysis: &Analysis,
+        spd_probe: &SpdProbe,
+        is_parallel: bool,
+    ) -> Result<MenuPlan, KError> {
         let mut specs = Vec::new();
         let mut notes = Vec::new();
 
         let enable_stress_solvers = stress_solvers_enabled();
         let spd_confident =
             analysis.approx_symmetric && analysis.diag_positive && !analysis.has_diag_zeros;
+        let spd_probe_ok = spd_probe.is_spd;
         let tiny_matrix = analysis.nrows <= tiny_matrix_threshold();
 
         if is_parallel {
             notes.push(
-                "MPI block-Jacobi/ASM entries use local subdomains instead of global coarsening.",
+                "MPI block-Jacobi/ASM entries use local subdomains instead of global coarsening."
+                    .to_string(),
             );
         } else {
-            notes.push("FGMRES entries are right-preconditioned in this demo.");
+            notes.push("FGMRES entries are right-preconditioned in this demo.".to_string());
         }
         if !enable_stress_solvers {
-            notes.push("Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.");
+            notes.push(
+                "Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.".to_string(),
+            );
         }
         if analysis.approx_symmetric && !spd_confident {
             notes.push(
-                "Approximate symmetry detected, but SPD is not confident; offering MINRES instead of CG.",
+                "Approximate symmetry detected, but SPD is not confident; offering MINRES instead of CG."
+                    .to_string(),
             );
+        }
+        if !spd_probe_ok {
+            if spd_probe.is_symmetric {
+                notes.push(
+                    "SPD probe failed; replacing PCG with MINRES because the matrix appears symmetric."
+                        .to_string(),
+                );
+            } else {
+                notes.push(
+                    "SPD probe failed; replacing PCG with GMRES/FGMRES because the matrix appears nonsymmetric."
+                        .to_string(),
+                );
+            }
         }
 
         specs.push(RunSpec {
@@ -482,60 +521,85 @@ mod real_demo {
                 },
             });
         } else {
-            notes.push("AMG disabled due to near-zero or missing diagonal entries.");
+            notes.push("AMG disabled due to near-zero or missing diagonal entries.".to_string());
         }
 
-        if spd_confident {
+        if spd_confident && spd_probe_ok {
+            let mut push_pcg = |spec: RunSpec, notes: &mut Vec<String>| -> Result<(), KError> {
+                match pcg_preconditioner_ok(&spec.pc)? {
+                    true => specs.push(spec),
+                    false => notes.push(format!(
+                        "Skipping {}: PCG requires an SPD preconditioner (PcCaps.is_spd = true).",
+                        spec.name
+                    )),
+                }
+                Ok(())
+            };
+
             if is_parallel {
                 if mpi_pcg_amg_enabled() {
                     notes.push(
-                        "MPI PCG(pipelined)+AMG uses a root-assembled AMG apply; expect slow iterations.",
+                        "MPI PCG(pipelined)+AMG uses a root-assembled AMG apply; expect slow iterations."
+                            .to_string(),
                     );
-                    specs.push(RunSpec {
-                        name: "PCG(pipelined) + AMG (L)",
+                    push_pcg(
+                        RunSpec {
+                            name: "PCG(pipelined) + AMG (L)",
+                            solver: SolverType::Pcg,
+                            pc_side: PcSide::Left,
+                            pc: PcConfigSpec::Type {
+                                pc_type: PcType::Amg,
+                                options: Some(amg_spd_options()),
+                            },
+                            setup: Some(pcg_pipelined_hook()),
+                        },
+                        &mut notes,
+                    )?;
+                } else {
+                    notes.push(
+                        "Skipping MPI PCG(pipelined)+AMG; select PCG + ASM/ILUTP for a local preconditioner (set KRYST_ENABLE_MPI_PCG_AMG=1 to force AMG)."
+                            .to_string(),
+                    );
+                }
+                push_pcg(
+                    RunSpec {
+                        name: "PCG(pipelined) + ASM/ILUTP (L)",
                         solver: SolverType::Pcg,
                         pc_side: PcSide::Left,
                         pc: PcConfigSpec::Type {
-                            pc_type: PcType::Amg,
-                            options: None,
+                            pc_type: PcType::Asm,
+                            options: Some(asm_ilutp_options()),
                         },
                         setup: Some(pcg_pipelined_hook()),
-                    });
-                } else {
-                    notes.push(
-                        "Skipping MPI PCG(pipelined)+AMG; select PCG + ASM/ILUTP for a local preconditioner (set KRYST_ENABLE_MPI_PCG_AMG=1 to force AMG).",
-                    );
-                }
-                specs.push(RunSpec {
-                    name: "PCG(pipelined) + ASM/ILUTP (L)",
+                    },
+                    &mut notes,
+                )?;
+            } else {
+                push_pcg(
+                    RunSpec {
+                        name: "PCG(pipelined) + AMG (L)",
+                        solver: SolverType::Pcg,
+                        pc_side: PcSide::Left,
+                        pc: PcConfigSpec::Builder(amg_builder(true)),
+                        setup: Some(pcg_pipelined_hook()),
+                    },
+                    &mut notes,
+                )?;
+            }
+            push_pcg(
+                RunSpec {
+                    name: "PCG + Jacobi (L)",
                     solver: SolverType::Pcg,
                     pc_side: PcSide::Left,
                     pc: PcConfigSpec::Type {
-                        pc_type: PcType::Asm,
-                        options: Some(asm_ilutp_options()),
+                        pc_type: PcType::Jacobi,
+                        options: None,
                     },
-                    setup: Some(pcg_pipelined_hook()),
-                });
-            } else {
-                specs.push(RunSpec {
-                    name: "PCG(pipelined) + AMG (L)",
-                    solver: SolverType::Pcg,
-                    pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Builder(amg_builder(true)),
-                    setup: Some(pcg_pipelined_hook()),
-                });
-            }
-            specs.push(RunSpec {
-                name: "PCG + Jacobi (L)",
-                solver: SolverType::Pcg,
-                pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Jacobi,
-                    options: None,
+                    setup: None,
                 },
-                setup: None,
-            });
-        } else if analysis.approx_symmetric {
+                &mut notes,
+            )?;
+        } else if analysis.approx_symmetric || spd_probe.is_symmetric {
             specs.push(RunSpec {
                 name: "MINRES + RAS/ASM + ILUTP (L)",
                 solver: SolverType::Minres,
@@ -576,7 +640,8 @@ mod real_demo {
 
         if enable_stress_solvers {
             notes.push(
-                "TFQMR/BiCGStab entries are stress tests for weak preconditioners or indefinite systems.",
+                "TFQMR/BiCGStab entries are stress tests for weak preconditioners or indefinite systems."
+                    .to_string(),
             );
             specs.push(RunSpec {
                 name: "TFQMR + ILUT (L)",
@@ -614,7 +679,7 @@ mod real_demo {
                     setup: None,
                 });
             } else {
-                notes.push("Dense LU requires the dense-direct feature.");
+                notes.push("Dense LU requires the dense-direct feature.".to_string());
             }
 
             #[cfg(feature = "superlu_dist")]
@@ -631,10 +696,12 @@ mod real_demo {
                 });
             }
         } else {
-            notes.push("Direct solvers are skipped for MPI runs (require global matrices).");
+            notes.push(
+                "Direct solvers are skipped for MPI runs (require global matrices).".to_string(),
+            );
         }
 
-        MenuPlan { specs, notes }
+        Ok(MenuPlan { specs, notes })
     }
 
     fn stress_solvers_enabled() -> bool {
@@ -645,6 +712,54 @@ mod real_demo {
             ),
             Err(_) => false,
         }
+    }
+
+    fn spd_probe(problem: &Problem) -> Result<SpdProbe, KError> {
+        let mut x = vec![0.0; problem.local_n];
+        let mut y = vec![0.0; problem.local_n];
+        for i in 0..problem.local_n {
+            let global_i = problem.global_row_start + i;
+            x[i] = pseudo_random(global_i, 0x9E3779B97F4A7C15);
+            y[i] = pseudo_random(global_i, 0xD1B54A32D192ED03);
+        }
+
+        let mut ax = vec![0.0; problem.local_n];
+        let mut ay = vec![0.0; problem.local_n];
+        problem.op.try_matvec(&x, &mut ax)?;
+        problem.op.try_matvec(&y, &mut ay)?;
+
+        let xax_local = dot(&x, &ax);
+        let xay_local = dot(&x, &ay);
+        let yax_local = dot(&y, &ax);
+
+        let xax = problem.comm.all_reduce_f64(xax_local);
+        let xay = problem.comm.all_reduce_f64(xay_local);
+        let yax = problem.comm.all_reduce_f64(yax_local);
+
+        let sym_den = xay.abs().max(yax.abs()).max(1.0);
+        let symmetry_residual = (xay - yax).abs() / sym_den;
+        let is_symmetric = symmetry_residual <= 1e-8;
+        let is_spd = is_symmetric && xax > 0.0;
+
+        Ok(SpdProbe {
+            xax,
+            symmetry_residual,
+            is_symmetric,
+            is_spd,
+        })
+    }
+
+    fn pseudo_random(index: usize, seed: u64) -> f64 {
+        let mut v = (index as u64).wrapping_add(seed);
+        v = v
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let unit = (v as f64) / (u64::MAX as f64);
+        (unit * 2.0) - 1.0
+    }
+
+    fn dot(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
     }
 
     fn mpi_pcg_amg_enabled() -> bool {
@@ -667,6 +782,29 @@ mod real_demo {
                 .unwrap_or(25),
             Err(_) => 25,
         }
+    }
+
+    fn pcg_preconditioner_ok(pc: &PcConfigSpec) -> Result<bool, KError> {
+        match pc {
+            PcConfigSpec::Type { pc_type, options } => match pc_type {
+                PcType::Jacobi => Ok(true),
+                PcType::Amg => Ok(options
+                    .as_ref()
+                    .and_then(|opts| opts.amg_require_spd)
+                    .unwrap_or(false)),
+                _ => Ok(false),
+            },
+            PcConfigSpec::Builder(builder) => {
+                let pc = builder()?;
+                Ok(pc.capabilities().is_spd)
+            }
+        }
+    }
+
+    fn amg_spd_options() -> PcOptions {
+        let mut opts = PcOptions::default();
+        opts.amg_require_spd = Some(true);
+        opts
     }
 
     fn ilut_options() -> PcOptions {
@@ -956,6 +1094,7 @@ mod real_demo {
                         rhs: rhs_local,
                         local_n: row_end - row_start,
                         global_n: matrix.nrows(),
+                        global_row_start: row_start,
                         comm: comm.clone(),
                         backend_descr: format!("DistCSR ({} ranks)", size),
                     };
@@ -979,6 +1118,7 @@ mod real_demo {
             rhs,
             local_n: csr_arc.nrows(),
             global_n: csr_arc.nrows(),
+            global_row_start: 0,
             comm: comm.clone(),
             backend_descr: "CSR (serial)".into(),
         };
