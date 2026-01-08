@@ -427,6 +427,7 @@ mod real_demo {
         let spd_confident =
             analysis.approx_symmetric && analysis.diag_positive && !analysis.has_diag_zeros;
         let spd_probe_ok = spd_probe.is_spd;
+        let relax_amg = !analysis.approx_symmetric || !spd_probe.is_spd;
         let tiny_matrix = analysis.nrows <= tiny_matrix_threshold();
 
         if is_parallel {
@@ -509,10 +510,14 @@ mod real_demo {
                 pc: if is_parallel {
                     PcConfigSpec::Type {
                         pc_type: PcType::Amg,
-                        options: None,
+                        options: if relax_amg {
+                            Some(amg_relaxed_options())
+                        } else {
+                            None
+                        },
                     }
                 } else {
-                    PcConfigSpec::Builder(amg_builder(false))
+                    PcConfigSpec::Builder(amg_builder(false, relax_amg))
                 },
                 setup: if is_parallel {
                     Some(gmres_hook())
@@ -580,7 +585,7 @@ mod real_demo {
                         name: "PCG(pipelined) + AMG (L)",
                         solver: SolverType::Pcg,
                         pc_side: PcSide::Left,
-                        pc: PcConfigSpec::Builder(amg_builder(true)),
+                        pc: PcConfigSpec::Builder(amg_builder(true, relax_amg)),
                         setup: Some(pcg_pipelined_hook()),
                     },
                     &mut notes,
@@ -807,6 +812,13 @@ mod real_demo {
         opts
     }
 
+    fn amg_relaxed_options() -> PcOptions {
+        let mut opts = PcOptions::default();
+        opts.amg_require_spd = Some(false);
+        opts.amg_relax_type = Some("chebyshev".into());
+        opts
+    }
+
     fn ilut_options() -> PcOptions {
         let mut opts = PcOptions::default();
         opts.ilut_drop_tol = Some(1e-4);
@@ -861,7 +873,7 @@ mod real_demo {
         })
     }
 
-    fn amg_builder(require_spd: bool) -> PcBuilder {
+    fn amg_builder(require_spd: bool, relax_checks: bool) -> PcBuilder {
         Arc::new(move || {
             let mut builder = AMG::builder()
                 .coarsening_type(CoarsenType::HMIS)
@@ -870,8 +882,18 @@ mod real_demo {
                 .smoothing_sweeps(1, 1)
                 .logging_level(0)
                 .print_level(0);
-            if require_spd {
+            if require_spd && !relax_checks {
                 builder = builder.require_spd(true);
+            }
+            if relax_checks {
+                builder = builder
+                    .require_spd(false)
+                    .verify_galerkin(true)
+                    .galerkin_rel_tol(1e-6)
+                    .verify_p_rank(true)
+                    .rank_cond_threshold(1e12)
+                    .rank_min_col_norm(1e-14)
+                    .relaxation_type(RelaxType::Chebyshev);
             }
             let amg = builder.build(&Mat::<f64>::zeros(0, 0))?;
             Ok(Box::new(amg) as Box<dyn Preconditioner>)
