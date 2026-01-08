@@ -212,6 +212,12 @@ pub struct PcOptions {
     pub amg_require_spd: Option<bool>,
     /// Print the AMG setup statistics when enabled.
     pub amg_print_setup: Option<bool>,
+    /// Distributed AMG apply mode: "root" or "local".
+    pub amg_dist_apply_mode: Option<String>,
+    /// Enable distributed apply instrumentation.
+    pub amg_dist_instrumentation: Option<bool>,
+    /// Scaling for halo-based coarse correction prototype.
+    pub amg_dist_coarse_ghost_scale: Option<f64>,
     /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
     /// Structured chain.
@@ -500,6 +506,11 @@ impl Sink for PcOptions {
             "pc_amg_keep_pivot_in_rap" => set_opt!(&mut self.amg_keep_pivot_in_rap, v),
             "pc_amg_require_spd" => set_opt!(&mut self.amg_require_spd, v),
             "pc_amg_print_setup" => set_opt!(&mut self.amg_print_setup, v),
+            "pc_amg_dist_apply_mode" => set_opt!(&mut self.amg_dist_apply_mode, v),
+            "pc_amg_dist_instrumentation" => set_opt!(&mut self.amg_dist_instrumentation, v),
+            "pc_amg_dist_coarse_ghost_scale" => {
+                set_opt!(&mut self.amg_dist_coarse_ghost_scale, v)
+            }
             "pc_amg_ieee_checks" => set_opt!(&mut self.amg_ieee_checks, v),
             "pc_amg_optimize_workspace" => set_opt!(&mut self.amg_optimize_workspace, v),
             "pc_sor_symmetric" => set_opt!(&mut self.sor_symmetric, v),
@@ -1607,6 +1618,9 @@ impl PcOptions {
         o!(amg_keep_pivot_in_rap);
         o!(amg_require_spd);
         o!(amg_print_setup);
+        o!(amg_dist_apply_mode);
+        o!(amg_dist_instrumentation);
+        o!(amg_dist_coarse_ghost_scale);
 
         o!(pc_chain);
         o!(chain);

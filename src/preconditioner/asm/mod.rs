@@ -21,6 +21,18 @@ use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcSide, Preconditioner};
 
+/// Metadata for a local ASM + global AMG coarse-correction hybrid.
+#[cfg(feature = "mpi")]
+#[derive(Clone, Debug)]
+pub struct AsmAmgHybridMeta {
+    pub layout: crate::matrix::op::DistLayout,
+    pub overlap: usize,
+    pub coarse_layout: crate::matrix::op::DistLayout,
+    pub coarse_halo: Option<std::sync::Arc<crate::matrix::dist::halo::HaloPlan>>,
+    pub coarse_dofs: Vec<usize>,
+    pub coarse_weights: Option<Vec<R>>,
+}
+
 /// High-level ASM preconditioner that dispatches to serial or distributed implementations.
 pub struct AsmPc {
     overlap: usize,

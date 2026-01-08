@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,8 @@ use crate::matrix::{
 };
 #[cfg(not(feature = "complex"))]
 use crate::matrix::DistCsrOp;
+#[cfg(not(feature = "complex"))]
+use crate::matrix::dist::halo::HaloPlan;
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
@@ -221,6 +223,18 @@ impl MixedPrecision {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistApplyMode {
+    RootGather,
+    LocalPrototype,
+}
+
+impl Default for DistApplyMode {
+    fn default() -> Self {
+        DistApplyMode::RootGather
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MixedStorage {
     Cached,
     Transient,
@@ -381,6 +395,9 @@ pub struct AMGConfig {
     pub mixed_precision: Option<MixedPrecision>,
     pub mixed_storage: MixedStorage,
     pub conditioning: ConditioningOptions,
+    pub dist_apply_mode: DistApplyMode,
+    pub dist_apply_instrumentation: bool,
+    pub dist_coarse_ghost_scale: f64,
 }
 
 impl Default for AMGConfig {
@@ -486,6 +503,9 @@ impl Default for AMGConfig {
             mixed_precision: None,
             mixed_storage: MixedStorage::Cached,
             conditioning: ConditioningOptions::default(),
+            dist_apply_mode: DistApplyMode::RootGather,
+            dist_apply_instrumentation: false,
+            dist_coarse_ghost_scale: 0.0,
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -541,6 +561,11 @@ impl AMGConfig {
         }
         if self.drop_tol < 0.0 {
             return Err(KError::InvalidInput("drop_tol must be ≥ 0".into()));
+        }
+        if !self.dist_coarse_ghost_scale.is_finite() || self.dist_coarse_ghost_scale < 0.0 {
+            return Err(KError::InvalidInput(
+                "dist_coarse_ghost_scale must be finite and ≥ 0".into(),
+            ));
         }
         if self.non_galerkin.enabled && self.non_galerkin.start_level >= self.max_levels {
             return Err(KError::InvalidInput(
@@ -696,6 +721,16 @@ impl AMGConfig {
                 cfg.logging_level = cfg.logging_level.max(2);
             }
         }
+        if let Some(ref mode) = opts.amg_dist_apply_mode {
+            cfg.dist_apply_mode = parse_dist_apply_mode(mode)?;
+        }
+        if let Some(flag) = opts.amg_dist_instrumentation {
+            cfg.dist_apply_instrumentation = flag;
+        }
+        if let Some(scale) = opts.amg_dist_coarse_ghost_scale {
+            cfg.dist_coarse_ghost_scale =
+                ensure_finite("amg_dist_coarse_ghost_scale", scale)?;
+        }
         cfg.conditioning = opts.conditioning_options()?;
         cfg.validate()?;
         Ok(cfg)
@@ -716,6 +751,16 @@ fn map_coarsen(kind: AmgCoarsenKind) -> CoarsenType {
         AmgCoarsenKind::Hmis => CoarsenType::HMIS,
         AmgCoarsenKind::Pmis => CoarsenType::PMIS,
         AmgCoarsenKind::Falgout => CoarsenType::Falgout,
+    }
+}
+
+fn parse_dist_apply_mode(value: &str) -> Result<DistApplyMode, KError> {
+    match value.to_ascii_lowercase().as_str() {
+        "root" | "root_gather" | "gather" => Ok(DistApplyMode::RootGather),
+        "local" | "local_prototype" | "prototype" => Ok(DistApplyMode::LocalPrototype),
+        _ => Err(KError::InvalidInput(format!(
+            "invalid amg_dist_apply_mode: {value}"
+        ))),
     }
 }
 
@@ -2694,6 +2739,8 @@ fn gather_vector(
     root: usize,
     local: &[f64],
 ) -> Result<Option<Vec<f64>>, KError> {
+    // Root-centric gather: every rank sends its owned slice to the root, which
+    // assembles the full global vector. Non-root ranks return None.
     let rank = comm.rank();
     let size = comm.size();
     if row_part.len() != size + 1 {
@@ -2736,6 +2783,8 @@ fn scatter_vector(
     global: Option<&[f64]>,
     local_out: &mut [f64],
 ) -> Result<(), KError> {
+    // Root-centric scatter: the root slices the global vector by row partition
+    // and sends each owned segment to its rank. Non-root ranks only receive.
     let rank = comm.rank();
     let size = comm.size();
     if row_part.len() != size + 1 {
@@ -2774,6 +2823,51 @@ fn scatter_vector(
     let mut reqs = vec![comm.irecv_from(local_out, root as i32)];
     comm.wait_all(&mut reqs);
     Ok(())
+}
+
+#[cfg(not(feature = "complex"))]
+fn owner_of_row(row_part: &[usize], gcol: usize) -> usize {
+    let mut lo = 0usize;
+    let mut hi = row_part.len().saturating_sub(2);
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if gcol < row_part[mid + 1] {
+            if gcol >= row_part[mid] {
+                return mid;
+            }
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo.min(row_part.len().saturating_sub(2))
+}
+
+#[cfg(not(feature = "complex"))]
+fn build_amg_halo_plan(
+    comm: UniverseComm,
+    row_part: Arc<Vec<usize>>,
+    row_start: usize,
+    row_end: usize,
+    local: &CsrMatrix<f64>,
+) -> Result<HaloPlan, KError> {
+    let rank = comm.rank();
+    let mut recv_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let row_ptr = local.row_ptr();
+    let col_idx = local.col_idx();
+    for row in 0..local.nrows() {
+        for idx in row_ptr[row]..row_ptr[row + 1] {
+            let gcol = col_idx[idx];
+            let owner = owner_of_row(&row_part, gcol);
+            if owner != rank {
+                recv_map.entry(owner).or_default().push(gcol);
+            }
+        }
+    }
+    HaloPlan::new(comm, row_part, row_start, row_end, recv_map)
 }
 
 #[cfg(debug_assertions)]
@@ -2879,6 +2973,9 @@ struct DistAmgInfo {
     root: usize,
     row_part: Arc<Vec<usize>>,
     n_global: usize,
+    local_hierarchy: Option<Box<AmgHierarchy>>,
+    local_matrix: Option<Arc<CsrMatrix<f64>>>,
+    halo_plan: Option<HaloPlan>,
 }
 
 impl DistAmgInfo {
@@ -3058,6 +3155,9 @@ impl AMG {
 
     #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
+        if matches!(self.cfg.dist_apply_mode, DistApplyMode::LocalPrototype) {
+            return self.setup_dist_local(dist);
+        }
         let comm = dist.comm();
         let rank = comm.rank();
         let row_part = dist.row_partition();
@@ -3072,6 +3172,9 @@ impl AMG {
             root,
             row_part: row_part.clone(),
             n_global: dist.n_global,
+            local_hierarchy: None,
+            local_matrix: None,
+            halo_plan: None,
         });
         let prev_cfg = self.cfg.clone();
         let mut local_stage: Option<&'static str> = None;
@@ -3209,6 +3312,96 @@ impl AMG {
         Ok(())
     }
 
+    #[cfg(not(feature = "complex"))]
+    fn setup_dist_local(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
+        let comm = dist.comm();
+        let rank = comm.rank();
+        let row_part = dist.row_partition();
+        let root = 0usize;
+
+        let mut local_stage: Option<&'static str> = None;
+        let mut local_detail: Option<String> = None;
+        let mut record_error = |stage: &'static str, err: KError| {
+            if local_stage.is_none() {
+                local_stage = Some(stage);
+                local_detail = Some(err.to_string());
+            }
+        };
+
+        let local_matrix = dist.local_matrix();
+        let local_block = dist.local_block_csr();
+        let mut local_hierarchy: Option<Box<AmgHierarchy>> = None;
+        let mut halo_plan: Option<HaloPlan> = None;
+
+        if local_stage.is_none() {
+            let mut local_amg = AMG::with_config(self.cfg.clone());
+            match local_amg.build_symbolic(&local_block) {
+                Ok(hier) => {
+                    local_hierarchy = Some(hier);
+                }
+                Err(err) => record_error("build_symbolic(local)", err),
+            }
+        }
+
+        if local_stage.is_none() {
+            match build_amg_halo_plan(
+                comm.clone(),
+                row_part.clone(),
+                dist.row_start,
+                dist.row_end,
+                &local_matrix,
+            ) {
+                Ok(plan) => halo_plan = Some(plan),
+                Err(err) => record_error("build_halo_plan", err),
+            }
+        }
+
+        let local_failure = if local_stage.is_none() { 0.0 } else { 1.0 };
+        let failure_sum = comm.all_reduce_f64(local_failure);
+        if failure_sum > 0.0 {
+            let local_message = local_stage.map(|stage| {
+                let detail = local_detail
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                format!("stage={stage}: {detail}")
+            });
+            let error_message = collect_error_message(comm, root, local_message);
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            self.csr = None;
+            return Err(KError::InvalidInput(format!(
+                "AMG distributed local setup failed: {}",
+                if error_message.is_empty() {
+                    "unknown error".to_string()
+                } else {
+                    error_message
+                }
+            )));
+        }
+
+        self.dist = Some(DistAmgInfo {
+            comm: comm.clone(),
+            root,
+            row_part: row_part.clone(),
+            n_global: dist.n_global,
+            local_hierarchy,
+            local_matrix: Some(Arc::new(local_matrix)),
+            halo_plan,
+        });
+        self.state = AmgState::Uninitialized;
+        self.stats = None;
+        self.csr = None;
+
+        if self.cfg.print_level >= 1 && self.cfg.logging_level >= 1 {
+            log::info!(
+                "AMG distributed local prototype setup complete: rank={} local_rows={}",
+                rank,
+                dist.local_nrows()
+            );
+        }
+        Ok(())
+    }
+
     fn apply_local(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
         if r.len() != z.len() {
             return Err(KError::InvalidInput(format!(
@@ -3228,6 +3421,16 @@ impl AMG {
                 return Err(KError::InvalidInput("AMG not set up".into()));
             }
         };
+        self.apply_with_hierarchy(side, r, z, h)
+    }
+
+    fn apply_with_hierarchy(
+        &self,
+        side: PcSide,
+        r: &[f64],
+        z: &mut [f64],
+        h: &AmgHierarchy,
+    ) -> Result<(), KError> {
         let mut ws = AMGWorkspace::new(h.finest().a.nrows());
         let do_prof = self.cfg.logging_level >= 2;
         if do_prof {
@@ -3259,11 +3462,51 @@ impl AMG {
         z: &mut [f64],
         dist: &DistAmgInfo,
     ) -> Result<(), KError> {
+        let do_prof = self.cfg.dist_apply_instrumentation;
+        let mut stats = if do_prof {
+            let mut stats = DistApplyStats::default();
+            stats.mode = self.cfg.dist_apply_mode;
+            Some(stats)
+        } else {
+            None
+        };
+
+        let result = match self.cfg.dist_apply_mode {
+            DistApplyMode::RootGather => self.apply_dist_root(side, r, z, dist, stats.as_mut()),
+            DistApplyMode::LocalPrototype => {
+                self.apply_dist_local(side, r, z, dist, stats.as_mut())
+            }
+        };
+
+        if do_prof {
+            if let Ok(mut rt) = self.runtime.lock() {
+                rt.last_dist_apply = stats;
+            }
+        } else if let Ok(mut rt) = self.runtime.lock() {
+            rt.last_dist_apply = None;
+        }
+
+        result
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn apply_dist_root(
+        &self,
+        side: PcSide,
+        r: &[f64],
+        z: &mut [f64],
+        dist: &DistAmgInfo,
+        stats: Option<&mut DistApplyStats>,
+    ) -> Result<(), KError> {
         let comm = &dist.comm;
         let root = dist.root;
         let row_part = dist.row_part.as_ref();
         let rank = comm.rank();
+        let t_gather = stats.as_ref().map(|_| tic());
         let global_r = gather_vector(comm, row_part, root, r)?;
+        if let (Some(stats), Some(t0)) = (stats.as_mut(), t_gather) {
+            stats.gather = toc(t0);
+        }
         let mut global_z = if rank == root {
             vec![0.0f64; dist.n_global]
         } else {
@@ -3273,14 +3516,78 @@ impl AMG {
             let rhs = global_r.as_ref().ok_or_else(|| {
                 KError::InvalidInput("root rank missing gathered RHS".into())
             })?;
+            let t_local = stats.as_ref().map(|_| tic());
             self.apply_local(side, rhs, &mut global_z)?;
+            if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
+                stats.local_apply = toc(t0);
+            }
         }
         let global_ref = if rank == root {
             Some(global_z.as_slice())
         } else {
             None
         };
+        let t_scatter = stats.as_ref().map(|_| tic());
         scatter_vector(comm, row_part, root, global_ref, z)?;
+        if let (Some(stats), Some(t0)) = (stats.as_mut(), t_scatter) {
+            stats.scatter = toc(t0);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn apply_dist_local(
+        &self,
+        side: PcSide,
+        r: &[f64],
+        z: &mut [f64],
+        dist: &DistAmgInfo,
+        stats: Option<&mut DistApplyStats>,
+    ) -> Result<(), KError> {
+        let hierarchy = dist.local_hierarchy.as_ref().ok_or_else(|| {
+            KError::InvalidInput("AMG local prototype hierarchy not initialized".into())
+        })?;
+        if r.len() != z.len() || r.len() != hierarchy.finest().a.nrows() {
+            return Err(KError::InvalidInput(
+                "AMG local prototype apply length mismatch".into(),
+            ));
+        }
+        let t_local = stats.as_ref().map(|_| tic());
+        self.apply_with_hierarchy(side, r, z, hierarchy)?;
+        if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
+            stats.local_apply = toc(t0);
+        }
+
+        if let (Some(halo), Some(local_matrix)) = (
+            dist.halo_plan.as_ref(),
+            dist.local_matrix.as_ref(),
+        ) {
+            let t_halo = stats.as_ref().map(|_| tic());
+            let req = halo.post_halo(r);
+            halo.complete_halo(req);
+            if let (Some(stats), Some(t0)) = (stats.as_mut(), t_halo) {
+                stats.halo_exchange = toc(t0);
+            }
+            if self.cfg.dist_coarse_ghost_scale > 0.0 {
+                let ghost = halo.ghost_slice_ref();
+                let row_ptr = local_matrix.row_ptr();
+                let col_idx = local_matrix.col_idx();
+                for row in 0..local_matrix.nrows() {
+                    let mut acc = 0.0f64;
+                    let mut count = 0usize;
+                    for idx in row_ptr[row]..row_ptr[row + 1] {
+                        let gcol = col_idx[idx];
+                        if let Some(&slot) = halo.index.ghost_index_of.get(&gcol) {
+                            acc += ghost[slot];
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        z[row] += self.cfg.dist_coarse_ghost_scale * acc / (count as f64);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -5614,6 +5921,14 @@ impl AMG {
             s.last_cycle = rt.last_cycle.clone();
         }
         out
+    }
+
+    pub fn dist_apply_stats(&self) -> Option<DistApplyStats> {
+        if let Ok(rt) = self.runtime.lock() {
+            rt.last_dist_apply.clone()
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]
@@ -8400,6 +8715,29 @@ impl Default for CycleTimings {
 }
 
 #[derive(Clone, Debug)]
+pub struct DistApplyStats {
+    pub mode: DistApplyMode,
+    pub local_apply: Duration,
+    pub gather: Duration,
+    pub scatter: Duration,
+    pub halo_exchange: Duration,
+    pub reductions: usize,
+}
+
+impl Default for DistApplyStats {
+    fn default() -> Self {
+        Self {
+            mode: DistApplyMode::RootGather,
+            local_apply: Duration::default(),
+            gather: Duration::default(),
+            scatter: Duration::default(),
+            halo_exchange: Duration::default(),
+            reductions: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct AmgStats {
     pub grid_complexity: f64,
     pub operator_complexity: f64,
@@ -8435,6 +8773,7 @@ impl AmgStats {
 #[derive(Default)]
 struct AmgRuntime {
     last_cycle: Option<CycleTimings>,
+    last_dist_apply: Option<DistApplyStats>,
 }
 
 fn operator_complexity_estimate(levels: &[AMGLevel]) -> f64 {
