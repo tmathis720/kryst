@@ -13,6 +13,7 @@
 //! - Golub & Van Loan, Matrix Computations
 
 use crate::error::KError;
+use crate::solver::MonitorCallback;
 use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::{parallel::UniverseComm, preconditioner::PcSide};
@@ -85,7 +86,7 @@ impl LinearSolver<Mat<Scalar>, Vec<Scalar>> for LuSolver {
         x: &mut Vec<Scalar>,
         _pc_side: PcSide,
         _comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<Self::Scalar>>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<Scalar>, KError> {
         #[cfg(feature = "logging")]
@@ -174,7 +175,7 @@ impl LinearSolver<Mat<Scalar>, Vec<Scalar>> for QrSolver {
         x: &mut Vec<Scalar>,
         _pc_side: PcSide,
         _comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<Self::Scalar>>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<Scalar>, KError> {
         #[cfg(feature = "logging")]

@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -609,12 +610,12 @@ impl IdrsSolver {
         omega
     }
 
-    fn monitor(&self, monitors: &[Box<dyn Fn(usize, f64) + Send + Sync>], iter: usize, res: f64) {
+    fn monitor(&self, monitors: &[Box<MonitorCallback<f64>>], iter: usize, res: f64) {
         if monitors.is_empty() {
             return;
         }
         for m in monitors {
-            m(iter, res);
+            let _ = m(iter, res, 0);
         }
     }
 
@@ -627,7 +628,7 @@ impl IdrsSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: KLinOp<Scalar = S> + ?Sized,
@@ -955,7 +956,7 @@ impl IdrsSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: KLinOp<Scalar = S> + ?Sized,
@@ -971,7 +972,7 @@ impl IdrsSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
     ) -> Result<SolveStats<f64>, KError>
     where
         A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
@@ -1022,7 +1023,7 @@ impl LinearSolver for IdrsSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors)

@@ -4,6 +4,8 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::{MonitorAction, MonitorCallback};
+use crate::solver::common::call_monitors;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
@@ -101,7 +103,7 @@ impl MinresSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -129,6 +131,7 @@ impl MinresSolver {
             &mut owned
         };
         let red = ReductCtx::new(comm, Some(&*work));
+        let mut reduction_count = 0usize;
         let mut buffers = MinresWorkspace::acquire(work, n);
         let MinresWorkspace {
             v_prev,
@@ -156,10 +159,11 @@ impl MinresSolver {
         let mut batched_norms = [R::default(); 2];
         let tmp2_view: &[S] = &tmp2[..n];
         red.norm2_many_into(&[tmp2_view, b], &mut batched_norms);
+        reduction_count += 1;
         let mut res = batched_norms[0];
         let res0 = res;
-        for m in monitors {
-            m(0, res);
+        if call_monitors(monitors, 0, res, reduction_count) {
+            return Ok(SolveStats::new(0, res, ConvergedReason::StoppedByMonitor));
         }
 
         let bnorm = batched_norms[1].max(1e-32);
@@ -218,6 +222,7 @@ impl MinresSolver {
                 used += 1;
 
                 red.dot_many_into(&pairs[..used], &mut dot_results[..used]);
+                reduction_count += 1;
 
                 let alpha = dot_result_to_real(dot_results[0]);
                 let prev_proj = if k > 1 {
@@ -302,8 +307,8 @@ impl MinresSolver {
             }
 
             res = phi_bar.abs();
-            for m in monitors {
-                m(k, res);
+            if call_monitors(monitors, k, res, reduction_count) {
+                return Ok(SolveStats::new(k, res, ConvergedReason::StoppedByMonitor));
             }
             let (reason, _) = self.conv.check(res, res0, k);
             if matches!(
@@ -388,7 +393,7 @@ impl MinresSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -406,7 +411,7 @@ impl MinresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -449,7 +454,7 @@ impl MinresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -483,7 +488,7 @@ impl LinearSolver for MinresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let pc = pc.map(|m| m as &dyn PreconditionerF64);
@@ -676,8 +681,9 @@ mod tests {
         let monitor_data = Arc::new(Mutex::new(Vec::<(usize, f64)>::new()));
         let monitor_data_clone = monitor_data.clone();
 
-        let monitor: Box<dyn Fn(usize, f64) + Send + Sync> = Box::new(move |iter, residual| {
+        let monitor: Box<MonitorCallback<f64>> = Box::new(move |iter, residual, _| {
             monitor_data_clone.lock().unwrap().push((iter, residual));
+            MonitorAction::Continue
         });
         let monitors = vec![monitor];
 

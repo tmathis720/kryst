@@ -10,6 +10,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -105,7 +106,7 @@ impl CgsSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -173,7 +174,7 @@ impl CgsSolver {
         let res0_reported = rnorm;
 
         for m in monitors {
-            m(0, rnorm);
+            let _ = m(0, rnorm, 0);
         }
 
         let (reason0, s0) = self.conv.check(rnorm, res0_reported, 0);
@@ -229,7 +230,7 @@ impl CgsSolver {
             red.dot_many_into(&dot_pairs, &mut dot_results);
             rnorm = norm_from_dot(dot_results[0]);
             for m in monitors {
-                m(k, rnorm);
+                let _ = m(k, rnorm, 0);
             }
 
             let (reason, s) = self.conv.check(rnorm, res0_reported, k);
@@ -281,7 +282,7 @@ impl CgsSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -299,7 +300,7 @@ impl CgsSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -353,7 +354,7 @@ impl LinearSolver for CgsSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)

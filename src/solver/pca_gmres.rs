@@ -3,6 +3,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -251,7 +252,7 @@ impl LinearSolver for PcaGmresSolver {
         x: &mut [f64],
         pc_side_arg: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side_arg, comm, monitors, work)
@@ -268,7 +269,7 @@ impl PcaGmresSolver {
         x: &mut [S],
         pc_side_arg: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -378,7 +379,7 @@ impl PcaGmresSolver {
         let mons = monitors.unwrap_or(&[]);
 
         for m in mons {
-            m(0, res);
+            let _ = m(0, res, 0);
         }
         if res <= thr {
             stats.final_residual = res;
@@ -439,7 +440,7 @@ impl PcaGmresSolver {
                 arnoldi_steps = k + 1;
 
                 for m in mons {
-                    m(total_iters, res);
+                    let _ = m(total_iters, res, 0);
                 }
                 let (reason, sstats) = self.conv.check(res, beta0, total_iters);
                 stats = sstats;
@@ -581,7 +582,7 @@ impl PcaGmresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where

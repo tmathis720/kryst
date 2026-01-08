@@ -15,6 +15,8 @@ use faer::prelude::*;
 #[cfg(not(feature = "complex"))]
 use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(not(feature = "complex"))]
+use kryst::solver::MonitorAction;
+#[cfg(not(feature = "complex"))]
 use std::sync::Arc;
 
 #[cfg(not(feature = "complex"))]
@@ -69,10 +71,11 @@ fn workspace_size_analysis() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Setting up workspace...");
 
         // Add monitor to track iterations without allocation
-        ksp.add_monitor(move |iter, residual| {
+        ksp.add_monitor(move |iter, residual, _reductions| {
             if iter == 0 || iter % 10 == 0 || residual < 1e-6 {
                 println!("    Iteration {}: residual = {:.3e}", iter, residual);
             }
+            MonitorAction::Continue
         });
 
         // Solve using workspace

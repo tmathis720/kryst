@@ -7,7 +7,7 @@ use kryst::error::KError;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::solver::pcg::CgNormType;
-use kryst::solver::{LinearSolver, PcgSolver};
+use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback, PcgSolver};
 use std::sync::{Arc, Mutex};
 
 struct HalfPc;
@@ -38,10 +38,11 @@ fn run(norm: CgNormType, expected: R) {
     let log = Arc::new(Mutex::new(Vec::new()));
     {
         let log_clone = log.clone();
-        let monitor: Box<dyn Fn(usize, f64) + Send + Sync> = Box::new(move |i, r| {
+        let monitor: Box<MonitorCallback<f64>> = Box::new(move |i, r, _| {
             if i == 0 {
                 log_clone.lock().unwrap().push(r);
             }
+            MonitorAction::Continue
         });
         solver
             .solve_with_comm(

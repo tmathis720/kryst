@@ -5,6 +5,7 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::op::LinOp;
 use kryst::preconditioner::PcSide;
+use kryst::solver::MonitorAction;
 use kryst::{assert_s_close, testkit};
 use std::sync::Arc;
 
@@ -63,11 +64,12 @@ fn monitors_reported_norms_and_final_true_residual() {
         use std::sync::{Arc, Mutex};
         let first: Arc<Mutex<Option<R>>> = Arc::new(Mutex::new(None));
         let first_clone = Arc::clone(&first);
-        ksp.add_monitor(move |iter, res| {
+        ksp.add_monitor(move |iter, res, _reductions| {
             if iter == 0 {
                 let mut slot = first_clone.lock().unwrap();
                 *slot = Some(res);
             }
+            MonitorAction::Continue
         });
 
         let mut x = vec![S::default(); n];
@@ -90,10 +92,11 @@ fn monitors_reported_norms_and_final_true_residual() {
     use std::sync::{Arc as SArc, Mutex as SMutex};
     let first_cg: SArc<SMutex<Option<R>>> = SArc::new(SMutex::new(None));
     let first_cg_cl = SArc::clone(&first_cg);
-    ksp.add_monitor(move |iter, res| {
+    ksp.add_monitor(move |iter, res, _reductions| {
         if iter == 0 {
             *first_cg_cl.lock().unwrap() = Some(res);
         }
+        MonitorAction::Continue
     });
     let mut x = vec![S::default(); n];
     let stats = ksp.solve(&b, &mut x).unwrap();
@@ -146,10 +149,11 @@ fn monitors_reported_norms_and_final_true_residual() {
         ksp.set_operators(amat, None);
         let first: SArc<SMutex<Option<R>>> = SArc::new(SMutex::new(None));
         let first_cl = SArc::clone(&first);
-        ksp.add_monitor(move |iter, res| {
+        ksp.add_monitor(move |iter, res, _reductions| {
             if iter == 0 {
                 *first_cl.lock().unwrap() = Some(res);
             }
+            MonitorAction::Continue
         });
         let mut x = vec![S::default(); n];
         let stats = ksp.solve(&b, &mut x).unwrap();
@@ -176,10 +180,11 @@ fn monitors_reported_norms_and_final_true_residual() {
         ksp.set_operators(amat, None);
         let first: SArc<SMutex<Option<R>>> = SArc::new(SMutex::new(None));
         let first_cl = SArc::clone(&first);
-        ksp.add_monitor(move |iter, res| {
+        ksp.add_monitor(move |iter, res, _reductions| {
             if iter == 0 {
                 *first_cl.lock().unwrap() = Some(res);
             }
+            MonitorAction::Continue
         });
         let mut x = vec![S::default(); n];
         let stats = ksp.solve(&b, &mut x).unwrap();

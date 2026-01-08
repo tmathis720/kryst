@@ -1,5 +1,7 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
+use crate::solver::common::call_monitors;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -55,7 +57,7 @@ pub struct PcgSolver {
     pub(crate) conv: Convergence,
     norm_type: CgNormType,
     reduction: ReductionOptions,
-    true_residual_monitor: Option<Box<dyn Fn(usize, f64) + Send + Sync>>,
+    true_residual_monitor: Option<Box<MonitorCallback<f64>>>,
     /// Whether the initial guess in `x` should be treated as nonzero.
     ///
     /// PETSc zeroes the initial guess by default unless told otherwise via
@@ -149,7 +151,7 @@ impl PcgSolver {
     /// Install a monitor that receives the true residual norm `||b - A x||₂`
     /// at each iteration. This uses the already available residual and is
     /// intended for debugging.
-    pub fn with_true_residual_monitor(mut self, m: Box<dyn Fn(usize, f64) + Send + Sync>) -> Self {
+    pub fn with_true_residual_monitor(mut self, m: Box<MonitorCallback<f64>>) -> Self {
         self.true_residual_monitor = Some(m);
         self
     }
@@ -203,7 +205,7 @@ impl PcgSolver {
     }
 
     /// Set or clear the true residual monitor after construction.
-    pub fn set_true_residual_monitor(&mut self, m: Option<Box<dyn Fn(usize, f64) + Send + Sync>>) {
+    pub fn set_true_residual_monitor(&mut self, m: Option<Box<MonitorCallback<f64>>>) {
         self.true_residual_monitor = m;
     }
 
@@ -313,7 +315,7 @@ impl PcgSolver {
         b: &[S],
         x: &mut [S],
         comm: &C,
-        monitors: &[Box<dyn Fn(usize, f64) + Send + Sync>],
+        monitors: &[Box<MonitorCallback<f64>>],
         work: &mut Workspace,
     ) -> Result<SolveStats<f64>, KError> {
         let n = b.len();
@@ -410,8 +412,8 @@ impl PcgSolver {
         };
         let res0 = res;
 
-        for m in monitors {
-            m(0, res);
+        if call_monitors(monitors, 0, res, 0) {
+            return Ok(SolveStats::new(0, res, ConvergedReason::StoppedByMonitor));
         }
         if let Some(m) = &self.true_residual_monitor {
             let value = self.ensure_norm(r, comm, &mut cached_r_norm);
@@ -527,8 +529,8 @@ impl PcgSolver {
                 CgNormType::None => {}
             }
 
-            for m in monitors {
-                m(k, res);
+            if call_monitors(monitors, k, res, 0) {
+                return Ok(SolveStats::new(k, res, ConvergedReason::StoppedByMonitor));
             }
             if let Some(m) = &self.true_residual_monitor {
                 let value = self.ensure_norm(r, comm, &mut r_norm);
@@ -569,7 +571,7 @@ impl PcgSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &C,
-        monitors: &[Box<dyn Fn(usize, f64) + Send + Sync>],
+        monitors: &[Box<MonitorCallback<f64>>],
         work: &mut Workspace,
     ) -> Result<SolveStats<f64>, KError> {
         if pc_side != PcSide::Left {
@@ -651,8 +653,11 @@ impl PcgSolver {
 
         let actual_res0 = self.nrm2_scalar(r, comm);
         counters.num_global_reductions += 1;
-        for m in monitors {
-            m(0, actual_res0);
+        if call_monitors(monitors, 0, actual_res0, counters.num_global_reductions) {
+            return Ok(
+                SolveStats::new(0, actual_res0, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
+            );
         }
         if let Some(m) = &self.true_residual_monitor {
             m(0, actual_res0);
@@ -709,8 +714,20 @@ impl PcgSolver {
                     let actual_res = self.nrm2_scalar(r, comm);
                     counters.num_global_reductions += 1;
 
-                    for m in monitors {
-                        m(iterations, actual_res);
+                    if call_monitors(
+                        monitors,
+                        iterations,
+                        actual_res,
+                        counters.num_global_reductions,
+                    ) {
+                        return Ok(
+                            SolveStats::new(
+                                iterations,
+                                actual_res,
+                                ConvergedReason::StoppedByMonitor,
+                            )
+                            .with_counters(counters),
+                        );
                     }
                     if let Some(m) = &self.true_residual_monitor {
                         m(iterations, actual_res);
@@ -875,8 +892,20 @@ impl PcgSolver {
                 let actual_res = self.nrm2_scalar(r, comm);
                 counters.num_global_reductions += 1;
 
-                for m in monitors {
-                    m(iterations, actual_res);
+                if call_monitors(
+                    monitors,
+                    iterations,
+                    actual_res,
+                    counters.num_global_reductions,
+                ) {
+                    return Ok(
+                        SolveStats::new(
+                            iterations,
+                            actual_res,
+                            ConvergedReason::StoppedByMonitor,
+                        )
+                        .with_counters(counters),
+                    );
                 }
                 if let Some(m) = &self.true_residual_monitor {
                     m(iterations, actual_res);
@@ -958,7 +987,7 @@ impl PcgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &C,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
@@ -973,7 +1002,7 @@ impl PcgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &C,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         match self.variant {
@@ -993,7 +1022,7 @@ impl PcgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &C,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let pc_ref = pc.as_deref();
@@ -1054,7 +1083,7 @@ impl PcgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &C,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let pc_ref = pc.as_deref();
@@ -1129,7 +1158,7 @@ impl LinearSolver for PcgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)

@@ -22,6 +22,8 @@ use kryst::error::KError;
 #[cfg(not(feature = "complex"))]
 use kryst::matrix::op::LinOp;
 #[cfg(not(feature = "complex"))]
+use kryst::solver::MonitorAction;
+#[cfg(not(feature = "complex"))]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "logging")]
@@ -64,8 +66,9 @@ fn main() -> Result<(), KError> {
     let mut ksp1 = KspContext::new();
 
     // Register a simple monitor that prints iteration and residual
-    ksp1.add_monitor(|iter, residual| {
+    ksp1.add_monitor(|iter, residual, _reductions| {
         println!("  Iter {}: residual = {:.3e}", iter, residual);
+        MonitorAction::Continue
     });
 
     ksp1.set_operators(a_op.clone(), None)
@@ -90,22 +93,24 @@ fn main() -> Result<(), KError> {
     let max_residual_clone = Arc::clone(&max_residual);
 
     // Monitor 1: Track maximum residual seen
-    ksp2.add_monitor(move |_iter, residual| {
+    ksp2.add_monitor(move |_iter, residual, _reductions| {
         let mut max_res = max_residual_clone.lock().unwrap();
         if residual > *max_res {
             *max_res = residual;
         }
+        MonitorAction::Continue
     });
 
     // Monitor 2: Print progress every iteration
-    ksp2.add_monitor(|iter, residual| {
+    ksp2.add_monitor(|iter, residual, _reductions| {
         println!("  GMRES iter {}: ||r|| = {:.3e}", iter, residual);
+        MonitorAction::Continue
     });
 
     // Monitor 3: Check for stagnation using Arc<Mutex<>>
     let prev_residual = Arc::new(Mutex::new(f64::INFINITY));
     let prev_residual_clone = Arc::clone(&prev_residual);
-    ksp2.add_monitor(move |iter, residual| {
+    ksp2.add_monitor(move |iter, residual, _reductions| {
         if iter > 0 {
             let mut prev_res = prev_residual_clone.lock().unwrap();
             let reduction = *prev_res / residual;
@@ -120,6 +125,7 @@ fn main() -> Result<(), KError> {
             let mut prev_res = prev_residual_clone.lock().unwrap();
             *prev_res = residual;
         }
+        MonitorAction::Continue
     });
 
     x.fill(0.0); // Reset solution
@@ -152,12 +158,14 @@ fn main() -> Result<(), KError> {
 
     println!("Initial monitor count: {}", ksp3.num_monitors());
 
-    ksp3.add_monitor(|iter, residual| {
+    ksp3.add_monitor(|iter, residual, _reductions| {
         println!("  Monitor A: iter={}, res={:.2e}", iter, residual);
+        MonitorAction::Continue
     });
 
-    ksp3.add_monitor(|iter, residual| {
+    ksp3.add_monitor(|iter, residual, _reductions| {
         println!("  Monitor B: iter={}, res={:.2e}", iter, residual);
+        MonitorAction::Continue
     });
 
     println!("After adding 2 monitors: {}", ksp3.num_monitors());
@@ -166,8 +174,9 @@ fn main() -> Result<(), KError> {
     println!("After clearing monitors: {}", ksp3.num_monitors());
 
     // Add a single final monitor
-    ksp3.add_monitor(|iter, residual| {
+    ksp3.add_monitor(|iter, residual, _reductions| {
         println!("  Final monitor: iter={}, res={:.3e}", iter, residual);
+        MonitorAction::Continue
     });
 
     x.fill(0.0); // Reset solution

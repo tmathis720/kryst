@@ -36,6 +36,8 @@ pub enum ConvergedReason {
     DivergedDtol,
     /// Diverged due to maximum iterations reached
     DivergedMaxIts,
+    /// Diverged due to a monitor-requested stop
+    StoppedByMonitor,
     /// Continue iterating (none of the stopping criteria met)
     Continued,
 }

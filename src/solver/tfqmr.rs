@@ -4,6 +4,8 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::{MonitorAction, MonitorCallback};
+use crate::solver::common::call_monitors;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -48,7 +50,7 @@ impl TfqmrSolver {
         x: &mut [S],
         mut pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -116,8 +118,8 @@ impl TfqmrSolver {
         }
         let res0: R = res_sq.sqrt();
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
-        for m in monitors {
-            m(0, res0);
+        if call_monitors(monitors, 0, res0, 0) {
+            return Ok(SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor));
         }
 
         let tol0 = self.conv.atol.max(self.conv.rtol * res0.max(1e-300));
@@ -209,8 +211,10 @@ impl TfqmrSolver {
 
                 let iter_count = 2 * (k - 1) + mstep + 1;
                 let dpest: R = ((2 * k + mstep + 1) as f64).sqrt() * tau_local;
-                for m in monitors {
-                    m(iter_count, dpest);
+                if call_monitors(monitors, iter_count, dpest, 0) {
+                    return Ok(
+                        SolveStats::new(iter_count, dpest, ConvergedReason::StoppedByMonitor),
+                    );
                 }
                 let (reason, s2) = self.conv.check(dpest, res0, iter_count);
                 stats = s2;
@@ -318,7 +322,7 @@ impl TfqmrSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -336,7 +340,7 @@ impl TfqmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -379,7 +383,7 @@ impl TfqmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -408,7 +412,7 @@ impl LinearSolver for TfqmrSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         let pc = pc.map(|m| m as &dyn PreconditionerF64);
@@ -610,8 +614,9 @@ mod tests {
         let mut pc = IdentityPc;
         let residuals: Arc<Mutex<Vec<R>>> = Arc::new(Mutex::new(Vec::new()));
         let res_clone = residuals.clone();
-        let monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>> = vec![Box::new(move |_, r| {
+        let monitors: Vec<Box<MonitorCallback<R>>> = vec![Box::new(move |_, r, _| {
             res_clone.lock().unwrap().push(r);
+            MonitorAction::Continue
         })];
         let _stats = solver
             .solve_k(

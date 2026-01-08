@@ -3,6 +3,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
@@ -14,7 +15,7 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::common::{recompute_true_residual_norm_s, ReductCtx};
+use crate::solver::common::{call_monitors, recompute_true_residual_norm_s, ReductCtx};
 use crate::solver::LinearSolver;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
@@ -99,7 +100,7 @@ impl FgmresSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -189,8 +190,15 @@ impl FgmresSolver {
         let mut pipeline_reductions = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
-        for m in mons {
-            m(0, res);
+        if call_monitors(mons, 0, res, pipeline_reductions) {
+            let counters = crate::utils::convergence::SolverCounters {
+                num_global_reductions: pipeline_reductions,
+                residual_replacements: 0,
+            };
+            return Ok(
+                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
+            );
         }
         let true_res = recompute_true_residual_norm_s(
             a,
@@ -453,8 +461,15 @@ impl FgmresSolver {
                 total_iters += 1;
                 arnoldi_steps = j + 1;
 
-                for m in mons {
-                    m(total_iters, res);
+                if call_monitors(mons, total_iters, res, pipeline_reductions) {
+                    let counters = crate::utils::convergence::SolverCounters {
+                        num_global_reductions: pipeline_reductions,
+                        residual_replacements: 0,
+                    };
+                    return Ok(
+                        SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                            .with_counters(counters),
+                    );
                 }
                 let true_res = recompute_true_residual_norm_s(
                     a,
@@ -640,7 +655,7 @@ impl FgmresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let (_, n) = a.dims();
@@ -700,7 +715,7 @@ impl LinearSolver for FgmresSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)

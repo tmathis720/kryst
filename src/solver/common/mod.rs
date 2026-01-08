@@ -3,6 +3,7 @@ pub mod givens;
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
@@ -13,10 +14,29 @@ use crate::parallel::{Comm, ReductionEngine, UniverseComm};
 use crate::reduction::{CommDeterministic, Packet, ReproMode, dot_local_slice};
 #[cfg(feature = "complex")]
 use crate::reduction::{DDP, KahanP, PacketAccum};
+use crate::solver::{MonitorAction, MonitorCallback};
 use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
 use crate::context::ksp_context::Workspace;
 
 pub use buffer::take_or_resize;
+
+#[inline]
+pub fn call_monitors<R: Copy>(
+    monitors: &[Box<MonitorCallback<R>>],
+    iteration: usize,
+    residual: R,
+    reductions: usize,
+) -> bool {
+    for monitor in monitors {
+        if matches!(
+            monitor(iteration, residual, reductions),
+            MonitorAction::Stop
+        ) {
+            return true;
+        }
+    }
+    false
+}
 
 /// Convert a conjugated dot-product result into its real scalar component.
 ///

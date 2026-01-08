@@ -6,6 +6,7 @@ use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
+use kryst::solver::MonitorAction;
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -16,11 +17,11 @@ fn test_monitor_registration() {
     assert_eq!(ksp.num_monitors(), 0);
 
     // Add a monitor
-    ksp.add_monitor(|_iter, _residual| {});
+    ksp.add_monitor(|_iter, _residual, _reductions| MonitorAction::Continue);
     assert_eq!(ksp.num_monitors(), 1);
 
     // Add another monitor
-    ksp.add_monitor(|_iter, _residual| {});
+    ksp.add_monitor(|_iter, _residual, _reductions| MonitorAction::Continue);
     assert_eq!(ksp.num_monitors(), 2);
 
     // Clear monitors
@@ -36,15 +37,16 @@ fn test_monitor_invocation() {
     let mut ksp = KspContext::new();
 
     // Register a monitor that counts calls
-    ksp.add_monitor(move |_iter, _residual| {
+    ksp.add_monitor(move |_iter, _residual, _reductions| {
         let mut count = call_count_clone.lock().unwrap();
         *count += 1;
+        MonitorAction::Continue
     });
 
     // Manually invoke monitors to test the mechanism
-    ksp.invoke_monitors(0, R::from(1.0));
-    ksp.invoke_monitors(1, R::from(0.5));
-    ksp.invoke_monitors(2, R::from(0.1));
+    ksp.invoke_monitors(0, R::from(1.0), 0);
+    ksp.invoke_monitors(1, R::from(0.5), 0);
+    ksp.invoke_monitors(2, R::from(0.1), 0);
 
     let final_count = *call_count.lock().unwrap();
     assert_eq!(final_count, 3);
@@ -69,9 +71,10 @@ fn test_monitor_with_solver() -> Result<(), KError> {
     let mut ksp = KspContext::new();
 
     // Register a monitor to collect residuals
-    ksp.add_monitor(move |iter, residual| {
+    ksp.add_monitor(move |iter, residual, _reductions| {
         let mut res_vec = residuals_clone.lock().unwrap();
         res_vec.push((iter, residual));
+        MonitorAction::Continue
     });
 
     ksp.set_type(SolverType::Cg)?
@@ -99,18 +102,20 @@ fn test_multiple_monitors() {
     let count2_clone = Arc::clone(&count2);
 
     // Register two monitors
-    ksp.add_monitor(move |_iter, _residual| {
+    ksp.add_monitor(move |_iter, _residual, _reductions| {
         let mut c = count1_clone.lock().unwrap();
         *c += 1;
+        MonitorAction::Continue
     });
 
-    ksp.add_monitor(move |_iter, _residual| {
+    ksp.add_monitor(move |_iter, _residual, _reductions| {
         let mut c = count2_clone.lock().unwrap();
         *c += 2; // Different increment to distinguish
+        MonitorAction::Continue
     });
 
     // Invoke monitors
-    ksp.invoke_monitors(0, R::from(1.0));
+    ksp.invoke_monitors(0, R::from(1.0), 0);
 
     assert_eq!(*count1.lock().unwrap(), 1);
     assert_eq!(*count2.lock().unwrap(), 2);

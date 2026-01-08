@@ -66,6 +66,7 @@
 //! - PETSc MATSUPERLU_DIST implementation
 
 use crate::error::KError;
+use crate::solver::MonitorCallback;
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm, contiguous_partition};
 use crate::solver::api::Solver;
@@ -4856,7 +4857,7 @@ impl LinearSolver<CsrMatrix<f64>, Vec<f64>> for SuperLuDistSolver {
         x: &mut Vec<f64>,
         pc_side: crate::preconditioner::PcSide,
         comm: &crate::parallel::UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, Self::Scalar) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<Self::Scalar>>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
         let _ = pc;

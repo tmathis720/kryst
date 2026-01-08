@@ -16,6 +16,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
+use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel::{
     dot_conj_local_with_mode, par_axpby, par_axpy, par_copy, sum_abs2_local_with_mode,
@@ -270,7 +271,7 @@ pub struct CgSolver {
     pub(crate) conv: Convergence,
     norm_type: CgNormType,
     trust_region: Option<R>,
-    true_residual_monitor: Option<Box<dyn Fn(usize, R) + Send + Sync>>,
+    true_residual_monitor: Option<Box<MonitorCallback<R>>>,
     /// Whether the supplied initial guess in `x` should be treated as
     /// nonzero. When `false` (the default) and `x` is numerically the zero
     /// vector, the solver skips the initial matvec and assumes `x = 0`.
@@ -318,7 +319,7 @@ impl CgSolver {
         self.initial_guess_nonzero = f;
         self
     }
-    pub fn with_true_residual_monitor(mut self, m: Box<dyn Fn(usize, R) + Send + Sync>) -> Self {
+    pub fn with_true_residual_monitor(mut self, m: Box<MonitorCallback<R>>) -> Self {
         self.true_residual_monitor = Some(m);
         self
     }
@@ -372,7 +373,7 @@ impl CgSolver {
     pub fn set_nonzero_guess(&mut self, f: bool) {
         self.initial_guess_nonzero = f;
     }
-    pub fn set_true_residual_monitor(&mut self, m: Option<Box<dyn Fn(usize, R) + Send + Sync>>) {
+    pub fn set_true_residual_monitor(&mut self, m: Option<Box<MonitorCallback<R>>>) {
         self.true_residual_monitor = m;
     }
 
@@ -390,7 +391,7 @@ impl CgSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -530,12 +531,12 @@ impl CgSolver {
 
         if let Some(ms) = monitors {
             for m in ms {
-                m(0, res0_reported);
+                let _ = m(0, res0_reported, 0);
             }
         }
         if let Some(m) = &self.true_residual_monitor {
             let true_res = red.norm2(r);
-            m(0, true_res);
+            let _ = m(0, true_res, 0);
         }
         #[cfg(feature = "logging")]
         trace!("CG initial residual: {res0_reported:.3e}");
@@ -788,12 +789,12 @@ impl CgSolver {
 
             if let Some(ms) = monitors {
                 for m in ms {
-                    m(k, res_reported);
+                    let _ = m(k, res_reported, 0);
                 }
             }
             if let Some(m) = &self.true_residual_monitor {
                 let true_res = red.norm2(r);
-                m(k, true_res);
+                let _ = m(k, true_res, 0);
             }
 
             let (reason, mut s) = self.conv.check(res_reported, res0_reported, k);
@@ -826,7 +827,7 @@ impl CgSolver {
         b: &[S],
         x: &mut [S],
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: &mut Workspace,
         nrows: usize,
     ) -> Result<SolveStats<R>, KError>
@@ -937,12 +938,12 @@ impl CgSolver {
 
         if let Some(ms) = monitors {
             for m in ms {
-                m(0, res0_reported);
+                let _ = m(0, res0_reported, 0);
             }
         }
         if let Some(m) = &self.true_residual_monitor {
             let true_res = red.norm2(r);
-            m(0, true_res);
+            let _ = m(0, true_res, 0);
         }
         #[cfg(feature = "logging")]
         trace!("CG initial residual: {res0_reported:.3e}");
@@ -1109,12 +1110,12 @@ impl CgSolver {
 
             if let Some(ms) = monitors {
                 for m in ms {
-                    m(k, res_reported);
+                    let _ = m(k, res_reported, 0);
                 }
             }
             if let Some(m) = &self.true_residual_monitor {
                 let true_res = red.norm2(r);
-                m(k, true_res);
+                let _ = m(k, true_res, 0);
             }
 
             let (reason, mut s_out) = self.conv.check(res_reported, res0_reported, k);
@@ -1160,7 +1161,7 @@ impl CgSolver {
         x: &mut [S],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, R) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
@@ -1178,7 +1179,7 @@ impl CgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
@@ -1238,7 +1239,7 @@ impl LinearSolver for CgSolver {
         x: &mut [f64],
         pc_side: PcSide,
         comm: &UniverseComm,
-        monitors: Option<&[Box<dyn Fn(usize, f64) + Send + Sync>]>,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)
