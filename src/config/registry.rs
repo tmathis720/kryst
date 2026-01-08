@@ -773,6 +773,27 @@ pub static SPECS: &[Spec] = &[
         doc: "print AMG setup tables",
     },
     Spec {
+        flag: "-pc_amg_dist_apply_mode",
+        key: "pc_amg_dist_apply_mode",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "distributed AMG apply mode: root or local",
+    },
+    Spec {
+        flag: "-pc_amg_dist_instrumentation",
+        key: "pc_amg_dist_instrumentation",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "enable distributed AMG apply instrumentation",
+    },
+    Spec {
+        flag: "-pc_amg_dist_coarse_ghost_scale",
+        key: "pc_amg_dist_coarse_ghost_scale",
+        arity: Arity::One,
+        kind: ValueKind::Float,
+        doc: "halo-based coarse correction scale for local prototype",
+    },
+    Spec {
         flag: "-pc_amg_ieee_checks",
         key: "pc_amg_ieee_checks",
         arity: Arity::Zero,
