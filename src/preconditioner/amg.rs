@@ -3183,12 +3183,16 @@ impl AMG {
         let prev_cfg = self.cfg.clone();
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
-        let mut record_error = |stage: &'static str, err: KError| {
-            if local_stage.is_none() {
-                local_stage = Some(stage);
-                local_detail = Some(err.to_string());
-            }
-        };
+        let mut record_error =
+            |local_stage: &mut Option<&'static str>,
+             local_detail: &mut Option<String>,
+             stage: &'static str,
+             err: KError| {
+                if local_stage.is_none() {
+                    *local_stage = Some(stage);
+                    *local_detail = Some(err.to_string());
+                }
+            };
         let mut setup_state: Option<(
             CsrMatrix<f64>,
             Box<AmgHierarchy>,
@@ -3200,7 +3204,7 @@ impl AMG {
         let global = match gather_dist_csr(dist, root) {
             Ok(global) => global,
             Err(err) => {
-                record_error("gather_dist_csr", err);
+                record_error(&mut local_stage, &mut local_detail, "gather_dist_csr", err);
                 None
             }
         };
@@ -3209,9 +3213,10 @@ impl AMG {
                 Some(mut fine) => {
                     let cfg = self.cfg.clone();
                     if cfg.conditioning.is_active() {
-                        if let Err(err) = apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
+                        if let Err(err) =
+                            apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
                         {
-                            record_error("conditioning", err);
+                            record_error(&mut local_stage, &mut local_detail, "conditioning", err);
                         }
                     }
                     if local_stage.is_none() {
@@ -3240,6 +3245,8 @@ impl AMG {
                                     Err(fallback_err) => {
                                         self.cfg = prev_cfg.clone();
                                         record_error(
+                                            &mut local_stage,
+                                            &mut local_detail,
                                             "build_symbolic",
                                             KError::InvalidInput(format!(
                                                 "strict setup failed: {primary_err}; permissive fallback failed: {fallback_err}"
@@ -3253,6 +3260,8 @@ impl AMG {
                 }
                 None => {
                     record_error(
+                        &mut local_stage,
+                        &mut local_detail,
                         "gather_dist_csr",
                         KError::InvalidInput("root rank missing assembled CSR matrix".into()),
                     );
@@ -3325,12 +3334,16 @@ impl AMG {
 
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
-        let mut record_error = |stage: &'static str, err: KError| {
-            if local_stage.is_none() {
-                local_stage = Some(stage);
-                local_detail = Some(err.to_string());
-            }
-        };
+        let mut record_error =
+            |local_stage: &mut Option<&'static str>,
+             local_detail: &mut Option<String>,
+             stage: &'static str,
+             err: KError| {
+                if local_stage.is_none() {
+                    *local_stage = Some(stage);
+                    *local_detail = Some(err.to_string());
+                }
+            };
 
         let local_matrix = dist.local_matrix();
         let local_block = dist.local_block_csr();
@@ -3343,7 +3356,14 @@ impl AMG {
                 Ok(hier) => {
                     local_hierarchy = Some(hier);
                 }
-                Err(err) => record_error("build_symbolic(local)", err),
+                Err(err) => {
+                    record_error(
+                        &mut local_stage,
+                        &mut local_detail,
+                        "build_symbolic(local)",
+                        err,
+                    );
+                }
             }
         }
 
@@ -3356,7 +3376,9 @@ impl AMG {
                 &local_matrix,
             ) {
                 Ok(plan) => halo_plan = Some(plan),
-                Err(err) => record_error("build_halo_plan", err),
+                Err(err) => {
+                    record_error(&mut local_stage, &mut local_detail, "build_halo_plan", err);
+                }
             }
         }
 
