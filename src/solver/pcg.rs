@@ -417,7 +417,7 @@ impl PcgSolver {
         }
         if let Some(m) = &self.true_residual_monitor {
             let value = self.ensure_norm(r, comm, &mut cached_r_norm);
-            m(0, value);
+            m(0, value, 0);
         }
 
         p.copy_from_slice(z);
@@ -534,7 +534,7 @@ impl PcgSolver {
             }
             if let Some(m) = &self.true_residual_monitor {
                 let value = self.ensure_norm(r, comm, &mut r_norm);
-                m(k, value);
+                m(k, value, 0);
             }
 
             let res_check = match self.norm_type {
@@ -660,7 +660,7 @@ impl PcgSolver {
             );
         }
         if let Some(m) = &self.true_residual_monitor {
-            m(0, actual_res0);
+            m(0, actual_res0, 0);
         }
 
         let (reason0, mut stats0) = self.conv.check(actual_res0, rnorm0, 0);
@@ -730,7 +730,7 @@ impl PcgSolver {
                         );
                     }
                     if let Some(m) = &self.true_residual_monitor {
-                        m(iterations, actual_res);
+                        m(iterations, actual_res, 0);
                     }
 
                     let (reason, mut stats) = self.conv.check(actual_res, rnorm0, iterations);
@@ -908,7 +908,7 @@ impl PcgSolver {
                     );
                 }
                 if let Some(m) = &self.true_residual_monitor {
-                    m(iterations, actual_res);
+                    m(iterations, actual_res, 0);
                 }
 
                 let (reason, mut stats) = self.conv.check(actual_res, rnorm0, iterations);
