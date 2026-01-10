@@ -25,6 +25,8 @@ use crate::matrix::{
 use crate::matrix::DistCsrOp;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::dist::halo::HaloPlan;
+#[cfg(feature = "complex")]
+use crate::matrix::parcsr::HaloPlan;
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]

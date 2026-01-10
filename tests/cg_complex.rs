@@ -16,6 +16,7 @@ use kryst::ops::kpc::KPreconditioner;
 use kryst::parallel::{NoComm, UniverseComm, global_nrm2};
 use kryst::preconditioner::PcSide;
 use kryst::solver::cg::{CgNormType, CgSolver};
+use kryst::solver::{MonitorAction, MonitorCallback};
 use kryst::utils::convergence::ConvergedReason;
 
 // ---------- Dense S-native operator (test-only) ----------
@@ -264,10 +265,11 @@ fn pcg_left_jacobi_monotone_precond() {
 
     let hist = Arc::new(Mutex::new(Vec::<R>::new()));
     let hist_clone = hist.clone();
-    let monitor = Box::new(move |_k: usize, r: R| {
+    let monitor = Box::new(move |_k: usize, r: R, _reductions: usize| {
         hist_clone.lock().unwrap().push(r);
+        MonitorAction::Continue
     });
-    let monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>> = vec![monitor];
+    let monitors: Vec<Box<MonitorCallback<R>>> = vec![monitor];
 
     let mut x = vec![S::zero(); n];
     let stats = solver
@@ -381,12 +383,13 @@ fn run_and_capture_norms(norm_type: CgNormType) -> Vec<R> {
 
     let hist = Arc::new(Mutex::new(Vec::<R>::new()));
     let hist_clone = hist.clone();
-    let monitor = Box::new(move |k: usize, r: R| {
+    let monitor = Box::new(move |k: usize, r: R, _reductions: usize| {
         if k <= 2 {
             hist_clone.lock().unwrap().push(r);
         }
+        MonitorAction::Continue
     });
-    let monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>> = vec![monitor];
+    let monitors: Vec<Box<MonitorCallback<R>>> = vec![monitor];
 
     let mut x = vec![S::zero(); n];
     let _ = solver.solve_with_comm(
