@@ -4,7 +4,7 @@ use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::{LinearSolver, PcgSolver};
+use kryst::solver::{LinearSolver, MonitorAction, PcgSolver};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -21,8 +21,9 @@ fn pcg_reports_true_residual() {
 
     let log: Arc<Mutex<Vec<(usize, R)>>> = Arc::new(Mutex::new(Vec::new()));
     let log_clone = log.clone();
-    solver.set_true_residual_monitor(Some(Box::new(move |i, r| {
+    solver.set_true_residual_monitor(Some(Box::new(move |i, r, _| {
         log_clone.lock().unwrap().push((i, r));
+        MonitorAction::Continue
     })));
 
     solver
