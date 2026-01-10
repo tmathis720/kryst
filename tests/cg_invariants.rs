@@ -11,7 +11,7 @@ use kryst::ops::klinop::KLinOp;
 use kryst::ops::kpc::KPreconditioner;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::CgSolver;
+use kryst::solver::{CgSolver, MonitorAction, MonitorCallback};
 use kryst::solver::cg::debug::{self, IterEvent};
 use kryst::utils::convergence::ConvergedReason;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -63,8 +63,9 @@ fn cg_complex_hpd_invariants() {
 
     let residuals = Arc::new(Mutex::new(Vec::<R>::new()));
     let monitor_res = residuals.clone();
-    let monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>> = vec![Box::new(move |_iter, res| {
+    let monitors: Vec<Box<MonitorCallback<R>>> = vec![Box::new(move |_iter, res, _norm| {
         monitor_res.lock().unwrap().push(res);
+        MonitorAction::Continue
     })];
 
     let stats = solver
@@ -147,8 +148,9 @@ fn cg_real_spd_invariants() {
 
     let residuals = Arc::new(Mutex::new(Vec::<R>::new()));
     let residual_sink = residuals.clone();
-    let monitors: Vec<Box<dyn Fn(usize, R) + Send + Sync>> = vec![Box::new(move |_iter, res| {
+    let monitors: Vec<Box<MonitorCallback<R>>> = vec![Box::new(move |_iter, res, _norm| {
         residual_sink.lock().unwrap().push(res);
+        MonitorAction::Continue
     })];
 
     let stats = solver
