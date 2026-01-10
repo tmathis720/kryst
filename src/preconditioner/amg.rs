@@ -2520,16 +2520,20 @@ fn broadcast_message<C: Comm>(comm: &C, root: usize, message: Option<String>) ->
         msg
     } else {
         let mut len_buf = [0u64];
-        let mut reqs = vec![comm.irecv_from_u64(&mut len_buf, root as i32)];
-        comm.wait_all(&mut reqs);
+        {
+            let mut reqs = vec![comm.irecv_from_u64(&mut len_buf, root as i32)];
+            comm.wait_all(&mut reqs);
+        }
         let len = len_buf[0] as usize;
         if len == 0 {
             return String::new();
         }
         let words = (len + 7) / 8;
         let mut data = vec![0u64; words];
-        let mut data_reqs = vec![comm.irecv_from_u64(&mut data, root as i32)];
-        comm.wait_all(&mut data_reqs);
+        {
+            let mut data_reqs = vec![comm.irecv_from_u64(&mut data, root as i32)];
+            comm.wait_all(&mut data_reqs);
+        }
         unpack_message_u64(&data, len)
     }
 }
@@ -2558,34 +2562,35 @@ fn collect_error_message<C: Comm>(
         return broadcast_message(comm, root, None);
     }
 
-    let mut len_bufs = vec![0u64; size];
+    let mut len_bufs = vec![[0u64; 1]; size];
     let mut len_reqs = Vec::new();
     for r in 0..size {
         if r == root {
             continue;
         }
-        len_reqs.push(comm.irecv_from_u64(
-            std::slice::from_mut(&mut len_bufs[r]),
-            r as i32,
-        ));
+        let buf = unsafe { &mut *len_bufs.as_mut_ptr().add(r) };
+        len_reqs.push(comm.irecv_from_u64(buf, r as i32));
     }
     comm.wait_all(&mut len_reqs);
 
     let mut data_bufs: Vec<Vec<u64>> = vec![Vec::new(); size];
-    let mut data_reqs = Vec::new();
-    for r in 0..size {
-        if r == root {
-            continue;
+    {
+        let mut data_reqs = Vec::new();
+        for r in 0..size {
+            if r == root {
+                continue;
+            }
+            let msg_len = len_bufs[r][0] as usize;
+            if msg_len == 0 {
+                continue;
+            }
+            let words = (msg_len + 7) / 8;
+            let buf = unsafe { &mut *data_bufs.as_mut_ptr().add(r) };
+            *buf = vec![0u64; words];
+            data_reqs.push(comm.irecv_from_u64(buf.as_mut_slice(), r as i32));
         }
-        let msg_len = len_bufs[r] as usize;
-        if msg_len == 0 {
-            continue;
-        }
-        let words = (msg_len + 7) / 8;
-        data_bufs[r] = vec![0u64; words];
-        data_reqs.push(comm.irecv_from_u64(data_bufs[r].as_mut_slice(), r as i32));
+        comm.wait_all(&mut data_reqs);
     }
-    comm.wait_all(&mut data_reqs);
 
     let mut messages = vec![String::new(); size];
     messages[root] = local;
@@ -2593,7 +2598,7 @@ fn collect_error_message<C: Comm>(
         if r == root {
             continue;
         }
-        let msg_len = len_bufs[r] as usize;
+        let msg_len = len_bufs[r][0] as usize;
         if msg_len == 0 {
             continue;
         }
@@ -2967,7 +2972,6 @@ impl AmgState {
     }
 }
 
-#[derive(Clone)]
 struct DistAmgInfo {
     comm: UniverseComm,
     root: usize,
@@ -3264,7 +3268,7 @@ impl AMG {
                     .unwrap_or_else(|| "unknown error".to_string());
                 format!("stage={stage}: {detail}")
             });
-            let error_message = collect_error_message(comm, root, local_message);
+            let error_message = collect_error_message(&comm, root, local_message);
             self.cfg = prev_cfg;
             self.cycle_policy = Self::make_cycle_policy(&self.cfg);
             self.state = AmgState::Uninitialized;
@@ -3365,7 +3369,7 @@ impl AMG {
                     .unwrap_or_else(|| "unknown error".to_string());
                 format!("stage={stage}: {detail}")
             });
-            let error_message = collect_error_message(comm, root, local_message);
+            let error_message = collect_error_message(&comm, root, local_message);
             self.state = AmgState::Uninitialized;
             self.stats = None;
             self.csr = None;
@@ -3496,7 +3500,7 @@ impl AMG {
         r: &[f64],
         z: &mut [f64],
         dist: &DistAmgInfo,
-        stats: Option<&mut DistApplyStats>,
+        mut stats: Option<&mut DistApplyStats>,
     ) -> Result<(), KError> {
         let comm = &dist.comm;
         let root = dist.root;
@@ -3542,7 +3546,7 @@ impl AMG {
         r: &[f64],
         z: &mut [f64],
         dist: &DistAmgInfo,
-        stats: Option<&mut DistApplyStats>,
+        mut stats: Option<&mut DistApplyStats>,
     ) -> Result<(), KError> {
         let hierarchy = dist.local_hierarchy.as_ref().ok_or_else(|| {
             KError::InvalidInput("AMG local prototype hierarchy not initialized".into())

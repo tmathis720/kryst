@@ -506,11 +506,7 @@ impl Sink for PcOptions {
             "pc_amg_keep_pivot_in_rap" => set_opt!(&mut self.amg_keep_pivot_in_rap, v),
             "pc_amg_require_spd" => set_opt!(&mut self.amg_require_spd, v),
             "pc_amg_print_setup" => set_opt!(&mut self.amg_print_setup, v),
-            "pc_amg_dist_apply_mode" => set_opt!(&mut self.amg_dist_apply_mode, v),
             "pc_amg_dist_instrumentation" => set_opt!(&mut self.amg_dist_instrumentation, v),
-            "pc_amg_dist_coarse_ghost_scale" => {
-                set_opt!(&mut self.amg_dist_coarse_ghost_scale, v)
-            }
             "pc_amg_ieee_checks" => set_opt!(&mut self.amg_ieee_checks, v),
             "pc_amg_optimize_workspace" => set_opt!(&mut self.amg_optimize_workspace, v),
             "pc_sor_symmetric" => set_opt!(&mut self.sor_symmetric, v),
@@ -636,6 +632,12 @@ impl Sink for PcOptions {
             }
             "pc_amg_print_level" => {
                 set_opt!(&mut self.amg_print_level, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_dist_apply_mode" => {
+                set_opt!(&mut self.amg_dist_apply_mode, v.to_lowercase())
+            }
+            "pc_amg_dist_coarse_ghost_scale" => {
+                set_opt!(&mut self.amg_dist_coarse_ghost_scale, parse_as::<f64>(v, spec)?)
             }
             "pc_amg_tolerance" => set_opt!(&mut self.amg_tolerance, parse_as::<f64>(v, spec)?),
             "pc_amg_max_iterations" => {

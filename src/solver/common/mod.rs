@@ -3,7 +3,6 @@ pub mod givens;
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]

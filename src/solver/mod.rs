@@ -5,7 +5,6 @@
 //! underlying solver types and traits for advanced use, custom pipelines, or testing.
 
 use crate::context::ksp_context::Workspace;
-use crate::solver::MonitorCallback;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;

@@ -98,7 +98,7 @@ impl LinearSolver<Mat<Scalar>, Vec<Scalar>> for LuSolver {
         // Call monitors at start if provided
         if let Some(monitors) = monitors {
             for monitor in monitors {
-                monitor(0, 0.0);
+                monitor(0, 0.0, 0);
             }
         }
 
@@ -123,7 +123,7 @@ impl LinearSolver<Mat<Scalar>, Vec<Scalar>> for LuSolver {
         // Call monitors at end if provided
         if let Some(monitors) = monitors {
             for monitor in monitors {
-                monitor(1, 0.0);
+                monitor(1, 0.0, 0);
             }
         }
 

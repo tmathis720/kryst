@@ -23,7 +23,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 
 /// Metadata for a local ASM + global AMG coarse-correction hybrid.
 #[cfg(feature = "mpi")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AsmAmgHybridMeta {
     pub layout: crate::matrix::op::DistLayout,
     pub overlap: usize,

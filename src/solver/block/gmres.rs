@@ -223,7 +223,7 @@ impl LinearSolver for BlockGmresSolver {
                     rnorm = block_norm_max(&r_block, comm);
                     iterations += 1;
                     for m in mons {
-                        m(iterations, rnorm);
+                        m(iterations, rnorm, 0);
                     }
                     let (iter_reason, iter_stats) = conv.check(rnorm, bnorm, iterations);
                     reason = iter_reason;
