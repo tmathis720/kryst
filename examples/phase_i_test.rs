@@ -4,6 +4,7 @@
 //! 1. FGMRES solver can be selected
 //! 2. Deferred PC construction works for matrix-dependent PCs
 //! 3. Command-line parsing works for new ASM/Chebyshev/AMG options
+//! cargo run --example phase_i_test --features=backend-faer,legacy-pc-bridge
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("phase_i_test.rs is unavailable when built with --features complex");

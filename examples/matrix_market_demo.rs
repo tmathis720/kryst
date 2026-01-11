@@ -25,7 +25,7 @@ mod real_demo {
     //! that are relevant for driven-cavity style matrices.
     //!
     //! to run:
-    //! cargo mpirun -n 2 --features=mpi,rayon,simd,dense-direct,faer-backend --example matrix_market_demo
+    //! cargo mpirun -n 2 --features=mpi,rayon,simd,dense-direct,backend-faer --example matrix_market_demo
     //! or for serial:
     //! cargo run --example matrix_market_demo
     //! (ensure the example is built with the "mpi" feature for MPI runs)

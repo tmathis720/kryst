@@ -1,3 +1,4 @@
+// cargo mpirun -n 4 --example mpi_gmres --features=mpi
 #[cfg(feature = "complex")]
 fn main() {
     eprintln!("mpi_gmres.rs is unavailable when built with --features complex");

@@ -9,7 +9,7 @@
 //! 5. Perform convergence analysis and write results
 //!
 //! Usage:
-//!   cargo mpirun -n 4 --example mpi_amg_gmres_demo [options]
+//!   cargo mpirun -n 4 --example mpi_amg_gmres_demo --features mpi_examples [options]
 //!   
 //! PETSc-style Options:
 //!   -ksp_type <solver>         Solver type (cg, pcg, gmres, bicgstab, cgs, qmr, tfqmr, minres, cgnr, preonly)

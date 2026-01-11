@@ -12,7 +12,7 @@ use kryst::*; // Import the trait
 /// and communicator splitting functionality.
 ///
 /// to run:
-/// cargo mpirun -n 4 --example mpi_parallel_demo
+/// cargo mpirun -n 4 --example mpi_parallel_demo --features=mpi
 #[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Kryst MPI-Parallel Communication Demo");

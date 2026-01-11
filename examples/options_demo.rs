@@ -16,10 +16,10 @@
 //! cargo run --example options_demo -- -ksp_type gmres -ksp_gmres_restart 100 -pc_type ilu0
 //!
 //! # Use direct LU solver (no Krylov iteration)
-//! cargo run --example options_demo -- -ksp_type preonly -pc_type lu
+//! cargo run --example options_demo --features backend-faer,dense-direct,mpi -- -ksp_type preonly -pc_type lu
 //!
 //! # Use direct QR solver (for least squares problems)
-//! cargo run --example options_demo -- -ksp_type preonly -pc_type qr
+//! cargo run --example options_demo --features backend-faer,dense-direct,mpi -- -ksp_type preonly -pc_type qr
 //!
 //! # Show all available options
 //! cargo run --example options_demo -- -help

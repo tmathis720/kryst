@@ -2145,12 +2145,12 @@ impl OrderingAlgorithms {
 
                         let rp = matrix.row_ptr();
                         let ci = matrix.col_idx();
-                        let local_rows = matrix.nrows();
+                        let local_rows = distribution.local_rows;
                         let mut encoded: Vec<usize> = Vec::new();
                         for local_row in 0..local_rows {
                             let global_row = distribution.local_to_global_row(local_row);
-                            let start = rp[local_row];
-                            let end = rp[local_row + 1];
+                            let start = rp[global_row];
+                            let end = rp[global_row + 1];
                             encoded.push(global_row);
                             encoded.push(end - start);
                             encoded.extend_from_slice(&ci[start..end]);
@@ -4414,8 +4414,9 @@ impl SuperLuDistSolver {
             PivotingStrategy::Dynamic
         };
 
-        // Milestone 1: use a single full-width panel for the whole matrix
-        let panel_size = n.max(1);
+        // Milestone 1: use a fixed panel size (bounded by matrix dimensions)
+        let configured_panel_size = self.options.panel_size.unwrap_or(64).max(1);
+        let panel_size = std::cmp::min(configured_panel_size, n.max(1));
 
         #[cfg(feature = "logging")]
         log::debug!(
