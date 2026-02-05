@@ -82,7 +82,15 @@ fn gmres_vs_direct_on_nonsymmetric() {
     let n = 10;
     let mut rng = rand::thread_rng();
     let data: Vec<R> = (0..n * n).map(|_| rng.r#gen()).collect();
-    let a = Mat::from_fn(n, n, |i, j| data[j * n + i]);
+    // Shift the diagonal to avoid near-singular random systems that can make
+    // convergence flaky for strict stopping criteria.
+    let a = Mat::from_fn(n, n, |i, j| {
+        let mut v = data[j * n + i];
+        if i == j {
+            v += n as R;
+        }
+        v
+    });
     let b: Vec<R> = (0..n).map(|_| rng.r#gen()).collect();
     let mut x_gmres = vec![R::default(); n];
     let mut solver = GmresSolver::new(100, 1e-8, 1000);
