@@ -3142,9 +3142,15 @@ impl AMG {
                         match build_smoother_only_hierarchy(fine, &mut smoother_cfg) {
                             Ok((hier, stats)) => (hier, stats, smoother_cfg),
                             Err(_) => {
-                                return Err(KError::InvalidInput(format!(
+                                let combined = format!(
                                     "AMG setup failed: {primary_err}; fallback failed: {fallback_err}"
-                                )));
+                                );
+                                return Err(match (&primary_err, &fallback_err) {
+                                    (KError::SolveError(_), KError::SolveError(_)) => {
+                                        KError::SolveError(combined)
+                                    }
+                                    _ => KError::InvalidInput(combined),
+                                });
                             }
                         }
                     }
