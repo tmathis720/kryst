@@ -588,7 +588,7 @@ fn build_levels_lower(l: &CsrMatrix<f64>) -> Levels {
         let mut li = 0u32;
         for &j in cols {
             if j >= i {
-                break;
+                continue;
             }
             li = li.max(lev[j] + 1);
         }
