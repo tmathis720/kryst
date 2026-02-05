@@ -99,6 +99,7 @@ nalgebra-explicit-dense = ["backend-nalgebra"]
 [[example]]
 name = "mpi_amg_gmres_demo"
 required-features = ["mpi_examples"]
+doc-scrape-examples = true
 
 [[bench]]
 name = "rap"

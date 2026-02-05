@@ -20,7 +20,9 @@ use crate::core::traits::{MatrixGet, RowPattern};
 use crate::error::KError;
 #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::matrix::op::CsrOp;
-#[cfg(not(feature = "complex"))]
+#[cfg(feature = "dense-direct")]
+use crate::matrix::sparse::CsrMatrix;
+#[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
