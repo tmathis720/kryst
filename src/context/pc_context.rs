@@ -485,6 +485,22 @@ impl PcConfig {
 pub struct PcFactory;
 
 impl PcFactory {
+    fn composite_mode_from_opts(
+        opts: Option<&PcOptions>,
+    ) -> Result<crate::preconditioner::chain::PcCompositeMode, KError> {
+        match opts.and_then(|o| o.pc_composite_type.as_deref()) {
+            None | Some("multiplicative") | Some("mul") => {
+                Ok(crate::preconditioner::chain::PcCompositeMode::Multiplicative)
+            }
+            Some("additive") | Some("add") => {
+                Ok(crate::preconditioner::chain::PcCompositeMode::Additive)
+            }
+            Some(other) => Err(KError::InvalidInput(format!(
+                "unknown pc_composite_type: {other}"
+            ))),
+        }
+    }
+
     fn split_chain_tokens(chain: &str) -> Vec<String> {
         chain
             .replace("->", ",")
@@ -662,9 +678,19 @@ impl PcFactory {
         opts: Option<&PcOptions>,
     ) -> Result<Vec<DeferredPcInfo>, KError> {
         let mut specs = Vec::new();
-        for token in Self::split_chain_tokens(chain) {
+        let prefixes = opts
+            .and_then(|o| o.pc_composite_prefixes.clone())
+            .unwrap_or_default();
+        for (i, token) in Self::split_chain_tokens(chain).into_iter().enumerate() {
             let pct = PcType::from_str(&token)?;
             let mut stage_opts = opts.cloned();
+            if let Some(prefix) = prefixes.get(i)
+                && let Some(scoped) = opts.and_then(|o| o.scoped_child(prefix)).cloned()
+            {
+                let mut merged = stage_opts.unwrap_or_default();
+                merged.overlay_from(scoped);
+                stage_opts = Some(merged);
+            }
             if token.eq_ignore_ascii_case("ras") {
                 stage_opts.get_or_insert_with(PcOptions::default).asm_mode =
                     Some("ras".to_string());
@@ -711,6 +737,7 @@ impl PcFactory {
         Self::validate_chain_specs(&specs)?;
         use crate::preconditioner::chain::PcChain;
 
+        let mode = Self::composite_mode_from_opts(specs.first().and_then(|s| s.options.as_ref()))?;
         let mut stages: Vec<Box<dyn Preconditioner>> = Vec::with_capacity(specs.len());
         for (i, spec) in specs.into_iter().enumerate() {
             let pc_type = spec.pc_type;
@@ -719,7 +746,7 @@ impl PcFactory {
             })?;
             stages.push(stage);
         }
-        Ok(Box::new(PcChain::new(stages)))
+        Ok(Box::new(PcChain::with_mode(stages, mode)))
     }
 
     pub fn create_pc_chain(
@@ -881,5 +908,22 @@ mod tests {
                 .and_then(|o| o.asm_mode.as_deref()),
             Some("ras")
         );
+    }
+    #[test]
+    fn chain_prefix_scoped_stage_options_are_merged() {
+        let args = vec![
+            "-pc_chain",
+            "jacobi->ilu",
+            "-pc_composite_prefixes",
+            "s0_,s1_",
+            "-s1_pc_ilu_levels",
+            "4",
+        ];
+        let opts = crate::config::options::PcOptions::from_args(&args).unwrap();
+        let specs =
+            PcFactory::create_pc_chain_from_str(opts.pc_chain.as_deref().unwrap(), Some(&opts))
+                .unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].options.as_ref().and_then(|o| o.ilu_level), Some(4));
     }
 }

@@ -242,6 +242,14 @@ pub struct PcOptions {
     pub pc_chain: Option<String>,
     /// Structured chain.
     pub chain: Option<Vec<PcOptions>>,
+    /// Composite application mode for `pc_chain`: `multiplicative` (default) or `additive`.
+    pub pc_composite_type: Option<String>,
+    /// Optional comma-separated stage prefixes for nested subcomponent options.
+    pub pc_composite_prefixes: Option<Vec<String>>,
+    /// Optional comma-separated FieldSplit child prefixes used for per-child options.
+    pub pc_fieldsplit_prefixes: Option<Vec<String>>,
+    /// Materialized per-prefix child option tables (prefix, options).
+    pub scoped_children: Vec<(String, Box<PcOptions>)>,
     /// Relaxation factor for SOR, ω ∈ (0, 2).
     pub omega: Option<f64>,
     /// Generic drop tolerance.
@@ -356,6 +364,98 @@ pub struct PcOptions {
     pub pc_scale: Option<String>,
     /// Conditioning: scaling norm ("1" or "inf").
     pub pc_scale_norm: Option<String>,
+}
+
+impl KspOptions {
+    pub fn from_args_with_prefix(args: &[&str], component_prefix: &str) -> Result<Self, KError> {
+        let mut me = Self::default();
+        let reg = registry();
+        let component = format!("-{component_prefix}");
+        reg.parse_into(args, &mut me, Some(&component))?;
+        if let Some(ref side) = me.pc_side {
+            PcSide::from_str(side)?;
+        }
+        Ok(me)
+    }
+}
+
+impl PcOptions {
+    pub fn from_args_with_prefix(args: &[&str], component_prefix: &str) -> Result<Self, KError> {
+        let mut me = Self::default();
+        let component = format!("-{component_prefix}");
+        registry().parse_into(args, &mut me, Some(&component))?;
+        me.validate_and_sync()?;
+        Ok(me)
+    }
+
+    fn validate_and_sync(&mut self) -> Result<(), KError> {
+        if let Some(ref t) = self.reorder {
+            kinds::ReorderKind::from_str(t)?;
+        }
+        if let Some(ref s) = self.scaling {
+            kinds::ScalingKind::from_str(s)?;
+        }
+        if let Some(ref t) = self.ilu_type {
+            kinds::IluTypeKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.ilu_reordering_type {
+            kinds::IluReorderKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.ilu_triangular_solve {
+            kinds::IluTriSolveKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_coarsen_type {
+            kinds::AmgCoarsenKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_interp_type {
+            kinds::AmgInterpKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_relax_type {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_smoother {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.asm_block_solver {
+            kinds::AsmBlockSolverKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.asm_mode {
+            kinds::AsmModeKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.sor_mat_side {
+            kinds::SorMatSideKind::from_str(t)?;
+        }
+        self.sync_ilu_all();
+        Ok(())
+    }
+
+    fn parse_prefix_list(v: &str) -> Vec<String> {
+        v.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn load_scoped_children_from_args(&mut self, args: &[&str]) -> Result<(), KError> {
+        self.scoped_children.clear();
+        let mut prefixes = self.pc_fieldsplit_prefixes.clone().unwrap_or_default();
+        if let Some(extra) = &self.pc_composite_prefixes {
+            prefixes.extend(extra.iter().cloned());
+        }
+        for prefix in prefixes {
+            let child = Self::from_args_with_prefix(args, &prefix)?;
+            self.scoped_children.push((prefix, Box::new(child)));
+        }
+        Ok(())
+    }
+
+    pub fn scoped_child(&self, prefix: &str) -> Option<&PcOptions> {
+        self.scoped_children
+            .iter()
+            .find(|(p, _)| p == prefix)
+            .map(|(_, o)| o.as_ref())
+    }
 }
 
 /// Side enum kept as-is.
@@ -708,6 +808,13 @@ impl Sink for PcOptions {
             "pc_mg_levels" => set_opt!(&mut self.pc_mg_levels, parse_as::<usize>(v, spec)?),
             "pc_mg_cycle_type" => set_opt!(&mut self.pc_mg_cycle_type, v.to_lowercase()),
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
+            "pc_composite_type" => set_opt!(&mut self.pc_composite_type, v.to_lowercase()),
+            "pc_composite_prefixes" => {
+                set_opt!(&mut self.pc_composite_prefixes, Self::parse_prefix_list(v))
+            }
+            "pc_fieldsplit_prefixes" => {
+                set_opt!(&mut self.pc_fieldsplit_prefixes, Self::parse_prefix_list(v))
+            }
             "pc_shift_diag" => set_opt!(&mut self.pc_shift_diag, parse_as::<f64>(v, spec)?),
             "pc_diag_inject_tau" => {
                 set_opt!(&mut self.pc_diag_inject_tau, parse_as::<f64>(v, spec)?)
@@ -1343,44 +1450,8 @@ impl PcOptions {
     pub fn from_args(args: &[&str]) -> Result<Self, KError> {
         let mut me = Self::default();
         registry().parse_into(args, &mut me, Some("-pc_"))?;
-        // enum validations (centralized)
-        if let Some(ref t) = me.reorder {
-            kinds::ReorderKind::from_str(t)?;
-        }
-        if let Some(ref s) = me.scaling {
-            kinds::ScalingKind::from_str(s)?;
-        }
-        if let Some(ref t) = me.ilu_type {
-            kinds::IluTypeKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.ilu_reordering_type {
-            kinds::IluReorderKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.ilu_triangular_solve {
-            kinds::IluTriSolveKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.amg_coarsen_type {
-            kinds::AmgCoarsenKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.amg_interp_type {
-            kinds::AmgInterpKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.amg_relax_type {
-            kinds::AmgRelaxKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.amg_smoother {
-            kinds::AmgRelaxKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.asm_block_solver {
-            kinds::AsmBlockSolverKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.asm_mode {
-            kinds::AsmModeKind::from_str(t)?;
-        }
-        if let Some(ref t) = me.sor_mat_side {
-            kinds::SorMatSideKind::from_str(t)?;
-        }
-        me.sync_ilu_all();
+        me.validate_and_sync()?;
+        me.load_scoped_children_from_args(args)?;
         Ok(me)
     }
 
@@ -1686,6 +1757,9 @@ impl PcOptions {
         o!(pc_mg_cycle_type);
 
         o!(pc_chain);
+        o!(pc_composite_type);
+        o!(pc_composite_prefixes);
+        o!(pc_fieldsplit_prefixes);
         o!(chain);
         o!(pc_fixdiag);
         o!(pc_shift_diag);
@@ -3264,5 +3338,51 @@ mod old_tests {
         assert_eq!(mpi_opts.ilutp_max_fill, 25);
         assert!((mpi_opts.ilutp_drop_tol - 1e-4).abs() < 1e-12);
         assert!((mpi_opts.ilutp_perm_tol - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_prefixed_pc_options_isolation() {
+        let args = vec![
+            "-pc_type",
+            "jacobi",
+            "-pc_fieldsplit_prefixes",
+            "u_,p_",
+            "-u_pc_type",
+            "ilu",
+            "-u_pc_ilu_levels",
+            "2",
+            "-p_pc_type",
+            "amg",
+            "-p_pc_amg_levels",
+            "3",
+        ];
+        let opts = PcOptions::from_args(&args).unwrap();
+        assert_eq!(opts.pc_type.as_deref(), Some("jacobi"));
+        let u = opts.scoped_child("u_").unwrap();
+        let p = opts.scoped_child("p_").unwrap();
+        assert_eq!(u.pc_type.as_deref(), Some("ilu"));
+        assert_eq!(u.ilu_level, Some(2));
+        assert_eq!(u.amg_levels, None);
+        assert_eq!(p.pc_type.as_deref(), Some("amg"));
+        assert_eq!(p.amg_levels, Some(3));
+        assert_eq!(p.ilu_level, None);
+    }
+
+    #[test]
+    fn test_prefixed_ksp_options_isolation() {
+        let args = vec![
+            "-ksp_type",
+            "gmres",
+            "-outer_ksp_type",
+            "fgmres",
+            "-outer_ksp_rtol",
+            "1e-3",
+        ];
+        let root = KspOptions::from_args(&args).unwrap();
+        let outer = KspOptions::from_args_with_prefix(&args, "outer_").unwrap();
+        assert_eq!(root.ksp_type.as_deref(), Some("gmres"));
+        assert_eq!(root.rtol, None);
+        assert_eq!(outer.ksp_type.as_deref(), Some("fgmres"));
+        assert_eq!(outer.rtol, Some(1e-3));
     }
 }

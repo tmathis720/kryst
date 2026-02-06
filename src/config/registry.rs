@@ -899,6 +899,27 @@ pub static SPECS: &[Spec] = &[
         doc: "comma-separated chain",
     },
     Spec {
+        flag: "-pc_composite_type",
+        key: "pc_composite_type",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "composite mode: multiplicative|additive",
+    },
+    Spec {
+        flag: "-pc_composite_prefixes",
+        key: "pc_composite_prefixes",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "comma-separated per-stage prefixes",
+    },
+    Spec {
+        flag: "-pc_fieldsplit_prefixes",
+        key: "pc_fieldsplit_prefixes",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "comma-separated per-field prefixes",
+    },
+    Spec {
         flag: "-pc_sor_omega",
         key: "pc_sor_omega",
         arity: Arity::One,

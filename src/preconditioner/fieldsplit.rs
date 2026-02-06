@@ -23,8 +23,18 @@ impl FieldSplitPc {
             .transpose()?
             .unwrap_or(PcType::Jacobi);
         let mut children = Vec::with_capacity(block_sizes.len());
-        for _ in &block_sizes {
-            children.push(PcFactory::create_preconditioner(child_type, Some(&opts))?);
+        let prefixes = opts.pc_fieldsplit_prefixes.clone().unwrap_or_default();
+        for (i, _) in block_sizes.iter().enumerate() {
+            let mut child_opts = opts.clone();
+            if let Some(prefix) = prefixes.get(i)
+                && let Some(scoped) = opts.scoped_child(prefix)
+            {
+                child_opts.overlay_from(scoped.clone());
+            }
+            children.push(PcFactory::create_preconditioner(
+                child_type,
+                Some(&child_opts),
+            )?);
         }
         Ok(Self {
             block_sizes,

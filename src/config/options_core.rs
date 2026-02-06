@@ -15,7 +15,7 @@ use crate::error::KError;
 
 #[derive(Copy, Clone, Debug)]
 pub enum Arity {
-    Zero, // presence toggles true (also supports explicit true/false/1/0)
+    Zero,         // presence toggles true (also supports explicit true/false/1/0)
     OptionalBool, // presence toggles true but behaves like Zero; flagged explicitly in the registry
     One,
     Two,
@@ -74,8 +74,31 @@ impl Registry {
                 i += 1;
                 continue;
             }
-            let Some(spec) = self.by_flag.get(tok) else {
-                // Unknown flag that looks like ours: suggest close match
+            let spec = if let Some(spec) = self.by_flag.get(tok) {
+                *spec
+            } else if let Some(pref) = prefix_filter {
+                if tok.starts_with(pref) {
+                    let suffix = &tok[pref.len()..];
+                    let canonical = format!("-{suffix}");
+                    if let Some(spec) = self.by_flag.get(canonical.as_str()) {
+                        *spec
+                    } else {
+                        let guess = nearest(canonical.as_str(), &self.flags);
+                        let mut msg = format!("Unrecognized option: {tok}");
+                        if let Some(g) = guess {
+                            msg.push_str(&format!(" (did you mean {} with prefix?)", g));
+                        }
+                        return Err(KError::SolveError(msg));
+                    }
+                } else {
+                    let guess = nearest(tok, &self.flags);
+                    let mut msg = format!("Unrecognized option: {tok}");
+                    if let Some(g) = guess {
+                        msg.push_str(&format!(" (did you mean {g}?)"));
+                    }
+                    return Err(KError::SolveError(msg));
+                }
+            } else {
                 let guess = nearest(tok, &self.flags);
                 let mut msg = format!("Unrecognized option: {tok}");
                 if let Some(g) = guess {
@@ -104,7 +127,7 @@ impl Registry {
                             spec.flag
                         )));
                     };
-                    sink.set_val(spec, v)?;
+                    sink.set_val(&spec, v)?;
                     i += 2;
                 }
                 Arity::Two => {
@@ -115,7 +138,7 @@ impl Registry {
                             spec.flag
                         )));
                     }
-                    sink.set_pair(spec, a.unwrap(), b.unwrap())?;
+                    sink.set_pair(&spec, a.unwrap(), b.unwrap())?;
                     i += 3;
                 }
             }
@@ -145,6 +168,10 @@ impl Registry {
             ));
         }
         out
+    }
+
+    pub fn spec_for_flag(&self, flag: &str) -> Option<Spec> {
+        self.by_flag.get(flag).copied()
     }
 }
 

@@ -38,13 +38,23 @@ thread_local! {
 /// y = P_k( ... P_2(P_1(x)) ... ) for all PcSide variants.
 /// This models M^{-1} ≈ P_k ∘ ... ∘ P_1.
 ///
+pub enum PcCompositeMode {
+    Multiplicative,
+    Additive,
+}
+
 pub struct PcChain {
     stages: Vec<Box<dyn Preconditioner>>,
+    mode: PcCompositeMode,
 }
 
 impl PcChain {
     pub fn new(stages: Vec<Box<dyn Preconditioner>>) -> Self {
-        Self { stages }
+        Self::with_mode(stages, PcCompositeMode::Multiplicative)
+    }
+
+    pub fn with_mode(stages: Vec<Box<dyn Preconditioner>>, mode: PcCompositeMode) -> Self {
+        Self { stages, mode }
     }
 
     pub fn len(&self) -> usize {
@@ -78,21 +88,41 @@ impl Preconditioner for PcChain {
             y.copy_from_slice(x);
             return Ok(());
         }
-        if self.stages.len() == 1 {
-            return self.stages[0].apply(side, x, y);
+        match self.mode {
+            PcCompositeMode::Multiplicative => {
+                if self.stages.len() == 1 {
+                    return self.stages[0].apply(side, x, y);
+                }
+                TLS_BUF.with(|b| -> Result<(), KError> {
+                    let mut tmp = b.borrow_mut();
+                    if tmp.len() < x.len() {
+                        tmp.resize(x.len(), S::zero());
+                    }
+                    tmp.copy_from_slice(x);
+                    for st in &self.stages {
+                        st.apply(side, &tmp, y)?;
+                        tmp.copy_from_slice(y);
+                    }
+                    Ok(())
+                })
+            }
+            PcCompositeMode::Additive => {
+                y.fill(S::zero());
+                TLS_BUF.with(|b| -> Result<(), KError> {
+                    let mut tmp = b.borrow_mut();
+                    if tmp.len() < x.len() {
+                        tmp.resize(x.len(), S::zero());
+                    }
+                    for st in &self.stages {
+                        st.apply(side, x, &mut tmp)?;
+                        for (yi, ti) in y.iter_mut().zip(tmp.iter()) {
+                            *yi += *ti;
+                        }
+                    }
+                    Ok(())
+                })
+            }
         }
-        TLS_BUF.with(|b| -> Result<(), KError> {
-            let mut tmp = b.borrow_mut();
-            if tmp.len() < x.len() {
-                tmp.resize(x.len(), S::zero());
-            }
-            tmp.copy_from_slice(x);
-            for st in &self.stages {
-                st.apply(side, &tmp, y)?;
-                tmp.copy_from_slice(y);
-            }
-            Ok(())
-        })
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -100,21 +130,41 @@ impl Preconditioner for PcChain {
             y.copy_from_slice(x);
             return Ok(());
         }
-        if self.stages.len() == 1 {
-            return self.stages[0].apply_mut(side, x, y);
+        match self.mode {
+            PcCompositeMode::Multiplicative => {
+                if self.stages.len() == 1 {
+                    return self.stages[0].apply_mut(side, x, y);
+                }
+                TLS_BUF.with(|b| -> Result<(), KError> {
+                    let mut tmp = b.borrow_mut();
+                    if tmp.len() < x.len() {
+                        tmp.resize(x.len(), S::zero());
+                    }
+                    tmp.copy_from_slice(x);
+                    for st in self.stages.iter_mut() {
+                        st.apply_mut(side, &tmp, y)?;
+                        tmp.copy_from_slice(y);
+                    }
+                    Ok(())
+                })
+            }
+            PcCompositeMode::Additive => {
+                y.fill(S::zero());
+                TLS_BUF.with(|b| -> Result<(), KError> {
+                    let mut tmp = b.borrow_mut();
+                    if tmp.len() < x.len() {
+                        tmp.resize(x.len(), S::zero());
+                    }
+                    for st in self.stages.iter_mut() {
+                        st.apply_mut(side, x, &mut tmp)?;
+                        for (yi, ti) in y.iter_mut().zip(tmp.iter()) {
+                            *yi += *ti;
+                        }
+                    }
+                    Ok(())
+                })
+            }
         }
-        TLS_BUF.with(|b| -> Result<(), KError> {
-            let mut tmp = b.borrow_mut();
-            if tmp.len() < x.len() {
-                tmp.resize(x.len(), S::zero());
-            }
-            tmp.copy_from_slice(x);
-            for st in self.stages.iter_mut() {
-                st.apply_mut(side, &tmp, y)?;
-                tmp.copy_from_slice(y);
-            }
-            Ok(())
-        })
     }
 
     fn supports_numeric_update(&self) -> bool {
