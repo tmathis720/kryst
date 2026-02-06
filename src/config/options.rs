@@ -136,6 +136,12 @@ pub struct KspOptions {
     pub min_len_vec: Option<usize>,
     pub min_rows_spmv: Option<usize>,
     pub chunk_rows_spmv: Option<usize>,
+    /// Damping/step parameter for Richardson KSP.
+    pub richardson_omega: Option<f64>,
+    /// Damping/step parameter for Chebyshev-as-KSP mode.
+    pub chebyshev_omega: Option<f64>,
+    /// Restart length for GCR family (falls back to ksp_restart).
+    pub gcr_restart: Option<usize>,
 }
 
 /// KSP type tag for option resolution helpers.
@@ -496,6 +502,14 @@ impl Sink for KspOptions {
             "ksp_chunk_rows_spmv" => set_opt!(
                 &mut self.chunk_rows_spmv,
                 ensure_ge_1("ksp_chunk_rows_spmv", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_richardson_omega" => {
+                set_opt!(&mut self.richardson_omega, parse_as::<f64>(v, spec)?)
+            }
+            "ksp_chebyshev_omega" => set_opt!(&mut self.chebyshev_omega, parse_as::<f64>(v, spec)?),
+            "ksp_gcr_restart" => set_opt!(
+                &mut self.gcr_restart,
+                ensure_ge_1("ksp_gcr_restart", parse_as::<usize>(v, spec)?)?
             ),
             "options_file" => Ok(()), // consumed earlier by expansion
             _ => Err(KError::SolveError(format!("Unknown KSP key: {}", spec.key))),

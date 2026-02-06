@@ -70,10 +70,13 @@ use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
-    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, FgmresSolver, GmresSolver, LinearSolver,
-    MinresSolver, MonitorAction, MonitorCallback, PCG_PIPELINED_DEFAULT_REPLACE_EVERY,
-    PcaGmresSolver, PcaPcMode, PcgSolver, PcgVariant, QmrSolver, TfqmrSolver,
+    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, CrSolver, FgmresSolver, GcrSolver,
+    GmresSolver, LinearSolver, MinresSolver, MonitorAction, MonitorCallback,
+    PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver, PcgVariant,
+    RichardsonSolver, TcqmrSolver,
 };
+#[cfg(feature = "complex")]
+use crate::solver::{QmrSolver, TfqmrSolver};
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::utils::reduction::ReductOptions;
 use std::fmt;
@@ -173,6 +176,12 @@ pub enum SolverType {
     PcaGmres,
     Qmr,
     Tfqmr,
+    Tcqmr,
+    Richardson,
+    Chebyshev,
+    Cr,
+    Gcr,
+    PipeGcr,
     Preonly,
 }
 
@@ -185,7 +194,9 @@ impl SolverType {
             | SolverType::Pcg
             | SolverType::Minres
             | SolverType::Lsqr
-            | SolverType::Lsmr => Some(PcSide::Left),
+            | SolverType::Lsmr
+            | SolverType::Chebyshev
+            | SolverType::Cr => Some(PcSide::Left),
             _ => None,
         }
     }
@@ -209,6 +220,12 @@ impl FromStr for SolverType {
             "pca_gmres" | "pcagmres" => Ok(SolverType::PcaGmres),
             "qmr" => Ok(SolverType::Qmr),
             "tfqmr" => Ok(SolverType::Tfqmr),
+            "tcqmr" => Ok(SolverType::Tcqmr),
+            "richardson" => Ok(SolverType::Richardson),
+            "chebyshev" => Ok(SolverType::Chebyshev),
+            "cr" => Ok(SolverType::Cr),
+            "gcr" => Ok(SolverType::Gcr),
+            "gcr_pipe" | "pipegcr" => Ok(SolverType::PipeGcr),
             "preonly" => Ok(SolverType::Preonly),
             other => Err(KError::UnrecognizedSolverType(other.to_string())),
         }
@@ -598,6 +615,24 @@ impl KspContext {
                 self.rtol,
                 self.maxits,
             ))),
+            SolverType::Tcqmr => Some(Box::new(TcqmrSolver::new(self.rtol, self.maxits))),
+            SolverType::Richardson => Some(Box::new(RichardsonSolver::new(self.rtol, self.maxits))),
+            SolverType::Chebyshev => {
+                let mut s = RichardsonSolver::new(self.rtol, self.maxits);
+                s.set_omega(0.8);
+                Some(Box::new(s))
+            }
+            SolverType::Cr => Some(Box::new(CrSolver::new(self.rtol, self.maxits))),
+            SolverType::Gcr => Some(Box::new(GcrSolver::new(
+                self.restart,
+                self.rtol,
+                self.maxits,
+            ))),
+            SolverType::PipeGcr => {
+                return Err(KError::Unsupported(
+                    "PipeGCR is not yet implemented; use -ksp_type gcr".into(),
+                ));
+            }
             SolverType::Preonly => {
                 // PREONLY is intentionally "no iterative solver".
                 // We’ll dispatch to `pc.direct_solve()` in `solve()`.
@@ -769,6 +804,39 @@ impl KspContext {
             let st = SolverType::from_str(t)?;
             self.set_type(st)?;
         }
+        if opts.richardson_omega.is_some()
+            && !matches!(self.solver_type, Some(SolverType::Richardson))
+        {
+            return Err(KError::InvalidInput(
+                "-ksp_richardson_omega requires -ksp_type richardson".into(),
+            ));
+        }
+        if opts.chebyshev_omega.is_some()
+            && !matches!(self.solver_type, Some(SolverType::Chebyshev))
+        {
+            return Err(KError::InvalidInput(
+                "-ksp_chebyshev_omega requires -ksp_type chebyshev".into(),
+            ));
+        }
+        if opts.gcr_restart.is_some() && !matches!(self.solver_type, Some(SolverType::Gcr)) {
+            return Err(KError::InvalidInput(
+                "-ksp_gcr_restart requires -ksp_type gcr".into(),
+            ));
+        }
+        if let Some(omega) = opts.richardson_omega {
+            if omega <= 0.0 {
+                return Err(KError::InvalidInput(
+                    "-ksp_richardson_omega must be > 0".into(),
+                ));
+            }
+        }
+        if let Some(omega) = opts.chebyshev_omega {
+            if omega <= 0.0 {
+                return Err(KError::InvalidInput(
+                    "-ksp_chebyshev_omega must be > 0".into(),
+                ));
+            }
+        }
         if let Some(rtol) = opts.rtol {
             self.rtol = rtol;
         }
@@ -818,6 +886,38 @@ impl KspContext {
                 }
             })
         });
+
+        if let Some(r) = opts.gcr_restart {
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<GcrSolver>())
+            {
+                *s = GcrSolver::new(r, self.rtol, self.maxits);
+            }
+        }
+
+        if let Some(omega) = opts.richardson_omega {
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<RichardsonSolver>())
+            {
+                s.set_omega(omega);
+            }
+        }
+
+        if let Some(omega) = opts.chebyshev_omega {
+            if matches!(self.solver_type, Some(SolverType::Chebyshev)) {
+                if let Some(s) = self
+                    .solver
+                    .as_mut()
+                    .and_then(|b| b.as_any_mut().downcast_mut::<RichardsonSolver>())
+                {
+                    s.set_omega(omega);
+                }
+            }
+        }
 
         // --- GMRES options ---
         if let Some(s) = self
@@ -2132,6 +2232,16 @@ impl KspContext {
                         work,
                     )?
                 }
+                SolverType::Tcqmr
+                | SolverType::Richardson
+                | SolverType::Chebyshev
+                | SolverType::Cr
+                | SolverType::Gcr
+                | SolverType::PipeGcr => {
+                    return Err(KError::Unsupported(
+                        "Selected solver is not yet available for complex scalars".into(),
+                    ));
+                }
                 SolverType::Preonly => unreachable!("PREONLY handled earlier"),
             };
 
@@ -2230,7 +2340,8 @@ impl KspContext {
     where
         F: Fn(usize, R, usize) -> MonitorAction + Send + Sync + 'static,
     {
-        self.monitors.push(Box::new(move |it, r, reds| f(it, r, reds)));
+        self.monitors
+            .push(Box::new(move |it, r, reds| f(it, r, reds)));
         self.monitor_policy = MonitorPolicy::Rank0Only;
     }
 
