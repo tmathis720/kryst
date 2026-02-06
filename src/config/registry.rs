@@ -62,6 +62,27 @@ pub static SPECS: &[Spec] = &[
         kind: ValueKind::UInt,
         doc: "GMRES-specific restart (overrides -ksp_restart)",
     },
+    Spec {
+        flag: "-ksp_gcr_restart",
+        key: "ksp_gcr_restart",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "GCR restart length (overrides -ksp_restart for gcr)",
+    },
+    Spec {
+        flag: "-ksp_richardson_omega",
+        key: "ksp_richardson_omega",
+        arity: Arity::One,
+        kind: ValueKind::Float,
+        doc: "Richardson damping parameter",
+    },
+    Spec {
+        flag: "-ksp_chebyshev_omega",
+        key: "ksp_chebyshev_omega",
+        arity: Arity::One,
+        kind: ValueKind::Float,
+        doc: "Chebyshev(KSP) damping parameter",
+    },
     // GMRES/FGMRES orthogonalization and extras
     Spec {
         flag: "-ksp_gmres_orthog",

@@ -227,6 +227,12 @@ pub use idrs::{
 };
 pub mod cgs;
 pub use cgs::CgsSolver;
+pub mod richardson;
+pub use richardson::RichardsonSolver;
+pub mod chebyshev;
+pub use chebyshev::ChebyshevSolver;
+pub mod cr;
+pub use cr::CrSolver;
 pub mod pcg;
 pub use pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
 pub mod minres;
@@ -254,6 +260,11 @@ pub mod qmr;
 pub use qmr::QmrSolver;
 pub mod tfqmr;
 pub use tfqmr::TfqmrSolver;
+pub mod tcqmr;
+pub use tcqmr::TcqmrSolver;
+
+pub mod gcr;
+pub use gcr::GcrSolver;
 
 pub mod pca_gmres;
 pub use pca_gmres::{PcaGmresSolver, PcaPcMode};

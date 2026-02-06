@@ -14,7 +14,7 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 ## Features
 
 ### Iterative Solvers
-- **Krylov Methods**: CG, PCG, GMRES, FGMRES, BiCGStab, CGS, QMR, TFQMR, MINRES, CGNR
+- **Krylov Methods**: CG, PCG, GMRES, FGMRES, GCR, BiCGStab, CGS, CR, Richardson, Chebyshev (KSP), QMR, TFQMR/TCQMR, MINRES, CGNR
 - **Direct Methods**: LU and QR factorization via PREONLY solver type
 - **Parallel Support**: Shared-memory (Rayon) and distributed-memory (MPI) parallelism
 
@@ -355,12 +355,15 @@ Run your program with PETSc-style options:
 ## Supported Command-line Options
 
 ### KSP (Krylov Solver) Options
-- `-ksp_type <solver>` - Solver type: `cg`, `pcg`, `gmres`, `fgmres`, `bicgstab`, `cgs`, `qmr`, `tfqmr`, `minres`, `cgnr`, `preonly`
+- `-ksp_type <solver>` - Solver type: `cg`, `pcg`, `gmres`, `fgmres`, `gcr`, `bicgstab`, `cgs`, `cr`, `richardson`, `chebyshev`, `qmr`, `tfqmr`, `tcqmr`, `minres`, `cgnr`, `preonly`
 - `-ksp_rtol <float>` - Relative convergence tolerance (default: 1e-5)
 - `-ksp_atol <float>` - Absolute convergence tolerance (default: 1e-50)
 - `-ksp_dtol <float>` - Divergence tolerance (default: 1e5)
 - `-ksp_max_it <int>` - Maximum number of iterations (default: 10000)
 - `-ksp_gmres_restart <int>` - GMRES restart parameter (default: 50)
+- `-ksp_gcr_restart <int>` - GCR restart parameter (falls back to `-ksp_restart`)
+- `-ksp_richardson_omega <real>` - Richardson damping parameter (>0)
+- `-ksp_chebyshev_omega <real>` - Chebyshev(KSP) damping parameter (>0)
 - `-ksp_pc_side <side>` - Preconditioning side: `left`, `right`, `symmetric`
 - `-ksp_reproducible` - Enable deterministic reductions; forces rank-ordered MPI sums and stable intra-rank chunking.
 
