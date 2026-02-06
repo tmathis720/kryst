@@ -130,6 +130,15 @@ pub enum PcReusePolicy {
     ReuseNumeric,
     Auto,
 }
+
+/// Distributed applicability of a preconditioner when MPI is enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcDistributedSupport {
+    /// Preconditioner operates only on rank-local slices.
+    LocalOnly,
+    /// Preconditioner applies a collective/distributed strategy.
+    Distributed,
+}
 impl PcReusePolicy {
     pub fn allow_numeric(self) -> bool {
         matches!(self, PcReusePolicy::ReuseNumeric | PcReusePolicy::Auto)
@@ -197,6 +206,11 @@ pub trait Preconditioner: Send + Sync {
     /// Capabilities advertised by this preconditioner.
     fn capabilities(&self) -> PcCaps {
         PcCaps::default()
+    }
+
+    /// Report whether the preconditioner is distributed-aware under MPI.
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 
     /// Mutable application (flexible/nonlinear preconditioners).

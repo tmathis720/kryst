@@ -102,6 +102,10 @@ impl Preconditioner for SuperLuDistPc {
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
     }
+
+    fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
+        crate::preconditioner::PcDistributedSupport::Distributed
+    }
 }
 
 #[cfg(feature = "complex")]
