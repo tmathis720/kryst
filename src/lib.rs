@@ -8,6 +8,9 @@
 //! # kryst
 //! PETSc-like Krylov solvers (KSP) and preconditioners (PC) in Rust.
 //!
+//! ## PETSc compatibility matrix
+//! - [PETSc → kryst mapping](https://github.com/tmathis720/kryst/blob/main/docs/petsc_mapping.md)
+//!
 //! ## Quick start (serial)
 //! ```rust,no_run
 //! use kryst::prelude::*;
