@@ -12,6 +12,11 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         PcConfig::Qr => Ok(Some(Box::new(
             crate::preconditioner::nalgebra_direct::NalgebraQrPc::new(),
         ))),
+        PcConfig::FieldSplit { .. }
+        | PcConfig::Shell { .. }
+        | PcConfig::Ksp { .. }
+        | PcConfig::Mg { .. }
+        | PcConfig::Bddc { .. } => Ok(None),
         _ => Ok(None),
     }
 }
