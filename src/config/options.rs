@@ -218,6 +218,20 @@ pub struct PcOptions {
     pub amg_dist_instrumentation: Option<bool>,
     /// Scaling for halo-based coarse correction prototype.
     pub amg_dist_coarse_ghost_scale: Option<f64>,
+    // FieldSplit
+    pub pc_fieldsplit_block_sizes: Option<Vec<usize>>,
+    pub pc_fieldsplit_child_pc_type: Option<String>,
+    // Shell
+    pub pc_shell_name: Option<String>,
+    // KSP-as-PC
+    pub pc_ksp_ksp_type: Option<String>,
+    pub pc_ksp_pc_type: Option<String>,
+    pub pc_ksp_maxits: Option<usize>,
+    pub pc_ksp_rtol: Option<f64>,
+    // MG
+    pub pc_mg_levels: Option<usize>,
+    pub pc_mg_cycle_type: Option<String>,
+
     /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
     /// Structured chain.
@@ -637,7 +651,10 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.amg_dist_apply_mode, v.to_lowercase())
             }
             "pc_amg_dist_coarse_ghost_scale" => {
-                set_opt!(&mut self.amg_dist_coarse_ghost_scale, parse_as::<f64>(v, spec)?)
+                set_opt!(
+                    &mut self.amg_dist_coarse_ghost_scale,
+                    parse_as::<f64>(v, spec)?
+                )
             }
             "pc_amg_tolerance" => set_opt!(&mut self.amg_tolerance, parse_as::<f64>(v, spec)?),
             "pc_amg_max_iterations" => {
@@ -655,6 +672,27 @@ impl Sink for PcOptions {
                 kinds::SorMatSideKind::from_str(v)?;
                 set_opt!(&mut self.sor_mat_side, v.to_lowercase())
             }
+            "pc_fieldsplit_block_sizes" => {
+                let parsed: Result<Vec<usize>, _> =
+                    v.split(',').map(|s| s.trim().parse()).collect();
+                match parsed {
+                    Ok(vv) => set_opt!(&mut self.pc_fieldsplit_block_sizes, vv),
+                    Err(_) => Err(KError::SolveError(format!(
+                        "Invalid {} value: {}. Use comma-separated usize list",
+                        spec.flag, v
+                    ))),
+                }
+            }
+            "pc_fieldsplit_child_pc_type" => {
+                set_opt!(&mut self.pc_fieldsplit_child_pc_type, v.to_lowercase())
+            }
+            "pc_shell_name" => set_opt!(&mut self.pc_shell_name, v.to_string()),
+            "pc_ksp_type" => set_opt!(&mut self.pc_ksp_ksp_type, v.to_lowercase()),
+            "pc_ksp_pc_type" => set_opt!(&mut self.pc_ksp_pc_type, v.to_lowercase()),
+            "pc_ksp_maxits" => set_opt!(&mut self.pc_ksp_maxits, parse_as::<usize>(v, spec)?),
+            "pc_ksp_rtol" => set_opt!(&mut self.pc_ksp_rtol, parse_as::<f64>(v, spec)?),
+            "pc_mg_levels" => set_opt!(&mut self.pc_mg_levels, parse_as::<usize>(v, spec)?),
+            "pc_mg_cycle_type" => set_opt!(&mut self.pc_mg_cycle_type, v.to_lowercase()),
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_shift_diag" => set_opt!(&mut self.pc_shift_diag, parse_as::<f64>(v, spec)?),
             "pc_diag_inject_tau" => {
@@ -1350,9 +1388,7 @@ impl PcOptions {
         }
         if let Ok(v) = std::env::var("KRYST_PC_JACOBI_BLOCK_SIZE") {
             me.jacobi_block_size = Some(v.parse().map_err(|_| {
-                KError::SolveError(format!(
-                    "Invalid KRYST_PC_JACOBI_BLOCK_SIZE: {v}"
-                ))
+                KError::SolveError(format!("Invalid KRYST_PC_JACOBI_BLOCK_SIZE: {v}"))
             })?);
         }
         if let Ok(v) = std::env::var("KRYST_PC_ILU_LEVELS") {
@@ -1468,9 +1504,10 @@ impl PcOptions {
             me.pc_fixdiag = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
         }
         if let Ok(v) = std::env::var("KRYST_PC_SHIFT_DIAG") {
-            me.pc_shift_diag = Some(v.parse().map_err(|_| {
-                KError::SolveError(format!("Invalid KRYST_PC_SHIFT_DIAG: {v}"))
-            })?);
+            me.pc_shift_diag =
+                Some(v.parse().map_err(|_| {
+                    KError::SolveError(format!("Invalid KRYST_PC_SHIFT_DIAG: {v}"))
+                })?);
         }
         if let Ok(v) = std::env::var("KRYST_PC_DIAG_INJECT_TAU") {
             me.pc_diag_inject_tau = Some(v.parse().map_err(|_| {
@@ -1623,6 +1660,16 @@ impl PcOptions {
         o!(amg_dist_apply_mode);
         o!(amg_dist_instrumentation);
         o!(amg_dist_coarse_ghost_scale);
+
+        o!(pc_fieldsplit_block_sizes);
+        o!(pc_fieldsplit_child_pc_type);
+        o!(pc_shell_name);
+        o!(pc_ksp_ksp_type);
+        o!(pc_ksp_pc_type);
+        o!(pc_ksp_maxits);
+        o!(pc_ksp_rtol);
+        o!(pc_mg_levels);
+        o!(pc_mg_cycle_type);
 
         o!(pc_chain);
         o!(chain);

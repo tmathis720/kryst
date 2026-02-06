@@ -113,6 +113,12 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             Ok(Some(pc))
         }
 
+        PcConfig::FieldSplit { .. }
+        | PcConfig::Shell { .. }
+        | PcConfig::Ksp { .. }
+        | PcConfig::Mg { .. }
+        | PcConfig::Bddc { .. } => Ok(None),
+
         PcConfig::Lu => {
             #[cfg(feature = "dense-direct")]
             {

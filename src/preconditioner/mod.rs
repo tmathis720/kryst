@@ -499,11 +499,11 @@ pub mod asm_amg;
 pub mod block_jacobi;
 #[cfg(feature = "backend-faer")]
 pub mod builders;
-pub mod builders_none;
 #[cfg(feature = "backend-faer")]
 pub mod builders_faer;
 #[cfg(feature = "backend-nalgebra")]
 pub mod builders_nalgebra;
+pub mod builders_none;
 pub mod chain;
 #[cfg(feature = "backend-faer")]
 pub mod chebyshev;
@@ -513,8 +513,7 @@ pub mod deflation;
 pub mod direct;
 #[cfg(feature = "backend-faer")]
 pub mod dist;
-#[cfg(feature = "backend-nalgebra")]
-pub mod nalgebra_direct;
+pub mod fieldsplit;
 #[cfg(feature = "backend-faer")]
 pub mod ilu;
 #[cfg(feature = "backend-faer")]
@@ -527,7 +526,12 @@ pub mod ilut;
 #[cfg(feature = "backend-faer")]
 pub mod ilutp;
 pub mod jacobi;
+pub mod ksp_pc;
+pub mod mg;
+#[cfg(feature = "backend-nalgebra")]
+pub mod nalgebra_direct;
 pub mod pivot;
+pub mod shell;
 #[cfg(feature = "backend-faer")]
 pub mod sor;
 pub mod tri_solve;

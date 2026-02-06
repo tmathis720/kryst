@@ -80,6 +80,11 @@ pub enum PcType {
     Chebyshev,
     Amg,
     ApproxInverse,
+    FieldSplit,
+    Shell,
+    Ksp,
+    Mg,
+    Bddc,
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
@@ -105,6 +110,11 @@ impl FromStr for PcType {
             "chebyshev" => Ok(PcType::Chebyshev),
             "amg" => Ok(PcType::Amg),
             "approxinv" | "approxinverse" => Ok(PcType::ApproxInverse),
+            "fieldsplit" => Ok(PcType::FieldSplit),
+            "shell" => Ok(PcType::Shell),
+            "ksp" => Ok(PcType::Ksp),
+            "mg" => Ok(PcType::Mg),
+            "bddc" => Ok(PcType::Bddc),
             "lu" => Ok(PcType::Lu),
             "qr" => Ok(PcType::Qr),
             "superludist" => {
@@ -209,6 +219,26 @@ pub enum PcConfig {
         reg: R,
         max_cond: R,
         parallel: bool,
+    },
+    FieldSplit {
+        block_sizes: Vec<usize>,
+        child_pc_type: Option<String>,
+    },
+    Shell {
+        name: Option<String>,
+    },
+    Ksp {
+        inner_ksp_type: Option<String>,
+        inner_pc_type: Option<String>,
+        maxits: usize,
+        rtol: R,
+    },
+    Mg {
+        levels: usize,
+        cycle_type: Option<String>,
+    },
+    Bddc {
+        placeholder: bool,
     },
     Lu,
     Qr,
@@ -398,6 +428,30 @@ impl PcConfig {
                     parallel,
                 }
             }
+            FieldSplit => {
+                let block_sizes = o
+                    .pc_fieldsplit_block_sizes
+                    .clone()
+                    .unwrap_or_else(|| vec![1]);
+                PcConfig::FieldSplit {
+                    block_sizes,
+                    child_pc_type: o.pc_fieldsplit_child_pc_type.clone(),
+                }
+            }
+            Shell => PcConfig::Shell {
+                name: o.pc_shell_name.clone(),
+            },
+            Ksp => PcConfig::Ksp {
+                inner_ksp_type: o.pc_ksp_ksp_type.clone(),
+                inner_pc_type: o.pc_ksp_pc_type.clone(),
+                maxits: o.pc_ksp_maxits.unwrap_or(3),
+                rtol: o.pc_ksp_rtol.unwrap_or(1e-2),
+            },
+            Mg => PcConfig::Mg {
+                levels: o.pc_mg_levels.unwrap_or(2),
+                cycle_type: o.pc_mg_cycle_type.clone(),
+            },
+            Bddc => PcConfig::Bddc { placeholder: true },
 
             Lu => PcConfig::Lu,
             Qr => PcConfig::Qr,
