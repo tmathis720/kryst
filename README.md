@@ -1018,6 +1018,7 @@ let stats = ksp.solve(&rhs, &mut sol)?;
 - **[Repository](https://github.com/tmathis720/kryst)** - Source code, issues, and discussions
 - **[Examples Directory](https://github.com/tmathis720/kryst/tree/main/examples)** - Comprehensive demonstration programs
 - **[Benchmarks](https://github.com/tmathis720/kryst/tree/main/benches)** - Performance comparison suite
+- **[PETSc Compatibility Matrix](docs/petsc_mapping.md)** - Detailed mapping of PETSc KSP/PC APIs to kryst
 - **[Phase III/IV Summary](PHASE_III_IV_SUMMARY.md)** - Advanced preconditioning and automation features
 
 ### Mathematical References
