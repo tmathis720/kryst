@@ -4,6 +4,10 @@
 //! This module exposes a small trait for global wrappers and the distributed
 //! vector helper that carries only the local slice.
 
+mod coarse;
+
+pub use coarse::DistCoarseStrategy;
+
 use crate::error::KError;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
@@ -261,6 +265,10 @@ impl Preconditioner for DistPcAdapter {
 
     fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
+    }
+
+    fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
+        crate::preconditioner::PcDistributedSupport::Distributed
     }
 }
 

@@ -34,7 +34,8 @@ use crate::preconditioner::builders::{
     build_ilut_with_conditioning, build_ilutp_with_conditioning, build_ilu0_with_conditioning,
 };
 #[cfg(feature = "mpi")]
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
+use crate::preconditioner::dist::DistCoarseStrategy;
 use crate::utils::conditioning::ConditioningOptions;
 #[cfg(feature = "mpi")]
 use std::sync::Arc;
@@ -53,6 +54,7 @@ pub struct DistributedAsm {
     inner_pc: AsmInnerPc,
     mode: AsmMode,
     weighting: Weighting,
+    coarse_strategy: DistCoarseStrategy,
     state: Option<DistributedAsmState>,
     last_sid: Option<StructureId>,
     last_vid: Option<ValuesId>,
@@ -81,6 +83,7 @@ impl DistributedAsm {
         inner_pc: AsmInnerPc,
         mode: AsmMode,
         weighting: Weighting,
+        coarse_strategy: DistCoarseStrategy,
     ) -> Self {
         Self {
             overlap,
@@ -89,6 +92,7 @@ impl DistributedAsm {
             inner_pc,
             mode,
             weighting,
+            coarse_strategy,
             state: None,
             last_sid: None,
             last_vid: None,
@@ -109,6 +113,7 @@ impl DistributedAsm {
             inner_pc,
             AsmMode::RAS,
             weighting,
+            DistCoarseStrategy::None,
         )
     }
 }
@@ -128,6 +133,13 @@ impl Preconditioner for DistributedAsm {
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if !matches!(self.coarse_strategy, DistCoarseStrategy::None) {
+            log::warn!(
+                "Distributed ASM coarse strategy {} not supported yet; falling back to none.",
+                self.coarse_strategy
+            );
+            self.coarse_strategy = DistCoarseStrategy::None;
+        }
         if self.mode == AsmMode::ASM {
             return Err(KError::Unsupported(
                 "Distributed ASM currently supports only RAS mode".into(),
@@ -330,6 +342,10 @@ impl Preconditioner for DistributedAsm {
 
     fn required_format(&self) -> OpFormat {
         OpFormat::Csr
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::Distributed
     }
 }
 

@@ -19,7 +19,8 @@ use crate::matrix::DistCsrOp;
 use crate::matrix::op::LinOp;
 #[cfg(feature = "mpi")]
 use crate::parallel::Comm;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
+use crate::preconditioner::dist::DistCoarseStrategy;
 
 /// Metadata for a local ASM + global AMG coarse-correction hybrid.
 #[cfg(feature = "mpi")]
@@ -41,6 +42,7 @@ pub struct AsmPc {
     inner_pc: AsmInnerPc,
     mode: AsmMode,
     weighting: Weighting,
+    dist_coarse_strategy: DistCoarseStrategy,
     inner: Option<AsmImpl>,
 }
 
@@ -87,6 +89,7 @@ impl AsmPc {
             inner_pc,
             mode,
             weighting,
+            dist_coarse_strategy: DistCoarseStrategy::None,
             inner: None,
         }
     }
@@ -106,6 +109,12 @@ impl AsmPc {
             AsmMode::RAS,
             weighting,
         )
+    }
+
+    /// Configure the distributed coarse-level strategy (MPI only).
+    pub fn with_dist_coarse_strategy(mut self, strategy: DistCoarseStrategy) -> Self {
+        self.dist_coarse_strategy = strategy;
+        self
     }
 
     fn build_serial(&self) -> AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
@@ -150,6 +159,7 @@ impl Preconditioner for AsmPc {
                     self.inner_pc,
                     self.mode,
                     self.weighting,
+                    self.dist_coarse_strategy,
                 );
                 match dist.setup(op) {
                     Ok(()) => {
@@ -200,6 +210,15 @@ impl Preconditioner for AsmPc {
             #[cfg(feature = "mpi")]
             Some(AsmImpl::Distributed(pc)) => pc.update_symbolic(op),
             None => self.setup(op),
+        }
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        match &self.inner {
+            Some(AsmImpl::Serial(_)) => PcDistributedSupport::LocalOnly,
+            #[cfg(feature = "mpi")]
+            Some(AsmImpl::Distributed(_)) => PcDistributedSupport::Distributed,
+            None => PcDistributedSupport::LocalOnly,
         }
     }
 }

@@ -45,9 +45,12 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 - **Smoothed AMG**: Configurable pre- and post-smoothing parameters (`amg_nu_pre`, `amg_nu_post`)
 
 #### MPI support notes
-- **MPI-local (per-rank)**: AMG, Chebyshev, SOR/SSOR, ILU/ILUT/ILUP/ILUTP, Approximate Inverse, LU/QR (dense-direct). These operate on the local block of a distributed matrix.
-- **Distributed-capable**: ASM over `DistCsrOp`, Block Jacobi on `DistCsrOp`, and `SuperLU_DIST` (when the `superlu_dist` feature is enabled).
-- **PC-Chaining** works on MPI, but each preconditioner in the chain keeps its local vs distributed behavior.
+- **MPI-local (per-rank)**: Chebyshev, SOR/SSOR, ILU/ILUT/ILUP/ILUTP, Approximate Inverse, LU/QR (dense-direct). These operate on the local block of a distributed matrix.
+- **Distributed-capable**: AMG (`root_gather` or `local_prototype` via `-pc_amg_dist_apply_mode`), ASM/RAS over `DistCsrOp`, Block Jacobi on `DistCsrOp`, and `SuperLU_DIST` (feature-gated).
+- **PC-Chaining** works on MPI, but each preconditioner stage keeps its own local vs distributed behavior.
+
+For a detailed local-vs-distributed matrix covering all preconditioners, see
+`docs/matrix_features.md`.
 
 ### Monitoring & Automation
 
@@ -397,6 +400,7 @@ Run your program with PETSc-style options:
 - `-pc_amg_rap_truncation_factor <float>` / `-pc_amg_rap_truncation_abs <float>` / `-pc_amg_rap_maxnnz <int>` prune RAP entries.
 - `-pc_amg_keep_transpose <bool>` / `-pc_amg_keep_pivot_in_rap <bool>` control symmetry-preserving entries.
 - `-pc_amg_require_spd <bool>` / `-pc_amg_print_setup <bool>` control SPD enforcement and setup printing.
+- `-pc_amg_dist_apply_mode <root_gather|local_prototype>` selects the distributed coarse strategy under MPI.
 
 Example AMG invocation:
 ```bash

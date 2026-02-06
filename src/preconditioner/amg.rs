@@ -32,6 +32,7 @@ use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::{Comm, UniverseComm};
+use crate::preconditioner::dist::DistCoarseStrategy;
 use crate::preconditioner::asm::{Asm, AsmCombine, AsmConfig, AsmLocalSolver};
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
@@ -225,18 +226,6 @@ impl MixedPrecision {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DistApplyMode {
-    RootGather,
-    LocalPrototype,
-}
-
-impl Default for DistApplyMode {
-    fn default() -> Self {
-        DistApplyMode::RootGather
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MixedStorage {
     Cached,
     Transient,
@@ -397,7 +386,7 @@ pub struct AMGConfig {
     pub mixed_precision: Option<MixedPrecision>,
     pub mixed_storage: MixedStorage,
     pub conditioning: ConditioningOptions,
-    pub dist_apply_mode: DistApplyMode,
+    pub dist_coarse_strategy: DistCoarseStrategy,
     pub dist_apply_instrumentation: bool,
     pub dist_coarse_ghost_scale: f64,
 }
@@ -505,7 +494,7 @@ impl Default for AMGConfig {
             mixed_precision: None,
             mixed_storage: MixedStorage::Cached,
             conditioning: ConditioningOptions::default(),
-            dist_apply_mode: DistApplyMode::RootGather,
+            dist_coarse_strategy: DistCoarseStrategy::RootGather,
             dist_apply_instrumentation: false,
             dist_coarse_ghost_scale: 0.0,
         };
@@ -724,7 +713,7 @@ impl AMGConfig {
             }
         }
         if let Some(ref mode) = opts.amg_dist_apply_mode {
-            cfg.dist_apply_mode = parse_dist_apply_mode(mode)?;
+            cfg.dist_coarse_strategy = parse_dist_apply_mode(mode)?;
         }
         if let Some(flag) = opts.amg_dist_instrumentation {
             cfg.dist_apply_instrumentation = flag;
@@ -756,14 +745,10 @@ fn map_coarsen(kind: AmgCoarsenKind) -> CoarsenType {
     }
 }
 
-fn parse_dist_apply_mode(value: &str) -> Result<DistApplyMode, KError> {
-    match value.to_ascii_lowercase().as_str() {
-        "root" | "root_gather" | "gather" => Ok(DistApplyMode::RootGather),
-        "local" | "local_prototype" | "prototype" => Ok(DistApplyMode::LocalPrototype),
-        _ => Err(KError::InvalidInput(format!(
-            "invalid amg_dist_apply_mode: {value}"
-        ))),
-    }
+fn parse_dist_apply_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
+    DistCoarseStrategy::from_str(value).map_err(|_| {
+        KError::InvalidInput(format!("invalid amg_dist_apply_mode: {value}"))
+    })
 }
 
 fn map_interp(kind: AmgInterpKind) -> InterpType {
@@ -3124,6 +3109,42 @@ impl AMG {
 
     // ---- Setup paths --------------------------------------------------------
 
+    #[cfg(not(feature = "complex"))]
+    fn resolve_dist_coarse_strategy(
+        &self,
+        comm: &UniverseComm,
+    ) -> Result<DistCoarseStrategy, KError> {
+        let strategy = self.cfg.dist_coarse_strategy;
+        match strategy {
+            DistCoarseStrategy::None => {
+                if comm.size() > 1 {
+                    log::warn!(
+                        "AMG distributed coarse strategy set to none; falling back to root_gather."
+                    );
+                    Ok(DistCoarseStrategy::RootGather)
+                } else {
+                    Ok(DistCoarseStrategy::None)
+                }
+            }
+            DistCoarseStrategy::SuperLuDist => {
+                #[cfg(feature = "superlu_dist")]
+                {
+                    log::warn!(
+                        "AMG distributed coarse strategy superlu_dist not wired yet; falling back to root_gather."
+                    );
+                    Ok(DistCoarseStrategy::RootGather)
+                }
+                #[cfg(not(feature = "superlu_dist"))]
+                {
+                    Err(KError::Unsupported(
+                        "superlu_dist coarse strategy requires feature superlu_dist".into(),
+                    ))
+                }
+            }
+            _ => Ok(strategy),
+        }
+    }
+
     fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<Box<AmgHierarchy>, KError> {
         // Build the full hierarchy from scratch (symbolic + numeric)
         let mut cfg = self.cfg.clone();
@@ -3167,7 +3188,8 @@ impl AMG {
 
     #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
-        if matches!(self.cfg.dist_apply_mode, DistApplyMode::LocalPrototype) {
+        let strategy = self.resolve_dist_coarse_strategy(&dist.comm())?;
+        if matches!(strategy, DistCoarseStrategy::LocalPrototype) {
             return self.setup_dist_local(dist);
         }
         let comm = dist.comm();
@@ -3499,16 +3521,26 @@ impl AMG {
         let do_prof = self.cfg.dist_apply_instrumentation;
         let mut stats = if do_prof {
             let mut stats = DistApplyStats::default();
-            stats.mode = self.cfg.dist_apply_mode;
+            stats.mode = self.cfg.dist_coarse_strategy;
             Some(stats)
         } else {
             None
         };
 
-        let result = match self.cfg.dist_apply_mode {
-            DistApplyMode::RootGather => self.apply_dist_root(side, r, z, dist, stats.as_mut()),
-            DistApplyMode::LocalPrototype => {
+        let strategy = self.resolve_dist_coarse_strategy(&dist.comm)?;
+        let result = match strategy {
+            DistCoarseStrategy::RootGather => {
+                self.apply_dist_root(side, r, z, dist, stats.as_mut())
+            }
+            DistCoarseStrategy::LocalPrototype => {
                 self.apply_dist_local(side, r, z, dist, stats.as_mut())
+            }
+            DistCoarseStrategy::None => Err(KError::Unsupported(
+                "AMG distributed apply requires a coarse strategy (root_gather or local_prototype)"
+                    .into(),
+            )),
+            DistCoarseStrategy::SuperLuDist => {
+                self.apply_dist_root(side, r, z, dist, stats.as_mut())
             }
         };
 
@@ -6176,6 +6208,15 @@ impl Preconditioner for AMG {
         }
         Ok(())
     }
+
+    fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
+        if let Some(dist) = &self.dist {
+            if dist.comm.size() > 1 {
+                return crate::preconditioner::PcDistributedSupport::Distributed;
+            }
+        }
+        crate::preconditioner::PcDistributedSupport::LocalOnly
+    }
 }
 
 #[cfg(feature = "complex")]
@@ -8750,7 +8791,7 @@ impl Default for CycleTimings {
 
 #[derive(Clone, Debug)]
 pub struct DistApplyStats {
-    pub mode: DistApplyMode,
+    pub mode: DistCoarseStrategy,
     pub local_apply: Duration,
     pub gather: Duration,
     pub scatter: Duration,
@@ -8761,7 +8802,7 @@ pub struct DistApplyStats {
 impl Default for DistApplyStats {
     fn default() -> Self {
         Self {
-            mode: DistApplyMode::RootGather,
+            mode: DistCoarseStrategy::RootGather,
             local_apply: Duration::default(),
             gather: Duration::default(),
             scatter: Duration::default(),

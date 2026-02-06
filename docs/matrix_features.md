@@ -60,6 +60,24 @@ documented behavior in the README and matrix module:
   - Rayon-backed CSR paths live in `src/matrix/spmv/mod.rs`.
   - Vector kernels used by solvers live in `src/algebra/parallel.rs`.
 
+## Preconditioner local vs distributed behavior
+
+The matrix below summarizes which preconditioners operate rank-locally (no MPI
+communication) versus those that provide distributed/global behavior when the
+operator is a `DistCsrOp` and `mpi` is enabled.
+
+| Preconditioner | Rank-local only | Distributed-capable | Notes |
+|---|---|---|---|
+| Jacobi / Block Jacobi | ✅ | ✅ | `pc_type block_jacobi` uses local blocks; `pc_global=block_jacobi` wraps MPI with `DistPcAdapter`. |
+| ILU / ILUT / ILUTP / ILUP | ✅ | ⚠️ | Operate on rank-local blocks; wrap with `pc_global=block_jacobi` for distributed apply. |
+| Chebyshev / SOR / SSOR | ✅ | ⚠️ | Local-only; select `pc_global` if a global wrapper is desired. |
+| Approximate Inverse | ✅ | ⚠️ | Rank-local only under MPI. |
+| ASM / RAS | ⚠️ | ✅ | Distributed ASM supports RAS mode with overlap; ASM mode is local only. |
+| AMG | ⚠️ | ✅ | Distributed AMG uses `root_gather` or `local_prototype` coarse strategy (`pc_amg_dist_apply_mode`). |
+| LU / QR (dense-direct) | ✅ | ❌ | Local-only under MPI; use `SuperLU_DIST` for distributed direct solves. |
+| SuperLU_DIST | ❌ | ✅ | Distributed direct solve when `superlu_dist` feature is enabled. |
+| PC Chain | ⚠️ | ⚠️ | Each stage retains its own local vs distributed behavior. |
+
 ## MPI/Rayon test matrix plan
 
 Use this plan to validate MPI/Rayon coverage with minimal, targeted tests:

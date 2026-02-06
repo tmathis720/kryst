@@ -67,7 +67,7 @@ use crate::parallel::Comm;
 use crate::preconditioner::dist::MpiPcOptions;
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
-use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, CrSolver, FgmresSolver, GcrSolver,
@@ -1860,6 +1860,11 @@ impl KspContext {
             }
         }
 
+        #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+        {
+            let _ = self.maybe_upgrade_local_pc(pmat.clone(), sid, vid)?;
+        }
+
         let (m, _) = amat.dims();
         let needs_new = self
             .work
@@ -2319,6 +2324,60 @@ impl KspContext {
                 "pc_global=none should not build a global PC".into(),
             )),
         }
+    }
+
+    #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+    fn maybe_upgrade_local_pc(
+        &mut self,
+        pmat: Arc<dyn LinOp<S = S>>,
+        sid: StructureId,
+        vid: ValuesId,
+    ) -> Result<bool, KError> {
+        let Some(pc) = self.pc.as_ref() else {
+            return Ok(false);
+        };
+        let comm = pmat.comm();
+        let is_distributed = comm.size() > 1
+            && (pmat.dist_layout().is_some() || pmat.as_any().downcast_ref::<DistCsrOp>().is_some());
+        if !is_distributed {
+            return Ok(false);
+        }
+        if pc.distributed_support() != PcDistributedSupport::LocalOnly {
+            return Ok(false);
+        }
+        let Some(pending) = self.pending_mpi_pc.as_ref() else {
+            log::warn!(
+                "Selected preconditioner is rank-local under MPI; consider -pc_global block_jacobi/asm/ras."
+            );
+            return Ok(false);
+        };
+        if pending.mpi_opts.global_pc == GlobalPcKind::None {
+            log::warn!(
+                "Selected preconditioner is rank-local under MPI; set -pc_global to use a distributed strategy."
+            );
+            return Ok(false);
+        }
+        let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
+            log::warn!(
+                "pc_global requested but operator is not a DistCsrOp; skipping distributed fallback."
+            );
+            return Ok(false);
+        };
+        log::info!(
+            "Upgrading rank-local preconditioner to distributed {:?} based on pc_global.",
+            pending.mpi_opts.global_pc
+        );
+        let mut new_pc = self.build_mpi_global_pc(pending, dist_op)?;
+        let want = new_pc.required_format();
+        let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
+        let pmat_view = materialize(pmat.clone(), want, tol)?;
+        if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
+            return self.handle_pc_setup_failure(err, pmat, sid, vid);
+        }
+        self.pc = Some(new_pc);
+        self.last_pc_sid = Some(sid);
+        self.last_pc_vid = Some(vid);
+        Ok(true)
     }
 
     /// Add an iteration monitor callback.
