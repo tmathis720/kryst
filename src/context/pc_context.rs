@@ -1,6 +1,6 @@
 use crate::algebra::prelude::*;
 use crate::config::kinds::SorMatSideKind;
-use crate::config::options::PcOptions;
+use crate::config::options::{KspOptions, PcOptions};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::asm::AsmInnerPc;
@@ -235,6 +235,8 @@ pub enum PcConfig {
         inner_pc_type: Option<String>,
         maxits: usize,
         rtol: R,
+        ksp_options: Option<KspOptions>,
+        pc_options: Option<PcOptions>,
     },
     Mg {
         levels: usize,
@@ -455,6 +457,11 @@ impl PcConfig {
                 inner_pc_type: o.pc_ksp_pc_type.clone(),
                 maxits: o.pc_ksp_maxits.unwrap_or(3),
                 rtol: o.pc_ksp_rtol.unwrap_or(1e-2),
+                ksp_options: o.pc_ksp_ksp_options.clone(),
+                pc_options: o
+                    .pc_ksp_pc_options
+                    .as_ref()
+                    .map(|opts| opts.as_ref().clone()),
             },
             Mg => PcConfig::Mg {
                 levels: o.pc_mg_levels.unwrap_or(2),
@@ -507,6 +514,7 @@ impl PcFactory {
             Some("additive") | Some("add") => {
                 Ok(crate::preconditioner::chain::PcCompositeMode::Additive)
             }
+            Some("schur") => Ok(crate::preconditioner::chain::PcCompositeMode::Schur),
             Some(other) => Err(KError::InvalidInput(format!(
                 "unknown pc_composite_type: {other}"
             ))),

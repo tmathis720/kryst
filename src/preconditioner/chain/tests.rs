@@ -58,6 +58,54 @@ fn pc_chain_applies_in_sequence() {
 
 #[test]
 #[cfg(not(feature = "complex"))]
+fn pc_chain_schur_correction_mode() {
+    struct AddOne;
+    impl Preconditioner for AddOne {
+        fn setup(&mut self, _a: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
+            Ok(())
+        }
+        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+            for (yi, xi) in y.iter_mut().zip(x) {
+                *yi = *xi + S::from_real(1.0);
+            }
+            Ok(())
+        }
+    }
+    struct ScaleTwo;
+    impl Preconditioner for ScaleTwo {
+        fn setup(&mut self, _a: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
+            Ok(())
+        }
+        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+            for (yi, xi) in y.iter_mut().zip(x) {
+                *yi = S::from_real(2.0) * *xi;
+            }
+            Ok(())
+        }
+    }
+
+    let mut chain = PcChain::with_mode(
+        vec![Box::new(AddOne), Box::new(ScaleTwo)],
+        PcCompositeMode::Schur,
+    );
+
+    let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
+    chain.setup(&a).unwrap();
+
+    let x = [S::from_real(3.0), S::from_real(-1.0)];
+    let mut y = [S::zero(), S::zero()];
+    chain.apply(PcSide::Left, &x, &mut y).unwrap();
+    assert_eq!(
+        y,
+        [
+            S::from_real(3.0) - S::from_real(1.0),
+            S::from_real(-1.0) - S::from_real(1.0),
+        ]
+    );
+}
+
+#[test]
+#[cfg(not(feature = "complex"))]
 fn deferred_chain_constructs_in_setup() {
     use crate::config::options::{KspOptions, PcOptions};
     use crate::context::ksp_context::KspContext;

@@ -82,6 +82,9 @@ impl Registry {
                     let canonical = format!("-{suffix}");
                     if let Some(spec) = self.by_flag.get(canonical.as_str()) {
                         *spec
+                    } else if is_hierarchical_flag(tok, pref, &self.flags) {
+                        i += 1;
+                        continue;
                     } else {
                         let guess = nearest(canonical.as_str(), &self.flags);
                         let mut msg = format!("Unrecognized option: {tok}");
@@ -173,6 +176,19 @@ impl Registry {
     pub fn spec_for_flag(&self, flag: &str) -> Option<Spec> {
         self.by_flag.get(flag).copied()
     }
+}
+
+fn is_hierarchical_flag(tok: &str, prefix: &str, flags: &[&'static str]) -> bool {
+    let Some(suffix) = tok.strip_prefix(prefix) else {
+        return false;
+    };
+    if !suffix.contains('_') {
+        return false;
+    }
+    flags.iter().any(|flag| {
+        let flag_suffix = flag.strip_prefix('-').unwrap_or(flag);
+        suffix != flag_suffix && suffix.ends_with(&format!("_{flag_suffix}"))
+    })
 }
 
 fn kind_str(k: ValueKind) -> Cow<'static, str> {

@@ -26,14 +26,19 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             inner_pc_type,
             maxits,
             rtol,
+            ksp_options,
+            pc_options,
         } => {
-            let mut opts = crate::config::options::PcOptions::default();
-            opts.pc_type = inner_pc_type.clone();
+            let mut opts = pc_options.clone().unwrap_or_default();
+            if opts.pc_type.is_none() {
+                opts.pc_type = inner_pc_type.clone();
+            }
             let pc = crate::preconditioner::ksp_pc::KspAsPc::new(
                 inner_pc_type.clone(),
                 inner_ksp_type.clone(),
                 *maxits,
                 *rtol,
+                ksp_options.clone(),
                 opts,
             )?;
             Ok(Some(Box::new(pc)))
