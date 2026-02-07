@@ -355,6 +355,33 @@ Run your program with PETSc-style options:
 ./my_program -help
 ```
 
+Diagnostics are available through PETSc-style view flags and emit structured JSON
+that includes solver, preconditioner, and key configuration fields:
+
+```bash
+# Structured KSP diagnostics
+./my_program -ksp_view
+
+# Structured PC diagnostics
+./my_program -pc_view
+```
+
+Example `-ksp_view` output (truncated):
+```json
+{
+  "solver_type": "Gmres",
+  "solver_config": {
+    "rtol": 1e-8,
+    "maxits": 1000,
+    "pc_side": "Left"
+  },
+  "pc": {
+    "pc_type": "Jacobi",
+    "config": {}
+  }
+}
+```
+
 ## Supported Command-line Options
 
 ### KSP (Krylov Solver) Options

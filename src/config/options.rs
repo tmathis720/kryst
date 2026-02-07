@@ -128,6 +128,8 @@ pub struct KspOptions {
     pub cg_single_reduction: Option<bool>,
     pub trust_region: Option<f64>,
     pub cg_use_async: Option<bool>,
+    /// Emit structured KSP diagnostics to stdout.
+    pub ksp_view: Option<bool>,
     pub cg_async_min_n: Option<usize>,
     /// Number of Rayon worker threads (requires the `rayon` feature). Ignored otherwise.
     pub threads: Option<usize>,
@@ -157,6 +159,8 @@ pub enum KspType {
 pub struct PcOptions {
     /// Preconditioner type (e.g., "jacobi", "ilut").
     pub pc_type: Option<String>,
+    /// Emit structured PC diagnostics to stdout.
+    pub pc_view: Option<bool>,
     /// Level of fill for ILU(k).
     pub ilu_level: Option<usize>,
     /// Degree for Chebyshev smoother.
@@ -745,6 +749,7 @@ impl Sink for KspOptions {
             "ksp_fgmres_happy_breakdown" => set_opt!(&mut self.fgmres_happy_breakdown, v),
             "ksp_monitor_rank0" => set_opt!(&mut self.ksp_monitor_rank0, v),
             "ksp_reproducible" => set_opt!(&mut self.reproducible, v),
+            "ksp_view" => set_opt!(&mut self.ksp_view, v),
             _ => Err(KError::SolveError(format!("Unknown KSP bool key: {key}"))),
         }
     }
@@ -890,6 +895,7 @@ impl Sink for PcOptions {
             "pc_approxinv_parallel" => set_opt!(&mut self.approxinv_parallel, v),
             "pc_fixdiag" => set_opt!(&mut self.pc_fixdiag, v),
             "pc_bddc_use_vertices" => set_opt!(&mut self.pc_bddc_use_vertices, v),
+            "pc_view" => set_opt!(&mut self.pc_view, v),
             _ => Err(KError::SolveError(format!("Unknown PC bool key: {key}"))),
         }
     }
@@ -1496,6 +1502,7 @@ impl KspOptions {
         o!(reduction);
         o!(ksp_monitor_rank0);
         o!(reproducible);
+        o!(ksp_view);
         o!(cg_variant);
 
         o!(gmres_restart);
@@ -1963,6 +1970,7 @@ impl PcOptions {
         }
 
         o!(pc_type);
+        o!(pc_view);
         o!(ilu_level);
         o!(chebyshev_degree);
         o!(ilut_drop_tol);
