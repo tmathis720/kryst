@@ -67,7 +67,7 @@ fn mpi_convergence_reason_consistent_across_ranks() {
     pc_opts.pc_type = Some("jacobi".to_string());
     pc_opts.pc_global = Some("block_jacobi".to_string());
     pc_opts.pc_local = Some("ilu".to_string());
-    ksp.set_from_options(&ksp_opts, &pc_opts)
+    ksp.set_from_options(&ksp_opts)
         .expect("set options");
     ksp.rtol = 1e-10;
     ksp.atol = 1e-12;
