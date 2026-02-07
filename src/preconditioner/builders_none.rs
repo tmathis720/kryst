@@ -73,9 +73,7 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
                 use_vertices: *use_vertices,
             },
         )?)),
-        PcConfig::Gamg { .. } => Err(KError::Unsupported(
-            "GAMG is not yet implemented; use pc_type=amg for now",
-        )),
+        PcConfig::Gamg { .. } => Ok(None),
         _ => Ok(None),
     }
 }

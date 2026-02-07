@@ -11,6 +11,8 @@ use std::str::FromStr;
 
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::amg::AMGConfig;
+#[cfg(feature = "backend-faer")]
+use crate::preconditioner::gamg::GamgConfig;
 
 #[cfg(not(feature = "backend-faer"))]
 #[derive(Clone, Debug)]
@@ -21,6 +23,19 @@ impl AMGConfig {
     pub fn try_from_opts(_opts: &PcOptions) -> Result<Self, KError> {
         Err(KError::Unsupported(
             "AMG requires backend-faer; enable backend-faer to use AMG options",
+        ))
+    }
+}
+
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Debug)]
+pub struct GamgConfig;
+
+#[cfg(not(feature = "backend-faer"))]
+impl GamgConfig {
+    pub fn try_from_opts(_opts: &PcOptions) -> Result<Self, KError> {
+        Err(KError::Unsupported(
+            "GAMG requires backend-faer; enable backend-faer to use GAMG options",
         ))
     }
 }
@@ -297,7 +312,8 @@ pub enum PcConfig {
         use_vertices: bool,
     },
     Gamg {
-        placeholder: bool,
+        config: GamgConfig,
+        conditioning: ConditioningOptions,
     },
     Lu,
     Qr,
@@ -526,7 +542,13 @@ impl PcConfig {
                 coarse_pc_type: o.pc_bddc_coarse_pc_type.clone(),
                 use_vertices: o.pc_bddc_use_vertices.unwrap_or(false),
             },
-            Gamg => PcConfig::Gamg { placeholder: true },
+            Gamg => {
+                let cfg = GamgConfig::try_from_opts(o)?;
+                PcConfig::Gamg {
+                    config: cfg,
+                    conditioning: conditioning.clone(),
+                }
+            }
 
             Lu => PcConfig::Lu,
             Qr => PcConfig::Qr,

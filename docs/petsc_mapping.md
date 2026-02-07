@@ -68,7 +68,7 @@ features, options, and monitoring/convergence hooks.
 | `ksp` | [`PcType::Ksp`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Ksp) | Partial | Uses simple inner-PC loop; Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc). |
 | `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Injection hierarchy with Galerkin coarse operators and V/W/F cycles; Tracking: [Multigrid parity](#tracking-mg-parity). |
 | `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Partial | Prototype coarse space/constraints + interface metadata; Tracking: [BDDC support](#tracking-bddc). |
-| `gamg` | [`PcType::Gamg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Gamg) | Unsupported | Tracking: [GAMG support](#tracking-gamg). |
+| `gamg` | [`PcType::Gamg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Gamg) | Partial | Backed by AMG with PETSc GAMG defaults; supports core GAMG options. |
 | `lu` | [`PcType::Lu`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Lu) | Supported | Direct solve (PREONLY recommended). |
 | `qr` | [`PcType::Qr`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Qr) | Supported | Direct solve (PREONLY recommended). |
 | `superludist` | [`PcType::SuperLuDist`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.SuperLuDist) | Partial | Requires `superlu_dist` feature. |
@@ -118,9 +118,9 @@ features, options, and monitoring/convergence hooks.
 | `-pc_bddc_coarse_ksp_type` | [`PcOptions::pc_bddc_coarse_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_ksp_type) | Partial | Wired to BDDC config/diagnostics; coarse solver placeholder. |
 | `-pc_bddc_coarse_pc_type` | [`PcOptions::pc_bddc_coarse_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_pc_type) | Partial | Wired to BDDC config/diagnostics; coarse solver placeholder. |
 | `-pc_bddc_use_vertices` | [`PcOptions::pc_bddc_use_vertices`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_use_vertices) | Partial | Enables vertex constraint metadata. |
-| `-pc_gamg_type` | [`PcOptions::pc_gamg_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_type) | Unsupported | Placeholder. |
-| `-pc_gamg_threshold` | [`PcOptions::pc_gamg_threshold`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_threshold) | Unsupported | Placeholder. |
-| `-pc_gamg_levels` | [`PcOptions::pc_gamg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_levels) | Unsupported | Placeholder. |
+| `-pc_gamg_type` | [`PcOptions::pc_gamg_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_type) | Partial | Supported values: `agg`, `classical`. |
+| `-pc_gamg_threshold` | [`PcOptions::pc_gamg_threshold`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_threshold) | Supported | Maps to GAMG strength threshold. |
+| `-pc_gamg_levels` | [`PcOptions::pc_gamg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_levels) | Supported | Maps to GAMG hierarchy depth. |
 
 ## Monitor hooks
 
@@ -159,7 +159,7 @@ High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 4. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
 5. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
 6. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
-7. **GAMG preconditioner** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
+7. **GAMG advanced options** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
 
 ## Tracking issues
 
@@ -185,7 +185,7 @@ Scope: coarse spaces, constraints, subdomain interface coupling, and full coarse
 
 <a id="tracking-gamg"></a>
 ### Tracking issue: GAMG support
-Scope: PETSc GAMG options, hierarchy setup, and smoother parity.
+Scope: extended PETSc GAMG options beyond `-pc_gamg_type`, `-pc_gamg_threshold`, `-pc_gamg_levels`, plus richer hierarchy and smoother parity.
 
 <a id="tracking-breakdown-reason"></a>
 ### Tracking issue: Breakdown reason parity

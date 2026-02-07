@@ -85,6 +85,14 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             cfg.conditioning = conditioning.clone();
             b::build_amg(cfg).map(Some)
         }
+        PcConfig::Gamg {
+            config,
+            conditioning,
+        } => {
+            let mut cfg = config.clone();
+            cfg.amg_config.conditioning = conditioning.clone();
+            b::build_gamg(cfg).map(Some)
+        }
         PcConfig::ApproxInv {
             kind,
             levels,
@@ -117,8 +125,7 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         | PcConfig::Shell { .. }
         | PcConfig::Ksp { .. }
         | PcConfig::Mg { .. }
-        | PcConfig::Bddc { .. }
-        | PcConfig::Gamg { .. } => Ok(None),
+        | PcConfig::Bddc { .. } => Ok(None),
 
         PcConfig::Lu => {
             #[cfg(feature = "dense-direct")]
