@@ -6,6 +6,7 @@ use crate::solver::LinearSolver;
 use crate::solver::block::{BlockKrylovOptions, bicgstab::BlockBicgstabSolver, gmres::BlockGmresSolver};
 use crate::utils::convergence::ConvergedReason;
 
+#[cfg(feature = "backend-faer")]
 #[test]
 fn block_gmres_converges_on_block_rhs() {
     let mut opts = BlockKrylovOptions::default();

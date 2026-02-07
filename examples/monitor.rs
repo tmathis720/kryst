@@ -11,25 +11,30 @@ fn main() {
     eprintln!("monitor example is disabled when the complex feature is enabled.");
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+fn main() {
+    eprintln!("monitor example requires the backend-faer feature.");
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::error::KError;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::op::LinOp;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::solver::MonitorAction;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "logging")]
 use log::{debug, info};
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), KError> {
     // Initialize logger if logging feature is enabled
     #[cfg(feature = "logging")]

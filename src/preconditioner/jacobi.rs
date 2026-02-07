@@ -3,7 +3,7 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel;
 use crate::algebra::prelude::*;
 use crate::error::KError;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(not(feature = "complex"), feature = "backend-faer"))]
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
@@ -109,7 +109,7 @@ impl Jacobi {
             self.n = n;
             return Ok(());
         }
-        #[cfg(not(feature = "complex"))]
+        #[cfg(all(not(feature = "complex"), feature = "backend-faer"))]
         {
             let csr = csr_from_linop(pmat, 0.0)?;
             self.fill_diag_from_csr(&csr);

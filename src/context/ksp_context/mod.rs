@@ -64,8 +64,9 @@ use crate::ops::klinop::KLinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
+#[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::MpiPcOptions;
-#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
 use crate::preconditioner::{PcDistributedSupport, PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
@@ -301,6 +302,7 @@ pub struct KspContext {
     reduction_opts: ReductOptions,
     reproducible: bool,
     exec: ExecutionPolicy,
+    #[cfg(feature = "backend-faer")]
     pending_mpi_pc: Option<PendingMpiPc>,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
@@ -310,8 +312,8 @@ pub struct KspContext {
 
 impl fmt::Debug for KspContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KspContext")
-            .field("solver", &self.solver.as_ref().map(|_| "set"))
+        let mut dbg = f.debug_struct("KspContext");
+        dbg.field("solver", &self.solver.as_ref().map(|_| "set"))
             .field("pc", &self.pc.as_ref().map(|_| "set"))
             .field("pending_pc", &self.pending_pc)
             .field("pc_spec", &self.pc_spec)
@@ -336,12 +338,13 @@ impl fmt::Debug for KspContext {
             .field("last_pc_vid", &self.last_pc_vid)
             .field("reduction_opts", &self.reduction_opts)
             .field("reproducible", &self.reproducible)
-            .field("exec", &self.exec)
-            .field("pending_mpi_pc", &self.pending_mpi_pc)
-            .field("pending_gmres", &self.pending_gmres)
+            .field("exec", &self.exec);
+        #[cfg(feature = "backend-faer")]
+        dbg.field("pending_mpi_pc", &self.pending_mpi_pc);
+        dbg.field("pending_gmres", &self.pending_gmres)
             .field("pending_fgmres", &self.pending_fgmres)
-            .field("pending_pcg", &self.pending_pcg)
-            .finish()
+            .field("pending_pcg", &self.pending_pcg);
+        dbg.finish()
     }
 }
 
@@ -381,6 +384,7 @@ struct PendingPcg {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(feature = "backend-faer")]
 struct PendingMpiPc {
     mpi_opts: MpiPcOptions,
     pc_opts: PcOptions,
@@ -531,6 +535,7 @@ impl KspContext {
             reduction_opts: ReductOptions::default(),
             reproducible: false,
             exec: ExecutionPolicy::default(),
+            #[cfg(feature = "backend-faer")]
             pending_mpi_pc: None,
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
@@ -1343,10 +1348,13 @@ impl KspContext {
                 PcFactory::create_pc_chain_candidates_from_str(chain_str, Some(pc_opts))?;
             self.set_pc_chain_candidates_from_specs(candidates)?;
         }
-        self.pending_mpi_pc = Some(PendingMpiPc {
-            mpi_opts: pc_opts.mpi_pc_options()?,
-            pc_opts: pc_opts.clone(),
-        });
+        #[cfg(feature = "backend-faer")]
+        {
+            self.pending_mpi_pc = Some(PendingMpiPc {
+                mpi_opts: pc_opts.mpi_pc_options()?,
+                pc_opts: pc_opts.clone(),
+            });
+        }
         let diagnostics = self.view();
         if ksp_opts.ksp_view.unwrap_or(false) {
             println!("{}", diagnostics.to_json_pretty());
@@ -1806,7 +1814,7 @@ impl KspContext {
         }
 
         if self.pc.is_none() {
-            #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+            #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
             {
                 if let Some(ref pending) = self.pending_mpi_pc
                     && pending.mpi_opts.global_pc != GlobalPcKind::None
@@ -2382,7 +2390,7 @@ impl KspContext {
         self.reset_pc_ids();
     }
 
-    #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+    #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
     fn build_mpi_global_pc(
         &self,
         pending: &PendingMpiPc,
@@ -2409,7 +2417,7 @@ impl KspContext {
         }
     }
 
-    #[cfg(all(not(feature = "complex"), feature = "mpi"))]
+    #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
     fn maybe_upgrade_local_pc(
         &mut self,
         pmat: Arc<dyn LinOp<S = S>>,

@@ -15,23 +15,28 @@ fn main() {
     eprintln!("bicgstab_workspace_demo is disabled when the complex feature is enabled.");
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+fn main() {
+    eprintln!("bicgstab_workspace_demo requires the backend-faer feature.");
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::ConvergedReason;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::solver::MonitorAction;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
 #[cfg(feature = "logging")]
 use env_logger;
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     #[cfg(feature = "logging")]

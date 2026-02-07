@@ -13,7 +13,9 @@ use std::str::FromStr;
 use crate::config::options_core::is_help_requested;
 use crate::config::options_core::{Arity, Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
+#[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{GlobalPcKind, LocalPcKind, MpiPcOptions};
+#[cfg(feature = "backend-faer")]
 use crate::preconditioner::ilu::{
     IluConfig, IluType as IluVariant, ReorderingType as IluReorderingType,
     TriSolveType as IluTriSolveType,
@@ -2232,6 +2234,7 @@ impl PcOptions {
     }
 
     /// Convert CLI-style options into MPI-specific preconditioner configuration.
+    #[cfg(feature = "backend-faer")]
     pub fn mpi_pc_options(&self) -> Result<MpiPcOptions, KError> {
         let global = self
             .pc_global
@@ -2282,6 +2285,7 @@ impl PcOptions {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 fn build_ilu_config(opts: &PcOptions) -> Result<IluConfig, KError> {
     let mut config = IluConfig::default();
 
@@ -2357,6 +2361,7 @@ fn build_ilu_config(opts: &PcOptions) -> Result<IluConfig, KError> {
     Ok(config)
 }
 
+#[cfg(feature = "backend-faer")]
 fn parse_ilu_variant(value: &str) -> Result<IluVariant, KError> {
     match value.to_lowercase().as_str() {
         "ilu0" => Ok(IluVariant::ILU0),
@@ -2367,6 +2372,7 @@ fn parse_ilu_variant(value: &str) -> Result<IluVariant, KError> {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 fn parse_ilu_reordering(value: &str) -> Result<IluReorderingType, KError> {
     match value.to_lowercase().as_str() {
         "none" => Ok(IluReorderingType::None),
@@ -2379,6 +2385,7 @@ fn parse_ilu_reordering(value: &str) -> Result<IluReorderingType, KError> {
     }
 }
 
+#[cfg(feature = "backend-faer")]
 fn parse_ilu_tri_solve(value: &str) -> Result<IluTriSolveType, KError> {
     match value.to_lowercase().as_str() {
         "exact" => Ok(IluTriSolveType::Exact),
@@ -3613,6 +3620,7 @@ mod old_tests {
         assert_eq!(pc_opts.ilu_level, Some(3));
     }
 
+    #[cfg(feature = "backend-faer")]
     #[test]
     fn test_build_ilu_config_from_options() {
         let mut opts = PcOptions::default();
@@ -3640,6 +3648,7 @@ mod old_tests {
         assert_eq!(config.parallel_chunk_size, 128);
     }
 
+    #[cfg(feature = "backend-faer")]
     #[test]
     fn test_ilutp_cli_to_mpi_options() {
         let mut opts = PcOptions::default();
