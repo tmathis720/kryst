@@ -503,6 +503,8 @@ impl Preconditioner for LegacyOpPreconditioner {
 #[cfg(feature = "backend-faer")]
 pub mod amg;
 #[cfg(feature = "backend-faer")]
+pub mod gamg;
+#[cfg(feature = "backend-faer")]
 pub mod approxinv;
 #[cfg(feature = "backend-faer")]
 pub mod approxinv_csr;

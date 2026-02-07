@@ -1,5 +1,6 @@
 use crate::error::KError;
 use crate::preconditioner::amg::AMGConfig;
+use crate::preconditioner::gamg::GamgConfig;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{
@@ -403,6 +404,12 @@ pub fn build_amg(cfg: AMGConfig) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::amg::AMG;
     let amg = AMG::with_config(cfg);
     Ok(Box::new(amg))
+}
+
+pub fn build_gamg(cfg: GamgConfig) -> Result<Box<dyn Preconditioner>, KError> {
+    use crate::preconditioner::gamg::Gamg;
+    let gamg = Gamg::with_config(cfg);
+    Ok(Box::new(gamg))
 }
 
 pub fn build_asm_amg(overlap: usize) -> Result<Box<dyn Preconditioner>, KError> {
