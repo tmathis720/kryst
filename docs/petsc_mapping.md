@@ -43,7 +43,7 @@ features, options, and monitoring/convergence hooks.
 | `chebyshev` | [`SolverType::Chebyshev`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html#variant.Chebyshev) | Partial | Chebyshev-as-KSP mode with fixed omega. |
 | `cr` | [`SolverType::Cr`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html#variant.Cr) | Partial | Backed by CGNR kernel. |
 | `gcr` | [`SolverType::Gcr`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html#variant.Gcr) | Partial | Implemented via flexible GMRES. |
-| `pipegcr` / `gcr_pipe` | [`SolverType::PipeGcr`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html#variant.PipeGcr) | Unsupported | Tracking: [PipeGCR support](#tracking-pipegcr). |
+| `pipegcr` / `gcr_pipe` | [`SolverType::PipeGcr`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html#variant.PipeGcr) | Unsupported | Parsed aliases for PipeGCR; tracking: [PipeGCR support](#tracking-pipegcr). |
 | `preonly` | [`SolverType::Preonly`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html#variant.Preonly) | Supported | Uses `Preconditioner::direct_solve` when available. |
 
 ## PC method matrix
