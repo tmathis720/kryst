@@ -53,9 +53,7 @@ impl RichardsonSolver {
         }
 
         let mut local_scratch = BridgeScratch::default();
-        let scratch = work
-            .map(|w| &mut w.bridge)
-            .unwrap_or(&mut local_scratch);
+        let scratch = work.map(|w| &mut w.bridge).unwrap_or(&mut local_scratch);
 
         let mut ax = vec![S::zero(); n];
         let mut r = vec![S::zero(); n];
