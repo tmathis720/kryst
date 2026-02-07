@@ -59,6 +59,7 @@ pub use crate::matrix::format::OpFormat;
 use crate::matrix::op::LinOp;
 
 pub mod bridge;
+pub mod bddc;
 pub mod pc_bridge;
 #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use faer::Mat;
