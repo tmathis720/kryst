@@ -67,5 +67,8 @@ fn denseop_csc_cache_includes_structure_id() {
     let c2 = <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&dop, R::default());
     let p1 = Arc::as_ptr(&c1) as usize;
     let p2 = Arc::as_ptr(&c2) as usize;
-    assert_ne!(p1, p2, "CSC cache entry not invalidated on structure change");
+    assert_ne!(
+        p1, p2,
+        "CSC cache entry not invalidated on structure change"
+    );
 }

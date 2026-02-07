@@ -7,8 +7,8 @@ use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
+use crate::utils::conditioning::{ConditioningOptions, apply_csr_transforms};
 use crate::utils::permutation::{Permutation, amd_csr, permute_csr_symmetric, rcm_csr};
-use crate::utils::conditioning::{apply_csr_transforms, ConditioningOptions};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;

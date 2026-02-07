@@ -20,8 +20,6 @@ use crate::matrix::op::CsrOp;
     feature = "legacy-pc-bridge"
 ))]
 use crate::matrix::op::DenseOp;
-#[cfg(feature = "mpi")]
-use std::collections::{HashMap, HashSet};
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 #[cfg(feature = "mpi")]
 use crate::matrix::sparse::CsrMatrix;
@@ -31,12 +29,14 @@ use crate::parallel::{Comm, UniverseComm, contiguous_partition};
 use crate::preconditioner::builders::build_jacobi;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::preconditioner::builders::{
-    build_ilut_with_conditioning, build_ilutp_with_conditioning, build_ilu0_with_conditioning,
+    build_ilu0_with_conditioning, build_ilut_with_conditioning, build_ilutp_with_conditioning,
 };
+use crate::preconditioner::dist::DistCoarseStrategy;
 #[cfg(feature = "mpi")]
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
-use crate::preconditioner::dist::DistCoarseStrategy;
 use crate::utils::conditioning::ConditioningOptions;
+#[cfg(feature = "mpi")]
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "mpi")]
 use std::sync::Arc;
 
@@ -635,12 +635,7 @@ impl SubdomainSolver {
                                 .into(),
                         ));
                     }
-                    let pc = build_ilut_with_conditioning(
-                        drop_tol,
-                        max_fill,
-                        None,
-                        conditioning,
-                    )?;
+                    let pc = build_ilut_with_conditioning(drop_tol, max_fill, None, conditioning)?;
                     Ok(SubdomainSolver::Csr(pc))
                 }
             }

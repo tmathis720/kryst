@@ -29,8 +29,6 @@ fn main() {
     eprintln!("mpi_amg_gmres_demo.rs is unavailable when built with --features complex");
 }
 
-
-
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
 use kryst::matrix::op::{CsrOp, wrap_with_comm};

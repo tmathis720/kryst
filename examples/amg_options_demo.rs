@@ -12,7 +12,6 @@ fn main() {
     eprintln!("amg_options_demo.rs is unavailable when built with --features complex");
 }
 
-
 use kryst::config::options::{KspOptions, PcOptions, parse_all_options};
 use std::env;
 

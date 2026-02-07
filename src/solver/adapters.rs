@@ -1,6 +1,6 @@
 use crate::matrix::sparse::CsrMatrix;
-use crate::solver::MonitorCallback;
 use crate::parallel::UniverseComm;
+use crate::solver::MonitorCallback;
 use crate::solver::api::Solver as CanonicalSolver;
 use crate::solver::legacy;
 use crate::{error::KError, utils::convergence::SolveStats};

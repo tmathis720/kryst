@@ -643,7 +643,9 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
     fn test_pair(h: &mut AllreduceHandle<(R, R)>) -> Option<(R, R)> {
         match h {
             AllreduceHandle::Ready(val) => Some(*val),
-            AllreduceHandle::Mpi { req, buf, convert, .. } => {
+            AllreduceHandle::Mpi {
+                req, buf, convert, ..
+            } => {
                 if mpi_test_request(req) {
                     let result = convert(buf);
                     Some(finalize_handle_pair(h, result))
@@ -658,7 +660,9 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
     fn test_vec(h: &mut AllreduceHandle<Vec<R>>) -> Option<Vec<R>> {
         match h {
             AllreduceHandle::Ready(val) => Some(val.clone()),
-            AllreduceHandle::Mpi { req, buf, convert, .. } => {
+            AllreduceHandle::Mpi {
+                req, buf, convert, ..
+            } => {
                 if mpi_test_request(req) {
                     let result = convert(buf);
                     Some(finalize_handle_vec(h, result))
@@ -674,7 +678,9 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         record_wait_pair();
         match h {
             AllreduceHandle::Ready(val) => val,
-            AllreduceHandle::Mpi { req, buf, convert, .. } => {
+            AllreduceHandle::Mpi {
+                req, buf, convert, ..
+            } => {
                 mpi_wait_request(req);
                 convert(&buf)
             }
@@ -686,7 +692,9 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
         record_wait_vec();
         match h {
             AllreduceHandle::Ready(val) => val,
-            AllreduceHandle::Mpi { req, buf, convert, .. } => {
+            AllreduceHandle::Mpi {
+                req, buf, convert, ..
+            } => {
                 mpi_wait_request(req);
                 convert(&buf)
             }

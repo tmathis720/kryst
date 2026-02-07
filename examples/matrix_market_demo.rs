@@ -362,8 +362,9 @@ mod real_demo {
             let method = spec.name;
             let progress_start = Instant::now();
             let stop_note_handle = Arc::clone(&early_stop_note);
-            let history: Arc<Mutex<VecDeque<f64>>> =
-                Arc::new(Mutex::new(VecDeque::with_capacity(early_stop.window.max(1))));
+            let history: Arc<Mutex<VecDeque<f64>>> = Arc::new(Mutex::new(VecDeque::with_capacity(
+                early_stop.window.max(1),
+            )));
             ksp.add_monitor_rank0(move |iter, residual, reductions| {
                 if progress_every > 0 && iter > 0 && iter % progress_every == 0 {
                     let elapsed = progress_start.elapsed().as_secs_f64();
@@ -509,9 +510,7 @@ mod real_demo {
         }
 
         if nonsymmetric {
-            notes.push(
-                "Default nonsymmetric choice: GMRES/FGMRES + RAS/ASM + ILUTP.".to_string(),
-            );
+            notes.push("Default nonsymmetric choice: GMRES/FGMRES + RAS/ASM + ILUTP.".to_string());
             specs.push(RunSpec {
                 name: if is_parallel {
                     "GMRES(50) + RAS/ASM + ILUTP (L)"

@@ -472,7 +472,12 @@ where
         ))
     }
 
-    fn apply(&self, _side: crate::preconditioner::PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
+    fn apply(
+        &self,
+        _side: crate::preconditioner::PcSide,
+        _x: &[S],
+        _y: &mut [S],
+    ) -> Result<(), KError> {
         Err(KError::Unsupported(
             "ApproxInv does not support complex scalars yet".into(),
         ))

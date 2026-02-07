@@ -13,7 +13,6 @@ use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::apply_pc_s;
 
-
 #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
 pub struct SuperLuDistPc {
     #[allow(dead_code)]

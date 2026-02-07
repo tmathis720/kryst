@@ -15,7 +15,6 @@ fn main() {
     eprintln!("shell_demo.rs is unavailable when built with --features complex");
 }
 
-
 use kryst::core::mat::shell::ShellMat;
 use kryst::core::traits::MatVec;
 

@@ -4,8 +4,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::{MonitorAction, MonitorCallback};
-use crate::solver::common::call_monitors;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
@@ -17,7 +15,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{self, PcSide, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, recompute_true_residual_norm_s, ReductCtx};
+use crate::solver::common::call_monitors;
+use crate::solver::common::{ReductCtx, dot_result_to_real, recompute_true_residual_norm_s};
+use crate::solver::{MonitorAction, MonitorCallback};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -315,15 +315,8 @@ impl MinresSolver {
                 reason,
                 ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
             ) {
-                let true_res_check = recompute_true_residual_norm_s(
-                    a,
-                    b,
-                    x,
-                    comm,
-                    red.engine(),
-                    tmp1,
-                    scratch,
-                );
+                let true_res_check =
+                    recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp1, scratch);
                 let (reason_true, _) = self.conv.check(true_res_check, bnorm, k);
                 if matches!(
                     reason_true,
@@ -345,15 +338,7 @@ impl MinresSolver {
             phi = phi_next;
         }
 
-        let true_res = recompute_true_residual_norm_s(
-            a,
-            b,
-            x,
-            comm,
-            red.engine(),
-            tmp1,
-            scratch,
-        );
+        let true_res = recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp1, scratch);
 
         let bnorm_eff = bnorm.max(R::from(1e-32));
         let rel = true_res / bnorm_eff;

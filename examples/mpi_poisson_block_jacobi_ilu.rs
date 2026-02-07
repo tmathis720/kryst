@@ -14,7 +14,6 @@ fn main() {
     eprintln!("mpi_poisson_block_jacobi_ilu.rs is unavailable when built with --features complex");
 }
 
-
 #[cfg(not(all(feature = "backend-faer", feature = "mpi", not(feature = "complex"))))]
 #[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {

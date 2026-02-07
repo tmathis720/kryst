@@ -66,17 +66,17 @@
 //! - PETSc MATSUPERLU_DIST implementation
 
 use crate::error::KError;
-use crate::solver::MonitorCallback;
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm, contiguous_partition};
+use crate::solver::MonitorCallback;
 use crate::solver::api::Solver;
 use crate::solver::legacy::LinearSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use faer::MatMut;
 use faer::prelude::*;
+use mpi::collective::CommunicatorCollectives;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use mpi::collective::CommunicatorCollectives;
 
 #[cfg(feature = "mpi")]
 use mpi::raw::AsRaw;
@@ -1169,11 +1169,7 @@ impl TriangularSolveData {
     }
 
     /// Wait for completion of specific request
-    pub fn wait(
-        &mut self,
-        request_id: usize,
-        target: Option<&mut [f64]>,
-    ) -> Result<(), KError> {
+    pub fn wait(&mut self, request_id: usize, target: Option<&mut [f64]>) -> Result<(), KError> {
         if let Some(index) = self
             .pending_requests
             .iter()
@@ -1185,7 +1181,8 @@ impl TriangularSolveData {
                 if req.meta.completed {
                     return Ok(());
                 }
-                let rc = unsafe { mpi::ffi::MPI_Wait(&mut req.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+                let rc =
+                    unsafe { mpi::ffi::MPI_Wait(&mut req.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
                 if rc != 0 {
                     return Err(KError::SolveError(format!(
                         "MPI_Wait failed with code {rc}"
@@ -1231,8 +1228,9 @@ impl TriangularSolveData {
             #[cfg(feature = "mpi")]
             {
                 if !req.meta.completed {
-                    let rc =
-                        unsafe { mpi::ffi::MPI_Wait(&mut req.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+                    let rc = unsafe {
+                        mpi::ffi::MPI_Wait(&mut req.handle, mpi::ffi::RSMPI_STATUS_IGNORE)
+                    };
                     if rc != 0 {
                         return Err(KError::SolveError(format!(
                             "MPI_Wait failed with code {rc}"
@@ -4207,11 +4205,7 @@ impl SuperLuDistSolver {
         Ok((row_scale, col_scale))
     }
 
-    fn allreduce_max_slice(
-        &self,
-        comm: &UniverseComm,
-        data: &mut [f64],
-    ) -> Result<(), KError> {
+    fn allreduce_max_slice(&self, comm: &UniverseComm, data: &mut [f64]) -> Result<(), KError> {
         if comm.size() <= 1 {
             return Ok(());
         }

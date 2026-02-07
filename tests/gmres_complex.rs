@@ -7,9 +7,9 @@ use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::{FgmresSolver, GmresSolver};
 use kryst::solver::fgmres::FgmresVariant;
 use kryst::solver::gmres::GmresVariant;
+use kryst::solver::{FgmresSolver, GmresSolver};
 use kryst::utils::convergence::ConvergedReason;
 use support::complex_dense::diagonally_dominant_system;
 

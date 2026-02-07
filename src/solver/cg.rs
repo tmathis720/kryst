@@ -16,7 +16,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel::{
     dot_conj_local_with_mode, par_axpby, par_axpy, par_copy, sum_abs2_local_with_mode,
@@ -34,7 +33,8 @@ use crate::parallel::Comm;
 use crate::parallel::{ReduceHandle, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, ReductCtx};
+use crate::solver::MonitorCallback;
+use crate::solver::common::{ReductCtx, dot_result_to_real};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use smallvec::SmallVec;
 use std::any::Any;
@@ -401,7 +401,10 @@ impl CgSolver {
         let _guard = StageGuard::new("CG");
 
         enum PapRequest {
-            None { p_ap: S, pnorm_sq: Option<R> },
+            None {
+                p_ap: S,
+                pnorm_sq: Option<R>,
+            },
             Handle {
                 handle: ReduceHandle<Vec<R>>,
                 need_pnorm: bool,
@@ -612,10 +615,7 @@ impl CgSolver {
 
             let (p_ap_scalar, pnorm_sq_opt) = match pap_req {
                 PapRequest::None { p_ap, pnorm_sq } => (p_ap, pnorm_sq),
-                PapRequest::Handle {
-                    handle,
-                    need_pnorm,
-                } => {
+                PapRequest::Handle { handle, need_pnorm } => {
                     let reduced = handle.wait();
                     #[cfg(feature = "complex")]
                     let (p_ap, offset) = (S::from_parts(reduced[0], reduced[1]), 2);

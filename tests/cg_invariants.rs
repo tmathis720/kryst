@@ -11,8 +11,8 @@ use kryst::ops::klinop::KLinOp;
 use kryst::ops::kpc::KPreconditioner;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::{CgSolver, MonitorAction, MonitorCallback};
 use kryst::solver::cg::debug::{self, IterEvent};
+use kryst::solver::{CgSolver, MonitorAction, MonitorCallback};
 use kryst::utils::convergence::ConvergedReason;
 use std::sync::{Arc, Mutex, OnceLock};
 

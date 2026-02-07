@@ -19,8 +19,8 @@ use crate::matrix::DistCsrOp;
 use crate::matrix::op::LinOp;
 #[cfg(feature = "mpi")]
 use crate::parallel::Comm;
-use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::preconditioner::dist::DistCoarseStrategy;
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 
 /// Metadata for a local ASM + global AMG coarse-correction hybrid.
 #[cfg(feature = "mpi")]

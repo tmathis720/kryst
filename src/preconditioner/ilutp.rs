@@ -31,11 +31,11 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
 use crate::preconditioner::ilu_csr::{ReorderingKind, ReorderingOptions};
-use crate::utils::permutation::{Permutation, amd_from_adj, rcm_from_adj};
-use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
+use crate::preconditioner::{LocalPreconditioner, legacy::Preconditioner};
+use crate::utils::conditioning::{ConditioningOptions, apply_dense_transforms};
 use crate::utils::metrics::{Counters, SolveTimer};
+use crate::utils::permutation::{Permutation, amd_from_adj, rcm_from_adj};
 use faer::Mat;
 use std::cmp::Ordering;
 use std::sync::Mutex;

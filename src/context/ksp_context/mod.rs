@@ -1374,7 +1374,11 @@ impl KspContext {
         insert_value(&mut solver_config, "maxits", self.maxits);
         insert_value(&mut solver_config, "restart", self.restart);
         insert_value(&mut solver_config, "pc_side", format!("{:?}", self.pc_side));
-        insert_value(&mut solver_config, "pc_reuse", format!("{:?}", self.pc_reuse));
+        insert_value(
+            &mut solver_config,
+            "pc_reuse",
+            format!("{:?}", self.pc_reuse),
+        );
         insert_value(
             &mut solver_config,
             "monitor_policy",
@@ -1401,7 +1405,11 @@ impl KspContext {
             self.reduction_opts.reproducible,
         );
         insert_value(&mut solver_config, "reproducible", self.reproducible);
-        insert_value(&mut solver_config, "execution_policy", format!("{:?}", self.exec));
+        insert_value(
+            &mut solver_config,
+            "execution_policy",
+            format!("{:?}", self.exec),
+        );
 
         let pc = self
             .pc_spec
@@ -2429,7 +2437,8 @@ impl KspContext {
         };
         let comm = pmat.comm();
         let is_distributed = comm.size() > 1
-            && (pmat.dist_layout().is_some() || pmat.as_any().downcast_ref::<DistCsrOp>().is_some());
+            && (pmat.dist_layout().is_some()
+                || pmat.as_any().downcast_ref::<DistCsrOp>().is_some());
         if !is_distributed {
             return Ok(false);
         }

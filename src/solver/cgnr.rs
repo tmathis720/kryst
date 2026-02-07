@@ -1,6 +1,5 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -13,8 +12,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::common::{
-    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+    ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
 };
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
@@ -178,15 +178,8 @@ impl CgnrSolver {
 
         let (reason0, mut stats0) = self.conv.check(rnow, bnorm, 0);
         if !matches!(reason0, ConvergedReason::Continued) {
-            let true_res = recompute_true_residual_norm_s(
-                a,
-                b,
-                x,
-                comm,
-                red.engine(),
-                tmp_true,
-                scratch,
-            );
+            let true_res =
+                recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
             stats0.final_residual = true_res;
             return Ok(stats0);
         }
@@ -198,15 +191,8 @@ impl CgnrSolver {
             a.matvec_s(p, ap, scratch);
             let denom = dot_result_to_real(red.dot(ap, ap));
             if denom <= R::default() || !denom.is_finite() {
-                let true_res = recompute_true_residual_norm_s(
-                    a,
-                    b,
-                    x,
-                    comm,
-                    red.engine(),
-                    tmp_true,
-                    scratch,
-                );
+                let true_res =
+                    recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
                 return Ok(SolveStats::new(
                     k - 1,
                     true_res,
@@ -240,15 +226,8 @@ impl CgnrSolver {
 
             let (reason, mut stats) = self.conv.check(rnow, bnorm, k);
             if !matches!(reason, ConvergedReason::Continued) {
-                let true_res = recompute_true_residual_norm_s(
-                    a,
-                    b,
-                    x,
-                    comm,
-                    red.engine(),
-                    tmp_true,
-                    scratch,
-                );
+                let true_res =
+                    recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
@@ -260,15 +239,8 @@ impl CgnrSolver {
             rz = rz_new;
         }
 
-        let true_res = recompute_true_residual_norm_s(
-            a,
-            b,
-            x,
-            comm,
-            red.engine(),
-            tmp_true,
-            scratch,
-        );
+        let true_res =
+            recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
         Ok(SolveStats::new(
             iters,
             true_res,

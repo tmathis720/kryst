@@ -2,15 +2,15 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
+use crate::ops::wrap::as_s_op;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::ops::wrap::as_s_op;
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::bicgstab::BiCgStabSolver;
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
 use std::any::Any;

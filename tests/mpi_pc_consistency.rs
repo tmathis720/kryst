@@ -12,7 +12,11 @@ use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 use kryst::utils::convergence::ConvergedReason;
 
-fn local_rows_from_global(global: &CsrMatrix<f64>, row_start: usize, n_local: usize) -> CsrMatrix<f64> {
+fn local_rows_from_global(
+    global: &CsrMatrix<f64>,
+    row_start: usize,
+    n_local: usize,
+) -> CsrMatrix<f64> {
     let mut row_ptr = Vec::with_capacity(n_local + 1);
     let mut col_idx = Vec::new();
     let mut values = Vec::new();
@@ -67,8 +71,7 @@ fn mpi_convergence_reason_consistent_across_ranks() {
     pc_opts.pc_type = Some("jacobi".to_string());
     pc_opts.pc_global = Some("block_jacobi".to_string());
     pc_opts.pc_local = Some("ilu".to_string());
-    ksp.set_from_options(&ksp_opts)
-        .expect("set options");
+    ksp.set_from_options(&ksp_opts).expect("set options");
     ksp.rtol = 1e-10;
     ksp.atol = 1e-12;
     ksp.maxits = 500;

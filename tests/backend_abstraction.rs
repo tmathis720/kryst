@@ -37,13 +37,19 @@ fn no_backend_gmres_pcnone_solves_identity() {
 #[cfg(feature = "backend-nalgebra")]
 #[test]
 fn nalgebra_preonly_lu_solves() {
-    let a = nalgebra::DMatrix::<S>::from_row_slice(2, 2, &[
-        S::from_real(2.0),
-        S::from_real(1.0),
-        S::from_real(1.0),
-        S::from_real(2.0),
-    ]);
-    let op = Arc::new(kryst::matrix::op_nalgebra::NalgebraDenseOp::new(Arc::new(a)));
+    let a = nalgebra::DMatrix::<S>::from_row_slice(
+        2,
+        2,
+        &[
+            S::from_real(2.0),
+            S::from_real(1.0),
+            S::from_real(1.0),
+            S::from_real(2.0),
+        ],
+    );
+    let op = Arc::new(kryst::matrix::op_nalgebra::NalgebraDenseOp::new(Arc::new(
+        a,
+    )));
 
     let b = vec![S::from_real(3.0), S::from_real(3.0)];
     let mut x = vec![S::zero(); 2];

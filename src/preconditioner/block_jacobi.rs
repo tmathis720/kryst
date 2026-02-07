@@ -33,11 +33,11 @@ use crate::preconditioner::Preconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
-use crate::utils::conditioning::ConditioningOptions;
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 #[cfg(feature = "dense-direct")]
 use crate::solver::legacy::LinearSolver;
+use crate::utils::conditioning::ConditioningOptions;
 #[cfg(feature = "dense-direct")]
 use faer::Mat;
 

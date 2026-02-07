@@ -2,10 +2,9 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
+use crate::algebra::prelude::S;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-use crate::algebra::prelude::S;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::ops::klinop::KLinOp;
@@ -13,6 +12,7 @@ use crate::ops::wrap::as_s_op;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
 use std::any::Any;
 
@@ -20,13 +20,13 @@ use super::BlockKrylovOptions;
 use super::block_vec::BlockVec;
 
 #[cfg(feature = "backend-faer")]
+use super::arnoldi::block_arnoldi_step;
+#[cfg(feature = "backend-faer")]
 use crate::parallel::{global_dot_conj, global_nrm2, global_nrm2_many};
 #[cfg(feature = "backend-faer")]
 use faer::linalg::solvers::{FullPivLu, SolveCore};
 #[cfg(feature = "backend-faer")]
 use faer::{Conj, MatMut, MatRef};
-#[cfg(feature = "backend-faer")]
-use super::arnoldi::block_arnoldi_step;
 
 /// Block GMRES solver for multiple right-hand sides.
 pub struct BlockGmresSolver {
@@ -36,11 +36,15 @@ pub struct BlockGmresSolver {
 // Conjugation helper for building normal equations:
 #[cfg(feature = "complex")]
 #[inline]
-fn conj_s(x: S) -> S { x.conj() }
+fn conj_s(x: S) -> S {
+    x.conj()
+}
 
 #[cfg(not(feature = "complex"))]
 #[inline]
-fn conj_s(x: S) -> S { x }
+fn conj_s(x: S) -> S {
+    x
+}
 
 impl BlockGmresSolver {
     pub fn new(options: BlockKrylovOptions) -> Self {
@@ -174,7 +178,13 @@ impl LinearSolver for BlockGmresSolver {
                         let w_col = w_block.col_mut(col);
                         op.matvec_s(vj_col, w_col, &mut scratch);
                     }
-                    let arnoldi = block_arnoldi_step(&basis, &mut w_block, comm, work, self.options.max_cond)?;
+                    let arnoldi = block_arnoldi_step(
+                        &basis,
+                        &mut w_block,
+                        comm,
+                        work,
+                        self.options.max_cond,
+                    )?;
 
                     let cols_h = (j + 1) * p;
                     let rows_h = (j + 2) * p;
@@ -204,13 +214,7 @@ impl LinearSolver for BlockGmresSolver {
                     let g_slice: Vec<S> = build_g(rows_h, p, &beta);
                     let y_slice: Vec<S> = solve_normal_eq(&h_slice, rows_h, cols_h, &g_slice, p)?;
 
-                    update_solution(
-                        &mut x_cycle,
-                        &x_block,
-                        &basis,
-                        &y_slice,
-                        cols_h,
-                    );
+                    update_solution(&mut x_cycle, &x_block, &basis, &y_slice, cols_h);
 
                     compute_residual(
                         &op,
@@ -340,9 +344,7 @@ fn block_norm_max(block: &BlockVec, comm: &UniverseComm) -> f64 {
         cols.push(block.col(col));
     }
     let norms = global_nrm2_many(comm, &cols);
-    norms
-        .into_iter()
-        .fold(0.0_f64, |acc, val| acc.max(val))
+    norms.into_iter().fold(0.0_f64, |acc, val| acc.max(val))
 }
 
 #[cfg(feature = "backend-faer")]
@@ -429,13 +431,7 @@ fn build_g(rows: usize, p: usize, beta: &[S]) -> Vec<S> {
 }
 
 #[cfg(feature = "backend-faer")]
-fn solve_normal_eq(
-    h: &[S],
-    rows: usize,
-    cols: usize,
-    g: &[S],
-    p: usize,
-) -> Result<Vec<S>, KError> {
+fn solve_normal_eq(h: &[S], rows: usize, cols: usize, g: &[S], p: usize) -> Result<Vec<S>, KError> {
     let mut ht_h = vec![0.0.into(); cols * cols];
     let mut ht_g = vec![0.0.into(); cols * p];
     for col_i in 0..cols {

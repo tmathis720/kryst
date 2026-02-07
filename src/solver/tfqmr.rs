@@ -4,8 +4,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::{MonitorAction, MonitorCallback};
-use crate::solver::common::call_monitors;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -18,7 +16,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, take_or_resize, ReductCtx};
+use crate::solver::common::call_monitors;
+use crate::solver::common::{ReductCtx, dot_result_to_real, take_or_resize};
+use crate::solver::{MonitorAction, MonitorCallback};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 
@@ -191,11 +191,7 @@ impl TfqmrSolver {
                 }
 
                 let src: &[S] = if mstep == 0 { &u[..] } else { &qv[..] };
-                let src_norm = if mstep == 0 {
-                    u_norm
-                } else {
-                    red.norm2(src)
-                };
+                let src_norm = if mstep == 0 { u_norm } else { red.norm2(src) };
                 let psi: R = src_norm / tau_local.max(1e-300);
                 let c: R = 1.0 / (1.0 + psi * psi).sqrt();
                 let eta: S = S::from_real(c * c) * alpha;
@@ -212,9 +208,11 @@ impl TfqmrSolver {
                 let iter_count = 2 * (k - 1) + mstep + 1;
                 let dpest: R = ((2 * k + mstep + 1) as f64).sqrt() * tau_local;
                 if call_monitors(monitors, iter_count, dpest, 0) {
-                    return Ok(
-                        SolveStats::new(iter_count, dpest, ConvergedReason::StoppedByMonitor),
-                    );
+                    return Ok(SolveStats::new(
+                        iter_count,
+                        dpest,
+                        ConvergedReason::StoppedByMonitor,
+                    ));
                 }
                 let (reason, s2) = self.conv.check(dpest, res0, iter_count);
                 stats = s2;

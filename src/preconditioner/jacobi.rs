@@ -5,10 +5,10 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 #[cfg(all(not(feature = "complex"), feature = "backend-faer"))]
 use crate::matrix::convert::csr_from_linop;
-use crate::matrix::op::LinOp;
-use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "backend-faer")]
 use crate::matrix::op::GenericCsrOp;
+use crate::matrix::op::LinOp;
+use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(feature = "complex")]

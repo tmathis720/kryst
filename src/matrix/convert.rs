@@ -220,10 +220,7 @@ pub fn try_as_csr(pmat: &dyn LinOp<S = S>) -> Option<&CsrMatrix<f64>> {
 /// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
 /// an unsupported `LinOp` type. See message for how to wrap with
 /// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
-pub fn to_csr_cached(
-    pmat: &dyn LinOp<S = S>,
-    drop_tol: R,
-) -> Result<Arc<CsrMatrix<f64>>, KError> {
+pub fn to_csr_cached(pmat: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<f64>>, KError> {
     if let Some(csr) = try_as_csr(pmat) {
         return Ok(Arc::new(csr.clone()));
     }
@@ -240,9 +237,9 @@ pub fn to_csr_cached(
         ));
     }
     if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp<f64>>() {
-        return Ok(<DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(
-            dense_op, drop_tol,
-        ));
+        return Ok(
+            <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csr_cached(dense_op, drop_tol),
+        );
     }
     #[cfg(not(feature = "complex"))]
     if let Some(dist) = pmat.as_any().downcast_ref::<DistCsrOp>() {
@@ -254,10 +251,7 @@ pub fn to_csr_cached(
 
 /// Obtain a CSR matrix from a [`LinOp`], converting and caching if necessary.
 #[inline]
-pub fn csr_from_linop(
-    op: &dyn LinOp<S = S>,
-    drop_tol: R,
-) -> Result<Arc<CsrMatrix<f64>>, KError> {
+pub fn csr_from_linop(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<f64>>, KError> {
     to_csr_cached(op, drop_tol)
 }
 
@@ -275,10 +269,7 @@ pub fn try_as_csc(pmat: &dyn LinOp<S = S>) -> Option<&CscMatrix<f64>> {
 /// Returns a recoverable `KError::InvalidInput` with guidance when `pmat` is
 /// an unsupported `LinOp` type. See message for how to wrap with
 /// `DenseOp`/`CsrOp` or implement `AsFormat` to enable cached conversions.
-pub fn to_csc_cached(
-    pmat: &dyn LinOp<S = S>,
-    drop_tol: R,
-) -> Result<Arc<CscMatrix<f64>>, KError> {
+pub fn to_csc_cached(pmat: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CscMatrix<f64>>, KError> {
     if let Some(csc) = try_as_csc(pmat) {
         return Ok(Arc::new(csc.clone()));
     }
@@ -297,26 +288,23 @@ pub fn to_csc_cached(
         ));
     }
     if let Some(dense_op) = pmat.as_any().downcast_ref::<DenseOp<f64>>() {
-        return Ok(<DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
-            dense_op, drop_tol,
-        ));
+        return Ok(
+            <DenseOp<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(dense_op, drop_tol),
+        );
     }
     #[cfg(not(feature = "complex"))]
     if let Some(dist) = pmat.as_any().downcast_ref::<DistCsrOp>() {
         let csr = dist.local_block_csr();
-        return Ok(<CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(
-            &csr, drop_tol,
-        ));
+        return Ok(
+            <CsrMatrix<f64> as AsFormat<f64, DefaultBackend>>::to_csc_cached(&csr, drop_tol),
+        );
     }
     Err(unsupported_linop_err(pmat, "to_csc_cached", "CSC"))
 }
 
 /// Obtain a CSC matrix from a [`LinOp`], converting and caching if necessary.
 #[inline]
-pub fn csc_from_linop(
-    op: &dyn LinOp<S = S>,
-    drop_tol: R,
-) -> Result<Arc<CscMatrix<f64>>, KError> {
+pub fn csc_from_linop(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CscMatrix<f64>>, KError> {
     to_csc_cached(op, drop_tol)
 }
 

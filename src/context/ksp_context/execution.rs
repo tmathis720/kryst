@@ -60,9 +60,8 @@ impl ExecutionPolicy {
                 let _guard = serial_guard(true);
                 #[cfg(feature = "rayon")]
                 {
-                    let pool = SERIAL_POOL.get_or_try_init(|| {
-                        rayon::ThreadPoolBuilder::new().num_threads(1).build()
-                    });
+                    let pool = SERIAL_POOL
+                        .get_or_try_init(|| rayon::ThreadPoolBuilder::new().num_threads(1).build());
                     if let Ok(pool) = pool {
                         return pool.install(f);
                     }

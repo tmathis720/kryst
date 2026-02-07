@@ -26,7 +26,12 @@ fn block_jacobi_apply_matches_block_solve() {
         .expect("block jacobi preconditioner");
     pc.setup(&op).expect("block jacobi setup");
 
-    let rhs = vec![S::from_real(1.0), S::from_real(2.0), S::from_real(3.0), S::from_real(4.0)];
+    let rhs = vec![
+        S::from_real(1.0),
+        S::from_real(2.0),
+        S::from_real(3.0),
+        S::from_real(4.0),
+    ];
     let mut out = vec![S::zero(); rhs.len()];
     pc.apply(PcSide::Left, &rhs, &mut out)
         .expect("block jacobi apply");

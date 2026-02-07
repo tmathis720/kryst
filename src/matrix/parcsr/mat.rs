@@ -196,19 +196,9 @@ mod tests {
         let comm = UniverseComm::Mpi(Arc::new(comm));
         let (row_start, row_end) = if rank == 0 { (0, 1) } else { (1, 2) };
         let (diag_val, off_val, colmap_owned, colmap_ghost) = if rank == 0 {
-            (
-                S::from_real(1.0),
-                S::from_real(2.0),
-                vec![0],
-                vec![1],
-            )
+            (S::from_real(1.0), S::from_real(2.0), vec![0], vec![1])
         } else {
-            (
-                S::from_real(4.0),
-                S::from_real(3.0),
-                vec![1],
-                vec![0],
-            )
+            (S::from_real(4.0), S::from_real(3.0), vec![1], vec![0])
         };
 
         let a_diag = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![diag_val]);

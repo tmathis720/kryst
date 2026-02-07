@@ -54,7 +54,7 @@ use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve};
-use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
+use crate::utils::conditioning::{ConditioningOptions, apply_dense_transforms};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;

@@ -69,10 +69,13 @@ fn solve_with(solver_type: SolverType, opts: KspOptions) -> ConvergedReason {
 }
 
 fn assert_converged(reason: ConvergedReason) {
-    assert!(matches!(
-        reason,
-        ConvergedReason::ConvergedAtol | ConvergedReason::ConvergedRtol
-    ), "unexpected convergence reason: {reason:?}");
+    assert!(
+        matches!(
+            reason,
+            ConvergedReason::ConvergedAtol | ConvergedReason::ConvergedRtol
+        ),
+        "unexpected convergence reason: {reason:?}"
+    );
 }
 
 #[test]

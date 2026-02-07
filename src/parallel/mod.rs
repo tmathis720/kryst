@@ -58,7 +58,9 @@ mod tests {
 
     #[test]
     fn contiguous_partition_distributes_remainder() {
-        let ranges: Vec<_> = (0..3).map(|rank| contiguous_partition(10, rank, 3)).collect();
+        let ranges: Vec<_> = (0..3)
+            .map(|rank| contiguous_partition(10, rank, 3))
+            .collect();
         assert_eq!(ranges, vec![(0, 4), (4, 7), (7, 10)]);
     }
 }

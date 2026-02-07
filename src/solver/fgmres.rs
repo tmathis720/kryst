@@ -3,7 +3,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
@@ -15,13 +14,14 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::common::{call_monitors, recompute_true_residual_norm_s, ReductCtx};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
+use crate::solver::common::{ReductCtx, call_monitors, recompute_true_residual_norm_s};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::utils::monitor::{
-    log_krylov_stagnation, log_residuals, stagnation_detected, ResidualSnapshot,
+    ResidualSnapshot, log_krylov_stagnation, log_residuals, stagnation_detected,
 };
 use smallvec::SmallVec;
 use std::any::Any;
@@ -196,8 +196,7 @@ impl FgmresSolver {
                 residual_replacements: 0,
             };
             return Ok(
-                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor)
-                    .with_counters(counters),
+                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
             );
         }
         let true_res = recompute_true_residual_norm_s(
@@ -466,10 +465,12 @@ impl FgmresSolver {
                         num_global_reductions: pipeline_reductions,
                         residual_replacements: 0,
                     };
-                    return Ok(
-                        SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
-                            .with_counters(counters),
-                    );
+                    return Ok(SolveStats::new(
+                        total_iters,
+                        res,
+                        ConvergedReason::StoppedByMonitor,
+                    )
+                    .with_counters(counters));
                 }
                 let true_res = recompute_true_residual_norm_s(
                     a,

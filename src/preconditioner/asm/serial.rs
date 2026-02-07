@@ -17,16 +17,16 @@ use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::CsrOp;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
+use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::PcCaps;
 use crate::preconditioner::Preconditioner as DynPreconditioner;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
-use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
-use crate::utils::conditioning::ConditioningOptions;
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
+use crate::utils::conditioning::ConditioningOptions;
 use crate::utils::partition::{contiguous_partition, greedy_nnz_balanced_partition};
 use std::sync::Arc;
 

@@ -27,11 +27,23 @@ impl PcDiagnostics {
             insert_opt(&mut config, "asm_mode", opts.asm_mode.clone());
             insert_opt(&mut config, "asm_weighting", opts.asm_weighting.clone());
             insert_opt(&mut config, "chebyshev_degree", opts.chebyshev_degree);
-            insert_opt(&mut config, "chebyshev_lambda_min", opts.chebyshev_lambda_min);
-            insert_opt(&mut config, "chebyshev_lambda_max", opts.chebyshev_lambda_max);
+            insert_opt(
+                &mut config,
+                "chebyshev_lambda_min",
+                opts.chebyshev_lambda_min,
+            );
+            insert_opt(
+                &mut config,
+                "chebyshev_lambda_max",
+                opts.chebyshev_lambda_max,
+            );
             insert_opt(&mut config, "amg_levels", opts.amg_levels);
             insert_opt(&mut config, "amg_cycle_type", opts.amg_cycle_type.clone());
-            insert_opt(&mut config, "amg_coarse_solver", opts.amg_coarse_solver.clone());
+            insert_opt(
+                &mut config,
+                "amg_coarse_solver",
+                opts.amg_coarse_solver.clone(),
+            );
             insert_opt(&mut config, "pc_chain", opts.pc_chain.clone());
         }
 

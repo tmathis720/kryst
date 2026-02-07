@@ -1,7 +1,5 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
-use crate::solver::common::call_monitors;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -16,6 +14,8 @@ use crate::preconditioner::{PcSide, Preconditioner};
 use crate::reduction::Packet;
 use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
+use crate::solver::common::call_monitors;
 #[cfg(feature = "complex")]
 use crate::solver::common::dot_result_to_real;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
@@ -720,14 +720,12 @@ impl PcgSolver {
                         actual_res,
                         counters.num_global_reductions,
                     ) {
-                        return Ok(
-                            SolveStats::new(
-                                iterations,
-                                actual_res,
-                                ConvergedReason::StoppedByMonitor,
-                            )
-                            .with_counters(counters),
-                        );
+                        return Ok(SolveStats::new(
+                            iterations,
+                            actual_res,
+                            ConvergedReason::StoppedByMonitor,
+                        )
+                        .with_counters(counters));
                     }
                     if let Some(m) = &self.true_residual_monitor {
                         m(iterations, actual_res, 0);
@@ -898,14 +896,12 @@ impl PcgSolver {
                     actual_res,
                     counters.num_global_reductions,
                 ) {
-                    return Ok(
-                        SolveStats::new(
-                            iterations,
-                            actual_res,
-                            ConvergedReason::StoppedByMonitor,
-                        )
-                        .with_counters(counters),
-                    );
+                    return Ok(SolveStats::new(
+                        iterations,
+                        actual_res,
+                        ConvergedReason::StoppedByMonitor,
+                    )
+                    .with_counters(counters));
                 }
                 if let Some(m) = &self.true_residual_monitor {
                     m(iterations, actual_res, 0);

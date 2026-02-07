@@ -4,7 +4,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use sprs::{CsMat, TriMat, CSR};
+use sprs::{CSR, CsMat, TriMat};
 
 use crate::algebra::prelude::*;
 use crate::error::KError;
@@ -133,7 +133,8 @@ impl<S> SparseBackend<S> for SprsBackend
 where
     S: KrystScalar<Real = f64>,
 {
-    const FORMAT_SUPPORT: BackendFormatSupport = BackendFormatSupport::new(true, true, false, false);
+    const FORMAT_SUPPORT: BackendFormatSupport =
+        BackendFormatSupport::new(true, true, false, false);
 
     type Csr = CsMat<f64>;
     type Csc = ();
@@ -161,7 +162,11 @@ where
     }
 
     fn dense_from_csr(csr: &Self::Csr) -> Result<Self::Dense, KError> {
-        let csr = if csr.storage() == CSR { csr.clone() } else { csr.to_csr() };
+        let csr = if csr.storage() == CSR {
+            csr.clone()
+        } else {
+            csr.to_csr()
+        };
         let mut data = vec![0.0; csr.rows() * csr.cols()];
         for (row_ind, row_vec) in csr.outer_iterator().enumerate() {
             for (col_ind, val) in row_vec.iter() {
@@ -195,9 +200,9 @@ pub fn try_materialize(
     if let Some(csr) = op.as_any().downcast_ref::<CsMat<f64>>() {
         return match want {
             OpFormat::Csr => Ok(Arc::new(csr.clone())),
-            OpFormat::Dense => Ok(Arc::new(
-                <SprsBackend as SparseBackend<S>>::dense_from_csr(csr)?,
-            )),
+            OpFormat::Dense => Ok(Arc::new(<SprsBackend as SparseBackend<S>>::dense_from_csr(
+                csr,
+            )?)),
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
             )),
@@ -206,9 +211,9 @@ pub fn try_materialize(
 
     if let Some(dense) = op.as_any().downcast_ref::<SprsDenseMat>() {
         return match want {
-            OpFormat::Csr => Ok(Arc::new(
-                <SprsBackend as SparseBackend<S>>::csr_from_dense(dense, drop_tol)?,
-            )),
+            OpFormat::Csr => Ok(Arc::new(<SprsBackend as SparseBackend<S>>::csr_from_dense(
+                dense, drop_tol,
+            )?)),
             OpFormat::Dense => Ok(Arc::new(dense.clone())),
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
@@ -240,9 +245,9 @@ pub fn try_materialize_ref(
     if let Some(csr) = op.as_any().downcast_ref::<CsMat<f64>>() {
         return match want {
             OpFormat::Csr => Ok(Arc::new(csr.clone())),
-            OpFormat::Dense => Ok(Arc::new(
-                <SprsBackend as SparseBackend<S>>::dense_from_csr(csr)?,
-            )),
+            OpFormat::Dense => Ok(Arc::new(<SprsBackend as SparseBackend<S>>::dense_from_csr(
+                csr,
+            )?)),
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
             )),
@@ -251,9 +256,9 @@ pub fn try_materialize_ref(
 
     if let Some(dense) = op.as_any().downcast_ref::<SprsDenseMat>() {
         return match want {
-            OpFormat::Csr => Ok(Arc::new(
-                <SprsBackend as SparseBackend<S>>::csr_from_dense(dense, drop_tol)?,
-            )),
+            OpFormat::Csr => Ok(Arc::new(<SprsBackend as SparseBackend<S>>::csr_from_dense(
+                dense, drop_tol,
+            )?)),
             OpFormat::Dense => Ok(Arc::new(dense.clone())),
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
@@ -285,10 +290,7 @@ mod tests {
         let dense_again =
             backend::materialize(Arc::new(csr_ref.clone()), OpFormat::Dense, 0.0).unwrap();
         assert_eq!(dense_again.format(), OpFormat::Dense);
-        let dense_ref = dense_again
-            .as_any()
-            .downcast_ref::<SprsDenseMat>()
-            .unwrap();
+        let dense_ref = dense_again.as_any().downcast_ref::<SprsDenseMat>().unwrap();
         assert_eq!(dense_ref.get(0, 0), 1.0);
         assert_eq!(dense_ref.get(1, 1), 2.0);
     }

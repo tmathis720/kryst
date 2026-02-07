@@ -3,7 +3,9 @@ use crate::context::ksp_context::Workspace;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
 use crate::solver::LinearSolver;
-use crate::solver::block::{BlockKrylovOptions, bicgstab::BlockBicgstabSolver, gmres::BlockGmresSolver};
+use crate::solver::block::{
+    BlockKrylovOptions, bicgstab::BlockBicgstabSolver, gmres::BlockGmresSolver,
+};
 use crate::utils::convergence::ConvergedReason;
 
 #[cfg(feature = "backend-faer")]

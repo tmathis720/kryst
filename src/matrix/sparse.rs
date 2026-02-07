@@ -266,13 +266,7 @@ impl<T: KrystScalar> CsrMatrix<T> {
     }
 
     /// Sparse matrix-vector product: y = alpha * A * x + beta * y.
-    pub fn spmv_scaled(
-        &self,
-        alpha: T,
-        x: &[T],
-        beta: T,
-        y: &mut [T],
-    ) -> Result<(), KError> {
+    pub fn spmv_scaled(&self, alpha: T, x: &[T], beta: T, y: &mut [T]) -> Result<(), KError> {
         if x.len() != self.ncols() || y.len() != self.nrows() {
             return Err(KError::InvalidInput(format!(
                 "Dimension mismatch in spmv: A={}x{}, x.len()={}, y.len={}",
@@ -362,10 +356,7 @@ where
     /// # Errors
     /// Returns `KError::Unsupported` when called with complex scalars.
     #[cfg(feature = "backend-faer")]
-    pub fn from_dense(
-        dense: &faer::Mat<R>,
-        drop_tol: R,
-    ) -> Result<Self, crate::error::KError> {
+    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Result<Self, crate::error::KError> {
         if crate::algebra::scalar::is_complex_scalar::<T>() {
             return Err(crate::error::KError::Unsupported(
                 "CSR from_dense is real-only; complex scalars are unsupported",
@@ -626,7 +617,12 @@ mod tests {
             2,
             vec![0, 2, 4],
             vec![0, 1, 0, 1],
-            vec![S::from_parts(1.0, 0.5), S::from_parts(2.0, -1.0), S::one(), S::zero()],
+            vec![
+                S::from_parts(1.0, 0.5),
+                S::from_parts(2.0, -1.0),
+                S::one(),
+                S::zero(),
+            ],
         );
         let err = csr.to_dense().unwrap_err();
         assert!(matches!(err, crate::error::KError::Unsupported(_)));

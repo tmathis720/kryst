@@ -217,9 +217,7 @@ fn unpack_scalar(words: &[u64]) -> Result<S, KError> {
     #[cfg(feature = "complex")]
     {
         if words.len() != 2 {
-            return Err(KError::InvalidInput(
-                "corrupt packed row buffer".into(),
-            ));
+            return Err(KError::InvalidInput("corrupt packed row buffer".into()));
         }
         Ok(S::from_parts(
             f64::from_bits(words[0]),
@@ -229,9 +227,7 @@ fn unpack_scalar(words: &[u64]) -> Result<S, KError> {
     #[cfg(not(feature = "complex"))]
     {
         if words.len() != 1 {
-            return Err(KError::InvalidInput(
-                "corrupt packed row buffer".into(),
-            ));
+            return Err(KError::InvalidInput("corrupt packed row buffer".into()));
         }
         Ok(S::from_real(f64::from_bits(words[0])))
     }

@@ -1,6 +1,5 @@
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -12,7 +11,8 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::solver::common::{dot_result_to_real, ReductCtx};
+use crate::solver::MonitorCallback;
+use crate::solver::common::{ReductCtx, dot_result_to_real};
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
@@ -813,12 +813,14 @@ impl IdrsSolver {
                                 &mut self.ws.scratch,
                                 &mut stats,
                             )?;
-                            omega_block =
-                                self.omega_value(&red, &mut stats, &self.ws.t[..n], &self.ws.v[..n]);
+                            omega_block = self.omega_value(
+                                &red,
+                                &mut stats,
+                                &self.ws.t[..n],
+                                &self.ws.v[..n],
+                            );
                             if omega_block.abs() <= f64::EPSILON {
-                                if self
-                                    .attempt_breakdown_repair(&mut attempts, &red, &mut stats)?
-                                {
+                                if self.attempt_breakdown_repair(&mut attempts, &red, &mut stats)? {
                                     continue 'block;
                                 }
                                 return Err(KError::BreakdownOrIndefinite);

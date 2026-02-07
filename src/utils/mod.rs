@@ -4,6 +4,7 @@ pub mod buffer_pool;
 pub mod coloring;
 pub mod conditioning;
 pub mod convergence;
+pub mod diagnostics;
 pub mod invariants;
 #[cfg(feature = "backend-faer")]
 pub mod matrix_market;
@@ -13,7 +14,6 @@ pub mod monitor;
 pub mod partition;
 pub mod permutation;
 pub mod profiling;
-pub mod diagnostics;
 pub mod reduction;
 #[cfg(feature = "backend-faer")]
 pub mod reordering;

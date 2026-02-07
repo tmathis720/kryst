@@ -10,8 +10,8 @@ pub use coarse::DistCoarseStrategy;
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
-use crate::preconditioner::{PcSide, Preconditioner};
 use crate::preconditioner::ilu::IluConfig;
+use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
 
@@ -240,9 +240,7 @@ impl Preconditioner for DistPcAdapter {
         let dist_op = op
             .as_any()
             .downcast_ref::<DistCsrOp>()
-            .ok_or_else(|| {
-                KError::InvalidInput("distributed PC requires a DistCsrOp".into())
-            })?;
+            .ok_or_else(|| KError::InvalidInput("distributed PC requires a DistCsrOp".into()))?;
         self.rebuild(dist_op)
     }
 
@@ -281,8 +279,9 @@ fn build_dist_pc(
         DistPcBuilder::BlockJacobi { opts } => {
             #[cfg(feature = "backend-faer")]
             {
-                let pc = build_block_jacobi_pc(dist_op, opts)?
-                    .ok_or_else(|| KError::InvalidInput("block-Jacobi PC not constructed".into()))?;
+                let pc = build_block_jacobi_pc(dist_op, opts)?.ok_or_else(|| {
+                    KError::InvalidInput("block-Jacobi PC not constructed".into())
+                })?;
                 Ok(pc)
             }
             #[cfg(not(feature = "backend-faer"))]

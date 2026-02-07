@@ -98,9 +98,7 @@ impl ConditioningOptions {
     pub fn validate(&self) -> Result<(), KError> {
         if let Some(v) = self.shift_diag {
             if !v.is_finite() {
-                return Err(KError::InvalidInput(
-                    "pc_shift_diag must be finite".into(),
-                ));
+                return Err(KError::InvalidInput("pc_shift_diag must be finite".into()));
             }
         }
         if let Some(v) = self.diag_inject_tau {
@@ -123,7 +121,11 @@ pub struct NormStats {
 
 impl fmt::Display for NormStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "min={:.3e} med={:.3e} max={:.3e}", self.min, self.median, self.max)
+        write!(
+            f,
+            "min={:.3e} med={:.3e} max={:.3e}",
+            self.min, self.median, self.max
+        )
     }
 }
 
@@ -165,14 +167,8 @@ fn norm_stats(values: &[f64]) -> NormStats {
         };
     }
     let mut buf = values.to_vec();
-    let min = values
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
-    let max = values
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let med = median(&mut buf);
     NormStats {
         min,
@@ -245,10 +241,7 @@ fn symmetry_estimate_csr(a: &CsrMatrix<f64>) -> Option<f64> {
     }
 }
 
-pub fn analyze_dense<M: DenseMatRef<f64>>(
-    matrix: &M,
-    tiny_threshold: f64,
-) -> ConditioningStats {
+pub fn analyze_dense<M: DenseMatRef<f64>>(matrix: &M, tiny_threshold: f64) -> ConditioningStats {
     let nrows = matrix.nrows();
     let ncols = matrix.ncols();
     let diag_len = nrows.min(ncols);
@@ -269,10 +262,7 @@ pub fn analyze_dense<M: DenseMatRef<f64>>(
     let diag_min_abs = if diag_vals.is_empty() {
         0.0
     } else {
-        diag_vals
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min)
+        diag_vals.iter().copied().fold(f64::INFINITY, f64::min)
     };
     let diag_median_abs = median(&mut diag_vals);
 
@@ -341,10 +331,7 @@ pub fn analyze_csr(a: &CsrMatrix<f64>, tiny_threshold: f64) -> ConditioningStats
     let diag_min_abs = if diag_vals.is_empty() {
         0.0
     } else {
-        diag_vals
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min)
+        diag_vals.iter().copied().fold(f64::INFINITY, f64::min)
     };
     let diag_median_abs = median(&mut diag_vals);
 
@@ -413,17 +400,24 @@ fn log_stats(label: &str, stage: &str, stats: &ConditioningStats) {
         colinf = stats.col_norm_inf
     );
     if let Some(sym) = stats.symmetry_estimate {
-        log::info!(
-            "Conditioning {label} ({stage}): symmetry≈{sym:.3} (1=symmetric)",
-        );
+        log::info!("Conditioning {label} ({stage}): symmetry≈{sym:.3} (1=symmetric)",);
     }
     if !stats.zero_rows.is_empty() {
-        let preview: Vec<String> = stats.zero_rows.iter().take(8).map(|i| i.to_string()).collect();
+        let preview: Vec<String> = stats
+            .zero_rows
+            .iter()
+            .take(8)
+            .map(|i| i.to_string())
+            .collect();
         log::info!(
             "Conditioning {label} ({stage}): zero rows={} [{}{}]",
             stats.zero_rows.len(),
             preview.join(", "),
-            if stats.zero_rows.len() > 8 { ", ..." } else { "" }
+            if stats.zero_rows.len() > 8 {
+                ", ..."
+            } else {
+                ""
+            }
         );
     }
 }
@@ -454,10 +448,7 @@ pub fn log_conditioning(label: &str, opts: &ConditioningOptions) {
     }
 }
 
-fn row_norms_dense<M: DenseMatRef<f64>>(
-    matrix: &M,
-    norm: ScaleNorm,
-) -> Vec<f64> {
+fn row_norms_dense<M: DenseMatRef<f64>>(matrix: &M, norm: ScaleNorm) -> Vec<f64> {
     let nrows = matrix.nrows();
     let ncols = matrix.ncols();
     let mut out = vec![0.0; nrows];
@@ -479,10 +470,7 @@ fn row_norms_dense<M: DenseMatRef<f64>>(
     out
 }
 
-fn col_norms_dense<M: DenseMatRef<f64>>(
-    matrix: &M,
-    norm: ScaleNorm,
-) -> Vec<f64> {
+fn col_norms_dense<M: DenseMatRef<f64>>(matrix: &M, norm: ScaleNorm) -> Vec<f64> {
     let nrows = matrix.nrows();
     let ncols = matrix.ncols();
     let mut out = vec![0.0; ncols];
@@ -504,11 +492,7 @@ fn col_norms_dense<M: DenseMatRef<f64>>(
     out
 }
 
-fn apply_dense_scale<M: DenseMatMut<f64>>(
-    matrix: &mut M,
-    dir: ScaleDirection,
-    norm: ScaleNorm,
-) {
+fn apply_dense_scale<M: DenseMatMut<f64>>(matrix: &mut M, dir: ScaleDirection, norm: ScaleNorm) {
     let nrows = matrix.nrows();
     let ncols = matrix.ncols();
     match dir {

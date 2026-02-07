@@ -10,7 +10,7 @@
 #![allow(clippy::needless_borrow)]
 
 use crate::algebra::prelude::*;
-use crate::reduction::{Kahan, ReproMode, Accum};
+use crate::reduction::{Accum, Kahan, ReproMode};
 use crate::utils::reduction::repro_mode_is_strict;
 
 #[cfg(feature = "rayon")]

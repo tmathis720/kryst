@@ -10,7 +10,6 @@ fn main() {
     eprintln!("phase_i_test.rs is unavailable when built with --features complex");
 }
 
-
 #[cfg(not(feature = "backend-faer"))]
 #[cfg(not(feature = "complex"))]
 fn main() {

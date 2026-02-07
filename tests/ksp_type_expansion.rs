@@ -56,8 +56,14 @@ fn parses_new_solver_types() {
     assert_eq!("cr".parse::<SolverType>().unwrap(), SolverType::Cr);
     assert_eq!("tcqmr".parse::<SolverType>().unwrap(), SolverType::Tcqmr);
     assert_eq!("gcr".parse::<SolverType>().unwrap(), SolverType::Gcr);
-    assert_eq!("gcr_pipe".parse::<SolverType>().unwrap(), SolverType::PipeGcr);
-    assert_eq!("pipegcr".parse::<SolverType>().unwrap(), SolverType::PipeGcr);
+    assert_eq!(
+        "gcr_pipe".parse::<SolverType>().unwrap(),
+        SolverType::PipeGcr
+    );
+    assert_eq!(
+        "pipegcr".parse::<SolverType>().unwrap(),
+        SolverType::PipeGcr
+    );
 }
 
 #[test]

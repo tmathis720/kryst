@@ -8,10 +8,10 @@ use faer::Mat;
 use crate::algebra::bridge::BridgeScratch;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-#[cfg(feature = "complex")]
-use crate::preconditioner::bridge::apply_pc_s;
 #[cfg(feature = "mpi")]
 use crate::parallel::Comm;
+#[cfg(feature = "complex")]
+use crate::preconditioner::bridge::apply_pc_s;
 
 pub struct QrPc;
 

@@ -60,9 +60,7 @@ fn unsupported_format_err(want: OpFormat) -> KError {
         OpFormat::Csc => KError::Unsupported(
             "materialize: cannot produce Csc; enable backend-faer or another sparse backend",
         ),
-        OpFormat::BlockCsr => {
-            KError::Unsupported("materialize: BlockCsr is not supported yet")
-        }
+        OpFormat::BlockCsr => KError::Unsupported("materialize: BlockCsr is not supported yet"),
         OpFormat::Any => KError::Unsupported("materialize: OpFormat::Any requires no conversion"),
     }
 }

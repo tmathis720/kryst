@@ -44,7 +44,10 @@ bitflags::bitflags! {
 pub enum AsmInnerPc {
     Jacobi,
     Ilu0,
-    Ilut { drop_tol: R, max_fill: usize },
+    Ilut {
+        drop_tol: R,
+        max_fill: usize,
+    },
     Ilutp {
         drop_tol: R,
         max_fill: usize,

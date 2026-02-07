@@ -195,7 +195,7 @@ where
             // Row k of B (since B is CSR, this is B[k,:])
             for jj in bp[k]..bp[k + 1] {
                 let j = bj[jj];
-            let inc = (aik * bv[jj]).real();
+                let inc = (aik * bv[jj]).real();
 
                 if mark[j] != i {
                     mark[j] = i;
@@ -937,10 +937,10 @@ pub fn random_spd(n: usize, bandwidth: usize) -> CsrMatrix<f64> {
 #[cfg(all(test, feature = "backend-faer"))]
 mod tests {
     use super::*;
-    use crate::matrix::sparse::CsrMatrix;
-    use faer::Mat;
     #[cfg(feature = "complex")]
     use crate::algebra::prelude::*;
+    use crate::matrix::sparse::CsrMatrix;
+    use faer::Mat;
 
     #[cfg(feature = "complex")]
     fn complex_csr(value: S) -> CsrMatrix<S> {

@@ -16,11 +16,7 @@ pub struct MatShell<S: KrystScalar> {
 }
 
 impl<S: KrystScalar> MatShell<S> {
-    pub fn new(
-        m: usize,
-        n: usize,
-        mv: impl Fn(&[S], &mut [S]) + Send + Sync + 'static,
-    ) -> Self {
+    pub fn new(m: usize, n: usize, mv: impl Fn(&[S], &mut [S]) + Send + Sync + 'static) -> Self {
         Self {
             m,
             n,
@@ -31,10 +27,7 @@ impl<S: KrystScalar> MatShell<S> {
         }
     }
 
-    pub fn with_transpose(
-        mut self,
-        mvt: impl Fn(&[S], &mut [S]) + Send + Sync + 'static,
-    ) -> Self {
+    pub fn with_transpose(mut self, mvt: impl Fn(&[S], &mut [S]) + Send + Sync + 'static) -> Self {
         self.mvt = Some(Arc::new(mvt));
         self
     }

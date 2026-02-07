@@ -86,10 +86,7 @@ where
     ///
     /// # Errors
     /// Returns `KError::Unsupported` when called with complex scalars.
-    pub fn from_dense(
-        dense: &faer::Mat<R>,
-        drop_tol: R,
-    ) -> Result<Self, crate::error::KError> {
+    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Result<Self, crate::error::KError> {
         if crate::algebra::scalar::is_complex_scalar::<T>() {
             return Err(crate::error::KError::Unsupported(
                 "CSC from_dense is real-only; complex scalars are unsupported",
@@ -220,7 +217,12 @@ mod tests {
             2,
             vec![0, 2, 4],
             vec![0, 1, 0, 1],
-            vec![S::from_parts(1.0, 0.5), S::from_parts(2.0, -1.0), S::one(), S::zero()],
+            vec![
+                S::from_parts(1.0, 0.5),
+                S::from_parts(2.0, -1.0),
+                S::one(),
+                S::zero(),
+            ],
         );
         let err = match csc.to_dense() {
             Err(err) => err,

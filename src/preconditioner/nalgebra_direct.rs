@@ -66,18 +66,14 @@ impl Preconditioner for NalgebraLuPc {
         ))
     }
 
-    fn direct_solve(
-        &mut self,
-        op: &dyn LinOp<S = S>,
-        b: &[S],
-        x: &mut [S],
-    ) -> Result<(), KError> {
+    fn direct_solve(&mut self, op: &dyn LinOp<S = S>, b: &[S], x: &mut [S]) -> Result<(), KError> {
         if self.lu.is_none() {
             self.factorize(op)?;
         }
-        let lu = self.lu.as_ref().ok_or_else(|| {
-            KError::SolveError("nalgebra LU factorization missing".into())
-        })?;
+        let lu = self
+            .lu
+            .as_ref()
+            .ok_or_else(|| KError::SolveError("nalgebra LU factorization missing".into()))?;
         if b.len() != self.n || x.len() != self.n {
             return Err(KError::InvalidInput(
                 "nalgebra LU solve dimension mismatch".into(),
@@ -137,18 +133,14 @@ impl Preconditioner for NalgebraQrPc {
         ))
     }
 
-    fn direct_solve(
-        &mut self,
-        op: &dyn LinOp<S = S>,
-        b: &[S],
-        x: &mut [S],
-    ) -> Result<(), KError> {
+    fn direct_solve(&mut self, op: &dyn LinOp<S = S>, b: &[S], x: &mut [S]) -> Result<(), KError> {
         if self.qr.is_none() {
             self.factorize(op)?;
         }
-        let qr = self.qr.as_ref().ok_or_else(|| {
-            KError::SolveError("nalgebra QR factorization missing".into())
-        })?;
+        let qr = self
+            .qr
+            .as_ref()
+            .ok_or_else(|| KError::SolveError("nalgebra QR factorization missing".into()))?;
         if b.len() != self.n || x.len() != self.n {
             return Err(KError::InvalidInput(
                 "nalgebra QR solve dimension mismatch".into(),

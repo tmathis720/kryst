@@ -58,11 +58,11 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::matrix::sparse::CsrMatrix;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::op::DenseOp;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::op::LinOp;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
 
@@ -225,8 +225,7 @@ fn test_optimal_solver(
             let stats_fallback = ksp_fallback.solve(&rhs_vec, &mut solution_fallback)?;
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
 
-            let true_residual =
-                true_residual_norm(dense_op.as_ref(), &rhs_vec, &solution_fallback);
+            let true_residual = true_residual_norm(dense_op.as_ref(), &rhs_vec, &solution_fallback);
             let converged = true_residual < 1e-6;
             let method_used = format!(
                 "{} + {} (fallback)",
@@ -441,9 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let matrix = matrix_data.to_csr_matrix()?;
         let (matrix, repaired) = repair_diagonal_csr(&matrix, 1e-14, 1e-8);
         if repaired > 0 {
-            println!(
-                "    → Repaired {repaired} diagonal entries (|diag|<=1e-14 or missing)."
-            );
+            println!("    → Repaired {repaired} diagonal entries (|diag|<=1e-14 or missing).");
         }
         let diag_issues = detect_diag_issues(&matrix, 1e-14, 20_000);
         let rhs = rhs_data.to_vector()?;

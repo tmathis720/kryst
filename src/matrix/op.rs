@@ -4,9 +4,9 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 #[cfg(feature = "backend-faer")]
 use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+use crate::matrix::format::OpFormat;
 #[cfg(feature = "backend-faer")]
 use crate::matrix::spmv::plan::{self as spmv_plan, SpmvPlan as ScalarSpmvPlan, SpmvTuning};
-use crate::matrix::format::OpFormat;
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{NoComm, UniverseComm};

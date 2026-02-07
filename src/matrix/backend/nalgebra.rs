@@ -15,7 +15,8 @@ impl<S> SparseBackend<S> for NalgebraBackend
 where
     S: KrystScalar<Real = f64>,
 {
-    const FORMAT_SUPPORT: BackendFormatSupport = BackendFormatSupport::new(true, false, false, false);
+    const FORMAT_SUPPORT: BackendFormatSupport =
+        BackendFormatSupport::new(true, false, false, false);
 
     type Csr = ();
     type Csc = ();

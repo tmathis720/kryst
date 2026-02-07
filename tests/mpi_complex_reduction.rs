@@ -1,8 +1,8 @@
 #![cfg(all(feature = "complex", feature = "mpi"))]
 
+use kryst::Comm;
 use kryst::algebra::prelude::*;
 use kryst::parallel::{MpiComm, UniverseComm, global_dot_conj};
-use kryst::Comm;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 fn mpi_test_guard() -> MutexGuard<'static, ()> {
@@ -34,5 +34,10 @@ fn mpi_complex_dot_conj_matches_expected() {
     }
 
     let tol = 1e-12 * (comm.size() as f64);
-    assert!((dot - expected).abs() < tol, "dot={:?} expected={:?}", dot, expected);
+    assert!(
+        (dot - expected).abs() < tol,
+        "dot={:?} expected={:?}",
+        dot,
+        expected
+    );
 }

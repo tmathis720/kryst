@@ -1,13 +1,13 @@
 #![cfg(all(feature = "complex", feature = "backend-faer"))]
 
 use approx::assert_abs_diff_eq;
+use kryst::KspContext;
 use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::SolverType;
 use kryst::context::pc_context::PcType;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::utils::convergence::ConvergedReason;
-use kryst::KspContext;
 use std::sync::Arc;
 
 fn apply_csr(a: &CsrMatrix<S>, x: &[S]) -> Vec<S> {

@@ -19,7 +19,8 @@ impl<S> SparseBackend<S> for NaiveBackend
 where
     S: KrystScalar<Real = f64>,
 {
-    const FORMAT_SUPPORT: BackendFormatSupport = BackendFormatSupport::new(false, false, false, false);
+    const FORMAT_SUPPORT: BackendFormatSupport =
+        BackendFormatSupport::new(false, false, false, false);
 
     type Csr = ();
     type Csc = ();

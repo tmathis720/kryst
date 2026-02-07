@@ -2,8 +2,8 @@
 #![cfg(not(feature = "complex"))]
 
 use super::*;
-use crate::assert_vec_close;
 use crate::algebra::prelude::*;
+use crate::assert_vec_close;
 use crate::matrix::DistCsrOp;
 use crate::matrix::op::CsrOp;
 use crate::matrix::sparse::CsrMatrix;
@@ -53,10 +53,7 @@ fn local_rows_from_global(global: &CsrMatrix<R>, row_start: usize, n_local: usiz
     CsrMatrix::from_csr(n_local, global.ncols(), row_ptr, col_idx, values)
 }
 
-fn make_dist_poisson(
-    comm: &UniverseComm,
-    n_per: usize,
-) -> (DistCsrOp, CsrMatrix<R>, usize, usize) {
+fn make_dist_poisson(comm: &UniverseComm, n_per: usize) -> (DistCsrOp, CsrMatrix<R>, usize, usize) {
     let rank = comm.rank();
     let size = comm.size();
     let n_global = n_per * size;
@@ -205,8 +202,8 @@ fn mpi_ras_apply_injects_owned_rows() {
     let subdofs: Vec<usize> = (sub_start..sub_end).collect();
     let sub_csr = subdomain_from_global(&global, &subdofs);
 
-    let mut ilu = build_ilu0_with_conditioning(ConditioningOptions::default())
-        .expect("ilu0 builder");
+    let mut ilu =
+        build_ilu0_with_conditioning(ConditioningOptions::default()).expect("ilu0 builder");
     ilu.setup(&CsrOp::new(Arc::new(sub_csr)))
         .expect("subdomain ilu0 setup");
 

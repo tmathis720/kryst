@@ -3,7 +3,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -18,8 +17,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
-use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
+use crate::solver::MonitorCallback;
 use crate::solver::common::ReductCtx;
+use crate::solver::common::givens::{apply_new_givens_and_update_g, apply_prev_givens_to_col};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use smallvec::SmallVec;
 
@@ -412,8 +412,7 @@ impl PcaGmresSolver {
                     }
                 }
 
-                let hnorm =
-                    self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h_s, &red);
+                let hnorm = self.project_and_normalize(&ws.q_s, k, &mut ws.tmp1, &mut ws.h_s, &red);
 
                 let vnext = &mut ws.q_s[k + 1][..];
                 if hnorm > R::default() {

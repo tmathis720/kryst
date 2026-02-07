@@ -577,10 +577,10 @@ where
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
+    use crate::error::KError;
     use crate::matrix::sparse::CsrMatrix;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::{DeflationOptions, Jacobi, PcSide, ZSource};
-    use crate::error::KError;
     use faer::Mat;
 
     #[test]

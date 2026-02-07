@@ -7,7 +7,9 @@ use kryst::error::KError;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::PcSide;
 use kryst::solver::LinearSolver;
-use kryst::solver::block::{BlockKrylovOptions, bicgstab::BlockBicgstabSolver, gmres::BlockGmresSolver};
+use kryst::solver::block::{
+    BlockKrylovOptions, bicgstab::BlockBicgstabSolver, gmres::BlockGmresSolver,
+};
 use kryst::utils::convergence::ConvergedReason;
 
 fn block_rhs(n: usize, p: usize) -> Vec<f64> {
@@ -41,7 +43,16 @@ fn rayon_block_gmres_converges() -> Result<(), KError> {
     opts.restart_blocks = 6;
     opts.max_iters = 2000;
     let mut solver = BlockGmresSolver::new(opts);
-    let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
+    let stats = solver.solve(
+        &a,
+        None,
+        &b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
     assert_converged(stats);
     Ok(())
 }
@@ -59,7 +70,16 @@ fn rayon_block_bicgstab_converges() -> Result<(), KError> {
     opts.block_size = 2;
     opts.max_iters = 200;
     let mut solver = BlockBicgstabSolver::new(opts);
-    let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
+    let stats = solver.solve(
+        &a,
+        None,
+        &b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
     assert_converged(stats);
     Ok(())
 }
@@ -81,7 +101,16 @@ fn mpi_block_gmres_converges() -> Result<(), KError> {
     opts.restart_blocks = 6;
     opts.max_iters = 2000;
     let mut solver = BlockGmresSolver::new(opts);
-    let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
+    let stats = solver.solve(
+        &a,
+        None,
+        &b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
     assert_converged(stats);
     Ok(())
 }
@@ -102,7 +131,16 @@ fn mpi_block_bicgstab_converges() -> Result<(), KError> {
     opts.block_size = 2;
     opts.max_iters = 200;
     let mut solver = BlockBicgstabSolver::new(opts);
-    let stats = solver.solve(&a, None, &b, &mut x, PcSide::Left, &comm, None, Some(&mut ws))?;
+    let stats = solver.solve(
+        &a,
+        None,
+        &b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
     assert_converged(stats);
     Ok(())
 }

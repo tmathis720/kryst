@@ -27,9 +27,9 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::convergence::ConvergedReason;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::solver::MonitorAction;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::convergence::ConvergedReason;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 

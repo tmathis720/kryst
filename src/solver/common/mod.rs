@@ -3,10 +3,11 @@ pub mod givens;
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 use crate::algebra::bridge::BridgeScratch;
+use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::context::ksp_context::Workspace;
 use crate::matrix::op::LinOp;
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, ReductionEngine, UniverseComm};
@@ -15,7 +16,6 @@ use crate::reduction::{CommDeterministic, Packet, ReproMode, dot_local_slice};
 use crate::reduction::{DDP, KahanP, PacketAccum};
 use crate::solver::{MonitorAction, MonitorCallback};
 use crate::utils::reduction::{AllreduceHandle, AsyncComm, ReductOptions};
-use crate::context::ksp_context::Workspace;
 
 pub use buffer::take_or_resize;
 
@@ -453,9 +453,7 @@ pub fn reported_residual_norm(
                 comm.dot(r_true, r_true).sqrt()
             }
         }
-        crate::preconditioner::PcSide::Right => {
-            comm.dot(r_true, r_true).sqrt()
-        }
+        crate::preconditioner::PcSide::Right => comm.dot(r_true, r_true).sqrt(),
     }
 }
 

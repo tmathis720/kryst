@@ -1,10 +1,10 @@
 #[cfg(feature = "rayon")]
 mod rayon_tests {
     use kryst::algebra::parallel::{dot_conj_local_with_mode, par_dot_conj_local};
-    use kryst::algebra::parallel_cfg::{parallel_tune, set_parallel_tune, ParallelTune};
+    use kryst::algebra::parallel_cfg::{ParallelTune, parallel_tune, set_parallel_tune};
     use kryst::algebra::prelude::*;
-    use kryst::matrix::spmv::{spmv_csr_parallel, spmv_csr_serial};
     use kryst::matrix::sparse::CsrMatrix;
+    use kryst::matrix::spmv::{spmv_csr_parallel, spmv_csr_serial};
     use kryst::parallel::set_global_reduction_mode_scoped;
     use kryst::reduction::ReproMode;
     use rayon::ThreadPoolBuilder;
@@ -64,12 +64,8 @@ mod rayon_tests {
             spmv_csr_serial(&a, &x, &mut y_ser).unwrap();
             assert_eq!(y_par, y_ser);
 
-            let x_vec: Vec<S> = (0..2048)
-                .map(|i| S::from_real((i as f64).sin()))
-                .collect();
-            let y_vec: Vec<S> = (0..2048)
-                .map(|i| S::from_real((i as f64).cos()))
-                .collect();
+            let x_vec: Vec<S> = (0..2048).map(|i| S::from_real((i as f64).sin())).collect();
+            let y_vec: Vec<S> = (0..2048).map(|i| S::from_real((i as f64).cos())).collect();
             let expected = dot_conj_local_with_mode(&x_vec, &y_vec, ReproMode::Deterministic);
             let actual = par_dot_conj_local(&x_vec, &y_vec);
             let diff = (expected - actual).abs();
@@ -80,9 +76,9 @@ mod rayon_tests {
     #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
     #[test]
     fn parallel_ilu_triangular_solve_matches_serial_factorization() {
+        use kryst::preconditioner::PcSide;
         use kryst::preconditioner::ilu::{Ilu, IluConfig, TriSolveType};
         use kryst::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
-        use kryst::preconditioner::PcSide;
 
         let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
         pool.install(|| {

@@ -17,7 +17,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -28,16 +27,17 @@ use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
-use crate::solver::common::call_monitors;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::common::ReductCtx;
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
+use crate::solver::common::ReductCtx;
+use crate::solver::common::call_monitors;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
 #[cfg(feature = "logging")]
-use crate::utils::monitor::{log_residuals, ResidualSnapshot};
+use crate::utils::monitor::{ResidualSnapshot, log_residuals};
+use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -317,8 +317,7 @@ impl GmresSolver {
                 residual_replacements: 0,
             };
             return Ok(
-                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor)
-                    .with_counters(counters),
+                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
             );
         }
         #[cfg(feature = "logging")]
@@ -688,10 +687,12 @@ impl GmresSolver {
                         num_global_reductions: reduction_count,
                         residual_replacements: 0,
                     };
-                    return Ok(
-                        SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
-                            .with_counters(counters),
-                    );
+                    return Ok(SolveStats::new(
+                        total_iters,
+                        res,
+                        ConvergedReason::StoppedByMonitor,
+                    )
+                    .with_counters(counters));
                 }
                 #[cfg(feature = "logging")]
                 if log::log_enabled!(log::Level::Info) {
@@ -897,14 +898,8 @@ impl GmresSolver {
             }
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {
-                let true_res = Self::true_residual_norm(
-                    a,
-                    b,
-                    x,
-                    red.engine(),
-                    &mut ws.tmp1,
-                    &mut ws.bridge,
-                );
+                let true_res =
+                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
                 reduction_count += 1;
                 #[cfg(feature = "metrics")]
                 {
@@ -1188,8 +1183,7 @@ impl GmresSolver {
                 residual_replacements: 0,
             };
             return Ok(
-                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor)
-                    .with_counters(counters),
+                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
             );
         }
         let true_res =
@@ -1371,7 +1365,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                     }
                 } // pairs dropped here; we can safely mutate w_block next.
-                  // W <- W - V C
+                // W <- W - V C
                 for i in 0..=k {
                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                     for j in 0..block {
@@ -1570,10 +1564,12 @@ impl GmresSolver {
                             num_global_reductions: reduction_count,
                             residual_replacements: 0,
                         };
-                        return Ok(
-                            SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
-                                .with_counters(counters),
-                        );
+                        return Ok(SolveStats::new(
+                            total_iters,
+                            res,
+                            ConvergedReason::StoppedByMonitor,
+                        )
+                        .with_counters(counters));
                     }
                     let true_res = Self::true_residual_norm(
                         a,

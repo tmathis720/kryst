@@ -203,9 +203,6 @@ mod tests {
             let slice = super::halo_slice_mut(&mut buf);
             slice.copy_from_slice(&[1.0, -1.0, 2.0, 3.0]);
         }
-        assert_eq!(
-            buf,
-            vec![S::from_parts(1.0, -1.0), S::from_parts(2.0, 3.0)]
-        );
+        assert_eq!(buf, vec![S::from_parts(1.0, -1.0), S::from_parts(2.0, 3.0)]);
     }
 }

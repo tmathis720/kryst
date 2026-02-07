@@ -2,7 +2,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -14,10 +13,11 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{self, PcSide, Preconditioner as PreconditionerF64};
-use crate::solver::common::{recompute_true_residual_norm_s, take_or_resize, ReductCtx};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
+use crate::solver::common::{ReductCtx, recompute_true_residual_norm_s, take_or_resize};
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-use crate::utils::monitor::{log_residuals, ResidualSnapshot};
+use crate::utils::monitor::{ResidualSnapshot, log_residuals};
 use std::any::Any;
 
 pub struct LsmrSolver {

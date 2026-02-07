@@ -17,11 +17,17 @@ pub enum DistCoarseStrategy {
 
 impl DistCoarseStrategy {
     pub fn is_rank_local(self) -> bool {
-        matches!(self, DistCoarseStrategy::None | DistCoarseStrategy::LocalPrototype)
+        matches!(
+            self,
+            DistCoarseStrategy::None | DistCoarseStrategy::LocalPrototype
+        )
     }
 
     pub fn is_collective(self) -> bool {
-        matches!(self, DistCoarseStrategy::RootGather | DistCoarseStrategy::SuperLuDist)
+        matches!(
+            self,
+            DistCoarseStrategy::RootGather | DistCoarseStrategy::SuperLuDist
+        )
     }
 }
 

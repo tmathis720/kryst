@@ -196,14 +196,15 @@ where
         }
         let mut row_norms = vec![0.0; n];
         let mut col_norms = vec![0.0; ncols];
-        let want_row_norms =
-            self.conditioning.diag_inject_tau.is_some()
-                || matches!(
-                    self.conditioning.scale,
-                    Some(ScaleDirection::Row) | Some(ScaleDirection::Both)
-                );
-        let want_col_norms =
-            matches!(self.conditioning.scale, Some(ScaleDirection::Col) | Some(ScaleDirection::Both));
+        let want_row_norms = self.conditioning.diag_inject_tau.is_some()
+            || matches!(
+                self.conditioning.scale,
+                Some(ScaleDirection::Row) | Some(ScaleDirection::Both)
+            );
+        let want_col_norms = matches!(
+            self.conditioning.scale,
+            Some(ScaleDirection::Col) | Some(ScaleDirection::Both)
+        );
         if want_row_norms || want_col_norms {
             for i in 0..n {
                 for j in 0..ncols {

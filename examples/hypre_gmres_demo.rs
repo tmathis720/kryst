@@ -11,7 +11,6 @@ fn main() {
     eprintln!("hypre_gmres_demo.rs is unavailable when built with --features complex");
 }
 
-
 #[cfg(not(feature = "backend-faer"))]
 #[cfg(not(feature = "complex"))]
 fn main() {

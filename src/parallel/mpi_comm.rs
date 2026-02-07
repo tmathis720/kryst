@@ -20,7 +20,7 @@ use mpi::raw::AsRaw;
 use mpi::topology::SimpleCommunicator;
 use mpi::traits::*;
 use std::ffi::c_void;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{MaybeUninit, size_of};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 

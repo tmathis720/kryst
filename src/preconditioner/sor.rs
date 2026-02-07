@@ -23,8 +23,8 @@
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
-use crate::algebra::prelude::*;
 use crate::algebra::parallel;
+use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
@@ -479,7 +479,8 @@ impl ObjPreconditioner for SorPc {
                     }
                     let mut s = self.scratch.lock().unwrap();
                     s.copy_from_slice(y);
-                    if self.mat_side.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty()
+                    if self.mat_side.contains(MatSorType::COLOR_SWEEP)
+                        && !self.color_blocks.is_empty()
                     {
                         self.backward_sweep_color(a, &s, y);
                     } else {
@@ -502,7 +503,8 @@ impl ObjPreconditioner for SorPc {
                 }
                 _ => {
                     // default to forward if unspecified
-                    if self.mat_side.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty()
+                    if self.mat_side.contains(MatSorType::COLOR_SWEEP)
+                        && !self.color_blocks.is_empty()
                     {
                         self.forward_sweep_color(a, x, y);
                     } else {
@@ -601,7 +603,12 @@ mod tests_color_sweep {
         let col_idx = vec![0, 1, 0, 1, 2, 1, 2];
         let values = vec![4.0, -1.0, -1.0, 4.0, -1.0, -1.0, 4.0];
         let a = CsrMatrix::from_csr(3, 3, row_ptr, col_idx, values);
-        let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER | MatSorType::COLOR_SWEEP, 0.0);
+        let mut pc = SorPc::new(
+            1.0,
+            1,
+            MatSorType::APPLY_LOWER | MatSorType::COLOR_SWEEP,
+            0.0,
+        );
         pc.setup(&a).unwrap();
 
         let b = vec![1.0; 3];

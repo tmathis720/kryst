@@ -10,7 +10,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -23,8 +22,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::common::{
-    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+    ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
 };
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 
@@ -257,15 +257,8 @@ impl CgsSolver {
             }
         }
 
-        let true_res = recompute_true_residual_norm_s(
-            a,
-            b,
-            x,
-            comm,
-            red.engine(),
-            &mut *w,
-            &mut *scratch,
-        );
+        let true_res =
+            recompute_true_residual_norm_s(a, b, x, comm, red.engine(), &mut *w, &mut *scratch);
         Ok(SolveStats::new(
             iters,
             true_res,

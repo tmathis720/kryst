@@ -11,8 +11,6 @@
 
 #[allow(unused_imports)]
 use crate::algebra::blas::{dot_conj, nrm2};
-use crate::solver::MonitorCallback;
-use crate::solver::common::call_monitors;
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -25,7 +23,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::common::ReductCtx;
+use crate::solver::common::call_monitors;
 use crate::utils::convergence::{ConvergedReason, SolveStats};
 
 #[cfg(feature = "logging")]
@@ -321,7 +321,11 @@ impl BiCgStabSolver {
 
             let s_norm = red.norm2(s);
             if call_monitors(mons, k, s_norm, 0) {
-                return Ok(SolveStats::new(k, s_norm, ConvergedReason::StoppedByMonitor));
+                return Ok(SolveStats::new(
+                    k,
+                    s_norm,
+                    ConvergedReason::StoppedByMonitor,
+                ));
             }
             if s_norm <= thr {
                 if need_left {
@@ -466,7 +470,11 @@ impl BiCgStabSolver {
                 red.norm2(r)
             };
             if call_monitors(mons, k, r_norm, 0) {
-                return Ok(SolveStats::new(k, r_norm, ConvergedReason::StoppedByMonitor));
+                return Ok(SolveStats::new(
+                    k,
+                    r_norm,
+                    ConvergedReason::StoppedByMonitor,
+                ));
             }
 
             if r_norm <= thr {
