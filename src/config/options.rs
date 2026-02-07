@@ -1547,6 +1547,9 @@ impl KspOptions {
         o!(min_len_vec);
         o!(min_rows_spmv);
         o!(chunk_rows_spmv);
+        o!(richardson_omega);
+        o!(chebyshev_omega);
+        o!(gcr_restart);
     }
 
     /// Configure the Rayon worker pool. Requires `feature="rayon"` to take effect.
