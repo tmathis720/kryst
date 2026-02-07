@@ -308,6 +308,7 @@ pub struct KspContext {
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
     pending_pcg: PendingPcg,
+    last_converged_reason: Option<ConvergedReason>,
 }
 
 impl fmt::Debug for KspContext {
@@ -343,7 +344,8 @@ impl fmt::Debug for KspContext {
         dbg.field("pending_mpi_pc", &self.pending_mpi_pc);
         dbg.field("pending_gmres", &self.pending_gmres)
             .field("pending_fgmres", &self.pending_fgmres)
-            .field("pending_pcg", &self.pending_pcg);
+            .field("pending_pcg", &self.pending_pcg)
+            .field("last_converged_reason", &self.last_converged_reason);
         dbg.finish()
     }
 }
@@ -540,6 +542,7 @@ impl KspContext {
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
+            last_converged_reason: None,
         }
     }
 
@@ -1436,6 +1439,10 @@ impl KspContext {
             pc_chain,
             setup_called: self.setup_called,
             bound_comm_id: self.bound_comm.as_ref().map(|comm| comm.id()),
+            last_converged_reason: self.last_converged_reason.map(|r| format!("{r:?}")),
+            last_converged_reason_petsc: self
+                .last_converged_reason
+                .map(|r| r.petsc_reason().to_string()),
         }
     }
 
@@ -1997,7 +2004,19 @@ impl KspContext {
 
     fn solve_impl(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         if !self.setup_called {
-            self.setup_impl()?;
+            if let Err(err) = self.setup_impl() {
+                if let Some(reason) = Self::map_setup_error_to_reason(&err) {
+                    let res = self
+                        .amat
+                        .as_ref()
+                        .and_then(|amat| self.residual_norm_for_stats(amat.as_ref(), b, x).ok())
+                        .unwrap_or_else(R::default);
+                    let stats = SolveStats::new(0, res, reason);
+                    self.last_converged_reason = Some(reason);
+                    return Ok(stats);
+                }
+                return Err(err);
+            }
         }
         let amat = self
             .amat
@@ -2083,6 +2102,7 @@ impl KspContext {
             let mat_for_residual: &dyn LinOp<S = S> = amat.as_ref();
 
             let res = self.true_residual_norm_in_place(mat_for_residual, b, x)?;
+            self.last_converged_reason = Some(ConvergedReason::ConvergedAtol);
             return Ok(SolveStats::new(0, res, ConvergedReason::ConvergedAtol));
         }
 
@@ -2116,10 +2136,16 @@ impl KspContext {
             ) {
                 Ok(stats) => stats,
                 Err(err) => {
-                    if let KError::PcFailed(msg) = err {
-                        log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                    if let Some(reason) = Self::map_solve_error_to_reason(&err) {
+                        if matches!(err, KError::PcFailed(_)) {
+                            if let KError::PcFailed(msg) = err {
+                                log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                            }
+                        }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
-                        return Ok(SolveStats::new(0, res, ConvergedReason::DivergedPcFailed));
+                        let stats = SolveStats::new(0, res, reason);
+                        self.last_converged_reason = Some(reason);
+                        return Ok(stats);
                     }
                     return Err(err);
                 }
@@ -2127,6 +2153,7 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            self.last_converged_reason = Some(stats.reason);
             Ok(stats)
         }
 
@@ -2362,10 +2389,14 @@ impl KspContext {
             })() {
                 Ok(stats) => stats,
                 Err(err) => {
-                    if let KError::PcFailed(msg) = err {
-                        log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                    if let Some(reason) = Self::map_solve_error_to_reason(&err) {
+                        if let KError::PcFailed(msg) = err {
+                            log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                        }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
-                        return Ok(SolveStats::new(0, res, ConvergedReason::DivergedPcFailed));
+                        let stats = SolveStats::new(0, res, reason);
+                        self.last_converged_reason = Some(reason);
+                        return Ok(stats);
                     }
                     return Err(err);
                 }
@@ -2373,7 +2404,51 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            self.last_converged_reason = Some(stats.reason);
             Ok(stats)
+        }
+    }
+
+    fn residual_norm_for_stats(
+        &mut self,
+        mat: &dyn LinOp<S = S>,
+        b: &[S],
+        x: &[S],
+    ) -> Result<R, KError> {
+        if self.work.is_some() {
+            return self.true_residual_norm_in_place(mat, b, x);
+        }
+        let mut tmp = vec![S::zero(); b.len()];
+        mat.try_matvec(x, &mut tmp)
+            .map_err(|e| KError::SolveError(format!("residual matvec failed: {e}")))?;
+        for (ri, bi) in tmp.iter_mut().zip(b.iter()) {
+            *ri = *bi - *ri;
+        }
+        let comm = mat.comm();
+        let red = comm.reduction_engine(&self.reduction_opts);
+        Ok(red.norm2_s(&tmp))
+    }
+
+    fn map_solve_error_to_reason(err: &KError) -> Option<ConvergedReason> {
+        match err {
+            KError::PcFailed(_) => Some(ConvergedReason::DivergedPcFailed),
+            KError::BreakdownOrIndefinite => Some(ConvergedReason::DivergedBreakdown),
+            KError::IndefiniteMatrix => Some(ConvergedReason::DivergedIndefiniteMatrix),
+            KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => {
+                Some(ConvergedReason::DivergedIndefinitePC)
+            }
+            _ => None,
+        }
+    }
+
+    fn map_setup_error_to_reason(err: &KError) -> Option<ConvergedReason> {
+        match err {
+            KError::PcFailed(_)
+            | KError::FactorError(_)
+            | KError::ZeroPivot(_)
+            | KError::IndefinitePreconditioner
+            | KError::DivergedIndefinitePC => Some(ConvergedReason::DivergedPcSetupFailed),
+            _ => None,
         }
     }
 

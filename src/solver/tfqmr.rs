@@ -117,6 +117,9 @@ impl TfqmrSolver {
             res_sq = R::default();
         }
         let res0: R = res_sq.sqrt();
+        if !res0.is_finite() {
+            return Ok(SolveStats::new(0, res0, ConvergedReason::DivergedNanOrInf));
+        }
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
         if call_monitors(monitors, 0, res0, 0) {
             return Ok(SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor));
@@ -128,8 +131,13 @@ impl TfqmrSolver {
             stats.final_residual = res0;
             return Ok(stats);
         }
-        if !rho.is_finite() || rho.abs() < self.breakdown_eps {
-            stats.reason = ConvergedReason::DivergedDtol;
+        if !rho.is_finite() {
+            stats.reason = ConvergedReason::DivergedNanOrInf;
+            stats.final_residual = res0;
+            return Ok(stats);
+        }
+        if rho.abs() < self.breakdown_eps {
+            stats.reason = ConvergedReason::DivergedBreakdown;
             stats.final_residual = res0;
             return Ok(stats);
         }
@@ -151,17 +159,29 @@ impl TfqmrSolver {
             }
 
             let sigma: S = red.dot(r_tld, v);
-            if !sigma.is_finite() || sigma.abs() < self.breakdown_eps {
+            if !sigma.is_finite() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedNanOrInf;
+                return Ok(stats);
+            }
+            if sigma.abs() < self.breakdown_eps {
+                stats.iterations = k;
+                stats.final_residual = true_res;
+                stats.reason = ConvergedReason::DivergedBreakdown;
                 return Ok(stats);
             }
             let alpha = rho / sigma;
-            if !alpha.is_finite() || alpha.abs() <= R::default() {
+            if !alpha.is_finite() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedNanOrInf;
+                return Ok(stats);
+            }
+            if alpha.abs() <= R::default() {
+                stats.iterations = k;
+                stats.final_residual = true_res;
+                stats.reason = ConvergedReason::DivergedBreakdown;
                 return Ok(stats);
             }
 
@@ -259,9 +279,15 @@ impl TfqmrSolver {
             let update_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
             red.dot_many_into(&update_pairs, &mut reductions);
             let rho_new: S = reductions[0];
-            if !rho_new.is_finite() || rho_new.abs() < self.breakdown_eps {
+            if !rho_new.is_finite() {
                 stats.iterations = k;
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedNanOrInf;
+                stats.final_residual = true_res;
+                return Ok(stats);
+            }
+            if rho_new.abs() < self.breakdown_eps {
+                stats.iterations = k;
+                stats.reason = ConvergedReason::DivergedBreakdown;
                 stats.final_residual = true_res;
                 return Ok(stats);
             }

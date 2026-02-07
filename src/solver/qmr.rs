@@ -131,7 +131,11 @@ impl QmrSolver {
         let eps = 1e-300;
         let mut rho = red.dot(r_tld, r);
         if rho.abs() <= eps {
-            return Err(KError::IndefiniteMatrix);
+            return Ok(SolveStats::new(
+                0,
+                res,
+                ConvergedReason::DivergedBreakdownBiCG,
+            ));
         }
 
         for k in 0..self.conv.max_iters {
@@ -141,7 +145,11 @@ impl QmrSolver {
             } else {
                 let rho_new = red.dot(r_tld, r);
                 if rho_new.abs() <= eps {
-                    return Err(KError::IndefiniteMatrix);
+                    return Ok(SolveStats::new(
+                        k,
+                        res,
+                        ConvergedReason::DivergedBreakdownBiCG,
+                    ));
                 }
                 let beta = rho_new / rho;
                 for i in 0..ncols {
@@ -161,7 +169,11 @@ impl QmrSolver {
 
             let sigma = red.dot(p_tld, v);
             if sigma.abs() <= eps {
-                return Err(KError::IndefiniteMatrix);
+                return Ok(SolveStats::new(
+                    k + 1,
+                    res,
+                    ConvergedReason::DivergedBreakdownBiCG,
+                ));
             }
             let alpha = rho / sigma;
 
@@ -175,8 +187,19 @@ impl QmrSolver {
             let s_view: &[S] = &s[..];
             red.dot_many_into(&[(t_view, t_view), (t_view, s_view)], &mut reductions);
             let tt = dot_result_to_real(reductions[0]);
-            if tt <= eps || !tt.is_finite() {
-                return Err(KError::IndefiniteMatrix);
+            if !tt.is_finite() {
+                return Ok(SolveStats::new(
+                    k + 1,
+                    res,
+                    ConvergedReason::DivergedNanOrInf,
+                ));
+            }
+            if tt <= eps {
+                return Ok(SolveStats::new(
+                    k + 1,
+                    res,
+                    ConvergedReason::DivergedBreakdownBiCG,
+                ));
             }
             let ts = reductions[1];
             let omega = ts / S::from_real(tt);
