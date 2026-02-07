@@ -50,8 +50,8 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             smoother_steps,
         } => Ok(Some(Box::new(crate::preconditioner::mg::MgPc::new(
             *levels,
-            cycle_type.clone(),
-            smoother.clone(),
+            cycle_type.clone().map(|v| v.to_lowercase()),
+            smoother.clone().map(|v| v.to_lowercase()),
             *smoother_steps,
         )))),
         PcConfig::Bddc { .. } => Err(KError::Unsupported(

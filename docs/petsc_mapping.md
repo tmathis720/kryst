@@ -66,7 +66,7 @@ features, options, and monitoring/convergence hooks.
 | `fieldsplit` | [`PcType::FieldSplit`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.FieldSplit) | Partial | Block-diagonal split only; Tracking: [FieldSplit advanced](#tracking-fieldsplit-advanced). |
 | `shell` | [`PcType::Shell`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Shell) + [`register_shell_callback`](https://docs.rs/kryst/latest/kryst/preconditioner/shell/fn.register_shell_callback.html) | Partial | Supports named callback only; Tracking: [Shell PC parity](#tracking-shell-pc). |
 | `ksp` | [`PcType::Ksp`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Ksp) | Partial | Uses simple inner-PC loop; Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc). |
-| `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Placeholder V-cycle; Tracking: [Multigrid parity](#tracking-mg-parity). |
+| `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Injection hierarchy with Galerkin coarse operators and V/W/F cycles; Tracking: [Multigrid parity](#tracking-mg-parity). |
 | `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Unsupported | Tracking: [BDDC support](#tracking-bddc). |
 | `gamg` | [`PcType::Gamg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Gamg) | Unsupported | Tracking: [GAMG support](#tracking-gamg). |
 | `lu` | [`PcType::Lu`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Lu) | Supported | Direct solve (PREONLY recommended). |
@@ -107,10 +107,10 @@ features, options, and monitoring/convergence hooks.
 | `-pc_fieldsplit_prefixes` | [`PcOptions::pc_fieldsplit_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_prefixes) | Partial | FieldSplit scope only. |
 | `-pc_ksp_type` | [`PcOptions::pc_ksp_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_ksp_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_ksp_pc_type` | [`PcOptions::pc_ksp_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_pc_type) | Partial | Used by `PcType::Ksp`. |
-| `-pc_mg_levels` | [`PcOptions::pc_mg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_levels) | Partial | Placeholder MG. |
-| `-pc_mg_cycle_type` | [`PcOptions::pc_mg_cycle_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_cycle_type) | Partial | Placeholder MG. |
-| `-pc_mg_smoother` | [`PcOptions::pc_mg_smoother`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother) | Unsupported | Parsed; smoother hooks not wired yet. |
-| `-pc_mg_smoother_steps` | [`PcOptions::pc_mg_smoother_steps`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother_steps) | Unsupported | Parsed; smoother hooks not wired yet. |
+| `-pc_mg_levels` | [`PcOptions::pc_mg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_levels) | Partial | Controls number of MG levels (injection coarsening). |
+| `-pc_mg_cycle_type` | [`PcOptions::pc_mg_cycle_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_cycle_type) | Partial | `v`/`w`/`f` cycles supported. |
+| `-pc_mg_smoother` | [`PcOptions::pc_mg_smoother`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother) | Partial | Smoother applied per-level; direct smoothers (`lu`/`qr`) become the coarse solve. |
+| `-pc_mg_smoother_steps` | [`PcOptions::pc_mg_smoother_steps`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother_steps) | Partial | Number of pre/post smoothing sweeps per level. |
 | `-pc_shell_name` | [`PcOptions::pc_shell_name`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_name) | Partial | Names callback for `PcType::Shell`. |
 | `-pc_bddc_coarse_ksp_type` | [`PcOptions::pc_bddc_coarse_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_ksp_type) | Unsupported | Placeholder. |
 | `-pc_bddc_coarse_pc_type` | [`PcOptions::pc_bddc_coarse_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_pc_type) | Unsupported | Placeholder. |
@@ -151,7 +151,7 @@ features, options, and monitoring/convergence hooks.
 High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 
 1. **FieldSplit advanced modes** (Schur, multiplicative, symmetric, and custom split options). Tracking: [FieldSplit advanced](#tracking-fieldsplit-advanced).
-2. **Multigrid hierarchy management** (custom smoothers/coarse solvers, interpolation/restriction). Tracking: [Multigrid parity](#tracking-mg-parity).
+2. **Multigrid hierarchy management** (custom P/R operators, advanced coarsening, richer coarse solves). Tracking: [Multigrid parity](#tracking-mg-parity).
 3. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
 4. **Shell PC parity** (setup hooks, stateful callbacks, richer PETSc `PCSHELL` options). Tracking: [Shell PC parity](#tracking-shell-pc).
 5. **Explicit breakdown/divergence reasons** (NaN/Inf, PC failure, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
@@ -167,7 +167,7 @@ Scope: Schur complement splits, additive/multiplicative modes, per-field matrice
 
 <a id="tracking-mg-parity"></a>
 ### Tracking issue: Multigrid parity
-Scope: coarse-grid operators, smoothers, prolongation/restriction, and full V/W/F-cycle semantics.
+Scope: advanced coarsening strategies, user-specified transfer operators, and richer coarse solves beyond injection + Galerkin.
 
 <a id="tracking-ksp-as-pc"></a>
 ### Tracking issue: KSP-as-PC parity
