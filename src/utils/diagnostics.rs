@@ -45,6 +45,21 @@ impl PcDiagnostics {
                 opts.amg_coarse_solver.clone(),
             );
             insert_opt(&mut config, "pc_chain", opts.pc_chain.clone());
+            insert_opt(
+                &mut config,
+                "pc_fieldsplit_type",
+                opts.pc_fieldsplit_type.clone(),
+            );
+            insert_opt(
+                &mut config,
+                "pc_fieldsplit_schur_fact_type",
+                opts.pc_fieldsplit_schur_fact_type.clone(),
+            );
+            insert_opt(
+                &mut config,
+                "pc_fieldsplit_schur_precondition",
+                opts.pc_fieldsplit_schur_precondition.clone(),
+            );
         }
 
         Self {

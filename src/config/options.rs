@@ -255,6 +255,8 @@ pub struct PcOptions {
     pub pc_fieldsplit_block_sizes: Option<Vec<usize>>,
     pub pc_fieldsplit_child_pc_type: Option<String>,
     pub pc_fieldsplit_type: Option<String>,
+    pub pc_fieldsplit_schur_fact_type: Option<String>,
+    pub pc_fieldsplit_schur_precondition: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
     // KSP-as-PC
@@ -1063,6 +1065,12 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.pc_fieldsplit_child_pc_type, v.to_lowercase())
             }
             "pc_fieldsplit_type" => set_opt!(&mut self.pc_fieldsplit_type, v.to_lowercase()),
+            "pc_fieldsplit_schur_fact_type" => {
+                set_opt!(&mut self.pc_fieldsplit_schur_fact_type, v.to_lowercase())
+            }
+            "pc_fieldsplit_schur_precondition" => {
+                set_opt!(&mut self.pc_fieldsplit_schur_precondition, v.to_lowercase())
+            }
             "pc_shell_name" => set_opt!(&mut self.pc_shell_name, v.to_string()),
             "pc_ksp_type" => set_opt!(&mut self.pc_ksp_ksp_type, v.to_lowercase()),
             "pc_ksp_pc_type" => set_opt!(&mut self.pc_ksp_pc_type, v.to_lowercase()),
@@ -2047,6 +2055,8 @@ impl PcOptions {
         o!(pc_fieldsplit_block_sizes);
         o!(pc_fieldsplit_child_pc_type);
         o!(pc_fieldsplit_type);
+        o!(pc_fieldsplit_schur_fact_type);
+        o!(pc_fieldsplit_schur_precondition);
         o!(pc_shell_name);
         o!(pc_ksp_ksp_type);
         o!(pc_ksp_pc_type);
