@@ -4,6 +4,7 @@ use crate::preconditioner::amg::AMGConfig;
 use crate::preconditioner::direct::{LuPc, QrPc};
 use crate::preconditioner::{
     Preconditioner,
+    bddc::BddcConfig,
     asm::{AsmCombine, AsmConfig, AsmLocalSolver},
     asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
     block_jacobi::BlockJacobi,
@@ -100,6 +101,12 @@ pub fn build_qr() -> Result<Box<dyn Preconditioner>, KError> {
     {
         Err(KError::Unsupported("dense-direct feature not enabled"))
     }
+}
+
+pub fn build_bddc(config: BddcConfig) -> Result<Box<dyn Preconditioner>, KError> {
+    Ok(Box::new(crate::preconditioner::bddc::BddcPc::new(
+        config,
+    )))
 }
 
 pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {

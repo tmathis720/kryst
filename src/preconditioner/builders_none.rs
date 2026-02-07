@@ -62,9 +62,17 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             smoother.clone().map(|v| v.to_lowercase()),
             *smoother_steps,
         )))),
-        PcConfig::Bddc { .. } => Err(KError::Unsupported(
-            "BDDC is not yet implemented; use ASM/FieldSplit for now",
-        )),
+        PcConfig::Bddc {
+            coarse_ksp_type,
+            coarse_pc_type,
+            use_vertices,
+        } => Ok(Some(crate::preconditioner::builders::build_bddc(
+            crate::preconditioner::bddc::BddcConfig {
+                coarse_ksp_type: coarse_ksp_type.clone(),
+                coarse_pc_type: coarse_pc_type.clone(),
+                use_vertices: *use_vertices,
+            },
+        )?)),
         PcConfig::Gamg { .. } => Err(KError::Unsupported(
             "GAMG is not yet implemented; use pc_type=amg for now",
         )),

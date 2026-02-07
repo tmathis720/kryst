@@ -68,6 +68,17 @@ impl PcDiagnostics {
                 "pc_fieldsplit_schur_precondition",
                 opts.pc_fieldsplit_schur_precondition.clone(),
             );
+            insert_opt(
+                &mut config,
+                "pc_bddc_coarse_ksp_type",
+                opts.pc_bddc_coarse_ksp_type.clone(),
+            );
+            insert_opt(
+                &mut config,
+                "pc_bddc_coarse_pc_type",
+                opts.pc_bddc_coarse_pc_type.clone(),
+            );
+            insert_opt(&mut config, "pc_bddc_use_vertices", opts.pc_bddc_use_vertices);
         }
 
         Self {

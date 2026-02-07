@@ -292,7 +292,9 @@ pub enum PcConfig {
         smoother_steps: Option<usize>,
     },
     Bddc {
-        placeholder: bool,
+        coarse_ksp_type: Option<String>,
+        coarse_pc_type: Option<String>,
+        use_vertices: bool,
     },
     Gamg {
         placeholder: bool,
@@ -519,7 +521,11 @@ impl PcConfig {
                 smoother: o.pc_mg_smoother.clone(),
                 smoother_steps: o.pc_mg_smoother_steps,
             },
-            Bddc => PcConfig::Bddc { placeholder: true },
+            Bddc => PcConfig::Bddc {
+                coarse_ksp_type: o.pc_bddc_coarse_ksp_type.clone(),
+                coarse_pc_type: o.pc_bddc_coarse_pc_type.clone(),
+                use_vertices: o.pc_bddc_use_vertices.unwrap_or(false),
+            },
             Gamg => PcConfig::Gamg { placeholder: true },
 
             Lu => PcConfig::Lu,

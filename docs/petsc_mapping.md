@@ -67,7 +67,7 @@ features, options, and monitoring/convergence hooks.
 | `shell` | [`PcType::Shell`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Shell) + [`register_shell_callback`](https://docs.rs/kryst/latest/kryst/preconditioner/shell/fn.register_shell_callback.html) | Partial | Supports apply/setup/destroy hooks with context bindings; Tracking: [Shell PC parity](#tracking-shell-pc). |
 | `ksp` | [`PcType::Ksp`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Ksp) | Partial | Uses simple inner-PC loop; Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc). |
 | `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Injection hierarchy with Galerkin coarse operators and V/W/F cycles; Tracking: [Multigrid parity](#tracking-mg-parity). |
-| `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Unsupported | Tracking: [BDDC support](#tracking-bddc). |
+| `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Partial | Prototype coarse space/constraints + interface metadata; Tracking: [BDDC support](#tracking-bddc). |
 | `gamg` | [`PcType::Gamg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Gamg) | Unsupported | Tracking: [GAMG support](#tracking-gamg). |
 | `lu` | [`PcType::Lu`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Lu) | Supported | Direct solve (PREONLY recommended). |
 | `qr` | [`PcType::Qr`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Qr) | Supported | Direct solve (PREONLY recommended). |
@@ -115,9 +115,9 @@ features, options, and monitoring/convergence hooks.
 | `-pc_shell_setup` | [`PcOptions::pc_shell_setup`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_setup) | Partial | Names shell setup hook. |
 | `-pc_shell_destroy` | [`PcOptions::pc_shell_destroy`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_destroy) | Partial | Names shell destroy hook. |
 | `-pc_shell_context` | [`PcOptions::pc_shell_context`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_context) | Partial | Names shell context binding. |
-| `-pc_bddc_coarse_ksp_type` | [`PcOptions::pc_bddc_coarse_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_ksp_type) | Unsupported | Placeholder. |
-| `-pc_bddc_coarse_pc_type` | [`PcOptions::pc_bddc_coarse_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_pc_type) | Unsupported | Placeholder. |
-| `-pc_bddc_use_vertices` | [`PcOptions::pc_bddc_use_vertices`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_use_vertices) | Unsupported | Placeholder. |
+| `-pc_bddc_coarse_ksp_type` | [`PcOptions::pc_bddc_coarse_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_ksp_type) | Partial | Wired to BDDC config/diagnostics; coarse solver placeholder. |
+| `-pc_bddc_coarse_pc_type` | [`PcOptions::pc_bddc_coarse_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_pc_type) | Partial | Wired to BDDC config/diagnostics; coarse solver placeholder. |
+| `-pc_bddc_use_vertices` | [`PcOptions::pc_bddc_use_vertices`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_use_vertices) | Partial | Enables vertex constraint metadata. |
 | `-pc_gamg_type` | [`PcOptions::pc_gamg_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_type) | Unsupported | Placeholder. |
 | `-pc_gamg_threshold` | [`PcOptions::pc_gamg_threshold`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_threshold) | Unsupported | Placeholder. |
 | `-pc_gamg_levels` | [`PcOptions::pc_gamg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_levels) | Unsupported | Placeholder. |
@@ -158,7 +158,7 @@ High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 3. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
 4. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
 5. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
-6. **BDDC preconditioner** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
+6. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
 7. **GAMG preconditioner** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
 
 ## Tracking issues
@@ -181,7 +181,7 @@ Scope: remaining `PCSHELL` hooks (transpose/symmetric apply), helper APIs for ty
 
 <a id="tracking-bddc"></a>
 ### Tracking issue: BDDC support
-Scope: coarse spaces, constraints, and subdomain interface handling.
+Scope: coarse spaces, constraints, subdomain interface coupling, and full coarse solve integration.
 
 <a id="tracking-gamg"></a>
 ### Tracking issue: GAMG support
