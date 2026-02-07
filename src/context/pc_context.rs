@@ -143,6 +143,32 @@ pub struct DeferredPcInfo {
     pub options: Option<PcOptions>,
 }
 
+/// Lightweight PC context for diagnostics and metadata reporting.
+#[derive(Debug, Clone)]
+pub struct PcContext {
+    pub pc_type: PcType,
+    pub options: Option<PcOptions>,
+}
+
+impl PcContext {
+    pub fn new(pc_type: PcType, options: Option<PcOptions>) -> Self {
+        Self { pc_type, options }
+    }
+
+    pub fn view(&self) -> crate::utils::diagnostics::PcDiagnostics {
+        crate::utils::diagnostics::PcDiagnostics::from_options(
+            Some(self.pc_type),
+            self.options.as_ref(),
+        )
+    }
+}
+
+impl From<DeferredPcInfo> for PcContext {
+    fn from(spec: DeferredPcInfo) -> Self {
+        Self::new(spec.pc_type, spec.options)
+    }
+}
+
 /// Simple no-op preconditioner.
 pub struct NoOpPreconditioner;
 

@@ -190,6 +190,13 @@ pub static SPECS: &[Spec] = &[
         doc: "invoke monitors only on rank 0",
     },
     Spec {
+        flag: "-ksp_view",
+        key: "ksp_view",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "emit structured KSP diagnostics",
+    },
+    Spec {
         flag: "-ksp_pc_side",
         key: "ksp_pc_side",
         arity: Arity::One,
@@ -343,6 +350,13 @@ pub static SPECS: &[Spec] = &[
         arity: Arity::One,
         kind: ValueKind::Str,
         doc: "jacobi, ilu, amg, ...",
+    },
+    Spec {
+        flag: "-pc_view",
+        key: "pc_view",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "emit structured PC diagnostics",
     },
     Spec {
         flag: "-pc_global",

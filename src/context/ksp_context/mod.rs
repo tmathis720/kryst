@@ -78,7 +78,11 @@ use crate::solver::{
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
 use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
 use crate::utils::reduction::ReductOptions;
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -380,6 +384,12 @@ struct PendingPcg {
 struct PendingMpiPc {
     mpi_opts: MpiPcOptions,
     pc_opts: PcOptions,
+}
+
+fn insert_value<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, value: T) {
+    if let Ok(value) = serde_json::to_value(value) {
+        map.insert(key.to_string(), value);
+    }
 }
 
 impl Default for KspContext {
@@ -1337,7 +1347,80 @@ impl KspContext {
             mpi_opts: pc_opts.mpi_pc_options()?,
             pc_opts: pc_opts.clone(),
         });
+        let diagnostics = self.view();
+        if ksp_opts.ksp_view.unwrap_or(false) {
+            println!("{}", diagnostics.to_json_pretty());
+        }
+        if pc_opts.pc_view.unwrap_or(false) {
+            println!("{}", diagnostics.pc_view().to_json_pretty());
+        }
         Ok(self)
+    }
+
+    /// Return structured diagnostics for the active KSP/PC configuration.
+    pub fn view(&self) -> KspDiagnostics {
+        let mut solver_config = BTreeMap::new();
+        insert_value(&mut solver_config, "rtol", self.rtol);
+        insert_value(&mut solver_config, "atol", self.atol);
+        insert_value(&mut solver_config, "dtol", self.dtol);
+        insert_value(&mut solver_config, "maxits", self.maxits);
+        insert_value(&mut solver_config, "restart", self.restart);
+        insert_value(&mut solver_config, "pc_side", format!("{:?}", self.pc_side));
+        insert_value(&mut solver_config, "pc_reuse", format!("{:?}", self.pc_reuse));
+        insert_value(
+            &mut solver_config,
+            "monitor_policy",
+            format!("{:?}", self.monitor_policy),
+        );
+        insert_value(
+            &mut solver_config,
+            "reduction_mode",
+            format!("{:?}", self.reduction_opts.mode),
+        );
+        insert_value(
+            &mut solver_config,
+            "reduction_exec",
+            format!("{:?}", self.reduction_opts.exec),
+        );
+        insert_value(
+            &mut solver_config,
+            "reduction_max_inflight",
+            self.reduction_opts.max_inflight,
+        );
+        insert_value(
+            &mut solver_config,
+            "reduction_reproducible",
+            self.reduction_opts.reproducible,
+        );
+        insert_value(&mut solver_config, "reproducible", self.reproducible);
+        insert_value(&mut solver_config, "execution_policy", format!("{:?}", self.exec));
+
+        let pc = self
+            .pc_spec
+            .as_ref()
+            .or(self.pending_pc.as_ref())
+            .map(|spec| PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref()));
+        let pc_chain = self
+            .pc_chain_plan
+            .as_ref()
+            .map(|plan| {
+                plan.active_specs()
+                    .iter()
+                    .map(|spec| {
+                        PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|chain| !chain.is_empty());
+
+        KspDiagnostics {
+            solver_type: self.solver_type.map(|st| format!("{st:?}")),
+            solver_config,
+            pc,
+            pc_chain,
+            setup_called: self.setup_called,
+            bound_comm_id: self.bound_comm.as_ref().map(|comm| comm.id()),
+        }
     }
 
     /// Assign the system and preconditioner operators.

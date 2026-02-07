@@ -48,4 +48,4 @@
 pub mod ksp_context;
 pub use ksp_context::{KspContext, MonitorPolicy};
 pub mod pc_context;
-pub use pc_context::{DeferredPcInfo, NoOpPreconditioner, PcFactory, PcType, SparsityPattern};
+pub use pc_context::{DeferredPcInfo, NoOpPreconditioner, PcContext, PcFactory, PcType, SparsityPattern};

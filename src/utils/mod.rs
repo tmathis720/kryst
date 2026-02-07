@@ -13,6 +13,7 @@ pub mod monitor;
 pub mod partition;
 pub mod permutation;
 pub mod profiling;
+pub mod diagnostics;
 pub mod reduction;
 #[cfg(feature = "backend-faer")]
 pub mod reordering;
