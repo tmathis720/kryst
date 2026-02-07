@@ -3,6 +3,7 @@ use crate::config::kinds::SorMatSideKind;
 use crate::config::options::{KspOptions, PcOptions};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+#[cfg(feature = "backend-faer")]
 use crate::preconditioner::asm::AsmInnerPc;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
@@ -29,12 +30,26 @@ type MatSorSide = crate::preconditioner::sor::MatSorType;
 
 #[cfg(not(feature = "backend-faer"))]
 bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct MatSorSide: u32 {
         const APPLY_LOWER = 0b0001;
         const APPLY_UPPER = 0b0010;
         const SYMMETRIC_SWEEP = 0b0100;
         const EISENSTAT = 0b1000;
     }
+}
+
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AsmInnerPc {
+    Jacobi,
+    Ilu0,
+    Ilut { drop_tol: R, max_fill: usize },
+    Ilutp {
+        drop_tol: R,
+        max_fill: usize,
+        perm_tol: R,
+    },
 }
 
 #[cfg(feature = "backend-faer")]

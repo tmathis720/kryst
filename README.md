@@ -46,10 +46,10 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 
 #### MPI support notes
 - **MPI-local (per-rank)**: Chebyshev, SOR/SSOR, ILU/ILUT/ILUP/ILUTP, Approximate Inverse, LU/QR (dense-direct). These operate on the local block of a distributed matrix.
-- **Distributed-capable**: AMG (`root_gather` or `local_prototype` via `-pc_amg_dist_apply_mode`), ASM/RAS over `DistCsrOp`, Block Jacobi on `DistCsrOp`, and `SuperLU_DIST` (feature-gated).
+- **Distributed-capable (MPI)**: AMG (`root_gather` or `local_prototype` via `-pc_amg_dist_apply_mode`), ASM/RAS over `DistCsrOp`, Block Jacobi on `DistCsrOp`, and `SuperLU_DIST` (feature-gated).
 - **PC-Chaining** works on MPI, but each preconditioner stage keeps its own local vs distributed behavior.
 
-For a detailed local-vs-distributed matrix covering all preconditioners, see
+For a detailed local-vs-distributed (MPI) matrix covering all preconditioners, see
 `docs/matrix_features.md`.
 
 ### Monitoring & Automation
@@ -1130,7 +1130,7 @@ cargo test --release
 
 The matrix feature matrix and MPI/Rayon test plan live in
 `docs/matrix_features.md`. Use them to validate communicator reductions,
-distributed SpMV/halo exchange, and Rayon-local kernels for
+distributed (MPI) SpMV/halo exchange, and Rayon-local kernels for
 `backend-faer + mpi + rayon` builds.
 
 ### Minimal MPI CI recipe

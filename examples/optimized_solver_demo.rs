@@ -46,11 +46,11 @@ fn main() {
     eprintln!("optimized_solver_demo requires the backend-faer feature.");
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::time::Instant;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -67,6 +67,7 @@ use kryst::matrix::op::LinOp;
 use kryst::utils::matrix_market::read_matrix_market;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 struct OptimalConfig {
     solver: &'static str,
     preconditioner: &'static str,
@@ -77,7 +78,7 @@ struct OptimalConfig {
 }
 
 /// Get the optimal solver configuration for a specific matrix
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
     match matrix_name {
         "fidap005" => OptimalConfig {
@@ -142,6 +143,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
 /// Test a solver configuration and return detailed results
 #[cfg(not(feature = "complex"))]
 // Use the true residual to gauge accuracy in the original system rather than preconditioned space.
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) -> f64 {
     let mut ax = vec![0.0; rhs.len()];
     op.matvec(solution, &mut ax);
@@ -155,6 +157,7 @@ fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) ->
 
 /// Test a solver configuration and return detailed results
 #[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn test_optimal_solver(
     matrix: &CsrMatrix<f64>,
     rhs: &[f64],
@@ -244,6 +247,7 @@ fn test_optimal_solver(
 
 /// Analyze matrix properties for diagnostics
 #[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     let n = matrix.nrows();
     let nnz = matrix.nnz();
@@ -285,6 +289,7 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
 }
 
 #[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn repair_diagonal_csr(a: &CsrMatrix<f64>, tol: f64, tau: f64) -> (CsrMatrix<f64>, usize) {
     let nrows = a.nrows();
     let ncols = a.ncols();
@@ -339,6 +344,7 @@ fn repair_diagonal_csr(a: &CsrMatrix<f64>, tol: f64, tau: f64) -> (CsrMatrix<f64
 }
 
 #[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn detect_diag_issues(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
     let n = matrix.nrows().min(matrix.ncols());
     let limit = n.min(max_rows);
@@ -352,6 +358,7 @@ fn detect_diag_issues(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> boo
 }
 
 #[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
     if row >= matrix.nrows() {
         return None;
@@ -370,6 +377,7 @@ fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging if available
     #[cfg(feature = "logging")]

@@ -1,4 +1,4 @@
-#![cfg(not(feature = "complex"))]
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 
 use kryst::algebra::prelude::*;

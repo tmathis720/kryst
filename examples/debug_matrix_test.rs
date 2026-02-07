@@ -9,22 +9,27 @@ fn main() {
     eprintln!("debug_matrix_test is disabled when the complex feature is enabled.");
 }
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(not(feature = "backend-faer"), not(feature = "complex")))]
+fn main() {
+    eprintln!("debug_matrix_test requires the backend-faer feature.");
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::algebra::prelude::*;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::path::PathBuf;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::time::Instant;
 
-#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Debug Matrix Market Test (CSR-only)");
     println!("===================================");

@@ -1,3 +1,5 @@
+#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
+
 use kryst::algebra::prelude::S;
 use kryst::algebra::scalar::KrystScalar;
 use kryst::config::options::PcOptions;
