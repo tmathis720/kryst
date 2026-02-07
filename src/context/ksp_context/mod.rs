@@ -2455,7 +2455,8 @@ impl KspContext {
         let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
         let pmat_view = materialize(pmat.clone(), want, tol)?;
         if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
-            return self.handle_pc_setup_failure(err, pmat, sid, vid);
+            self.handle_pc_setup_failure(err, pmat, sid, vid)?;
+            return Ok(false);
         }
         self.pc = Some(new_pc);
         self.last_pc_sid = Some(sid);
