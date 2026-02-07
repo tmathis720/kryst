@@ -16,7 +16,8 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         | PcConfig::Shell { .. }
         | PcConfig::Ksp { .. }
         | PcConfig::Mg { .. }
-        | PcConfig::Bddc { .. } => Ok(None),
+        | PcConfig::Bddc { .. }
+        | PcConfig::Gamg { .. } => Ok(None),
         _ => Ok(None),
     }
 }

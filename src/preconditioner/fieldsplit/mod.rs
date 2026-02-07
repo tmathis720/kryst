@@ -11,6 +11,14 @@ pub struct FieldSplitPc {
     children: Vec<Box<dyn Preconditioner>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BlockSpan {
+    start: usize,
+    end: usize,
+}
+
+impl BlockSpan {}
+
 impl FieldSplitPc {
     pub fn new(
         block_sizes: Vec<usize>,
@@ -67,13 +75,16 @@ impl Preconditioner for FieldSplitPc {
         let n = x.len();
         let mut off = 0usize;
         for (blk, child) in self.block_sizes.iter().zip(self.children.iter()) {
-            let end = off + *blk;
+            let span = BlockSpan {
+                start: off,
+                end: off + *blk,
+            };
             let mut xin = vec![S::zero(); n];
-            xin[off..end].copy_from_slice(&x[off..end]);
+            xin[span.start..span.end].copy_from_slice(&x[span.start..span.end]);
             let mut zout = vec![S::zero(); n];
             child.apply(side, &xin, &mut zout)?;
-            y[off..end].copy_from_slice(&zout[off..end]);
-            off = end;
+            y[span.start..span.end].copy_from_slice(&zout[span.start..span.end]);
+            off = span.end;
         }
         Ok(())
     }

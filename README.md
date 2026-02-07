@@ -373,7 +373,7 @@ Run your program with PETSc-style options:
 ### PC (Preconditioner) Options
 
 #### Basic Preconditioner Options
-- `-pc_type <pc>` - Preconditioner type: `jacobi`, `blockjacobi`, `sor`, `none`, `fieldsplit`, `shell`, `ksp`, `mg`, `bddc` (placeholder).
+- `-pc_type <pc>` - Preconditioner type: `jacobi`, `blockjacobi`, `sor`, `none`, `fieldsplit`, `shell`, `ksp`, `mg`, `bddc` (placeholder), `gamg` (placeholder).
 
 #### Incomplete Factorization Options
 - `-pc_type <pc>` - ILU variants: `ilu0`, `ilu`, `ilut`, `ilutp`, `ilup`
@@ -425,11 +425,12 @@ Example AMG invocation:
 ```
 
 #### Composite Preconditioning Options
-- `-pc_type fieldsplit` with `-pc_fieldsplit_block_sizes 2,2,...` and optional `-pc_fieldsplit_child_pc_type <pc>` configures block splits.
+- `-pc_type fieldsplit` with `-pc_fieldsplit_block_sizes 2,2,...`, optional `-pc_fieldsplit_child_pc_type <pc>`, and `-pc_fieldsplit_type <mode>` configures block splits.
 - `-pc_type shell` with `-pc_shell_name <name>` resolves a registered shell callback.
 - `-pc_type ksp` with `-pc_ksp_type <solver>`, `-pc_ksp_pc_type <pc>`, `-pc_ksp_maxits <n>`, `-pc_ksp_rtol <tol>` configures inner KSP-as-PC behavior.
-- `-pc_type mg` with `-pc_mg_levels <n>` and `-pc_mg_cycle_type <v|w>` enables basic multigrid-style placeholder wiring.
+- `-pc_type mg` with `-pc_mg_levels <n>`, `-pc_mg_cycle_type <v|w>`, and optional `-pc_mg_smoother <name>` / `-pc_mg_smoother_steps <n>` enables basic multigrid-style placeholder wiring.
 - `-pc_type bddc` is parsed but currently returns an explicit unsupported error (documented placeholder).
+- `-pc_type gamg` is parsed but currently returns an explicit unsupported error (documented placeholder).
 
 - `-pc_chain <string>` - Sequential preconditioner chain (e.g., "jacobi,chebyshev")
 - `-pc_type asm` - Additive Schwarz Method

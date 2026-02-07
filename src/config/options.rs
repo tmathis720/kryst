@@ -227,6 +227,7 @@ pub struct PcOptions {
     // FieldSplit
     pub pc_fieldsplit_block_sizes: Option<Vec<usize>>,
     pub pc_fieldsplit_child_pc_type: Option<String>,
+    pub pc_fieldsplit_type: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
     // KSP-as-PC
@@ -237,6 +238,16 @@ pub struct PcOptions {
     // MG
     pub pc_mg_levels: Option<usize>,
     pub pc_mg_cycle_type: Option<String>,
+    pub pc_mg_smoother: Option<String>,
+    pub pc_mg_smoother_steps: Option<usize>,
+    // BDDC
+    pub pc_bddc_coarse_ksp_type: Option<String>,
+    pub pc_bddc_coarse_pc_type: Option<String>,
+    pub pc_bddc_use_vertices: Option<bool>,
+    // GAMG
+    pub pc_gamg_type: Option<String>,
+    pub pc_gamg_threshold: Option<f64>,
+    pub pc_gamg_levels: Option<usize>,
 
     /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
@@ -660,6 +671,7 @@ impl Sink for PcOptions {
             // Approximate inverse (CSR) options
             "pc_approxinv_parallel" => set_opt!(&mut self.approxinv_parallel, v),
             "pc_fixdiag" => set_opt!(&mut self.pc_fixdiag, v),
+            "pc_bddc_use_vertices" => set_opt!(&mut self.pc_bddc_use_vertices, v),
             _ => Err(KError::SolveError(format!("Unknown PC bool key: {key}"))),
         }
     }
@@ -800,6 +812,7 @@ impl Sink for PcOptions {
             "pc_fieldsplit_child_pc_type" => {
                 set_opt!(&mut self.pc_fieldsplit_child_pc_type, v.to_lowercase())
             }
+            "pc_fieldsplit_type" => set_opt!(&mut self.pc_fieldsplit_type, v.to_lowercase()),
             "pc_shell_name" => set_opt!(&mut self.pc_shell_name, v.to_string()),
             "pc_ksp_type" => set_opt!(&mut self.pc_ksp_ksp_type, v.to_lowercase()),
             "pc_ksp_pc_type" => set_opt!(&mut self.pc_ksp_pc_type, v.to_lowercase()),
@@ -807,6 +820,22 @@ impl Sink for PcOptions {
             "pc_ksp_rtol" => set_opt!(&mut self.pc_ksp_rtol, parse_as::<f64>(v, spec)?),
             "pc_mg_levels" => set_opt!(&mut self.pc_mg_levels, parse_as::<usize>(v, spec)?),
             "pc_mg_cycle_type" => set_opt!(&mut self.pc_mg_cycle_type, v.to_lowercase()),
+            "pc_mg_smoother" => set_opt!(&mut self.pc_mg_smoother, v.to_lowercase()),
+            "pc_mg_smoother_steps" => {
+                set_opt!(
+                    &mut self.pc_mg_smoother_steps,
+                    ensure_ge_1("pc_mg_smoother_steps", parse_as::<usize>(v, spec)?)?
+                )
+            }
+            "pc_bddc_coarse_ksp_type" => {
+                set_opt!(&mut self.pc_bddc_coarse_ksp_type, v.to_lowercase())
+            }
+            "pc_bddc_coarse_pc_type" => {
+                set_opt!(&mut self.pc_bddc_coarse_pc_type, v.to_lowercase())
+            }
+            "pc_gamg_type" => set_opt!(&mut self.pc_gamg_type, v.to_lowercase()),
+            "pc_gamg_threshold" => set_opt!(&mut self.pc_gamg_threshold, parse_as::<f64>(v, spec)?),
+            "pc_gamg_levels" => set_opt!(&mut self.pc_gamg_levels, parse_as::<usize>(v, spec)?),
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_composite_type" => set_opt!(&mut self.pc_composite_type, v.to_lowercase()),
             "pc_composite_prefixes" => {
@@ -1748,6 +1777,7 @@ impl PcOptions {
 
         o!(pc_fieldsplit_block_sizes);
         o!(pc_fieldsplit_child_pc_type);
+        o!(pc_fieldsplit_type);
         o!(pc_shell_name);
         o!(pc_ksp_ksp_type);
         o!(pc_ksp_pc_type);
@@ -1755,6 +1785,14 @@ impl PcOptions {
         o!(pc_ksp_rtol);
         o!(pc_mg_levels);
         o!(pc_mg_cycle_type);
+        o!(pc_mg_smoother);
+        o!(pc_mg_smoother_steps);
+        o!(pc_bddc_coarse_ksp_type);
+        o!(pc_bddc_coarse_pc_type);
+        o!(pc_bddc_use_vertices);
+        o!(pc_gamg_type);
+        o!(pc_gamg_threshold);
+        o!(pc_gamg_levels);
 
         o!(pc_chain);
         o!(pc_composite_type);
