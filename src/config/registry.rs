@@ -983,6 +983,27 @@ pub static SPECS: &[Spec] = &[
         doc: "registered shell callback name",
     },
     Spec {
+        flag: "-pc_shell_setup",
+        key: "pc_shell_setup",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell setup hook name",
+    },
+    Spec {
+        flag: "-pc_shell_destroy",
+        key: "pc_shell_destroy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell destroy hook name",
+    },
+    Spec {
+        flag: "-pc_shell_context",
+        key: "pc_shell_context",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell context binding",
+    },
+    Spec {
         flag: "-pc_ksp_type",
         key: "pc_ksp_type",
         arity: Arity::One,

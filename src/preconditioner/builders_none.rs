@@ -18,8 +18,16 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             )?;
             Ok(Some(Box::new(pc)))
         }
-        PcConfig::Shell { name } => Ok(Some(Box::new(crate::preconditioner::shell::ShellPc::new(
+        PcConfig::Shell {
+            name,
+            setup,
+            destroy,
+            context,
+        } => Ok(Some(Box::new(crate::preconditioner::shell::ShellPc::new(
             name.clone(),
+            setup.clone(),
+            destroy.clone(),
+            context.clone(),
         )))),
         PcConfig::Ksp {
             inner_ksp_type,

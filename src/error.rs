@@ -22,6 +22,8 @@ pub enum KError {
     ZeroPivot(usize),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("preconditioner failed: {0}")]
+    PcFailed(String),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
     #[error("unrecognized solver type: {0}")]
@@ -71,6 +73,11 @@ mod tests {
         assert_eq!(
             format!("{}", KError::IndefinitePreconditioner),
             "indefinite preconditioner detected (beta < 0)"
+        );
+
+        assert_eq!(
+            format!("{}", KError::PcFailed("pc shell".to_string())),
+            "preconditioner failed: pc shell"
         );
 
         assert_eq!(format!("{}", KError::ZeroPivot(42)), "zero pivot at row 42");
@@ -145,10 +152,11 @@ mod tests {
         let _e5 = KError::IndefiniteMatrix;
         let _e6 = KError::IndefinitePreconditioner;
         let _e7 = KError::ZeroPivot(0);
-        let _e8 = KError::Unsupported("test");
-        let _e9 = KError::UnrecognizedSolverType("test".to_string());
-        let _e10 = KError::UnrecognizedPcType("test".to_string());
-        let _e11 = KError::UnrecognizedPcSide("test".to_string());
+        let _e8 = KError::PcFailed("test".to_string());
+        let _e9 = KError::Unsupported("test");
+        let _e10 = KError::UnrecognizedSolverType("test".to_string());
+        let _e11 = KError::UnrecognizedPcType("test".to_string());
+        let _e12 = KError::UnrecognizedPcSide("test".to_string());
 
         // All variants should be constructible
         assert!(true);

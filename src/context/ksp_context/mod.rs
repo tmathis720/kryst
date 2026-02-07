@@ -2104,7 +2104,7 @@ impl KspContext {
                 .solver
                 .as_mut()
                 .ok_or_else(|| KError::SolveError("No solver".into()))?;
-            let mut stats = solver.solve(
+            let mut stats = match solver.solve(
                 amat_ref,
                 pc,
                 b,
@@ -2113,7 +2113,17 @@ impl KspContext {
                 &comm,
                 monitors,
                 self.work.as_mut(),
-            )?;
+            ) {
+                Ok(stats) => stats,
+                Err(err) => {
+                    if let KError::PcFailed(msg) = err {
+                        log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                        let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
+                        return Ok(SolveStats::new(0, res, ConvergedReason::DivergedPcFailed));
+                    }
+                    return Err(err);
+                }
+            };
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
@@ -2138,7 +2148,8 @@ impl KspContext {
 
             let op = LinOpAsK { inner: amat_ref };
 
-            let mut stats = match solver_type {
+            let mut stats = match (|| -> Result<SolveStats<R>, KError> {
+                Ok(match solver_type {
                 SolverType::Cg => {
                     let s = solver
                         .as_any_mut()
@@ -2347,6 +2358,17 @@ impl KspContext {
                     ));
                 }
                 SolverType::Preonly => unreachable!("PREONLY handled earlier"),
+            })
+            })() {
+                Ok(stats) => stats,
+                Err(err) => {
+                    if let KError::PcFailed(msg) = err {
+                        log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                        let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
+                        return Ok(SolveStats::new(0, res, ConvergedReason::DivergedPcFailed));
+                    }
+                    return Err(err);
+                }
             };
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
