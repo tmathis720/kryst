@@ -11,28 +11,29 @@ use std::time::{Duration, Instant};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-use crate::config::kinds::{AmgCoarsenKind, AmgInterpKind, AmgRelaxKind};
+use crate::config::kinds::{
+    AmgCoarseSolveKind, AmgCoarsenKind, AmgCycleKind, AmgInterpKind, AmgRelaxKind, AmgStrengthKind,
+};
 use crate::config::options::PcOptions;
 use crate::error::KError;
+#[cfg(not(feature = "complex"))]
+use crate::matrix::DistCsrOp;
+#[cfg(not(feature = "complex"))]
+use crate::matrix::dist::halo::HaloPlan;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
+#[cfg(feature = "complex")]
+use crate::matrix::parcsr::HaloPlan;
 use crate::matrix::{
     convert::csr_from_linop,
     dense_api::DenseMatRef,
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
-#[cfg(not(feature = "complex"))]
-use crate::matrix::DistCsrOp;
-#[cfg(not(feature = "complex"))]
-use crate::matrix::dist::halo::HaloPlan;
-#[cfg(feature = "complex")]
-use crate::matrix::parcsr::HaloPlan;
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::{Comm, UniverseComm};
-use crate::preconditioner::dist::DistCoarseStrategy;
 use crate::preconditioner::asm::{Asm, AsmCombine, AsmConfig, AsmLocalSolver};
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
@@ -40,6 +41,7 @@ use crate::preconditioner::bridge::{
 };
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
+use crate::preconditioner::dist::DistCoarseStrategy;
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
@@ -580,20 +582,7 @@ impl AMGConfig {
     }
 
     fn apply_relax_type(&mut self, value: &str) -> Result<(), KError> {
-        let kind = AmgRelaxKind::from_str(value)?;
-        let relax = match kind {
-            AmgRelaxKind::Jacobi => RelaxType::Jacobi,
-            AmgRelaxKind::Gs => RelaxType::GaussSeidel,
-            AmgRelaxKind::Gsr => RelaxType::GaussSeidelBackward,
-            AmgRelaxKind::Sgs => RelaxType::SymmetricGaussSeidel,
-            AmgRelaxKind::Hgs => RelaxType::HybridGaussSeidel,
-            AmgRelaxKind::L1Jacobi => RelaxType::L1Jacobi,
-            AmgRelaxKind::Chebyshev => RelaxType::Chebyshev,
-            AmgRelaxKind::ChebyshevSafe => RelaxType::ChebyshevSafe,
-            AmgRelaxKind::SafeguardedGs => RelaxType::SafeguardedGaussSeidel,
-            AmgRelaxKind::Ilu0 => RelaxType::Ilu0,
-            AmgRelaxKind::Ras => RelaxType::Ras,
-        };
+        let relax = map_relax(AmgRelaxKind::from_str(value)?);
         self.relax_type = relax;
         for phase in RelaxPhase::ALL {
             self.grid_relax_type[phase.ix()] = relax;
@@ -604,6 +593,10 @@ impl AMGConfig {
 
     pub fn try_from_opts(opts: &PcOptions) -> Result<Self, KError> {
         let mut cfg = Self::default();
+        let mut per_phase_relax = false;
+        let mut pre_override: Option<usize> = None;
+        let mut post_override: Option<usize> = None;
+        let coarse_sweeps_explicit = opts.amg_sweeps_coarse.is_some();
 
         if let Some(levels) = opts.amg_levels {
             cfg.max_levels = levels;
@@ -617,11 +610,21 @@ impl AMGConfig {
             }
             cfg.strong_threshold = threshold;
         }
+        if let Some(ref strength) = opts.amg_strength_type {
+            cfg.normalize_strength = map_strength_kind(AmgStrengthKind::from_str(strength)?);
+        }
         if let Some(pre) = opts.amg_nu_pre {
             cfg.set_smoothing_sweeps(pre, cfg.post_sweeps);
         }
         if let Some(post) = opts.amg_nu_post {
             cfg.set_smoothing_sweeps(cfg.pre_sweeps, post);
+        }
+        if let Some(ref cycle) = opts.amg_cycle_type {
+            cfg.cycle_type = map_cycle_type(AmgCycleKind::from_str(cycle)?, opts.amg_cycle_w_gamma);
+        } else if let Some(gamma) = opts.amg_cycle_w_gamma {
+            cfg.cycle_type = CycleType::W {
+                gamma: gamma.max(2),
+            };
         }
         if let Some(threshold) = opts.amg_coarse_threshold {
             cfg.coarse_threshold = threshold;
@@ -652,14 +655,58 @@ impl AMGConfig {
         }
         if let Some(ref interp) = opts.amg_interp_type {
             cfg.interp_type = map_interp(AmgInterpKind::from_str(interp)?);
+        } else if let Some(ref interp) = opts.amg_interp_variant {
+            cfg.interp_type = map_interp(AmgInterpKind::from_str(interp)?);
         }
         if let Some(ref smoother) = opts.amg_smoother {
             cfg.apply_relax_type(smoother)?;
         } else if let Some(ref relax) = opts.amg_relax_type {
             cfg.apply_relax_type(relax)?;
         }
+        if let Some(ref smoother) = opts.amg_smoother_fine {
+            cfg.grid_relax_type[RelaxPhase::Fine.ix()] =
+                map_relax(AmgRelaxKind::from_str(smoother)?);
+            per_phase_relax = true;
+        }
+        if let Some(ref smoother) = opts.amg_smoother_down {
+            cfg.grid_relax_type[RelaxPhase::Down.ix()] =
+                map_relax(AmgRelaxKind::from_str(smoother)?);
+            per_phase_relax = true;
+        }
+        if let Some(ref smoother) = opts.amg_smoother_up {
+            cfg.grid_relax_type[RelaxPhase::Up.ix()] = map_relax(AmgRelaxKind::from_str(smoother)?);
+            per_phase_relax = true;
+        }
+        if let Some(ref smoother) = opts.amg_smoother_coarse {
+            cfg.grid_relax_type[RelaxPhase::Coarsest.ix()] =
+                map_relax(AmgRelaxKind::from_str(smoother)?);
+            per_phase_relax = true;
+        }
         if let Some(steps) = opts.amg_smoother_steps {
             cfg.set_smoothing_sweeps(steps, steps);
+        }
+        if let Some(fine) = opts.amg_sweeps_fine {
+            cfg.num_grid_sweeps[RelaxPhase::Fine.ix()] = fine;
+            if opts.amg_sweeps_down.is_none() {
+                pre_override = Some(fine);
+            }
+        }
+        if let Some(down) = opts.amg_sweeps_down {
+            cfg.num_grid_sweeps[RelaxPhase::Down.ix()] = down;
+            pre_override = Some(down);
+        }
+        if let Some(up) = opts.amg_sweeps_up {
+            cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = up;
+            post_override = Some(up);
+        }
+        if let Some(coarse) = opts.amg_sweeps_coarse {
+            cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] = coarse;
+        }
+        if let Some(pre) = pre_override {
+            cfg.pre_sweeps = pre;
+        }
+        if let Some(post) = post_override {
+            cfg.post_sweeps = post;
         }
         if let Some(omega) = opts.amg_smoother_omega {
             let omega = ensure_finite("amg_smoother_omega", omega)?;
@@ -692,6 +739,12 @@ impl AMGConfig {
         if let Some(flag) = opts.amg_optimize_workspace {
             cfg.optimize_workspace = flag;
         }
+        if let Some(ref coarse) = opts.amg_coarse_solver {
+            cfg.coarse_solve = map_coarse_solve(AmgCoarseSolveKind::from_str(coarse)?);
+            if matches!(cfg.coarse_solve, CoarseSolve::DirectDense) && !coarse_sweeps_explicit {
+                cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] = 0;
+            }
+        }
         if let Some(flag) = opts.amg_keep_transpose {
             cfg.keep_transpose = flag;
         }
@@ -719,8 +772,10 @@ impl AMGConfig {
             cfg.dist_apply_instrumentation = flag;
         }
         if let Some(scale) = opts.amg_dist_coarse_ghost_scale {
-            cfg.dist_coarse_ghost_scale =
-                ensure_finite("amg_dist_coarse_ghost_scale", scale)?;
+            cfg.dist_coarse_ghost_scale = ensure_finite("amg_dist_coarse_ghost_scale", scale)?;
+        }
+        if per_phase_relax {
+            cfg.relax_type = cfg.grid_relax_type[RelaxPhase::Fine.ix()];
         }
         cfg.conditioning = opts.conditioning_options()?;
         cfg.validate()?;
@@ -736,6 +791,22 @@ fn ensure_finite(name: &str, value: f64) -> Result<f64, KError> {
     }
 }
 
+fn map_relax(kind: AmgRelaxKind) -> RelaxType {
+    match kind {
+        AmgRelaxKind::Jacobi => RelaxType::Jacobi,
+        AmgRelaxKind::Gs => RelaxType::GaussSeidel,
+        AmgRelaxKind::Gsr => RelaxType::GaussSeidelBackward,
+        AmgRelaxKind::Sgs => RelaxType::SymmetricGaussSeidel,
+        AmgRelaxKind::Hgs => RelaxType::HybridGaussSeidel,
+        AmgRelaxKind::L1Jacobi => RelaxType::L1Jacobi,
+        AmgRelaxKind::Chebyshev => RelaxType::Chebyshev,
+        AmgRelaxKind::ChebyshevSafe => RelaxType::ChebyshevSafe,
+        AmgRelaxKind::SafeguardedGs => RelaxType::SafeguardedGaussSeidel,
+        AmgRelaxKind::Ilu0 => RelaxType::Ilu0,
+        AmgRelaxKind::Ras => RelaxType::Ras,
+    }
+}
+
 fn map_coarsen(kind: AmgCoarsenKind) -> CoarsenType {
     match kind {
         AmgCoarsenKind::Rs => CoarsenType::RS,
@@ -745,10 +816,18 @@ fn map_coarsen(kind: AmgCoarsenKind) -> CoarsenType {
     }
 }
 
+fn map_cycle_type(kind: AmgCycleKind, gamma: Option<usize>) -> CycleType {
+    match kind {
+        AmgCycleKind::V => CycleType::V,
+        AmgCycleKind::W => CycleType::W {
+            gamma: gamma.unwrap_or(2).max(2),
+        },
+    }
+}
+
 fn parse_dist_apply_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
-    DistCoarseStrategy::from_str(value).map_err(|_| {
-        KError::InvalidInput(format!("invalid amg_dist_apply_mode: {value}"))
-    })
+    DistCoarseStrategy::from_str(value)
+        .map_err(|_| KError::InvalidInput(format!("invalid amg_dist_apply_mode: {value}")))
 }
 
 fn map_interp(kind: AmgInterpKind) -> InterpType {
@@ -759,6 +838,22 @@ fn map_interp(kind: AmgInterpKind) -> InterpType {
         AmgInterpKind::Extended => InterpType::Extended,
         AmgInterpKind::Standard => InterpType::Standard,
         AmgInterpKind::He => InterpType::HE,
+    }
+}
+
+fn map_coarse_solve(kind: AmgCoarseSolveKind) -> CoarseSolve {
+    match kind {
+        AmgCoarseSolveKind::Cg => CoarseSolve::CG,
+        AmgCoarseSolveKind::Direct => CoarseSolve::DirectDense,
+        AmgCoarseSolveKind::Ilu => CoarseSolve::ILU,
+        AmgCoarseSolveKind::Smoother => CoarseSolve::Smoother,
+    }
+}
+
+fn map_strength_kind(kind: AmgStrengthKind) -> bool {
+    match kind {
+        AmgStrengthKind::Classical => false,
+        AmgStrengthKind::Symmetric | AmgStrengthKind::Normalized => true,
     }
 }
 
@@ -846,6 +941,89 @@ mod config_mapping_tests {
         let cfg = AMGConfig::try_from_opts(&opts).unwrap();
         assert!(!cfg.require_spd);
         assert!(!cfg.keep_transpose);
+    }
+
+    #[test]
+    fn amg_config_cycle_and_coarse_solver_overrides() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_cycle_type",
+            "w",
+            "-pc_amg_cycle_w_gamma",
+            "3",
+            "-pc_amg_coarse_solver",
+            "direct",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert_eq!(cfg.cycle_type, CycleType::W { gamma: 3 });
+        assert_eq!(cfg.coarse_solve, CoarseSolve::DirectDense);
+        assert_eq!(cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()], 0);
+    }
+
+    #[test]
+    fn amg_config_phase_smoothers_and_sweeps_override() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_require_spd",
+            "false",
+            "-pc_amg_smoother_fine",
+            "jacobi",
+            "-pc_amg_smoother_down",
+            "gs",
+            "-pc_amg_smoother_up",
+            "sgs",
+            "-pc_amg_smoother_coarse",
+            "chebyshev",
+            "-pc_amg_sweeps_fine",
+            "2",
+            "-pc_amg_sweeps_down",
+            "3",
+            "-pc_amg_sweeps_up",
+            "4",
+            "-pc_amg_sweeps_coarse",
+            "0",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert_eq!(
+            cfg.grid_relax_type[RelaxPhase::Fine.ix()],
+            RelaxType::Jacobi
+        );
+        assert_eq!(
+            cfg.grid_relax_type[RelaxPhase::Down.ix()],
+            RelaxType::GaussSeidel
+        );
+        assert_eq!(
+            cfg.grid_relax_type[RelaxPhase::Up.ix()],
+            RelaxType::SymmetricGaussSeidel
+        );
+        assert_eq!(
+            cfg.grid_relax_type[RelaxPhase::Coarsest.ix()],
+            RelaxType::Chebyshev
+        );
+        assert_eq!(cfg.num_grid_sweeps[RelaxPhase::Fine.ix()], 2);
+        assert_eq!(cfg.num_grid_sweeps[RelaxPhase::Down.ix()], 3);
+        assert_eq!(cfg.num_grid_sweeps[RelaxPhase::Up.ix()], 4);
+        assert_eq!(cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()], 0);
+        assert_eq!(cfg.pre_sweeps, 3);
+        assert_eq!(cfg.post_sweeps, 4);
+        assert_eq!(cfg.relax_type, RelaxType::Jacobi);
+    }
+
+    #[test]
+    fn amg_config_strength_and_interp_variants() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_strength_type",
+            "classical",
+            "-pc_amg_interp_variant",
+            "direct",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert!(!cfg.normalize_strength);
+        assert_eq!(cfg.interp_type, InterpType::Direct);
     }
 
     #[test]
@@ -2526,11 +2704,7 @@ fn broadcast_message<C: Comm>(comm: &C, root: usize, message: Option<String>) ->
 }
 
 #[cfg(not(feature = "complex"))]
-fn collect_error_message<C: Comm>(
-    comm: &C,
-    root: usize,
-    local_message: Option<String>,
-) -> String {
+fn collect_error_message<C: Comm>(comm: &C, root: usize, local_message: Option<String>) -> String {
     let rank = comm.rank();
     let size = comm.size();
     let local = local_message.unwrap_or_default();
@@ -2601,10 +2775,7 @@ fn collect_error_message<C: Comm>(
 }
 
 #[cfg(not(feature = "complex"))]
-fn gather_dist_csr(
-    dist: &DistCsrOp,
-    root: usize,
-) -> Result<Option<CsrMatrix<f64>>, KError> {
+fn gather_dist_csr(dist: &DistCsrOp, root: usize) -> Result<Option<CsrMatrix<f64>>, KError> {
     let comm = dist.comm();
     let rank = comm.rank();
     let size = comm.size();
@@ -2646,14 +2817,8 @@ fn gather_dist_csr(
         recv_col_idx_u64[r] = vec![0u64; nnz];
         recv_vals[r] = vec![0.0; nnz];
         let mut reqs = Vec::with_capacity(3);
-        reqs.push(comm.irecv_from_u64(
-            recv_row_ptr_u64[r].as_mut_slice(),
-            r as i32,
-        ));
-        reqs.push(comm.irecv_from_u64(
-            recv_col_idx_u64[r].as_mut_slice(),
-            r as i32,
-        ));
+        reqs.push(comm.irecv_from_u64(recv_row_ptr_u64[r].as_mut_slice(), r as i32));
+        reqs.push(comm.irecv_from_u64(recv_col_idx_u64[r].as_mut_slice(), r as i32));
         reqs.push(comm.irecv_from(recv_vals[r].as_mut_slice(), r as i32));
         comm.wait_all(&mut reqs);
     }
@@ -2972,16 +3137,8 @@ struct DistAmgInfo {
 impl DistAmgInfo {
     fn local_range(&self) -> (usize, usize) {
         let rank = self.comm.rank();
-        let start = self
-            .row_part
-            .get(rank)
-            .copied()
-            .unwrap_or_default();
-        let end = self
-            .row_part
-            .get(rank + 1)
-            .copied()
-            .unwrap_or(start);
+        let start = self.row_part.get(rank).copied().unwrap_or_default();
+        let end = self.row_part.get(rank + 1).copied().unwrap_or(start);
         (start, end)
     }
 
@@ -3213,16 +3370,15 @@ impl AMG {
         let prev_cfg = self.cfg.clone();
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
-        let mut record_error =
-            |local_stage: &mut Option<&'static str>,
-             local_detail: &mut Option<String>,
-             stage: &'static str,
-             err: KError| {
-                if local_stage.is_none() {
-                    *local_stage = Some(stage);
-                    *local_detail = Some(err.to_string());
-                }
-            };
+        let mut record_error = |local_stage: &mut Option<&'static str>,
+                                local_detail: &mut Option<String>,
+                                stage: &'static str,
+                                err: KError| {
+            if local_stage.is_none() {
+                *local_stage = Some(stage);
+                *local_detail = Some(err.to_string());
+            }
+        };
         let mut setup_state: Option<(
             CsrMatrix<f64>,
             Box<AmgHierarchy>,
@@ -3243,8 +3399,7 @@ impl AMG {
                 Some(mut fine) => {
                     let cfg = self.cfg.clone();
                     if cfg.conditioning.is_active() {
-                        if let Err(err) =
-                            apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
+                        if let Err(err) = apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
                         {
                             record_error(&mut local_stage, &mut local_detail, "conditioning", err);
                         }
@@ -3256,8 +3411,7 @@ impl AMG {
                         match self.build_symbolic(&fine) {
                             Ok(hierarchy) => {
                                 setup_profile = Some("strict");
-                                setup_state =
-                                    Some((fine, hierarchy, sid, vid, pattern_hash));
+                                setup_state = Some((fine, hierarchy, sid, vid, pattern_hash));
                             }
                             Err(primary_err) => {
                                 let mut permissive_cfg = prev_cfg.clone();
@@ -3313,16 +3467,14 @@ impl AMG {
             self.state = AmgState::Uninitialized;
             self.stats = None;
             self.csr = None;
-            return Err(KError::InvalidInput(
-                format!(
-                    "AMG distributed setup failed: {}",
-                    if error_message.is_empty() {
-                        "unknown error".to_string()
-                    } else {
-                        error_message
-                    }
-                ),
-            ));
+            return Err(KError::InvalidInput(format!(
+                "AMG distributed setup failed: {}",
+                if error_message.is_empty() {
+                    "unknown error".to_string()
+                } else {
+                    error_message
+                }
+            )));
         }
         if rank != root {
             self.state = AmgState::Uninitialized;
@@ -3330,9 +3482,9 @@ impl AMG {
             self.csr = None;
             return Ok(());
         }
-        let (fine, hierarchy, sid, vid, pattern_hash) = setup_state.ok_or_else(
-            || KError::InvalidInput("AMG distributed setup missing hierarchy state".into()),
-        )?;
+        let (fine, hierarchy, sid, vid, pattern_hash) = setup_state.ok_or_else(|| {
+            KError::InvalidInput("AMG distributed setup missing hierarchy state".into())
+        })?;
         self.state = AmgState::Ready {
             hierarchy,
             last_structure_id: sid,
@@ -3364,16 +3516,15 @@ impl AMG {
 
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
-        let mut record_error =
-            |local_stage: &mut Option<&'static str>,
-             local_detail: &mut Option<String>,
-             stage: &'static str,
-             err: KError| {
-                if local_stage.is_none() {
-                    *local_stage = Some(stage);
-                    *local_detail = Some(err.to_string());
-                }
-            };
+        let mut record_error = |local_stage: &mut Option<&'static str>,
+                                local_detail: &mut Option<String>,
+                                stage: &'static str,
+                                err: KError| {
+            if local_stage.is_none() {
+                *local_stage = Some(stage);
+                *local_detail = Some(err.to_string());
+            }
+        };
 
         let local_matrix = dist.local_matrix();
         let local_block = dist.local_block_csr();
@@ -3579,9 +3730,9 @@ impl AMG {
             Vec::new()
         };
         if rank == root {
-            let rhs = global_r.as_ref().ok_or_else(|| {
-                KError::InvalidInput("root rank missing gathered RHS".into())
-            })?;
+            let rhs = global_r
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("root rank missing gathered RHS".into()))?;
             let t_local = stats.as_ref().map(|_| tic());
             self.apply_local(side, rhs, &mut global_z)?;
             if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
@@ -3624,10 +3775,9 @@ impl AMG {
             stats.local_apply = toc(t0);
         }
 
-        if let (Some(halo), Some(local_matrix)) = (
-            dist.halo_plan.as_ref(),
-            dist.local_matrix.as_ref(),
-        ) {
+        if let (Some(halo), Some(local_matrix)) =
+            (dist.halo_plan.as_ref(), dist.local_matrix.as_ref())
+        {
             let t_halo = stats.as_ref().map(|_| tic());
             let req = halo.post_halo(r);
             halo.complete_halo(req);

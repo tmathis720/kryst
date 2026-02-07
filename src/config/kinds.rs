@@ -114,6 +114,67 @@ simple_kind! {
     }
 }
 
+// pc_amg_cycle_type
+simple_kind! {
+    pub enum AmgCycleKind { V => "v", W => "w" }
+}
+
+// pc_amg_strength_type
+pub enum AmgStrengthKind {
+    Classical,
+    Symmetric,
+    Normalized,
+}
+
+impl AmgStrengthKind {
+    pub const fn allowed() -> &'static [&'static str] {
+        &["classical", "symmetric", "normalized", "sym", "norm"]
+    }
+}
+
+impl FromStr for AmgStrengthKind {
+    type Err = KError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let s = raw.to_ascii_lowercase();
+        match s.as_str() {
+            "classical" => Ok(Self::Classical),
+            "symmetric" | "sym" => Ok(Self::Symmetric),
+            "normalized" | "norm" => Ok(Self::Normalized),
+            other => Err(invalid_choice("amg_strength_type", other, Self::allowed())),
+        }
+    }
+}
+
+// pc_amg_coarse_solver
+pub enum AmgCoarseSolveKind {
+    Cg,
+    Direct,
+    Ilu,
+    Smoother,
+}
+
+impl AmgCoarseSolveKind {
+    pub const fn allowed() -> &'static [&'static str] {
+        &["cg", "direct", "direct_dense", "lu", "ilu", "smoother"]
+    }
+}
+
+impl FromStr for AmgCoarseSolveKind {
+    type Err = KError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let s = raw.to_ascii_lowercase();
+        match s.as_str() {
+            "cg" => Ok(Self::Cg),
+            "direct" | "direct_dense" | "lu" => Ok(Self::Direct),
+            "ilu" => Ok(Self::Ilu),
+            "smoother" => Ok(Self::Smoother),
+            other => Err(invalid_choice("amg_coarse_solver", other, Self::allowed())),
+        }
+    }
+}
+
 // pc_asm_block_solver
 simple_kind! {
     pub enum AsmBlockSolverKind { Ludense => "ludense", Csr => "csr" }

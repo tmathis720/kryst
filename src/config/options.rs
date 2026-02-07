@@ -184,8 +184,11 @@ pub struct PcOptions {
     pub chebyshev_lambda_max: Option<f64>,
     pub amg_levels: Option<usize>,
     pub amg_strength_threshold: Option<f64>,
+    pub amg_strength_type: Option<String>,
     pub amg_nu_pre: Option<usize>,
     pub amg_nu_post: Option<usize>,
+    pub amg_cycle_type: Option<String>,
+    pub amg_cycle_w_gamma: Option<usize>,
     pub amg_coarse_threshold: Option<usize>,
     pub amg_max_coarse_size: Option<usize>,
     pub amg_min_coarse_size: Option<usize>,
@@ -194,7 +197,9 @@ pub struct PcOptions {
     pub amg_interpolation_truncation: Option<f64>,
     pub amg_coarsen_type: Option<String>,
     pub amg_interp_type: Option<String>,
+    pub amg_interp_variant: Option<String>,
     pub amg_relax_type: Option<String>,
+    pub amg_coarse_solver: Option<String>,
     pub amg_logging_level: Option<usize>,
     pub amg_print_level: Option<usize>,
     pub amg_tolerance: Option<f64>,
@@ -206,6 +211,22 @@ pub struct PcOptions {
     pub amg_smoother_steps: Option<usize>,
     /// Jacobi omega for smoothing/adaptive routines.
     pub amg_smoother_omega: Option<f64>,
+    /// Per-phase smoother override: fine level.
+    pub amg_smoother_fine: Option<String>,
+    /// Per-phase smoother override: down-sweep.
+    pub amg_smoother_down: Option<String>,
+    /// Per-phase smoother override: up-sweep.
+    pub amg_smoother_up: Option<String>,
+    /// Per-phase smoother override: coarsest level.
+    pub amg_smoother_coarse: Option<String>,
+    /// Per-phase sweep counts (fine).
+    pub amg_sweeps_fine: Option<usize>,
+    /// Per-phase sweep counts (down).
+    pub amg_sweeps_down: Option<usize>,
+    /// Per-phase sweep counts (up).
+    pub amg_sweeps_up: Option<usize>,
+    /// Per-phase sweep counts (coarsest).
+    pub amg_sweeps_coarse: Option<usize>,
     /// Absolute RAP truncation tolerance.
     pub amg_rap_truncation_abs: Option<f64>,
     /// Cap on entries per RAP row.
@@ -427,11 +448,35 @@ impl PcOptions {
         if let Some(ref t) = self.amg_interp_type {
             kinds::AmgInterpKind::from_str(t)?;
         }
+        if let Some(ref t) = self.amg_interp_variant {
+            kinds::AmgInterpKind::from_str(t)?;
+        }
         if let Some(ref t) = self.amg_relax_type {
             kinds::AmgRelaxKind::from_str(t)?;
         }
         if let Some(ref t) = self.amg_smoother {
             kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_smoother_fine {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_smoother_down {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_smoother_up {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_smoother_coarse {
+            kinds::AmgRelaxKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_cycle_type {
+            kinds::AmgCycleKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_coarse_solver {
+            kinds::AmgCoarseSolveKind::from_str(t)?;
+        }
+        if let Some(ref t) = self.amg_strength_type {
+            kinds::AmgStrengthKind::from_str(t)?;
         }
         if let Some(ref t) = self.asm_block_solver {
             kinds::AsmBlockSolverKind::from_str(t)?;
@@ -889,8 +934,13 @@ impl Sink for PcOptions {
             "pc_amg_strength_threshold" => {
                 set_opt!(&mut self.amg_strength_threshold, parse_as::<f64>(v, spec)?)
             }
+            "pc_amg_strength_type" => set_opt!(&mut self.amg_strength_type, v.to_lowercase()),
             "pc_amg_nu_pre" => set_opt!(&mut self.amg_nu_pre, parse_as::<usize>(v, spec)?),
             "pc_amg_nu_post" => set_opt!(&mut self.amg_nu_post, parse_as::<usize>(v, spec)?),
+            "pc_amg_cycle_type" => set_opt!(&mut self.amg_cycle_type, v.to_lowercase()),
+            "pc_amg_cycle_w_gamma" => {
+                set_opt!(&mut self.amg_cycle_w_gamma, parse_as::<usize>(v, spec)?)
+            }
             "pc_amg_coarse_threshold" => {
                 set_opt!(&mut self.amg_coarse_threshold, parse_as::<usize>(v, spec)?)
             }
@@ -929,8 +979,25 @@ impl Sink for PcOptions {
             "pc_amg_coarsen" => set_opt!(&mut self.amg_coarsen_type, v.to_lowercase()),
             "pc_amg_interp_type" => set_opt!(&mut self.amg_interp_type, v.to_lowercase()),
             "pc_amg_interp" => set_opt!(&mut self.amg_interp_type, v.to_lowercase()),
+            "pc_amg_interp_variant" => set_opt!(&mut self.amg_interp_variant, v.to_lowercase()),
             "pc_amg_relax_type" => set_opt!(&mut self.amg_relax_type, v.to_lowercase()),
             "pc_amg_smoother" => set_opt!(&mut self.amg_smoother, v.to_lowercase()),
+            "pc_amg_smoother_fine" => set_opt!(&mut self.amg_smoother_fine, v.to_lowercase()),
+            "pc_amg_smoother_down" => set_opt!(&mut self.amg_smoother_down, v.to_lowercase()),
+            "pc_amg_smoother_up" => set_opt!(&mut self.amg_smoother_up, v.to_lowercase()),
+            "pc_amg_smoother_coarse" => {
+                set_opt!(&mut self.amg_smoother_coarse, v.to_lowercase())
+            }
+            "pc_amg_sweeps_fine" => {
+                set_opt!(&mut self.amg_sweeps_fine, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_sweeps_down" => {
+                set_opt!(&mut self.amg_sweeps_down, parse_as::<usize>(v, spec)?)
+            }
+            "pc_amg_sweeps_up" => set_opt!(&mut self.amg_sweeps_up, parse_as::<usize>(v, spec)?),
+            "pc_amg_sweeps_coarse" => {
+                set_opt!(&mut self.amg_sweeps_coarse, parse_as::<usize>(v, spec)?)
+            }
             "pc_amg_smoother_steps" => {
                 set_opt!(
                     &mut self.amg_smoother_steps,
@@ -940,6 +1007,8 @@ impl Sink for PcOptions {
             "pc_amg_smoother_omega" => {
                 set_opt!(&mut self.amg_smoother_omega, parse_as::<f64>(v, spec)?)
             }
+            "pc_amg_coarse_solver" => set_opt!(&mut self.amg_coarse_solver, v.to_lowercase()),
+            "pc_amg_coarse_pc_type" => set_opt!(&mut self.amg_coarse_solver, v.to_lowercase()),
             "pc_amg_logging_level" => {
                 set_opt!(&mut self.amg_logging_level, parse_as::<usize>(v, spec)?)
             }
@@ -1918,8 +1987,11 @@ impl PcOptions {
 
         o!(amg_levels);
         o!(amg_strength_threshold);
+        o!(amg_strength_type);
         o!(amg_nu_pre);
         o!(amg_nu_post);
+        o!(amg_cycle_type);
+        o!(amg_cycle_w_gamma);
         o!(amg_coarse_threshold);
         o!(amg_max_coarse_size);
         o!(amg_min_coarse_size);
@@ -1928,8 +2000,18 @@ impl PcOptions {
         o!(amg_interpolation_truncation);
         o!(amg_coarsen_type);
         o!(amg_interp_type);
+        o!(amg_interp_variant);
         o!(amg_relax_type);
         o!(amg_smoother);
+        o!(amg_smoother_fine);
+        o!(amg_smoother_down);
+        o!(amg_smoother_up);
+        o!(amg_smoother_coarse);
+        o!(amg_sweeps_fine);
+        o!(amg_sweeps_down);
+        o!(amg_sweeps_up);
+        o!(amg_sweeps_coarse);
+        o!(amg_coarse_solver);
         o!(amg_logging_level);
         o!(amg_print_level);
         o!(amg_tolerance);
@@ -2365,8 +2447,13 @@ mod tests {
                     "pc_ilu_par_factor" => "parilu",
                     "pc_amg_coarsen_type" => "rs",
                     "pc_amg_interp_type" => "classical",
+                    "pc_amg_interp_variant" => "extended",
                     "pc_amg_relax_type" => "jacobi",
                     "pc_amg_smoother" => "jacobi",
+                    "pc_amg_smoother_fine" => "jacobi",
+                    "pc_amg_smoother_down" => "gs",
+                    "pc_amg_smoother_up" => "sgs",
+                    "pc_amg_smoother_coarse" => "chebyshev",
                     "pc_amg_coarsen" => "hmis",
                     "pc_amg_interp" => "extended",
                     "pc_amg_interp_maxnnz" => "8",
@@ -2375,6 +2462,10 @@ mod tests {
                     "pc_amg_rap_maxnnz" => "16",
                     "pc_amg_smoother_steps" => "2",
                     "pc_amg_smoother_omega" => "0.8",
+                    "pc_amg_cycle_type" => "v",
+                    "pc_amg_cycle_w_gamma" => "2",
+                    "pc_amg_strength_type" => "symmetric",
+                    "pc_amg_coarse_solver" => "cg",
                     "pc_asm_subdomains" => "0,1",
 
                     // Fallback by kind (must satisfy ensure_ge_1 where applicable)
