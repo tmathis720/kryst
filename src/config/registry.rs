@@ -959,7 +959,21 @@ pub static SPECS: &[Spec] = &[
         key: "pc_fieldsplit_type",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "fieldsplit mode hint (additive/multiplicative)",
+        doc: "fieldsplit mode hint (additive/multiplicative/symmetric/schur)",
+    },
+    Spec {
+        flag: "-pc_fieldsplit_schur_fact_type",
+        key: "pc_fieldsplit_schur_fact_type",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "Schur factorization type (diag/lower/upper/full)",
+    },
+    Spec {
+        flag: "-pc_fieldsplit_schur_precondition",
+        key: "pc_fieldsplit_schur_precondition",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "Schur preconditioning strategy (self/diag/a11)",
     },
     Spec {
         flag: "-pc_shell_name",
