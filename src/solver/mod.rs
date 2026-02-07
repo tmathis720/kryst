@@ -265,6 +265,8 @@ pub use tcqmr::TcqmrSolver;
 
 pub mod gcr;
 pub use gcr::GcrSolver;
+pub mod pipegcr;
+pub use pipegcr::PipeGcrSolver;
 
 pub mod pca_gmres;
 pub use pca_gmres::{PcaGmresSolver, PcaPcMode};

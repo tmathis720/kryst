@@ -74,7 +74,7 @@ use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, CrSolver, FgmresSolver, GcrSolver,
     GmresSolver, LinearSolver, MinresSolver, MonitorAction, MonitorCallback,
     PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver, PcgVariant,
-    RichardsonSolver, TcqmrSolver,
+    PipeGcrSolver, RichardsonSolver, TcqmrSolver,
 };
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
@@ -647,9 +647,11 @@ impl KspContext {
                 self.maxits,
             ))),
             SolverType::PipeGcr => {
-                return Err(KError::Unsupported(
-                    "PipeGCR is not yet implemented; use -ksp_type gcr".into(),
-                ));
+                Some(Box::new(PipeGcrSolver::new(
+                    self.restart,
+                    self.rtol,
+                    self.maxits,
+                )))
             }
             SolverType::Preonly => {
                 // PREONLY is intentionally "no iterative solver".
@@ -836,9 +838,14 @@ impl KspContext {
                 "-ksp_chebyshev_omega requires -ksp_type chebyshev".into(),
             ));
         }
-        if opts.gcr_restart.is_some() && !matches!(self.solver_type, Some(SolverType::Gcr)) {
+        if opts.gcr_restart.is_some()
+            && !matches!(
+                self.solver_type,
+                Some(SolverType::Gcr | SolverType::PipeGcr)
+            )
+        {
             return Err(KError::InvalidInput(
-                "-ksp_gcr_restart requires -ksp_type gcr".into(),
+                "-ksp_gcr_restart requires -ksp_type gcr or -ksp_type pipegcr".into(),
             ));
         }
         if let Some(omega) = opts.richardson_omega {
@@ -912,6 +919,13 @@ impl KspContext {
                 .and_then(|b| b.as_any_mut().downcast_mut::<GcrSolver>())
             {
                 *s = GcrSolver::new(r, self.rtol, self.maxits);
+            }
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<PipeGcrSolver>())
+            {
+                *s = PipeGcrSolver::new(r, self.rtol, self.maxits);
             }
         }
 
