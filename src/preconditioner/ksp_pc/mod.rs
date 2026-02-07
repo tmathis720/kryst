@@ -7,6 +7,7 @@ use crate::preconditioner::{PcSide, Preconditioner};
 
 pub struct KspAsPc {
     inner: Box<dyn Preconditioner>,
+    inner_ksp_type: Option<String>,
     maxits: usize,
     rtol: R,
 }
@@ -14,6 +15,7 @@ pub struct KspAsPc {
 impl KspAsPc {
     pub fn new(
         inner_pc_type: Option<String>,
+        inner_ksp_type: Option<String>,
         maxits: usize,
         rtol: R,
         opts: PcOptions,
@@ -26,6 +28,7 @@ impl KspAsPc {
         let inner = PcFactory::create_preconditioner(pct, Some(&opts))?;
         Ok(Self {
             inner,
+            inner_ksp_type,
             maxits: maxits.max(1),
             rtol,
         })
@@ -34,6 +37,9 @@ impl KspAsPc {
 
 impl Preconditioner for KspAsPc {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if let Some(ref ksp) = self.inner_ksp_type {
+            crate::context::ksp_context::SolverType::from_str(ksp)?;
+        }
         self.inner.setup(a)
     }
 

@@ -9,12 +9,12 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         PcConfig::FieldSplit {
             block_sizes,
             child_pc_type,
+            options,
         } => {
-            let opts = crate::config::options::PcOptions::default();
             let pc = crate::preconditioner::fieldsplit::FieldSplitPc::new(
                 block_sizes.clone(),
                 child_pc_type.clone(),
-                opts,
+                options.clone(),
             )?;
             Ok(Some(Box::new(pc)))
         }
@@ -22,7 +22,7 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             name.clone(),
         )))),
         PcConfig::Ksp {
-            inner_ksp_type: _,
+            inner_ksp_type,
             inner_pc_type,
             maxits,
             rtol,
@@ -31,17 +31,29 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             opts.pc_type = inner_pc_type.clone();
             let pc = crate::preconditioner::ksp_pc::KspAsPc::new(
                 inner_pc_type.clone(),
+                inner_ksp_type.clone(),
                 *maxits,
                 *rtol,
                 opts,
             )?;
             Ok(Some(Box::new(pc)))
         }
-        PcConfig::Mg { levels, cycle_type } => Ok(Some(Box::new(
-            crate::preconditioner::mg::MgPc::new(*levels, cycle_type.clone()),
-        ))),
+        PcConfig::Mg {
+            levels,
+            cycle_type,
+            smoother,
+            smoother_steps,
+        } => Ok(Some(Box::new(crate::preconditioner::mg::MgPc::new(
+            *levels,
+            cycle_type.clone(),
+            smoother.clone(),
+            *smoother_steps,
+        )))),
         PcConfig::Bddc { .. } => Err(KError::Unsupported(
             "BDDC is not yet implemented; use ASM/FieldSplit for now",
+        )),
+        PcConfig::Gamg { .. } => Err(KError::Unsupported(
+            "GAMG is not yet implemented; use pc_type=amg for now",
         )),
         _ => Ok(None),
     }

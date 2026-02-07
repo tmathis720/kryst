@@ -85,6 +85,7 @@ pub enum PcType {
     Ksp,
     Mg,
     Bddc,
+    Gamg,
     Lu,
     Qr,
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
@@ -115,6 +116,7 @@ impl FromStr for PcType {
             "ksp" => Ok(PcType::Ksp),
             "mg" => Ok(PcType::Mg),
             "bddc" => Ok(PcType::Bddc),
+            "gamg" => Ok(PcType::Gamg),
             "lu" => Ok(PcType::Lu),
             "qr" => Ok(PcType::Qr),
             "superludist" => {
@@ -223,6 +225,7 @@ pub enum PcConfig {
     FieldSplit {
         block_sizes: Vec<usize>,
         child_pc_type: Option<String>,
+        options: PcOptions,
     },
     Shell {
         name: Option<String>,
@@ -236,8 +239,13 @@ pub enum PcConfig {
     Mg {
         levels: usize,
         cycle_type: Option<String>,
+        smoother: Option<String>,
+        smoother_steps: Option<usize>,
     },
     Bddc {
+        placeholder: bool,
+    },
+    Gamg {
         placeholder: bool,
     },
     Lu,
@@ -436,6 +444,7 @@ impl PcConfig {
                 PcConfig::FieldSplit {
                     block_sizes,
                     child_pc_type: o.pc_fieldsplit_child_pc_type.clone(),
+                    options: o.clone(),
                 }
             }
             Shell => PcConfig::Shell {
@@ -450,8 +459,11 @@ impl PcConfig {
             Mg => PcConfig::Mg {
                 levels: o.pc_mg_levels.unwrap_or(2),
                 cycle_type: o.pc_mg_cycle_type.clone(),
+                smoother: o.pc_mg_smoother.clone(),
+                smoother_steps: o.pc_mg_smoother_steps,
             },
             Bddc => PcConfig::Bddc { placeholder: true },
+            Gamg => PcConfig::Gamg { placeholder: true },
 
             Lu => PcConfig::Lu,
             Qr => PcConfig::Qr,

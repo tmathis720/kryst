@@ -68,6 +68,7 @@ features, options, and monitoring/convergence hooks.
 | `ksp` | [`PcType::Ksp`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Ksp) | Partial | Uses simple inner-PC loop; Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc). |
 | `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Placeholder V-cycle; Tracking: [Multigrid parity](#tracking-mg-parity). |
 | `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Unsupported | Tracking: [BDDC support](#tracking-bddc). |
+| `gamg` | [`PcType::Gamg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Gamg) | Unsupported | Tracking: [GAMG support](#tracking-gamg). |
 | `lu` | [`PcType::Lu`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Lu) | Supported | Direct solve (PREONLY recommended). |
 | `qr` | [`PcType::Qr`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Qr) | Supported | Direct solve (PREONLY recommended). |
 | `superludist` | [`PcType::SuperLuDist`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.SuperLuDist) | Partial | Requires `superlu_dist` feature. |
@@ -102,12 +103,21 @@ features, options, and monitoring/convergence hooks.
 | `-pc_composite_type` | [`PcOptions::pc_composite_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_composite_type) | Supported | `multiplicative` or `additive`. |
 | `-pc_composite_prefixes` | [`PcOptions::pc_composite_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_composite_prefixes) | Supported | Per-stage options scoping. |
 | `-pc_fieldsplit_block_sizes` | [`PcOptions::pc_fieldsplit_block_sizes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_block_sizes) | Partial | Block-diagonal split only. |
+| `-pc_fieldsplit_type` | [`PcOptions::pc_fieldsplit_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_type) | Unsupported | Placeholder; stored but not applied. |
 | `-pc_fieldsplit_prefixes` | [`PcOptions::pc_fieldsplit_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_prefixes) | Partial | FieldSplit scope only. |
 | `-pc_ksp_type` | [`PcOptions::pc_ksp_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_ksp_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_ksp_pc_type` | [`PcOptions::pc_ksp_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_pc_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_mg_levels` | [`PcOptions::pc_mg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_levels) | Partial | Placeholder MG. |
 | `-pc_mg_cycle_type` | [`PcOptions::pc_mg_cycle_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_cycle_type) | Partial | Placeholder MG. |
+| `-pc_mg_smoother` | [`PcOptions::pc_mg_smoother`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother) | Unsupported | Parsed; smoother hooks not wired yet. |
+| `-pc_mg_smoother_steps` | [`PcOptions::pc_mg_smoother_steps`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother_steps) | Unsupported | Parsed; smoother hooks not wired yet. |
 | `-pc_shell_name` | [`PcOptions::pc_shell_name`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_name) | Partial | Names callback for `PcType::Shell`. |
+| `-pc_bddc_coarse_ksp_type` | [`PcOptions::pc_bddc_coarse_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_ksp_type) | Unsupported | Placeholder. |
+| `-pc_bddc_coarse_pc_type` | [`PcOptions::pc_bddc_coarse_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_pc_type) | Unsupported | Placeholder. |
+| `-pc_bddc_use_vertices` | [`PcOptions::pc_bddc_use_vertices`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_use_vertices) | Unsupported | Placeholder. |
+| `-pc_gamg_type` | [`PcOptions::pc_gamg_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_type) | Unsupported | Placeholder. |
+| `-pc_gamg_threshold` | [`PcOptions::pc_gamg_threshold`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_threshold) | Unsupported | Placeholder. |
+| `-pc_gamg_levels` | [`PcOptions::pc_gamg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_levels) | Unsupported | Placeholder. |
 
 ## Monitor hooks
 
@@ -147,6 +157,7 @@ High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 5. **Explicit breakdown/divergence reasons** (NaN/Inf, PC failure, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
 6. **PipeGCR solver** (`-ksp_type pipegcr`). Tracking: [PipeGCR support](#tracking-pipegcr).
 7. **BDDC preconditioner** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
+8. **GAMG preconditioner** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
 
 ## Tracking issues
 
@@ -173,6 +184,10 @@ Scope: pipelined GCR implementation and option parity (`-ksp_gcr_restart`, monit
 <a id="tracking-bddc"></a>
 ### Tracking issue: BDDC support
 Scope: coarse spaces, constraints, and subdomain interface handling.
+
+<a id="tracking-gamg"></a>
+### Tracking issue: GAMG support
+Scope: PETSc GAMG options, hierarchy setup, and smoother parity.
 
 <a id="tracking-breakdown-reason"></a>
 ### Tracking issue: Breakdown reason parity
