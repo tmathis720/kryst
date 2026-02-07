@@ -172,6 +172,65 @@ fn test_non_option_args_ignored() {
 }
 
 #[test]
+fn test_hierarchical_fieldsplit_prefixes_isolate_options() {
+    let args = vec![
+        "-pc_type",
+        "jacobi",
+        "-pc_fieldsplit_0_pc_type",
+        "ilu",
+        "-pc_fieldsplit_0_pc_ilu_levels",
+        "2",
+        "-pc_fieldsplit_1_pc_type",
+        "amg",
+        "-pc_fieldsplit_1_pc_amg_levels",
+        "3",
+    ];
+    let opts = PcOptions::from_args(&args).unwrap();
+    assert_eq!(opts.pc_type.as_deref(), Some("jacobi"));
+    let expected_prefixes = vec![
+        "pc_fieldsplit_0_".to_string(),
+        "pc_fieldsplit_1_".to_string(),
+    ];
+    assert_eq!(
+        opts.pc_fieldsplit_prefixes.as_ref(),
+        Some(&expected_prefixes)
+    );
+    let first = opts.scoped_child("pc_fieldsplit_0_").unwrap();
+    let second = opts.scoped_child("pc_fieldsplit_1_").unwrap();
+    assert_eq!(first.pc_type.as_deref(), Some("ilu"));
+    assert_eq!(first.ilu_level, Some(2));
+    assert_eq!(first.amg_levels, None);
+    assert_eq!(second.pc_type.as_deref(), Some("amg"));
+    assert_eq!(second.amg_levels, Some(3));
+    assert_eq!(second.ilu_level, None);
+}
+
+#[test]
+fn test_ksp_pc_scoped_options_do_not_leak() {
+    let args = vec![
+        "-pc_type",
+        "ksp",
+        "-pc_ksp_ksp_type",
+        "gmres",
+        "-pc_ksp_ksp_rtol",
+        "1e-4",
+        "-pc_ksp_pc_type",
+        "ilu",
+        "-pc_ksp_pc_ilu_levels",
+        "3",
+    ];
+    let opts = PcOptions::from_args(&args).unwrap();
+    assert_eq!(opts.pc_type.as_deref(), Some("ksp"));
+    assert_eq!(opts.ilu_level, None);
+    let nested_ksp = opts.pc_ksp_ksp_options.as_ref().unwrap();
+    assert_eq!(nested_ksp.ksp_type.as_deref(), Some("gmres"));
+    assert_eq!(nested_ksp.rtol, Some(1e-4));
+    let nested_pc = opts.pc_ksp_pc_options.as_ref().unwrap();
+    assert_eq!(nested_pc.pc_type.as_deref(), Some("ilu"));
+    assert_eq!(nested_pc.ilu_level, Some(3));
+}
+
+#[test]
 fn test_solver_type_from_str() {
     use kryst::context::ksp_context::SolverType;
     use std::str::FromStr;

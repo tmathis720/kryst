@@ -782,6 +782,28 @@ Features:
 - **Parameter Inheritance**: Specialized parameters apply to respective stages
 - **Performance Tuning**: Optimize combinations via `ParameterTuner`
 
+Composite modes and scoped options:
+- `-pc_composite_type multiplicative|additive|schur` selects how stages combine (sequential, sum, or Schur-style correction).
+- Stage-scoped options can be provided with either `-pc_composite_prefixes s0_,s1_` or hierarchical flags such as
+  `-pc_composite_0_pc_type jacobi -pc_composite_1_pc_type ilu`.
+
+FieldSplit scoping examples:
+```
+./my_program \
+  -pc_type fieldsplit \
+  -pc_fieldsplit_block_sizes 2,2 \
+  -pc_fieldsplit_0_pc_type ilu -pc_fieldsplit_0_pc_ilu_levels 2 \
+  -pc_fieldsplit_1_pc_type amg -pc_fieldsplit_1_pc_amg_levels 3
+```
+
+Nested KSP preconditioner scoping:
+```
+./my_program \
+  -pc_type ksp \
+  -pc_ksp_ksp_type gmres -pc_ksp_ksp_rtol 1e-4 \
+  -pc_ksp_pc_type ilu -pc_ksp_pc_ilu_levels 3
+```
+
 ### Domain Decomposition
 - **ASM**: Additive Schwarz Method with configurable overlap
 - **Approximate Inverse**: SPAI-type sparse approximate inverse

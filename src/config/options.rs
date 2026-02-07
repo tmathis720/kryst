@@ -11,7 +11,7 @@ use crate::error::KError;
 use std::str::FromStr;
 
 use crate::config::options_core::is_help_requested;
-use crate::config::options_core::{Sink, Spec, expand_options_files, parse_as};
+use crate::config::options_core::{Arity, Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
 use crate::preconditioner::dist::{GlobalPcKind, LocalPcKind, MpiPcOptions};
 use crate::preconditioner::ilu::{
@@ -235,6 +235,10 @@ pub struct PcOptions {
     pub pc_ksp_pc_type: Option<String>,
     pub pc_ksp_maxits: Option<usize>,
     pub pc_ksp_rtol: Option<f64>,
+    /// Scoped KSP options for nested `pc_type = ksp` contexts.
+    pub pc_ksp_ksp_options: Option<KspOptions>,
+    /// Scoped PC options for nested `pc_type = ksp` contexts.
+    pub pc_ksp_pc_options: Option<Box<PcOptions>>,
     // MG
     pub pc_mg_levels: Option<usize>,
     pub pc_mg_cycle_type: Option<String>,
@@ -396,6 +400,8 @@ impl PcOptions {
         let component = format!("-{component_prefix}");
         registry().parse_into(args, &mut me, Some(&component))?;
         me.validate_and_sync()?;
+        me.load_scoped_children_from_args(args, Some(component_prefix))?;
+        me.load_ksp_scoped_options_from_args(args, Some(component_prefix))?;
         Ok(me)
     }
 
@@ -448,17 +454,184 @@ impl PcOptions {
             .collect()
     }
 
-    fn load_scoped_children_from_args(&mut self, args: &[&str]) -> Result<(), KError> {
+    fn is_bool_literal(s: &str) -> bool {
+        matches!(
+            s,
+            "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off"
+        )
+    }
+
+    fn load_scoped_children_from_args(
+        &mut self,
+        args: &[&str],
+        current_prefix: Option<&str>,
+    ) -> Result<(), KError> {
         self.scoped_children.clear();
+        let discovered_fieldsplit =
+            Self::discover_indexed_prefixes(args, "pc_fieldsplit", current_prefix);
+        let discovered_composite =
+            Self::discover_indexed_prefixes(args, "pc_composite", current_prefix);
         let mut prefixes = self.pc_fieldsplit_prefixes.clone().unwrap_or_default();
+        for prefix in &discovered_fieldsplit {
+            if !prefixes.contains(prefix) {
+                prefixes.push(prefix.clone());
+            }
+        }
         if let Some(extra) = &self.pc_composite_prefixes {
-            prefixes.extend(extra.iter().cloned());
+            for prefix in extra {
+                if !prefixes.contains(prefix) {
+                    prefixes.push(prefix.clone());
+                }
+            }
+        }
+        for prefix in &discovered_composite {
+            if !prefixes.contains(prefix) {
+                prefixes.push(prefix.clone());
+            }
+        }
+        prefixes.sort();
+        prefixes.dedup();
+        if !discovered_fieldsplit.is_empty() {
+            let mut merged = self.pc_fieldsplit_prefixes.clone().unwrap_or_default();
+            for prefix in discovered_fieldsplit {
+                if !merged.contains(&prefix) {
+                    merged.push(prefix);
+                }
+            }
+            self.pc_fieldsplit_prefixes = Some(merged);
+        }
+        if !discovered_composite.is_empty() {
+            let mut merged = self.pc_composite_prefixes.clone().unwrap_or_default();
+            for prefix in discovered_composite {
+                if !merged.contains(&prefix) {
+                    merged.push(prefix);
+                }
+            }
+            self.pc_composite_prefixes = Some(merged);
         }
         for prefix in prefixes {
             let child = Self::from_args_with_prefix(args, &prefix)?;
             self.scoped_children.push((prefix, Box::new(child)));
         }
         Ok(())
+    }
+
+    fn discover_indexed_prefixes(
+        args: &[&str],
+        root: &str,
+        current_prefix: Option<&str>,
+    ) -> Vec<String> {
+        let mut prefixes = Vec::new();
+        let prefix = match current_prefix {
+            Some(current) => format!("-{current}{root}_"),
+            None => format!("-{root}_"),
+        };
+        for arg in args {
+            let Some(rest) = arg.strip_prefix(&prefix) else {
+                continue;
+            };
+            let mut parts = rest.splitn(2, '_');
+            let Some(index) = parts.next() else {
+                continue;
+            };
+            let Some(suffix) = parts.next() else {
+                continue;
+            };
+            if suffix.is_empty() || !index.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let discovered = match current_prefix {
+                Some(current) => format!("{current}{root}_{index}_"),
+                None => format!("{root}_{index}_"),
+            };
+            prefixes.push(discovered);
+        }
+        prefixes
+    }
+
+    fn load_ksp_scoped_options_from_args(
+        &mut self,
+        args: &[&str],
+        current_prefix: Option<&str>,
+    ) -> Result<(), KError> {
+        let prefix =
+            current_prefix.map_or_else(|| "pc_ksp_".to_string(), |p| format!("{p}pc_ksp_"));
+        let prefix = format!("-{prefix}");
+        let ksp_args = Self::collect_prefixed_args(args, &prefix, |flag| flag.starts_with("-ksp_"));
+        if !ksp_args.is_empty() {
+            let ksp_opts =
+                KspOptions::from_args_with_prefix(&ksp_args, prefix.trim_start_matches('-'))?;
+            let ksp_opts = if ksp_opts.ksp_type.is_none() {
+                let mut ksp_opts = ksp_opts;
+                ksp_opts.ksp_type = self.pc_ksp_ksp_type.clone();
+                ksp_opts
+            } else {
+                ksp_opts
+            };
+            self.pc_ksp_ksp_options = Some(ksp_opts);
+        }
+
+        let pc_args = Self::collect_prefixed_args(args, &prefix, |flag| flag.starts_with("-pc_"));
+        if !pc_args.is_empty() {
+            let pc_opts =
+                PcOptions::from_args_with_prefix(&pc_args, prefix.trim_start_matches('-'))?;
+            let pc_opts = if pc_opts.pc_type.is_none() {
+                let mut pc_opts = pc_opts;
+                pc_opts.pc_type = self.pc_ksp_pc_type.clone();
+                pc_opts
+            } else {
+                pc_opts
+            };
+            self.pc_ksp_pc_options = Some(Box::new(pc_opts));
+        }
+        Ok(())
+    }
+
+    fn collect_prefixed_args<'a, F>(args: &'a [&'a str], prefix: &str, keep: F) -> Vec<&'a str>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let reg = registry();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            let tok = args[i];
+            if let Some(suffix) = tok.strip_prefix(prefix) {
+                let canonical = format!("-{suffix}");
+                if let Some(spec) = reg.spec_for_flag(&canonical) {
+                    if keep(&canonical) {
+                        out.push(tok);
+                        match spec.arity {
+                            Arity::Zero | Arity::OptionalBool => {
+                                if let Some(next) = args.get(i + 1)
+                                    && Self::is_bool_literal(next)
+                                {
+                                    out.push(next);
+                                    i += 1;
+                                }
+                            }
+                            Arity::One => {
+                                if let Some(next) = args.get(i + 1) {
+                                    out.push(next);
+                                    i += 1;
+                                }
+                            }
+                            Arity::Two => {
+                                if let Some(next) = args.get(i + 1) {
+                                    out.push(next);
+                                }
+                                if let Some(next) = args.get(i + 2) {
+                                    out.push(next);
+                                }
+                                i += 2;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
     }
 
     pub fn scoped_child(&self, prefix: &str) -> Option<&PcOptions> {
@@ -1480,7 +1653,8 @@ impl PcOptions {
         let mut me = Self::default();
         registry().parse_into(args, &mut me, Some("-pc_"))?;
         me.validate_and_sync()?;
-        me.load_scoped_children_from_args(args)?;
+        me.load_scoped_children_from_args(args, None)?;
+        me.load_ksp_scoped_options_from_args(args, None)?;
         Ok(me)
     }
 
@@ -1783,6 +1957,8 @@ impl PcOptions {
         o!(pc_ksp_pc_type);
         o!(pc_ksp_maxits);
         o!(pc_ksp_rtol);
+        o!(pc_ksp_ksp_options);
+        o!(pc_ksp_pc_options);
         o!(pc_mg_levels);
         o!(pc_mg_cycle_type);
         o!(pc_mg_smoother);

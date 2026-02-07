@@ -32,6 +32,7 @@ use std::cell::RefCell;
 
 thread_local! {
     static TLS_BUF: RefCell<Vec<S>> = const { RefCell::new(Vec::new()) };
+    static TLS_BUF2: RefCell<Vec<S>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A simple compositional preconditioner:
@@ -41,6 +42,7 @@ thread_local! {
 pub enum PcCompositeMode {
     Multiplicative,
     Additive,
+    Schur,
 }
 
 pub struct PcChain {
@@ -122,6 +124,32 @@ impl Preconditioner for PcChain {
                     Ok(())
                 })
             }
+            PcCompositeMode::Schur => TLS_BUF.with(|b1| -> Result<(), KError> {
+                let mut tmp = b1.borrow_mut();
+                if tmp.len() < x.len() {
+                    tmp.resize(x.len(), S::zero());
+                }
+                self.stages[0].apply(side, x, y)?;
+                if self.stages.len() == 1 {
+                    return Ok(());
+                }
+                for ((ti, xi), yi) in tmp.iter_mut().zip(x.iter()).zip(y.iter()) {
+                    *ti = *xi - *yi;
+                }
+                TLS_BUF2.with(|b2| -> Result<(), KError> {
+                    let mut corr = b2.borrow_mut();
+                    if corr.len() < x.len() {
+                        corr.resize(x.len(), S::zero());
+                    }
+                    for st in &self.stages[1..] {
+                        st.apply(side, &tmp, &mut corr)?;
+                        for (yi, ci) in y.iter_mut().zip(corr.iter()) {
+                            *yi += *ci;
+                        }
+                    }
+                    Ok(())
+                })
+            }),
         }
     }
 
@@ -164,6 +192,32 @@ impl Preconditioner for PcChain {
                     Ok(())
                 })
             }
+            PcCompositeMode::Schur => TLS_BUF.with(|b1| -> Result<(), KError> {
+                let mut tmp = b1.borrow_mut();
+                if tmp.len() < x.len() {
+                    tmp.resize(x.len(), S::zero());
+                }
+                self.stages[0].apply_mut(side, x, y)?;
+                if self.stages.len() == 1 {
+                    return Ok(());
+                }
+                for ((ti, xi), yi) in tmp.iter_mut().zip(x.iter()).zip(y.iter()) {
+                    *ti = *xi - *yi;
+                }
+                TLS_BUF2.with(|b2| -> Result<(), KError> {
+                    let mut corr = b2.borrow_mut();
+                    if corr.len() < x.len() {
+                        corr.resize(x.len(), S::zero());
+                    }
+                    for st in self.stages.iter_mut().skip(1) {
+                        st.apply_mut(side, &tmp, &mut corr)?;
+                        for (yi, ci) in y.iter_mut().zip(corr.iter()) {
+                            *yi += *ci;
+                        }
+                    }
+                    Ok(())
+                })
+            }),
         }
     }
 
