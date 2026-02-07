@@ -186,7 +186,11 @@ impl CgsSolver {
         let mut rho_abs = rho.abs();
         let mut rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
         if rho_abs <= rho_thr {
-            return Err(KError::IndefiniteMatrix);
+            return Ok(SolveStats::new(
+                0,
+                rnorm,
+                ConvergedReason::DivergedBreakdown,
+            ));
         }
 
         u.copy_from_slice(r);
@@ -206,7 +210,11 @@ impl CgsSolver {
             let v_norm = norm_from_dot(dot_results[1]);
             let sigma_thr = BRK_ABS.max(BRK_REL * rtld_norm * v_norm);
             if sigma_abs <= sigma_thr {
-                return Err(KError::IndefiniteMatrix);
+                return Ok(SolveStats::new(
+                    k,
+                    rnorm,
+                    ConvergedReason::DivergedBreakdown,
+                ));
             }
             let alpha = rho / sigma;
 
@@ -245,7 +253,11 @@ impl CgsSolver {
             rho_abs = rho.abs();
             rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
             if rho_abs <= rho_thr {
-                return Err(KError::IndefiniteMatrix);
+                return Ok(SolveStats::new(
+                    k,
+                    rnorm,
+                    ConvergedReason::DivergedBreakdown,
+                ));
             }
             let beta = rho / rho_old;
 

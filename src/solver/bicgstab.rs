@@ -210,6 +210,9 @@ impl BiCgStabSolver {
         let bnorm = red.norm2(b).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
+        if !res0.is_finite() {
+            return Ok(SolveStats::new(0, res0, ConvergedReason::DivergedNanOrInf));
+        }
         if call_monitors(mons, 0, res0, 0) {
             return Ok(SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor));
         }
@@ -247,7 +250,7 @@ impl BiCgStabSolver {
                 } else {
                     red.norm2(r)
                 };
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 return Ok(stats);
             }
 
@@ -304,7 +307,7 @@ impl BiCgStabSolver {
                 } else {
                     red.norm2(r)
                 };
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 return Ok(stats);
             }
             alpha = rho / alpha_den;
@@ -320,6 +323,12 @@ impl BiCgStabSolver {
             }
 
             let s_norm = red.norm2(s);
+            if !s_norm.is_finite() {
+                stats.iterations = k;
+                stats.final_residual = s_norm;
+                stats.reason = ConvergedReason::DivergedNanOrInf;
+                return Ok(stats);
+            }
             if call_monitors(mons, k, s_norm, 0) {
                 return Ok(SolveStats::new(
                     k,
@@ -392,7 +401,7 @@ impl BiCgStabSolver {
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 return Ok(stats);
             }
             let omega = omega_reds[1] / omega_den;
@@ -401,7 +410,7 @@ impl BiCgStabSolver {
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
-                stats.reason = ConvergedReason::DivergedDtol;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 return Ok(stats);
             }
 
@@ -469,6 +478,12 @@ impl BiCgStabSolver {
             } else {
                 red.norm2(r)
             };
+            if !r_norm.is_finite() {
+                stats.iterations = k;
+                stats.final_residual = r_norm;
+                stats.reason = ConvergedReason::DivergedNanOrInf;
+                return Ok(stats);
+            }
             if call_monitors(mons, k, r_norm, 0) {
                 return Ok(SolveStats::new(
                     k,
@@ -487,7 +502,7 @@ impl BiCgStabSolver {
                 };
                 return Ok(stats);
             }
-            if !r_norm.is_finite() || r_norm >= self.dtol * bnorm {
+            if r_norm >= self.dtol * bnorm {
                 stats.iterations = k;
                 stats.final_residual = r_norm;
                 stats.reason = ConvergedReason::DivergedDtol;

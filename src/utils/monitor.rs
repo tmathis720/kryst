@@ -36,6 +36,7 @@ use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use crate::algebra::prelude::*;
+use crate::utils::convergence::ConvergedReason;
 use crate::preconditioner::stats::ParIluIterSample;
 
 pub enum Event<'a> {
@@ -353,10 +354,20 @@ impl IterationMonitor {
         self.convergence_reason = reason.to_string();
     }
 
+    /// Mark the solve as converged with a PETSc-equivalent reason.
+    pub fn mark_converged_reason(&mut self, reason: ConvergedReason) {
+        self.mark_converged(reason.petsc_reason());
+    }
+
     /// Mark the solve as diverged with a reason.
     pub fn mark_diverged(&mut self, reason: &str) {
         self.converged = false;
         self.convergence_reason = reason.to_string();
+    }
+
+    /// Mark the solve as diverged with a PETSc-equivalent reason.
+    pub fn mark_diverged_reason(&mut self, reason: ConvergedReason) {
+        self.mark_diverged(reason.petsc_reason());
     }
 
     /// Get comprehensive convergence statistics.

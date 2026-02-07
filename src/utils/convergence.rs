@@ -32,16 +32,73 @@ pub enum ConvergedReason {
     ConvergedTrustRegion,
     /// Converged due to a happy breakdown (e.g., `pᵀAp` ≈ 0)
     ConvergedHappyBreakdown,
+    /// Diverged due to NaN or Inf residuals
+    DivergedNanOrInf,
     /// Diverged due to divergence tolerance: ‖r‖ ≥ dtol * ‖b‖
     DivergedDtol,
     /// Diverged due to maximum iterations reached
     DivergedMaxIts,
+    /// Diverged due to a breakdown (generic)
+    DivergedBreakdown,
+    /// Diverged due to a BiCG-specific breakdown
+    DivergedBreakdownBiCG,
+    /// Diverged because the matrix is indefinite
+    DivergedIndefiniteMatrix,
+    /// Diverged because the preconditioner is indefinite
+    DivergedIndefinitePC,
+    /// Diverged because preconditioner setup failed
+    DivergedPcSetupFailed,
     /// Diverged because the preconditioner failed
     DivergedPcFailed,
     /// Diverged due to a monitor-requested stop
     StoppedByMonitor,
     /// Continue iterating (none of the stopping criteria met)
     Continued,
+}
+
+impl ConvergedReason {
+    /// PETSc-equivalent convergence reason identifier.
+    pub fn petsc_reason(self) -> &'static str {
+        match self {
+            ConvergedReason::ConvergedRtol => "KSP_CONVERGED_RTOL",
+            ConvergedReason::ConvergedAtol => "KSP_CONVERGED_ATOL",
+            ConvergedReason::ConvergedTrustRegion => "KSP_CONVERGED_TRUST_REGION",
+            ConvergedReason::ConvergedHappyBreakdown => "KSP_CONVERGED_HAPPY_BREAKDOWN",
+            ConvergedReason::DivergedNanOrInf => "KSP_DIVERGED_NANORINF",
+            ConvergedReason::DivergedDtol => "KSP_DIVERGED_DTOL",
+            ConvergedReason::DivergedMaxIts => "KSP_DIVERGED_ITS",
+            ConvergedReason::DivergedBreakdown => "KSP_DIVERGED_BREAKDOWN",
+            ConvergedReason::DivergedBreakdownBiCG => "KSP_DIVERGED_BREAKDOWN_BICG",
+            ConvergedReason::DivergedIndefiniteMatrix => "KSP_DIVERGED_INDEFINITE_MAT",
+            ConvergedReason::DivergedIndefinitePC => "KSP_DIVERGED_INDEFINITE_PC",
+            ConvergedReason::DivergedPcSetupFailed => "KSP_DIVERGED_PCSETUP_FAILED",
+            ConvergedReason::DivergedPcFailed => "KSP_DIVERGED_PC_FAILED",
+            ConvergedReason::StoppedByMonitor => "KSP_DIVERGED_USER",
+            ConvergedReason::Continued => "KSP_CONVERGED_ITERATING",
+        }
+    }
+
+    /// Whether the reason indicates a converged solve.
+    pub fn is_converged(self) -> bool {
+        matches!(
+            self,
+            ConvergedReason::ConvergedRtol
+                | ConvergedReason::ConvergedAtol
+                | ConvergedReason::ConvergedTrustRegion
+                | ConvergedReason::ConvergedHappyBreakdown
+        )
+    }
+
+    /// Whether the reason indicates divergence.
+    pub fn is_diverged(self) -> bool {
+        !matches!(self, ConvergedReason::Continued) && !self.is_converged()
+    }
+}
+
+impl std::fmt::Display for ConvergedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.petsc_reason())
+    }
 }
 
 /// Statistics from a solve operation.
@@ -134,6 +191,11 @@ impl Convergence {
     /// # Returns
     /// Tuple of (ConvergedReason, SolveStats) indicating the stopping reason.
     pub fn check(&self, rnorm: R, bnorm: R, iters: usize) -> (ConvergedReason, SolveStats<R>) {
+        if !rnorm.is_finite() || !bnorm.is_finite() {
+            let stats = SolveStats::new(iters, rnorm, ConvergedReason::DivergedNanOrInf);
+            return (ConvergedReason::DivergedNanOrInf, stats);
+        }
+
         // Absolute tolerance test first (most restrictive)
         if rnorm <= self.atol {
             let stats = SolveStats::new(iters, rnorm, ConvergedReason::ConvergedAtol);
@@ -319,6 +381,16 @@ mod tests {
         let reason = ConvergedReason::ConvergedRtol;
         let debug_str = format!("{:?}", reason);
         assert!(debug_str.contains("ConvergedRtol"));
+    }
+
+    #[test]
+    fn test_convergence_nan_or_inf() {
+        let conv = Convergence::new(1e-6, 1e-12, 1e3, 10);
+        let (reason_nan, _) = conv.check(f64::NAN, 1.0, 1);
+        assert_eq!(reason_nan, ConvergedReason::DivergedNanOrInf);
+
+        let (reason_inf, _) = conv.check(f64::INFINITY, 1.0, 2);
+        assert_eq!(reason_inf, ConvergedReason::DivergedNanOrInf);
     }
 
     #[test]

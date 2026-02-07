@@ -104,6 +104,10 @@ pub struct KspDiagnostics {
     pub pc_chain: Option<Vec<PcDiagnostics>>,
     pub setup_called: bool,
     pub bound_comm_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_converged_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_converged_reason_petsc: Option<String>,
 }
 
 impl KspDiagnostics {
