@@ -154,14 +154,10 @@ impl MgPc {
     fn build_smoother(&self, name: &str) -> Result<Box<dyn Preconditioner>, KError> {
         let pc_type = PcType::from_str(name)?;
         if pc_type == PcType::Mg {
-            return Err(KError::InvalidInput(
-                "pc_mg_smoother cannot be mg".into(),
-            ));
+            return Err(KError::InvalidInput("pc_mg_smoother cannot be mg".into()));
         }
         if pc_type == PcType::None {
-            return Err(KError::InvalidInput(
-                "pc_mg_smoother cannot be none".into(),
-            ));
+            return Err(KError::InvalidInput("pc_mg_smoother cannot be none".into()));
         }
         PcFactory::create_preconditioner(pc_type, None)
     }
@@ -203,12 +199,7 @@ impl MgPc {
         (p, r, n_coarse)
     }
 
-    fn smooth_level(
-        level: &MgLevel,
-        sweeps: usize,
-        b: &[S],
-        x: &mut [S],
-    ) -> Result<(), KError> {
+    fn smooth_level(level: &MgLevel, sweeps: usize, b: &[S], x: &mut [S]) -> Result<(), KError> {
         let smoother = match level.smoother.as_ref() {
             Some(sm) => sm,
             None => return Ok(()),
@@ -248,9 +239,7 @@ impl MgPc {
                     MgCoarseSolve::Direct(pc) => {
                         let op = CsrLinOp::new(level.operator.clone());
                         if let Err(err) = pc.direct_solve(&op, b, x) {
-                            log::warn!(
-                                "coarse direct_solve failed ({err}); falling back to apply"
-                            );
+                            log::warn!("coarse direct_solve failed ({err}); falling back to apply");
                             pc.apply(PcSide::Left, b, x)?;
                         }
                     }
@@ -360,9 +349,7 @@ impl Preconditioner for MgPc {
         let smoother_name = self.smoother.as_deref().unwrap_or("jacobi");
         let pc_type = PcType::from_str(smoother_name)?;
         if pc_type == PcType::None {
-            return Err(KError::InvalidInput(
-                "pc_mg_smoother cannot be none".into(),
-            ));
+            return Err(KError::InvalidInput("pc_mg_smoother cannot be none".into()));
         }
         let mut hierarchy = MgHierarchy::new(levels);
         for lvl in hierarchy.levels_mut().iter_mut().take(self.levels - 1) {
