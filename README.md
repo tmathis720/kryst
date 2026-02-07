@@ -394,13 +394,30 @@ Run your program with PETSc-style options:
 - `-pc_amg` - shorthand alias for `-pc_type amg`.
 - `-pc_amg_coarsen <rs|hmis|pmis|falgout>` - Coarsening strategy (maps to `AMGConfig::coarsen_type`).
 - `-pc_amg_interp <classical|direct|multipass|extended|standard>` - Interpolation/extended-smoothing variant.
+- `-pc_amg_interp_variant <...>` - Alias for `-pc_amg_interp`.
+- `-pc_amg_strength_type <classical|symmetric|normalized>` - Strength-of-connection variant.
 - `-pc_amg_smoother <jacobi|gs|gsr|sgs|hgs|l1jacobi|chebyshev>` - Smoother applied on each level.
+- `-pc_amg_smoother_{fine|down|up|coarse} <name>` - Per-phase smoother overrides.
 - `-pc_amg_smoother_steps <int>` and `-pc_amg_smoother_omega <float>` control smoothing sweeps/relaxation weight.
+- `-pc_amg_sweeps_{fine|down|up|coarse} <int>` - Per-phase sweep counts.
+- `-pc_amg_cycle_type <v|w>` / `-pc_amg_cycle_w_gamma <int>` select V/W cycles and W-cycle gamma.
+- `-pc_amg_coarse_solver <cg|direct|ilu|smoother>` - Coarse-level solver selection.
 - `-pc_amg_truncation_factor <float>` / `-pc_amg_interp_maxnnz <int>` trim interpolation fill.
 - `-pc_amg_rap_truncation_factor <float>` / `-pc_amg_rap_truncation_abs <float>` / `-pc_amg_rap_maxnnz <int>` prune RAP entries.
 - `-pc_amg_keep_transpose <bool>` / `-pc_amg_keep_pivot_in_rap <bool>` control symmetry-preserving entries.
 - `-pc_amg_require_spd <bool>` / `-pc_amg_print_setup <bool>` control SPD enforcement and setup printing.
 - `-pc_amg_dist_apply_mode <root_gather|local_prototype>` selects the distributed coarse strategy under MPI.
+
+##### AMG option matrix (PETSc-style)
+| CLI flag | Config field | Notes |
+| --- | --- | --- |
+| `-pc_amg_cycle_type <v|w>` | `AMGConfig::cycle_type` | `w` uses `-pc_amg_cycle_w_gamma` (default 2). |
+| `-pc_amg_cycle_w_gamma <int>` | `AMGConfig::cycle_type` | W-cycle gamma. |
+| `-pc_amg_coarse_solver <cg|direct|ilu|smoother>` | `AMGConfig::coarse_solve` | `direct` maps to dense LU. |
+| `-pc_amg_strength_type <classical|symmetric|normalized>` | `AMGConfig::normalize_strength` | `classical` disables normalization. |
+| `-pc_amg_smoother_{fine|down|up|coarse} <name>` | `AMGConfig::grid_relax_type` | Per-phase smoother override. |
+| `-pc_amg_sweeps_{fine|down|up|coarse} <int>` | `AMGConfig::num_grid_sweeps` | Per-phase sweep counts. |
+| `-pc_amg_interp_variant <...>` | `AMGConfig::interp_type` | Alias for `-pc_amg_interp`. |
 
 Example AMG invocation:
 ```bash
