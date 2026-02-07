@@ -2478,6 +2478,7 @@ mod tests {
                     "pc_amg_strength_type" => "symmetric",
                     "pc_amg_coarse_solver" => "cg",
                     "pc_asm_subdomains" => "0,1",
+                    "pc_fieldsplit_block_sizes" => "1,2",
 
                     // Fallback by kind (must satisfy ensure_ge_1 where applicable)
                     _ => match spec.kind {
