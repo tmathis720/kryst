@@ -1,6 +1,7 @@
 //! Structured diagnostics for KSP/PC configuration.
 
 use crate::config::options::PcOptions;
+use crate::context::ksp_context::KspContext;
 use crate::context::pc_context::PcType;
 use serde::Serialize;
 use serde_json::Value;
@@ -10,11 +11,18 @@ use std::collections::BTreeMap;
 pub struct PcDiagnostics {
     pub pc_type: Option<String>,
     pub config: BTreeMap<String, Value>,
+    /// Nested KSP diagnostics when `pc_type = Ksp`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_ksp: Option<KspDiagnostics>,
 }
 
 impl PcDiagnostics {
     pub fn from_options(pc_type: Option<PcType>, opts: Option<&PcOptions>) -> Self {
         let mut config = BTreeMap::new();
+        let nested_ksp = opts.and_then(|opts| match pc_type {
+            Some(PcType::Ksp) => build_nested_ksp_diagnostics(opts),
+            _ => None,
+        });
         if let Some(opts) = opts {
             insert_opt(&mut config, "ilu_level", opts.ilu_level);
             insert_opt(&mut config, "ilut_drop_tol", opts.ilut_drop_tol);
@@ -65,6 +73,7 @@ impl PcDiagnostics {
         Self {
             pc_type: pc_type.map(|pct| format!("{pct:?}")),
             config,
+            nested_ksp,
         }
     }
 
@@ -117,6 +126,40 @@ fn insert_opt<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, val: O
             map.insert(key.to_string(), value);
         }
     }
+}
+
+fn build_nested_ksp_diagnostics(opts: &PcOptions) -> Option<KspDiagnostics> {
+    let mut ksp_opts = opts.pc_ksp_ksp_options.clone().unwrap_or_default();
+    if ksp_opts.ksp_type.is_none() {
+        ksp_opts.ksp_type = opts
+            .pc_ksp_ksp_type
+            .clone()
+            .or_else(|| Some("richardson".to_string()));
+    }
+    if ksp_opts.maxits.is_none() {
+        ksp_opts.maxits = opts.pc_ksp_maxits;
+    }
+    if ksp_opts.rtol.is_none() {
+        ksp_opts.rtol = opts.pc_ksp_rtol;
+    }
+    ksp_opts.ksp_view = Some(false);
+
+    let mut pc_opts = opts
+        .pc_ksp_pc_options
+        .as_ref()
+        .map(|b| b.as_ref().clone())
+        .unwrap_or_default();
+    if pc_opts.pc_type.is_none() {
+        pc_opts.pc_type = opts
+            .pc_ksp_pc_type
+            .clone()
+            .or_else(|| Some("jacobi".to_string()));
+    }
+    pc_opts.pc_view = Some(false);
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).ok()?;
+    Some(ksp.view())
 }
 
 #[cfg(test)]
