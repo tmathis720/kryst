@@ -108,6 +108,10 @@ impl MpiComm {
     pub fn congruent(&self, other: &MpiComm) -> bool {
         use mpi::topology::CommunicatorRelation;
 
+        if self.world.as_raw() == other.world.as_raw() {
+            return true;
+        }
+
         matches!(
             self.world.compare(&other.world),
             CommunicatorRelation::Identical | CommunicatorRelation::Congruent
