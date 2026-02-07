@@ -358,7 +358,7 @@ Run your program with PETSc-style options:
 ## Supported Command-line Options
 
 ### KSP (Krylov Solver) Options
-- `-ksp_type <solver>` - Solver type: `cg`, `pcg`, `gmres`, `fgmres`, `gcr`, `bicgstab`, `cgs`, `cr`, `richardson`, `chebyshev`, `qmr`, `tfqmr`, `tcqmr`, `minres`, `cgnr`, `preonly`
+- `-ksp_type <solver>` - Solver type: `cg`, `pcg`, `gmres`, `fgmres`, `gcr`, `pipegcr` (unsupported), `bicgstab`, `cgs`, `cr`, `richardson`, `chebyshev`, `qmr`, `tfqmr`, `tcqmr`, `minres`, `cgnr`, `preonly`
 - `-ksp_rtol <float>` - Relative convergence tolerance (default: 1e-5)
 - `-ksp_atol <float>` - Absolute convergence tolerance (default: 1e-50)
 - `-ksp_dtol <float>` - Divergence tolerance (default: 1e5)
