@@ -64,7 +64,7 @@ features, options, and monitoring/convergence hooks.
 | `amg` | [`PcType::Amg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Amg) | Supported | Algebraic multigrid with `PcOptions::amg_*`. |
 | `approxinv` | [`PcType::ApproxInverse`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.ApproxInverse) | Supported | CSR approximate inverse (FSAI/SPAI). |
 | `fieldsplit` | [`PcType::FieldSplit`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.FieldSplit) | Partial | Block-diagonal split only; Tracking: [FieldSplit advanced](#tracking-fieldsplit-advanced). |
-| `shell` | [`PcType::Shell`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Shell) + [`register_shell_callback`](https://docs.rs/kryst/latest/kryst/preconditioner/shell/fn.register_shell_callback.html) | Partial | Supports named callback only; Tracking: [Shell PC parity](#tracking-shell-pc). |
+| `shell` | [`PcType::Shell`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Shell) + [`register_shell_callback`](https://docs.rs/kryst/latest/kryst/preconditioner/shell/fn.register_shell_callback.html) | Partial | Supports apply/setup/destroy hooks with context bindings; Tracking: [Shell PC parity](#tracking-shell-pc). |
 | `ksp` | [`PcType::Ksp`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Ksp) | Partial | Uses simple inner-PC loop; Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc). |
 | `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Injection hierarchy with Galerkin coarse operators and V/W/F cycles; Tracking: [Multigrid parity](#tracking-mg-parity). |
 | `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Unsupported | Tracking: [BDDC support](#tracking-bddc). |
@@ -112,6 +112,9 @@ features, options, and monitoring/convergence hooks.
 | `-pc_mg_smoother` | [`PcOptions::pc_mg_smoother`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother) | Partial | Smoother applied per-level; direct smoothers (`lu`/`qr`) become the coarse solve. |
 | `-pc_mg_smoother_steps` | [`PcOptions::pc_mg_smoother_steps`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother_steps) | Partial | Number of pre/post smoothing sweeps per level. |
 | `-pc_shell_name` | [`PcOptions::pc_shell_name`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_name) | Partial | Names callback for `PcType::Shell`. |
+| `-pc_shell_setup` | [`PcOptions::pc_shell_setup`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_setup) | Partial | Names shell setup hook. |
+| `-pc_shell_destroy` | [`PcOptions::pc_shell_destroy`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_destroy) | Partial | Names shell destroy hook. |
+| `-pc_shell_context` | [`PcOptions::pc_shell_context`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_shell_context) | Partial | Names shell context binding. |
 | `-pc_bddc_coarse_ksp_type` | [`PcOptions::pc_bddc_coarse_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_ksp_type) | Unsupported | Placeholder. |
 | `-pc_bddc_coarse_pc_type` | [`PcOptions::pc_bddc_coarse_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_coarse_pc_type) | Unsupported | Placeholder. |
 | `-pc_bddc_use_vertices` | [`PcOptions::pc_bddc_use_vertices`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_bddc_use_vertices) | Unsupported | Placeholder. |
@@ -141,7 +144,7 @@ features, options, and monitoring/convergence hooks.
 | `KSP_DIVERGED_ITS` | [`ConvergedReason::DivergedMaxIts`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedMaxIts) | Supported | Max iterations. |
 | `KSP_DIVERGED_BREAKDOWN` | — | Unsupported | Tracking: [Breakdown reason parity](#tracking-breakdown-reason). |
 | `KSP_DIVERGED_BREAKDOWN_BICG` | — | Unsupported | Tracking: [Breakdown reason parity](#tracking-breakdown-reason). |
-| `KSP_DIVERGED_PC_FAILED` | — | Unsupported | Tracking: [PC failure reasons](#tracking-pc-failure-reason). |
+| `KSP_DIVERGED_PC_FAILED` | [`ConvergedReason::DivergedPcFailed`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedPcFailed) | Partial | Shell PC hook failures map here. |
 | `KSP_DIVERGED_NANORINF` | — | Unsupported | Tracking: [NaN/Inf reasons](#tracking-nan-inf-reason). |
 | `KSP_CONVERGED_ITERATING` | [`ConvergedReason::Continued`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.Continued) | Supported | Still iterating. |
 | `KSP_DIVERGED_MONITOR` | [`ConvergedReason::StoppedByMonitor`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.StoppedByMonitor) | Supported | Monitor requested stop. |
@@ -153,8 +156,8 @@ High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 1. **FieldSplit advanced modes** (Schur, multiplicative, symmetric, and custom split options). Tracking: [FieldSplit advanced](#tracking-fieldsplit-advanced).
 2. **Multigrid hierarchy management** (custom P/R operators, advanced coarsening, richer coarse solves). Tracking: [Multigrid parity](#tracking-mg-parity).
 3. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
-4. **Shell PC parity** (setup hooks, stateful callbacks, richer PETSc `PCSHELL` options). Tracking: [Shell PC parity](#tracking-shell-pc).
-5. **Explicit breakdown/divergence reasons** (NaN/Inf, PC failure, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
+4. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
+5. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
 6. **PipeGCR solver** (`-ksp_type pipegcr`). Tracking: [PipeGCR support](#tracking-pipegcr).
 7. **BDDC preconditioner** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
 8. **GAMG preconditioner** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
@@ -175,7 +178,7 @@ Scope: full nested KSP configuration (inner tolerances, monitors, solver selecti
 
 <a id="tracking-shell-pc"></a>
 ### Tracking issue: Shell PC parity
-Scope: richer `PCSHELL` hooks (setup/destroy), mutable context, and error propagation matching PETSc.
+Scope: remaining `PCSHELL` hooks (transpose/symmetric apply), helper APIs for typed context binding, and broader option parity beyond setup/destroy/context.
 
 <a id="tracking-pipegcr"></a>
 ### Tracking issue: PipeGCR support
@@ -195,7 +198,7 @@ Scope: explicit divergence reasons (breakdown, NaN/Inf, PC failure) matching PET
 
 <a id="tracking-pc-failure-reason"></a>
 ### Tracking issue: PC failure reasons
-Scope: propagate PC setup/apply failures into convergence reasons.
+Scope: extend PC failure propagation beyond shell hooks (e.g., factorization/solver failures).
 
 <a id="tracking-nan-inf-reason"></a>
 ### Tracking issue: NaN/Inf reasons

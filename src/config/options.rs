@@ -259,6 +259,9 @@ pub struct PcOptions {
     pub pc_fieldsplit_schur_precondition: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
+    pub pc_shell_setup: Option<String>,
+    pub pc_shell_destroy: Option<String>,
+    pub pc_shell_context: Option<String>,
     // KSP-as-PC
     pub pc_ksp_ksp_type: Option<String>,
     pub pc_ksp_pc_type: Option<String>,
@@ -1072,6 +1075,9 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.pc_fieldsplit_schur_precondition, v.to_lowercase())
             }
             "pc_shell_name" => set_opt!(&mut self.pc_shell_name, v.to_string()),
+            "pc_shell_setup" => set_opt!(&mut self.pc_shell_setup, v.to_string()),
+            "pc_shell_destroy" => set_opt!(&mut self.pc_shell_destroy, v.to_string()),
+            "pc_shell_context" => set_opt!(&mut self.pc_shell_context, v.to_string()),
             "pc_ksp_type" => set_opt!(&mut self.pc_ksp_ksp_type, v.to_lowercase()),
             "pc_ksp_pc_type" => set_opt!(&mut self.pc_ksp_pc_type, v.to_lowercase()),
             "pc_ksp_maxits" => set_opt!(&mut self.pc_ksp_maxits, parse_as::<usize>(v, spec)?),
@@ -2058,6 +2064,9 @@ impl PcOptions {
         o!(pc_fieldsplit_schur_fact_type);
         o!(pc_fieldsplit_schur_precondition);
         o!(pc_shell_name);
+        o!(pc_shell_setup);
+        o!(pc_shell_destroy);
+        o!(pc_shell_context);
         o!(pc_ksp_ksp_type);
         o!(pc_ksp_pc_type);
         o!(pc_ksp_maxits);

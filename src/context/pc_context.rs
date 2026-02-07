@@ -273,6 +273,9 @@ pub enum PcConfig {
     },
     Shell {
         name: Option<String>,
+        setup: Option<String>,
+        destroy: Option<String>,
+        context: Option<String>,
     },
     Ksp {
         inner_ksp_type: Option<String>,
@@ -495,6 +498,9 @@ impl PcConfig {
             }
             Shell => PcConfig::Shell {
                 name: o.pc_shell_name.clone(),
+                setup: o.pc_shell_setup.clone(),
+                destroy: o.pc_shell_destroy.clone(),
+                context: o.pc_shell_context.clone(),
             },
             Ksp => PcConfig::Ksp {
                 inner_ksp_type: o.pc_ksp_ksp_type.clone(),
