@@ -41,6 +41,7 @@ fn gmres_pipelined_tracks_classical_convergence() -> Result<(), KError> {
     Ok(())
 }
 
+#[cfg(not(feature = "complex"))]
 #[test]
 fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
     let a = util::spd_poisson2d(6);
@@ -61,4 +62,29 @@ fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
 
     assert!(res_sstep <= R::from(1e-8) * bnorm + R::from(1e-10));
     Ok(())
+}
+
+#[cfg(feature = "complex")]
+#[test]
+fn gmres_sstep_is_unavailable_for_complex() -> Result<(), KError> {
+    let a = util::spd_poisson2d(6);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 4);
+    let restart = 12;
+
+    let err = solve_with_variant(
+        &a,
+        &b,
+        GmresVariant::SStep {
+            s: 3,
+            reorth: crate::context::ksp_context::ReorthPolicy::IfNeeded,
+            max_cond: 1e8,
+        },
+        restart,
+    )
+    .expect_err("expected complex s-step GMRES to be unavailable");
+
+    match err {
+        KError::NotImplemented(_) => Ok(()),
+        other => Err(other),
+    }
 }
