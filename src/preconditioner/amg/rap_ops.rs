@@ -13,7 +13,11 @@ pub struct CsrPattern {
 }
 
 /// Symbolic RAP = R * A * P returns the pattern of the coarse operator.
-pub fn rap_symbolic(r: &CsrMatrix<f64>, a: &CsrMatrix<f64>, p: &CsrMatrix<f64>) -> CsrPattern {
+pub fn rap_symbolic<T: KrystScalar>(
+    r: &CsrMatrix<T>,
+    a: &CsrMatrix<T>,
+    p: &CsrMatrix<T>,
+) -> CsrPattern {
     let nc = r.nrows();
     let rp_r = r.row_ptr();
     let cj_r = r.col_idx();
@@ -62,15 +66,15 @@ pub fn rap_symbolic(r: &CsrMatrix<f64>, a: &CsrMatrix<f64>, p: &CsrMatrix<f64>) 
 }
 
 /// Numeric RAP using fixed pattern, writing values into out_vals (nnz = pat.col_idx.len()).
-pub fn rap_numeric(
+pub fn rap_numeric<T: KrystScalar>(
     pat: &CsrPattern,
-    r: &CsrMatrix<f64>,
-    a: &CsrMatrix<f64>,
-    p: &CsrMatrix<f64>,
-    out_vals: &mut [f64],
+    r: &CsrMatrix<T>,
+    a: &CsrMatrix<T>,
+    p: &CsrMatrix<T>,
+    out_vals: &mut [T],
 ) {
     assert_eq!(out_vals.len(), pat.col_idx.len());
-    out_vals.fill(0.0);
+    out_vals.fill(T::zero());
 
     let rp_r = r.row_ptr();
     let cj_r = r.col_idx();
@@ -96,7 +100,7 @@ pub fn rap_numeric(
         // For simplicity and small rows, use Vec lookup
         let len = row_end - row_start;
         let cols: Vec<usize> = pc[row_start..row_end].to_vec();
-        let mut vals: Vec<f64> = vec![0.0; len];
+        let mut vals: Vec<T> = vec![T::zero(); len];
 
         let rs_r = rp_r[i];
         let re_r = rp_r[i + 1];

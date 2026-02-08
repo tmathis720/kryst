@@ -29,6 +29,8 @@ use crate::matrix::{
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
+#[cfg(all(feature = "complex", feature = "backend-faer"))]
+use crate::matrix::op::{CsrOp, DenseOp, GenericCsrOp};
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
@@ -2615,6 +2617,77 @@ fn csr_pattern_hash(a: &CsrMatrix<f64>) -> u64 {
     a.row_ptr().hash(&mut hasher);
     a.col_idx().hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(feature = "complex")]
+fn csr_from_dense_complex(mat: &Mat<S>, drop_tol: R) -> CsrMatrix<S> {
+    let m = mat.nrows();
+    let n = mat.ncols();
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for i in 0..m {
+        for j in 0..n {
+            let v = mat[(i, j)];
+            if v.abs() > drop_tol {
+                col_idx.push(j);
+                vals.push(v);
+            }
+        }
+        row_ptr.push(col_idx.len());
+    }
+    CsrMatrix::from_csr(m, n, row_ptr, col_idx, vals)
+}
+
+#[cfg(feature = "complex")]
+fn csr_from_linop_complex(
+    op: &dyn LinOp<S = S>,
+    drop_tol: R,
+) -> Result<Arc<CsrMatrix<S>>, KError> {
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
+        return Ok(Arc::new(csr.clone()));
+    }
+    #[cfg(feature = "backend-faer")]
+    if let Some(csr_op) = op.as_any().downcast_ref::<CsrOp<S>>() {
+        return Ok(Arc::new(csr_op.inner().clone()));
+    }
+    #[cfg(feature = "backend-faer")]
+    if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<S>>() {
+        let mat = generic.matrix();
+        return Ok(Arc::new(CsrMatrix::from_csr(
+            mat.nrows,
+            mat.ncols,
+            mat.rowptr.clone(),
+            mat.colind.clone(),
+            mat.values.clone(),
+        )));
+    }
+    if let Some(mat) = op.as_any().downcast_ref::<Mat<S>>() {
+        return Ok(Arc::new(csr_from_dense_complex(mat, drop_tol)));
+    }
+    #[cfg(feature = "backend-faer")]
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp<S>>() {
+        return Ok(Arc::new(csr_from_dense_complex(
+            dense_op.inner(),
+            drop_tol,
+        )));
+    }
+    Err(KError::InvalidInput(
+        "AMG: unsupported complex LinOp; provide CSR/Dense or GenericCsrOp".into(),
+    ))
+}
+
+#[cfg(feature = "complex")]
+fn csr_real_from_complex(csr: &CsrMatrix<S>) -> CsrMatrix<f64> {
+    let values = csr.values().iter().map(|v| v.real()).collect();
+    CsrMatrix::from_csr(
+        csr.nrows(),
+        csr.ncols(),
+        csr.row_ptr().to_vec(),
+        csr.col_idx().to_vec(),
+        values,
+    )
 }
 
 #[cfg(not(feature = "complex"))]
@@ -6239,45 +6312,10 @@ impl Preconditioner for AMG {
             }
         }
         self.dist = None;
-        let csr = csr_from_linop(op, self.cfg.drop_tol)?;
-        let csr = if self.cfg.conditioning.is_active() {
-            let mut local = (*csr).clone();
-            apply_csr_transforms("AMG", &mut local, &self.cfg.conditioning)?;
-            Arc::new(local)
-        } else {
-            csr
-        };
-        let csr_ref = csr.as_ref();
-        #[cfg(debug_assertions)]
-        debug_check_csr(csr_ref, "setup csr");
         let sid = op.structure_id();
         let vid = op.values_id();
-        let pattern_hash = csr_pattern_hash(csr_ref);
-
-        self.ensure_symbolic_structure(csr_ref, sid, pattern_hash)?;
-
-        let need_numeric = match &self.state {
-            AmgState::Ready { last_values_id, .. } => *last_values_id != vid,
-            AmgState::SymbolicOnly { .. } => true,
-            AmgState::Uninitialized => true,
-        };
-
-        if need_numeric {
-            self.refresh_numeric_ready(csr_ref, sid, vid, pattern_hash)?;
-        }
-
-        self.csr = Some(csr.clone());
-        if self.cfg.logging_level >= 2
-            && self.cfg.print_level >= 1
-            && let Some(s) = self.stats.as_ref()
-        {
-            print_setup_tables(s);
-        }
-        #[cfg(debug_assertions)]
-        if self.cfg.require_spd {
-            self.spd_probe()?;
-        }
-        Ok(())
+        let csr = csr_from_linop(op, self.cfg.drop_tol)?;
+        self.setup_from_csr_real(csr, sid, vid)
     }
 
     fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
@@ -6369,18 +6407,127 @@ impl Preconditioner for AMG {
     }
 }
 
+impl AMG {
+    fn setup_from_csr_real(
+        &mut self,
+        csr: Arc<CsrMatrix<f64>>,
+        sid: StructureId,
+        vid: ValuesId,
+    ) -> Result<(), KError> {
+        let csr = if self.cfg.conditioning.is_active() {
+            let mut local = (*csr).clone();
+            apply_csr_transforms("AMG", &mut local, &self.cfg.conditioning)?;
+            Arc::new(local)
+        } else {
+            csr
+        };
+        let csr_ref = csr.as_ref();
+        #[cfg(debug_assertions)]
+        debug_check_csr(csr_ref, "setup csr");
+        let pattern_hash = csr_pattern_hash(csr_ref);
+
+        self.ensure_symbolic_structure(csr_ref, sid, pattern_hash)?;
+
+        let need_numeric = match &self.state {
+            AmgState::Ready { last_values_id, .. } => *last_values_id != vid,
+            AmgState::SymbolicOnly { .. } => true,
+            AmgState::Uninitialized => true,
+        };
+
+        if need_numeric {
+            self.refresh_numeric_ready(csr_ref, sid, vid, pattern_hash)?;
+        }
+
+        self.csr = Some(csr.clone());
+        if self.cfg.logging_level >= 2
+            && self.cfg.print_level >= 1
+            && let Some(s) = self.stats.as_ref()
+        {
+            print_setup_tables(s);
+        }
+        #[cfg(debug_assertions)]
+        if self.cfg.require_spd {
+            self.spd_probe()?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(feature = "complex")]
 impl Preconditioner for AMG {
-    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "AMG does not support complex scalars yet".into(),
-        ))
+    fn dims(&self) -> (usize, usize) {
+        if let Some(dist) = &self.dist {
+            let n = dist.local_nrows();
+            return (n, n);
+        }
+        if let AmgState::Ready { hierarchy, .. } = &self.state {
+            let n = hierarchy.finest().a.nrows();
+            (n, n)
+        } else if let Some(csr) = self.csr.as_ref() {
+            (csr.nrows(), csr.ncols())
+        } else {
+            (0, 0)
+        }
     }
 
-    fn apply(&self, _side: PcSide, _r: &[S], _z: &mut [S]) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "AMG does not support complex scalars yet".into(),
-        ))
+    fn required_format(&self) -> crate::matrix::format::OpFormat {
+        crate::matrix::format::OpFormat::Csr
+    }
+
+    fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
+            self.cfg.coarse_solve = if self.cfg.require_spd {
+                CoarseSolve::CG
+            } else {
+                self.cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] = 0;
+                CoarseSolve::DirectDense
+            };
+        }
+        self.cfg.validate()?;
+        self.dist = None;
+        let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
+        let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
+        let sid = op.structure_id();
+        let vid = op.values_id();
+        self.setup_from_csr_real(csr_real, sid, vid)
+    }
+
+    fn apply(&self, side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
+        if r.len() != z.len() {
+            return Err(KError::InvalidInput(format!(
+                "AMG.apply: r/z size mismatch: {} vs {}",
+                r.len(),
+                z.len()
+            )));
+        }
+        let n = r.len();
+        let mut r_re = vec![0.0f64; n];
+        let mut r_im = vec![0.0f64; n];
+        for (i, &ri) in r.iter().enumerate() {
+            r_re[i] = ri.real();
+            r_im[i] = ri.imag();
+        }
+        let mut z_re = vec![0.0f64; n];
+        let mut z_im = vec![0.0f64; n];
+        self.apply_local(side, &r_re, &mut z_re)?;
+        self.apply_local(side, &r_im, &mut z_im)?;
+        for i in 0..n {
+            z[i] = S::from_parts(z_re[i], z_im[i]);
+        }
+        Ok(())
+    }
+
+    fn capabilities(&self) -> PcCaps {
+        let mut caps = PcCaps::default();
+        if self.cfg.require_spd {
+            caps.is_spd = true;
+            caps.side_restriction = Some(PcSide::Left);
+        }
+        caps
+    }
+
+    fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
+        crate::preconditioner::PcDistributedSupport::LocalOnly
     }
 }
 
