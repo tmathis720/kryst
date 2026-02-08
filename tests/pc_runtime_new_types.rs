@@ -2,11 +2,12 @@
 
 use kryst::algebra::prelude::S;
 use kryst::algebra::scalar::KrystScalar;
-use kryst::config::options::PcOptions;
+use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::pc_context::PcFactory;
 use kryst::matrix::op::DenseOp;
 use kryst::preconditioner::{PcSide, shell::register_shell_callback};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn eye_op(n: usize) -> Arc<DenseOp<S>> {
     let mat = faer::Mat::<S>::from_fn(
@@ -15,6 +16,27 @@ fn eye_op(n: usize) -> Arc<DenseOp<S>> {
         |i, j| if i == j { S::from_real(1.0) } else { S::zero() },
     );
     Arc::new(DenseOp::new(Arc::new(mat)))
+}
+
+fn diag_op(diag: &[S]) -> Arc<DenseOp<S>> {
+    let n = diag.len();
+    let mat = faer::Mat::<S>::from_fn(n, n, |i, j| if i == j { diag[i] } else { S::zero() });
+    Arc::new(DenseOp::new(Arc::new(mat)))
+}
+
+fn rel_error(x: &[S], x_true: &[S]) -> f64 {
+    let mut num = 0.0;
+    let mut denom = 0.0;
+    for (xi, ti) in x.iter().zip(x_true.iter()) {
+        let diff = *xi - *ti;
+        num += diff.abs2();
+        denom += ti.abs2();
+    }
+    if denom == 0.0 {
+        0.0
+    } else {
+        (num / denom).sqrt()
+    }
 }
 
 #[test]
@@ -104,4 +126,119 @@ fn smoke_fieldsplit_shell_ksp_mg_and_bddc_placeholder() {
         Err(e) => e,
     };
     assert!(err.to_string().to_lowercase().contains("bddc"));
+}
+
+#[test]
+fn ksp_pc_nested_converges() {
+    let diag = vec![
+        S::from_real(2.0),
+        S::from_real(3.0),
+        S::from_real(4.0),
+    ];
+    let op = diag_op(&diag);
+    let b = diag.clone();
+    let x_true = vec![S::from_real(1.0); diag.len()];
+
+    let mut ksp_pc = PcFactory::create_from_options(&PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("cg".into()),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        pc_ksp_maxits: Some(25),
+        pc_ksp_rtol: Some(1e-12),
+        ..Default::default()
+    })
+    .expect("ksp pc create");
+    ksp_pc.setup(op.as_ref()).expect("ksp setup");
+    let mut y = vec![S::zero(); diag.len()];
+    ksp_pc.apply(PcSide::Left, &b, &mut y).expect("ksp apply");
+
+    assert!(rel_error(&y, &x_true) < 1e-8);
+}
+
+#[test]
+fn ksp_pc_scoped_options_override() {
+    let diag = vec![
+        S::from_real(2.0),
+        S::from_real(3.0),
+        S::from_real(4.0),
+    ];
+    let op = diag_op(&diag);
+    let b = diag.clone();
+    let x_true = vec![S::from_real(1.0); diag.len()];
+
+    let mut base_pc = PcFactory::create_from_options(&PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("cg".into()),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        pc_ksp_maxits: Some(1),
+        pc_ksp_rtol: Some(1e-12),
+        ..Default::default()
+    })
+    .expect("base ksp pc create");
+    base_pc.setup(op.as_ref()).expect("base ksp setup");
+    let mut y_base = vec![S::zero(); diag.len()];
+    base_pc
+        .apply(PcSide::Left, &b, &mut y_base)
+        .expect("base ksp apply");
+    let base_err = rel_error(&y_base, &x_true);
+
+    let mut override_pc = PcFactory::create_from_options(&PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("cg".into()),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        pc_ksp_maxits: Some(1),
+        pc_ksp_rtol: Some(1e-12),
+        pc_ksp_ksp_options: Some(KspOptions {
+            maxits: Some(10),
+            rtol: Some(1e-12),
+            ksp_monitor_rank0: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .expect("override ksp pc create");
+    override_pc.setup(op.as_ref()).expect("override ksp setup");
+    let mut y_override = vec![S::zero(); diag.len()];
+    override_pc
+        .apply(PcSide::Left, &b, &mut y_override)
+        .expect("override ksp apply");
+    let override_err = rel_error(&y_override, &x_true);
+
+    assert!(override_err < base_err);
+}
+
+#[test]
+fn ksp_pc_uses_inner_pc_options() {
+    let diag = vec![S::from_real(2.0), S::from_real(3.0)];
+    let op = diag_op(&diag);
+    let b = diag.clone();
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    register_shell_callback(
+        "ksp_pc_inner_shell",
+        Arc::new(|_side: PcSide, x: &[S], y: &mut [S]| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            y.copy_from_slice(x);
+            Ok(())
+        }),
+    );
+
+    let mut ksp_pc = PcFactory::create_from_options(&PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("richardson".into()),
+        pc_ksp_maxits: Some(1),
+        pc_ksp_rtol: Some(1e-8),
+        pc_ksp_pc_options: Some(Box::new(PcOptions {
+            pc_type: Some("shell".into()),
+            pc_shell_name: Some("ksp_pc_inner_shell".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
+    .expect("ksp pc create");
+    ksp_pc.setup(op.as_ref()).expect("ksp setup");
+    let mut y = vec![S::zero(); diag.len()];
+    ksp_pc.apply(PcSide::Left, &b, &mut y).expect("ksp apply");
+
+    assert!(CALLS.load(Ordering::SeqCst) > 0);
 }

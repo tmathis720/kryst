@@ -52,50 +52,32 @@ impl Preconditioner for KspAsPc {
         if let Some(ref ksp) = self.inner_ksp_type {
             crate::context::ksp_context::SolverType::from_str(ksp)?;
         }
-        let mut guard = self.nested_ksp.lock().expect("ksp-pc nested lock");
-        if guard.is_none() {
-            *guard = Some(KspContext::new());
-        }
-        if let Some(ksp) = guard.as_mut() {
-            if self.configure_nested_ksp(ksp, a)? {
-                return Ok(());
-            }
+        self.teardown_nested_ksp();
+        let mut ksp = KspContext::new();
+        if self.configure_nested_ksp(&mut ksp, a)? {
+            let mut guard = self.nested_ksp.lock().expect("ksp-pc nested lock");
+            *guard = Some(ksp);
+            return Ok(());
         }
         self.inner.setup(a)?;
-        *guard = None;
         Ok(())
     }
 
     fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        if let Some(ksp) = self.nested_ksp.lock().expect("ksp-pc nested lock").as_mut() {
-            if x.len() != y.len() {
-                return Err(KError::InvalidInput(
-                    "ksp-pc input/output length mismatch".into(),
-                ));
-            }
-            y.fill(S::zero());
-            let _ = ksp.solve(x, y)?;
-            return Ok(());
-        }
         if x.len() != y.len() {
             return Err(KError::InvalidInput(
                 "ksp-pc input/output length mismatch".into(),
             ));
         }
-        self.inner.apply(side, x, y)
-    }
-
-    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if let Some(ksp) = self.nested_ksp.lock().expect("ksp-pc nested lock").as_mut() {
-            if x.len() != y.len() {
-                return Err(KError::InvalidInput(
-                    "ksp-pc input/output length mismatch".into(),
-                ));
-            }
             y.fill(S::zero());
             let _ = ksp.solve(x, y)?;
             return Ok(());
         }
+        self.inner.apply(side, x, y)
+    }
+
+    fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
     }
 }
@@ -103,6 +85,11 @@ impl Preconditioner for KspAsPc {
 use std::str::FromStr;
 
 impl KspAsPc {
+    fn teardown_nested_ksp(&self) {
+        let mut guard = self.nested_ksp.lock().expect("ksp-pc nested lock");
+        *guard = None;
+    }
+
     fn effective_ksp_options(&self) -> KspOptions {
         let mut ksp_opts = self.ksp_options.clone().unwrap_or_default();
         if ksp_opts.ksp_type.is_none() {
@@ -148,7 +135,7 @@ impl KspAsPc {
         let ksp_opts = self.effective_ksp_options();
         let pc_opts = self.effective_pc_options();
         ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
-        ksp.set_operators(amat, None);
+        ksp.try_set_operators_with_comm(amat, None, a.comm())?;
         ksp.setup()?;
         Ok(true)
     }
