@@ -102,9 +102,9 @@ features, options, and monitoring/convergence hooks.
 | `-pc_chain` | [`PcOptions::pc_chain`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_chain) | Supported | Composite chain (`jacobi->ilu->amg`). |
 | `-pc_composite_type` | [`PcOptions::pc_composite_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_composite_type) | Supported | `multiplicative` or `additive`. |
 | `-pc_composite_prefixes` | [`PcOptions::pc_composite_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_composite_prefixes) | Supported | Per-stage options scoping. |
-| `-pc_fieldsplit_block_sizes` | [`PcOptions::pc_fieldsplit_block_sizes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_block_sizes) | Partial | Block-diagonal split only. |
-| `-pc_fieldsplit_type` | [`PcOptions::pc_fieldsplit_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_type) | Unsupported | Placeholder; stored but not applied. |
-| `-pc_fieldsplit_prefixes` | [`PcOptions::pc_fieldsplit_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_prefixes) | Partial | FieldSplit scope only. |
+| `-pc_fieldsplit_block_sizes` | [`PcOptions::pc_fieldsplit_block_sizes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_block_sizes) | Supported | Splits local or distributed operators into per-field blocks. |
+| `-pc_fieldsplit_type` | [`PcOptions::pc_fieldsplit_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_type) | Supported | Supports `additive`, `multiplicative`, `symmetric`, and `schur`. |
+| `-pc_fieldsplit_prefixes` | [`PcOptions::pc_fieldsplit_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_prefixes) | Supported | Per-field scoping for nested sub-KSP/PC options. |
 | `-pc_ksp_type` | [`PcOptions::pc_ksp_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_ksp_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_ksp_pc_type` | [`PcOptions::pc_ksp_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_pc_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_mg_levels` | [`PcOptions::pc_mg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_levels) | Partial | Controls number of MG levels (injection coarsening). |
@@ -153,19 +153,14 @@ features, options, and monitoring/convergence hooks.
 
 High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 
-1. **FieldSplit advanced modes** (Schur, multiplicative, symmetric, and custom split options). Tracking: [FieldSplit advanced](#tracking-fieldsplit-advanced).
-2. **Multigrid hierarchy management** (custom P/R operators, advanced coarsening, richer coarse solves). Tracking: [Multigrid parity](#tracking-mg-parity).
-3. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
-4. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
-5. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
-6. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
-7. **GAMG advanced options** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
+1. **Multigrid hierarchy management** (custom P/R operators, advanced coarsening, richer coarse solves). Tracking: [Multigrid parity](#tracking-mg-parity).
+2. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
+3. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
+4. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
+5. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
+6. **GAMG advanced options** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
 
 ## Tracking issues
-
-<a id="tracking-fieldsplit-advanced"></a>
-### Tracking issue: FieldSplit advanced
-Scope: Schur complement splits, additive/multiplicative modes, per-field matrices, and PETSc-style split types.
 
 <a id="tracking-mg-parity"></a>
 ### Tracking issue: Multigrid parity

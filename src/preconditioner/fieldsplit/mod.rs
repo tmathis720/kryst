@@ -4,9 +4,12 @@ use crate::context::pc_context::{PcFactory, PcType};
 use crate::core::traits::SubmatrixExtract;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
+use crate::matrix::op::DistLayout;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::utils::spgemm_with_drop_tol_generic;
 use crate::preconditioner::{PcSide, Preconditioner};
+use std::cmp::{max, min};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -18,6 +21,7 @@ pub struct FieldSplitPc {
     full_matrix: Option<Arc<CsrMatrix<S>>>,
     block_matrices: Vec<Arc<CsrMatrix<S>>>,
     schur_blocks: Option<SchurBlocks>,
+    schur_precondition_matrix: Option<Arc<CsrMatrix<S>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +58,7 @@ enum SchurFactorization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchurPrecondition {
     Self_,
+    Diag,
     A11,
 }
 
@@ -102,6 +107,7 @@ impl FieldSplitPc {
             full_matrix: None,
             block_matrices: Vec::new(),
             schur_blocks: None,
+            schur_precondition_matrix: None,
         })
     }
 
@@ -140,7 +146,8 @@ impl FieldSplitPc {
                     .to_lowercase()
                     .as_str()
                 {
-                    "self" | "diag" => SchurPrecondition::Self_,
+                    "self" => SchurPrecondition::Self_,
+                    "diag" => SchurPrecondition::Diag,
                     "a11" => SchurPrecondition::A11,
                     other => {
                         return Err(KError::InvalidInput(format!(
@@ -173,6 +180,46 @@ impl FieldSplitPc {
         spans
     }
 
+    fn block_spans_from_sizes_with_layout(
+        block_sizes: &[usize],
+        local_n: usize,
+        layout: Option<&DistLayout>,
+    ) -> Result<Vec<BlockSpan>, KError> {
+        let total: usize = block_sizes.iter().sum();
+        if total == local_n {
+            return Ok(Self::block_spans_from_sizes(block_sizes));
+        }
+        if let Some(layout) = layout {
+            if total == layout.global_rows {
+                let mut spans = Vec::with_capacity(block_sizes.len());
+                let mut off = 0usize;
+                for size in block_sizes {
+                    let start = off;
+                    let end = off + *size;
+                    off = end;
+                    let local_start = max(start, layout.row_start);
+                    let local_end = min(end, layout.row_end);
+                    if local_start >= local_end {
+                        spans.push(BlockSpan { start: 0, end: 0 });
+                    } else {
+                        spans.push(BlockSpan {
+                            start: local_start - layout.row_start,
+                            end: local_end - layout.row_start,
+                        });
+                    }
+                }
+                return Ok(spans);
+            }
+            return Err(KError::InvalidInput(format!(
+                "pc_fieldsplit_block_sizes must sum to local ({local_n}) or global ({}) rows",
+                layout.global_rows
+            )));
+        }
+        Err(KError::InvalidInput(format!(
+            "pc_fieldsplit_block_sizes must sum to matrix size ({local_n})"
+        )))
+    }
+
     fn extract_block_matrices(
         &self,
         csr: &CsrMatrix<S>,
@@ -198,6 +245,106 @@ impl FieldSplitPc {
         Some(SchurBlocks { a12, a21 })
     }
 
+    fn schur_diag_approx(
+        &self,
+        a11: &CsrMatrix<S>,
+        a22: &CsrMatrix<S>,
+        schur: &SchurBlocks,
+    ) -> Result<CsrMatrix<S>, KError> {
+        let n1 = a11.nrows();
+        let mut diag_inv = vec![S::zero(); n1];
+        for i in 0..n1 {
+            let rs = a11.row_ptr()[i];
+            let re = a11.row_ptr()[i + 1];
+            let mut aii = S::zero();
+            for p in rs..re {
+                if a11.col_idx()[p] == i {
+                    aii = a11.values()[p];
+                    break;
+                }
+            }
+            diag_inv[i] = if aii.abs() > 1e-14 { aii.inv() } else { S::zero() };
+        }
+        let a12 = schur.a12.as_ref();
+        let mut scaled_vals = Vec::with_capacity(a12.values().len());
+        for row in 0..a12.nrows() {
+            let rs = a12.row_ptr()[row];
+            let re = a12.row_ptr()[row + 1];
+            for p in rs..re {
+                scaled_vals.push(a12.values()[p] * diag_inv[row]);
+            }
+        }
+        let scaled_a12 = CsrMatrix::from_csr(
+            a12.nrows(),
+            a12.ncols(),
+            a12.row_ptr().to_vec(),
+            a12.col_idx().to_vec(),
+            scaled_vals,
+        );
+        let product = spgemm_with_drop_tol_generic(schur.a21.as_ref(), &scaled_a12, 1e-12)?;
+        Self::csr_subtract(a22, &product, 1e-12)
+    }
+
+    fn csr_subtract(
+        a: &CsrMatrix<S>,
+        b: &CsrMatrix<S>,
+        drop_tol: <S as KrystScalar>::Real,
+    ) -> Result<CsrMatrix<S>, KError> {
+        if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
+            return Err(KError::InvalidInput(format!(
+                "csr_subtract dimension mismatch: A={}x{}, B={}x{}",
+                a.nrows(),
+                a.ncols(),
+                b.nrows(),
+                b.ncols()
+            )));
+        }
+        let nrows = a.nrows();
+        let mut row_ptr = Vec::with_capacity(nrows + 1);
+        row_ptr.push(0);
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+        for row in 0..nrows {
+            let mut ia = a.row_ptr()[row];
+            let mut ib = b.row_ptr()[row];
+            let a_end = a.row_ptr()[row + 1];
+            let b_end = b.row_ptr()[row + 1];
+            while ia < a_end || ib < b_end {
+                let (col, val) = if ib >= b_end
+                    || (ia < a_end && a.col_idx()[ia] < b.col_idx()[ib])
+                {
+                    let col = a.col_idx()[ia];
+                    let val = a.values()[ia];
+                    ia += 1;
+                    (col, val)
+                } else if ia >= a_end || b.col_idx()[ib] < a.col_idx()[ia] {
+                    let col = b.col_idx()[ib];
+                    let val = -b.values()[ib];
+                    ib += 1;
+                    (col, val)
+                } else {
+                    let col = a.col_idx()[ia];
+                    let val = a.values()[ia] - b.values()[ib];
+                    ia += 1;
+                    ib += 1;
+                    (col, val)
+                };
+                if val.abs() > drop_tol {
+                    col_idx.push(col);
+                    values.push(val);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+        Ok(CsrMatrix::from_csr(
+            nrows,
+            a.ncols(),
+            row_ptr,
+            col_idx,
+            values,
+        ))
+    }
+
     fn update_residual(&self, x: &[S], y: &[S], r: &mut [S]) -> Result<(), KError> {
         let a = self.full_matrix.as_ref().ok_or_else(|| {
             KError::InvalidInput("fieldsplit multiplicative requires CSR matrix".into())
@@ -213,6 +360,9 @@ impl FieldSplitPc {
     fn apply_additive(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         y.fill(S::zero());
         for (span, child) in self.block_spans.iter().zip(self.children.iter()) {
+            if span.len() == 0 {
+                continue;
+            }
             let mut zout = vec![S::zero(); span.len()];
             child.apply(side, &x[span.start..span.end], &mut zout)?;
             y[span.start..span.end].copy_from_slice(&zout);
@@ -225,6 +375,9 @@ impl FieldSplitPc {
         let mut y_accum = vec![S::zero(); n];
         let mut residual = x.to_vec();
         for (span, child) in self.block_spans.iter().zip(self.children.iter()) {
+            if span.len() == 0 {
+                continue;
+            }
             let mut zout = vec![S::zero(); span.len()];
             child.apply(side, &residual[span.start..span.end], &mut zout)?;
             for (i, val) in zout.iter().enumerate() {
@@ -241,6 +394,9 @@ impl FieldSplitPc {
         let mut y_accum = vec![S::zero(); n];
         let mut residual = x.to_vec();
         for (span, child) in self.block_spans.iter().zip(self.children.iter()) {
+            if span.len() == 0 {
+                continue;
+            }
             let mut zout = vec![S::zero(); span.len()];
             child.apply(side, &residual[span.start..span.end], &mut zout)?;
             for (i, val) in zout.iter().enumerate() {
@@ -249,6 +405,9 @@ impl FieldSplitPc {
             self.update_residual(x, &y_accum, &mut residual)?;
         }
         for (span, child) in self.block_spans.iter().zip(self.children.iter()).rev() {
+            if span.len() == 0 {
+                continue;
+            }
             let mut zout = vec![S::zero(); span.len()];
             child.apply(side, &residual[span.start..span.end], &mut zout)?;
             for (i, val) in zout.iter().enumerate() {
@@ -334,14 +493,11 @@ impl FieldSplitPc {
 impl Preconditioner for FieldSplitPc {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         let n = a.dims().0;
-        if self.block_sizes.iter().sum::<usize>() != n {
-            return Err(KError::InvalidInput(format!(
-                "pc_fieldsplit_block_sizes must sum to matrix size ({n})"
-            )));
-        }
-        let spans = Self::block_spans_from_sizes(&self.block_sizes);
+        let spans =
+            Self::block_spans_from_sizes_with_layout(&self.block_sizes, n, a.dist_layout())?;
         let csr = csr_from_linop(a, 0.0)?;
         let block_mats = self.extract_block_matrices(csr.as_ref(), &spans);
+        let mut schur_precondition_matrix = None;
         if let FieldSplitType::Schur { precondition, .. } = self.split_type {
             if precondition == SchurPrecondition::A11 && block_mats.len() >= 2 {
                 let a11_dims = block_mats[0].dims();
@@ -352,6 +508,19 @@ impl Preconditioner for FieldSplitPc {
                     )));
                 }
             }
+            if precondition == SchurPrecondition::Diag {
+                let schur = self
+                    .extract_schur_blocks(csr.as_ref(), &spans)
+                    .ok_or_else(|| KError::InvalidInput("missing Schur blocks".into()))?;
+                let a11 = block_mats
+                    .get(0)
+                    .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?;
+                let a22 = block_mats
+                    .get(1)
+                    .ok_or_else(|| KError::InvalidInput("missing A22 block".into()))?;
+                let schur_mat = self.schur_diag_approx(a11.as_ref(), a22.as_ref(), &schur)?;
+                schur_precondition_matrix = Some(Arc::new(schur_mat));
+            }
         }
         for (idx, child) in self.children.iter_mut().enumerate() {
             let block = match self.split_type {
@@ -361,6 +530,12 @@ impl Preconditioner for FieldSplitPc {
                 } if idx == 1 => block_mats
                     .get(0)
                     .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?,
+                FieldSplitType::Schur {
+                    precondition: SchurPrecondition::Diag,
+                    ..
+                } if idx == 1 => schur_precondition_matrix
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("missing Schur approximation".into()))?,
                 _ => block_mats
                     .get(idx)
                     .ok_or_else(|| KError::InvalidInput("missing fieldsplit block".into()))?,
@@ -376,6 +551,7 @@ impl Preconditioner for FieldSplitPc {
             }
             _ => None,
         };
+        self.schur_precondition_matrix = schur_precondition_matrix;
         Ok(())
     }
 
