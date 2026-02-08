@@ -11,7 +11,11 @@ pub struct Strength {
 }
 
 impl Strength {
-    pub fn from_csr(a: &CsrMatrix<f64>, theta: f64, normalize: bool) -> Self {
+    pub fn from_csr<T: KrystScalar<Real = f64>>(
+        a: &CsrMatrix<T>,
+        theta: f64,
+        normalize: bool,
+    ) -> Self {
         strength_csr(a, theta, normalize)
     }
 
@@ -91,7 +95,11 @@ impl Strength {
     }
 }
 
-pub fn strength_csr(a: &CsrMatrix<f64>, theta: f64, normalize: bool) -> Strength {
+pub fn strength_csr<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
+    theta: f64,
+    normalize: bool,
+) -> Strength {
     let n = a.nrows();
     let rp = a.row_ptr();
     let cj = a.col_idx();

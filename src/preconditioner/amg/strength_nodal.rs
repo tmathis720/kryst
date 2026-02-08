@@ -15,8 +15,8 @@ pub struct NodalStrength {
     pub col_idx: Vec<usize>,
 }
 
-pub fn strength_nodal_from_csr(
-    a: &CsrMatrix<f64>,
+pub fn strength_nodal_from_csr<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
     block_size: usize,
     theta: f64,
     normalize: bool,
@@ -37,7 +37,7 @@ pub fn strength_nodal_from_csr(
         for p in rs..re {
             let j = cj[p];
             let w = j / block_size;
-            let val_sq = vv[p] * vv[p];
+            let val_sq = vv[p].abs2();
             if u == w {
                 diag_sq[u] += val_sq;
             } else {
@@ -85,8 +85,8 @@ pub fn strength_nodal_from_csr(
     NodalStrength { row_ptr, col_idx }
 }
 
-pub fn strength_nodal(
-    a: &CsrMatrix<f64>,
+pub fn strength_nodal<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
     layout: &DofLayout,
     theta: f64,
     normalize: bool,
