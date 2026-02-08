@@ -16,7 +16,7 @@ use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
 use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan};
 use crate::matrix::dist::spmv_dist::RowRanges;
-use crate::matrix::op::{ChangeIds, LinOp, StructureId, ValuesId};
+use crate::matrix::op::{ChangeIds, DistLayout, LinOp, StructureId, ValuesId};
 use crate::matrix::parcsr::{self, ParCsrMatrix};
 use crate::matrix::sparse::CsrMatrix;
 use crate::ops::klinop::KLinOp;
@@ -67,6 +67,7 @@ pub struct DistCsrOp {
     pub row_start: usize,
     pub row_end: usize,
     pub n_local: usize,
+    layout: DistLayout,
     row_ptr: Vec<usize>,
     col_idx: Vec<usize>,
     vals: Vec<S>,
@@ -154,11 +155,21 @@ impl DistCsrOp {
         ids.bump_structure();
         ids.bump_values();
 
+        let layout = DistLayout {
+            global_rows: n_global,
+            global_cols: n_global,
+            row_start,
+            row_end,
+            col_start: row_start,
+            col_end: row_end,
+        };
+
         Ok(Self {
             n_global,
             row_start,
             row_end,
             n_local,
+            layout,
             row_ptr,
             col_idx,
             vals,
@@ -460,6 +471,10 @@ impl LinOp for DistCsrOp {
 
     fn comm(&self) -> UniverseComm {
         self.halo.index.comm.clone()
+    }
+
+    fn dist_layout(&self) -> Option<&DistLayout> {
+        Some(&self.layout)
     }
 
     fn format(&self) -> crate::matrix::format::OpFormat {

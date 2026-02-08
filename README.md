@@ -469,7 +469,7 @@ Example AMG invocation:
 ```
 
 #### Composite Preconditioning Options
-- `-pc_type fieldsplit` with `-pc_fieldsplit_block_sizes 2,2,...`, optional `-pc_fieldsplit_child_pc_type <pc>`, and `-pc_fieldsplit_type <mode>` configures block splits.
+- `-pc_type fieldsplit` with `-pc_fieldsplit_block_sizes 2,2,...`, optional `-pc_fieldsplit_child_pc_type <pc>`, and `-pc_fieldsplit_type <additive|multiplicative|symmetric|schur>` configures block splits. `-pc_fieldsplit_schur_fact_type <diag|lower|upper|full>` and `-pc_fieldsplit_schur_precondition <self|diag|a11>` tune Schur factorizations.
 - `-pc_type shell` with `-pc_shell_name <name>` resolves a registered shell callback.
 - `-pc_type ksp` with `-pc_ksp_type <solver>`, `-pc_ksp_pc_type <pc>`, `-pc_ksp_maxits <n>`, `-pc_ksp_rtol <tol>` configures inner KSP-as-PC behavior.
 - `-pc_type mg` with `-pc_mg_levels <n>`, `-pc_mg_cycle_type <v|w>`, and optional `-pc_mg_smoother <name>` / `-pc_mg_smoother_steps <n>` enables basic multigrid-style placeholder wiring.
