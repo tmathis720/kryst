@@ -479,7 +479,7 @@ impl<S: KrystScalar> LinOp for DenseOp<S> {
         }
     }
     fn as_any(&self) -> &dyn Any {
-        &*self.mat
+        self
     }
     fn structure_id(&self) -> StructureId {
         self.ids.structure_id()
