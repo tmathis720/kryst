@@ -33,7 +33,9 @@ pub trait ShellApply: Send + Sync {
     ) -> Result<(), KError>;
 }
 
-impl<F> ShellApply for F
+pub struct ShellApplyFn<F>(F);
+
+impl<F> ShellApply for ShellApplyFn<F>
 where
     F: Fn(PcSide, &[S], &mut [S]) -> Result<(), KError> + Send + Sync,
 {
@@ -48,7 +50,9 @@ where
     }
 }
 
-impl<F> ShellApply for F
+pub struct ShellApplyWithContext<F>(F);
+
+impl<F> ShellApply for ShellApplyWithContext<F>
 where
     F: Fn(PcSide, &[S], &mut [S], &mut dyn ShellContext) -> Result<(), KError> + Send + Sync,
 {
@@ -67,7 +71,9 @@ pub trait ShellSetup: Send + Sync {
     fn setup(&self, a: &dyn LinOp<S = S>, ctx: &mut dyn ShellContext) -> Result<(), KError>;
 }
 
-impl<F> ShellSetup for F
+pub struct ShellSetupFn<F>(F);
+
+impl<F> ShellSetup for ShellSetupFn<F>
 where
     F: Fn(&dyn LinOp<S = S>) -> Result<(), KError> + Send + Sync,
 {
@@ -76,7 +82,9 @@ where
     }
 }
 
-impl<F> ShellSetup for F
+pub struct ShellSetupWithContext<F>(F);
+
+impl<F> ShellSetup for ShellSetupWithContext<F>
 where
     F: Fn(&dyn LinOp<S = S>, &mut dyn ShellContext) -> Result<(), KError> + Send + Sync,
 {
@@ -89,7 +97,9 @@ pub trait ShellDestroy: Send + Sync {
     fn destroy(&self, ctx: &mut dyn ShellContext) -> Result<(), KError>;
 }
 
-impl<F> ShellDestroy for F
+pub struct ShellDestroyFn<F>(F);
+
+impl<F> ShellDestroy for ShellDestroyFn<F>
 where
     F: Fn() -> Result<(), KError> + Send + Sync,
 {
@@ -98,7 +108,9 @@ where
     }
 }
 
-impl<F> ShellDestroy for F
+pub struct ShellDestroyWithContext<F>(F);
+
+impl<F> ShellDestroy for ShellDestroyWithContext<F>
 where
     F: Fn(&mut dyn ShellContext) -> Result<(), KError> + Send + Sync,
 {
@@ -123,6 +135,23 @@ pub fn register_shell_callback(name: impl Into<String>, callback: Arc<dyn ShellA
         .insert(name.into(), callback);
 }
 
+pub fn shell_apply<F>(callback: F) -> Arc<dyn ShellApply>
+where
+    F: Fn(PcSide, &[S], &mut [S]) -> Result<(), KError> + Send + Sync + 'static,
+{
+    Arc::new(ShellApplyFn(callback))
+}
+
+pub fn shell_apply_with_context<F>(callback: F) -> Arc<dyn ShellApply>
+where
+    F: Fn(PcSide, &[S], &mut [S], &mut dyn ShellContext) -> Result<(), KError>
+        + Send
+        + Sync
+        + 'static,
+{
+    Arc::new(ShellApplyWithContext(callback))
+}
+
 pub fn register_shell_setup(name: impl Into<String>, callback: Arc<dyn ShellSetup>) {
     SETUP_REGISTRY
         .write()
@@ -130,11 +159,42 @@ pub fn register_shell_setup(name: impl Into<String>, callback: Arc<dyn ShellSetu
         .insert(name.into(), callback);
 }
 
+pub fn shell_setup<F>(callback: F) -> Arc<dyn ShellSetup>
+where
+    F: Fn(&dyn LinOp<S = S>) -> Result<(), KError> + Send + Sync + 'static,
+{
+    Arc::new(ShellSetupFn(callback))
+}
+
+pub fn shell_setup_with_context<F>(callback: F) -> Arc<dyn ShellSetup>
+where
+    F: Fn(&dyn LinOp<S = S>, &mut dyn ShellContext) -> Result<(), KError>
+        + Send
+        + Sync
+        + 'static,
+{
+    Arc::new(ShellSetupWithContext(callback))
+}
+
 pub fn register_shell_destroy(name: impl Into<String>, callback: Arc<dyn ShellDestroy>) {
     DESTROY_REGISTRY
         .write()
         .expect("shell destroy registry poisoned")
         .insert(name.into(), callback);
+}
+
+pub fn shell_destroy<F>(callback: F) -> Arc<dyn ShellDestroy>
+where
+    F: Fn() -> Result<(), KError> + Send + Sync + 'static,
+{
+    Arc::new(ShellDestroyFn(callback))
+}
+
+pub fn shell_destroy_with_context<F>(callback: F) -> Arc<dyn ShellDestroy>
+where
+    F: Fn(&mut dyn ShellContext) -> Result<(), KError> + Send + Sync + 'static,
+{
+    Arc::new(ShellDestroyWithContext(callback))
 }
 
 pub fn register_shell_context(name: impl Into<String>, factory: Arc<dyn ShellContextFactory>) {
@@ -211,32 +271,38 @@ impl Preconditioner for ShellPc {
         self.context_factory = factory.clone();
 
         if let Some(name) = self.callback_name.as_ref() {
-            self.callback = APPLY_REGISTRY
+            self.callback = Some(
+                APPLY_REGISTRY
                 .read()
                 .expect("shell callback registry poisoned")
                 .get(name)
                 .cloned()
                 .ok_or_else(|| {
                     KError::InvalidInput(format!("shell callback not registered: {name}"))
-                })?;
+                })?,
+            );
         }
         if let Some(name) = self.setup_name.as_ref() {
-            self.setup = SETUP_REGISTRY
+            self.setup = Some(
+                SETUP_REGISTRY
                 .read()
                 .expect("shell setup registry poisoned")
                 .get(name)
                 .cloned()
-                .ok_or_else(|| KError::InvalidInput(format!("shell setup not registered: {name}")))?;
+                .ok_or_else(|| KError::InvalidInput(format!("shell setup not registered: {name}")))?,
+            );
         }
         if let Some(name) = self.destroy_name.as_ref() {
-            self.destroy = DESTROY_REGISTRY
+            self.destroy = Some(
+                DESTROY_REGISTRY
                 .read()
                 .expect("shell destroy registry poisoned")
                 .get(name)
                 .cloned()
                 .ok_or_else(|| {
                     KError::InvalidInput(format!("shell destroy not registered: {name}"))
-                })?;
+                })?,
+            );
         }
 
         let mut guard = self

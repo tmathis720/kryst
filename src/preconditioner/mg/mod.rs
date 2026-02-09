@@ -8,7 +8,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::rap_opt;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MgCycleType {
@@ -30,7 +30,6 @@ impl MgCycleType {
     }
 }
 
-#[derive(Debug)]
 enum MgCoarseSolve {
     Direct(Box<dyn Preconditioner>),
     Smoother(Box<dyn Preconditioner>, usize),
@@ -119,7 +118,7 @@ pub struct MgPc {
     pub smoother: Option<String>,
     pub smoother_steps: Option<usize>,
     hierarchy: Option<MgHierarchy>,
-    coarse_solve: Option<MgCoarseSolve>,
+    coarse_solve: Option<Mutex<MgCoarseSolve>>,
     cycle: MgCycleType,
     smoother_sweeps: usize,
 }
@@ -235,7 +234,10 @@ impl MgPc {
         let is_coarse = level_ix + 1 == hierarchy.levels.len();
         if is_coarse {
             if let Some(coarse) = &self.coarse_solve {
-                match coarse {
+                let mut guard = coarse.lock().map_err(|_| {
+                    KError::SolveError("mg coarse solver mutex poisoned".into())
+                })?;
+                match &mut *guard {
                     MgCoarseSolve::Direct(pc) => {
                         let op = CsrLinOp::new(level.operator.clone());
                         if let Err(err) = pc.direct_solve(&op, b, x) {
@@ -375,7 +377,7 @@ impl Preconditioner for MgPc {
             PcType::SuperLuDist => MgCoarseSolve::Direct(coarse_solver),
             _ => MgCoarseSolve::Smoother(coarse_solver, self.smoother_sweeps),
         };
-        self.coarse_solve = Some(coarse_solve);
+        self.coarse_solve = Some(Mutex::new(coarse_solve));
         self.hierarchy = Some(hierarchy);
         Ok(())
     }

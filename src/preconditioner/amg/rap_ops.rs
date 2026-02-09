@@ -66,7 +66,7 @@ pub fn rap_symbolic<T: KrystScalar>(
 }
 
 /// Numeric RAP using fixed pattern, writing values into out_vals (nnz = pat.col_idx.len()).
-pub fn rap_numeric<T: KrystScalar>(
+pub fn rap_numeric<T: KrystScalar + std::ops::AddAssign>(
     pat: &CsrPattern,
     r: &CsrMatrix<T>,
     a: &CsrMatrix<T>,

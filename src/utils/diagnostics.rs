@@ -13,14 +13,14 @@ pub struct PcDiagnostics {
     pub config: BTreeMap<String, Value>,
     /// Nested KSP diagnostics when `pc_type = Ksp`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub nested_ksp: Option<KspDiagnostics>,
+    pub nested_ksp: Option<Box<KspDiagnostics>>,
 }
 
 impl PcDiagnostics {
     pub fn from_options(pc_type: Option<PcType>, opts: Option<&PcOptions>) -> Self {
         let mut config = BTreeMap::new();
         let nested_ksp = opts.and_then(|opts| match pc_type {
-            Some(PcType::Ksp) => build_nested_ksp_diagnostics(opts),
+            Some(PcType::Ksp) => build_nested_ksp_diagnostics(opts).map(Box::new),
             _ => None,
         });
         if let Some(opts) = opts {
@@ -96,7 +96,7 @@ impl PcDiagnostics {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PcViewDiagnostics {
-    pub pc: Option<PcDiagnostics>,
+    pub pc: Option<Box<PcDiagnostics>>,
     pub pc_chain: Option<Vec<PcDiagnostics>>,
 }
 
@@ -111,7 +111,7 @@ impl PcViewDiagnostics {
 pub struct KspDiagnostics {
     pub solver_type: Option<String>,
     pub solver_config: BTreeMap<String, Value>,
-    pub pc: Option<PcDiagnostics>,
+    pub pc: Option<Box<PcDiagnostics>>,
     pub pc_chain: Option<Vec<PcDiagnostics>>,
     pub setup_called: bool,
     pub bound_comm_id: Option<u64>,

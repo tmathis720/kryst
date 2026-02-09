@@ -108,7 +108,6 @@ fn apply_petsc_gamg_defaults(cfg: &mut AMGConfig, gamg_type: GamgType) {
 }
 
 #[cfg(feature = "backend-faer")]
-#[derive(Debug, Clone)]
 pub struct Gamg {
     amg: AMG,
     config: GamgConfig,

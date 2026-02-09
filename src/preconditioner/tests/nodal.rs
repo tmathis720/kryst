@@ -9,7 +9,7 @@ use crate::preconditioner::amg::util::DofLayout;
 #[test]
 fn nodal_aggregates_group_dofs() {
     // 4 DOFs, block_size=2 -> 2 nodes
-    let a = CsrMatrix::identity(4);
+    let a = CsrMatrix::<f64>::identity(4);
     let layout = DofLayout::new(4, 2);
     let zero = R::default();
     let s = strength_nodal(&a, &layout, zero, true);
