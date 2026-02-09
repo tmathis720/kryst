@@ -4,24 +4,43 @@ use kryst::algebra::prelude::S;
 use kryst::algebra::scalar::KrystScalar;
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::pc_context::PcFactory;
-use kryst::matrix::op::DenseOp;
+use kryst::matrix::sparse::CsrMatrix;
 use kryst::preconditioner::{PcSide, shell::register_shell_callback, shell::shell_apply};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn eye_op(n: usize) -> Arc<DenseOp<S>> {
-    let mat = faer::Mat::<S>::from_fn(
-        n,
-        n,
-        |i, j| if i == j { S::from_real(1.0) } else { S::zero() },
-    );
-    Arc::new(DenseOp::new(Arc::new(mat)))
+fn eye_op(n: usize) -> Arc<CsrMatrix<S>> {
+    Arc::new(CsrMatrix::identity(n))
 }
 
-fn diag_op(diag: &[S]) -> Arc<DenseOp<S>> {
+fn diag_op(diag: &[S]) -> Arc<CsrMatrix<S>> {
     let n = diag.len();
-    let mat = faer::Mat::<S>::from_fn(n, n, |i, j| if i == j { diag[i] } else { S::zero() });
-    Arc::new(DenseOp::new(Arc::new(mat)))
+    let row_ptr: Vec<usize> = (0..=n).collect();
+    let col_idx: Vec<usize> = (0..n).collect();
+    let values = diag.to_vec();
+    Arc::new(CsrMatrix::from_csr(n, n, row_ptr, col_idx, values))
+}
+
+fn tridiag_op(diag: &[S], off: S) -> Arc<CsrMatrix<S>> {
+    let n = diag.len();
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::with_capacity(n * 3);
+    let mut values = Vec::with_capacity(n * 3);
+    row_ptr.push(0);
+    for i in 0..n {
+        if i > 0 {
+            col_idx.push(i - 1);
+            values.push(off);
+        }
+        col_idx.push(i);
+        values.push(diag[i]);
+        if i + 1 < n {
+            col_idx.push(i + 1);
+            values.push(off);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    Arc::new(CsrMatrix::from_csr(n, n, row_ptr, col_idx, values))
 }
 
 fn rel_error(x: &[S], x_true: &[S]) -> f64 {
@@ -130,14 +149,12 @@ fn smoke_fieldsplit_shell_ksp_mg_and_bddc_placeholder() {
 
 #[test]
 fn ksp_pc_nested_converges() {
-    let diag = vec![
-        S::from_real(2.0),
-        S::from_real(3.0),
-        S::from_real(4.0),
-    ];
-    let op = diag_op(&diag);
-    let b = diag.clone();
+    let diag = vec![S::from_real(2.0), S::from_real(3.0), S::from_real(4.0)];
+    let off = S::from_real(-1.0);
+    let op = tridiag_op(&diag, off);
     let x_true = vec![S::from_real(1.0); diag.len()];
+    let mut b = vec![S::zero(); diag.len()];
+    op.try_spmv(&x_true, &mut b).expect("build rhs");
 
     let mut ksp_pc = PcFactory::create_from_options(&PcOptions {
         pc_type: Some("ksp".into()),
@@ -157,14 +174,12 @@ fn ksp_pc_nested_converges() {
 
 #[test]
 fn ksp_pc_scoped_options_override() {
-    let diag = vec![
-        S::from_real(2.0),
-        S::from_real(3.0),
-        S::from_real(4.0),
-    ];
-    let op = diag_op(&diag);
-    let b = diag.clone();
+    let diag = vec![S::from_real(2.0), S::from_real(3.0), S::from_real(4.0)];
+    let off = S::from_real(-1.0);
+    let op = tridiag_op(&diag, off);
     let x_true = vec![S::from_real(1.0); diag.len()];
+    let mut b = vec![S::zero(); diag.len()];
+    op.try_spmv(&x_true, &mut b).expect("build rhs");
 
     let mut base_pc = PcFactory::create_from_options(&PcOptions {
         pc_type: Some("ksp".into()),
