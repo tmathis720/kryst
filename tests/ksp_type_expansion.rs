@@ -101,10 +101,9 @@ fn richardson_converges_and_reason_is_converged() {
 }
 
 #[test]
-fn pipegcr_reports_unsupported() {
+fn pipegcr_is_supported() {
     let mut ksp = KspContext::new();
-    let err = ksp.set_type(SolverType::PipeGcr).unwrap_err();
-    assert!(format!("{err}").contains("PipeGCR"));
+    ksp.set_type(SolverType::PipeGcr).unwrap();
 }
 
 #[test]
