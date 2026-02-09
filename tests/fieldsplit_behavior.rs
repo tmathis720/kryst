@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcFactory;
+use kryst::KError;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::prelude::*;
