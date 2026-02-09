@@ -48,10 +48,17 @@ fn reason_id(reason: ConvergedReason) -> f64 {
         ConvergedReason::ConvergedAtol => 2.0,
         ConvergedReason::ConvergedTrustRegion => 3.0,
         ConvergedReason::ConvergedHappyBreakdown => 4.0,
-        ConvergedReason::DivergedDtol => 5.0,
-        ConvergedReason::DivergedMaxIts => 6.0,
-        ConvergedReason::StoppedByMonitor => 7.0,
-        ConvergedReason::Continued => 8.0,
+        ConvergedReason::DivergedNanOrInf => 5.0,
+        ConvergedReason::DivergedDtol => 6.0,
+        ConvergedReason::DivergedMaxIts => 7.0,
+        ConvergedReason::DivergedBreakdown => 8.0,
+        ConvergedReason::DivergedBreakdownBiCG => 9.0,
+        ConvergedReason::DivergedIndefiniteMatrix => 10.0,
+        ConvergedReason::DivergedIndefinitePC => 11.0,
+        ConvergedReason::DivergedPcSetupFailed => 12.0,
+        ConvergedReason::DivergedPcFailed => 13.0,
+        ConvergedReason::StoppedByMonitor => 14.0,
+        ConvergedReason::Continued => 15.0,
     }
 }
 
