@@ -239,7 +239,7 @@ pub fn spgemm_with_drop_tol(
 #[inline]
 pub fn spgemm_generic<T>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> Result<CsrMatrix<T>, KError>
 where
-    T: KrystScalar<Real = f64>,
+    T: KrystScalar<Real = f64> + std::ops::AddAssign,
 {
     spgemm_with_drop_tol_generic(a, b, 1e-12)
 }
@@ -524,7 +524,7 @@ pub fn sparse_galerkin_product_generic<T>(
     interpolation: &CsrMatrix<T>, // P
 ) -> Result<CsrMatrix<T>, KError>
 where
-    T: KrystScalar<Real = f64>,
+    T: KrystScalar<Real = f64> + std::ops::AddAssign,
 {
     // Step 1: T = A * P
     let ap = spgemm_generic(matrix, interpolation)?;
@@ -548,7 +548,7 @@ pub fn rap_btree_generic<T>(
     interpolation: &CsrMatrix<T>,
 ) -> Result<CsrMatrix<T>, KError>
 where
-    T: KrystScalar<Real = f64>,
+    T: KrystScalar<Real = f64> + std::ops::AddAssign,
 {
     let ap = spgemm_btree_generic(matrix, interpolation)?;
     spgemm_btree_generic(restriction, &ap)
@@ -572,7 +572,7 @@ pub fn rap_opt_generic<T>(
     interpolation: &CsrMatrix<T>,
 ) -> Result<CsrMatrix<T>, KError>
 where
-    T: KrystScalar<Real = f64>,
+    T: KrystScalar<Real = f64> + std::ops::AddAssign,
 {
     sparse_galerkin_product_generic(restriction, matrix, interpolation)
 }
