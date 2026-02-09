@@ -46,7 +46,7 @@ where
         y: &mut [S],
         _ctx: &mut dyn ShellContext,
     ) -> Result<(), KError> {
-        (self)(side, x, y)
+        (self.0)(side, x, y)
     }
 }
 
@@ -63,7 +63,7 @@ where
         y: &mut [S],
         ctx: &mut dyn ShellContext,
     ) -> Result<(), KError> {
-        (self)(side, x, y, ctx)
+        (self.0)(side, x, y, ctx)
     }
 }
 
@@ -78,7 +78,7 @@ where
     F: Fn(&dyn LinOp<S = S>) -> Result<(), KError> + Send + Sync,
 {
     fn setup(&self, a: &dyn LinOp<S = S>, _ctx: &mut dyn ShellContext) -> Result<(), KError> {
-        (self)(a)
+        (self.0)(a)
     }
 }
 
@@ -89,7 +89,7 @@ where
     F: Fn(&dyn LinOp<S = S>, &mut dyn ShellContext) -> Result<(), KError> + Send + Sync,
 {
     fn setup(&self, a: &dyn LinOp<S = S>, ctx: &mut dyn ShellContext) -> Result<(), KError> {
-        (self)(a, ctx)
+        (self.0)(a, ctx)
     }
 }
 
@@ -104,7 +104,7 @@ where
     F: Fn() -> Result<(), KError> + Send + Sync,
 {
     fn destroy(&self, _ctx: &mut dyn ShellContext) -> Result<(), KError> {
-        (self)()
+        (self.0)()
     }
 }
 
@@ -115,7 +115,7 @@ where
     F: Fn(&mut dyn ShellContext) -> Result<(), KError> + Send + Sync,
 {
     fn destroy(&self, ctx: &mut dyn ShellContext) -> Result<(), KError> {
-        (self)(ctx)
+        (self.0)(ctx)
     }
 }
 

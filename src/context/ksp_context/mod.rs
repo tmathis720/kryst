@@ -2023,7 +2023,8 @@ impl KspContext {
         if !self.setup_called {
             if let Err(err) = self.setup_impl() {
                 if let Some(reason) = Self::map_setup_error_to_reason(&err) {
-                    let res = if let Some(amat) = self.amat.as_ref() {
+                    let amat = self.amat.clone();
+                    let res = if let Some(amat) = amat.as_ref() {
                         self.residual_norm_for_stats(amat.as_ref(), b, x)
                             .unwrap_or_else(|_| R::default())
                     } else {
