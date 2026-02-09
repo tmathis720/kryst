@@ -1432,7 +1432,10 @@ impl KspContext {
             .pc_spec
             .as_ref()
             .or(self.pending_pc.as_ref())
-            .map(|spec| PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref()));
+            .map(|spec| Box::new(PcDiagnostics::from_options(
+                Some(spec.pc_type),
+                spec.options.as_ref(),
+            )));
         let pc_chain = self
             .pc_chain_plan
             .as_ref()
@@ -2020,11 +2023,12 @@ impl KspContext {
         if !self.setup_called {
             if let Err(err) = self.setup_impl() {
                 if let Some(reason) = Self::map_setup_error_to_reason(&err) {
-                    let res = self
-                        .amat
-                        .as_ref()
-                        .and_then(|amat| self.residual_norm_for_stats(amat.as_ref(), b, x).ok())
-                        .unwrap_or_else(R::default);
+                    let res = if let Some(amat) = self.amat.as_ref() {
+                        self.residual_norm_for_stats(amat.as_ref(), b, x)
+                            .unwrap_or_else(|_| R::default())
+                    } else {
+                        R::default()
+                    };
                     let stats = SolveStats::new(0, res, reason);
                     self.last_converged_reason = Some(reason);
                     return Ok(stats);

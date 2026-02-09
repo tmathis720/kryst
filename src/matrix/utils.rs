@@ -133,7 +133,7 @@ pub fn spgemm_with_drop_tol_generic<T>(
     drop_tol: T::Real,
 ) -> Result<CsrMatrix<T>, KError>
 where
-    T: KrystScalar<Real = f64>,
+    T: KrystScalar<Real = f64> + std::ops::AddAssign,
 {
     if a.ncols() != b.nrows() {
         return Err(KError::InvalidInput(format!(
@@ -461,7 +461,7 @@ pub fn default_spmv_tuning() -> SpmvTuning {
 /// as a comparison baseline for optimized kernels in benchmarks.
 pub fn spgemm_btree_generic<T>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> Result<CsrMatrix<T>, KError>
 where
-    T: KrystScalar<Real = f64>,
+    T: KrystScalar<Real = f64> + std::ops::AddAssign,
 {
     use std::collections::BTreeMap;
 

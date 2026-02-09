@@ -5,7 +5,7 @@ use kryst::algebra::scalar::KrystScalar;
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::pc_context::PcFactory;
 use kryst::matrix::op::DenseOp;
-use kryst::preconditioner::{PcSide, shell::register_shell_callback};
+use kryst::preconditioner::{PcSide, shell::register_shell_callback, shell::shell_apply};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -82,7 +82,7 @@ fn smoke_fieldsplit_shell_ksp_mg_and_bddc_placeholder() {
 
     register_shell_callback(
         "scale2",
-        Arc::new(|_side: PcSide, x: &[S], y: &mut [S]| {
+        shell_apply(|_side: PcSide, x: &[S], y: &mut [S]| {
             for (yi, xi) in y.iter_mut().zip(x.iter()) {
                 *yi = *xi * S::from_real(2.0);
             }
@@ -216,7 +216,7 @@ fn ksp_pc_uses_inner_pc_options() {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     register_shell_callback(
         "ksp_pc_inner_shell",
-        Arc::new(|_side: PcSide, x: &[S], y: &mut [S]| {
+        shell_apply(|_side: PcSide, x: &[S], y: &mut [S]| {
             CALLS.fetch_add(1, Ordering::SeqCst);
             y.copy_from_slice(x);
             Ok(())

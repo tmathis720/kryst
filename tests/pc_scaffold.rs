@@ -130,7 +130,7 @@ fn pc_scaffold_apply_smoke() -> Result<(), KError> {
 
     kryst::preconditioner::shell::register_shell_callback(
         "double",
-        std::sync::Arc::new(|_side, x: &[S], y: &mut [S]| {
+        kryst::preconditioner::shell::shell_apply(|_side, x: &[S], y: &mut [S]| {
             for (yi, xi) in y.iter_mut().zip(x.iter()) {
                 *yi = *xi + *xi;
             }

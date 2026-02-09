@@ -3,7 +3,8 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::{FgmresSolver, FgmresVariant, LinearSolver, MonitorCallback};
+use crate::solver::{FgmresSolver, LinearSolver, MonitorCallback};
+use crate::solver::fgmres::FgmresVariant;
 use crate::utils::convergence::SolveStats;
 use std::any::Any;
 
