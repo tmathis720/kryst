@@ -1,11 +1,14 @@
 use crate::algebra::prelude::*;
-use crate::algebra::scalar::{S, is_complex_scalar};
+use crate::algebra::scalar::{is_complex_scalar, S};
+use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
-use crate::matrix::convert::csr_from_linop;
+use crate::matrix::convert::{csr_from_linop, try_as_csr};
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::rap_opt;
+use crate::parallel::UniverseComm;
+use crate::preconditioner::ksp_pc::KspAsPc;
 use crate::preconditioner::{PcSide, Preconditioner};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -30,6 +33,62 @@ impl MgCycleType {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MgCoarsenType {
+    Injection,
+    Linear,
+    Aggregation,
+}
+
+impl MgCoarsenType {
+    fn from_option(v: Option<&str>) -> Result<Self, KError> {
+        match v.unwrap_or("linear") {
+            "injection" | "inject" => Ok(Self::Injection),
+            "linear" | "interp" => Ok(Self::Linear),
+            "aggregation" | "agg" => Ok(Self::Aggregation),
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_mg_coarsen_type: {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MgInterpType {
+    Injection,
+    Linear,
+}
+
+impl MgInterpType {
+    fn from_option(v: Option<&str>) -> Result<Self, KError> {
+        match v.unwrap_or("linear") {
+            "injection" | "inject" => Ok(Self::Injection),
+            "linear" => Ok(Self::Linear),
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_mg_interpolation_type: {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MgRestrictType {
+    Injection,
+    FullWeighting,
+}
+
+impl MgRestrictType {
+    fn from_option(v: Option<&str>) -> Result<Self, KError> {
+        match v.unwrap_or("full_weighting") {
+            "injection" | "inject" => Ok(Self::Injection),
+            "full_weighting" | "full" | "fw" => Ok(Self::FullWeighting),
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_mg_restriction_type: {other}"
+            ))),
+        }
+    }
+}
+
 enum MgCoarseSolve {
     Direct(Box<dyn Preconditioner>),
     Smoother(Box<dyn Preconditioner>, usize),
@@ -38,11 +97,12 @@ enum MgCoarseSolve {
 #[derive(Clone)]
 struct CsrLinOp {
     csr: Arc<CsrMatrix<f64>>,
+    comm: UniverseComm,
 }
 
 impl CsrLinOp {
-    fn new(csr: Arc<CsrMatrix<f64>>) -> Self {
-        Self { csr }
+    fn new(csr: Arc<CsrMatrix<f64>>, comm: UniverseComm) -> Self {
+        Self { csr, comm }
     }
 }
 
@@ -65,6 +125,10 @@ impl LinOp for CsrLinOp {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn comm(&self) -> UniverseComm {
+        self.comm.clone()
     }
 }
 
@@ -117,37 +181,149 @@ pub struct MgPc {
     pub cycle_type: Option<String>,
     pub smoother: Option<String>,
     pub smoother_steps: Option<usize>,
+    pub coarsen_type: Option<String>,
+    pub interpolation_type: Option<String>,
+    pub restriction_type: Option<String>,
+    pub coarse_pc_type: Option<String>,
+    pub coarse_ksp_type: Option<String>,
+    pub coarse_ksp_maxits: Option<usize>,
+    pub coarse_ksp_rtol: Option<f64>,
     hierarchy: Option<MgHierarchy>,
     coarse_solve: Option<Mutex<MgCoarseSolve>>,
     cycle: MgCycleType,
     smoother_sweeps: usize,
+    coarsen: MgCoarsenType,
+    interp: MgInterpType,
+    restrict: MgRestrictType,
+    user_transfers: Vec<(usize, Arc<CsrMatrix<f64>>, Arc<CsrMatrix<f64>>)>,
+    comm: UniverseComm,
+}
+
+pub struct MgTransferOperators {
+    pub prolongation: Arc<CsrMatrix<f64>>,
+    pub restriction: Arc<CsrMatrix<f64>>,
 }
 
 impl MgPc {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         levels: usize,
         cycle_type: Option<String>,
         smoother: Option<String>,
         smoother_steps: Option<usize>,
+        coarsen_type: Option<String>,
+        interpolation_type: Option<String>,
+        restriction_type: Option<String>,
+        coarse_pc_type: Option<String>,
+        coarse_ksp_type: Option<String>,
+        coarse_ksp_maxits: Option<usize>,
+        coarse_ksp_rtol: Option<f64>,
     ) -> Self {
         let cycle = MgCycleType::from_option(cycle_type.as_deref()).unwrap_or(MgCycleType::V);
         let smoother_sweeps = smoother_steps.unwrap_or(1).max(1);
+        let coarsen =
+            MgCoarsenType::from_option(coarsen_type.as_deref()).unwrap_or(MgCoarsenType::Linear);
+        let interp = MgInterpType::from_option(interpolation_type.as_deref())
+            .unwrap_or(MgInterpType::Linear);
+        let restrict = MgRestrictType::from_option(restriction_type.as_deref())
+            .unwrap_or(MgRestrictType::FullWeighting);
         Self {
             levels,
             cycle_type,
             smoother,
             smoother_steps,
+            coarsen_type,
+            interpolation_type,
+            restriction_type,
+            coarse_pc_type,
+            coarse_ksp_type,
+            coarse_ksp_maxits,
+            coarse_ksp_rtol,
             hierarchy: None,
             coarse_solve: None,
             cycle,
             smoother_sweeps,
+            coarsen,
+            interp,
+            restrict,
+            user_transfers: Vec::new(),
+            comm: UniverseComm::NoComm(crate::parallel::NoComm),
         }
+    }
+
+    pub fn set_level_transfer_operators(
+        &mut self,
+        level: usize,
+        operators: MgTransferOperators,
+    ) -> Result<(), KError> {
+        if level + 1 >= self.levels {
+            return Err(KError::InvalidInput(format!(
+                "level {level} cannot own transfer operators for {} levels",
+                self.levels
+            )));
+        }
+        self.user_transfers
+            .retain(|(existing, _, _)| *existing != level);
+        self.user_transfers
+            .push((level, operators.prolongation, operators.restriction));
+        Ok(())
+    }
+
+    pub fn set_level_transfer_from_linops(
+        &mut self,
+        level: usize,
+        prolongation: &dyn LinOp<S = S>,
+        restriction: &dyn LinOp<S = S>,
+    ) -> Result<(), KError> {
+        let p = match try_as_csr(prolongation) {
+            Some(m) => Arc::new(m.clone()),
+            None => csr_from_linop(prolongation, 0.0)?,
+        };
+        let r = match try_as_csr(restriction) {
+            Some(m) => Arc::new(m.clone()),
+            None => csr_from_linop(restriction, 0.0)?,
+        };
+        self.set_level_transfer_operators(
+            level,
+            MgTransferOperators {
+                prolongation: p,
+                restriction: r,
+            },
+        )
     }
 
     pub fn hierarchy(&self) -> &MgHierarchy {
         self.hierarchy
             .as_ref()
             .expect("MgPc::hierarchy requires setup")
+    }
+
+    fn pc_type_name(pc: PcType) -> &'static str {
+        match pc {
+            PcType::Jacobi => "jacobi",
+            PcType::Ilu0 => "ilu0",
+            PcType::None => "none",
+            PcType::Ilu => "ilu",
+            PcType::Ilut => "ilut",
+            PcType::Ilutp => "ilutp",
+            PcType::Ilup => "ilup",
+            PcType::BlockJacobi => "block_jacobi",
+            PcType::Sor => "sor",
+            PcType::Asm => "asm",
+            PcType::Chebyshev => "chebyshev",
+            PcType::Amg => "amg",
+            PcType::ApproxInverse => "approxinv",
+            PcType::FieldSplit => "fieldsplit",
+            PcType::Shell => "shell",
+            PcType::Ksp => "ksp",
+            PcType::Mg => "mg",
+            PcType::Bddc => "bddc",
+            PcType::Gamg => "gamg",
+            PcType::Lu => "lu",
+            PcType::Qr => "qr",
+            #[cfg(feature = "superlu_dist")]
+            PcType::SuperLuDist => "superludist",
+        }
     }
 
     fn build_smoother(&self, name: &str) -> Result<Box<dyn Preconditioner>, KError> {
@@ -161,38 +337,69 @@ impl MgPc {
         PcFactory::create_preconditioner(pc_type, None)
     }
 
-    fn build_transfer(n_fine: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>, usize) {
-        let n_coarse = (n_fine + 1) / 2;
+    fn build_transfer(
+        n_fine: usize,
+        coarsen: MgCoarsenType,
+        interp: MgInterpType,
+        restrict: MgRestrictType,
+    ) -> (CsrMatrix<f64>, CsrMatrix<f64>, usize) {
+        let coarse_div = match coarsen {
+            MgCoarsenType::Aggregation => 3,
+            MgCoarsenType::Injection | MgCoarsenType::Linear => 2,
+        };
+        let n_coarse = (n_fine + coarse_div - 1) / coarse_div;
+
         let mut p_row_ptr = Vec::with_capacity(n_fine + 1);
-        let mut p_col_idx = Vec::with_capacity(n_fine);
-        let mut p_values = Vec::with_capacity(n_fine);
+        let mut p_col_idx = Vec::with_capacity(n_fine * 2);
+        let mut p_values = Vec::with_capacity(n_fine * 2);
         p_row_ptr.push(0);
         for i in 0..n_fine {
-            let coarse = i / 2;
-            p_col_idx.push(coarse);
-            p_values.push(1.0);
+            let coarse = i / coarse_div;
+            match interp {
+                MgInterpType::Injection => {
+                    p_col_idx.push(coarse.min(n_coarse.saturating_sub(1)));
+                    p_values.push(1.0);
+                }
+                MgInterpType::Linear => {
+                    let j0 = coarse.min(n_coarse.saturating_sub(1));
+                    p_col_idx.push(j0);
+                    p_values.push(1.0);
+                    if i % coarse_div != 0 {
+                        let j1 = (j0 + 1).min(n_coarse.saturating_sub(1));
+                        if j1 != j0 {
+                            p_col_idx.push(j1);
+                            p_values.push(0.5);
+                        }
+                    }
+                }
+            }
             p_row_ptr.push(p_col_idx.len());
         }
+
         let mut r_row_ptr = Vec::with_capacity(n_coarse + 1);
         let mut r_col_idx = Vec::with_capacity(n_fine);
         let mut r_values = Vec::with_capacity(n_fine);
         r_row_ptr.push(0);
         for j in 0..n_coarse {
-            let fine0 = 2 * j;
-            let fine1 = fine0 + 1;
-            let mut entries = 0;
-            if fine0 < n_fine {
-                r_col_idx.push(fine0);
-                r_values.push(if fine1 < n_fine { 0.5 } else { 1.0 });
-                entries += 1;
+            let start = coarse_div * j;
+            let end = (start + coarse_div).min(n_fine);
+            for i in start..end {
+                r_col_idx.push(i);
+                let w = match restrict {
+                    MgRestrictType::Injection => {
+                        if i == start {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    MgRestrictType::FullWeighting => 1.0 / ((end - start) as f64),
+                };
+                r_values.push(w);
             }
-            if fine1 < n_fine {
-                r_col_idx.push(fine1);
-                r_values.push(0.5);
-                entries += 1;
-            }
-            r_row_ptr.push(*r_row_ptr.last().unwrap() + entries);
+            r_row_ptr.push(r_col_idx.len());
         }
+
         let p = CsrMatrix::from_csr(n_fine, n_coarse, p_row_ptr, p_col_idx, p_values);
         let r = CsrMatrix::from_csr(n_coarse, n_fine, r_row_ptr, r_col_idx, r_values);
         (p, r, n_coarse)
@@ -234,12 +441,12 @@ impl MgPc {
         let is_coarse = level_ix + 1 == hierarchy.levels.len();
         if is_coarse {
             if let Some(coarse) = &self.coarse_solve {
-                let mut guard = coarse.lock().map_err(|_| {
-                    KError::SolveError("mg coarse solver mutex poisoned".into())
-                })?;
+                let mut guard = coarse
+                    .lock()
+                    .map_err(|_| KError::SolveError("mg coarse solver mutex poisoned".into()))?;
                 match &mut *guard {
                     MgCoarseSolve::Direct(pc) => {
-                        let op = CsrLinOp::new(level.operator.clone());
+                        let op = CsrLinOp::new(level.operator.clone(), self.comm.clone());
                         if let Err(err) = pc.direct_solve(&op, b, x) {
                             log::warn!("coarse direct_solve failed ({err}); falling back to apply");
                             pc.apply(PcSide::Left, b, x)?;
@@ -319,14 +526,36 @@ impl Preconditioner for MgPc {
                 "multigrid is only supported for real scalars".into(),
             ));
         }
+        self.cycle = MgCycleType::from_option(self.cycle_type.as_deref())?;
+        self.coarsen = MgCoarsenType::from_option(self.coarsen_type.as_deref())?;
+        self.interp = MgInterpType::from_option(self.interpolation_type.as_deref())?;
+        self.restrict = MgRestrictType::from_option(self.restriction_type.as_deref())?;
+
         let a = csr_from_linop(_a, 0.0)?;
         let mut levels = Vec::new();
         levels.push(MgLevel::new(0, a.clone()));
         let mut current = a;
         for level in 0..(self.levels - 1) {
-            let (p, r, n_coarse) = Self::build_transfer(current.nrows());
-            let p = Arc::new(p);
-            let r = Arc::new(r);
+            let user_tr = self
+                .user_transfers
+                .iter()
+                .find(|(idx, _, _)| *idx == level)
+                .map(|(_, p, r)| (p.clone(), r.clone()));
+            let (p, r, n_coarse) = if let Some((p, r)) = user_tr {
+                if p.nrows() != current.nrows() || r.ncols() != current.nrows() {
+                    return Err(KError::InvalidInput(format!(
+                        "user transfer dimensions incompatible at level {level}"
+                    )));
+                }
+                {
+                    let n = r.nrows();
+                    (p, r, n)
+                }
+            } else {
+                let (p, r, n_coarse) =
+                    Self::build_transfer(current.nrows(), self.coarsen, self.interp, self.restrict);
+                (Arc::new(p), Arc::new(r), n_coarse)
+            };
             let coarse = rap_opt(r.as_ref(), current.as_ref(), p.as_ref())?;
             let coarse = Arc::new(coarse);
             if let Some(entry) = levels.get_mut(level) {
@@ -345,23 +574,55 @@ impl Preconditioner for MgPc {
             ));
         }
         self.levels = levels.len();
-        self.cycle = MgCycleType::from_option(self.cycle_type.as_deref())?;
         self.smoother_sweeps = self.smoother_steps.unwrap_or(1).max(1);
 
         let smoother_name = self.smoother.as_deref().unwrap_or("jacobi");
-        let pc_type = PcType::from_str(smoother_name)?;
-        if pc_type == PcType::None {
+        let smoother_pc_type = PcType::from_str(smoother_name)?;
+        if smoother_pc_type == PcType::None {
             return Err(KError::InvalidInput("pc_mg_smoother cannot be none".into()));
         }
         let mut hierarchy = MgHierarchy::new(levels);
+        let op_comm = _a.comm();
+        self.comm = op_comm.clone();
         for lvl in hierarchy.levels_mut().iter_mut().take(self.levels - 1) {
             let mut smoother = self.build_smoother(smoother_name)?;
-            let op = CsrLinOp::new(lvl.operator.clone());
+            let op = CsrLinOp::new(lvl.operator.clone(), op_comm.clone());
             smoother.setup(&op)?;
             lvl.smoother = Some(smoother);
         }
 
-        let mut coarse_solver = self.build_smoother(smoother_name)?;
+        let coarse_pc_type = self
+            .coarse_pc_type
+            .as_deref()
+            .map(PcType::from_str)
+            .transpose()?
+            .unwrap_or(smoother_pc_type);
+        let mut coarse_solver: Box<dyn Preconditioner> =
+            if let Some(ksp_type) = &self.coarse_ksp_type {
+                let mut coarse_pc_opts = PcOptions {
+                    pc_type: Some(Self::pc_type_name(coarse_pc_type).to_string()),
+                    ..Default::default()
+                };
+                if coarse_pc_type == PcType::Ksp {
+                    coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
+                }
+                Box::new(KspAsPc::new(
+                    Some(Self::pc_type_name(coarse_pc_type).to_string()),
+                    Some(ksp_type.clone()),
+                    self.coarse_ksp_maxits.unwrap_or(8),
+                    self.coarse_ksp_rtol.unwrap_or(1e-10),
+                    Some(KspOptions {
+                        ksp_type: Some(ksp_type.clone()),
+                        maxits: self.coarse_ksp_maxits,
+                        rtol: self.coarse_ksp_rtol,
+                        ..Default::default()
+                    }),
+                    coarse_pc_opts,
+                )?)
+            } else {
+                PcFactory::create_preconditioner(coarse_pc_type, None)?
+            };
+
         let coarse_op = CsrLinOp::new(
             hierarchy
                 .levels()
@@ -369,9 +630,10 @@ impl Preconditioner for MgPc {
                 .ok_or_else(|| KError::InvalidInput("missing coarse level".into()))?
                 .operator
                 .clone(),
+            op_comm,
         );
         coarse_solver.setup(&coarse_op)?;
-        let coarse_solve = match pc_type {
+        let coarse_solve = match coarse_pc_type {
             PcType::Lu | PcType::Qr => MgCoarseSolve::Direct(coarse_solver),
             #[cfg(feature = "superlu_dist")]
             PcType::SuperLuDist => MgCoarseSolve::Direct(coarse_solver),
@@ -391,5 +653,57 @@ impl Preconditioner for MgPc {
         y.fill(S::zero());
         self.mg_cycle(0, x, y, self.cycle)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mg_user_transfer_overrides_default() {
+        let mut mg = MgPc::new(
+            3,
+            Some("v".into()),
+            Some("jacobi".into()),
+            Some(1),
+            Some("injection".into()),
+            Some("injection".into()),
+            Some("injection".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let p = Arc::new(CsrMatrix::from_csr(
+            4,
+            2,
+            vec![0, 1, 2, 3, 4],
+            vec![0, 0, 1, 1],
+            vec![1.0; 4],
+        ));
+        let r = Arc::new(CsrMatrix::from_csr(
+            2,
+            4,
+            vec![0, 2, 4],
+            vec![0, 1, 2, 3],
+            vec![0.5; 4],
+        ));
+        mg.set_level_transfer_operators(
+            0,
+            MgTransferOperators {
+                prolongation: p,
+                restriction: r,
+            },
+        )
+        .expect("set transfer");
+        assert_eq!(mg.user_transfers.len(), 1);
+    }
+
+    #[test]
+    fn mg_transfer_variants_parse() {
+        assert!(MgCoarsenType::from_option(Some("aggregation")).is_ok());
+        assert!(MgInterpType::from_option(Some("linear")).is_ok());
+        assert!(MgRestrictType::from_option(Some("full_weighting")).is_ok());
     }
 }

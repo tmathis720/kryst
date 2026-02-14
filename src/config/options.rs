@@ -276,6 +276,13 @@ pub struct PcOptions {
     pub pc_mg_cycle_type: Option<String>,
     pub pc_mg_smoother: Option<String>,
     pub pc_mg_smoother_steps: Option<usize>,
+    pub pc_mg_coarsen_type: Option<String>,
+    pub pc_mg_interpolation_type: Option<String>,
+    pub pc_mg_restriction_type: Option<String>,
+    pub pc_mg_coarse_pc_type: Option<String>,
+    pub pc_mg_coarse_ksp_type: Option<String>,
+    pub pc_mg_coarse_ksp_maxits: Option<usize>,
+    pub pc_mg_coarse_ksp_rtol: Option<f64>,
     // BDDC
     pub pc_bddc_coarse_ksp_type: Option<String>,
     pub pc_bddc_coarse_pc_type: Option<String>,
@@ -1090,6 +1097,26 @@ impl Sink for PcOptions {
                     &mut self.pc_mg_smoother_steps,
                     ensure_ge_1("pc_mg_smoother_steps", parse_as::<usize>(v, spec)?)?
                 )
+            }
+            "pc_mg_coarsen_type" => set_opt!(&mut self.pc_mg_coarsen_type, v.to_lowercase()),
+            "pc_mg_interpolation_type" => {
+                set_opt!(&mut self.pc_mg_interpolation_type, v.to_lowercase())
+            }
+            "pc_mg_restriction_type" => {
+                set_opt!(&mut self.pc_mg_restriction_type, v.to_lowercase())
+            }
+            "pc_mg_coarse_pc_type" => set_opt!(&mut self.pc_mg_coarse_pc_type, v.to_lowercase()),
+            "pc_mg_coarse_ksp_type" => {
+                set_opt!(&mut self.pc_mg_coarse_ksp_type, v.to_lowercase())
+            }
+            "pc_mg_coarse_ksp_maxits" => {
+                set_opt!(
+                    &mut self.pc_mg_coarse_ksp_maxits,
+                    parse_as::<usize>(v, spec)?
+                )
+            }
+            "pc_mg_coarse_ksp_rtol" => {
+                set_opt!(&mut self.pc_mg_coarse_ksp_rtol, parse_as::<f64>(v, spec)?)
             }
             "pc_bddc_coarse_ksp_type" => {
                 set_opt!(&mut self.pc_bddc_coarse_ksp_type, v.to_lowercase())
@@ -2077,6 +2104,13 @@ impl PcOptions {
         o!(pc_mg_cycle_type);
         o!(pc_mg_smoother);
         o!(pc_mg_smoother_steps);
+        o!(pc_mg_coarsen_type);
+        o!(pc_mg_interpolation_type);
+        o!(pc_mg_restriction_type);
+        o!(pc_mg_coarse_pc_type);
+        o!(pc_mg_coarse_ksp_type);
+        o!(pc_mg_coarse_ksp_maxits);
+        o!(pc_mg_coarse_ksp_rtol);
         o!(pc_bddc_coarse_ksp_type);
         o!(pc_bddc_coarse_pc_type);
         o!(pc_bddc_use_vertices);
