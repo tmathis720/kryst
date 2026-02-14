@@ -259,6 +259,8 @@ pub struct PcOptions {
     pub pc_fieldsplit_schur_precondition: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
+    pub pc_shell_apply_transpose: Option<String>,
+    pub pc_shell_apply_symmetric: Option<String>,
     pub pc_shell_setup: Option<String>,
     pub pc_shell_destroy: Option<String>,
     pub pc_shell_context: Option<String>,
@@ -1082,6 +1084,12 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.pc_fieldsplit_schur_precondition, v.to_lowercase())
             }
             "pc_shell_name" => set_opt!(&mut self.pc_shell_name, v.to_string()),
+            "pc_shell_apply_transpose" => {
+                set_opt!(&mut self.pc_shell_apply_transpose, v.to_string())
+            }
+            "pc_shell_apply_symmetric" => {
+                set_opt!(&mut self.pc_shell_apply_symmetric, v.to_string())
+            }
             "pc_shell_setup" => set_opt!(&mut self.pc_shell_setup, v.to_string()),
             "pc_shell_destroy" => set_opt!(&mut self.pc_shell_destroy, v.to_string()),
             "pc_shell_context" => set_opt!(&mut self.pc_shell_context, v.to_string()),
@@ -2091,6 +2099,8 @@ impl PcOptions {
         o!(pc_fieldsplit_schur_fact_type);
         o!(pc_fieldsplit_schur_precondition);
         o!(pc_shell_name);
+        o!(pc_shell_apply_transpose);
+        o!(pc_shell_apply_symmetric);
         o!(pc_shell_setup);
         o!(pc_shell_destroy);
         o!(pc_shell_context);
@@ -3763,5 +3773,23 @@ mod old_tests {
         assert_eq!(root.rtol, None);
         assert_eq!(outer.ksp_type.as_deref(), Some("fgmres"));
         assert_eq!(outer.rtol, Some(1e-3));
+    }
+    #[test]
+    fn parses_shell_transpose_and_symmetric_hooks() {
+        let args = vec![
+            "-pc_shell_name",
+            "base",
+            "-pc_shell_apply_transpose",
+            "t_hook",
+            "-pc_shell_apply_symmetric",
+            "s_hook",
+            "-pc_shell_context",
+            "ctx",
+        ];
+        let opts = PcOptions::from_args(&args).expect("pc options parse should succeed");
+        assert_eq!(opts.pc_shell_name.as_deref(), Some("base"));
+        assert_eq!(opts.pc_shell_apply_transpose.as_deref(), Some("t_hook"));
+        assert_eq!(opts.pc_shell_apply_symmetric.as_deref(), Some("s_hook"));
+        assert_eq!(opts.pc_shell_context.as_deref(), Some("ctx"));
     }
 }
