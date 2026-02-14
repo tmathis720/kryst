@@ -61,6 +61,14 @@ fn pc_options_parse_scaffold_prefixes() {
         "0.1",
         "-pc_gamg_levels",
         "3",
+        "-pc_gamg_coarsen_type",
+        "pmis",
+        "-pc_gamg_interp_type",
+        "standard",
+        "-pc_gamg_aggressive_levels",
+        "2",
+        "-pc_gamg_aggressive_mis_k",
+        "5",
     ];
     let opts = PcOptions::from_args(&args).unwrap();
     assert_eq!(opts.pc_fieldsplit_block_sizes, Some(vec![2, 2]));
@@ -81,6 +89,10 @@ fn pc_options_parse_scaffold_prefixes() {
     assert_eq!(opts.pc_gamg_type.as_deref(), Some("agg"));
     assert_eq!(opts.pc_gamg_threshold, Some(0.1));
     assert_eq!(opts.pc_gamg_levels, Some(3));
+    assert_eq!(opts.pc_gamg_coarsen_type.as_deref(), Some("pmis"));
+    assert_eq!(opts.pc_gamg_interp_type.as_deref(), Some("standard"));
+    assert_eq!(opts.pc_gamg_aggressive_levels, Some(2));
+    assert_eq!(opts.pc_gamg_aggressive_mis_k, Some(5));
 }
 
 #[test]

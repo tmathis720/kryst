@@ -290,9 +290,20 @@ pub struct PcOptions {
     pub pc_bddc_coarse_pc_type: Option<String>,
     pub pc_bddc_use_vertices: Option<bool>,
     // GAMG
+    /// GAMG variant profile (`agg` or `classical`).
     pub pc_gamg_type: Option<String>,
+    /// GAMG strong-connection threshold in `(0, 1]`.
     pub pc_gamg_threshold: Option<f64>,
+    /// Maximum GAMG hierarchy depth.
     pub pc_gamg_levels: Option<usize>,
+    /// Override GAMG coarsening strategy (`rs`, `hmis`, `pmis`, `falgout`).
+    pub pc_gamg_coarsen_type: Option<String>,
+    /// Override GAMG interpolation (`classical`, `direct`, `multipass`, `extended`, `standard`, `he`).
+    pub pc_gamg_interp_type: Option<String>,
+    /// Number of aggressive coarsening levels.
+    pub pc_gamg_aggressive_levels: Option<usize>,
+    /// PMIS/HMIS neighborhood depth for aggressive coarsening (>= 2).
+    pub pc_gamg_aggressive_mis_k: Option<usize>,
 
     /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
@@ -1135,6 +1146,20 @@ impl Sink for PcOptions {
             "pc_gamg_type" => set_opt!(&mut self.pc_gamg_type, v.to_lowercase()),
             "pc_gamg_threshold" => set_opt!(&mut self.pc_gamg_threshold, parse_as::<f64>(v, spec)?),
             "pc_gamg_levels" => set_opt!(&mut self.pc_gamg_levels, parse_as::<usize>(v, spec)?),
+            "pc_gamg_coarsen_type" => set_opt!(&mut self.pc_gamg_coarsen_type, v.to_lowercase()),
+            "pc_gamg_interp_type" => set_opt!(&mut self.pc_gamg_interp_type, v.to_lowercase()),
+            "pc_gamg_aggressive_levels" => {
+                set_opt!(
+                    &mut self.pc_gamg_aggressive_levels,
+                    parse_as::<usize>(v, spec)?
+                )
+            }
+            "pc_gamg_aggressive_mis_k" => {
+                set_opt!(
+                    &mut self.pc_gamg_aggressive_mis_k,
+                    parse_as::<usize>(v, spec)?
+                )
+            }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_composite_type" => set_opt!(&mut self.pc_composite_type, v.to_lowercase()),
             "pc_composite_prefixes" => {
@@ -2127,6 +2152,10 @@ impl PcOptions {
         o!(pc_gamg_type);
         o!(pc_gamg_threshold);
         o!(pc_gamg_levels);
+        o!(pc_gamg_coarsen_type);
+        o!(pc_gamg_interp_type);
+        o!(pc_gamg_aggressive_levels);
+        o!(pc_gamg_aggressive_mis_k);
 
         o!(pc_chain);
         o!(pc_composite_type);

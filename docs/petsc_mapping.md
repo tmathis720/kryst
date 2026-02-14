@@ -121,6 +121,10 @@ features, options, and monitoring/convergence hooks.
 | `-pc_gamg_type` | [`PcOptions::pc_gamg_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_type) | Partial | Supported values: `agg`, `classical`. |
 | `-pc_gamg_threshold` | [`PcOptions::pc_gamg_threshold`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_threshold) | Supported | Maps to GAMG strength threshold. |
 | `-pc_gamg_levels` | [`PcOptions::pc_gamg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_levels) | Supported | Maps to GAMG hierarchy depth. |
+| `-pc_gamg_coarsen_type` | [`PcOptions::pc_gamg_coarsen_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_coarsen_type) | Supported | Coarsening override (`rs`, `hmis`, `pmis`, `falgout`). |
+| `-pc_gamg_interp_type` | [`PcOptions::pc_gamg_interp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_interp_type) | Supported | Interpolation override (`classical`, `direct`, `multipass`, `extended`, `standard`, `he`). |
+| `-pc_gamg_aggressive_levels` | [`PcOptions::pc_gamg_aggressive_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_aggressive_levels) | Supported | Aggressive coarsening level count (>=1). |
+| `-pc_gamg_aggressive_mis_k` | [`PcOptions::pc_gamg_aggressive_mis_k`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_aggressive_mis_k) | Supported | Aggressive PMIS/HMIS neighborhood depth (>=2). |
 
 ## Monitor hooks
 
@@ -180,7 +184,7 @@ Scope: coarse spaces, constraints, subdomain interface coupling, and full coarse
 
 <a id="tracking-gamg"></a>
 ### Tracking issue: GAMG support
-Scope: extended PETSc GAMG options beyond `-pc_gamg_type`, `-pc_gamg_threshold`, `-pc_gamg_levels`, plus richer hierarchy and smoother parity.
+Scope: remaining PETSc GAMG parity (e.g., richer smoother controls and hierarchy diagnostics) beyond currently supported type/threshold/levels/coarsen/interpolation/aggressive settings.
 
 <a id="tracking-breakdown-reason"></a>
 ### Tracking issue: Breakdown reason parity

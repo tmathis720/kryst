@@ -2,14 +2,16 @@ use crate::algebra::prelude::*;
 use crate::config::options::PcOptions;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::{
-    Op, OpFormat, PcCaps, PcDistributedSupport, PcSide, Preconditioner,
-};
+use crate::preconditioner::{Op, OpFormat, PcCaps, PcDistributedSupport, PcSide, Preconditioner};
 
 #[cfg(feature = "backend-faer")]
+use crate::config::kinds::{AmgCoarsenKind, AmgInterpKind};
+#[cfg(feature = "backend-faer")]
 use crate::preconditioner::amg::{
-    AMGConfig, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType, AMG,
+    AMG, AMGConfig, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType,
 };
+#[cfg(feature = "backend-faer")]
+use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GamgType {
@@ -54,9 +56,7 @@ impl GamgConfig {
 
         if let Some(levels) = opts.pc_gamg_levels {
             if levels == 0 {
-                return Err(KError::InvalidInput(
-                    "pc_gamg_levels must be >= 1".into(),
-                ));
+                return Err(KError::InvalidInput("pc_gamg_levels must be >= 1".into()));
             }
             amg_config.max_levels = levels;
         }
@@ -67,6 +67,28 @@ impl GamgConfig {
                 ));
             }
             amg_config.strong_threshold = threshold;
+        }
+        if let Some(coarsen_type) = opts.pc_gamg_coarsen_type.as_deref() {
+            amg_config.coarsen_type = map_gamg_coarsen_type(coarsen_type)?;
+        }
+        if let Some(interp_type) = opts.pc_gamg_interp_type.as_deref() {
+            amg_config.interp_type = map_gamg_interp_type(interp_type)?;
+        }
+        if let Some(levels) = opts.pc_gamg_aggressive_levels {
+            if levels == 0 {
+                return Err(KError::InvalidInput(
+                    "pc_gamg_aggressive_levels must be >= 1".into(),
+                ));
+            }
+            amg_config.agg_num_levels = levels;
+        }
+        if let Some(mis_k) = opts.pc_gamg_aggressive_mis_k {
+            if mis_k < 2 {
+                return Err(KError::InvalidInput(
+                    "pc_gamg_aggressive_mis_k must be >= 2".into(),
+                ));
+            }
+            amg_config.aggressive_mis_k = mis_k;
         }
 
         Ok(GamgConfig {
@@ -83,6 +105,30 @@ impl GamgConfig {
             "GAMG requires backend-faer; enable backend-faer to use GAMG options",
         ))
     }
+}
+
+#[cfg(feature = "backend-faer")]
+fn map_gamg_coarsen_type(value: &str) -> Result<CoarsenType, KError> {
+    let kind = AmgCoarsenKind::from_str(value)?;
+    Ok(match kind {
+        AmgCoarsenKind::Rs => CoarsenType::RS,
+        AmgCoarsenKind::Hmis => CoarsenType::HMIS,
+        AmgCoarsenKind::Pmis => CoarsenType::PMIS,
+        AmgCoarsenKind::Falgout => CoarsenType::Falgout,
+    })
+}
+
+#[cfg(feature = "backend-faer")]
+fn map_gamg_interp_type(value: &str) -> Result<InterpType, KError> {
+    let kind = AmgInterpKind::from_str(value)?;
+    Ok(match kind {
+        AmgInterpKind::Classical => InterpType::Classical,
+        AmgInterpKind::Direct => InterpType::Direct,
+        AmgInterpKind::Multipass => InterpType::Multipass,
+        AmgInterpKind::Extended => InterpType::Extended,
+        AmgInterpKind::Standard => InterpType::Standard,
+        AmgInterpKind::He => InterpType::HE,
+    })
 }
 
 #[cfg(feature = "backend-faer")]
@@ -181,5 +227,57 @@ impl Preconditioner for Gamg {
 
     fn preferred_drop_tol_for_format(&self) -> Option<R> {
         self.amg.preferred_drop_tol_for_format()
+    }
+}
+
+#[cfg(all(test, feature = "backend-faer"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gamg_config_parses_advanced_options() {
+        let opts = PcOptions {
+            pc_gamg_type: Some("agg".into()),
+            pc_gamg_levels: Some(5),
+            pc_gamg_threshold: Some(0.17),
+            pc_gamg_coarsen_type: Some("pmis".into()),
+            pc_gamg_interp_type: Some("standard".into()),
+            pc_gamg_aggressive_levels: Some(3),
+            pc_gamg_aggressive_mis_k: Some(4),
+            ..Default::default()
+        };
+
+        let cfg = GamgConfig::try_from_opts(&opts).expect("gamg config parse");
+        assert_eq!(cfg.gamg_type, GamgType::Agg);
+        assert_eq!(cfg.amg_config.max_levels, 5);
+        assert_eq!(cfg.amg_config.strong_threshold, 0.17);
+        assert_eq!(cfg.amg_config.coarsen_type, CoarsenType::PMIS);
+        assert_eq!(cfg.amg_config.interp_type, InterpType::Standard);
+        assert_eq!(cfg.amg_config.agg_num_levels, 3);
+        assert_eq!(cfg.amg_config.aggressive_mis_k, 4);
+        assert!(!cfg.amg_config.dist_apply_instrumentation);
+    }
+
+    #[test]
+    fn gamg_config_rejects_invalid_aggressive_controls() {
+        let opts = PcOptions {
+            pc_gamg_aggressive_levels: Some(0),
+            ..Default::default()
+        };
+        let err = GamgConfig::try_from_opts(&opts).expect_err("expected aggressive levels to fail");
+        assert!(
+            err.to_string()
+                .contains("pc_gamg_aggressive_levels must be >= 1")
+        );
+
+        let opts = PcOptions {
+            pc_gamg_aggressive_mis_k: Some(1),
+            ..Default::default()
+        };
+        let err = GamgConfig::try_from_opts(&opts).expect_err("expected mis k to fail");
+        assert!(
+            err.to_string()
+                .contains("pc_gamg_aggressive_mis_k must be >= 2")
+        );
     }
 }
