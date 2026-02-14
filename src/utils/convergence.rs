@@ -32,8 +32,10 @@ pub enum ConvergedReason {
     ConvergedTrustRegion,
     /// Converged due to a happy breakdown (e.g., `pᵀAp` ≈ 0)
     ConvergedHappyBreakdown,
-    /// Diverged due to NaN or Inf residuals
-    DivergedNanOrInf,
+    /// Diverged due to NaN residuals
+    DivergedNan,
+    /// Diverged due to Inf residuals
+    DivergedInf,
     /// Diverged due to divergence tolerance: ‖r‖ ≥ dtol * ‖b‖
     DivergedDtol,
     /// Diverged due to maximum iterations reached
@@ -64,7 +66,8 @@ impl ConvergedReason {
             ConvergedReason::ConvergedAtol => "KSP_CONVERGED_ATOL",
             ConvergedReason::ConvergedTrustRegion => "KSP_CONVERGED_TRUST_REGION",
             ConvergedReason::ConvergedHappyBreakdown => "KSP_CONVERGED_HAPPY_BREAKDOWN",
-            ConvergedReason::DivergedNanOrInf => "KSP_DIVERGED_NANORINF",
+            ConvergedReason::DivergedNan => "KSP_DIVERGED_NANORINF",
+            ConvergedReason::DivergedInf => "KSP_DIVERGED_NANORINF",
             ConvergedReason::DivergedDtol => "KSP_DIVERGED_DTOL",
             ConvergedReason::DivergedMaxIts => "KSP_DIVERGED_ITS",
             ConvergedReason::DivergedBreakdown => "KSP_DIVERGED_BREAKDOWN",
@@ -75,6 +78,17 @@ impl ConvergedReason {
             ConvergedReason::DivergedPcFailed => "KSP_DIVERGED_PC_FAILED",
             ConvergedReason::StoppedByMonitor => "KSP_DIVERGED_USER",
             ConvergedReason::Continued => "KSP_CONVERGED_ITERATING",
+        }
+    }
+
+    /// Classify a non-finite value as a dedicated convergence reason.
+    pub fn from_non_finite(value: R) -> Option<Self> {
+        if value.is_nan() {
+            Some(ConvergedReason::DivergedNan)
+        } else if value.is_infinite() {
+            Some(ConvergedReason::DivergedInf)
+        } else {
+            None
         }
     }
 
@@ -191,9 +205,11 @@ impl Convergence {
     /// # Returns
     /// Tuple of (ConvergedReason, SolveStats) indicating the stopping reason.
     pub fn check(&self, rnorm: R, bnorm: R, iters: usize) -> (ConvergedReason, SolveStats<R>) {
-        if !rnorm.is_finite() || !bnorm.is_finite() {
-            let stats = SolveStats::new(iters, rnorm, ConvergedReason::DivergedNanOrInf);
-            return (ConvergedReason::DivergedNanOrInf, stats);
+        if let Some(reason) = ConvergedReason::from_non_finite(rnorm)
+            .or_else(|| ConvergedReason::from_non_finite(bnorm))
+        {
+            let stats = SolveStats::new(iters, rnorm, reason);
+            return (reason, stats);
         }
 
         // Absolute tolerance test first (most restrictive)
@@ -387,10 +403,13 @@ mod tests {
     fn test_convergence_nan_or_inf() {
         let conv = Convergence::new(1e-6, 1e-12, 1e3, 10);
         let (reason_nan, _) = conv.check(f64::NAN, 1.0, 1);
-        assert_eq!(reason_nan, ConvergedReason::DivergedNanOrInf);
+        assert_eq!(reason_nan, ConvergedReason::DivergedNan);
 
         let (reason_inf, _) = conv.check(f64::INFINITY, 1.0, 2);
-        assert_eq!(reason_inf, ConvergedReason::DivergedNanOrInf);
+        assert_eq!(reason_inf, ConvergedReason::DivergedInf);
+
+        let (reason_bnorm_inf, _) = conv.check(1.0, f64::INFINITY, 3);
+        assert_eq!(reason_bnorm_inf, ConvergedReason::DivergedInf);
     }
 
     #[test]

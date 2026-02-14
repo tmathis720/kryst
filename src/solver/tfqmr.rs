@@ -117,8 +117,8 @@ impl TfqmrSolver {
             res_sq = R::default();
         }
         let res0: R = res_sq.sqrt();
-        if !res0.is_finite() {
-            return Ok(SolveStats::new(0, res0, ConvergedReason::DivergedNanOrInf));
+        if let Some(reason) = ConvergedReason::from_non_finite(res0) {
+            return Ok(SolveStats::new(0, res0, reason));
         }
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
         if call_monitors(monitors, 0, res0, 0) {
@@ -131,13 +131,13 @@ impl TfqmrSolver {
             stats.final_residual = res0;
             return Ok(stats);
         }
-        if !rho.is_finite() {
-            stats.reason = ConvergedReason::DivergedNanOrInf;
+        if let Some(reason) = ConvergedReason::from_non_finite(rho.abs()) {
+            stats.reason = reason;
             stats.final_residual = res0;
             return Ok(stats);
         }
         if rho.abs() < self.breakdown_eps {
-            stats.reason = ConvergedReason::DivergedBreakdown;
+            stats.reason = ConvergedReason::DivergedBreakdownBiCG;
             stats.final_residual = res0;
             return Ok(stats);
         }
@@ -159,29 +159,29 @@ impl TfqmrSolver {
             }
 
             let sigma: S = red.dot(r_tld, v);
-            if !sigma.is_finite() {
+            if let Some(reason) = ConvergedReason::from_non_finite(sigma.abs()) {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedNanOrInf;
+                stats.reason = reason;
                 return Ok(stats);
             }
             if sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedBreakdown;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 return Ok(stats);
             }
             let alpha = rho / sigma;
-            if !alpha.is_finite() {
+            if let Some(reason) = ConvergedReason::from_non_finite(alpha.abs()) {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedNanOrInf;
+                stats.reason = reason;
                 return Ok(stats);
             }
             if alpha.abs() <= R::default() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedBreakdown;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 return Ok(stats);
             }
 
@@ -279,15 +279,15 @@ impl TfqmrSolver {
             let update_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
             red.dot_many_into(&update_pairs, &mut reductions);
             let rho_new: S = reductions[0];
-            if !rho_new.is_finite() {
+            if let Some(reason) = ConvergedReason::from_non_finite(rho_new.abs()) {
                 stats.iterations = k;
-                stats.reason = ConvergedReason::DivergedNanOrInf;
+                stats.reason = reason;
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
             if rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
-                stats.reason = ConvergedReason::DivergedBreakdown;
+                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
@@ -655,5 +655,54 @@ mod tests {
             )
             .unwrap();
         assert!(!residuals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tfqmr_reports_breakdown_reason() {
+        let a = Dense {
+            a: vec![vec![s(2.0), s(1.0)], vec![s(3.0), s(4.0)]],
+        };
+        let b = [s(4.0), s(11.0)];
+        let mut x = [S::zero(), S::zero()];
+        let mut w = Workspace::new(2);
+        let mut solver = TfqmrSolver::new(1e-12, 20);
+        solver.breakdown_eps = 1e9;
+        let stats = solver
+            .solve_k(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                Some(&mut w),
+            )
+            .unwrap();
+        assert_eq!(stats.reason, ConvergedReason::DivergedBreakdownBiCG);
+    }
+
+    #[test]
+    fn tfqmr_reports_nan_reason() {
+        let a = Dense {
+            a: vec![vec![s(f64::NAN), s(0.0)], vec![s(0.0), s(1.0)]],
+        };
+        let b = [s(1.0), s(1.0)];
+        let mut x = [S::zero(), S::zero()];
+        let mut w = Workspace::new(2);
+        let mut solver = TfqmrSolver::new(1e-12, 20);
+        let stats = solver
+            .solve_k(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &UniverseComm::NoComm(crate::parallel::NoComm),
+                None,
+                Some(&mut w),
+            )
+            .unwrap();
+        assert_eq!(stats.reason, ConvergedReason::DivergedNan);
     }
 }

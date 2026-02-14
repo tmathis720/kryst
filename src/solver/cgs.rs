@@ -189,7 +189,7 @@ impl CgsSolver {
             return Ok(SolveStats::new(
                 0,
                 rnorm,
-                ConvergedReason::DivergedBreakdown,
+                ConvergedReason::DivergedBreakdownBiCG,
             ));
         }
 
@@ -213,7 +213,7 @@ impl CgsSolver {
                 return Ok(SolveStats::new(
                     k,
                     rnorm,
-                    ConvergedReason::DivergedBreakdown,
+                    ConvergedReason::DivergedBreakdownBiCG,
                 ));
             }
             let alpha = rho / sigma;
@@ -256,7 +256,7 @@ impl CgsSolver {
                 return Ok(SolveStats::new(
                     k,
                     rnorm,
-                    ConvergedReason::DivergedBreakdown,
+                    ConvergedReason::DivergedBreakdownBiCG,
                 ));
             }
             let beta = rho / rho_old;

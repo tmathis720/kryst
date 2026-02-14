@@ -187,12 +187,8 @@ impl QmrSolver {
             let s_view: &[S] = &s[..];
             red.dot_many_into(&[(t_view, t_view), (t_view, s_view)], &mut reductions);
             let tt = dot_result_to_real(reductions[0]);
-            if !tt.is_finite() {
-                return Ok(SolveStats::new(
-                    k + 1,
-                    res,
-                    ConvergedReason::DivergedNanOrInf,
-                ));
+            if let Some(reason) = ConvergedReason::from_non_finite(tt) {
+                return Ok(SolveStats::new(k + 1, res, reason));
             }
             if tt <= eps {
                 return Ok(SolveStats::new(
