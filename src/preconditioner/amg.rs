@@ -20,6 +20,8 @@ use crate::error::KError;
 use crate::matrix::DistCsrOp;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::dist::halo::HaloPlan;
+#[cfg(all(feature = "complex", feature = "backend-faer"))]
+use crate::matrix::op::{CsrOp, DenseOp, GenericCsrOp};
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 #[cfg(feature = "complex")]
 use crate::matrix::parcsr::HaloPlan;
@@ -29,8 +31,6 @@ use crate::matrix::{
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
 };
-#[cfg(all(feature = "complex", feature = "backend-faer"))]
-use crate::matrix::op::{CsrOp, DenseOp, GenericCsrOp};
 #[cfg(feature = "simd")]
 use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
@@ -2641,10 +2641,7 @@ fn csr_from_dense_complex(mat: &Mat<S>, drop_tol: R) -> CsrMatrix<S> {
 }
 
 #[cfg(feature = "complex")]
-fn csr_from_linop_complex(
-    op: &dyn LinOp<S = S>,
-    drop_tol: R,
-) -> Result<Arc<CsrMatrix<S>>, KError> {
+fn csr_from_linop_complex(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<S>>, KError> {
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
         return Ok(Arc::new(csr.clone()));
     }
@@ -2668,10 +2665,7 @@ fn csr_from_linop_complex(
     }
     #[cfg(feature = "backend-faer")]
     if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp<S>>() {
-        return Ok(Arc::new(csr_from_dense_complex(
-            dense_op.inner(),
-            drop_tol,
-        )));
+        return Ok(Arc::new(csr_from_dense_complex(dense_op.inner(), drop_tol)));
     }
     Err(KError::InvalidInput(
         "AMG: unsupported complex LinOp; provide CSR/Dense or GenericCsrOp".into(),
@@ -3231,6 +3225,14 @@ pub struct AMG {
     stats: Option<AmgStats>,
     runtime: Mutex<AmgRuntime>,
     dist: Option<DistAmgInfo>,
+    transfer_overrides: BTreeMap<usize, AmgTransferOperators>,
+    coarse_level_overrides: BTreeMap<usize, CoarseSolve>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AmgTransferOperators {
+    pub prolongation: CsrMatrix<f64>,
+    pub restriction: CsrMatrix<f64>,
 }
 
 impl Default for AMG {
@@ -3244,6 +3246,8 @@ impl Default for AMG {
             stats: None,
             runtime: Mutex::new(AmgRuntime::default()),
             dist: None,
+            transfer_overrides: BTreeMap::new(),
+            coarse_level_overrides: BTreeMap::new(),
         }
     }
 }
@@ -3265,6 +3269,19 @@ impl AMG {
             state: AmgState::Uninitialized,
             ..Default::default()
         }
+    }
+
+    pub fn set_level_transfer_operators(&mut self, level: usize, operators: AmgTransferOperators) {
+        self.transfer_overrides.insert(level, operators);
+    }
+
+    pub fn set_level_coarse_solver(&mut self, level: usize, solve: CoarseSolve) {
+        self.coarse_level_overrides.insert(level, solve);
+    }
+
+    pub fn clear_hierarchy_overrides(&mut self) {
+        self.transfer_overrides.clear();
+        self.coarse_level_overrides.clear();
     }
 
     fn make_cycle_policy(cfg: &AMGConfig) -> Box<dyn CyclePolicy + Send + Sync> {
@@ -3378,14 +3395,14 @@ impl AMG {
     fn build_symbolic(&mut self, fine: &CsrMatrix<f64>) -> Result<Box<AmgHierarchy>, KError> {
         // Build the full hierarchy from scratch (symbolic + numeric)
         let mut cfg = self.cfg.clone();
-        let primary = build_hierarchy(fine, &mut cfg);
+        let primary = build_hierarchy(fine, &mut cfg, &self.transfer_overrides);
         let (hier, stats, used_cfg) = match primary {
             Ok((hier, stats)) => (hier, stats, cfg),
             Err(primary_err) => {
                 let mut fallback_cfg = cfg.clone();
                 fallback_cfg.coarsen_type = CoarsenType::RS;
                 fallback_cfg.interp_type = InterpType::Classical;
-                match build_hierarchy(fine, &mut fallback_cfg) {
+                match build_hierarchy(fine, &mut fallback_cfg, &self.transfer_overrides) {
                     Ok((hier, stats)) => (hier, stats, fallback_cfg),
                     Err(fallback_err) => {
                         let mut smoother_cfg = cfg.clone();
@@ -3411,6 +3428,15 @@ impl AMG {
         #[cfg(test)]
         BUILD_SYMBOLIC_COUNT.with(|c| c.set(c.get() + 1));
         self.cfg = used_cfg;
+        if let Some((_, solve)) = self
+            .coarse_level_overrides
+            .iter()
+            .filter(|(lvl, _)| **lvl < hier.levels.len())
+            .max_by_key(|(lvl, _)| *lvl)
+        {
+            // best-effort: pick the deepest matching override for the built hierarchy.
+            self.cfg.coarse_solve = *solve;
+        }
         self.cycle_policy = Self::make_cycle_policy(&self.cfg);
         self.stats = stats;
         Ok(Box::new(hier))
@@ -6578,6 +6604,7 @@ impl crate::preconditioner::legacy::Preconditioner<Mat<f64>, Vec<f64>> for AMG {
 fn build_hierarchy(
     fine: &CsrMatrix<f64>,
     cfg: &mut AMGConfig,
+    transfer_overrides: &BTreeMap<usize, AmgTransferOperators>,
 ) -> Result<(AmgHierarchy, Option<AmgStats>), KError> {
     let mut levels: Vec<AMGLevel> = Vec::with_capacity(cfg.max_levels);
     let mut a_cur = fine.clone();
@@ -6698,6 +6725,9 @@ fn build_hierarchy(
             nnz_r: 0,
             max_row_sum_a: max_row_sum_abs(&a_cur),
             eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
+            smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+            smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
+                * a_cur.nnz() as f64,
         });
         timings.push(lt0);
     }
@@ -7048,6 +7078,35 @@ fn build_hierarchy(
                 }
             }
         }
+        if let Some(override_ops) = transfer_overrides.get(&level) {
+            if override_ops.prolongation.nrows() != n {
+                return Err(KError::InvalidInput(format!(
+                    "AMG transfer override level {level} has P rows {}, expected {n}",
+                    override_ops.prolongation.nrows()
+                )));
+            }
+            if override_ops.restriction.ncols() != n {
+                return Err(KError::InvalidInput(format!(
+                    "AMG transfer override level {level} has R cols {}, expected {n}",
+                    override_ops.restriction.ncols()
+                )));
+            }
+            if override_ops.prolongation.ncols() != override_ops.restriction.nrows() {
+                return Err(KError::InvalidInput(format!(
+                    "AMG transfer override level {level} has inconsistent coarse dims P: {} cols, R: {} rows",
+                    override_ops.prolongation.ncols(),
+                    override_ops.restriction.nrows()
+                )));
+            }
+            p = override_ops.prolongation.clone();
+            p_csr = Pcsr {
+                m: p.nrows(),
+                n: p.ncols(),
+                row_ptr: p.row_ptr().to_vec(),
+                col_idx: p.col_idx().to_vec(),
+                vals: p.values().to_vec(),
+            };
+        }
         // R = P^T pattern and values
         let (r_row_ptr, r_col_idx, r_vals, p2r_pos) =
             with_timing(do_stats, &mut lt.restrict, || {
@@ -7319,6 +7378,9 @@ fn build_hierarchy(
                 nnz_r: 0,
                 max_row_sum_a: max_row_sum_abs(&a_cur),
                 eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
+                smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+                smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
+                    * a_cur.nnz() as f64,
             });
             let ls_len = level_stats.len();
             if ls_len >= 2
@@ -7512,6 +7574,9 @@ fn build_smoother_only_hierarchy(
             nnz_r: 0,
             max_row_sum_a: max_row_sum_abs(fine),
             eff_nnz_a: Some(eff_nnz(fine, cfg.stats_eps)),
+            smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+            smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
+                * fine.nnz() as f64,
         }];
         stats.diagnostics = vec![AmgLevelStats {
             p_min_col_norm: 0.0,
@@ -9026,6 +9091,8 @@ pub struct LevelStats {
     pub nnz_r: usize,
     pub max_row_sum_a: f64,
     pub eff_nnz_a: Option<usize>,
+    pub smoother_sweeps: usize,
+    pub smoothing_work_estimate: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -9160,6 +9227,11 @@ fn operator_complexity_estimate(levels: &[AMGLevel]) -> f64 {
 fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
     let mut out = Vec::with_capacity(h.levels.len());
     for (i, lvl) in h.levels.iter().enumerate() {
+        let sweeps = h.policy.sweeps[if i == h.coarsest_ix() {
+            RelaxPhase::Coarsest.ix()
+        } else {
+            RelaxPhase::Down.ix()
+        }];
         out.push(LevelStats {
             level: i,
             n: lvl.a.nrows(),
@@ -9179,6 +9251,8 @@ fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
             },
             max_row_sum_a: max_row_sum_abs(&lvl.a),
             eff_nnz_a: Some(eff_nnz(&lvl.a, cfg.stats_eps)),
+            smoother_sweeps: sweeps,
+            smoothing_work_estimate: sweeps as f64 * lvl.a.nnz() as f64,
         });
     }
     out

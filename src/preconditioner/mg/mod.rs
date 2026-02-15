@@ -10,6 +10,7 @@ use crate::matrix::utils::rap_opt;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::ksp_pc::KspAsPc;
 use crate::preconditioner::{PcSide, Preconditioner};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -196,6 +197,7 @@ pub struct MgPc {
     interp: MgInterpType,
     restrict: MgRestrictType,
     user_transfers: Vec<(usize, Arc<CsrMatrix<f64>>, Arc<CsrMatrix<f64>>)>,
+    level_coarse_pc_types: BTreeMap<usize, String>,
     comm: UniverseComm,
 }
 
@@ -247,6 +249,7 @@ impl MgPc {
             interp,
             restrict,
             user_transfers: Vec::new(),
+            level_coarse_pc_types: BTreeMap::new(),
             comm: UniverseComm::NoComm(crate::parallel::NoComm),
         }
     }
@@ -292,6 +295,22 @@ impl MgPc {
         )
     }
 
+    pub fn set_level_coarse_solver_type(
+        &mut self,
+        level: usize,
+        pc_type: impl Into<String>,
+    ) -> Result<(), KError> {
+        if level >= self.levels {
+            return Err(KError::InvalidInput(format!(
+                "level {level} out of range for {} levels",
+                self.levels
+            )));
+        }
+        let value = pc_type.into().to_lowercase();
+        let _ = PcType::from_str(&value)?;
+        self.level_coarse_pc_types.insert(level, value);
+        Ok(())
+    }
     pub fn hierarchy(&self) -> &MgHierarchy {
         self.hierarchy
             .as_ref()
@@ -586,9 +605,15 @@ impl Preconditioner for MgPc {
             lvl.smoother = Some(smoother);
         }
 
-        let coarse_pc_type = self
-            .coarse_pc_type
-            .as_deref()
+        let coarse_level = self.levels.saturating_sub(1);
+        let coarse_override = self
+            .level_coarse_pc_types
+            .iter()
+            .filter(|(lvl, _)| **lvl <= coarse_level)
+            .max_by_key(|(lvl, _)| *lvl)
+            .map(|(_, v)| v.as_str());
+        let coarse_pc_type = coarse_override
+            .or(self.coarse_pc_type.as_deref())
             .map(PcType::from_str)
             .transpose()?
             .unwrap_or(smoother_pc_type);
@@ -700,5 +725,28 @@ mod tests {
         assert!(MgCoarsenType::from_option(Some("aggregation")).is_ok());
         assert!(MgInterpType::from_option(Some("linear")).is_ok());
         assert!(MgRestrictType::from_option(Some("full_weighting")).is_ok());
+    }
+
+    #[test]
+    fn mg_level_coarse_solver_override_records() {
+        let mut mg = MgPc::new(
+            3,
+            Some("v".into()),
+            Some("jacobi".into()),
+            Some(1),
+            Some("linear".into()),
+            Some("linear".into()),
+            Some("full_weighting".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        mg.set_level_coarse_solver_type(1, "ilu0")
+            .expect("set level coarse solver");
+        assert_eq!(
+            mg.level_coarse_pc_types.get(&1).map(String::as_str),
+            Some("ilu0")
+        );
     }
 }

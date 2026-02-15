@@ -73,7 +73,7 @@ operator is a `DistCsrOp` and `mpi` is enabled.
 | Chebyshev / SOR / SSOR | ✅ | ⚠️ | Local-only; select `pc_global` if a global wrapper is desired. |
 | Approximate Inverse | ✅ | ⚠️ | Rank-local only under MPI. |
 | ASM / RAS | ⚠️ | ✅ | Distributed ASM supports RAS mode with overlap; ASM mode is local only. |
-| AMG | ⚠️ | ✅ | Distributed AMG uses `root_gather` or `local_prototype` coarse strategy (`pc_amg_dist_apply_mode`). |
+| AMG / GAMG | ⚠️ | ✅ | Distributed coarse execution is policy-controlled (`pc_amg_dist_apply_mode`); diagnostics include grid/operator complexity and per-level nnz/smoothing-work estimates. |
 | LU / QR (dense-direct) | ✅ | ❌ | Local-only under MPI; use `SuperLU_DIST` for distributed direct solves. |
 | SuperLU_DIST | ❌ | ✅ | Distributed direct solve when `superlu_dist` feature is enabled. |
 | PC Chain | ⚠️ | ⚠️ | Each stage retains its own local vs distributed behavior. |
@@ -157,6 +157,17 @@ let mut y = vec![S::zero(); 2];
 
 a.spmv_transpose_scaled(S::one(), &x, S::zero(), &mut y).unwrap();
 ```
+
+
+### AMG/GAMG feature-behavior notes by build
+
+| Feature set | AMG/GAMG hierarchy behavior | Scaling tradeoff |
+| --- | --- | --- |
+| `backend-faer` | Full AMG hierarchy build, symbolic+numeric phases with cached numeric refresh when structure is unchanged. | Best single-rank baseline; coarsening quality dominates setup time. |
+| `backend-faer,rayon` | Same hierarchy semantics; smoother and local SpMV paths can parallelize per-rank work. | Better throughput on medium/large ranks; thread oversubscription can hurt coarse-level latency. |
+| `backend-faer,mpi` | Distributed apply supports coarse policies via `pc_amg_dist_apply_mode` (`root_gather`/`local_prototype`). | `root_gather` lowers implementation risk but centralizes coarse solve; `local_prototype` avoids gather bottleneck but may reduce coarse-grid quality. |
+| `backend-faer,mpi,rayon` | MPI coarse policy + threaded local smoothers/matvec; instrumentation via `pc_amg_dist_instrumentation`. | Highest ceiling for strong scaling if coarse policy is tuned; requires balancing MPI ranks vs threads. |
+| `backend-faer,complex` | AMG/GAMG remain available but core hierarchy operators are still real-valued in MG paths. | Use AMG/GAMG where real-operator assumptions are valid; complex workloads may need additional projection cost. |
 
 ## CSR invariants
 
