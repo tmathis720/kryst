@@ -57,6 +57,10 @@ pub enum LocalPcKind {
     Ilu,
     Ilut,
     Ilutp,
+    Sor,
+    Chebyshev,
+    Fsai,
+    Spai,
 }
 
 impl FromStr for LocalPcKind {
@@ -67,6 +71,10 @@ impl FromStr for LocalPcKind {
             "ilu" => Ok(LocalPcKind::Ilu),
             "ilut" => Ok(LocalPcKind::Ilut),
             "ilutp" => Ok(LocalPcKind::Ilutp),
+            "sor" => Ok(LocalPcKind::Sor),
+            "chebyshev" | "cheby" => Ok(LocalPcKind::Chebyshev),
+            "fsai" => Ok(LocalPcKind::Fsai),
+            "spai" | "approxinv" => Ok(LocalPcKind::Spai),
             other => Err(KError::InvalidInput(format!(
                 "Unknown pc_local value: {other}"
             ))),

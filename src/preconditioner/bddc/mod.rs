@@ -3,7 +3,7 @@
 use crate::algebra::scalar::{R, S};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 
 #[derive(Debug, Clone)]
 pub struct BddcConfig {
@@ -146,5 +146,9 @@ impl Preconditioner for BddcPc {
         }
         y.copy_from_slice(x);
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::Distributed
     }
 }

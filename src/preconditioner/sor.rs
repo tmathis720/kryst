@@ -32,19 +32,19 @@ use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
-use crate::preconditioner::{legacy::Preconditioner, PcSide};
+use crate::preconditioner::{PcDistributedSupport, PcSide, legacy::Preconditioner};
 use crate::utils::coloring::{build_blocks_from_colors, csr_distance2_coloring};
 use bitflags::bitflags;
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 bitflags! {
     /// Bitflags for SOR sweep types and options.
@@ -520,6 +520,10 @@ impl ObjPreconditioner for SorPc {
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
     }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
+    }
 }
 
 #[cfg(feature = "complex")]
@@ -566,6 +570,10 @@ impl ObjPreconditioner for SorPc {
             y[i] = S::from_parts(yr[i], yi[i]);
         }
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 

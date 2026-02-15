@@ -27,7 +27,7 @@ use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use std::cell::RefCell;
 
 thread_local! {
@@ -259,6 +259,18 @@ impl Preconditioner for PcChain {
             }
         }
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        if self
+            .stages
+            .iter()
+            .any(|stage| stage.distributed_support() == PcDistributedSupport::Distributed)
+        {
+            PcDistributedSupport::Distributed
+        } else {
+            PcDistributedSupport::LocalOnly
+        }
     }
 }
 

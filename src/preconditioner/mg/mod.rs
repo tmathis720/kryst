@@ -9,7 +9,7 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::rap_opt;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::ksp_pc::KspAsPc;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -673,6 +673,10 @@ impl Preconditioner for MgPc {
         y.fill(S::zero());
         self.mg_cycle(0, x, y, self.cycle)?;
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 

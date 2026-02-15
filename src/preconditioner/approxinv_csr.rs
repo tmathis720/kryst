@@ -18,7 +18,7 @@ use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 
 use faer::Mat;
 use faer::linalg::solvers::SolveLstsq;
@@ -449,6 +449,10 @@ impl Preconditioner for FsaiCsr {
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
     }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
+    }
 }
 
 #[cfg(feature = "complex")]
@@ -741,6 +745,10 @@ impl Preconditioner for SpaiCsr {
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 

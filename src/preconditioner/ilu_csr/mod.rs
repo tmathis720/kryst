@@ -6,7 +6,9 @@ use crate::matrix::convert::csr_from_linop;
 use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
-use crate::preconditioner::{LocalPreconditioner, Op, PcCaps, PcSide, Preconditioner};
+use crate::preconditioner::{
+    LocalPreconditioner, Op, PcCaps, PcDistributedSupport, PcSide, Preconditioner,
+};
 use crate::utils::conditioning::{ConditioningOptions, apply_csr_transforms};
 use crate::utils::permutation::{Permutation, amd_csr, permute_csr_symmetric, rcm_csr};
 
@@ -1099,6 +1101,10 @@ impl Preconditioner for IluCsr {
 
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         self.apply_op_scalar(Op::NoTrans, x, y)
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 
     fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
