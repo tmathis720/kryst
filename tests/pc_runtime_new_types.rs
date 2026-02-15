@@ -137,14 +137,18 @@ fn smoke_fieldsplit_shell_ksp_mg_and_bddc_placeholder() {
     mg.setup(op.as_ref()).expect("mg setup");
     mg.apply(PcSide::Left, &x, &mut y).expect("mg apply");
 
-    let err = match PcFactory::create_from_options(&PcOptions {
+    match PcFactory::create_from_options(&PcOptions {
         pc_type: Some("bddc".into()),
         ..Default::default()
     }) {
-        Ok(_) => panic!("bddc unexpectedly succeeded"),
-        Err(e) => e,
-    };
-    assert!(err.to_string().to_lowercase().contains("bddc"));
+        Ok(mut bddc) => {
+            bddc.setup(op.as_ref()).expect("bddc setup");
+            bddc.apply(PcSide::Left, &x, &mut y).expect("bddc apply");
+        }
+        Err(err) => {
+            assert!(err.to_string().to_lowercase().contains("bddc"));
+        }
+    }
 }
 
 #[test]

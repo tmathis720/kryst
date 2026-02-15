@@ -125,7 +125,7 @@ impl LinOp for CsrLinOp {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
-        self
+        self.csr.as_ref()
     }
 
     fn comm(&self) -> UniverseComm {
