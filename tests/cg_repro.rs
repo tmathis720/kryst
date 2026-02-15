@@ -63,7 +63,44 @@ fn run_once(comm: &UniverseComm, threads: Option<usize>) -> Vec<f64> {
         MonitorAction::Continue
     });
 
-    ksp.solve(&rhs, &mut x).unwrap();
+    let _ = ksp.solve(&rhs, &mut x).unwrap();
+
+    history.lock().unwrap().clone()
+}
+
+fn run_once_with_variant(
+    comm: &UniverseComm,
+    threads: Option<usize>,
+    variant: CgVariant,
+) -> Vec<f64> {
+    let n = 32;
+    let a = make_spd_operator(comm, n);
+    let rhs = vec![1.0; n];
+    let mut x = vec![0.0; n];
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Cg).unwrap();
+    ksp.try_set_pc_side(PcSide::Left).unwrap();
+    ksp.set_operators(a, None);
+
+    let mut opts = KspOptions::default();
+    opts.reproducible = Some(true);
+    opts.cg_variant = Some(variant);
+    opts.threads = threads;
+    ksp.set_from_options(&opts).unwrap();
+    ksp.set_tolerances(1e-12, 0.0, 1e6, 100);
+
+    let history = Arc::new(Mutex::new(Vec::new()));
+    let monitor_history = Arc::clone(&history);
+    ksp.clear_monitors();
+    ksp.add_monitor(move |_iter, residual, _reductions| {
+        if let Ok(mut guard) = monitor_history.lock() {
+            guard.push(residual);
+        }
+        MonitorAction::Continue
+    });
+
+    let _ = ksp.solve(&rhs, &mut x).unwrap();
 
     history.lock().unwrap().clone()
 }
@@ -103,5 +140,20 @@ fn reproducible_history_multi_thread() {
             (a - b).abs() <= 1e-12 * scale,
             "residual mismatch: {a} vs {b}"
         );
+    }
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn pipelined_reproducible_histories_stable_per_thread_count() {
+    let comm = test_comm();
+    for &threads in &[1usize, 2usize, 4usize] {
+        let h1 = run_once_with_variant(&comm, Some(threads), CgVariant::Pipelined);
+        let h2 = run_once_with_variant(&comm, Some(threads), CgVariant::Pipelined);
+        assert_eq!(h1.len(), h2.len());
+        for (a, b) in h1.iter().zip(h2.iter()) {
+            let scale = a.abs().max(b.abs()).max(1.0);
+            assert!((a - b).abs() <= 1e-12 * scale);
+        }
     }
 }

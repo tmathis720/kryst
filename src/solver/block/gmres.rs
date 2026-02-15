@@ -8,12 +8,13 @@ use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::ops::klinop::KLinOp;
-use crate::ops::wrap::as_s_op;
+use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
+use crate::utils::reduction::test_hooks;
 use std::any::Any;
 
 use super::BlockKrylovOptions;
@@ -79,11 +80,6 @@ impl LinearSolver for BlockGmresSolver {
         }
         #[cfg(feature = "backend-faer")]
         {
-            if pc.is_some() {
-                return Err(KError::Unsupported(
-                    "block GMRES preconditioning is not implemented",
-                ));
-            }
             if !matches!(pc_side, PcSide::Left) {
                 return Err(KError::Unsupported(
                     "block GMRES currently supports only left preconditioning",
@@ -116,6 +112,10 @@ impl LinearSolver for BlockGmresSolver {
             let mut local_ws = Workspace::default();
             let work = work.unwrap_or(&mut local_ws);
             let op = as_s_op(a);
+            let pc_wrapper = pc.as_deref().map(as_s_pc);
+            let pc_ref = pc_wrapper
+                .as_ref()
+                .map(|w| w as &dyn crate::ops::kpc::KPreconditioner<Scalar = S>);
             let mut scratch = crate::algebra::bridge::BridgeScratch::new();
 
             let mut b_block = BlockVec::new(ncols, p);
@@ -127,18 +127,21 @@ impl LinearSolver for BlockGmresSolver {
             let mut ax_block = BlockVec::new(ncols, p);
             compute_residual(
                 &op,
+                pc_ref,
                 &b_block,
                 &x_block,
                 &mut r_block,
                 &mut ax_block,
                 &mut scratch,
-            );
+            )?;
 
             let bnorm = block_norm_max(&b_block, comm);
+            let start_reduct = test_hooks::wait_counters();
             let mut rnorm = block_norm_max(&r_block, comm);
             let mut iterations = 0usize;
             let mut reason = ConvergedReason::Continued;
             let mut counters = SolverCounters::default();
+            counters.num_global_reductions += 2;
             let conv = Convergence::new(
                 self.options.rtol,
                 self.options.atol,
@@ -161,7 +164,8 @@ impl LinearSolver for BlockGmresSolver {
 
             while iterations < self.options.max_iters {
                 let mut v0 = r_block.clone();
-                let beta = block_qr(&mut v0, comm, work)?;
+                let (beta, qr_reductions) = block_qr(&mut v0, comm, work)?;
+                counters.num_global_reductions += qr_reductions;
                 basis.clear();
                 basis.push(v0);
                 for val in &mut h_full {
@@ -177,6 +181,11 @@ impl LinearSolver for BlockGmresSolver {
                         let vj_col = vj.col(col);
                         let w_col = w_block.col_mut(col);
                         op.matvec_s(vj_col, w_col, &mut scratch);
+                        if let Some(pc) = pc_ref {
+                            let mut pc_out = vec![S::zero(); ncols];
+                            pc.apply_s(PcSide::Left, w_col, &mut pc_out, &mut scratch)?;
+                            w_col.copy_from_slice(&pc_out);
+                        }
                     }
                     let arnoldi = block_arnoldi_step(
                         &basis,
@@ -185,6 +194,7 @@ impl LinearSolver for BlockGmresSolver {
                         work,
                         self.options.max_cond,
                     )?;
+                    counters.num_global_reductions += 1;
 
                     let cols_h = (j + 1) * p;
                     let rows_h = (j + 2) * p;
@@ -218,23 +228,25 @@ impl LinearSolver for BlockGmresSolver {
 
                     compute_residual(
                         &op,
+                        pc_ref,
                         &b_block,
                         &x_cycle,
                         &mut r_block,
                         &mut ax_block,
                         &mut scratch,
-                    );
+                    )?;
                     rnorm = block_norm_max(&r_block, comm);
+                    counters.num_global_reductions += 1;
                     iterations += 1;
                     for m in mons {
-                        m(iterations, rnorm, 0);
+                        m(iterations, rnorm, counters.num_global_reductions);
                     }
                     let (iter_reason, iter_stats) = conv.check(rnorm, bnorm, iterations);
                     reason = iter_reason;
                     if reason != ConvergedReason::Continued {
                         x_block = x_cycle;
                         stats = iter_stats;
-                        stats.counters = counters;
+                        stats.counters = finalize_counters(counters, start_reduct);
                         write_block_to_slice(&x_block, x)?;
                         return Ok(stats);
                     }
@@ -246,29 +258,39 @@ impl LinearSolver for BlockGmresSolver {
                 x_block = x_cycle;
                 compute_residual(
                     &op,
+                    pc_ref,
                     &b_block,
                     &x_block,
                     &mut r_block,
                     &mut ax_block,
                     &mut scratch,
-                );
+                )?;
                 rnorm = block_norm_max(&r_block, comm);
+                counters.num_global_reductions += 1;
                 let (iter_reason, iter_stats) = conv.check(rnorm, bnorm, iterations);
                 reason = iter_reason;
                 if reason != ConvergedReason::Continued {
                     stats = iter_stats;
-                    stats.counters = counters;
+                    stats.counters = finalize_counters(counters, start_reduct);
                     write_block_to_slice(&x_block, x)?;
                     return Ok(stats);
                 }
             }
 
             let mut stats = SolveStats::new(iterations, rnorm, ConvergedReason::DivergedMaxIts);
-            stats.counters = counters;
+            stats.counters = finalize_counters(counters, start_reduct);
             write_block_to_slice(&x_block, x)?;
             Ok(stats)
         }
     }
+}
+
+#[cfg(feature = "backend-faer")]
+fn finalize_counters(mut counters: SolverCounters, start_reduct: (usize, usize)) -> SolverCounters {
+    let end_reduct = test_hooks::wait_counters();
+    let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+    counters.num_global_reductions += async_reductions;
+    counters
 }
 
 #[cfg(feature = "backend-faer")]
@@ -313,18 +335,24 @@ fn write_block_to_slice(block: &BlockVec, data: &mut [f64]) -> Result<(), KError
 #[cfg(feature = "backend-faer")]
 fn compute_residual<A: KLinOp<Scalar = S> + ?Sized>(
     a: &A,
+    pc: Option<&dyn crate::ops::kpc::KPreconditioner<Scalar = S>>,
     b: &BlockVec,
     x: &BlockVec,
     r: &mut BlockVec,
     ax: &mut BlockVec,
     scratch: &mut crate::algebra::bridge::BridgeScratch,
-) {
+) -> Result<(), KError> {
     let p = b.ncols();
     let n = b.nrows();
+    let mut pc_out = vec![S::zero(); n];
     for col in 0..p {
         let xcol = x.col(col);
         let axcol = ax.col_mut(col);
         a.matvec_s(xcol, axcol, scratch);
+        if let Some(pc) = pc {
+            pc.apply_s(PcSide::Left, axcol, &mut pc_out, scratch)?;
+            axcol.copy_from_slice(&pc_out);
+        }
     }
     for col in 0..p {
         let bcol = b.col(col);
@@ -334,6 +362,7 @@ fn compute_residual<A: KLinOp<Scalar = S> + ?Sized>(
             rcol[i] = bcol[i] - axcol[i];
         }
     }
+    Ok(())
 }
 
 #[cfg(feature = "backend-faer")]
@@ -376,10 +405,11 @@ fn block_qr(
     block: &mut BlockVec,
     comm: &UniverseComm,
     work: &mut Workspace,
-) -> Result<Vec<S>, KError> {
+) -> Result<(Vec<S>, usize), KError> {
     let p = block.ncols();
     let n = block.nrows();
     let mut r: Vec<S> = vec![0.0.into(); p * p];
+    let mut reductions = 0usize;
     work.blk_scratch.resize(n, 0.0.into());
     let col_buf = &mut work.blk_scratch[..n];
     for j in 0..p {
@@ -387,12 +417,14 @@ fn block_qr(
         for i in 0..j {
             let qi = block.col(i);
             let dot = global_dot_conj(comm, qi, &col_buf[..]);
+            reductions += 1;
             r[i * p + j] = dot;
             for (buf, &qi_val) in col_buf.iter_mut().zip(qi.iter()) {
                 *buf -= dot * qi_val;
             }
         }
         let norm = global_nrm2(comm, &col_buf[..]);
+        reductions += 1;
         if norm <= 0.0 {
             return Err(KError::FactorError(
                 "block GMRES: dependent block encountered".into(),
@@ -405,7 +437,7 @@ fn block_qr(
             *dst = src * inv;
         }
     }
-    Ok(r)
+    Ok((r, reductions))
 }
 
 #[cfg(feature = "backend-faer")]

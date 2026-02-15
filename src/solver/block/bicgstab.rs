@@ -6,7 +6,7 @@ use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
-use crate::ops::wrap::as_s_op;
+use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
@@ -47,11 +47,6 @@ impl LinearSolver for BlockBicgstabSolver {
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        if pc.is_some() {
-            return Err(KError::Unsupported(
-                "block BiCGSTAB preconditioning is not implemented",
-            ));
-        }
         let (nrows, ncols) = a.dims();
         if nrows != ncols {
             return Err(KError::InvalidInput(
@@ -81,6 +76,10 @@ impl LinearSolver for BlockBicgstabSolver {
 
         // Bridge dyn LinOp<S=f64> -> KLinOp via F64AsSOp wrapper.
         let op = as_s_op(a);
+        let pc_wrapper = pc.as_deref().map(as_s_pc);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|w| w as &dyn crate::ops::kpc::KPreconditioner<Scalar = S>);
 
         let mut b_block = BlockVec::new(ncols, p);
         fill_block_from_slice(&mut b_block, b)?;
@@ -98,7 +97,7 @@ impl LinearSolver for BlockBicgstabSolver {
             solver.dtol = self.options.dtol;
             let stats = solver.solve(
                 &op,
-                None,
+                pc_ref,
                 b_block.col(col),
                 x_block.col_mut(col),
                 pc_side,
