@@ -1159,16 +1159,77 @@ impl Preconditioner for IluCsr {
 
 #[cfg(feature = "complex")]
 impl Preconditioner for IluCsr {
-    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "IluCsr does not support complex scalars yet".into(),
-        ))
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
     }
 
-    fn apply(&self, _side: PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "IluCsr does not support complex scalars yet".into(),
-        ))
+    fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        let csr = if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
+            let values = csr.values().iter().map(|v| v.real()).collect();
+            Arc::new(CsrMatrix::from_csr(
+                csr.nrows(),
+                csr.ncols(),
+                csr.row_ptr().to_vec(),
+                csr.col_idx().to_vec(),
+                values,
+            ))
+        } else {
+            return Err(KError::Unsupported(
+                "IluCsr complex setup currently requires a CSR operator".into(),
+            ));
+        };
+
+        let mut conditioned = None;
+        let a = if self.cfg.conditioning.is_active() {
+            let mut local = (*csr).clone();
+            apply_csr_transforms("ILU/ILUT", &mut local, &self.cfg.conditioning)?;
+            conditioned = Some(local);
+            conditioned.as_ref().unwrap()
+        } else {
+            csr.as_ref()
+        };
+
+        let perm = match self.cfg.reordering.kind {
+            ReorderingKind::None => Permutation::identity(a.nrows()),
+            ReorderingKind::Rcm => rcm_csr(&a),
+            ReorderingKind::Amd => amd_csr(&a),
+        };
+        let a_perm = if self.cfg.reordering.symmetric {
+            permute_csr_symmetric(&a, &perm)
+        } else {
+            permute_csr_symmetric(&a, &perm)
+        };
+        self.perm = perm;
+        self.factor_symbolic_and_numeric(&a_perm)?;
+        self.build_levels_if_enabled();
+        self.tmp.resize(a_perm.nrows(), Real::zero());
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let n = self.n;
+        if x.len() != n || y.len() != n {
+            return Err(KError::InvalidInput(format!(
+                "IluCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+        let mut xr = vec![0.0; n];
+        let mut xi = vec![0.0; n];
+        let mut yr = vec![0.0; n];
+        let mut yi = vec![0.0; n];
+        for i in 0..n {
+            xr[i] = x[i].real();
+            xi[i] = x[i].imag();
+        }
+        self.apply_op_scalar(Op::NoTrans, &xr, &mut yr)?;
+        self.apply_op_scalar(Op::NoTrans, &xi, &mut yi)?;
+        for i in 0..n {
+            y[i] = S::from_parts(yr[i], yi[i]);
+        }
+        Ok(())
     }
 }
 

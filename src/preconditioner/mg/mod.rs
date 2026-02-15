@@ -1,5 +1,5 @@
 use crate::algebra::prelude::*;
-use crate::algebra::scalar::{is_complex_scalar, S};
+use crate::algebra::scalar::S;
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
@@ -520,11 +520,6 @@ impl Preconditioner for MgPc {
     fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
         if self.levels < 2 {
             return Err(KError::InvalidInput("pc_mg_levels must be >= 2".into()));
-        }
-        if is_complex_scalar::<S>() {
-            return Err(KError::Unsupported(
-                "multigrid is only supported for real scalars".into(),
-            ));
         }
         self.cycle = MgCycleType::from_option(self.cycle_type.as_deref())?;
         self.coarsen = MgCoarsenType::from_option(self.coarsen_type.as_deref())?;

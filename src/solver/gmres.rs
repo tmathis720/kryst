@@ -28,16 +28,16 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::solver::common::call_monitors;
+use crate::solver::common::ReductCtx;
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::ReductCtx;
-use crate::solver::common::call_monitors;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-#[cfg(feature = "logging")]
-use crate::utils::monitor::{ResidualSnapshot, log_residuals};
 use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
+#[cfg(feature = "logging")]
+use crate::utils::monitor::{log_residuals, ResidualSnapshot};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -1022,13 +1022,6 @@ impl GmresSolver {
         A: KLinOp<Scalar = S> + ?Sized,
         P: KPreconditioner<Scalar = S> + ?Sized,
     {
-        #[cfg(feature = "complex")]
-        {
-            return Err(KError::NotImplemented(
-                "GMRES s-step is not yet implemented for complex scalars".into(),
-            ));
-        }
-
         let (m, n) = a.dims();
         if m != n || b.len() != n || x.len() != n {
             return Err(KError::InvalidInput(
@@ -1365,7 +1358,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                     }
                 } // pairs dropped here; we can safely mutate w_block next.
-                // W <- W - V C
+                  // W <- W - V C
                 for i in 0..=k {
                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                     for j in 0..block {

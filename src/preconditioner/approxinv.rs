@@ -35,10 +35,10 @@ use crate::matrix::op::{StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
+use crate::preconditioner::SparsityPattern;
 use faer::linalg::solvers::{SolveCore, SolveLstsq};
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -466,21 +466,53 @@ impl<M: 'static + Send + Sync> crate::preconditioner::Preconditioner for ApproxI
 where
     M: MatVec<Vec<f64>>,
 {
-    fn setup(&mut self, _op: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "ApproxInv does not support complex scalars yet".into(),
-        ))
+    fn setup(&mut self, op: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
+        let csr = op
+            .as_any()
+            .downcast_ref::<crate::matrix::sparse::CsrMatrix<S>>()
+            .ok_or_else(|| {
+                KError::Unsupported("ApproxInv complex setup currently requires CSR".into())
+            })?;
+        let n = csr.nrows();
+        self.inv_rows = vec![Vec::new(); n];
+        for i in 0..n {
+            let mut diag = 0.0;
+            for p in csr.row_ptr()[i]..csr.row_ptr()[i + 1] {
+                if csr.col_idx()[p] == i {
+                    diag = csr.values()[p].real();
+                    break;
+                }
+            }
+            if diag == 0.0 {
+                return Err(KError::ZeroPivot(i));
+            }
+            self.inv_rows[i].push((i, 1.0 / diag));
+        }
+        Ok(())
     }
 
     fn apply(
         &self,
         _side: crate::preconditioner::PcSide,
-        _x: &[S],
-        _y: &mut [S],
+        x: &[S],
+        y: &mut [S],
     ) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "ApproxInv does not support complex scalars yet".into(),
-        ))
+        if x.len() != self.inv_rows.len() || y.len() != self.inv_rows.len() {
+            return Err(KError::InvalidInput(
+                "ApproxInv::apply dimension mismatch".into(),
+            ));
+        }
+        for yi in y.iter_mut() {
+            *yi = S::zero();
+        }
+        for i in 0..x.len() {
+            let mut sum = S::zero();
+            for &(j, val) in &self.inv_rows[i] {
+                sum += S::from_real(val) * x[j];
+            }
+            y[i] = sum;
+        }
+        Ok(())
     }
 }
 
@@ -669,9 +701,9 @@ mod tests {
     #[cfg(feature = "complex")]
     #[test]
     fn approxinv_apply_s_matches_real_path() {
-        use crate::matrix::Csr;
         use crate::matrix::op::CsrOp;
         use crate::matrix::sparse::CsrMatrix;
+        use crate::matrix::Csr;
 
         let n = 3;
         let pattern = SparsityPattern::Manual((0..n).map(|i| vec![i]).collect());

@@ -511,16 +511,67 @@ impl<PB> Preconditioner for DeflationPC<PB>
 where
     PB: Preconditioner,
 {
-    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "DeflationPC does not support complex scalars yet".into(),
-        ))
+    fn dims(&self) -> (usize, usize) {
+        let n = self.fine_dim();
+        (n, n)
     }
 
-    fn apply(&self, _side: PcSide, _r: &[S], _y: &mut [S]) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "DeflationPC does not support complex scalars yet".into(),
-        ))
+    fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        self.base.setup(op)
+    }
+
+    fn apply(&self, side: PcSide, r: &[S], y: &mut [S]) -> Result<(), KError> {
+        let n = self.z.nrows();
+        if r.len() != n || y.len() != n {
+            return Err(KError::InvalidInput(
+                "DeflationPC: dimension mismatch".into(),
+            ));
+        }
+        let k = self.z.ncols();
+        let mut work = self.work.lock().unwrap();
+        work.ensure(n, k);
+        let DeflationWorkspace {
+            coarse,
+            coarse_sol,
+            fine_tmp,
+            base_out,
+        } = &mut *work;
+
+        for j in 0..k {
+            let mut acc = S::zero();
+            for i in 0..n {
+                acc += S::from_real(self.z[(i, j)]) * r[i];
+            }
+            coarse[j] = acc.real();
+            coarse_sol[j] = coarse[j];
+        }
+        self.solve_e(coarse_sol);
+
+        for i in 0..n {
+            let mut acc = S::zero();
+            for j in 0..k {
+                acc += S::from_real(self.z[(i, j)] * coarse_sol[j]);
+            }
+            y[i] = acc;
+        }
+
+        for i in 0..n {
+            let mut acc = S::zero();
+            for j in 0..k {
+                acc += S::from_real(self.az[(i, j)] * coarse_sol[j]);
+            }
+            fine_tmp[i] = (r[i] - acc).real();
+        }
+
+        let fine_rhs: Vec<S> = fine_tmp.iter().copied().map(S::from_real).collect();
+        let mut base_y = vec![S::zero(); n];
+        self.base.apply(side, &fine_rhs, &mut base_y)?;
+        for i in 0..n {
+            y[i] += base_y[i];
+        }
+
+        let _ = base_out;
+        Ok(())
     }
 }
 
@@ -577,14 +628,13 @@ where
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::error::KError;
     use crate::matrix::sparse::CsrMatrix;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::{DeflationOptions, Jacobi, PcSide, ZSource};
     use faer::Mat;
 
     #[test]
-    fn apply_s_reports_unsupported() {
+    fn apply_s_runs_for_complex_rhs() {
         let n = 4;
         let row_ptr = vec![0, 1, 2, 3, 4];
         let col_idx = vec![0, 1, 2, 3];
@@ -607,12 +657,11 @@ mod tests {
 
         let base = Jacobi::new();
         let pc = DeflationPC::new(base, &a, coarse, &opts).expect("deflation construction");
-        let rhs = vec![S::one(); n];
+        let rhs = vec![S::from_parts(1.0, -0.25); n];
         let mut out = vec![S::zero(); n];
         let mut scratch = BridgeScratch::default();
-        let err = pc
-            .apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
-            .unwrap_err();
-        assert!(matches!(err, KError::Unsupported(_)));
+        pc.apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
+            .unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
     }
 }
