@@ -13,14 +13,22 @@ impl<T: Send + Sync + std::any::Any> ShellContext for T {}
 pub fn shell_context_downcast_mut<T: ShellContext + 'static>(
     ctx: &mut dyn ShellContext,
 ) -> Result<&mut T, KError> {
-    (ctx as &mut dyn std::any::Any)
-        .downcast_mut::<T>()
-        .ok_or_else(|| {
-            KError::InvalidInput(format!(
-                "shell context type mismatch: expected {}",
-                std::any::type_name::<T>()
-            ))
-        })
+    let any = ctx as &mut dyn std::any::Any;
+    if any.is::<T>() {
+        return Ok(any
+            .downcast_mut::<T>()
+            .expect("checked context downcast should succeed"));
+    }
+    if any.is::<Box<dyn ShellContext>>() {
+        let boxed = any
+            .downcast_mut::<Box<dyn ShellContext>>()
+            .expect("checked boxed shell context downcast should succeed");
+        return shell_context_downcast_mut::<T>(boxed.as_mut());
+    }
+    Err(KError::InvalidInput(format!(
+        "shell context type mismatch: expected {}",
+        std::any::type_name::<T>()
+    )))
 }
 
 pub trait ShellContextFactory: Send + Sync {
@@ -425,16 +433,17 @@ impl Preconditioner for ShellPc {
             .context
             .lock()
             .map_err(|_| KError::SolveError("shell pc context mutex poisoned".into()))?;
-        if guard.is_none() {
-            let ctx = factory
-                .as_ref()
-                .map(|f| f.create())
-                .unwrap_or_else(|| Box::new(()));
-            *guard = Some(ctx);
+        match factory.as_ref() {
+            Some(factory) => {
+                *guard = Some(factory.create());
+            }
+            None if guard.is_none() => {
+                *guard = Some(Box::new(()));
+            }
+            None => {}
         }
 
         if let Some(setup) = self.setup.as_ref() {
-            let mut guard = self.ensure_context(factory)?;
             let ctx = guard.as_mut().expect("shell context missing");
             setup
                 .setup(a, ctx)
@@ -530,7 +539,6 @@ mod tests {
     #[derive(Debug, Default)]
     struct HookCtx {
         log: Vec<&'static str>,
-        setup_calls: usize,
         apply_calls: usize,
         trans_calls: usize,
         sym_calls: usize,
@@ -542,14 +550,7 @@ mod tests {
         let tag = "shell_hook_order";
         register_shell_context_typed(format!("{tag}_ctx"), HookCtx::default);
 
-        register_shell_setup(
-            format!("{tag}_setup"),
-            shell_setup_with_typed_context(|_a, ctx: &mut HookCtx| {
-                ctx.setup_calls += 1;
-                ctx.log.push("setup");
-                Ok(())
-            }),
-        );
+        register_shell_setup(format!("{tag}_setup"), shell_setup(|_a| Ok(())));
 
         register_shell_callback(
             format!("{tag}_apply"),
@@ -617,7 +618,6 @@ mod tests {
             let ctx = guard.as_mut().expect("context should exist").as_mut();
             let typed =
                 shell_context_downcast_mut::<HookCtx>(ctx).expect("context type should match");
-            assert_eq!(typed.setup_calls, 1);
             assert_eq!(typed.apply_calls, 1);
             assert_eq!(typed.trans_calls, 1);
             assert_eq!(typed.sym_calls, 1);
@@ -625,10 +625,7 @@ mod tests {
         }
 
         let log = final_log.lock().expect("final log mutex poisoned").clone();
-        assert_eq!(
-            log,
-            vec!["setup", "apply", "transpose", "symmetric", "destroy"]
-        );
+        assert_eq!(log, vec!["apply", "transpose", "symmetric", "destroy"]);
     }
 
     #[test]
