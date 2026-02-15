@@ -78,7 +78,7 @@ use crate::solver::{
 };
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::convergence::{ConvergedReason, NestedPcFailure, SolveStats};
 use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
 use crate::utils::reduction::ReductOptions;
 use serde::Serialize;
@@ -646,13 +646,11 @@ impl KspContext {
                 self.rtol,
                 self.maxits,
             ))),
-            SolverType::PipeGcr => {
-                Some(Box::new(PipeGcrSolver::new(
-                    self.restart,
-                    self.rtol,
-                    self.maxits,
-                )))
-            }
+            SolverType::PipeGcr => Some(Box::new(PipeGcrSolver::new(
+                self.restart,
+                self.rtol,
+                self.maxits,
+            ))),
             SolverType::Preonly => {
                 // PREONLY is intentionally "no iterative solver".
                 // We’ll dispatch to `pc.direct_solve()` in `solve()`.
@@ -1432,10 +1430,12 @@ impl KspContext {
             .pc_spec
             .as_ref()
             .or(self.pending_pc.as_ref())
-            .map(|spec| Box::new(PcDiagnostics::from_options(
-                Some(spec.pc_type),
-                spec.options.as_ref(),
-            )));
+            .map(|spec| {
+                Box::new(PcDiagnostics::from_options(
+                    Some(spec.pc_type),
+                    spec.options.as_ref(),
+                ))
+            });
         let pc_chain = self
             .pc_chain_plan
             .as_ref()
@@ -2157,12 +2157,15 @@ impl KspContext {
                 Err(err) => {
                     if let Some(reason) = Self::map_solve_error_to_reason(&err) {
                         if matches!(err, KError::PcFailed(_)) {
-                            if let KError::PcFailed(msg) = err {
+                            if let KError::PcFailed(ref msg) = err {
                                 log::warn!("KSP diverged due to preconditioner failure: {msg}");
                             }
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
-                        let stats = SolveStats::new(0, res, reason);
+                        let mut stats = SolveStats::new(0, res, reason);
+                        if let KError::NestedPcFailed(failure) = &err {
+                            stats = stats.with_nested_pc_failure(failure.clone());
+                        }
                         self.last_converged_reason = Some(reason);
                         return Ok(stats);
                     }
@@ -2196,224 +2199,227 @@ impl KspContext {
 
             let mut stats = match (|| -> Result<SolveStats<R>, KError> {
                 Ok(match solver_type {
-                SolverType::Cg => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<CgSolver>()
-                        .ok_or_else(|| KError::SolveError("CG solver missing".into()))?;
-                    s.solve_with_comm(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Cgnr => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<CgnrSolver>()
-                        .ok_or_else(|| KError::SolveError("CGNR solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Gmres => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<GmresSolver>()
-                        .ok_or_else(|| KError::SolveError("GMRES solver missing".into()))?;
-                    s.solve(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Fgmres => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<FgmresSolver>()
-                        .ok_or_else(|| KError::SolveError("FGMRES solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref_mut(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::BiCgStab => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<BiCgStabSolver>()
-                        .ok_or_else(|| KError::SolveError("BiCGStab solver missing".into()))?;
-                    s.solve(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Cgs => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<CgsSolver>()
-                        .ok_or_else(|| KError::SolveError("CGS solver missing".into()))?;
-                    s.solve(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Pcg => {
-                    return Err(KError::Unsupported(
-                        "PCG is not yet available for complex scalars".into(),
-                    ));
-                }
-                SolverType::Minres => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<MinresSolver>()
-                        .ok_or_else(|| KError::SolveError("MINRES solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Lsqr => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<crate::solver::LsqrSolver>()
-                        .ok_or_else(|| KError::SolveError("LSQR solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Lsmr => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<crate::solver::LsmrSolver>()
-                        .ok_or_else(|| KError::SolveError("LSMR solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::PcaGmres => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<PcaGmresSolver>()
-                        .ok_or_else(|| KError::SolveError("PCA-GMRES solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Qmr => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<QmrSolver>()
-                        .ok_or_else(|| KError::SolveError("QMR solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Tfqmr => {
-                    let s = solver
-                        .as_any_mut()
-                        .downcast_mut::<TfqmrSolver>()
-                        .ok_or_else(|| KError::SolveError("TFQMR solver missing".into()))?;
-                    s.solve_k(
-                        &op,
-                        pc_k.as_deref(),
-                        b,
-                        x,
-                        self.pc_side,
-                        &comm,
-                        monitors,
-                        work,
-                    )?
-                }
-                SolverType::Tcqmr
-                | SolverType::Richardson
-                | SolverType::Chebyshev
-                | SolverType::Cr
-                | SolverType::Gcr
-                | SolverType::PipeGcr => {
-                    return Err(KError::Unsupported(
-                        "Selected solver is not yet available for complex scalars".into(),
-                    ));
-                }
-                SolverType::Preonly => unreachable!("PREONLY handled earlier"),
-            })
+                    SolverType::Cg => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<CgSolver>()
+                            .ok_or_else(|| KError::SolveError("CG solver missing".into()))?;
+                        s.solve_with_comm(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Cgnr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<CgnrSolver>()
+                            .ok_or_else(|| KError::SolveError("CGNR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Gmres => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<GmresSolver>()
+                            .ok_or_else(|| KError::SolveError("GMRES solver missing".into()))?;
+                        s.solve(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Fgmres => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<FgmresSolver>()
+                            .ok_or_else(|| KError::SolveError("FGMRES solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref_mut(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::BiCgStab => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<BiCgStabSolver>()
+                            .ok_or_else(|| KError::SolveError("BiCGStab solver missing".into()))?;
+                        s.solve(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Cgs => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<CgsSolver>()
+                            .ok_or_else(|| KError::SolveError("CGS solver missing".into()))?;
+                        s.solve(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Pcg => {
+                        return Err(KError::Unsupported(
+                            "PCG is not yet available for complex scalars".into(),
+                        ));
+                    }
+                    SolverType::Minres => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<MinresSolver>()
+                            .ok_or_else(|| KError::SolveError("MINRES solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Lsqr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<crate::solver::LsqrSolver>()
+                            .ok_or_else(|| KError::SolveError("LSQR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Lsmr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<crate::solver::LsmrSolver>()
+                            .ok_or_else(|| KError::SolveError("LSMR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::PcaGmres => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<PcaGmresSolver>()
+                            .ok_or_else(|| KError::SolveError("PCA-GMRES solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Qmr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<QmrSolver>()
+                            .ok_or_else(|| KError::SolveError("QMR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Tfqmr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<TfqmrSolver>()
+                            .ok_or_else(|| KError::SolveError("TFQMR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Tcqmr
+                    | SolverType::Richardson
+                    | SolverType::Chebyshev
+                    | SolverType::Cr
+                    | SolverType::Gcr
+                    | SolverType::PipeGcr => {
+                        return Err(KError::Unsupported(
+                            "Selected solver is not yet available for complex scalars".into(),
+                        ));
+                    }
+                    SolverType::Preonly => unreachable!("PREONLY handled earlier"),
+                })
             })() {
                 Ok(stats) => stats,
                 Err(err) => {
                     if let Some(reason) = Self::map_solve_error_to_reason(&err) {
-                        if let KError::PcFailed(msg) = err {
+                        if let KError::PcFailed(ref msg) = err {
                             log::warn!("KSP diverged due to preconditioner failure: {msg}");
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
-                        let stats = SolveStats::new(0, res, reason);
+                        let mut stats = SolveStats::new(0, res, reason);
+                        if let KError::NestedPcFailed(failure) = &err {
+                            stats = stats.with_nested_pc_failure(failure.clone());
+                        }
                         self.last_converged_reason = Some(reason);
                         return Ok(stats);
                     }
@@ -2451,6 +2457,7 @@ impl KspContext {
     fn map_solve_error_to_reason(err: &KError) -> Option<ConvergedReason> {
         match err {
             KError::PcFailed(_) => Some(ConvergedReason::DivergedPcFailed),
+            KError::NestedPcFailed(NestedPcFailure { reason, .. }) => Some(*reason),
             KError::BreakdownOrIndefinite => Some(ConvergedReason::DivergedBreakdown),
             KError::IndefiniteMatrix => Some(ConvergedReason::DivergedIndefiniteMatrix),
             KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => {
