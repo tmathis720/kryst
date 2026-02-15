@@ -142,16 +142,29 @@ features, options, and monitoring/convergence hooks.
 | --- | --- | --- | --- |
 | `KSP_CONVERGED_RTOL` | [`ConvergedReason::ConvergedRtol`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.ConvergedRtol) | Supported | Relative tolerance met. |
 | `KSP_CONVERGED_ATOL` | [`ConvergedReason::ConvergedAtol`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.ConvergedAtol) | Supported | Absolute tolerance met. |
-| `KSP_CONVERGED_STEP_LENGTH` | [`ConvergedReason::ConvergedTrustRegion`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.ConvergedTrustRegion) | Partial | Trust-region style stopping. |
+| `KSP_CONVERGED_TRUST_REGION` | [`ConvergedReason::ConvergedTrustRegion`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.ConvergedTrustRegion) | Partial | Trust-region style stopping. |
 | `KSP_CONVERGED_HAPPY_BREAKDOWN` | [`ConvergedReason::ConvergedHappyBreakdown`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.ConvergedHappyBreakdown) | Supported | Happy breakdown in GMRES/TFQMR variants. |
 | `KSP_DIVERGED_DTOL` | [`ConvergedReason::DivergedDtol`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedDtol) | Supported | Divergence tolerance exceeded. |
 | `KSP_DIVERGED_ITS` | [`ConvergedReason::DivergedMaxIts`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedMaxIts) | Supported | Max iterations. |
-| `KSP_DIVERGED_BREAKDOWN` | — | Unsupported | Tracking: [Breakdown reason parity](#tracking-breakdown-reason). |
-| `KSP_DIVERGED_BREAKDOWN_BICG` | — | Unsupported | Tracking: [Breakdown reason parity](#tracking-breakdown-reason). |
-| `KSP_DIVERGED_PC_FAILED` | [`ConvergedReason::DivergedPcFailed`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedPcFailed) | Partial | Shell PC hook failures map here. |
-| `KSP_DIVERGED_NANORINF` | — | Unsupported | Tracking: [NaN/Inf reasons](#tracking-nan-inf-reason). |
+| `KSP_DIVERGED_BREAKDOWN` | [`ConvergedReason::DivergedBreakdown`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedBreakdown) | Partial | Generic breakdown/indefinite failures are currently emitted by IDRS through `KError::BreakdownOrIndefinite` remapping. |
+| `KSP_DIVERGED_BREAKDOWN_BICG` | [`ConvergedReason::DivergedBreakdownBiCG`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedBreakdownBiCG) | Supported | BiCG-family breakdown reason used by BiCGStab, CGS, QMR, and TFQMR kernels. |
+| `KSP_DIVERGED_INDEFINITE_MAT` | [`ConvergedReason::DivergedIndefiniteMatrix`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedIndefiniteMatrix) | Supported | Matrix indefiniteness checks are active in CG/PCG paths. |
+| `KSP_DIVERGED_INDEFINITE_PC` | [`ConvergedReason::DivergedIndefinitePC`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedIndefinitePC) | Supported | Emitted when solver math or setup detects an indefinite preconditioner. |
+| `KSP_DIVERGED_PCSETUP_FAILED` | [`ConvergedReason::DivergedPcSetupFailed`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedPcSetupFailed) | Supported | `KspContext::setup` and setup-on-solve remap factorization/PC setup failures into a converged-reason result. |
+| `KSP_DIVERGED_PC_FAILED` | [`ConvergedReason::DivergedPcFailed`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedPcFailed) | Supported | Preconditioner apply failures (including shell apply/setup hooks) propagate as solve divergence. |
+| `KSP_DIVERGED_NANORINF` | [`ConvergedReason::DivergedNan`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedNan) / [`ConvergedReason::DivergedInf`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.DivergedInf) | Supported | Non-finite residual checks map both NaN and Inf to PETSc's shared NaN-or-Inf reason code. |
 | `KSP_CONVERGED_ITERATING` | [`ConvergedReason::Continued`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.Continued) | Supported | Still iterating. |
-| `KSP_DIVERGED_MONITOR` | [`ConvergedReason::StoppedByMonitor`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.StoppedByMonitor) | Supported | Monitor requested stop. |
+| `KSP_DIVERGED_USER` | [`ConvergedReason::StoppedByMonitor`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.StoppedByMonitor) | Supported | Monitor requested stop (PETSc "user requested" divergence code). |
+
+### Divergence reason emitters by method
+
+- `KSP_DIVERGED_BREAKDOWN`: currently emitted by `IDRS` through `KError::BreakdownOrIndefinite` remapping in `KspContext`.
+- `KSP_DIVERGED_BREAKDOWN_BICG`: emitted by BiCG-family kernels (`BiCGStab`, `CGS`, `QMR`, `TFQMR`).
+- `KSP_DIVERGED_NANORINF`: emitted by any solver calling `Convergence::check` (`CG`, `PCG`, `GMRES`, `FGMRES`, `MINRES`, `LSQR`, `PCA-GMRES`, `QMR`) and by explicit non-finite guards in `BiCGStab`/`TFQMR`.
+- `KSP_DIVERGED_INDEFINITE_MAT` / `KSP_DIVERGED_INDEFINITE_PC`: emitted by `CG`/`PCG` indefiniteness checks and preserved through nested KSP-PC propagation.
+- `KSP_DIVERGED_PCSETUP_FAILED`: emitted during `KspContext::setup` (or implicit setup within `solve`) when PC setup/factorization fails.
+- `KSP_DIVERGED_PC_FAILED`: emitted when preconditioner apply paths fail (including shell PC hooks and nested KSP-as-PC inner failures).
+- For nested preconditioners, `SolveStats::nested_pc_failure` captures the inner reason/iterations/component metadata so monitor output can explain the outer failure.
 
 
 ## MG/GAMG hierarchy and coarse-policy mapping
@@ -172,7 +185,7 @@ High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 1. **Multigrid hierarchy management** (remaining parity for full PETSc per-level KSP stacks and advanced adaptive policies). Tracking: [Multigrid parity](#tracking-mg-parity).
 2. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
 3. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
-4. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
+4. **Convergence-reason method coverage** (some reasons are implemented but remain method-specific). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
 5. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
 6. **GAMG advanced options** (`-pc_type gamg`), especially full PETSc-level smoother and repartition controls. Tracking: [GAMG support](#tracking-gamg).
 
@@ -205,10 +218,6 @@ Scope: explicit divergence reasons (breakdown, NaN/Inf, PC failure) matching PET
 <a id="tracking-pc-failure-reason"></a>
 ### Tracking issue: PC failure reasons
 Scope: extend PC failure propagation beyond shell hooks (e.g., factorization/solver failures).
-
-<a id="tracking-nan-inf-reason"></a>
-### Tracking issue: NaN/Inf reasons
-Scope: detect NaN/Inf residuals and map to PETSc divergence reasons.
 
 ## Complex-scalar exclusions by method
 

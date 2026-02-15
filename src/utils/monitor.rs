@@ -179,7 +179,10 @@ pub struct ConvergenceStats {
     pub avg_pc_time: Option<Duration>,
     /// Did the solver converge?
     pub converged: bool,
-    /// Final convergence criterion met
+    /// Final convergence/divergence criterion met.
+    ///
+    /// This string can include propagated preconditioner failures (setup/apply
+    /// failures mapped to PETSc-like divergence reasons by `KspContext`).
     pub convergence_reason: String,
 }
 
