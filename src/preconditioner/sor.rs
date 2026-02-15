@@ -32,19 +32,19 @@ use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{PcSide, legacy::Preconditioner};
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::preconditioner::{legacy::Preconditioner, PcSide};
 use crate::utils::coloring::{build_blocks_from_colors, csr_distance2_coloring};
 use bitflags::bitflags;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicPtr, Ordering};
 
 bitflags! {
     /// Bitflags for SOR sweep types and options.
@@ -433,32 +433,7 @@ impl SorPc {
             });
         }
     }
-}
-
-#[cfg(not(feature = "complex"))]
-impl ObjPreconditioner for SorPc {
-    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let csr = csr_from_linop(op, 0.0)?;
-        self.a_csr = Some(csr.clone());
-        self.ensure_inv_diag(&csr)?;
-        self.ensure_coloring(&csr);
-        Ok(())
-    }
-
-    fn supports_numeric_update(&self) -> bool {
-        true
-    }
-
-    fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        // Re-extract CSR (values may have changed) and recompute inverse diagonal
-        let csr = csr_from_linop(op, 0.0)?;
-        self.a_csr = Some(csr.clone());
-        self.ensure_inv_diag(&csr)?;
-        self.ensure_coloring(&csr);
-        Ok(())
-    }
-
-    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+    fn apply_real(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
         let a = self
             .a_csr
             .as_ref()
@@ -471,7 +446,6 @@ impl ObjPreconditioner for SorPc {
         for _ in 0..self.sweeps {
             match (side, self.mat_side) {
                 (_, s) if s.contains(MatSorType::SYMMETRIC_SWEEP) => {
-                    // forward then backward using scratch
                     if s.contains(MatSorType::COLOR_SWEEP) && !self.color_blocks.is_empty() {
                         self.forward_sweep_color(a, x, y);
                     } else {
@@ -502,7 +476,6 @@ impl ObjPreconditioner for SorPc {
                     }
                 }
                 _ => {
-                    // default to forward if unspecified
                     if self.mat_side.contains(MatSorType::COLOR_SWEEP)
                         && !self.color_blocks.is_empty()
                     {
@@ -515,6 +488,34 @@ impl ObjPreconditioner for SorPc {
         }
         Ok(())
     }
+}
+
+#[cfg(not(feature = "complex"))]
+impl ObjPreconditioner for SorPc {
+    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let csr = csr_from_linop(op, 0.0)?;
+        self.a_csr = Some(csr.clone());
+        self.ensure_inv_diag(&csr)?;
+        self.ensure_coloring(&csr);
+        Ok(())
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+
+    fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        // Re-extract CSR (values may have changed) and recompute inverse diagonal
+        let csr = csr_from_linop(op, 0.0)?;
+        self.a_csr = Some(csr.clone());
+        self.ensure_inv_diag(&csr)?;
+        self.ensure_coloring(&csr);
+        Ok(())
+    }
+
+    fn apply(&self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        self.apply_real(side, x, y)
+    }
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
@@ -523,16 +524,48 @@ impl ObjPreconditioner for SorPc {
 
 #[cfg(feature = "complex")]
 impl ObjPreconditioner for SorPc {
-    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "SOR does not support complex scalars yet".into(),
-        ))
+    fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        let csr = if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
+            let values = csr.values().iter().map(|v| v.real()).collect();
+            Arc::new(CsrMatrix::from_csr(
+                csr.nrows(),
+                csr.ncols(),
+                csr.row_ptr().to_vec(),
+                csr.col_idx().to_vec(),
+                values,
+            ))
+        } else {
+            return Err(KError::Unsupported(
+                "SOR complex setup currently requires a CSR operator".into(),
+            ));
+        };
+        self.a_csr = Some(csr.clone());
+        self.ensure_inv_diag(&csr)?;
+        self.ensure_coloring(&csr);
+        Ok(())
     }
 
-    fn apply(&self, _side: PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "SOR does not support complex scalars yet".into(),
-        ))
+    fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let n = self.n;
+        if x.len() != n || y.len() != n {
+            return Err(KError::InvalidInput(
+                "dimension mismatch in SorPc::apply".into(),
+            ));
+        }
+        let mut xr = vec![0.0; n];
+        let mut xi = vec![0.0; n];
+        let mut yr = vec![0.0; n];
+        let mut yi = vec![0.0; n];
+        for i in 0..n {
+            xr[i] = x[i].real();
+            xi[i] = x[i].imag();
+        }
+        self.apply_real(side, &xr, &mut yr)?;
+        self.apply_real(side, &xi, &mut yi)?;
+        for i in 0..n {
+            y[i] = S::from_parts(yr[i], yi[i]);
+        }
+        Ok(())
     }
 }
 
@@ -574,20 +607,32 @@ impl KPreconditioner for SorPc {
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::error::KError;
+    use crate::matrix::sparse::CsrMatrix;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::PcSide;
 
     #[test]
-    fn apply_s_reports_unsupported() {
-        let pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
-        let rhs = vec![S::one(); 2];
+    fn apply_s_runs_for_complex_rhs() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                S::from_real(4.0),
+                S::from_real(-1.0),
+                S::from_real(-1.0),
+                S::from_real(4.0),
+            ],
+        );
+        let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
+        pc.setup(&a).unwrap();
+        let rhs = vec![S::from_parts(1.0, 0.5); 2];
         let mut out = vec![S::zero(); rhs.len()];
         let mut scratch = BridgeScratch::default();
-        let err = pc
-            .apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
-            .unwrap_err();
-        assert!(matches!(err, KError::Unsupported(_)));
+        pc.apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
+            .unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
     }
 }
 

@@ -66,12 +66,14 @@ fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
 
 #[cfg(feature = "complex")]
 #[test]
-fn gmres_sstep_is_unavailable_for_complex() -> Result<(), KError> {
+fn gmres_sstep_complex_matches_classical_reason() -> Result<(), KError> {
     let a = util::spd_poisson2d(6);
     let b: Vec<R> = util::rhs_random(a.nrows(), 4);
     let restart = 12;
 
-    let err = solve_with_variant(
+    let (_x_classic, it_classic, res_classic) =
+        solve_with_variant(&a, &b, GmresVariant::Classical, restart)?;
+    let (_x_sstep, it_sstep, res_sstep) = solve_with_variant(
         &a,
         &b,
         GmresVariant::SStep {
@@ -80,11 +82,10 @@ fn gmres_sstep_is_unavailable_for_complex() -> Result<(), KError> {
             max_cond: 1e8,
         },
         restart,
-    )
-    .expect_err("expected complex s-step GMRES to be unavailable");
+    )?;
 
-    match err {
-        KError::NotImplemented(_) => Ok(()),
-        other => Err(other),
-    }
+    assert!(res_sstep.is_finite());
+    assert!(res_classic.is_finite());
+    assert!((it_classic as isize - it_sstep as isize).abs() as usize <= restart);
+    Ok(())
 }

@@ -197,3 +197,14 @@ Scope: extend PC failure propagation beyond shell hooks (e.g., factorization/sol
 <a id="tracking-nan-inf-reason"></a>
 ### Tracking issue: NaN/Inf reasons
 Scope: detect NaN/Inf residuals and map to PETSc divergence reasons.
+
+## Complex-scalar exclusions by method
+
+When building with `--features complex`, support is currently method-specific:
+
+- `KSP GMRES (s-step)`: available; no complex hard-fail path.
+- `PC SOR`: available with CSR-only setup and real-part operator projection.
+- `PC Deflation`: available with real coarse operators applied to complex vectors.
+- `PC ILU (CSR)`: partial; CSR-only setup with real-part projection, then split real/imag solves.
+- `PC ApproxInv`: partial; CSR-only setup with diagonal real-part initialization, complex apply supported.
+- `PC MG`: still limited by real-only hierarchy/operator storage (`f64` levels), so complex parity is incomplete.
