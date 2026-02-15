@@ -1,7 +1,7 @@
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use faer::Mat;
 
 #[cfg(feature = "complex")]
@@ -78,6 +78,10 @@ impl Preconditioner for QrPc {
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Dense
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 

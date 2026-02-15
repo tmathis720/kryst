@@ -3,7 +3,7 @@
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use nalgebra::{DMatrix, DVector, Dynamic};
 
 fn extract_dense(op: &dyn LinOp<S = S>) -> Result<DMatrix<S>, KError> {
@@ -90,6 +90,10 @@ impl Preconditioner for NalgebraLuPc {
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Dense
     }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
+    }
 }
 
 pub struct NalgebraQrPc {
@@ -156,5 +160,9 @@ impl Preconditioner for NalgebraQrPc {
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Dense
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }

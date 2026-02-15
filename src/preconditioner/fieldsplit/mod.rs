@@ -8,7 +8,7 @@ use crate::matrix::op::DistLayout;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::spgemm_with_drop_tol_generic;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use std::cmp::{max, min};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -263,7 +263,11 @@ impl FieldSplitPc {
                     break;
                 }
             }
-            diag_inv[i] = if aii.abs() > 1e-14 { aii.inv() } else { S::zero() };
+            diag_inv[i] = if aii.abs() > 1e-14 {
+                aii.inv()
+            } else {
+                S::zero()
+            };
         }
         let a12 = schur.a12.as_ref();
         let mut scaled_vals = Vec::with_capacity(a12.values().len());
@@ -310,8 +314,7 @@ impl FieldSplitPc {
             let a_end = a.row_ptr()[row + 1];
             let b_end = b.row_ptr()[row + 1];
             while ia < a_end || ib < b_end {
-                let (col, val) = if ib >= b_end
-                    || (ia < a_end && a.col_idx()[ia] < b.col_idx()[ib])
+                let (col, val) = if ib >= b_end || (ia < a_end && a.col_idx()[ia] < b.col_idx()[ib])
                 {
                     let col = a.col_idx()[ia];
                     let val = a.values()[ia];
@@ -566,6 +569,18 @@ impl Preconditioner for FieldSplitPc {
             FieldSplitType::Multiplicative => self.apply_multiplicative(side, x, y),
             FieldSplitType::Symmetric => self.apply_symmetric(side, x, y),
             FieldSplitType::Schur { .. } => self.apply_schur(side, x, y),
+        }
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        if self
+            .children
+            .iter()
+            .any(|pc| pc.distributed_support() == PcDistributedSupport::Distributed)
+        {
+            PcDistributedSupport::Distributed
+        } else {
+            PcDistributedSupport::LocalOnly
         }
     }
 }

@@ -68,7 +68,9 @@ use crate::parallel::Comm;
 use crate::preconditioner::dist::MpiPcOptions;
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
-use crate::preconditioner::{PcDistributedSupport, PcReusePolicy, PcSide, Preconditioner};
+#[cfg(feature = "mpi")]
+use crate::preconditioner::PcDistributedSupport;
+use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
     BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, CrSolver, FgmresSolver, GcrSolver,
@@ -2569,22 +2571,21 @@ impl KspContext {
             return Ok(false);
         }
         let Some(pending) = self.pending_mpi_pc.as_ref() else {
-            log::warn!(
-                "Selected preconditioner is rank-local under MPI; consider -pc_global block_jacobi/asm/ras."
-            );
-            return Ok(false);
+            return Err(KError::InvalidInput(
+                "selected preconditioner is rank-local for a distributed operator; set -pc_global block_jacobi|asm|ras"
+                    .into(),
+            ));
         };
         if pending.mpi_opts.global_pc == GlobalPcKind::None {
-            log::warn!(
-                "Selected preconditioner is rank-local under MPI; set -pc_global to use a distributed strategy."
-            );
-            return Ok(false);
+            return Err(KError::InvalidInput(
+                "selected preconditioner is rank-local for a distributed operator; -pc_global must be set"
+                    .into(),
+            ));
         }
         let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
-            log::warn!(
-                "pc_global requested but operator is not a DistCsrOp; skipping distributed fallback."
-            );
-            return Ok(false);
+            return Err(KError::InvalidInput(
+                "-pc_global requires DistCsrOp when running distributed".into(),
+            ));
         };
         log::info!(
             "Upgrading rank-local preconditioner to distributed {:?} based on pc_global.",

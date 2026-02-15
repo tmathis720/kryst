@@ -60,23 +60,43 @@ documented behavior in the README and matrix module:
   - Rayon-backed CSR paths live in `src/matrix/spmv/mod.rs`.
   - Vector kernels used by solvers live in `src/algebra/parallel.rs`.
 
-## Preconditioner local vs distributed behavior
+## Distributed-safe solver/preconditioner combinations
 
-The matrix below summarizes which preconditioners operate rank-locally (no MPI
-communication) versus those that provide distributed/global behavior when the
-operator is a `DistCsrOp` and `mpi` is enabled.
+This matrix is the definitive reference for MPI safety when `comm.size() > 1`
+and the operator is distributed (`DistCsrOp` or has a distributed layout).
 
-| Preconditioner | Rank-local only | Distributed-capable | Notes |
-|---|---|---|---|
-| Jacobi / Block Jacobi | ✅ | ✅ | `pc_type block_jacobi` uses local blocks; `pc_global=block_jacobi` wraps MPI with `DistPcAdapter`. |
-| ILU / ILUT / ILUTP / ILUP | ✅ | ⚠️ | Operate on rank-local blocks; wrap with `pc_global=block_jacobi` for distributed apply. |
-| Chebyshev / SOR / SSOR | ✅ | ⚠️ | Local-only; select `pc_global` if a global wrapper is desired. |
-| Approximate Inverse | ✅ | ⚠️ | Rank-local only under MPI. |
-| ASM / RAS | ⚠️ | ✅ | Distributed ASM supports RAS mode with overlap; ASM mode is local only. |
-| AMG / GAMG | ⚠️ | ✅ | Distributed coarse execution is policy-controlled (`pc_amg_dist_apply_mode`); diagnostics include grid/operator complexity and per-level nnz/smoothing-work estimates. |
-| LU / QR (dense-direct) | ✅ | ❌ | Local-only under MPI; use `SuperLU_DIST` for distributed direct solves. |
-| SuperLU_DIST | ❌ | ✅ | Distributed direct solve when `superlu_dist` feature is enabled. |
-| PC Chain | ⚠️ | ⚠️ | Each stage retains its own local vs distributed behavior. |
+Legend:
+- ✅ supported as-is.
+- ✅* supported when wrapped with `-pc_global ...` (explicit distributed adapter).
+- ❌ unsupported/invalid setup.
+
+| Preconditioner family | `distributed_support()` contract | Local semantics | Distributed adapter semantics | MPI-safe setup combinations |
+|---|---|---|---|---|
+| Jacobi | `LocalOnly` | Diagonal inverse on rank-local rows. | `pc_global=block_jacobi` gives additive block-Jacobi across ranks. | ✅ serial; ✅* MPI with `pc_global=block_jacobi`; ❌ MPI with `pc_global=none`. |
+| ILU / ILUT / ILUTP / ILU_CSR | `LocalOnly` | Rank-local factorization/triangular solves. | `pc_global=block_jacobi` wraps local factors per rank (no cross-rank coupling in PC apply). | ✅ serial; ✅* MPI with `pc_global=block_jacobi`; ❌ MPI with `pc_global=none`. |
+| SOR / SSOR | `LocalOnly` | Local forward/backward/color sweeps. | `pc_global=block_jacobi,pc_local=sor` gives per-rank smoother inside additive composition. | ✅ serial; ✅* MPI with `pc_global=block_jacobi`; ❌ MPI with `pc_global=none`. |
+| Chebyshev PC | `LocalOnly` | Local polynomial smoothing with local CSR. | `pc_global=block_jacobi,pc_local=chebyshev` applies local polynomial PCs additively across ranks. | ✅ serial; ✅* MPI with `pc_global=block_jacobi`; ❌ MPI with `pc_global=none`. |
+| ApproxInv (FSAI/SPAI CSR) | `LocalOnly` | Local approximate inverse on owned rows/cols. | `pc_global=block_jacobi,pc_local=fsai|spai` composes local approximate inverses additively. | ✅ serial; ✅* MPI with `pc_global=block_jacobi`; ❌ MPI with `pc_global=none`. |
+| Block Jacobi (object PC) | `LocalOnly` | Explicit local blocking over local rows. | Use `pc_global=block_jacobi` for MPI-level composition. | ✅ serial; ✅* MPI with `pc_global=block_jacobi`; ❌ MPI with `pc_global=none`. |
+| ASM / RAS | `Distributed` when distributed backend is selected, else `LocalOnly` | Local ASM for serial/local layout. | Native distributed overlap exchange; RAS weighting when configured. | ✅ serial; ✅ MPI (`pc_global=asm` or `pc_global=ras`). |
+| AMG / GAMG | `Distributed` when distributed hierarchy/apply path is active | Local hierarchy otherwise. | Native distributed coarse strategies (`root_gather`/`local_prototype` etc.). | ✅ serial; ✅ MPI with distributed AMG modes. |
+| AsmAmg | `Distributed` | Two-level hybrid semantics in local runs. | Distributed semantics inherited from ASM/AMG combination. | ✅ serial; ✅ MPI distributed runs. |
+| BDDC (prototype) | `Distributed` | Metadata-only prototype apply in serial too. | Distributed contract advertised for domain-decomposition composition. | ✅ serial; ✅ MPI (prototype behavior). |
+| MG / KSP-as-PC / direct LU/QR / nalgebra direct | `LocalOnly` | Local-only behavior. | No distributed adapter beyond `pc_global=block_jacobi` for local-PC families. | ✅ serial; ❌ MPI unless wrapped as supported above (LU/QR/nalgebra remain ❌). |
+| SuperLU_DIST | `Distributed` | N/A | Native distributed direct solve. | ✅ MPI when `superlu_dist` feature is enabled. |
+| PC Chain | Aggregates child contracts | Stage-wise local or distributed application. | Distributed if any stage is distributed. | ✅ mixed chains; setup fails early on invalid distributed/local combinations. |
+| FieldSplit | Aggregates child contracts | Per-field local solves/sweeps. | Distributed if any child is distributed; preserves per-child semantics. | ✅ mixed local/distributed child PCs; setup fails early for invalid MPI combinations. |
+
+### Setup-time capability negotiation rules
+
+- For distributed operators with rank-local PCs, setup now fails early unless a
+  global adapter is explicitly selected (`-pc_global block_jacobi|asm|ras`).
+- `pc_global=none` is treated as invalid for distributed operators when the
+  selected PC advertises `LocalOnly`.
+- `pc_global` requires a distributed operator (`DistCsrOp`) when MPI mode is
+  active.
+- Composite PCs (`pc_chain`, `fieldsplit`, `pc_ksp`) preserve child
+  `distributed_support()` contracts instead of implicitly downgrading behavior.
 
 ## MPI/Rayon test matrix plan
 

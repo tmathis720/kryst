@@ -9,7 +9,7 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::amg::{AMGConfig, CycleType};
 use crate::preconditioner::asm::{Asm, AsmConfig};
-use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
+use crate::preconditioner::{PcCaps, PcDistributedSupport, PcSide, Preconditioner};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
@@ -225,6 +225,10 @@ impl Preconditioner for AsmAmg {
     fn capabilities(&self) -> PcCaps {
         PcCaps::default()
     }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::Distributed
+    }
 }
 
 #[cfg(feature = "complex")]
@@ -239,6 +243,10 @@ impl Preconditioner for AsmAmg {
         Err(KError::Unsupported(
             "AsmAmg does not support complex scalars yet".into(),
         ))
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::Distributed
     }
 }
 

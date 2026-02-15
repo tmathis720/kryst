@@ -6,7 +6,7 @@ use crate::error::KError;
 use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::NestedPcFailure;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -183,6 +183,14 @@ impl Preconditioner for KspAsPc {
 
     fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        if self.inner.distributed_support() == PcDistributedSupport::Distributed {
+            PcDistributedSupport::Distributed
+        } else {
+            PcDistributedSupport::LocalOnly
+        }
     }
 }
 

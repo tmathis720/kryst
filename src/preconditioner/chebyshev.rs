@@ -36,6 +36,7 @@ use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+use crate::preconditioner::PcDistributedSupport;
 use crate::preconditioner::Preconditioner as ObjPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
@@ -602,6 +603,10 @@ impl ObjPreconditioner for ChebyshevPc {
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
     }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
+    }
 }
 
 #[cfg(feature = "complex")]
@@ -621,6 +626,10 @@ impl ObjPreconditioner for ChebyshevPc {
         Err(KError::Unsupported(
             "Chebyshev does not support complex scalars yet".into(),
         ))
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 

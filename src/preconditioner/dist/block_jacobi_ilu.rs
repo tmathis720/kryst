@@ -7,6 +7,10 @@ use crate::matrix::dist_csr::DistCsrOp;
 use crate::matrix::op::LinOp;
 use crate::parallel::UniverseComm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use crate::preconditioner::approxinv_csr::{ApproxInvKind, ApproxInvParams, FsaiCsr, SpaiCsr};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use crate::preconditioner::chebyshev::ChebyshevPc;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::ilu::{Ilu, IluConfig};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::ilut::RowFilterPreconditioner;
@@ -14,8 +18,15 @@ use crate::preconditioner::ilut::RowFilterPreconditioner;
 use crate::preconditioner::ilutp::Ilutp;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
-use crate::preconditioner::{LocalPreconditioner, PcSide};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use crate::preconditioner::sor::{MatSorType, SorPc};
+use crate::preconditioner::{LocalPreconditioner, PcSide, Preconditioner as ObjPreconditioner};
 use crate::utils::conditioning::ConditioningOptions;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use crate::matrix::op::CsrOp;
 
 use super::{DistVec, DistributedPreconditioner};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -84,6 +95,49 @@ where
         let x_local = x.local_view();
         let mut y_local = vec![0.0; self.n_local];
         self.local_pc.apply_local(x_local, &mut y_local)?;
+        x.local_view_mut().copy_from_slice(&y_local);
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+pub struct BlockJacobiObjPc {
+    comm: UniverseComm,
+    local_pc: Box<dyn ObjPreconditioner>,
+    row_offset: usize,
+    n_local: usize,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl BlockJacobiObjPc {
+    pub fn new(
+        comm: UniverseComm,
+        local_pc: Box<dyn ObjPreconditioner>,
+        row_offset: usize,
+        n_local: usize,
+    ) -> Self {
+        Self {
+            comm,
+            local_pc,
+            row_offset,
+            n_local,
+        }
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl DistributedPreconditioner for BlockJacobiObjPc {
+    type Scalar = f64;
+
+    fn apply_global(&self, side: PcSide, x: &mut DistVec) -> Result<(), KError> {
+        let _ = &self.comm;
+        debug_assert_eq!(x.row_offset(), self.row_offset);
+        debug_assert_eq!(x.local_len(), self.n_local);
+        if self.n_local == 0 {
+            return Ok(());
+        }
+        let mut y_local = vec![0.0; self.n_local];
+        self.local_pc.apply(side, x.local_view(), &mut y_local)?;
         x.local_view_mut().copy_from_slice(&y_local);
         Ok(())
     }
@@ -164,6 +218,60 @@ pub fn build_block_jacobi_pc(
                     opts.ilutp_perm_tol,
                     opts.conditioning.clone(),
                 )?),
+                LocalPcKind::Sor => {
+                    let mut pc = SorPc::new(1.0, 1, MatSorType::SYMMETRIC_SWEEP, 0.0);
+                    let local = Arc::new(dist_op.local_block_csr());
+                    let op = CsrOp::new(local);
+                    ObjPreconditioner::setup(&mut pc, &op)?;
+                    Box::new(BlockJacobiObjPc::new(
+                        dist_op.comm(),
+                        Box::new(pc),
+                        dist_op.local_row_offset(),
+                        dist_op.local_nrows(),
+                    ))
+                }
+                LocalPcKind::Chebyshev => {
+                    let mut pc = ChebyshevPc::new(2, 1e-2, 1.0);
+                    let local = Arc::new(dist_op.local_block_csr());
+                    let op = CsrOp::new(local);
+                    ObjPreconditioner::setup(&mut pc, &op)?;
+                    Box::new(BlockJacobiObjPc::new(
+                        dist_op.comm(),
+                        Box::new(pc),
+                        dist_op.local_row_offset(),
+                        dist_op.local_nrows(),
+                    ))
+                }
+                LocalPcKind::Fsai => {
+                    let mut pc = FsaiCsr::new_with_params(ApproxInvParams {
+                        kind: ApproxInvKind::FSAI,
+                        ..ApproxInvParams::default()
+                    });
+                    let local = Arc::new(dist_op.local_block_csr());
+                    let op = CsrOp::new(local);
+                    ObjPreconditioner::setup(&mut pc, &op)?;
+                    Box::new(BlockJacobiObjPc::new(
+                        dist_op.comm(),
+                        Box::new(pc),
+                        dist_op.local_row_offset(),
+                        dist_op.local_nrows(),
+                    ))
+                }
+                LocalPcKind::Spai => {
+                    let mut pc = SpaiCsr::new_with_params(ApproxInvParams {
+                        kind: ApproxInvKind::SPAI,
+                        ..ApproxInvParams::default()
+                    });
+                    let local = Arc::new(dist_op.local_block_csr());
+                    let op = CsrOp::new(local);
+                    ObjPreconditioner::setup(&mut pc, &op)?;
+                    Box::new(BlockJacobiObjPc::new(
+                        dist_op.comm(),
+                        Box::new(pc),
+                        dist_op.local_row_offset(),
+                        dist_op.local_nrows(),
+                    ))
+                }
             };
             Ok(Some(wrapper))
         }

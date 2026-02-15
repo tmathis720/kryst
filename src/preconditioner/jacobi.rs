@@ -18,7 +18,7 @@ use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
 use crate::preconditioner::stats::{PcIntrospect, PcStats};
-use crate::preconditioner::{LocalPreconditioner, PcSide, Preconditioner};
+use crate::preconditioner::{LocalPreconditioner, PcDistributedSupport, PcSide, Preconditioner};
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -153,6 +153,10 @@ impl Preconditioner for Jacobi {
         });
         self.applies.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 

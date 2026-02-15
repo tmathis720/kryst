@@ -26,13 +26,13 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::PcSide;
 #[cfg(not(feature = "complex"))]
 use crate::preconditioner::Preconditioner;
 #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
+use crate::preconditioner::{PcDistributedSupport, PcSide};
 #[cfg(feature = "dense-direct")]
 use crate::solver::direct_lu::LuSolver;
 #[cfg(feature = "dense-direct")]
@@ -439,6 +439,10 @@ impl Preconditioner for BlockJacobi {
         }
         BlockJacobi::apply(self, x, y);
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        PcDistributedSupport::LocalOnly
     }
 }
 
