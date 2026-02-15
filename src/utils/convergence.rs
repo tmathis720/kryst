@@ -124,6 +124,19 @@ pub struct SolverCounters {
     pub residual_replacements: usize,
 }
 
+/// Structured failure details propagated from a nested preconditioner solve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NestedPcFailure {
+    /// Stage/component that produced the nested solve failure.
+    pub component: &'static str,
+    /// Inner KSP convergence reason.
+    pub reason: ConvergedReason,
+    /// Inner iteration count.
+    pub iterations: usize,
+    /// Human-readable context (inner solver/pc selections, etc.).
+    pub detail: String,
+}
+
 #[cfg(feature = "metrics")]
 #[derive(Clone, Debug, Default)]
 pub struct SolveMetrics {
@@ -158,6 +171,8 @@ pub struct SolveStats<R> {
     pub complex_drift_max_rel: R,
     /// Optional solver timing and reduction metrics.
     pub metrics: SolveMetrics,
+    /// Structured details for nested preconditioner failures, when available.
+    pub nested_pc_failure: Option<NestedPcFailure>,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -172,12 +187,19 @@ impl<R: Default> SolveStats<R> {
             complex_drift_counts: [0; 6],
             complex_drift_max_rel: R::default(),
             metrics: SolveMetrics::default(),
+            nested_pc_failure: None,
         }
     }
 
     /// Attach solver counters to an existing statistics record.
     pub fn with_counters(mut self, counters: SolverCounters) -> Self {
         self.counters = counters;
+        self
+    }
+
+    /// Attach nested preconditioner failure metadata.
+    pub fn with_nested_pc_failure(mut self, failure: NestedPcFailure) -> Self {
+        self.nested_pc_failure = Some(failure);
         self
     }
 }

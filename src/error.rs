@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::utils::convergence::NestedPcFailure;
+
 // Unified error type for kryst
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,8 @@ pub enum KError {
     InvalidInput(String),
     #[error("preconditioner failed: {0}")]
     PcFailed(String),
+    #[error("nested preconditioner failed ({0:?})")]
+    NestedPcFailed(NestedPcFailure),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
     #[error("unrecognized solver type: {0}")]
