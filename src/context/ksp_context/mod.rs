@@ -820,19 +820,22 @@ impl KspContext {
             set_parallel_tune(tune);
         }
 
-        if let Some(ref t) = opts.ksp_type {
-            let st = SolverType::from_str(t)?;
-            self.set_type(st)?;
-        }
+        let requested_solver_type = opts
+            .ksp_type
+            .as_deref()
+            .map(SolverType::from_str)
+            .transpose()?;
+        let effective_solver_type = requested_solver_type.or(self.solver_type);
+
         if opts.richardson_omega.is_some()
-            && !matches!(self.solver_type, Some(SolverType::Richardson))
+            && !matches!(effective_solver_type, Some(SolverType::Richardson))
         {
             return Err(KError::InvalidInput(
                 "-ksp_richardson_omega requires -ksp_type richardson".into(),
             ));
         }
         if opts.chebyshev_omega.is_some()
-            && !matches!(self.solver_type, Some(SolverType::Chebyshev))
+            && !matches!(effective_solver_type, Some(SolverType::Chebyshev))
         {
             return Err(KError::InvalidInput(
                 "-ksp_chebyshev_omega requires -ksp_type chebyshev".into(),
@@ -862,20 +865,30 @@ impl KspContext {
                 ));
             }
         }
+        let mut scalar_solver_config_changed = false;
         if let Some(rtol) = opts.rtol {
             self.rtol = rtol;
+            scalar_solver_config_changed = true;
         }
         if let Some(atol) = opts.atol {
             self.atol = atol;
+            scalar_solver_config_changed = true;
         }
         if let Some(dtol) = opts.dtol {
             self.dtol = dtol;
+            scalar_solver_config_changed = true;
         }
         if let Some(maxits) = opts.maxits {
             self.maxits = maxits;
+            scalar_solver_config_changed = true;
         }
         if let Some(restart) = opts.restart {
             self.restart = restart;
+        }
+        if let Some(st) = requested_solver_type {
+            self.set_type(st)?;
+        } else if scalar_solver_config_changed {
+            self.invalidate_solver_setup();
         }
         if let Some(ref side) = opts.pc_side {
             self.set_pc_side_from_str(side)?;
