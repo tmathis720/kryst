@@ -97,7 +97,7 @@ reproducible CI runs.
 | `-ksp_cg_variant classic|pipelined` | `classic` | Select the CG algorithm. `pipelined` enables a single-reduction Chronopoulos–Gear variant with asynchronous collectives. |
 | `-ksp_reproducible` | `false` | Enable deterministic reductions (rank-ordered MPI sums and fixed-order local kernels). |
 | `-ksp_threads <N>` | unset | Request `N` Rayon workers (requires `--features rayon`). Ignored in builds without Rayon. |
-| `-ksp_gmres_variant classical|pipelined|sstep[:s]` | `classical` | Select the GMRES variant. `sstep` accepts an optional block size `s` (currently parsed but reported as not yet implemented). |
+| `-ksp_gmres_variant classical|pipelined|sstep[:s]` | `classical` | Select the GMRES variant. `sstep` accepts an optional block size `s`; `s=1` uses the explicit s-step path while larger panels currently fall back to classical GMRES for robustness. |
 | `-ksp_residual_replacement <iters>` | `50` | Force periodic residual recomputation in pipelined CG to control drift (`0` disables). |
 | `-ksp_trust_region <radius>` | unset | Enable CG trust-region safeguarding with the provided radius. |
 | `-ksp_reorthog never|ifneeded|always` | `ifneeded` | Control Gram-Schmidt reorthogonalisation in GMRES and FGMRES. |
@@ -166,6 +166,19 @@ RAYON_NUM_THREADS=1 mpirun -n 4 cargo run --example mpi_parallel_demo --features
 For performance studies across MPI-only, Rayon-only, and hybrid builds, run the
 `mpi_rayon_suite` benchmark via `cargo bench` (see `scripts/bench_mpi_rayon.sh`)
 to compare ILU and ASM preconditioner workloads on small/medium/large matrices.
+
+#### Recommended advanced-variant bundles
+
+- **Throughput / latency-hiding (MPI + Rayon):**
+  `-ksp_cg_variant pipelined -ksp_gmres_variant pipelined -ksp_residual_replacement 50 -ksp_threads <N>`
+- **Deterministic CI / regression:**
+  `-ksp_cg_variant pipelined -ksp_gmres_variant sstep:1 -ksp_reproducible -ksp_threads 1`
+- **Conservative robustness on hard nonsymmetric systems:**
+  `-ksp_gmres_variant classical -ksp_reorthog ifneeded -ksp_gmres_reorth_tol 0.7`
+
+All advanced Krylov variants report synchronization cost via
+`SolveStats::counters.num_global_reductions`; pipelined PCG additionally reports
+`SolveStats::counters.residual_replacements`.
 
 ### Architecture
 - **PETSc-style API**: Unified KSP context for runtime solver selection
