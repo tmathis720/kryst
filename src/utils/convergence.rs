@@ -159,7 +159,11 @@ pub struct SolveStats<R> {
     pub iterations: usize,
     /// Final residual norm
     pub final_residual: R,
-    /// Reason for stopping
+    /// Reason for stopping.
+    ///
+    /// This includes mapped preconditioner lifecycle failures (for example
+    /// `DivergedPcSetupFailed`/`DivergedPcFailed`) when setup/apply errors are
+    /// propagated through `KspContext` into `SolveStats`.
     pub reason: ConvergedReason,
     /// Additional counters collected during the solve.
     pub counters: SolverCounters,
@@ -172,6 +176,9 @@ pub struct SolveStats<R> {
     /// Optional solver timing and reduction metrics.
     pub metrics: SolveMetrics,
     /// Structured details for nested preconditioner failures, when available.
+    ///
+    /// Outer solves use this to preserve the inner component/reason/iteration
+    /// context when KSP-as-PC or other nested preconditioners fail.
     pub nested_pc_failure: Option<NestedPcFailure>,
 }
 
