@@ -153,22 +153,34 @@ features, options, and monitoring/convergence hooks.
 | `KSP_CONVERGED_ITERATING` | [`ConvergedReason::Continued`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.Continued) | Supported | Still iterating. |
 | `KSP_DIVERGED_MONITOR` | [`ConvergedReason::StoppedByMonitor`](https://docs.rs/kryst/latest/kryst/utils/convergence/enum.ConvergedReason.html#variant.StoppedByMonitor) | Supported | Monitor requested stop. |
 
+
+## MG/GAMG hierarchy and coarse-policy mapping
+
+| PETSc option/workflow | kryst option/API | Status | Notes |
+| --- | --- | --- | --- |
+| `-pc_mg_coarse_pc_type` / `-pc_mg_coarse_ksp_type` | `PcOptions::pc_mg_coarse_*` | Supported | Global coarse solver selection for built-in MG. |
+| Per-level MG coarse strategy overrides | `MgPc::set_level_coarse_solver_type(level, "...")` | Partial | Deepest matching level override is used for the active coarse solve path. |
+| User-supplied MG transfers (`P`,`R`) | `MgPc::set_level_transfer_operators` / `set_level_transfer_from_linops` | Supported | Overrides generated transfers level-by-level. |
+| GAMG distributed coarse policy | `-pc_amg_dist_apply_mode {root_gather,local_prototype,...}` | Supported | `GamgConfig::try_from_opts` forwards these controls into AMG. |
+| GAMG hierarchy transfer/coarse overrides | `Gamg::set_level_transfer_operators`, `Gamg::set_level_coarse_solver` | Partial | Uses AMG hierarchy override hooks; useful for prototypes and tuning. |
+| AMG diagnostics (complexity + level nnz) | `AmgStats::{grid_complexity, operator_complexity, levels[]}` | Supported | Includes per-level `nnz_a/nnz_p/nnz_r`, effective nnz, and smoothing-work estimates. |
+
 ## Known parity gaps
 
 High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 
-1. **Multigrid hierarchy management** (custom P/R operators, advanced coarsening, richer coarse solves). Tracking: [Multigrid parity](#tracking-mg-parity).
+1. **Multigrid hierarchy management** (remaining parity for full PETSc per-level KSP stacks and advanced adaptive policies). Tracking: [Multigrid parity](#tracking-mg-parity).
 2. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
 3. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
 4. **Explicit breakdown/divergence reasons** (NaN/Inf, BiCG breakdown distinctions). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
 5. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
-6. **GAMG advanced options** (`-pc_type gamg`). Tracking: [GAMG support](#tracking-gamg).
+6. **GAMG advanced options** (`-pc_type gamg`), especially full PETSc-level smoother and repartition controls. Tracking: [GAMG support](#tracking-gamg).
 
 ## Tracking issues
 
 <a id="tracking-mg-parity"></a>
 ### Tracking issue: Multigrid parity
-Scope: advanced coarsening strategies, user-specified transfer operators, and richer coarse solves beyond injection + Galerkin.
+Scope: remaining advanced cycle orchestration and full PETSc-equivalent per-level KSP/PC policy controls.
 
 <a id="tracking-ksp-as-pc"></a>
 ### Tracking issue: KSP-as-PC parity
@@ -184,7 +196,7 @@ Scope: coarse spaces, constraints, subdomain interface coupling, and full coarse
 
 <a id="tracking-gamg"></a>
 ### Tracking issue: GAMG support
-Scope: remaining PETSc GAMG parity (e.g., richer smoother controls and hierarchy diagnostics) beyond currently supported type/threshold/levels/coarsen/interpolation/aggressive settings.
+Scope: remaining PETSc GAMG parity (e.g., repartitioning and full smoother stacks) beyond supported type/threshold/levels/coarsen/interpolation/aggressive/distributed-coarse controls.
 
 <a id="tracking-breakdown-reason"></a>
 ### Tracking issue: Breakdown reason parity

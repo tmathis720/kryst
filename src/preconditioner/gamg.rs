@@ -8,8 +8,11 @@ use crate::preconditioner::{Op, OpFormat, PcCaps, PcDistributedSupport, PcSide, 
 use crate::config::kinds::{AmgCoarsenKind, AmgInterpKind};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::amg::{
-    AMG, AMGConfig, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType,
+    AMGConfig, AmgTransferOperators, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType,
+    AMG,
 };
+#[cfg(feature = "backend-faer")]
+use crate::preconditioner::dist::DistCoarseStrategy;
 #[cfg(feature = "backend-faer")]
 use std::str::FromStr;
 
@@ -90,6 +93,12 @@ impl GamgConfig {
             }
             amg_config.aggressive_mis_k = mis_k;
         }
+        if let Some(mode) = opts.amg_dist_apply_mode.as_deref() {
+            amg_config.dist_coarse_strategy = parse_gamg_dist_mode(mode)?;
+        }
+        if let Some(enabled) = opts.amg_dist_instrumentation {
+            amg_config.dist_apply_instrumentation = enabled;
+        }
 
         Ok(GamgConfig {
             gamg_type,
@@ -104,6 +113,19 @@ impl GamgConfig {
         Err(KError::Unsupported(
             "GAMG requires backend-faer; enable backend-faer to use GAMG options",
         ))
+    }
+}
+
+#[cfg(feature = "backend-faer")]
+fn parse_gamg_dist_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
+    match value {
+        "none" => Ok(DistCoarseStrategy::None),
+        "root" | "root_gather" | "gather" => Ok(DistCoarseStrategy::RootGather),
+        "local" | "local_prototype" => Ok(DistCoarseStrategy::LocalPrototype),
+        "superlu_dist" => Ok(DistCoarseStrategy::SuperLuDist),
+        other => Err(KError::InvalidInput(format!(
+            "unsupported GAMG coarse apply mode: {other}"
+        ))),
     }
 }
 
@@ -168,6 +190,14 @@ impl Gamg {
 
     pub fn config(&self) -> &GamgConfig {
         &self.config
+    }
+
+    pub fn set_level_transfer_operators(&mut self, level: usize, operators: AmgTransferOperators) {
+        self.amg.set_level_transfer_operators(level, operators);
+    }
+
+    pub fn set_level_coarse_solver(&mut self, level: usize, solve: CoarseSolve) {
+        self.amg.set_level_coarse_solver(level, solve);
     }
 }
 
@@ -259,25 +289,38 @@ mod tests {
     }
 
     #[test]
+    fn gamg_config_parses_dist_coarse_controls() {
+        let opts = PcOptions {
+            amg_dist_apply_mode: Some("local_prototype".into()),
+            amg_dist_instrumentation: Some(true),
+            ..Default::default()
+        };
+        let cfg = GamgConfig::try_from_opts(&opts).expect("parse distributed options");
+        assert_eq!(
+            cfg.amg_config.dist_coarse_strategy,
+            DistCoarseStrategy::LocalPrototype
+        );
+        assert!(cfg.amg_config.dist_apply_instrumentation);
+    }
+
+    #[test]
     fn gamg_config_rejects_invalid_aggressive_controls() {
         let opts = PcOptions {
             pc_gamg_aggressive_levels: Some(0),
             ..Default::default()
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected aggressive levels to fail");
-        assert!(
-            err.to_string()
-                .contains("pc_gamg_aggressive_levels must be >= 1")
-        );
+        assert!(err
+            .to_string()
+            .contains("pc_gamg_aggressive_levels must be >= 1"));
 
         let opts = PcOptions {
             pc_gamg_aggressive_mis_k: Some(1),
             ..Default::default()
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected mis k to fail");
-        assert!(
-            err.to_string()
-                .contains("pc_gamg_aggressive_mis_k must be >= 2")
-        );
+        assert!(err
+            .to_string()
+            .contains("pc_gamg_aggressive_mis_k must be >= 2"));
     }
 }
