@@ -1,4 +1,4 @@
-use crate::algebra::scalar::{KrystScalar, S};
+use crate::algebra::scalar::{KrystScalar, S, is_complex_scalar};
 use crate::config::options::PcOptions;
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::core::traits::SubmatrixExtract;
@@ -6,6 +6,7 @@ use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::DistLayout;
 use crate::matrix::op::LinOp;
+use crate::matrix::op::{StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::spgemm_with_drop_tol_generic;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -22,7 +23,12 @@ pub struct FieldSplitPc {
     block_matrices: Vec<Arc<CsrMatrix<S>>>,
     schur_blocks: Option<SchurBlocks>,
     schur_precondition_matrix: Option<Arc<CsrMatrix<S>>>,
+    schur_apply_hook: Option<SchurApplyHook>,
+    last_structure_id: Option<StructureId>,
+    last_values_id: Option<ValuesId>,
 }
+
+type SchurApplyHook = Arc<dyn Fn(&[S], &mut [S]) -> Result<(), KError> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy)]
 struct BlockSpan {
@@ -60,6 +66,8 @@ enum SchurPrecondition {
     Self_,
     Diag,
     A11,
+    Full,
+    FullMatFree,
 }
 
 #[derive(Debug, Clone)]
@@ -83,13 +91,19 @@ impl FieldSplitPc {
         let prefixes = opts.pc_fieldsplit_prefixes.clone().unwrap_or_default();
         for (i, _) in block_sizes.iter().enumerate() {
             let mut child_opts = opts.clone();
+            child_opts.pc_type = None;
             if let Some(prefix) = prefixes.get(i)
                 && let Some(scoped) = opts.scoped_child(prefix)
             {
                 child_opts.overlay_from(scoped.clone());
             }
+            let scoped_type = child_opts
+                .pc_type
+                .as_deref()
+                .map(PcType::from_str)
+                .transpose()?;
             children.push(PcFactory::create_preconditioner(
-                child_type,
+                scoped_type.unwrap_or(child_type),
                 Some(&child_opts),
             )?);
         }
@@ -108,6 +122,9 @@ impl FieldSplitPc {
             block_matrices: Vec::new(),
             schur_blocks: None,
             schur_precondition_matrix: None,
+            schur_apply_hook: None,
+            last_structure_id: None,
+            last_values_id: None,
         })
     }
 
@@ -149,6 +166,8 @@ impl FieldSplitPc {
                     "self" => SchurPrecondition::Self_,
                     "diag" => SchurPrecondition::Diag,
                     "a11" => SchurPrecondition::A11,
+                    "full" => SchurPrecondition::Full,
+                    "full_matfree" | "matfree" => SchurPrecondition::FullMatFree,
                     other => {
                         return Err(KError::InvalidInput(format!(
                             "unknown pc_fieldsplit_schur_precondition: {other}"
@@ -185,6 +204,30 @@ impl FieldSplitPc {
         local_n: usize,
         layout: Option<&DistLayout>,
     ) -> Result<Vec<BlockSpan>, KError> {
+        if block_sizes.is_empty() {
+            return Err(KError::InvalidInput(
+                "pc_fieldsplit_block_sizes must contain at least one block".into(),
+            ));
+        }
+        if block_sizes.contains(&0) {
+            return Err(KError::InvalidInput(
+                "pc_fieldsplit_block_sizes entries must all be > 0".into(),
+            ));
+        }
+        if let Some(layout) = layout {
+            if layout.row_end < layout.row_start {
+                return Err(KError::InvalidInput(
+                    "invalid distributed layout: row_end < row_start".into(),
+                ));
+            }
+            if layout.row_end - layout.row_start != local_n {
+                return Err(KError::InvalidInput(format!(
+                    "distributed layout/local row mismatch: local_n={local_n}, layout_rows={}",
+                    layout.row_end - layout.row_start
+                )));
+            }
+        }
+
         let total: usize = block_sizes.iter().sum();
         if total == local_n {
             return Ok(Self::block_spans_from_sizes(block_sizes));
@@ -209,6 +252,12 @@ impl FieldSplitPc {
                     }
                 }
                 return Ok(spans);
+            }
+            if total > local_n && total < layout.global_rows {
+                return Err(KError::InvalidInput(format!(
+                    "pc_fieldsplit_block_sizes appears mixed local/global (sum={total}, local={local_n}, global={}); provide all-local or all-global sizes",
+                    layout.global_rows
+                )));
             }
             return Err(KError::InvalidInput(format!(
                 "pc_fieldsplit_block_sizes must sum to local ({local_n}) or global ({}) rows",
@@ -238,11 +287,26 @@ impl FieldSplitPc {
         if spans.len() != 2 {
             return None;
         }
+        let n = csr.nrows();
+        if spans.iter().any(|s| s.end > n || s.start > s.end) {
+            return None;
+        }
         let rows_0: Vec<usize> = (spans[0].start..spans[0].end).collect();
         let rows_1: Vec<usize> = (spans[1].start..spans[1].end).collect();
         let a12 = Arc::new(csr.extract_submatrix(&rows_0, &rows_1));
         let a21 = Arc::new(csr.extract_submatrix(&rows_1, &rows_0));
         Some(SchurBlocks { a12, a21 })
+    }
+
+    fn schur_full_approx(
+        &self,
+        a11: &CsrMatrix<S>,
+        a22: &CsrMatrix<S>,
+        schur: &SchurBlocks,
+    ) -> Result<CsrMatrix<S>, KError> {
+        // Reuse the reusable block-factorization path with a higher-fidelity approximation
+        // placeholder; currently this delegates to the diagonal-inverse A11 approximation.
+        self.schur_diag_approx(a11, a22, schur)
     }
 
     fn schur_diag_approx(
@@ -458,7 +522,11 @@ impl FieldSplitPc {
                 for i in 0..tmp2.len() {
                     tmp2[i] = x2[i] - tmp2[i];
                 }
-                self.children[1].apply(side, &tmp2, &mut y2)?;
+                if let Some(hook) = &self.schur_apply_hook {
+                    hook(&tmp2, &mut y2)?;
+                } else {
+                    self.children[1].apply(side, &tmp2, &mut y2)?;
+                }
             }
             SchurFactorization::Upper => {
                 self.children[1].apply(side, x2, &mut y2)?;
@@ -476,7 +544,11 @@ impl FieldSplitPc {
                 for i in 0..tmp2.len() {
                     tmp2[i] = x2[i] - tmp2[i];
                 }
-                self.children[1].apply(side, &tmp2, &mut y2)?;
+                if let Some(hook) = &self.schur_apply_hook {
+                    hook(&tmp2, &mut y2)?;
+                } else {
+                    self.children[1].apply(side, &tmp2, &mut y2)?;
+                }
                 let mut tmp1 = vec![S::zero(); span0.len()];
                 schur.a12.try_spmv(&y2, &mut tmp1)?;
                 let mut corr = vec![S::zero(); span0.len()];
@@ -495,13 +567,34 @@ impl FieldSplitPc {
 
 impl Preconditioner for FieldSplitPc {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if self.last_structure_id == Some(a.structure_id())
+            && self.last_values_id == Some(a.values_id())
+            && !self.block_spans.is_empty()
+        {
+            return Ok(());
+        }
         let n = a.dims().0;
         let spans =
             Self::block_spans_from_sizes_with_layout(&self.block_sizes, n, a.dist_layout())?;
+        if let Some(layout) = a.dist_layout()
+            && spans.iter().map(BlockSpan::len).sum::<usize>() != n
+            && self.block_sizes.iter().sum::<usize>() == layout.global_rows
+        {
+            return Err(KError::InvalidInput(
+                "fieldsplit local block spans do not cover local rows; check global block sizes against ownership layout".into(),
+            ));
+        }
         let csr = csr_from_linop(a, 0.0)?;
         let block_mats = self.extract_block_matrices(csr.as_ref(), &spans);
         let mut schur_precondition_matrix = None;
+        let mut schur_apply_hook: Option<SchurApplyHook> = None;
         if let FieldSplitType::Schur { precondition, .. } = self.split_type {
+            if precondition == SchurPrecondition::Diag && is_complex_scalar::<S>() {
+                return Err(KError::InvalidInput(
+                    "pc_fieldsplit_schur_precondition=diag is not supported for complex scalars"
+                        .into(),
+                ));
+            }
             if precondition == SchurPrecondition::A11 && block_mats.len() >= 2 {
                 let a11_dims = block_mats[0].dims();
                 let a22_dims = block_mats[1].dims();
@@ -523,6 +616,29 @@ impl Preconditioner for FieldSplitPc {
                     .ok_or_else(|| KError::InvalidInput("missing A22 block".into()))?;
                 let schur_mat = self.schur_diag_approx(a11.as_ref(), a22.as_ref(), &schur)?;
                 schur_precondition_matrix = Some(Arc::new(schur_mat));
+            } else if matches!(
+                precondition,
+                SchurPrecondition::Full | SchurPrecondition::FullMatFree
+            ) {
+                let schur = self
+                    .extract_schur_blocks(csr.as_ref(), &spans)
+                    .ok_or_else(|| KError::InvalidInput("missing Schur blocks".into()))?;
+                let a22 = block_mats
+                    .get(1)
+                    .ok_or_else(|| KError::InvalidInput("missing A22 block".into()))?;
+                let a11 = block_mats
+                    .first()
+                    .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?;
+                let schur_mat = self.schur_full_approx(a11.as_ref(), a22.as_ref(), &schur)?;
+                let schur_arc = Arc::new(schur_mat);
+                if precondition == SchurPrecondition::Full {
+                    schur_precondition_matrix = Some(schur_arc);
+                } else {
+                    let schur_mat = schur_arc.clone();
+                    schur_apply_hook = Some(Arc::new(move |rhs: &[S], out: &mut [S]| {
+                        schur_mat.try_spmv(rhs, out)
+                    }));
+                }
             }
         }
         for (idx, child) in self.children.iter_mut().enumerate() {
@@ -535,6 +651,12 @@ impl Preconditioner for FieldSplitPc {
                     .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?,
                 FieldSplitType::Schur {
                     precondition: SchurPrecondition::Diag,
+                    ..
+                } if idx == 1 => schur_precondition_matrix
+                    .as_ref()
+                    .ok_or_else(|| KError::InvalidInput("missing Schur approximation".into()))?,
+                FieldSplitType::Schur {
+                    precondition: SchurPrecondition::Full,
                     ..
                 } if idx == 1 => schur_precondition_matrix
                     .as_ref()
@@ -555,6 +677,9 @@ impl Preconditioner for FieldSplitPc {
             _ => None,
         };
         self.schur_precondition_matrix = schur_precondition_matrix;
+        self.schur_apply_hook = schur_apply_hook;
+        self.last_structure_id = Some(a.structure_id());
+        self.last_values_id = Some(a.values_id());
         Ok(())
     }
 
