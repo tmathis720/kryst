@@ -1,25 +1,12 @@
+#![cfg(feature = "backend-faer")]
+
+use std::sync::Arc;
+
+use faer::Mat;
 use kryst::context::pc_context::PcFactory;
 use kryst::error::KError;
-use kryst::matrix::op::LinOp;
+use kryst::matrix::op::DenseOp;
 use kryst::prelude::*;
-
-struct IdentityOp(usize);
-
-impl LinOp for IdentityOp {
-    type S = S;
-
-    fn dims(&self) -> (usize, usize) {
-        (self.0, self.0)
-    }
-
-    fn matvec(&self, x: &[S], y: &mut [S]) {
-        y.copy_from_slice(x);
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
 
 #[test]
 fn pc_options_parse_scaffold_prefixes() {
@@ -97,7 +84,8 @@ fn pc_options_parse_scaffold_prefixes() {
 
 #[test]
 fn pc_scaffold_apply_smoke() -> Result<(), KError> {
-    let op = IdentityOp(4);
+    let mat = Mat::<R>::identity(4, 4);
+    let op = DenseOp::<S>::new(Arc::new(mat));
     let x = vec![
         S::from_real(1.0),
         S::from_real(2.0),
@@ -177,17 +165,11 @@ fn pc_scaffold_unsupported_types() {
         pc_type: Some("bddc".into()),
         ..Default::default()
     };
-    let err = PcFactory::create_from_options(&bddc_opts)
-        .err()
-        .expect("expected bddc to be unsupported");
-    assert!(matches!(err, KError::Unsupported(_)));
+    PcFactory::create_from_options(&bddc_opts).expect("expected bddc scaffold to construct");
 
     let gamg_opts = PcOptions {
         pc_type: Some("gamg".into()),
         ..Default::default()
     };
-    let err = PcFactory::create_from_options(&gamg_opts)
-        .err()
-        .expect("expected gamg to be unsupported");
-    assert!(matches!(err, KError::Unsupported(_)));
+    PcFactory::create_from_options(&gamg_opts).expect("expected gamg scaffold to construct");
 }
