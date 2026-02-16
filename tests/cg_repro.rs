@@ -9,9 +9,6 @@ use kryst::preconditioner::PcSide;
 use kryst::solver::MonitorAction;
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "mpi")]
-use kryst::parallel::MpiComm;
-
 fn make_spd_operator(comm: &UniverseComm, n: usize) -> Arc<dyn LinOp<S = f64>> {
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx = Vec::with_capacity(3 * n);
@@ -106,14 +103,11 @@ fn run_once_with_variant(
 }
 
 fn test_comm() -> UniverseComm {
-    #[cfg(feature = "mpi")]
-    {
-        UniverseComm::Mpi(Arc::new(MpiComm::new()))
-    }
-    #[cfg(not(feature = "mpi"))]
-    {
-        UniverseComm::NoComm(NoComm)
-    }
+    // This test validates deterministic local iteration histories across thread
+    // counts. It does not exercise distributed collectives, so forcing a local
+    // communicator avoids MPI runtime/threading interactions that can stall the
+    // test harness under threaded execution.
+    UniverseComm::NoComm(NoComm)
 }
 
 #[test]
