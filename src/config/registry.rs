@@ -913,6 +913,27 @@ pub static SPECS: &[Spec] = &[
         doc: "distributed AMG apply mode: root or local",
     },
     Spec {
+        flag: "-pc_amg_dist_coarse_repartition",
+        key: "pc_amg_dist_coarse_repartition",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "distributed AMG coarse repartition policy: keep|uniform|root",
+    },
+    Spec {
+        flag: "-pc_amg_dist_repartition",
+        key: "pc_amg_dist_repartition",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_amg_dist_coarse_repartition",
+    },
+    Spec {
+        flag: "-pc_amg_dist_coarse_solver_route",
+        key: "pc_amg_dist_coarse_solver_route",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "distributed AMG coarse solver route: auto|root|local|superlu_dist",
+    },
+    Spec {
         flag: "-pc_amg_dist_instrumentation",
         key: "pc_amg_dist_instrumentation",
         arity: Arity::Zero,
@@ -1191,6 +1212,20 @@ pub static SPECS: &[Spec] = &[
         arity: Arity::One,
         kind: ValueKind::UInt,
         doc: "GAMG aggressive coarsening MIS neighborhood depth",
+    },
+    Spec {
+        flag: "-pc_gamg_repartition",
+        key: "pc_gamg_repartition",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_amg_dist_coarse_repartition",
+    },
+    Spec {
+        flag: "-pc_gamg_coarse_solver_route",
+        key: "pc_gamg_coarse_solver_route",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_amg_dist_coarse_solver_route",
     },
     Spec {
         flag: "-pc_chain",

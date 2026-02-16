@@ -6,7 +6,7 @@
 
 mod coarse;
 
-pub use coarse::DistCoarseStrategy;
+pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;

@@ -4,6 +4,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use kryst::config::options::PcOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::{LinOp, StructureId, ValuesId};
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
@@ -108,4 +109,11 @@ fn mpi_replicated_cg_succeeds() {
     let global_norm = comm.dot(&x, &x);
     let expected_norm = comm.size() as f64 * (1.0 + 9.0);
     assert!((global_norm - expected_norm).abs() < 1e-10);
+}
+
+#[test]
+fn mpi_gamg_repartition_alias_maps_to_amg_option() {
+    let opts = PcOptions::from_args(&["-pc_type", "gamg", "-pc_gamg_repartition", "root"])
+        .expect("parse gamg repartition alias");
+    assert_eq!(opts.amg_dist_coarse_repartition.as_deref(), Some("root"));
 }

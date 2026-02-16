@@ -110,3 +110,25 @@ fn mpi_convergence_reason_consistent_across_ranks() {
         "iteration count differs across ranks"
     );
 }
+
+#[test]
+fn mpi_gamg_distributed_policy_options_parse() {
+    let opts = PcOptions::from_args(&[
+        "-pc_type",
+        "gamg",
+        "-pc_amg_dist_apply_mode",
+        "local_prototype",
+        "-pc_amg_dist_coarse_repartition",
+        "uniform",
+        "-pc_gamg_coarse_solver_route",
+        "local",
+        "-pc_amg_dist_instrumentation",
+        "true",
+    ])
+    .expect("parse distributed GAMG policy options");
+
+    assert_eq!(opts.amg_dist_apply_mode.as_deref(), Some("local_prototype"));
+    assert_eq!(opts.amg_dist_coarse_repartition.as_deref(), Some("uniform"));
+    assert_eq!(opts.amg_dist_coarse_solver_route.as_deref(), Some("local"));
+    assert_eq!(opts.amg_dist_instrumentation, Some(true));
+}

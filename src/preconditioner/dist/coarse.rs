@@ -15,6 +15,73 @@ pub enum DistCoarseStrategy {
     SuperLuDist,
 }
 
+/// Policy for repartitioning the coarse grid in distributed AMG setups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistCoarseRepartition {
+    /// Preserve the fine-grid ownership partition.
+    Keep,
+    /// Build an even contiguous row partition over all ranks.
+    Uniform,
+    /// Route setup through a root-owned coarse partition.
+    Root,
+}
+
+impl Default for DistCoarseRepartition {
+    fn default() -> Self {
+        Self::Keep
+    }
+}
+
+impl FromStr for DistCoarseRepartition {
+    type Err = KError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "keep" | "fine" | "inherit" => Ok(Self::Keep),
+            "uniform" | "block" | "contiguous" => Ok(Self::Uniform),
+            "root" | "root_owned" => Ok(Self::Root),
+            other => Err(KError::InvalidInput(format!(
+                "invalid dist coarse repartition policy: {other}"
+            ))),
+        }
+    }
+}
+
+/// Explicit route for the coarse solve backend in distributed AMG.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistCoarseSolverRoute {
+    /// Choose the backend implied by other settings.
+    Auto,
+    /// Force gathered root-level solve path.
+    Root,
+    /// Force local prototype coarse path.
+    Local,
+    /// Force SuperLU_DIST coarse routing when available.
+    SuperLuDist,
+}
+
+impl Default for DistCoarseSolverRoute {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl FromStr for DistCoarseSolverRoute {
+    type Err = KError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "root" | "root_gather" | "gather" => Ok(Self::Root),
+            "local" | "local_prototype" => Ok(Self::Local),
+            "superlu_dist" | "superludist" => Ok(Self::SuperLuDist),
+            other => Err(KError::InvalidInput(format!(
+                "invalid dist coarse solver route: {other}"
+            ))),
+        }
+    }
+}
+
 impl DistCoarseStrategy {
     pub fn is_rank_local(self) -> bool {
         matches!(
