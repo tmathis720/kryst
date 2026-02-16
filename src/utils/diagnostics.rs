@@ -78,7 +78,11 @@ impl PcDiagnostics {
                 "pc_bddc_coarse_pc_type",
                 opts.pc_bddc_coarse_pc_type.clone(),
             );
-            insert_opt(&mut config, "pc_bddc_use_vertices", opts.pc_bddc_use_vertices);
+            insert_opt(
+                &mut config,
+                "pc_bddc_use_vertices",
+                opts.pc_bddc_use_vertices,
+            );
         }
 
         Self {
@@ -145,17 +149,17 @@ fn insert_opt<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, val: O
 
 fn build_nested_ksp_diagnostics(opts: &PcOptions) -> Option<KspDiagnostics> {
     let mut ksp_opts = opts.pc_ksp_ksp_options.clone().unwrap_or_default();
+    if let Some(v) = opts.pc_ksp_ksp_type.clone() {
+        ksp_opts.ksp_type = Some(v);
+    }
+    if let Some(v) = opts.pc_ksp_maxits {
+        ksp_opts.maxits = Some(v);
+    }
+    if let Some(v) = opts.pc_ksp_rtol {
+        ksp_opts.rtol = Some(v);
+    }
     if ksp_opts.ksp_type.is_none() {
-        ksp_opts.ksp_type = opts
-            .pc_ksp_ksp_type
-            .clone()
-            .or_else(|| Some("richardson".to_string()));
-    }
-    if ksp_opts.maxits.is_none() {
-        ksp_opts.maxits = opts.pc_ksp_maxits;
-    }
-    if ksp_opts.rtol.is_none() {
-        ksp_opts.rtol = opts.pc_ksp_rtol;
+        ksp_opts.ksp_type = Some("richardson".to_string());
     }
     ksp_opts.ksp_view = Some(false);
 
@@ -164,11 +168,11 @@ fn build_nested_ksp_diagnostics(opts: &PcOptions) -> Option<KspDiagnostics> {
         .as_ref()
         .map(|b| b.as_ref().clone())
         .unwrap_or_default();
+    if let Some(v) = opts.pc_ksp_pc_type.clone() {
+        pc_opts.pc_type = Some(v);
+    }
     if pc_opts.pc_type.is_none() {
-        pc_opts.pc_type = opts
-            .pc_ksp_pc_type
-            .clone()
-            .or_else(|| Some("jacobi".to_string()));
+        pc_opts.pc_type = Some("jacobi".to_string());
     }
     pc_opts.pc_view = Some(false);
 

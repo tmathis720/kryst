@@ -1,6 +1,6 @@
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::config::options::{KspOptions, PcOptions};
-use crate::context::ksp_context::KspContext;
+use crate::context::ksp_context::{ExecutionPolicy, KspContext};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
 use crate::matrix::backend::materialize_ref;
@@ -15,6 +15,43 @@ struct InnerKspContext {
     ksp: KspContext,
     ksp_options: KspOptions,
     pc_options: PcOptions,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResidualHistorySummary {
+    len: usize,
+    first: R,
+    last: R,
+    min: R,
+    max: R,
+}
+
+impl ResidualHistorySummary {
+    fn from_history(history: &[R]) -> Option<Self> {
+        if history.is_empty() {
+            return None;
+        }
+        let mut min = history[0];
+        let mut max = history[0];
+        for &v in &history[1..] {
+            min = min.min(v);
+            max = max.max(v);
+        }
+        Some(Self {
+            len: history.len(),
+            first: history[0],
+            last: history[history.len() - 1],
+            min,
+            max,
+        })
+    }
+
+    fn detail_fragment(self) -> String {
+        format!(
+            "history_len={} first={:.3e} last={:.3e} min={:.3e} max={:.3e}",
+            self.len, self.first, self.last, self.min, self.max
+        )
+    }
 }
 
 pub struct KspAsPc {
@@ -61,56 +98,43 @@ impl KspAsPc {
     }
 
     fn effective_ksp_options(&self) -> KspOptions {
+        // Precedence is explicit and stable:
+        // 1) flat pc_ksp_* knobs (legacy)
+        // 2) scoped pc_ksp_ksp_options block
+        // 3) KSP-as-PC defaults
         let mut ksp_opts = self.ksp_options.clone().unwrap_or_default();
-        if ksp_opts.ksp_type.is_none() {
-            ksp_opts.ksp_type = self
-                .inner_ksp_type
-                .clone()
-                .or_else(|| Some("richardson".to_string()));
+        if let Some(ksp_type) = self.inner_ksp_type.clone() {
+            ksp_opts.ksp_type = Some(ksp_type);
         }
-        if ksp_opts.maxits.is_none() {
+        if self.maxits > 0 {
             ksp_opts.maxits = Some(self.maxits);
         }
-        if ksp_opts.rtol.is_none() {
+        if self.rtol > 0.0 {
             ksp_opts.rtol = Some(self.rtol);
+        }
+
+        if ksp_opts.ksp_type.is_none() {
+            ksp_opts.ksp_type = Some("richardson".to_string());
+        }
+        if ksp_opts.maxits.is_none() {
+            ksp_opts.maxits = Some(1);
+        }
+        if ksp_opts.rtol.is_none() {
+            ksp_opts.rtol = Some(1e-2);
         }
         ksp_opts
     }
 
     fn effective_pc_options(&self) -> PcOptions {
+        // Flat pc_ksp_pc_type overrides scoped pc_ksp_pc_options.pc_type.
         let mut pc_opts = self.inner_pc_opts.clone();
+        if let Some(pc_type) = self.inner_pc_type.clone() {
+            pc_opts.pc_type = Some(pc_type);
+        }
         if pc_opts.pc_type.is_none() {
-            pc_opts.pc_type = self
-                .inner_pc_type
-                .clone()
-                .or_else(|| Some("jacobi".to_string()));
+            pc_opts.pc_type = Some("jacobi".to_string());
         }
         pc_opts
-    }
-
-    fn check_nested_compatibility(
-        &self,
-        ksp_opts: &KspOptions,
-        a: &dyn LinOp<S = S>,
-    ) -> Result<(), KError> {
-        let comm = a.comm();
-        if matches!(ksp_opts.threads_mode.as_deref(), Some("global")) {
-            return Err(KError::InvalidInput(
-                "pc_type=ksp does not allow inner ksp_threads_mode=global; use context/serial"
-                    .into(),
-            ));
-        }
-
-        if comm.size() > 1
-            && ksp_opts.threads.unwrap_or(1) > 1
-            && matches!(ksp_opts.threads_mode.as_deref(), Some("context") | None)
-        {
-            return Err(KError::InvalidInput(
-                "nested pc_type=ksp with MPI requires explicit inner serial threading; set pc_ksp_ksp_options.threads_mode=serial"
-                    .into(),
-            ));
-        }
-        Ok(())
     }
 
     fn configure_nested_ksp(&self, a: &dyn LinOp<S = S>) -> Result<bool, KError> {
@@ -124,10 +148,11 @@ impl KspAsPc {
         };
 
         let ksp_opts = self.effective_ksp_options();
-        self.check_nested_compatibility(&ksp_opts, a)?;
         let pc_opts = self.effective_pc_options();
+        let nested_exec = ExecutionPolicy::nested_from_options(&ksp_opts, a.comm().size())?;
 
         let mut ksp = KspContext::new();
+        ksp.set_execution_policy(nested_exec);
         ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
         ksp.try_set_operators_with_comm(amat, None, a.comm())?;
         ksp.setup()?;
@@ -170,14 +195,25 @@ impl Preconditioner for KspAsPc {
             y.fill(S::zero());
             let stats = inner.ksp.solve(x, y)?;
             if !Self::is_acceptable_inner_reason(stats.reason) {
+                let history = vec![stats.final_residual];
+                let history_summary = ResidualHistorySummary::from_history(&history)
+                    .map(ResidualHistorySummary::detail_fragment)
+                    .unwrap_or_else(|| "history_len=0".to_string());
+                let detail = format!(
+                    "inner_ksp={:?} inner_pc={:?} true_final_norm={:.3e} nested_reason={} {}",
+                    inner.ksp_options.ksp_type,
+                    inner.pc_options.pc_type,
+                    stats.final_residual,
+                    stats.reason,
+                    history_summary
+                );
                 return Err(KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
                     reason: stats.reason,
                     iterations: stats.iterations,
-                    detail: format!(
-                        "inner_ksp={:?} inner_pc={:?}",
-                        inner.ksp_options.ksp_type, inner.pc_options.pc_type
-                    ),
+                    detail,
+                    final_norm: Some(format!("true_residual_l2={:.6e}", stats.final_residual)),
+                    residual_history_summary: Some(history_summary),
                 }));
             }
             return Ok(());
@@ -270,6 +306,73 @@ mod tests {
     fn nested_ksp_pc_outer_fgmres_multiple_inner_and_sides() {
         run_nested_case(SolverType::Fgmres, "richardson", "left");
         run_nested_case(SolverType::Fgmres, "gmres", "right");
+    }
+
+    #[test]
+    fn nested_ksp_flat_options_override_scoped_block() {
+        let a = tri_diag(10);
+        let n = a.dims().0;
+        let b = vec![1.0; n];
+        let mut x = vec![0.0; n];
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).unwrap();
+        let ksp_opts = KspOptions {
+            maxits: Some(20),
+            rtol: Some(1e-8),
+            ..Default::default()
+        };
+        let pc_opts = PcOptions {
+            pc_type: Some("ksp".into()),
+            pc_ksp_ksp_type: Some("gmres".into()),
+            pc_ksp_maxits: Some(1),
+            pc_ksp_rtol: Some(1e-1),
+            pc_ksp_ksp_options: Some(KspOptions {
+                ksp_type: Some("richardson".into()),
+                maxits: Some(6),
+                rtol: Some(1e-16),
+                ..Default::default()
+            }),
+            pc_ksp_pc_type: Some("none".into()),
+            pc_ksp_pc_options: Some(Box::new(PcOptions {
+                pc_type: Some("jacobi".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+        ksp.set_operators(a, None);
+        let stats = ksp.solve(&b, &mut x).unwrap();
+        assert!(stats.reason.is_converged());
+        assert!(stats.nested_pc_failure.is_none());
+    }
+
+    #[test]
+    fn nested_pc_failure_metadata_fields_are_populated() {
+        let failure = NestedPcFailure {
+            component: "pc_ksp",
+            reason: crate::utils::convergence::ConvergedReason::DivergedDtol,
+            iterations: 3,
+            final_norm: Some("true_residual_l2=1.234000e+00".into()),
+            residual_history_summary: Some(
+                "history_len=1 first=1.234e+00 last=1.234e+00 min=1.234e+00 max=1.234e+00".into(),
+            ),
+            detail: "inner_ksp=Some(\"gmres\") inner_pc=Some(\"none\")".into(),
+        };
+        assert!(
+            failure
+                .final_norm
+                .as_deref()
+                .unwrap_or_default()
+                .contains("true_residual_l2")
+        );
+        assert!(
+            failure
+                .residual_history_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("history_len=")
+        );
     }
 
     #[test]

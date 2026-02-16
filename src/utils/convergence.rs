@@ -133,6 +133,10 @@ pub struct NestedPcFailure {
     pub reason: ConvergedReason,
     /// Inner iteration count.
     pub iterations: usize,
+    /// Final inner norm semantics/summary reported by the nested solve.
+    pub final_norm: Option<String>,
+    /// Inner residual history summary captured by nested monitors or solver callbacks.
+    pub residual_history_summary: Option<String>,
     /// Human-readable context (inner solver/pc selections, etc.).
     pub detail: String,
 }
