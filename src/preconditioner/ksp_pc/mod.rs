@@ -7,7 +7,7 @@ use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
-use crate::utils::convergence::NestedPcFailure;
+use crate::utils::convergence::{ConvergedReason, NestedPcFailure};
 use std::str::FromStr;
 use std::sync::Mutex;
 
@@ -140,6 +140,10 @@ impl KspAsPc {
         });
         Ok(true)
     }
+
+    fn is_acceptable_inner_reason(reason: ConvergedReason) -> bool {
+        reason.is_converged() || matches!(reason, ConvergedReason::DivergedMaxIts)
+    }
 }
 
 impl Preconditioner for KspAsPc {
@@ -165,7 +169,7 @@ impl Preconditioner for KspAsPc {
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
             y.fill(S::zero());
             let stats = inner.ksp.solve(x, y)?;
-            if !stats.reason.is_converged() {
+            if !Self::is_acceptable_inner_reason(stats.reason) {
                 return Err(KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
                     reason: stats.reason,
