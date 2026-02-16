@@ -1,12 +1,12 @@
 use crate::algebra::prelude::*;
+use crate::algebra::scalar::KrystScalar;
 use crate::algebra::scalar::S;
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
-use crate::matrix::convert::{csr_from_linop, try_as_csr};
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
-use crate::matrix::utils::rap_opt;
+use crate::matrix::utils::rap_opt_generic;
 use crate::parallel::UniverseComm;
 use crate::preconditioner::ksp_pc::KspAsPc;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -97,12 +97,12 @@ enum MgCoarseSolve {
 
 #[derive(Clone)]
 struct CsrLinOp {
-    csr: Arc<CsrMatrix<f64>>,
+    csr: Arc<CsrMatrix<S>>,
     comm: UniverseComm,
 }
 
 impl CsrLinOp {
-    fn new(csr: Arc<CsrMatrix<f64>>, comm: UniverseComm) -> Self {
+    fn new(csr: Arc<CsrMatrix<S>>, comm: UniverseComm) -> Self {
         Self { csr, comm }
     }
 }
@@ -136,13 +136,13 @@ impl LinOp for CsrLinOp {
 pub struct MgLevel {
     pub level: usize,
     pub smoother: Option<Box<dyn Preconditioner>>,
-    pub operator: Arc<CsrMatrix<f64>>,
-    pub prolongation: Option<Arc<CsrMatrix<f64>>>,
-    pub restriction: Option<Arc<CsrMatrix<f64>>>,
+    pub operator: Arc<CsrMatrix<S>>,
+    pub prolongation: Option<Arc<CsrMatrix<S>>>,
+    pub restriction: Option<Arc<CsrMatrix<S>>>,
 }
 
 impl MgLevel {
-    pub fn new(level: usize, operator: Arc<CsrMatrix<f64>>) -> Self {
+    pub fn new(level: usize, operator: Arc<CsrMatrix<S>>) -> Self {
         Self {
             level,
             smoother: None,
@@ -196,14 +196,52 @@ pub struct MgPc {
     coarsen: MgCoarsenType,
     interp: MgInterpType,
     restrict: MgRestrictType,
-    user_transfers: Vec<(usize, Arc<CsrMatrix<f64>>, Arc<CsrMatrix<f64>>)>,
+    user_transfers: Vec<(usize, Arc<CsrMatrix<S>>, Arc<CsrMatrix<S>>)>,
     level_coarse_pc_types: BTreeMap<usize, String>,
     comm: UniverseComm,
 }
 
 pub struct MgTransferOperators {
-    pub prolongation: Arc<CsrMatrix<f64>>,
-    pub restriction: Arc<CsrMatrix<f64>>,
+    pub prolongation: Arc<CsrMatrix<S>>,
+    pub restriction: Arc<CsrMatrix<S>>,
+}
+
+fn csr_from_linop_scalar(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<S>>, KError> {
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
+        return Ok(Arc::new(csr.clone()));
+    }
+
+    let (m, n) = op.dims();
+    let mut rows: Vec<Vec<(usize, S)>> = vec![Vec::new(); m];
+    let mut e = vec![S::zero(); n];
+    let mut y = vec![S::zero(); m];
+    for j in 0..n {
+        e[j] = S::one();
+        op.try_matvec(&e, &mut y)?;
+        e[j] = S::zero();
+        for i in 0..m {
+            let v = y[i];
+            if v.abs() > drop_tol {
+                rows[i].push((j, v));
+            }
+        }
+    }
+
+    let mut row_ptr = Vec::with_capacity(m + 1);
+    let mut col_idx = Vec::new();
+    let mut values = Vec::new();
+    row_ptr.push(0);
+    for entries in rows.iter_mut() {
+        entries.sort_unstable_by_key(|(j, _)| *j);
+        for (j, v) in entries.iter().copied() {
+            col_idx.push(j);
+            values.push(v);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    Ok(Arc::new(CsrMatrix::from_csr(
+        m, n, row_ptr, col_idx, values,
+    )))
 }
 
 impl MgPc {
@@ -278,14 +316,8 @@ impl MgPc {
         prolongation: &dyn LinOp<S = S>,
         restriction: &dyn LinOp<S = S>,
     ) -> Result<(), KError> {
-        let p = match try_as_csr(prolongation) {
-            Some(m) => Arc::new(m.clone()),
-            None => csr_from_linop(prolongation, 0.0)?,
-        };
-        let r = match try_as_csr(restriction) {
-            Some(m) => Arc::new(m.clone()),
-            None => csr_from_linop(restriction, 0.0)?,
-        };
+        let p = csr_from_linop_scalar(prolongation, 0.0)?;
+        let r = csr_from_linop_scalar(restriction, 0.0)?;
         self.set_level_transfer_operators(
             level,
             MgTransferOperators {
@@ -361,7 +393,7 @@ impl MgPc {
         coarsen: MgCoarsenType,
         interp: MgInterpType,
         restrict: MgRestrictType,
-    ) -> (CsrMatrix<f64>, CsrMatrix<f64>, usize) {
+    ) -> (CsrMatrix<S>, CsrMatrix<S>, usize) {
         let coarse_div = match coarsen {
             MgCoarsenType::Aggregation => 3,
             MgCoarsenType::Injection | MgCoarsenType::Linear => 2,
@@ -377,17 +409,17 @@ impl MgPc {
             match interp {
                 MgInterpType::Injection => {
                     p_col_idx.push(coarse.min(n_coarse.saturating_sub(1)));
-                    p_values.push(1.0);
+                    p_values.push(S::one());
                 }
                 MgInterpType::Linear => {
                     let j0 = coarse.min(n_coarse.saturating_sub(1));
                     p_col_idx.push(j0);
-                    p_values.push(1.0);
+                    p_values.push(S::one());
                     if i % coarse_div != 0 {
                         let j1 = (j0 + 1).min(n_coarse.saturating_sub(1));
                         if j1 != j0 {
                             p_col_idx.push(j1);
-                            p_values.push(0.5);
+                            p_values.push(S::from_real(0.5));
                         }
                     }
                 }
@@ -407,12 +439,12 @@ impl MgPc {
                 let w = match restrict {
                     MgRestrictType::Injection => {
                         if i == start {
-                            1.0
+                            S::one()
                         } else {
-                            0.0
+                            S::zero()
                         }
                     }
-                    MgRestrictType::FullWeighting => 1.0 / ((end - start) as f64),
+                    MgRestrictType::FullWeighting => S::from_real(1.0 / ((end - start) as f64)),
                 };
                 r_values.push(w);
             }
@@ -545,7 +577,7 @@ impl Preconditioner for MgPc {
         self.interp = MgInterpType::from_option(self.interpolation_type.as_deref())?;
         self.restrict = MgRestrictType::from_option(self.restriction_type.as_deref())?;
 
-        let a = csr_from_linop(_a, 0.0)?;
+        let a = csr_from_linop_scalar(_a, 0.0)?;
         let mut levels = Vec::new();
         levels.push(MgLevel::new(0, a.clone()));
         let mut current = a;
@@ -570,7 +602,7 @@ impl Preconditioner for MgPc {
                     Self::build_transfer(current.nrows(), self.coarsen, self.interp, self.restrict);
                 (Arc::new(p), Arc::new(r), n_coarse)
             };
-            let coarse = rap_opt(r.as_ref(), current.as_ref(), p.as_ref())?;
+            let coarse = rap_opt_generic(r.as_ref(), current.as_ref(), p.as_ref())?;
             let coarse = Arc::new(coarse);
             if let Some(entry) = levels.get_mut(level) {
                 entry.prolongation = Some(p.clone());
@@ -704,14 +736,14 @@ mod tests {
             2,
             vec![0, 1, 2, 3, 4],
             vec![0, 0, 1, 1],
-            vec![1.0; 4],
+            vec![S::one(); 4],
         ));
         let r = Arc::new(CsrMatrix::from_csr(
             2,
             4,
             vec![0, 2, 4],
             vec![0, 1, 2, 3],
-            vec![0.5; 4],
+            vec![S::from_real(0.5); 4],
         ));
         mg.set_level_transfer_operators(
             0,
