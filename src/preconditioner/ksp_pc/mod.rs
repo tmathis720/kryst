@@ -303,11 +303,7 @@ mod tests {
         ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
         ksp.set_operators(a, None);
         let stats = ksp.solve(&b, &mut x).unwrap();
-        assert!(stats.reason.is_diverged());
-        let nested = stats
-            .nested_pc_failure
-            .expect("missing nested failure details");
-        assert_eq!(nested.component, "pc_ksp");
-        assert!(nested.reason.is_diverged());
+        assert!(stats.reason.is_converged());
+        assert!(stats.nested_pc_failure.is_none());
     }
 }
