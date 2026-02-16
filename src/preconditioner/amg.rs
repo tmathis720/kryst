@@ -3231,8 +3231,8 @@ pub struct AMG {
 
 #[derive(Clone, Debug)]
 pub struct AmgTransferOperators {
-    pub prolongation: CsrMatrix<f64>,
-    pub restriction: CsrMatrix<f64>,
+    pub prolongation: CsrMatrix<S>,
+    pub restriction: CsrMatrix<S>,
 }
 
 impl Default for AMG {
@@ -7098,14 +7098,28 @@ fn build_hierarchy(
                     override_ops.restriction.nrows()
                 )));
             }
-            p = override_ops.prolongation.clone();
-            p_csr = Pcsr {
-                m: p.nrows(),
-                n: p.ncols(),
-                row_ptr: p.row_ptr().to_vec(),
-                col_idx: p.col_idx().to_vec(),
-                vals: p.values().to_vec(),
-            };
+            #[cfg(feature = "complex")]
+            {
+                p = csr_real_from_complex(&override_ops.prolongation);
+                p_csr = Pcsr {
+                    m: p.nrows(),
+                    n: p.ncols(),
+                    row_ptr: p.row_ptr().to_vec(),
+                    col_idx: p.col_idx().to_vec(),
+                    vals: p.values().to_vec(),
+                };
+            }
+            #[cfg(not(feature = "complex"))]
+            {
+                p = override_ops.prolongation.clone();
+                p_csr = Pcsr {
+                    m: p.nrows(),
+                    n: p.ncols(),
+                    row_ptr: p.row_ptr().to_vec(),
+                    col_idx: p.col_idx().to_vec(),
+                    vals: p.values().to_vec(),
+                };
+            }
         }
         // R = P^T pattern and values
         let (r_row_ptr, r_col_idx, r_vals, p2r_pos) =

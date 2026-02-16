@@ -48,6 +48,34 @@ fn ksp_gmres_identity_complex() {
 }
 
 #[test]
+fn ksp_gmres_mg_identity_complex() {
+    let n = 8;
+    let csr = CsrMatrix::identity(n);
+    let op = Arc::new(CsrOp::new(Arc::new(csr)));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).unwrap();
+    ksp.set_pc_type(PcType::Mg, None).unwrap();
+    ksp.set_tolerances(1e-12, 1e-14, 1e8, 50);
+    ksp.set_operators(op, None);
+
+    let b = (0..n)
+        .map(|i| S::from_parts(i as f64 + 1.0, -(i as f64) * 0.25))
+        .collect::<Vec<_>>();
+    let mut x = vec![S::zero(); n];
+
+    let stats = ksp.solve(&b, &mut x).expect("GMRES+MG solve");
+    assert!(matches!(
+        stats.reason,
+        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+    ));
+
+    for (xi, bi) in x.iter().zip(b.iter()) {
+        assert_abs_diff_eq!(xi.real(), bi.real(), epsilon = 1e-9);
+        assert_abs_diff_eq!(xi.imag(), bi.imag(), epsilon = 1e-9);
+    }
+}
+#[test]
 fn ksp_cg_hermitian_pd_complex() {
     // Hermitian positive definite: [[2, 1+i], [1-i, 2]]
     let row_ptr = vec![0, 2, 4];
