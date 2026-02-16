@@ -64,12 +64,12 @@ use crate::ops::klinop::KLinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
+#[cfg(feature = "mpi")]
+use crate::preconditioner::PcDistributedSupport;
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::MpiPcOptions;
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
-#[cfg(feature = "mpi")]
-use crate::preconditioner::PcDistributedSupport;
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
@@ -80,7 +80,7 @@ use crate::solver::{
 };
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
-use crate::utils::convergence::{ConvergedReason, NestedPcFailure, SolveStats};
+use crate::utils::convergence::{ConvergedReason, SolveStats};
 use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
 use crate::utils::reduction::ReductOptions;
 use serde::Serialize;
@@ -2472,7 +2472,7 @@ impl KspContext {
     fn map_solve_error_to_reason(err: &KError) -> Option<ConvergedReason> {
         match err {
             KError::PcFailed(_) => Some(ConvergedReason::DivergedPcFailed),
-            KError::NestedPcFailed(NestedPcFailure { reason, .. }) => Some(*reason),
+            KError::NestedPcFailed(_) => Some(ConvergedReason::DivergedPcFailed),
             KError::BreakdownOrIndefinite => Some(ConvergedReason::DivergedBreakdown),
             KError::IndefiniteMatrix => Some(ConvergedReason::DivergedIndefiniteMatrix),
             KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => {
