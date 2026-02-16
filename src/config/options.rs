@@ -247,6 +247,10 @@ pub struct PcOptions {
     pub amg_print_setup: Option<bool>,
     /// Distributed AMG apply mode: "root" or "local".
     pub amg_dist_apply_mode: Option<String>,
+    /// Distributed coarse repartition policy: keep|uniform|root.
+    pub amg_dist_coarse_repartition: Option<String>,
+    /// Explicit distributed coarse solver route: auto|root|local|superlu_dist.
+    pub amg_dist_coarse_solver_route: Option<String>,
     /// Enable distributed apply instrumentation.
     pub amg_dist_instrumentation: Option<bool>,
     /// Scaling for halo-based coarse correction prototype.
@@ -1050,6 +1054,21 @@ impl Sink for PcOptions {
             }
             "pc_amg_dist_apply_mode" => {
                 set_opt!(&mut self.amg_dist_apply_mode, v.to_lowercase())
+            }
+            "pc_amg_dist_coarse_repartition" => {
+                set_opt!(&mut self.amg_dist_coarse_repartition, v.to_lowercase())
+            }
+            "pc_amg_dist_repartition" => {
+                set_opt!(&mut self.amg_dist_coarse_repartition, v.to_lowercase())
+            }
+            "pc_gamg_repartition" => {
+                set_opt!(&mut self.amg_dist_coarse_repartition, v.to_lowercase())
+            }
+            "pc_amg_dist_coarse_solver_route" => {
+                set_opt!(&mut self.amg_dist_coarse_solver_route, v.to_lowercase())
+            }
+            "pc_gamg_coarse_solver_route" => {
+                set_opt!(&mut self.amg_dist_coarse_solver_route, v.to_lowercase())
             }
             "pc_amg_dist_coarse_ghost_scale" => {
                 set_opt!(
@@ -2115,6 +2134,8 @@ impl PcOptions {
         o!(amg_require_spd);
         o!(amg_print_setup);
         o!(amg_dist_apply_mode);
+        o!(amg_dist_coarse_repartition);
+        o!(amg_dist_coarse_solver_route);
         o!(amg_dist_instrumentation);
         o!(amg_dist_coarse_ghost_scale);
 

@@ -43,7 +43,9 @@ use crate::preconditioner::bridge::{
 };
 use crate::preconditioner::chebyshev::{self, ChebBounds};
 use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource};
-use crate::preconditioner::dist::DistCoarseStrategy;
+use crate::preconditioner::dist::{
+    DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy,
+};
 use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
@@ -391,6 +393,8 @@ pub struct AMGConfig {
     pub mixed_storage: MixedStorage,
     pub conditioning: ConditioningOptions,
     pub dist_coarse_strategy: DistCoarseStrategy,
+    pub dist_coarse_repartition: DistCoarseRepartition,
+    pub dist_coarse_solver_route: DistCoarseSolverRoute,
     pub dist_apply_instrumentation: bool,
     pub dist_coarse_ghost_scale: f64,
 }
@@ -499,6 +503,8 @@ impl Default for AMGConfig {
             mixed_storage: MixedStorage::Cached,
             conditioning: ConditioningOptions::default(),
             dist_coarse_strategy: DistCoarseStrategy::RootGather,
+            dist_coarse_repartition: DistCoarseRepartition::Keep,
+            dist_coarse_solver_route: DistCoarseSolverRoute::Auto,
             dist_apply_instrumentation: false,
             dist_coarse_ghost_scale: 0.0,
         };
@@ -770,6 +776,12 @@ impl AMGConfig {
         if let Some(ref mode) = opts.amg_dist_apply_mode {
             cfg.dist_coarse_strategy = parse_dist_apply_mode(mode)?;
         }
+        if let Some(ref repartition) = opts.amg_dist_coarse_repartition {
+            cfg.dist_coarse_repartition = parse_dist_coarse_repartition(repartition)?;
+        }
+        if let Some(ref route) = opts.amg_dist_coarse_solver_route {
+            cfg.dist_coarse_solver_route = parse_dist_coarse_solver_route(route)?;
+        }
         if let Some(flag) = opts.amg_dist_instrumentation {
             cfg.dist_apply_instrumentation = flag;
         }
@@ -830,6 +842,16 @@ fn map_cycle_type(kind: AmgCycleKind, gamma: Option<usize>) -> CycleType {
 fn parse_dist_apply_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
     DistCoarseStrategy::from_str(value)
         .map_err(|_| KError::InvalidInput(format!("invalid amg_dist_apply_mode: {value}")))
+}
+
+fn parse_dist_coarse_repartition(value: &str) -> Result<DistCoarseRepartition, KError> {
+    DistCoarseRepartition::from_str(value)
+        .map_err(|_| KError::InvalidInput(format!("invalid amg_dist_coarse_repartition: {value}")))
+}
+
+fn parse_dist_coarse_solver_route(value: &str) -> Result<DistCoarseSolverRoute, KError> {
+    DistCoarseSolverRoute::from_str(value)
+        .map_err(|_| KError::InvalidInput(format!("invalid amg_dist_coarse_solver_route: {value}")))
 }
 
 fn map_interp(kind: AmgInterpKind) -> InterpType {
@@ -3361,7 +3383,12 @@ impl AMG {
         &self,
         comm: &UniverseComm,
     ) -> Result<DistCoarseStrategy, KError> {
-        let strategy = self.cfg.dist_coarse_strategy;
+        let strategy = match self.cfg.dist_coarse_solver_route {
+            DistCoarseSolverRoute::Auto => self.cfg.dist_coarse_strategy,
+            DistCoarseSolverRoute::Root => DistCoarseStrategy::RootGather,
+            DistCoarseSolverRoute::Local => DistCoarseStrategy::LocalPrototype,
+            DistCoarseSolverRoute::SuperLuDist => DistCoarseStrategy::SuperLuDist,
+        };
         match strategy {
             DistCoarseStrategy::None => {
                 if comm.size() > 1 {
@@ -3444,13 +3471,14 @@ impl AMG {
 
     #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
+        let setup_t0 = tic();
         let strategy = self.resolve_dist_coarse_strategy(&dist.comm())?;
         if matches!(strategy, DistCoarseStrategy::LocalPrototype) {
             return self.setup_dist_local(dist);
         }
         let comm = dist.comm();
         let rank = comm.rank();
-        let row_part = dist.row_partition();
+        let row_part = self.dist_coarse_partition(dist.row_partition(), dist.n_global);
         let root = 0usize;
         // Distributed setup is root-centric: we gather the global matrix, build the
         // hierarchy on rank 0, and keep non-root ranks in an uninitialized state.
@@ -3579,6 +3607,13 @@ impl AMG {
             self.state = AmgState::Uninitialized;
             self.stats = None;
             self.csr = None;
+            if let Ok(mut rt) = self.runtime.lock() {
+                let mut ds = DistApplyStats::default();
+                ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+                ds.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+                ds.setup_total = toc(setup_t0);
+                rt.last_dist_apply = Some(ds);
+            }
             return Ok(());
         }
         let (fine, hierarchy, sid, vid, pattern_hash) = setup_state.ok_or_else(|| {
@@ -3603,14 +3638,22 @@ impl AMG {
         {
             print_setup_tables(s);
         }
+        if let Ok(mut rt) = self.runtime.lock() {
+            let mut ds = DistApplyStats::default();
+            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+            ds.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+            ds.setup_total = toc(setup_t0);
+            rt.last_dist_apply = Some(ds);
+        }
         Ok(())
     }
 
     #[cfg(not(feature = "complex"))]
     fn setup_dist_local(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
+        let setup_t0 = tic();
         let comm = dist.comm();
         let rank = comm.rank();
-        let row_part = dist.row_partition();
+        let row_part = self.dist_coarse_partition(dist.row_partition(), dist.n_global);
         let root = 0usize;
 
         let mut local_stage: Option<&'static str> = None;
@@ -3697,6 +3740,13 @@ impl AMG {
         self.state = AmgState::Uninitialized;
         self.stats = None;
         self.csr = None;
+        if let Ok(mut rt) = self.runtime.lock() {
+            let mut ds = DistApplyStats::default();
+            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+            ds.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+            ds.setup_total = toc(setup_t0);
+            rt.last_dist_apply = Some(ds);
+        }
 
         if self.cfg.print_level >= 1 && self.cfg.logging_level >= 1 {
             log::info!(
@@ -3772,6 +3822,8 @@ impl AMG {
         let mut stats = if do_prof {
             let mut stats = DistApplyStats::default();
             stats.mode = self.cfg.dist_coarse_strategy;
+            stats.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+            stats.coarse_repartition = self.cfg.dist_coarse_repartition;
             Some(stats)
         } else {
             None
@@ -3795,6 +3847,24 @@ impl AMG {
         };
 
         if do_prof {
+            if let Some(stats_ref) = stats.as_mut()
+                && let Ok(rt) = self.runtime.lock()
+                && let Some(last_cycle) = rt.last_cycle.as_ref()
+            {
+                stats_ref.per_level_apply = last_cycle
+                    .per_level
+                    .iter()
+                    .map(|lvl| {
+                        lvl.pre_smooth
+                            + lvl.matvec
+                            + lvl.residual_axpy
+                            + lvl.restrict
+                            + lvl.coarse_solve
+                            + lvl.prolong
+                            + lvl.post_smooth
+                    })
+                    .collect();
+            }
             if let Ok(mut rt) = self.runtime.lock() {
                 rt.last_dist_apply = stats;
             }
@@ -3822,6 +3892,10 @@ impl AMG {
         let global_r = gather_vector(comm, row_part, root, r)?;
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_gather) {
             stats.gather = toc(t0);
+            let n = row_part.last().copied().unwrap_or_default();
+            stats.comm_bytes = stats
+                .comm_bytes
+                .saturating_add(n * std::mem::size_of::<f64>());
         }
         let mut global_z = if rank == root {
             vec![0.0f64; dist.n_global]
@@ -3847,6 +3921,10 @@ impl AMG {
         scatter_vector(comm, row_part, root, global_ref, z)?;
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_scatter) {
             stats.scatter = toc(t0);
+            let n = row_part.last().copied().unwrap_or_default();
+            stats.comm_bytes = stats
+                .comm_bytes
+                .saturating_add(n * std::mem::size_of::<f64>());
         }
         Ok(())
     }
@@ -3882,6 +3960,13 @@ impl AMG {
             halo.complete_halo(req);
             if let (Some(stats), Some(t0)) = (stats.as_mut(), t_halo) {
                 stats.halo_exchange = toc(t0);
+                let halo_bytes: usize = halo
+                    .index
+                    .recv_map
+                    .values()
+                    .map(|cols| cols.len() * std::mem::size_of::<f64>())
+                    .sum();
+                stats.comm_bytes = stats.comm_bytes.saturating_add(halo_bytes);
             }
             if self.cfg.dist_coarse_ghost_scale > 0.0 {
                 let ghost = halo.ghost_slice_ref();
@@ -3904,6 +3989,37 @@ impl AMG {
             }
         }
         Ok(())
+    }
+
+    fn dist_coarse_partition(
+        &self,
+        fine_row_part: Arc<Vec<usize>>,
+        n_global: usize,
+    ) -> Arc<Vec<usize>> {
+        match self.cfg.dist_coarse_repartition {
+            DistCoarseRepartition::Keep => fine_row_part,
+            DistCoarseRepartition::Uniform => {
+                if fine_row_part.is_empty() {
+                    return fine_row_part;
+                }
+                let size = fine_row_part.len().saturating_sub(1);
+                let mut part = Vec::with_capacity(size + 1);
+                part.push(0);
+                for r in 0..size {
+                    let end = n_global * (r + 1) / size;
+                    part.push(end);
+                }
+                Arc::new(part)
+            }
+            DistCoarseRepartition::Root => {
+                let size = fine_row_part.len().saturating_sub(1);
+                let mut part = vec![0usize; size + 1];
+                if let Some(last) = part.last_mut() {
+                    *last = n_global;
+                }
+                Arc::new(part)
+            }
+        }
     }
 
     fn ensure_symbolic_structure(
@@ -9170,10 +9286,15 @@ impl Default for CycleTimings {
 #[derive(Clone, Debug)]
 pub struct DistApplyStats {
     pub mode: DistCoarseStrategy,
+    pub coarse_solver_route: DistCoarseSolverRoute,
+    pub coarse_repartition: DistCoarseRepartition,
     pub local_apply: Duration,
     pub gather: Duration,
     pub scatter: Duration,
     pub halo_exchange: Duration,
+    pub setup_total: Duration,
+    pub per_level_apply: Vec<Duration>,
+    pub comm_bytes: usize,
     pub reductions: usize,
 }
 
@@ -9181,10 +9302,15 @@ impl Default for DistApplyStats {
     fn default() -> Self {
         Self {
             mode: DistCoarseStrategy::RootGather,
+            coarse_solver_route: DistCoarseSolverRoute::Auto,
+            coarse_repartition: DistCoarseRepartition::Keep,
             local_apply: Duration::default(),
             gather: Duration::default(),
             scatter: Duration::default(),
             halo_exchange: Duration::default(),
+            setup_total: Duration::default(),
+            per_level_apply: Vec::new(),
+            comm_bytes: 0,
             reductions: 0,
         }
     }
