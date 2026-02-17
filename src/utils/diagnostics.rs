@@ -26,6 +26,10 @@ fn pc_complex_support(pc_type: Option<PcType>) -> PcComplexSupport {
     match pc_type {
         Some(PcType::Sor) => PcComplexSupport::NativeComplex,
         Some(PcType::Jacobi) | Some(PcType::Chebyshev) => PcComplexSupport::NativeComplex,
+        Some(PcType::Ilu0) | Some(PcType::Iluk) | Some(PcType::Ilut) => {
+            PcComplexSupport::NativeComplex
+        }
+        Some(PcType::ApproxInverse) => PcComplexSupport::NativeComplex,
         _ => PcComplexSupport::ProjectedComplex,
     }
 }

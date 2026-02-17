@@ -18,8 +18,6 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::S;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-#[cfg(feature = "complex")]
-use crate::preconditioner::pc_bridge::apply_pc_s;
 
 use once_cell::sync::OnceCell;
 
@@ -183,6 +181,14 @@ pub struct IluCsr {
     // scratch for apply
     tmp: Vec<Real>,
     perm: Permutation,
+    #[cfg(feature = "complex")]
+    c_l_val: Vec<S>,
+    #[cfg(feature = "complex")]
+    c_u_val: Vec<S>,
+    #[cfg(feature = "complex")]
+    c_tmp: Vec<S>,
+    #[cfg(feature = "complex")]
+    native_complex_active: bool,
 }
 
 impl IluCsr {
@@ -209,6 +215,14 @@ impl IluCsr {
             buckets_bwd: Vec::new(),
             tmp: Vec::new(),
             perm: Permutation::identity(0),
+            #[cfg(feature = "complex")]
+            c_l_val: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_u_val: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_tmp: Vec::new(),
+            #[cfg(feature = "complex")]
+            native_complex_active: false,
         }
     }
 
@@ -289,6 +303,75 @@ impl IluCsr {
             IluKind::Iluk { k } => self.factor_iluk_numeric_only(a, k),
             IluKind::Ilut { .. } => self.factor_ilut_numeric_only(a),
         }
+    }
+
+    #[cfg(feature = "complex")]
+    fn factor_ilu0_complex(&mut self, a: &CsrMatrix<S>) -> Result<(), KError> {
+        let a_zero = CsrMatrix::from_csr(
+            a.nrows(),
+            a.ncols(),
+            a.row_ptr().to_vec(),
+            a.col_idx().to_vec(),
+            vec![0.0; a.values().len()],
+        );
+        self.factor_ilu0(&a_zero)?;
+        self.c_l_val.resize(self.l_val.len(), S::zero());
+        self.c_u_val.resize(self.u_val.len(), S::zero());
+
+        let n = a.nrows();
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let mut map = URowMap::new();
+        map.ensure_size(n);
+        let milu = matches!(self.cfg.kind, IluKind::Milu0);
+
+        for i in 0..n {
+            map.prime(&self.u_row, &self.u_col, i);
+            for p in rp[i]..rp[i + 1] {
+                let j = cj[p];
+                let val = vv[p];
+                if j < i {
+                    let ls = self.l_row[i];
+                    if let Ok(off) = self.l_col[ls..self.l_row[i + 1]].binary_search(&j) {
+                        self.c_l_val[ls + off] = val;
+                    }
+                } else if let Some(pos) = map.get(j) {
+                    self.c_u_val[pos] = val;
+                }
+            }
+
+            for p in self.l_row[i]..self.l_row[i + 1] {
+                let j = self.l_col[p];
+                let wij = self.c_l_val[p];
+                if wij == S::zero() {
+                    continue;
+                }
+                let djj = self.c_u_val[self.u_diag_ix[j]];
+                let mult = wij / djj;
+                self.c_l_val[p] = mult;
+                for q in self.u_row[j]..self.u_row[j + 1] {
+                    let k = self.u_col[q];
+                    if k <= j {
+                        continue;
+                    }
+                    let ujk = self.c_u_val[q];
+                    if let Some(pos_ik) = map.get(k) {
+                        self.c_u_val[pos_ik] -= mult * ujk;
+                    } else if milu {
+                        self.c_u_val[self.u_diag_ix[i]] -= mult * ujk;
+                    }
+                }
+            }
+
+            let d = self.c_u_val[self.u_diag_ix[i]];
+            if d.abs() <= self.cfg.pivot_threshold {
+                return Err(KError::ZeroPivot(i));
+            }
+        }
+
+        self.native_complex_active = true;
+        Ok(())
     }
 
     // === ILU(0) implementation over CSR ===
@@ -1170,46 +1253,76 @@ impl Preconditioner for IluCsr {
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        let csr = if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
-            let values = csr.values().iter().map(|v| v.real()).collect();
-            Arc::new(CsrMatrix::from_csr(
-                csr.nrows(),
-                csr.ncols(),
-                csr.row_ptr().to_vec(),
-                csr.col_idx().to_vec(),
-                values,
-            ))
-        } else {
-            return Err(KError::Unsupported(
-                "IluCsr complex setup currently requires a CSR operator; non-CSR LinOp paths have no lossless complex ILU fallback".into(),
-            ));
-        };
+        let csr = op
+            .as_any()
+            .downcast_ref::<CsrMatrix<S>>()
+            .ok_or_else(|| {
+                KError::Unsupported(
+                    "IluCsr complex setup currently requires a CSR operator; non-CSR LinOp paths have no lossless complex ILU fallback".into(),
+                )
+            })?;
 
-        let mut conditioned = None;
-        let a = if self.cfg.conditioning.is_active() {
-            let mut local = (*csr).clone();
-            apply_csr_transforms("ILU/ILUT", &mut local, &self.cfg.conditioning)?;
-            conditioned = Some(local);
-            conditioned.as_ref().unwrap()
-        } else {
-            csr.as_ref()
-        };
+        let sid = op.structure_id();
+        let vid = op.values_id();
+        let structure_changed = self.last_sid != Some(sid);
+        let values_changed = self.last_vid != Some(vid);
 
-        let perm = match self.cfg.reordering.kind {
-            ReorderingKind::None => Permutation::identity(a.nrows()),
-            ReorderingKind::Rcm => rcm_csr(&a),
-            ReorderingKind::Amd => amd_csr(&a),
-        };
-        let a_perm = if self.cfg.reordering.symmetric {
-            permute_csr_symmetric(&a, &perm)
+        if structure_changed || !self.cfg.numeric_update_fixed {
+            let perm = match self.cfg.reordering.kind {
+                ReorderingKind::None => Permutation::identity(csr.nrows()),
+                ReorderingKind::Rcm => {
+                    let a_real = CsrMatrix::from_csr(
+                        csr.nrows(),
+                        csr.ncols(),
+                        csr.row_ptr().to_vec(),
+                        csr.col_idx().to_vec(),
+                        csr.values().iter().map(|v| v.real()).collect(),
+                    );
+                    rcm_csr(&a_real)
+                }
+                ReorderingKind::Amd => {
+                    let a_real = CsrMatrix::from_csr(
+                        csr.nrows(),
+                        csr.ncols(),
+                        csr.row_ptr().to_vec(),
+                        csr.col_idx().to_vec(),
+                        csr.values().iter().map(|v| v.real()).collect(),
+                    );
+                    amd_csr(&a_real)
+                }
+            };
+            let a_perm = if self.cfg.reordering.symmetric {
+                permute_csr_symmetric(csr, &perm)
+            } else {
+                permute_csr_symmetric(csr, &perm)
+            };
+            self.perm = perm;
+
+            if matches!(self.cfg.kind, IluKind::Ilu0 | IluKind::Milu0) {
+                self.factor_ilu0_complex(&a_perm)?;
+            } else {
+                let a_real = CsrMatrix::from_csr(
+                    a_perm.nrows(),
+                    a_perm.ncols(),
+                    a_perm.row_ptr().to_vec(),
+                    a_perm.col_idx().to_vec(),
+                    a_perm.values().iter().map(|v| v.real()).collect(),
+                );
+                self.native_complex_active = false;
+                self.factor_symbolic_and_numeric(&a_real)?;
+            }
+
+            self.build_levels_if_enabled();
+            self.last_sid = Some(sid);
+            self.last_vid = Some(vid);
+            self.tmp.resize(csr.nrows(), Real::zero());
+            self.c_tmp.resize(csr.nrows(), S::zero());
+            Ok(())
+        } else if values_changed {
+            self.update_numeric(op)
         } else {
-            permute_csr_symmetric(&a, &perm)
-        };
-        self.perm = perm;
-        self.factor_symbolic_and_numeric(&a_perm)?;
-        self.build_levels_if_enabled();
-        self.tmp.resize(a_perm.nrows(), Real::zero());
-        Ok(())
+            Ok(())
+        }
     }
 
     fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -1222,20 +1335,96 @@ impl Preconditioner for IluCsr {
                 y.len()
             )));
         }
-        let mut xr = vec![0.0; n];
-        let mut xi = vec![0.0; n];
-        let mut yr = vec![0.0; n];
-        let mut yi = vec![0.0; n];
-        for i in 0..n {
-            xr[i] = x[i].real();
-            xi[i] = x[i].imag();
+
+        if self.native_complex_active {
+            let mut w = x.to_vec();
+            for i in 0..n {
+                let mut s = w[i];
+                for p in self.l_row[i]..self.l_row[i + 1] {
+                    s -= self.c_l_val[p] * w[self.l_col[p]];
+                }
+                w[i] = s;
+            }
+            for i in (0..n).rev() {
+                let mut s = w[i];
+                for p in self.u_row[i]..self.u_row[i + 1] {
+                    let j = self.u_col[p];
+                    if j > i {
+                        s -= self.c_u_val[p] * w[j];
+                    }
+                }
+                w[i] = s / self.c_u_val[self.u_diag_ix[i]];
+            }
+            y.copy_from_slice(&w);
+            Ok(())
+        } else {
+            let mut xr = vec![0.0; n];
+            let mut xi = vec![0.0; n];
+            let mut yr = vec![0.0; n];
+            let mut yi = vec![0.0; n];
+            for i in 0..n {
+                xr[i] = x[i].real();
+                xi[i] = x[i].imag();
+            }
+            self.apply_op_scalar(Op::NoTrans, &xr, &mut yr)?;
+            self.apply_op_scalar(Op::NoTrans, &xi, &mut yi)?;
+            for i in 0..n {
+                y[i] = S::from_parts(yr[i], yi[i]);
+            }
+            Ok(())
         }
-        self.apply_op_scalar(Op::NoTrans, &xr, &mut yr)?;
-        self.apply_op_scalar(Op::NoTrans, &xi, &mut yi)?;
-        for i in 0..n {
-            y[i] = S::from_parts(yr[i], yi[i]);
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        self.cfg.numeric_update_fixed
+    }
+
+    fn update_numeric(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if !self.cfg.numeric_update_fixed {
+            return Err(KError::Unsupported("numeric update requires fixed pattern"));
         }
+        if Some(op.structure_id()) != self.last_sid {
+            return Err(KError::Unsupported("pattern changed; call update_symbolic"));
+        }
+
+        let csr = op.as_any().downcast_ref::<CsrMatrix<S>>().ok_or_else(|| {
+            KError::Unsupported("IluCsr complex numeric update requires CSR".into())
+        })?;
+        let a_perm = permute_csr_symmetric(csr, &self.perm);
+        if matches!(self.cfg.kind, IluKind::Ilu0 | IluKind::Milu0) {
+            self.factor_ilu0_complex(&a_perm)?;
+        } else {
+            let a_real = CsrMatrix::from_csr(
+                a_perm.nrows(),
+                a_perm.ncols(),
+                a_perm.row_ptr().to_vec(),
+                a_perm.col_idx().to_vec(),
+                a_perm.values().iter().map(|v| v.real()).collect(),
+            );
+            self.native_complex_active = false;
+            self.factor_numeric_only(&a_real)?;
+        }
+        self.last_vid = Some(op.values_id());
         Ok(())
+    }
+
+    fn update_symbolic(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        self.last_sid = None;
+        self.last_vid = None;
+        self.setup(op)
+    }
+
+    fn required_format(&self) -> OpFormat {
+        OpFormat::Csr
+    }
+
+    fn capabilities(&self) -> PcCaps {
+        PcCaps {
+            supports_transpose: true,
+            supports_conj_trans: false,
+            is_spd: false,
+            side_restriction: Some(PcSide::Left),
+        }
     }
 }
 
@@ -1276,8 +1465,8 @@ impl KPreconditioner for IluCsr {
         y: &mut [Self::Scalar],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
-        // Generic bridge from complex -> real (f64) and back
-        apply_pc_s(self, side, x, y, scratch)
+        let _ = scratch;
+        self.apply(side, x, y)
     }
 }
 
