@@ -1,4 +1,3 @@
-#![cfg(not(feature = "complex"))]
 #![cfg(feature = "complex")]
 
 mod support;
@@ -50,4 +49,56 @@ fn bicgstab_solves_random_complex_system() {
         assert_abs_diff_eq!(approx.real(), exact.real(), epsilon = 1e-7);
         assert_abs_diff_eq!(approx.imag(), exact.imag(), epsilon = 1e-7);
     }
+}
+
+#[test]
+fn bicgstab_with_sor_preconditioner_complex() {
+    use kryst::matrix::sparse::CsrMatrix;
+    use kryst::ops::kpc::KPreconditioner;
+    use kryst::preconditioner::sor::{MatSorType, SorPc};
+
+    let n = 7;
+    let (op, _x_true, b) = diagonally_dominant_system(n, SEED, ROW_SCALE, DIAG_SHIFT);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut solver = BiCgStabSolver::new(1e-9, 300);
+    let mut work = Workspace::new(n);
+    let mut x = vec![S::zero(); n];
+
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for i in 0..n {
+        if i > 0 {
+            col_idx.push(i - 1);
+            vals.push(S::from_real(-0.1));
+        }
+        col_idx.push(i);
+        vals.push(S::from_real(2.0));
+        if i + 1 < n {
+            col_idx.push(i + 1);
+            vals.push(S::from_real(-0.1));
+        }
+        row_ptr.push(col_idx.len());
+    }
+    let a = CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals);
+    let mut sor = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
+    kryst::preconditioner::Preconditioner::setup(&mut sor, &a).unwrap();
+
+    let stats = solver
+        .solve(
+            &op,
+            Some(&sor as &dyn KPreconditioner<Scalar = S>),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut work),
+        )
+        .expect("BiCGStab+SOR solve");
+    assert!(matches!(
+        stats.reason,
+        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+    ));
 }

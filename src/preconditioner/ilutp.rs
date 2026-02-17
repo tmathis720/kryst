@@ -41,6 +41,9 @@ use std::cmp::Ordering;
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Complex arithmetic capability for this preconditioner implementation.
+pub const COMPLEX_SUPPORT: &str = "projected_complex";
+
 /// ILUTP preconditioner with threshold control and partial pivoting.
 ///
 /// This preconditioner is particularly effective for nonsymmetric, indefinite

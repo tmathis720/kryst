@@ -72,6 +72,9 @@ use log::{debug, info, trace, warn};
 type S = f64;
 type Real = f64;
 
+/// Complex arithmetic capability for this preconditioner implementation.
+pub const COMPLEX_SUPPORT: &str = "projected_complex";
+
 /// HYPRE-inspired ILU types
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IluType {

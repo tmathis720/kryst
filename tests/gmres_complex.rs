@@ -147,3 +147,51 @@ fn fgmres_pipelined_solves_random_complex_system() {
     let err = op.residual_norm(&x, &b);
     assert!(err.is_finite(), "pipelined FGMRES residual not finite");
 }
+
+#[test]
+fn gmres_with_sor_preconditioner_complex() {
+    use kryst::matrix::sparse::CsrMatrix;
+    use kryst::ops::kpc::KPreconditioner;
+    use kryst::preconditioner::sor::{MatSorType, SorPc};
+
+    let n = 6;
+    let (op, _x_true, b) = diagonally_dominant_system(n, SEED + 7, ROW_SCALE, DIAG_SHIFT);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut solver = GmresSolver::new(8, 1e-9, 120);
+    let mut work = Workspace::new(n);
+    let mut x = vec![S::zero(); n];
+
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for i in 0..n {
+        col_idx.push(i);
+        vals.push(S::from_real(2.0));
+        if i + 1 < n {
+            col_idx.push(i + 1);
+            vals.push(S::from_parts(-0.2, 0.1));
+        }
+        row_ptr.push(col_idx.len());
+    }
+    let a = CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals);
+    let mut sor = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
+    kryst::preconditioner::Preconditioner::setup(&mut sor, &a).unwrap();
+
+    let stats = solver
+        .solve(
+            &op,
+            Some(&sor as &dyn KPreconditioner<Scalar = S>),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut work),
+        )
+        .expect("GMRES+SOR solve");
+    assert!(matches!(
+        stats.reason,
+        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+    ));
+}

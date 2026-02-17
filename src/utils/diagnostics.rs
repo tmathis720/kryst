@@ -7,10 +7,34 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy)]
+enum PcComplexSupport {
+    NativeComplex,
+    ProjectedComplex,
+}
+
+impl PcComplexSupport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeComplex => "native_complex",
+            Self::ProjectedComplex => "projected_complex",
+        }
+    }
+}
+
+fn pc_complex_support(pc_type: Option<PcType>) -> PcComplexSupport {
+    match pc_type {
+        Some(PcType::Sor) => PcComplexSupport::NativeComplex,
+        Some(PcType::Jacobi) | Some(PcType::Chebyshev) => PcComplexSupport::NativeComplex,
+        _ => PcComplexSupport::ProjectedComplex,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PcDiagnostics {
     pub pc_type: Option<String>,
     pub config: BTreeMap<String, Value>,
+    pub complex_support: String,
     /// Nested KSP diagnostics when `pc_type = Ksp`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nested_ksp: Option<Box<KspDiagnostics>>,
@@ -85,9 +109,12 @@ impl PcDiagnostics {
             );
         }
 
+        let complex_support = pc_complex_support(pc_type).as_str().to_string();
+
         Self {
             pc_type: pc_type.map(|pct| format!("{pct:?}")),
             config,
+            complex_support,
             nested_ksp,
         }
     }

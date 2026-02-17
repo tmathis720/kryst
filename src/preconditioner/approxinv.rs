@@ -35,14 +35,17 @@ use crate::matrix::op::{StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
-use crate::preconditioner::SparsityPattern;
 use faer::linalg::solvers::{SolveCore, SolveLstsq};
 use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+/// Complex arithmetic capability for this preconditioner implementation.
+pub const COMPLEX_SUPPORT: &str = "projected_complex";
 
 /// Sparse Approximate Inverse (SPAI) preconditioner
 ///
@@ -579,6 +582,9 @@ mod tests {
     #[cfg(feature = "complex")]
     use std::sync::Arc;
 
+    /// Complex arithmetic capability for this preconditioner implementation.
+    pub const COMPLEX_SUPPORT: &str = "projected_complex";
+
     /// Simple dense matrix for testing
     #[derive(Clone)]
     struct DenseMat<T> {
@@ -701,9 +707,9 @@ mod tests {
     #[cfg(feature = "complex")]
     #[test]
     fn approxinv_apply_s_matches_real_path() {
+        use crate::matrix::Csr;
         use crate::matrix::op::CsrOp;
         use crate::matrix::sparse::CsrMatrix;
-        use crate::matrix::Csr;
 
         let n = 3;
         let pattern = SparsityPattern::Manual((0..n).map(|i| vec![i]).collect());
