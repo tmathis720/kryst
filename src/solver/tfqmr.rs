@@ -19,7 +19,7 @@ use crate::solver::LinearSolver;
 use crate::solver::common::call_monitors;
 use crate::solver::common::{ReductCtx, dot_result_to_real, take_or_resize};
 use crate::solver::{MonitorAction, MonitorCallback};
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, FailureReasonKind, SolveStats};
 use std::any::Any;
 
 pub struct TfqmrSolver {
@@ -137,7 +137,7 @@ impl TfqmrSolver {
             return Ok(stats);
         }
         if rho.abs() < self.breakdown_eps {
-            stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+            stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
             stats.final_residual = res0;
             return Ok(stats);
         }
@@ -168,7 +168,7 @@ impl TfqmrSolver {
             if sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 return Ok(stats);
             }
             let alpha = rho / sigma;
@@ -181,7 +181,7 @@ impl TfqmrSolver {
             if alpha.abs() <= R::default() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 return Ok(stats);
             }
 
@@ -287,7 +287,7 @@ impl TfqmrSolver {
             }
             if rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
@@ -679,7 +679,10 @@ mod tests {
                 Some(&mut w),
             )
             .unwrap();
-        assert_eq!(stats.reason, ConvergedReason::DivergedBreakdownBiCG);
+        assert_eq!(
+            stats.reason,
+            ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG)
+        );
     }
 
     #[test]

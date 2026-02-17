@@ -26,7 +26,7 @@ use crate::solver::MonitorCallback;
 use crate::solver::common::{
     ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
 };
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, FailureReasonKind, SolveStats};
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
@@ -189,7 +189,7 @@ impl CgsSolver {
             return Ok(SolveStats::new(
                 0,
                 rnorm,
-                ConvergedReason::DivergedBreakdownBiCG,
+                ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
             ));
         }
 
@@ -213,7 +213,7 @@ impl CgsSolver {
                 return Ok(SolveStats::new(
                     k,
                     rnorm,
-                    ConvergedReason::DivergedBreakdownBiCG,
+                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
                 ));
             }
             let alpha = rho / sigma;
@@ -256,7 +256,7 @@ impl CgsSolver {
                 return Ok(SolveStats::new(
                     k,
                     rnorm,
-                    ConvergedReason::DivergedBreakdownBiCG,
+                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
                 ));
             }
             let beta = rho / rho_old;

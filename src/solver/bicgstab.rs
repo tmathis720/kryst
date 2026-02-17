@@ -25,7 +25,7 @@ use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as Preconditi
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
-use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
+use crate::utils::convergence::{ConvergedReason, FailureReasonKind, SolveStats, SolverCounters};
 use crate::utils::reduction::{AllreduceOps, ReductOptions};
 
 #[cfg(feature = "logging")]
@@ -270,7 +270,7 @@ impl BiCgStabSolver {
                 } else {
                     red.norm2(r)
                 };
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -331,7 +331,7 @@ impl BiCgStabSolver {
                 } else {
                     red.norm2(r)
                 };
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -444,7 +444,7 @@ impl BiCgStabSolver {
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -456,7 +456,7 @@ impl BiCgStabSolver {
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
-                stats.reason = ConvergedReason::DivergedBreakdownBiCG;
+                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,

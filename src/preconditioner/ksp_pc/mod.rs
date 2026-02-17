@@ -7,7 +7,7 @@ use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
-use crate::utils::convergence::{ConvergedReason, NestedPcFailure};
+use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
 use std::str::FromStr;
 use std::sync::Mutex;
 
@@ -236,7 +236,7 @@ impl Preconditioner for KspAsPc {
                 );
                 KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
-                    reason: ConvergedReason::DivergedPcFailed,
+                    reason: ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
                     iterations: 0,
                     detail,
                     final_norm: None,

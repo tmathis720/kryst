@@ -155,6 +155,11 @@ pub struct KspDiagnostics {
     pub last_converged_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_converged_reason_petsc: Option<String>,
+    pub reason_counters_breakdown: usize,
+    pub reason_counters_nan: usize,
+    pub reason_counters_inf: usize,
+    pub reason_counters_pc_setup: usize,
+    pub reason_counters_pc_apply: usize,
 }
 
 impl KspDiagnostics {
