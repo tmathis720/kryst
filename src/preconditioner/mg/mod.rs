@@ -232,7 +232,10 @@ pub struct MgTransferOperators {
     pub restriction: Arc<CsrMatrix<MgScalar>>,
 }
 
-fn csr_from_linop_scalar(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<MgScalar>>, KError> {
+fn csr_from_linop_scalar(
+    op: &dyn LinOp<S = S>,
+    drop_tol: R,
+) -> Result<Arc<CsrMatrix<MgScalar>>, KError> {
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
         return Ok(Arc::new(csr.clone()));
     }
@@ -724,18 +727,11 @@ impl Preconditioner for MgPc {
             if coarse_pc_type == PcType::Ksp {
                 coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
             }
+            if coarse_pc_opts.pc_type.is_none() {
+                coarse_pc_opts.pc_type = Some("jacobi".to_string());
+            }
             Box::new(KspAsPc::new(
-                Some(Self::pc_type_name(coarse_pc_type).to_string()),
-                Some(ksp_type.clone()),
-                coarse_policy
-                    .and_then(|p| p.coarse_ksp_maxits)
-                    .or(self.coarse_ksp_maxits)
-                    .unwrap_or(8),
-                coarse_policy
-                    .and_then(|p| p.coarse_ksp_rtol)
-                    .or(self.coarse_ksp_rtol)
-                    .unwrap_or(1e-10),
-                Some(KspOptions {
+                KspOptions {
                     ksp_type: Some(ksp_type.clone()),
                     maxits: coarse_policy
                         .and_then(|p| p.coarse_ksp_maxits)
@@ -744,7 +740,7 @@ impl Preconditioner for MgPc {
                         .and_then(|p| p.coarse_ksp_rtol)
                         .or(self.coarse_ksp_rtol),
                     ..Default::default()
-                }),
+                },
                 coarse_pc_opts,
             )?)
         } else {
