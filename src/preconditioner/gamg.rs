@@ -18,6 +18,16 @@ use crate::preconditioner::dist::{
 #[cfg(feature = "backend-faer")]
 use std::str::FromStr;
 
+#[cfg(feature = "backend-faer")]
+#[derive(Clone, Debug, Default)]
+pub struct GamgLevelPolicy {
+    pub level: usize,
+    pub smoother: Option<String>,
+    pub sweeps: Option<usize>,
+    pub coarse_solver: Option<CoarseSolve>,
+    pub side: Option<PcSide>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GamgType {
     Agg,
@@ -41,6 +51,7 @@ impl GamgType {
 pub struct GamgConfig {
     pub gamg_type: GamgType,
     pub amg_config: AMGConfig,
+    pub level_policies: Vec<GamgLevelPolicy>,
 }
 
 #[cfg(not(feature = "backend-faer"))]
@@ -107,12 +118,66 @@ impl GamgConfig {
         if let Some(route) = opts.amg_dist_coarse_solver_route.as_deref() {
             amg_config.dist_coarse_solver_route = DistCoarseSolverRoute::from_str(route)?;
         }
+        if let Some(policy) = opts.amg_dist_coarse_policy.as_deref() {
+            amg_config.dist_coarse_strategy = DistCoarseStrategy::from_str(policy)?;
+        }
+
+        let level_policies = opts
+            .pc_gamg_level_policies
+            .as_ref()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| parse_gamg_level_policy(entry).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         Ok(GamgConfig {
             gamg_type,
             amg_config,
+            level_policies,
         })
     }
+}
+
+#[cfg(feature = "backend-faer")]
+fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
+    let mut policy = GamgLevelPolicy::default();
+    for token in value.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some((k, v)) = token.split_once('=') {
+            match k.trim() {
+                "level" => {
+                    policy.level = v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid gamg policy level: {v}"))
+                    })?
+                }
+                "smoother" => policy.smoother = Some(v.trim().to_lowercase()),
+                "sweeps" => {
+                    policy.sweeps =
+                        Some(v.trim().parse().map_err(|_| {
+                            KError::InvalidInput(format!("invalid gamg sweeps: {v}"))
+                        })?)
+                }
+                "coarse" | "coarse_solver" => {
+                    policy.coarse_solver = Some(match v.trim().to_lowercase().as_str() {
+                        "cg" => CoarseSolve::CG,
+                        "direct" | "dense" => CoarseSolve::DirectDense,
+                        "ilu" => CoarseSolve::ILU,
+                        "smoother" => CoarseSolve::Smoother,
+                        other => {
+                            return Err(KError::InvalidInput(format!(
+                                "invalid gamg coarse solver: {other}"
+                            )));
+                        }
+                    })
+                }
+                "side" => policy.side = Some(PcSide::from_str(v.trim())?),
+                _ => {}
+            }
+        }
+    }
+    Ok(policy)
 }
 
 #[cfg(not(feature = "backend-faer"))]
@@ -217,6 +282,11 @@ impl Preconditioner for Gamg {
     }
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        for p in &self.config.level_policies {
+            if let Some(solve) = p.coarse_solver {
+                self.amg.set_level_coarse_solver(p.level, solve);
+            }
+        }
         self.amg.setup(a)
     }
 

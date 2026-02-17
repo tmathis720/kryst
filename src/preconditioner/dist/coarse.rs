@@ -15,6 +15,38 @@ pub enum DistCoarseStrategy {
     SuperLuDist,
 }
 
+/// Explicit coarse ownership policy for distributed coarse-grid operators/solves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistCoarsePolicy {
+    /// Gather coarse system/solve state to root rank only.
+    RootGather,
+    /// Replicate coarse system state on all ranks.
+    Replicated,
+    /// Route through an external distributed backend.
+    External,
+}
+
+impl Default for DistCoarsePolicy {
+    fn default() -> Self {
+        Self::RootGather
+    }
+}
+
+impl FromStr for DistCoarsePolicy {
+    type Err = KError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "root" | "root_gather" | "gather" => Ok(Self::RootGather),
+            "replicated" | "replicate" | "all" => Ok(Self::Replicated),
+            "external" | "backend" | "superlu_dist" => Ok(Self::External),
+            other => Err(KError::InvalidInput(format!(
+                "invalid dist coarse policy: {other}"
+            ))),
+        }
+    }
+}
+
 /// Policy for repartitioning the coarse grid in distributed AMG setups.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DistCoarseRepartition {
