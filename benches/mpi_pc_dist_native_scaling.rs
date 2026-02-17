@@ -56,7 +56,12 @@ fn slice_rows(a: &CsrMatrix<f64>, row_start: usize, n_local: usize) -> CsrMatrix
     CsrMatrix::from_csr(n_local, a.ncols(), row_ptr, col_idx, values)
 }
 
-fn build_case(grid: usize, comm: &UniverseComm, native: bool) -> (KspContext, Vec<f64>, Vec<f64>) {
+fn build_case(
+    grid: usize,
+    comm: &UniverseComm,
+    pc_local: &str,
+    apply_mode: &str,
+) -> (KspContext, Vec<f64>, Vec<f64>) {
     let a_global = datasets::poisson2d_csr(grid);
     let n_global = a_global.nrows();
     let part_prefix = build_part_prefix(n_global, comm.size());
@@ -67,18 +72,13 @@ fn build_case(grid: usize, comm: &UniverseComm, native: bool) -> (KspContext, Ve
     let dist = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
         .expect("dist csr build");
 
-    let mode = if native {
-        "distributed_native"
-    } else {
-        "local_wrapper"
-    };
     let opts = KspOptions::from_args(&[
         "-pc_global",
         "block_jacobi",
         "-pc_local",
-        "ilutp",
+        pc_local,
         "-pc_dist_local_apply",
-        mode,
+        apply_mode,
     ])
     .expect("ksp options parse");
 
@@ -103,15 +103,21 @@ fn bench_suite(c: &mut Criterion) {
 
     let mut strong = c.benchmark_group("mpi_pc_dist_native_strong");
     for (label, grid) in strong_sizes {
-        for native in [false, true] {
-            let mode = if native { "native" } else { "wrapper" };
-            let (mut ksp, b, mut x) = build_case(grid, &comm, native);
-            strong.bench_function(format!("{label}_{mode}"), |ben| {
-                ben.iter(|| {
-                    x.fill(0.0);
-                    let _ = ksp.solve(&b, &mut x).unwrap();
+        for pc_local in ["ilutp", "sor", "chebyshev"] {
+            for apply_mode in ["wrapped_local", "distributed_native"] {
+                let bench_mode = if apply_mode == "distributed_native" {
+                    "native"
+                } else {
+                    "wrapper"
+                };
+                let (mut ksp, b, mut x) = build_case(grid, &comm, pc_local, apply_mode);
+                strong.bench_function(format!("{label}_{pc_local}_{bench_mode}"), |ben| {
+                    ben.iter(|| {
+                        x.fill(0.0);
+                        let _ = ksp.solve(&b, &mut x).unwrap();
+                    });
                 });
-            });
+            }
         }
     }
     strong.finish();
@@ -119,15 +125,21 @@ fn bench_suite(c: &mut Criterion) {
     let mut weak = c.benchmark_group("mpi_pc_dist_native_weak");
     for base in weak_per_rank {
         let global_grid = base * comm.size().max(1);
-        for native in [false, true] {
-            let mode = if native { "native" } else { "wrapper" };
-            let (mut ksp, b, mut x) = build_case(global_grid, &comm, native);
-            weak.bench_function(format!("weak_{base}_{mode}"), |ben| {
-                ben.iter(|| {
-                    x.fill(0.0);
-                    let _ = ksp.solve(&b, &mut x).unwrap();
+        for pc_local in ["ilutp", "sor", "chebyshev"] {
+            for apply_mode in ["wrapped_local", "distributed_native"] {
+                let bench_mode = if apply_mode == "distributed_native" {
+                    "native"
+                } else {
+                    "wrapper"
+                };
+                let (mut ksp, b, mut x) = build_case(global_grid, &comm, pc_local, apply_mode);
+                weak.bench_function(format!("weak_{base}_{pc_local}_{bench_mode}"), |ben| {
+                    ben.iter(|| {
+                        x.fill(0.0);
+                        let _ = ksp.solve(&b, &mut x).unwrap();
+                    });
                 });
-            });
+            }
         }
     }
     weak.finish();

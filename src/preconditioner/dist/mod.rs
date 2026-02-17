@@ -113,7 +113,7 @@ impl Default for MpiPcOptions {
             ilutp_max_fill: 10,
             ilutp_drop_tol: 1e-4,
             ilutp_perm_tol: 0.1,
-            local_apply_mode: DistLocalApplyMode::LocalWrapper,
+            local_apply_mode: DistLocalApplyMode::WrappedLocal,
         }
     }
 }
