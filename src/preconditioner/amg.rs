@@ -4585,6 +4585,8 @@ impl AMG {
         if self.cfg.logging_level > 0 {
             let mut st = AmgStats::from_hierarchy(h);
             st.levels = collect_level_stats(h, &self.cfg);
+            st.selected_dist_coarse_route =
+                Some(format!("{:?}", self.cfg.dist_coarse_solver_route));
             st.diagnostics = diag_stats;
             self.stats = Some(st);
         }
@@ -6844,6 +6846,8 @@ fn build_hierarchy(
             smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
             smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
                 * a_cur.nnz() as f64,
+            selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+            coarse_solver: None,
         });
         timings.push(lt0);
     }
@@ -7511,6 +7515,8 @@ fn build_hierarchy(
                 smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
                 smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
                     * a_cur.nnz() as f64,
+                selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+                coarse_solver: None,
             });
             let ls_len = level_stats.len();
             if ls_len >= 2
@@ -7570,6 +7576,7 @@ fn build_hierarchy(
     let stats_opt = if do_stats {
         let mut stats = AmgStats::from_hierarchy(&hier);
         stats.levels = level_stats;
+        stats.selected_dist_coarse_route = Some(format!("{:?}", cfg.dist_coarse_solver_route));
         stats.diagnostics = diag_stats;
         let mut setup = SetupTimings::default();
         setup.per_level = timings;
@@ -7707,6 +7714,8 @@ fn build_smoother_only_hierarchy(
             smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
             smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
                 * fine.nnz() as f64,
+            selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+            coarse_solver: Some(format!("{:?}", CoarseSolve::Smoother)),
         }];
         stats.diagnostics = vec![AmgLevelStats {
             p_min_col_norm: 0.0,
@@ -9223,6 +9232,8 @@ pub struct LevelStats {
     pub eff_nnz_a: Option<usize>,
     pub smoother_sweeps: usize,
     pub smoothing_work_estimate: f64,
+    pub selected_relax: String,
+    pub coarse_solver: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -9325,6 +9336,7 @@ pub struct AmgStats {
     pub diagnostics: Vec<AmgLevelStats>,
     pub setup: SetupTimings,
     pub last_cycle: Option<CycleTimings>,
+    pub selected_dist_coarse_route: Option<String>,
 }
 
 impl AmgStats {
@@ -9345,6 +9357,7 @@ impl AmgStats {
             diagnostics: Vec::new(),
             setup: SetupTimings::default(),
             last_cycle: None,
+            selected_dist_coarse_route: None,
         }
     }
 }
@@ -9393,6 +9406,19 @@ fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
             eff_nnz_a: Some(eff_nnz(&lvl.a, cfg.stats_eps)),
             smoother_sweeps: sweeps,
             smoothing_work_estimate: sweeps as f64 * lvl.a.nnz() as f64,
+            selected_relax: format!(
+                "{:?}",
+                h.policy.kind[if i == h.coarsest_ix() {
+                    RelaxPhase::Coarsest.ix()
+                } else {
+                    RelaxPhase::Down.ix()
+                }]
+            ),
+            coarse_solver: if i == h.coarsest_ix() {
+                Some(format!("{:?}", cfg.coarse_solve))
+            } else {
+                None
+            },
         });
     }
     out

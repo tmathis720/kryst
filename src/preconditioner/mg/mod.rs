@@ -22,6 +22,8 @@ pub struct MgLevelPolicy {
     pub level: usize,
     pub smoother_type: Option<String>,
     pub smoother_steps: Option<usize>,
+    pub pre_sweeps: Option<usize>,
+    pub post_sweeps: Option<usize>,
     pub smoother_side: Option<PcSide>,
     pub coarse_pc_type: Option<String>,
     pub coarse_ksp_type: Option<String>,
@@ -36,6 +38,25 @@ pub struct MgLevelDiagnostics {
     pub nnz: usize,
     pub work_estimate: usize,
     pub reduction_count: usize,
+    pub selected_pc: String,
+    pub selected_ksp: Option<String>,
+    pub pre_sweeps: usize,
+    pub post_sweeps: usize,
+    pub side: PcSide,
+    pub coarse_route: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct MgResolvedPolicy {
+    smoother: String,
+    pre_sweeps: usize,
+    post_sweeps: usize,
+    smoother_side: PcSide,
+    coarse_pc_type: Option<String>,
+    coarse_ksp_type: Option<String>,
+    coarse_ksp_maxits: Option<usize>,
+    coarse_ksp_rtol: Option<f64>,
+    coarse_side: PcSide,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,7 +516,13 @@ impl MgPc {
         (p, r, n_coarse)
     }
 
-    fn smooth_level(level: &MgLevel, sweeps: usize, b: &[S], x: &mut [S]) -> Result<(), KError> {
+    fn smooth_level(
+        level: &MgLevel,
+        sweeps: usize,
+        side: PcSide,
+        b: &[S],
+        x: &mut [S],
+    ) -> Result<(), KError> {
         let smoother = match level.smoother.as_ref() {
             Some(sm) => sm,
             None => return Ok(()),
@@ -508,7 +535,7 @@ impl MgPc {
             for i in 0..n {
                 residual[i] = b[i] - residual[i];
             }
-            smoother.apply(PcSide::Left, &residual, &mut correction)?;
+            smoother.apply(side, &residual, &mut correction)?;
             for i in 0..n {
                 x[i] += correction[i];
             }
@@ -516,11 +543,53 @@ impl MgPc {
         Ok(())
     }
 
-    fn policy_for_level(&self, level: usize) -> Option<&MgLevelPolicy> {
-        self.level_policies
-            .iter()
-            .filter(|p| p.level <= level)
-            .max_by_key(|p| p.level)
+    fn resolved_policy_for_level(&self, level: usize) -> MgResolvedPolicy {
+        let default_smoother = self.smoother.as_deref().unwrap_or("jacobi").to_string();
+        let mut resolved = MgResolvedPolicy {
+            smoother: default_smoother,
+            pre_sweeps: self.smoother_sweeps,
+            post_sweeps: self.smoother_sweeps,
+            smoother_side: PcSide::Left,
+            coarse_pc_type: self.coarse_pc_type.clone(),
+            coarse_ksp_type: self.coarse_ksp_type.clone(),
+            coarse_ksp_maxits: self.coarse_ksp_maxits,
+            coarse_ksp_rtol: self.coarse_ksp_rtol,
+            coarse_side: PcSide::Left,
+        };
+        for p in self.level_policies.iter().filter(|p| p.level <= level) {
+            if let Some(v) = p.smoother_type.as_ref() {
+                resolved.smoother = v.clone();
+            }
+            if let Some(v) = p.smoother_steps {
+                resolved.pre_sweeps = v;
+                resolved.post_sweeps = v;
+            }
+            if let Some(v) = p.pre_sweeps {
+                resolved.pre_sweeps = v;
+            }
+            if let Some(v) = p.post_sweeps {
+                resolved.post_sweeps = v;
+            }
+            if let Some(v) = p.smoother_side {
+                resolved.smoother_side = v;
+            }
+            if let Some(v) = p.coarse_pc_type.as_ref() {
+                resolved.coarse_pc_type = Some(v.clone());
+            }
+            if let Some(v) = p.coarse_ksp_type.as_ref() {
+                resolved.coarse_ksp_type = Some(v.clone());
+            }
+            if let Some(v) = p.coarse_ksp_maxits {
+                resolved.coarse_ksp_maxits = Some(v);
+            }
+            if let Some(v) = p.coarse_ksp_rtol {
+                resolved.coarse_ksp_rtol = Some(v);
+            }
+            if let Some(v) = p.coarse_side {
+                resolved.coarse_side = v;
+            }
+        }
+        resolved
     }
 
     fn mg_cycle(
@@ -538,10 +607,7 @@ impl MgPc {
         let is_coarse = level_ix + 1 == hierarchy.levels.len();
         if is_coarse {
             if let Some(coarse) = &self.coarse_solve {
-                let coarse_side = self
-                    .policy_for_level(level_ix)
-                    .and_then(|p| p.coarse_side)
-                    .unwrap_or(PcSide::Left);
+                let coarse_side = self.resolved_policy_for_level(level_ix).coarse_side;
                 let mut guard = coarse
                     .lock()
                     .map_err(|_| KError::SolveError("mg coarse solver mutex poisoned".into()))?;
@@ -572,11 +638,9 @@ impl MgPc {
             return Ok(());
         }
 
-        let pre_sweeps = self
-            .policy_for_level(level_ix)
-            .and_then(|p| p.smoother_steps)
-            .unwrap_or(self.smoother_sweeps);
-        Self::smooth_level(level, pre_sweeps, b, x)?;
+        let level_policy = self.resolved_policy_for_level(level_ix);
+        let pre_sweeps = level_policy.pre_sweeps;
+        Self::smooth_level(level, pre_sweeps, level_policy.smoother_side, b, x)?;
 
         let mut residual = vec![S::zero(); b.len()];
         level.operator.try_spmv(x, &mut residual)?;
@@ -616,11 +680,8 @@ impl MgPc {
             x[i] += fine_correction[i];
         }
 
-        let post_sweeps = self
-            .policy_for_level(level_ix)
-            .and_then(|p| p.smoother_steps)
-            .unwrap_or(self.smoother_sweeps);
-        Self::smooth_level(level, post_sweeps, b, x)?;
+        let post_sweeps = level_policy.post_sweeps;
+        Self::smooth_level(level, post_sweeps, level_policy.smoother_side, b, x)?;
         Ok(())
     }
 }
@@ -689,63 +750,45 @@ impl Preconditioner for MgPc {
         let op_comm = _a.comm();
         self.comm = op_comm.clone();
         for lvl in hierarchy.levels_mut().iter_mut().take(self.levels - 1) {
-            let policy = self.policy_for_level(lvl.level);
-            let policy_smoother = policy
-                .and_then(|p| p.smoother_type.as_deref())
-                .unwrap_or(smoother_name);
-            let mut smoother = self.build_smoother(policy_smoother)?;
+            let policy = self.resolved_policy_for_level(lvl.level);
+            let mut smoother = self.build_smoother(&policy.smoother)?;
             let op = CsrLinOp::new(lvl.operator.clone(), op_comm.clone());
             smoother.setup(&op)?;
             lvl.smoother = Some(smoother);
         }
 
         let coarse_level = self.levels.saturating_sub(1);
-        let coarse_override = self
-            .policy_for_level(coarse_level)
-            .and_then(|p| p.coarse_pc_type.as_deref())
-            .or_else(|| {
-                self.level_coarse_pc_types
-                    .iter()
-                    .filter(|(lvl, _)| **lvl <= coarse_level)
-                    .max_by_key(|(lvl, _)| *lvl)
-                    .map(|(_, v)| v.as_str())
-            });
-        let coarse_policy = self.policy_for_level(coarse_level);
-        let coarse_pc_type = coarse_override
-            .or(self.coarse_pc_type.as_deref())
+        let coarse_policy = self.resolved_policy_for_level(coarse_level);
+        let coarse_pc_type = coarse_policy
+            .coarse_pc_type
+            .as_deref()
             .map(PcType::from_str)
             .transpose()?
             .unwrap_or(smoother_pc_type);
-        let mut coarse_solver: Box<dyn Preconditioner> = if let Some(ksp_type) = coarse_policy
-            .and_then(|p| p.coarse_ksp_type.as_ref())
-            .or(self.coarse_ksp_type.as_ref())
-        {
-            let mut coarse_pc_opts = PcOptions {
-                pc_type: Some(Self::pc_type_name(coarse_pc_type).to_string()),
-                ..Default::default()
-            };
-            if coarse_pc_type == PcType::Ksp {
-                coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
-            }
-            if coarse_pc_opts.pc_type.is_none() {
-                coarse_pc_opts.pc_type = Some("jacobi".to_string());
-            }
-            Box::new(KspAsPc::new(
-                KspOptions {
-                    ksp_type: Some(ksp_type.clone()),
-                    maxits: coarse_policy
-                        .and_then(|p| p.coarse_ksp_maxits)
-                        .or(self.coarse_ksp_maxits),
-                    rtol: coarse_policy
-                        .and_then(|p| p.coarse_ksp_rtol)
-                        .or(self.coarse_ksp_rtol),
+        let mut coarse_solver: Box<dyn Preconditioner> =
+            if let Some(ksp_type) = coarse_policy.coarse_ksp_type.as_ref() {
+                let mut coarse_pc_opts = PcOptions {
+                    pc_type: Some(Self::pc_type_name(coarse_pc_type).to_string()),
                     ..Default::default()
-                },
-                coarse_pc_opts,
-            )?)
-        } else {
-            PcFactory::create_preconditioner(coarse_pc_type, None)?
-        };
+                };
+                if coarse_pc_type == PcType::Ksp {
+                    coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
+                }
+                if coarse_pc_opts.pc_type.is_none() {
+                    coarse_pc_opts.pc_type = Some("jacobi".to_string());
+                }
+                Box::new(KspAsPc::new(
+                    KspOptions {
+                        ksp_type: Some(ksp_type.clone()),
+                        maxits: coarse_policy.coarse_ksp_maxits,
+                        rtol: coarse_policy.coarse_ksp_rtol,
+                        ..Default::default()
+                    },
+                    coarse_pc_opts,
+                )?)
+            } else {
+                PcFactory::create_preconditioner(coarse_pc_type, None)?
+            };
 
         let coarse_op = CsrLinOp::new(
             hierarchy
@@ -770,12 +813,26 @@ impl Preconditioner for MgPc {
             .map(|lvl| MgLevelDiagnostics {
                 level: lvl.level,
                 nnz: lvl.operator.nnz(),
-                work_estimate: lvl.operator.nnz()
-                    * self
-                        .policy_for_level(lvl.level)
-                        .and_then(|p| p.smoother_steps)
-                        .unwrap_or(self.smoother_sweeps),
+                work_estimate: {
+                    let policy = self.resolved_policy_for_level(lvl.level);
+                    lvl.operator.nnz() * (policy.pre_sweeps + policy.post_sweeps)
+                },
                 reduction_count: 0,
+                selected_pc: self.resolved_policy_for_level(lvl.level).smoother,
+                selected_ksp: None,
+                pre_sweeps: self.resolved_policy_for_level(lvl.level).pre_sweeps,
+                post_sweeps: self.resolved_policy_for_level(lvl.level).post_sweeps,
+                side: self.resolved_policy_for_level(lvl.level).smoother_side,
+                coarse_route: if lvl.level == coarse_level {
+                    let route = if coarse_policy.coarse_ksp_type.is_some() {
+                        "nested_ksp"
+                    } else {
+                        "pc_apply"
+                    };
+                    Some(route.to_string())
+                } else {
+                    None
+                },
             })
             .collect();
         self.hierarchy = Some(hierarchy);
