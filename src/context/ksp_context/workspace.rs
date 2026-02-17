@@ -291,6 +291,13 @@ impl Workspace {
     pub fn n(&self) -> usize {
         self.n
     }
+
+    /// Lightweight estimate of local work used by adaptive execution policy.
+    #[inline]
+    pub fn local_work_estimate(&self) -> usize {
+        let basis_cols = self.m.saturating_add(1);
+        self.n.saturating_mul(basis_cols.max(1))
+    }
     #[inline]
     pub fn m(&self) -> usize {
         self.m

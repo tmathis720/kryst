@@ -5,7 +5,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};
-use kryst::parallel::{NoComm, UniverseComm};
+use kryst::parallel::{Comm, NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use std::sync::Arc;
 

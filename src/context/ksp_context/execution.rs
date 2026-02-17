@@ -4,6 +4,7 @@ use crate::config::options::KspOptions;
 use crate::error::KError;
 use crate::reduction::ReproMode;
 use crate::utils::reduction::{ReductExec, ReductOptions};
+use std::fmt;
 use std::sync::Arc;
 
 #[cfg(feature = "rayon")]
@@ -41,6 +42,51 @@ pub struct ExecutionPolicy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KrylovVariant {
+    Classical,
+    Pipelined,
+    SStep,
+}
+
+#[derive(Clone, Debug)]
+pub struct AutoExecutionReport {
+    pub comm_size: usize,
+    pub local_work: usize,
+    pub restart_len: usize,
+    pub reduction_latency_us: f64,
+    pub variant: KrylovVariant,
+    pub reduction: ReproMode,
+    pub reduction_exec: ReductExec,
+    pub overlap: OverlapStrategy,
+    pub threading: &'static str,
+    pub threads: usize,
+}
+
+impl AutoExecutionReport {
+    pub fn concise(&self) -> String {
+        format!(
+            "ExecutionPolicy::Auto(variant={:?}, reduction={:?}/{:?}, overlap={:?}, threads={}:{}, comm={}, work={}, restart={}, latency_us={:.2})",
+            self.variant,
+            self.reduction,
+            self.reduction_exec,
+            self.overlap,
+            self.threading,
+            self.threads,
+            self.comm_size,
+            self.local_work,
+            self.restart_len,
+            self.reduction_latency_us
+        )
+    }
+}
+
+impl fmt::Display for AutoExecutionReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.concise())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlapStrategy {
     Disabled,
     Conservative,
@@ -51,6 +97,9 @@ pub enum OverlapStrategy {
 pub struct AdaptiveExecutionDecision {
     pub problem_size: usize,
     pub comm_size: usize,
+    pub restart_len: usize,
+    pub local_work: usize,
+    pub reduction_latency_us: f64,
     pub tune: ParallelTune,
     pub threading: &'static str,
     pub recommended_threads: usize,
@@ -58,14 +107,20 @@ pub struct AdaptiveExecutionDecision {
     pub requested_reduction: ReproMode,
     pub selected_reduction: ReproMode,
     pub reduction_exec: ReductExec,
+    pub variant: KrylovVariant,
+    pub sstep_block: Option<usize>,
     pub overlap: OverlapStrategy,
     pub monitor_overhead_sensitive: bool,
+    pub auto_report: AutoExecutionReport,
 }
 
 impl AdaptiveExecutionDecision {
     pub fn decide(
         problem_size: usize,
         comm_size: usize,
+        restart_len: usize,
+        local_work: usize,
+        reduction_latency_us: f64,
         reproducible: bool,
         monitor_overhead_sensitive: bool,
         reduction: &ReductOptions,
@@ -94,20 +149,38 @@ impl AdaptiveExecutionDecision {
                 ReproMode::Fast => ReproMode::Deterministic,
                 mode => mode,
             }
-        } else if comm_size > 1 && monitor_overhead_sensitive {
+        } else if comm_size > 1 && (monitor_overhead_sensitive || reduction_latency_us > 35.0) {
             ReproMode::Fast
         } else {
             requested_reduction
         };
 
+        let high_latency = reduction_latency_us > 25.0;
+        let very_high_latency = reduction_latency_us > 60.0;
+
         let reduction_exec = if comm_size > 1
             && !reproducible
             && !monitor_overhead_sensitive
-            && problem_size >= tune.min_rows_spmv
+            && (problem_size >= tune.min_rows_spmv || high_latency)
         {
             ReductExec::Async
         } else {
             ReductExec::Sync
+        };
+
+        let variant = if comm_size <= 1 || restart_len <= 2 {
+            KrylovVariant::Classical
+        } else if very_high_latency && restart_len >= 12 && local_work >= tune.min_rows_spmv {
+            KrylovVariant::SStep
+        } else if high_latency || problem_size >= tune.min_rows_spmv {
+            KrylovVariant::Pipelined
+        } else {
+            KrylovVariant::Classical
+        };
+
+        let sstep_block = match variant {
+            KrylovVariant::SStep => Some((restart_len / 4).clamp(2, 8)),
+            _ => None,
         };
 
         let overlap = if matches!(reduction_exec, ReductExec::Sync) {
@@ -121,6 +194,9 @@ impl AdaptiveExecutionDecision {
         Self {
             problem_size,
             comm_size,
+            restart_len,
+            local_work,
+            reduction_latency_us,
             tune,
             threading: threading.0,
             recommended_threads: threading.1,
@@ -128,8 +204,22 @@ impl AdaptiveExecutionDecision {
             requested_reduction,
             selected_reduction,
             reduction_exec,
+            variant,
+            sstep_block,
             overlap,
             monitor_overhead_sensitive,
+            auto_report: AutoExecutionReport {
+                comm_size,
+                local_work,
+                restart_len,
+                reduction_latency_us,
+                variant,
+                reduction: selected_reduction,
+                reduction_exec,
+                overlap,
+                threading: threading.0,
+                threads: threading.1,
+            },
         }
     }
 }
@@ -281,7 +371,7 @@ mod tests {
     #[test]
     fn adaptive_policy_uses_fast_sync_when_monitor_heavy() {
         let opt = ReductOptions::default();
-        let d = AdaptiveExecutionDecision::decide(2048, 4, false, true, &opt);
+        let d = AdaptiveExecutionDecision::decide(2048, 4, 30, 2048 * 30, 10.0, false, true, &opt);
         assert_eq!(d.selected_reduction, ReproMode::Fast);
         assert!(matches!(d.reduction_exec, ReductExec::Sync));
     }
@@ -289,10 +379,20 @@ mod tests {
     #[test]
     fn adaptive_policy_forces_deterministic_when_reproducible() {
         let opt = ReductOptions::default();
-        let d = AdaptiveExecutionDecision::decide(16384, 8, true, false, &opt);
+        let d =
+            AdaptiveExecutionDecision::decide(16384, 8, 40, 16384 * 40, 20.0, true, false, &opt);
         assert!(matches!(
             d.selected_reduction,
             ReproMode::Deterministic | ReproMode::DeterministicAccurate
         ));
+    }
+
+    #[test]
+    fn adaptive_policy_selects_sstep_for_high_latency() {
+        let opt = ReductOptions::default();
+        let d =
+            AdaptiveExecutionDecision::decide(32768, 16, 50, 32768 * 50, 80.0, false, false, &opt);
+        assert!(matches!(d.variant, KrylovVariant::SStep));
+        assert!(d.sstep_block.is_some());
     }
 }

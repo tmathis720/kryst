@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use crate::algebra::prelude::*;
 use crate::error::KError;
@@ -12,6 +13,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 // Compact encoding of the active reproducibility mode for cross-module queries.
 // 0 = Fast, 1 = Deterministic, 2 = DeterministicAccurate
 static CURRENT_REPRO: AtomicU8 = AtomicU8::new(0);
+static REDUCTION_LATENCY_NS_EWMA: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Test-only counters that track how many global reductions were launched.
 #[derive(Clone, Debug, Default)]
@@ -125,6 +128,42 @@ pub fn current_repro_mode() -> ReproMode {
         1 => ReproMode::Deterministic,
         2 => ReproMode::DeterministicAccurate,
         _ => ReproMode::Fast,
+    }
+}
+
+#[inline]
+fn observe_reduction_latency(sample_ns: u64) {
+    if sample_ns == 0 {
+        return;
+    }
+    let mut prev = REDUCTION_LATENCY_NS_EWMA.load(Ordering::Relaxed);
+    loop {
+        let next = if prev == 0 {
+            sample_ns
+        } else {
+            ((prev * 7) + sample_ns) / 8
+        };
+        match REDUCTION_LATENCY_NS_EWMA.compare_exchange_weak(
+            prev,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(cur) => prev = cur,
+        }
+    }
+}
+
+#[inline]
+pub fn reduction_latency_estimate_us() -> f64 {
+    REDUCTION_LATENCY_NS_EWMA.load(Ordering::Relaxed) as f64 / 1_000.0
+}
+
+#[inline]
+pub fn seed_reduction_latency_estimate_us(us: f64) {
+    if us.is_finite() && us > 0.0 {
+        REDUCTION_LATENCY_NS_EWMA.store((us * 1_000.0) as u64, Ordering::Relaxed);
     }
 }
 
@@ -417,16 +456,24 @@ impl AllreduceOps for crate::parallel::NoComm {
 
     fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
+        let t0 = Instant::now();
         match h {
-            AllreduceHandle::Ready(val) => val,
+            AllreduceHandle::Ready(val) => {
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                val
+            }
             _ => unreachable!(),
         }
     }
 
     fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
+        let t0 = Instant::now();
         match h {
-            AllreduceHandle::Ready(val) => val,
+            AllreduceHandle::Ready(val) => {
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                val
+            }
             _ => unreachable!(),
         }
     }
@@ -489,18 +536,34 @@ impl AllreduceOps for crate::parallel::rayon_comm::RayonComm {
 
     fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
+        let t0 = Instant::now();
         match h {
-            AllreduceHandle::Ready(val) => val,
-            AllreduceHandle::Rayon { rx } => rx.recv().unwrap(),
+            AllreduceHandle::Ready(val) => {
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                val
+            }
+            AllreduceHandle::Rayon { rx } => {
+                let out = rx.recv().unwrap();
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                out
+            }
             _ => unreachable!(),
         }
     }
 
     fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
+        let t0 = Instant::now();
         match h {
-            AllreduceHandle::Ready(val) => val,
-            AllreduceHandle::Rayon { rx } => rx.recv().unwrap(),
+            AllreduceHandle::Ready(val) => {
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                val
+            }
+            AllreduceHandle::Rayon { rx } => {
+                let out = rx.recv().unwrap();
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                out
+            }
             _ => unreachable!(),
         }
     }
@@ -676,13 +739,19 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
 
     fn wait_pair(h: AllreduceHandle<(R, R)>) -> (R, R) {
         record_wait_pair();
+        let t0 = Instant::now();
         match h {
-            AllreduceHandle::Ready(val) => val,
+            AllreduceHandle::Ready(val) => {
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                val
+            }
             AllreduceHandle::Mpi {
                 req, buf, convert, ..
             } => {
                 mpi_wait_request(req);
-                convert(&buf)
+                let out = convert(&buf);
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                out
             }
             _ => unreachable!(),
         }
@@ -690,13 +759,19 @@ impl AllreduceOps for crate::parallel::mpi_comm::MpiComm {
 
     fn wait_vec(h: AllreduceHandle<Vec<R>>) -> Vec<R> {
         record_wait_vec();
+        let t0 = Instant::now();
         match h {
-            AllreduceHandle::Ready(val) => val,
+            AllreduceHandle::Ready(val) => {
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                val
+            }
             AllreduceHandle::Mpi {
                 req, buf, convert, ..
             } => {
                 mpi_wait_request(req);
-                convert(&buf)
+                let out = convert(&buf);
+                observe_reduction_latency(t0.elapsed().as_nanos() as u64);
+                out
             }
             _ => unreachable!(),
         }
