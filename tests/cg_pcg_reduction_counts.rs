@@ -6,7 +6,7 @@ use kryst::context::ksp_context::Workspace;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::LinearSolver;
-use kryst::solver::PcgSolver;
+use kryst::solver::{BiCgStabSolver, PcgSolver};
 use std::sync::atomic::Ordering;
 use support::reduce_counter::CountingComm;
 
@@ -49,4 +49,41 @@ fn pcg_reduction_counts() {
     let expected = 2 + 2 * stats.iterations;
     assert_eq!(comm.reduces.load(Ordering::Relaxed), expected);
     assert_eq!(stats.counters.num_global_reductions, 0);
+}
+
+#[test]
+fn bicgstab_reports_reduction_counters() {
+    let n = 6;
+    let mut a = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        a[(i, i)] = 4.0;
+        if i + 1 < n {
+            a[(i, i + 1)] = -1.0;
+        }
+        if i > 0 {
+            a[(i, i - 1)] = 2.0;
+        }
+    }
+
+    let b = vec![1.0; n];
+    let mut x = vec![0.0; n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut solver = BiCgStabSolver::new(1e-10, 50);
+    let mut wk = Workspace::default();
+    solver.setup_workspace(&mut wk);
+    let stats = solver
+        .solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut wk),
+        )
+        .unwrap();
+
+    assert!(stats.counters.num_global_reductions >= 2);
+    assert!(stats.counters.residual_replacements <= stats.iterations);
 }

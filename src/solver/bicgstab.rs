@@ -24,9 +24,9 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::ReductCtx;
-use crate::solver::common::call_monitors;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
+use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
+use crate::utils::reduction::{AllreduceOps, ReductOptions};
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
@@ -211,10 +211,22 @@ impl BiCgStabSolver {
         let thr = self.atol.max(self.rtol * bnorm);
 
         if let Some(reason) = ConvergedReason::from_non_finite(res0) {
-            return Ok(SolveStats::new(0, res0, reason));
+            return Ok(
+                SolveStats::new(0, res0, reason).with_counters(SolverCounters {
+                    num_global_reductions: 2,
+                    residual_replacements: 0,
+                }),
+            );
         }
         if call_monitors(mons, 0, res0, 0) {
-            return Ok(SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor));
+            return Ok(
+                SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor).with_counters(
+                    SolverCounters {
+                        num_global_reductions: 2,
+                        residual_replacements: 0,
+                    },
+                ),
+            );
         }
         if res0 <= thr {
             let reason = if res0 <= self.atol {
@@ -222,7 +234,12 @@ impl BiCgStabSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            return Ok(SolveStats::new(0, res0, reason));
+            return Ok(
+                SolveStats::new(0, res0, reason).with_counters(SolverCounters {
+                    num_global_reductions: 2,
+                    residual_replacements: 0,
+                }),
+            );
         }
 
         let mut rho_prev = S::one();
@@ -234,6 +251,8 @@ impl BiCgStabSolver {
         let eps_omega = 1e-30;
 
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
+        let mut sync_reductions = 2usize;
+        let mut async_reduction_waits = 0usize;
 
         for k in 1..=self.maxits {
             let rho = if need_left {
@@ -241,6 +260,7 @@ impl BiCgStabSolver {
             } else {
                 red.dot(r_hat, r)
             };
+            sync_reductions += 1;
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
@@ -251,7 +271,10 @@ impl BiCgStabSolver {
                     red.norm2(r)
                 };
                 stats.reason = ConvergedReason::DivergedBreakdownBiCG;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
 
             let beta = if k == 1 {
@@ -298,6 +321,7 @@ impl BiCgStabSolver {
             }
 
             let alpha_den = red.dot(r_hat, v);
+            sync_reductions += 1;
             if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {k}");
@@ -308,7 +332,10 @@ impl BiCgStabSolver {
                     red.norm2(r)
                 };
                 stats.reason = ConvergedReason::DivergedBreakdownBiCG;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
             alpha = rho / alpha_den;
 
@@ -323,18 +350,25 @@ impl BiCgStabSolver {
             }
 
             let s_norm = red.norm2(s);
+            sync_reductions += 1;
             if let Some(reason) = ConvergedReason::from_non_finite(s_norm) {
                 stats.iterations = k;
                 stats.final_residual = s_norm;
                 stats.reason = reason;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
             if call_monitors(mons, k, s_norm, 0) {
-                return Ok(SolveStats::new(
-                    k,
-                    s_norm,
-                    ConvergedReason::StoppedByMonitor,
-                ));
+                return Ok(
+                    SolveStats::new(k, s_norm, ConvergedReason::StoppedByMonitor).with_counters(
+                        SolverCounters {
+                            num_global_reductions: sync_reductions + async_reduction_waits,
+                            residual_replacements: async_reduction_waits,
+                        },
+                    ),
+                );
             }
             if s_norm <= thr {
                 if need_left {
@@ -368,7 +402,10 @@ impl BiCgStabSolver {
                 } else {
                     ConvergedReason::ConvergedRtol
                 };
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
 
             if need_left {
@@ -391,27 +428,39 @@ impl BiCgStabSolver {
                 }
             }
 
-            let mut omega_reds = [S::zero(), S::zero()];
-            let dot_pairs = [(&t[..], &t[..]), (&t[..], &s[..])];
-            red.dot_many_into(&dot_pairs, &mut omega_reds);
+            let async_opt = ReductOptions {
+                mode: red.mode(),
+                ..ReductOptions::default()
+            };
+            let (omega_req, _omega_local) =
+                dot2_async_s(comm, &t[..], &t[..], &t[..], &s[..], &async_opt)?;
 
-            let omega_den = omega_reds[0];
+            let omega_reds = <UniverseComm as AllreduceOps>::wait_pair(omega_req);
+            async_reduction_waits += 1;
+
+            let omega_den = S::from_real(omega_reds.0);
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
                 stats.reason = ConvergedReason::DivergedBreakdownBiCG;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
-            let omega = omega_reds[1] / omega_den;
+            let omega = S::from_real(omega_reds.1) / omega_den;
             if omega.abs() <= eps_omega || !omega.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
                 stats.reason = ConvergedReason::DivergedBreakdownBiCG;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
 
             if need_left {
@@ -478,18 +527,25 @@ impl BiCgStabSolver {
             } else {
                 red.norm2(r)
             };
+            sync_reductions += 1;
             if let Some(reason) = ConvergedReason::from_non_finite(r_norm) {
                 stats.iterations = k;
                 stats.final_residual = r_norm;
                 stats.reason = reason;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
             if call_monitors(mons, k, r_norm, 0) {
-                return Ok(SolveStats::new(
-                    k,
-                    r_norm,
-                    ConvergedReason::StoppedByMonitor,
-                ));
+                return Ok(
+                    SolveStats::new(k, r_norm, ConvergedReason::StoppedByMonitor).with_counters(
+                        SolverCounters {
+                            num_global_reductions: sync_reductions + async_reduction_waits,
+                            residual_replacements: async_reduction_waits,
+                        },
+                    ),
+                );
             }
 
             if r_norm <= thr {
@@ -500,13 +556,19 @@ impl BiCgStabSolver {
                 } else {
                     ConvergedReason::ConvergedRtol
                 };
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
             if r_norm >= self.dtol * bnorm {
                 stats.iterations = k;
                 stats.final_residual = r_norm;
                 stats.reason = ConvergedReason::DivergedDtol;
-                return Ok(stats);
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                }));
             }
 
             rho_prev = rho;
@@ -514,11 +576,15 @@ impl BiCgStabSolver {
         }
 
         let r_norm = red.norm2(r);
-        Ok(SolveStats::new(
-            self.maxits,
-            r_norm,
-            ConvergedReason::DivergedMaxIts,
-        ))
+        sync_reductions += 1;
+        Ok(
+            SolveStats::new(self.maxits, r_norm, ConvergedReason::DivergedMaxIts).with_counters(
+                SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    residual_replacements: async_reduction_waits,
+                },
+            ),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

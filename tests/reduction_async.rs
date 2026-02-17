@@ -1,6 +1,7 @@
 #![cfg(not(feature = "complex"))]
 use kryst::algebra::prelude::*;
 use kryst::parallel::{Comm, NoComm};
+use kryst::reduction::ReproMode;
 use kryst::utils::reduction::{AllreduceOps, ReductOptions};
 use std::env;
 
@@ -98,4 +99,18 @@ fn mpi_allreduce_pair_matches_sum() {
         global.1,
         (size_r * S::from_real(size + 3.0).real()) / S::from_real(2.0).real()
     );
+}
+
+#[test]
+fn nocomm_async_pair_honors_deterministic_modes() {
+    let comm = NoComm;
+    for mode in [ReproMode::Deterministic, ReproMode::DeterministicAccurate] {
+        let opts = ReductOptions {
+            mode,
+            ..ReductOptions::default()
+        };
+        let (mut handle, local) = comm.allreduce2_async(1.5, -2.25, &opts).unwrap();
+        assert_eq!(local, (1.5, -2.25));
+        assert_eq!(NoComm::test_pair(&mut handle), Some((1.5, -2.25)));
+    }
 }
