@@ -10,6 +10,27 @@ pub trait ShellContext: Send + Sync + std::any::Any {}
 
 impl<T: Send + Sync + std::any::Any> ShellContext for T {}
 
+pub fn shell_context_downcast_ref<T: ShellContext + 'static>(
+    ctx: &dyn ShellContext,
+) -> Result<&T, KError> {
+    let any = ctx as &dyn std::any::Any;
+    if any.is::<T>() {
+        return Ok(any
+            .downcast_ref::<T>()
+            .expect("checked context downcast should succeed"));
+    }
+    if any.is::<Box<dyn ShellContext>>() {
+        let boxed = any
+            .downcast_ref::<Box<dyn ShellContext>>()
+            .expect("checked boxed shell context downcast should succeed");
+        return shell_context_downcast_ref::<T>(boxed.as_ref());
+    }
+    Err(KError::InvalidInput(format!(
+        "shell context type mismatch: expected {}",
+        std::any::type_name::<T>()
+    )))
+}
+
 pub fn shell_context_downcast_mut<T: ShellContext + 'static>(
     ctx: &mut dyn ShellContext,
 ) -> Result<&mut T, KError> {
@@ -144,6 +165,8 @@ static APPLY_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static APPLY_TRANSPOSE_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+static APPLY_CONJ_TRANSPOSE_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 static APPLY_SYMMETRIC_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static SETUP_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellSetup>>>> =
@@ -164,6 +187,16 @@ pub fn register_shell_apply_transpose(name: impl Into<String>, callback: Arc<dyn
     APPLY_TRANSPOSE_REGISTRY
         .write()
         .expect("shell transpose callback registry poisoned")
+        .insert(name.into(), callback);
+}
+
+pub fn register_shell_apply_conjugate_transpose(
+    name: impl Into<String>,
+    callback: Arc<dyn ShellApply>,
+) {
+    APPLY_CONJ_TRANSPOSE_REGISTRY
+        .write()
+        .expect("shell conjugate-transpose callback registry poisoned")
         .insert(name.into(), callback);
 }
 
@@ -285,12 +318,14 @@ where
 pub struct ShellPc {
     callback_name: Option<String>,
     callback_transpose_name: Option<String>,
+    callback_conjugate_transpose_name: Option<String>,
     callback_symmetric_name: Option<String>,
     setup_name: Option<String>,
     destroy_name: Option<String>,
     context_name: Option<String>,
     callback: Option<Arc<dyn ShellApply>>,
     callback_transpose: Option<Arc<dyn ShellApply>>,
+    callback_conjugate_transpose: Option<Arc<dyn ShellApply>>,
     callback_symmetric: Option<Arc<dyn ShellApply>>,
     setup: Option<Arc<dyn ShellSetup>>,
     destroy: Option<Arc<dyn ShellDestroy>>,
@@ -302,6 +337,7 @@ impl ShellPc {
     pub fn new(
         callback_name: Option<String>,
         callback_transpose_name: Option<String>,
+        callback_conjugate_transpose_name: Option<String>,
         callback_symmetric_name: Option<String>,
         setup_name: Option<String>,
         destroy_name: Option<String>,
@@ -310,12 +346,14 @@ impl ShellPc {
         Self {
             callback_name,
             callback_transpose_name,
+            callback_conjugate_transpose_name,
             callback_symmetric_name,
             setup_name,
             destroy_name,
             context_name,
             callback: None,
             callback_transpose: None,
+            callback_conjugate_transpose: None,
             callback_symmetric: None,
             setup: None,
             destroy: None,
@@ -341,6 +379,35 @@ impl ShellPc {
 
     fn shell_error(stage: &str, err: KError) -> KError {
         KError::PcFailed(format!("shell pc {stage} failed: {err}"))
+    }
+
+    pub fn with_typed_context<T, F, R>(&self, callback: F) -> Result<R, KError>
+    where
+        T: ShellContext + 'static,
+        F: FnOnce(&mut T) -> Result<R, KError>,
+    {
+        let mut guard = self.ensure_context(self.context_factory.clone())?;
+        let ctx = guard.as_mut().expect("shell context missing").as_mut();
+        let typed = shell_context_downcast_mut::<T>(ctx)?;
+        callback(typed)
+    }
+
+    pub fn with_typed_context_ref<T, F, R>(&self, callback: F) -> Result<R, KError>
+    where
+        T: ShellContext + 'static,
+        F: FnOnce(&T) -> Result<R, KError>,
+    {
+        let guard = self
+            .context
+            .lock()
+            .map_err(|_| KError::SolveError("shell pc context mutex poisoned".into()))?;
+        let Some(ctx) = guard.as_ref() else {
+            return Err(KError::InvalidInput(
+                "shell context is not initialized".into(),
+            ));
+        };
+        let typed = shell_context_downcast_ref::<T>(ctx.as_ref())?;
+        callback(typed)
     }
 
     fn invoke_apply(
@@ -420,6 +487,20 @@ impl Preconditioner for ShellPc {
                     })?,
             );
         }
+        if let Some(name) = self.callback_conjugate_transpose_name.as_ref() {
+            self.callback_conjugate_transpose = Some(
+                APPLY_CONJ_TRANSPOSE_REGISTRY
+                    .read()
+                    .expect("shell conjugate-transpose callback registry poisoned")
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        KError::InvalidInput(format!(
+                            "shell conjugate-transpose callback not registered: {name}"
+                        ))
+                    })?,
+            );
+        }
         if let Some(name) = self.callback_symmetric_name.as_ref() {
             self.callback_symmetric = Some(
                 APPLY_SYMMETRIC_REGISTRY
@@ -488,9 +569,19 @@ impl Preconditioner for ShellPc {
     fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
         match op {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
-            Op::Trans | Op::ConjTrans => self.invoke_apply(
+            Op::Trans => self.invoke_apply(
                 self.callback_transpose.as_ref().or(self.callback.as_ref()),
                 "apply_transpose",
+                PcSide::Left,
+                x,
+                y,
+            ),
+            Op::ConjTrans => self.invoke_apply(
+                self.callback_conjugate_transpose
+                    .as_ref()
+                    .or(self.callback_transpose.as_ref())
+                    .or(self.callback.as_ref()),
+                "apply_conjugate_transpose",
                 PcSide::Left,
                 x,
                 y,
@@ -500,9 +591,12 @@ impl Preconditioner for ShellPc {
 
     fn capabilities(&self) -> PcCaps {
         let supports_transpose = self.callback_transpose.is_some() || self.callback.is_some();
+        let supports_conj_trans = self.callback_conjugate_transpose.is_some()
+            || self.callback_transpose.is_some()
+            || self.callback.is_some();
         PcCaps {
             supports_transpose,
-            supports_conj_trans: supports_transpose,
+            supports_conj_trans,
             ..PcCaps::default()
         }
     }
@@ -590,6 +684,15 @@ mod tests {
                 Ok(())
             }),
         );
+        register_shell_apply_conjugate_transpose(
+            format!("{tag}_conj_transpose"),
+            shell_apply_with_typed_context(|_side, x, y, ctx: &mut HookCtx| {
+                ctx.trans_calls += 1;
+                ctx.log.push("conjugate_transpose");
+                y.copy_from_slice(x);
+                Ok(())
+            }),
+        );
 
         register_shell_apply_symmetric(
             format!("{tag}_symmetric"),
@@ -617,6 +720,7 @@ mod tests {
             let mut pc = ShellPc::new(
                 Some(format!("{tag}_apply")),
                 Some(format!("{tag}_transpose")),
+                Some(format!("{tag}_conj_transpose")),
                 Some(format!("{tag}_symmetric")),
                 Some(format!("{tag}_setup")),
                 Some(format!("{tag}_destroy")),
@@ -630,6 +734,8 @@ mod tests {
                 .expect("forward apply should succeed");
             pc.apply_op(Op::Trans, &x, &mut y)
                 .expect("transpose apply should succeed");
+            pc.apply_op(Op::ConjTrans, &x, &mut y)
+                .expect("conjugate-transpose apply should succeed");
             pc.apply(PcSide::Symmetric, &x, &mut y)
                 .expect("symmetric apply should succeed");
 
@@ -638,13 +744,58 @@ mod tests {
             let typed =
                 shell_context_downcast_mut::<HookCtx>(ctx).expect("context type should match");
             assert_eq!(typed.apply_calls, 1);
-            assert_eq!(typed.trans_calls, 1);
+            assert_eq!(typed.trans_calls, 2);
             assert_eq!(typed.sym_calls, 1);
             drop(guard);
         }
 
         let log = final_log.lock().expect("final log mutex poisoned").clone();
-        assert_eq!(log, vec!["apply", "transpose", "symmetric", "destroy"]);
+        assert_eq!(
+            log,
+            vec![
+                "apply",
+                "transpose",
+                "conjugate_transpose",
+                "symmetric",
+                "destroy"
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_pc_typed_context_helpers_surface_values() {
+        let tag = "shell_typed_context_api";
+        register_shell_context_typed(format!("{tag}_ctx"), || HookCtx {
+            apply_calls: 3,
+            ..HookCtx::default()
+        });
+
+        let mut pc = ShellPc::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(format!("{tag}_ctx")),
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+
+        let calls = pc
+            .with_typed_context_ref::<HookCtx, _, _>(|ctx| Ok(ctx.apply_calls))
+            .expect("typed immutable access should succeed");
+        assert_eq!(calls, 3);
+
+        pc.with_typed_context::<HookCtx, _, _>(|ctx| {
+            ctx.apply_calls += 1;
+            Ok(())
+        })
+        .expect("typed mutable access should succeed");
+
+        let calls = pc
+            .with_typed_context_ref::<HookCtx, _, _>(|ctx| Ok(ctx.apply_calls))
+            .expect("typed immutable access should succeed");
+        assert_eq!(calls, 4);
     }
 
     #[test]
@@ -659,13 +810,16 @@ mod tests {
 
     #[test]
     fn transpose_and_symmetric_fallback_to_apply_when_unregistered() {
-        let mut pc = ShellPc::new(None, None, None, None, None, None);
+        let mut pc = ShellPc::new(None, None, None, None, None, None, None);
         pc.setup(&TestOp).expect("setup should succeed");
 
         let x = vec![1.0, 2.0];
         let mut y = vec![0.0, 0.0];
         pc.apply_op(Op::Trans, &x, &mut y)
             .expect("transpose fallback should succeed");
+        assert_eq!(y, x);
+        pc.apply_op(Op::ConjTrans, &x, &mut y)
+            .expect("conjugate-transpose fallback should succeed");
         assert_eq!(y, x);
         pc.apply(PcSide::Symmetric, &x, &mut y)
             .expect("symmetric fallback should succeed");

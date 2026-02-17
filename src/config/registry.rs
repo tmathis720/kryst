@@ -1025,6 +1025,13 @@ pub static SPECS: &[Spec] = &[
         doc: "registered shell transpose apply hook name",
     },
     Spec {
+        flag: "-pc_shell_apply_conjugate_transpose",
+        key: "pc_shell_apply_conjugate_transpose",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell conjugate-transpose apply hook name",
+    },
+    Spec {
         flag: "-pc_shell_apply_symmetric",
         key: "pc_shell_apply_symmetric",
         arity: Arity::One,

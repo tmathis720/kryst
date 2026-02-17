@@ -2178,8 +2178,8 @@ impl KspContext {
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
-                        if let KError::NestedPcFailed(failure) = &err {
-                            stats = stats.with_nested_pc_failure(failure.clone());
+                        if let Some(failure) = Self::pc_failure_metadata_for_stats(&err) {
+                            stats = stats.with_nested_pc_failure(failure);
                         }
                         self.last_converged_reason = Some(reason);
                         return Ok(stats);
@@ -2432,8 +2432,8 @@ impl KspContext {
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
-                        if let KError::NestedPcFailed(failure) = &err {
-                            stats = stats.with_nested_pc_failure(failure.clone());
+                        if let Some(failure) = Self::pc_failure_metadata_for_stats(&err) {
+                            stats = stats.with_nested_pc_failure(failure);
                         }
                         self.last_converged_reason = Some(reason);
                         return Ok(stats);
@@ -2467,6 +2467,23 @@ impl KspContext {
         let comm = mat.comm();
         let red = comm.reduction_engine(&self.reduction_opts);
         Ok(red.norm2_s(&tmp))
+    }
+
+    fn pc_failure_metadata_for_stats(
+        err: &KError,
+    ) -> Option<crate::utils::convergence::NestedPcFailure> {
+        match err {
+            KError::PcFailed(msg) => Some(crate::utils::convergence::NestedPcFailure {
+                component: "pc",
+                reason: ConvergedReason::DivergedPcFailed,
+                iterations: 0,
+                final_norm: None,
+                residual_history_summary: None,
+                detail: msg.clone(),
+            }),
+            KError::NestedPcFailed(failure) => Some(failure.clone()),
+            _ => None,
+        }
     }
 
     fn map_solve_error_to_reason(err: &KError) -> Option<ConvergedReason> {

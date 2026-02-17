@@ -1,15 +1,14 @@
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::preconditioner::PcSide;
 #[cfg(not(feature = "complex"))]
 use crate::preconditioner::Preconditioner as PreconditionerF64;
+use crate::preconditioner::{Op, PcCaps, PcSide};
 
 /// Internal, scalar-generic preconditioner interface.
 ///
 /// The trait is object safe so solvers can work with `Arc<dyn KPreconditioner<Scalar = S> + Sync>` when
 /// sharing a handle between threads, or with mutable references when per-thread access is sufficient.
-/// Future extensions (transpose support, batched application) can be added without breaking callers.
 pub trait KPreconditioner: Send {
     type Scalar: KrystScalar;
 
@@ -24,6 +23,28 @@ pub trait KPreconditioner: Send {
         y: &mut [Self::Scalar],
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError>;
+
+    /// Apply a selected matrix operation through the preconditioner.
+    fn apply_op_s(
+        &self,
+        op: Op,
+        x: &[Self::Scalar],
+        y: &mut [Self::Scalar],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        match op {
+            Op::NoTrans => self.apply_s(PcSide::Left, x, y, scratch),
+            Op::Trans => Err(KError::Unsupported("transpose application not supported")),
+            Op::ConjTrans => Err(KError::Unsupported(
+                "conjugate-transpose application not supported",
+            )),
+        }
+    }
+
+    /// Capabilities exposed by the wrapped preconditioner.
+    fn capabilities_s(&self) -> PcCaps {
+        PcCaps::default()
+    }
 
     /// Apply the preconditioner in a mutable/flexible mode.
     ///
@@ -75,6 +96,22 @@ where
         _scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
         <T as PreconditionerF64>::apply(self, side, x, y)
+    }
+
+    #[inline]
+    fn apply_op_s(
+        &self,
+        op: Op,
+        x: &[f64],
+        y: &mut [f64],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        <T as PreconditionerF64>::apply_op(self, op, x, y)
+    }
+
+    #[inline]
+    fn capabilities_s(&self) -> PcCaps {
+        <T as PreconditionerF64>::capabilities(self)
     }
 
     #[inline]
