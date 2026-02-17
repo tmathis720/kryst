@@ -57,6 +57,11 @@ impl PcDiagnostics {
             insert_opt(&mut config, "ilutp_perm_tol", opts.ilutp_perm_tol);
             insert_opt(&mut config, "asm_overlap", opts.asm_overlap);
             insert_opt(&mut config, "asm_mode", opts.asm_mode.clone());
+            insert_opt(
+                &mut config,
+                "pc_dist_local_apply",
+                opts.pc_dist_local_apply.clone(),
+            );
             insert_opt(&mut config, "asm_weighting", opts.asm_weighting.clone());
             insert_opt(&mut config, "chebyshev_degree", opts.chebyshev_degree);
             insert_opt(

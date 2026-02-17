@@ -5,8 +5,10 @@
 //! vector helper that carries only the local slice.
 
 mod coarse;
+mod native_plan;
 
 pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
+pub use native_plan::DistLocalApplyMode;
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
@@ -95,6 +97,7 @@ pub struct MpiPcOptions {
     pub ilutp_max_fill: usize,
     pub ilutp_drop_tol: f64,
     pub ilutp_perm_tol: f64,
+    pub local_apply_mode: DistLocalApplyMode,
 }
 
 impl Default for MpiPcOptions {
@@ -110,6 +113,7 @@ impl Default for MpiPcOptions {
             ilutp_max_fill: 10,
             ilutp_drop_tol: 1e-4,
             ilutp_perm_tol: 0.1,
+            local_apply_mode: DistLocalApplyMode::LocalWrapper,
         }
     }
 }
