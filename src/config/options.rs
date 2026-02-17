@@ -263,6 +263,7 @@ pub struct PcOptions {
     pub pc_fieldsplit_schur_precondition: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
+    pub pc_shell_apply: Option<String>,
     pub pc_shell_apply_transpose: Option<String>,
     pub pc_shell_apply_symmetric: Option<String>,
     pub pc_shell_setup: Option<String>,
@@ -1113,7 +1114,11 @@ impl Sink for PcOptions {
             "pc_fieldsplit_schur_precondition" => {
                 set_opt!(&mut self.pc_fieldsplit_schur_precondition, v.to_lowercase())
             }
-            "pc_shell_name" => set_opt!(&mut self.pc_shell_name, v.to_string()),
+            "pc_shell_name" => {
+                set_opt!(&mut self.pc_shell_name, v.to_string())?;
+                set_opt!(&mut self.pc_shell_apply, v.to_string())
+            }
+            "pc_shell_apply" => set_opt!(&mut self.pc_shell_apply, v.to_string()),
             "pc_shell_apply_transpose" => {
                 set_opt!(&mut self.pc_shell_apply_transpose, v.to_string())
             }
@@ -2145,6 +2150,7 @@ impl PcOptions {
         o!(pc_fieldsplit_schur_fact_type);
         o!(pc_fieldsplit_schur_precondition);
         o!(pc_shell_name);
+        o!(pc_shell_apply);
         o!(pc_shell_apply_transpose);
         o!(pc_shell_apply_symmetric);
         o!(pc_shell_setup);
@@ -3827,7 +3833,7 @@ mod old_tests {
     #[test]
     fn parses_shell_transpose_and_symmetric_hooks() {
         let args = vec![
-            "-pc_shell_name",
+            "-pc_shell_apply",
             "base",
             "-pc_shell_apply_transpose",
             "t_hook",
@@ -3837,9 +3843,17 @@ mod old_tests {
             "ctx",
         ];
         let opts = PcOptions::from_args(&args).expect("pc options parse should succeed");
-        assert_eq!(opts.pc_shell_name.as_deref(), Some("base"));
+        assert_eq!(opts.pc_shell_apply.as_deref(), Some("base"));
         assert_eq!(opts.pc_shell_apply_transpose.as_deref(), Some("t_hook"));
         assert_eq!(opts.pc_shell_apply_symmetric.as_deref(), Some("s_hook"));
         assert_eq!(opts.pc_shell_context.as_deref(), Some("ctx"));
+    }
+
+    #[test]
+    fn parses_shell_name_legacy_aliases_apply() {
+        let args = vec!["-pc_shell_name", "legacy"];
+        let opts = PcOptions::from_args(&args).expect("pc options parse should succeed");
+        assert_eq!(opts.pc_shell_name.as_deref(), Some("legacy"));
+        assert_eq!(opts.pc_shell_apply.as_deref(), Some("legacy"));
     }
 }

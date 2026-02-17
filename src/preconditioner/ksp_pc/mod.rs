@@ -376,6 +376,59 @@ mod tests {
     }
 
     #[test]
+    fn nested_ksp_failure_propagates_shell_callback_error() {
+        use crate::preconditioner::shell::{register_shell_callback, shell_apply};
+
+        let tag = "nested_shell_err";
+        register_shell_callback(
+            format!("{tag}_apply"),
+            shell_apply(|_, _, _| Err(KError::SolveError("boom".into()))),
+        );
+
+        let a = tri_diag(8);
+        let n = a.dims().0;
+        let b = vec![1.0; n];
+        let mut x = vec![0.0; n];
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).unwrap();
+        let ksp_opts = KspOptions {
+            maxits: Some(5),
+            rtol: Some(1e-10),
+            ..Default::default()
+        };
+        let pc_opts = PcOptions {
+            pc_type: Some("ksp".into()),
+            pc_ksp_ksp_options: Some(KspOptions {
+                ksp_type: Some("richardson".into()),
+                maxits: Some(2),
+                rtol: Some(1e-16),
+                ..Default::default()
+            }),
+            pc_ksp_pc_options: Some(Box::new(PcOptions {
+                pc_type: Some("shell".into()),
+                pc_shell_apply: Some(format!("{tag}_apply")),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+        ksp.set_operators(a, None);
+        let stats = ksp.solve(&b, &mut x).unwrap();
+        assert_eq!(
+            stats.reason,
+            crate::utils::convergence::ConvergedReason::DivergedPcFailed
+        );
+        let failure = stats
+            .nested_pc_failure
+            .as_ref()
+            .expect("nested failure metadata should be present");
+        assert_eq!(failure.component, "pc_ksp");
+        assert!(failure.detail.contains("inner_pc=Some(\"shell\")"));
+    }
+
+    #[test]
     fn nested_ksp_failure_surfaces_inner_reason() {
         let a = tri_diag(8);
         let n = a.dims().0;

@@ -142,6 +142,10 @@ where
 
 static APPLY_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+static APPLY_TRANSPOSE_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static APPLY_SYMMETRIC_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 static SETUP_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellSetup>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static DESTROY_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellDestroy>>>> =
@@ -153,6 +157,20 @@ pub fn register_shell_callback(name: impl Into<String>, callback: Arc<dyn ShellA
     APPLY_REGISTRY
         .write()
         .expect("shell callback registry poisoned")
+        .insert(name.into(), callback);
+}
+
+pub fn register_shell_apply_transpose(name: impl Into<String>, callback: Arc<dyn ShellApply>) {
+    APPLY_TRANSPOSE_REGISTRY
+        .write()
+        .expect("shell transpose callback registry poisoned")
+        .insert(name.into(), callback);
+}
+
+pub fn register_shell_apply_symmetric(name: impl Into<String>, callback: Arc<dyn ShellApply>) {
+    APPLY_SYMMETRIC_REGISTRY
+        .write()
+        .expect("shell symmetric callback registry poisoned")
         .insert(name.into(), callback);
 }
 
@@ -390,9 +408,9 @@ impl Preconditioner for ShellPc {
         }
         if let Some(name) = self.callback_transpose_name.as_ref() {
             self.callback_transpose = Some(
-                APPLY_REGISTRY
+                APPLY_TRANSPOSE_REGISTRY
                     .read()
-                    .expect("shell callback registry poisoned")
+                    .expect("shell transpose callback registry poisoned")
                     .get(name)
                     .cloned()
                     .ok_or_else(|| {
@@ -404,9 +422,9 @@ impl Preconditioner for ShellPc {
         }
         if let Some(name) = self.callback_symmetric_name.as_ref() {
             self.callback_symmetric = Some(
-                APPLY_REGISTRY
+                APPLY_SYMMETRIC_REGISTRY
                     .read()
-                    .expect("shell callback registry poisoned")
+                    .expect("shell symmetric callback registry poisoned")
                     .get(name)
                     .cloned()
                     .ok_or_else(|| {
@@ -481,9 +499,10 @@ impl Preconditioner for ShellPc {
     }
 
     fn capabilities(&self) -> PcCaps {
+        let supports_transpose = self.callback_transpose.is_some() || self.callback.is_some();
         PcCaps {
-            supports_transpose: self.callback_transpose.is_some(),
-            supports_conj_trans: self.callback_transpose.is_some(),
+            supports_transpose,
+            supports_conj_trans: supports_transpose,
             ..PcCaps::default()
         }
     }
@@ -562,7 +581,7 @@ mod tests {
             }),
         );
 
-        register_shell_callback(
+        register_shell_apply_transpose(
             format!("{tag}_transpose"),
             shell_apply_with_typed_context(|_side, x, y, ctx: &mut HookCtx| {
                 ctx.trans_calls += 1;
@@ -572,7 +591,7 @@ mod tests {
             }),
         );
 
-        register_shell_callback(
+        register_shell_apply_symmetric(
             format!("{tag}_symmetric"),
             shell_apply_with_typed_context(|_side, x, y, ctx: &mut HookCtx| {
                 ctx.sym_calls += 1;
@@ -636,5 +655,20 @@ mod tests {
             Err(err) => err,
         };
         assert!(format!("{err}").contains("HookCtx"));
+    }
+
+    #[test]
+    fn transpose_and_symmetric_fallback_to_apply_when_unregistered() {
+        let mut pc = ShellPc::new(None, None, None, None, None, None);
+        pc.setup(&TestOp).expect("setup should succeed");
+
+        let x = vec![1.0, 2.0];
+        let mut y = vec![0.0, 0.0];
+        pc.apply_op(Op::Trans, &x, &mut y)
+            .expect("transpose fallback should succeed");
+        assert_eq!(y, x);
+        pc.apply(PcSide::Symmetric, &x, &mut y)
+            .expect("symmetric fallback should succeed");
+        assert_eq!(y, x);
     }
 }

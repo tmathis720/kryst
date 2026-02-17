@@ -524,7 +524,7 @@ impl PcConfig {
                 }
             }
             Shell => PcConfig::Shell {
-                name: o.pc_shell_name.clone(),
+                name: o.pc_shell_apply.clone().or_else(|| o.pc_shell_name.clone()),
                 apply_transpose: o.pc_shell_apply_transpose.clone(),
                 apply_symmetric: o.pc_shell_apply_symmetric.clone(),
                 setup: o.pc_shell_setup.clone(),
