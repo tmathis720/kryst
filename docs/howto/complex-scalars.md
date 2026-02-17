@@ -13,11 +13,11 @@ The `complex` feature is still evolving. Current high-value methods now behave a
 - `GMRES` `SStep` variant no longer hard-fails under complex builds; it executes through the same `solve_sstep` path used by real scalars (with existing fallback to classical GMRES when `s > 1`).
 - `SOR` (`SorPc`) accepts complex vectors and uses a real-valued sweep operator assembled from the operator real part when setup is provided as CSR. This is functionally equivalent for real-valued matrices with complex RHS/iterates.
 - `DeflationPC` now applies in complex mode by combining real coarse-space operators (`Z`, `AZ`, `E`) with complex vectors; coarse factors remain real.
-- `ApproxInv` in complex mode currently supports CSR setup via diagonal-only real-part initialization and applies that real operator to complex vectors.
-- `IluCsr` in complex mode currently supports CSR setup via real-part projection and applies triangular solves independently to real/imaginary parts.
+- `ApproxInv` in complex mode currently runs in a guarded degraded mode: CSR setup is required and initialization uses diagonal real-part projection. Complex apply remains available, but setup is not a full complex SPAI/FSAI build.
+- `IluCsr` in complex mode currently runs in a guarded degraded mode: setup projects CSR values to their real part and apply executes split real/imag triangular solves. This preserves CSR fast paths but is not a native complex ILU factorization.
 
 ### Remaining exclusions / tradeoffs
 
 - `SOR`, `ApproxInv`, and `IluCsr` complex setup paths currently require CSR operators in complex mode.
-- `IluCsr` and `ApproxInv` complex setup use real-part projection of matrix entries; fully complex factorization/SPAI are not implemented yet.
-- `MG` (`MgPc`) remains effectively real-only internally (level operators are `CsrMatrix<f64>`), so complex parity is incomplete.
+- `IluCsr` and `ApproxInv` emit explicit degraded-mode diagnostics in complex setup paths, and both currently rely on real-part projection kernels where mathematically unavoidable.
+- `MG` (`MgPc`) level/operator storage is scalar-aware (`S`) across hierarchy operators and transfer operators; method parity still depends on the configured smoothers/coarse solvers.

@@ -226,6 +226,6 @@ When building with `--features complex`, support is currently method-specific:
 - `KSP GMRES (s-step)`: available; no complex hard-fail path.
 - `PC SOR`: available with CSR-only setup and real-part operator projection.
 - `PC Deflation`: available with real coarse operators applied to complex vectors.
-- `PC ILU (CSR)`: partial; CSR-only setup with real-part projection, then split real/imag solves.
-- `PC ApproxInv`: partial; CSR-only setup with diagonal real-part initialization, complex apply supported.
-- `PC MG`: still limited by real-only hierarchy/operator storage (`f64` levels), so complex parity is incomplete.
+- `PC ILU (CSR)`: partial; CSR-only complex path is available with explicit degraded-mode diagnostics, using real-part setup projection and split real/imag solves.
+- `PC ApproxInv`: partial; CSR-only complex path is available with explicit degraded-mode diagnostics, using diagonal real-part initialization and complex apply.
+- `PC MG`: hierarchy/operator storage is scalar-aware (S-based levels/transfers). Complex parity still depends on smoother/coarse preconditioner implementations.
