@@ -80,7 +80,10 @@ use crate::solver::{
 };
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::convergence::{
+    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, ReasonDiagnosticsCounters,
+    SolveStats, map_kerror_to_reason,
+};
 use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
 use crate::utils::reduction::ReductOptions;
 use serde::Serialize;
@@ -311,6 +314,7 @@ pub struct KspContext {
     pending_fgmres: PendingFgmres,
     pending_pcg: PendingPcg,
     last_converged_reason: Option<ConvergedReason>,
+    reason_counters: ReasonDiagnosticsCounters,
 }
 
 impl fmt::Debug for KspContext {
@@ -347,7 +351,8 @@ impl fmt::Debug for KspContext {
         dbg.field("pending_gmres", &self.pending_gmres)
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
-            .field("last_converged_reason", &self.last_converged_reason);
+            .field("last_converged_reason", &self.last_converged_reason)
+            .field("reason_counters", &self.reason_counters);
         dbg.finish()
     }
 }
@@ -545,6 +550,7 @@ impl KspContext {
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
             last_converged_reason: None,
+            reason_counters: ReasonDiagnosticsCounters::default(),
         }
     }
 
@@ -1475,6 +1481,11 @@ impl KspContext {
             last_converged_reason_petsc: self
                 .last_converged_reason
                 .map(|r| r.petsc_reason().to_string()),
+            reason_counters_breakdown: self.reason_counters.breakdown,
+            reason_counters_nan: self.reason_counters.nan,
+            reason_counters_inf: self.reason_counters.inf,
+            reason_counters_pc_setup: self.reason_counters.pc_setup,
+            reason_counters_pc_apply: self.reason_counters.pc_apply,
         }
     }
 
@@ -2045,8 +2056,12 @@ impl KspContext {
                     } else {
                         R::default()
                     };
-                    let stats = SolveStats::new(0, res, reason);
+                    let stats = SolveStats::new(0, res, reason).finalize_reason_counters();
                     self.last_converged_reason = Some(reason);
+                    self.reason_counters.record_reason(reason);
+                    if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                        self.reason_counters.record_reason(inner.reason);
+                    }
                     return Ok(stats);
                 }
                 return Err(err);
@@ -2137,7 +2152,11 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(mat_for_residual, b, x)?;
             self.last_converged_reason = Some(ConvergedReason::ConvergedAtol);
-            return Ok(SolveStats::new(0, res, ConvergedReason::ConvergedAtol));
+            self.reason_counters
+                .record_reason(ConvergedReason::ConvergedAtol);
+            return Ok(
+                SolveStats::new(0, res, ConvergedReason::ConvergedAtol).finalize_reason_counters()
+            );
         }
 
         let amat_ref = amat.as_ref();
@@ -2181,7 +2200,12 @@ impl KspContext {
                         if let Some(failure) = Self::pc_failure_metadata_for_stats(&err) {
                             stats = stats.with_nested_pc_failure(failure);
                         }
+                        let stats = stats.finalize_reason_counters();
                         self.last_converged_reason = Some(reason);
+                        self.reason_counters.record_reason(reason);
+                        if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                            self.reason_counters.record_reason(inner.reason);
+                        }
                         return Ok(stats);
                     }
                     return Err(err);
@@ -2190,7 +2214,12 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            let stats = stats.finalize_reason_counters();
             self.last_converged_reason = Some(stats.reason);
+            self.reason_counters.record_reason(stats.reason);
+            if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                self.reason_counters.record_reason(inner.reason);
+            }
             Ok(stats)
         }
 
@@ -2435,7 +2464,12 @@ impl KspContext {
                         if let Some(failure) = Self::pc_failure_metadata_for_stats(&err) {
                             stats = stats.with_nested_pc_failure(failure);
                         }
+                        let stats = stats.finalize_reason_counters();
                         self.last_converged_reason = Some(reason);
+                        self.reason_counters.record_reason(reason);
+                        if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                            self.reason_counters.record_reason(inner.reason);
+                        }
                         return Ok(stats);
                     }
                     return Err(err);
@@ -2444,7 +2478,12 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            let stats = stats.finalize_reason_counters();
             self.last_converged_reason = Some(stats.reason);
+            self.reason_counters.record_reason(stats.reason);
+            if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                self.reason_counters.record_reason(inner.reason);
+            }
             Ok(stats)
         }
     }
@@ -2469,13 +2508,11 @@ impl KspContext {
         Ok(red.norm2_s(&tmp))
     }
 
-    fn pc_failure_metadata_for_stats(
-        err: &KError,
-    ) -> Option<crate::utils::convergence::NestedPcFailure> {
+    fn pc_failure_metadata_for_stats(err: &KError) -> Option<NestedPcFailure> {
         match err {
-            KError::PcFailed(msg) => Some(crate::utils::convergence::NestedPcFailure {
+            KError::PcFailed(msg) => Some(NestedPcFailure {
                 component: "pc",
-                reason: ConvergedReason::DivergedPcFailed,
+                reason: ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
                 iterations: 0,
                 final_norm: None,
                 residual_history_summary: None,
@@ -2487,27 +2524,11 @@ impl KspContext {
     }
 
     fn map_solve_error_to_reason(err: &KError) -> Option<ConvergedReason> {
-        match err {
-            KError::PcFailed(_) => Some(ConvergedReason::DivergedPcFailed),
-            KError::NestedPcFailed(_) => Some(ConvergedReason::DivergedPcFailed),
-            KError::BreakdownOrIndefinite => Some(ConvergedReason::DivergedBreakdown),
-            KError::IndefiniteMatrix => Some(ConvergedReason::DivergedIndefiniteMatrix),
-            KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => {
-                Some(ConvergedReason::DivergedIndefinitePC)
-            }
-            _ => None,
-        }
+        map_kerror_to_reason(err, FailureStage::Solve)
     }
 
     fn map_setup_error_to_reason(err: &KError) -> Option<ConvergedReason> {
-        match err {
-            KError::PcFailed(_)
-            | KError::FactorError(_)
-            | KError::ZeroPivot(_)
-            | KError::IndefinitePreconditioner
-            | KError::DivergedIndefinitePC => Some(ConvergedReason::DivergedPcSetupFailed),
-            _ => None,
-        }
+        map_kerror_to_reason(err, FailureStage::Setup)
     }
 
     fn true_residual_norm_in_place(

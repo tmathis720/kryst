@@ -2,6 +2,35 @@
 
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::error::KError;
+
+/// Stable reason categories for automation/diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasonCategory {
+    Breakdown,
+    Nan,
+    Inf,
+    PcSetup,
+    PcApply,
+}
+
+/// Canonical failure mapping keys used by KSP/PC code paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureReasonKind {
+    Breakdown,
+    BreakdownBiCG,
+    Nan,
+    Inf,
+    PcSetup,
+    PcApply,
+}
+
+/// Stage for mapping transport errors into stable KSP reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureStage {
+    Setup,
+    Solve,
+}
 
 /// Convergence criteria for iterative solvers.
 ///
@@ -59,6 +88,32 @@ pub enum ConvergedReason {
 }
 
 impl ConvergedReason {
+    /// Canonicalize a method-local failure kind into a stable reason code.
+    pub fn from_failure_kind(kind: FailureReasonKind) -> Self {
+        match kind {
+            FailureReasonKind::Breakdown => ConvergedReason::DivergedBreakdown,
+            FailureReasonKind::BreakdownBiCG => ConvergedReason::DivergedBreakdownBiCG,
+            FailureReasonKind::Nan => ConvergedReason::DivergedNan,
+            FailureReasonKind::Inf => ConvergedReason::DivergedInf,
+            FailureReasonKind::PcSetup => ConvergedReason::DivergedPcSetupFailed,
+            FailureReasonKind::PcApply => ConvergedReason::DivergedPcFailed,
+        }
+    }
+
+    /// Group reason codes into stable automation categories.
+    pub fn category(self) -> Option<ReasonCategory> {
+        match self {
+            ConvergedReason::DivergedBreakdown | ConvergedReason::DivergedBreakdownBiCG => {
+                Some(ReasonCategory::Breakdown)
+            }
+            ConvergedReason::DivergedNan => Some(ReasonCategory::Nan),
+            ConvergedReason::DivergedInf => Some(ReasonCategory::Inf),
+            ConvergedReason::DivergedPcSetupFailed => Some(ReasonCategory::PcSetup),
+            ConvergedReason::DivergedPcFailed => Some(ReasonCategory::PcApply),
+            _ => None,
+        }
+    }
+
     /// PETSc-equivalent convergence reason identifier.
     pub fn petsc_reason(self) -> &'static str {
         match self {
@@ -106,6 +161,58 @@ impl ConvergedReason {
     /// Whether the reason indicates divergence.
     pub fn is_diverged(self) -> bool {
         !matches!(self, ConvergedReason::Continued) && !self.is_converged()
+    }
+}
+
+/// Transport-layer mapping of setup/solve errors into stable reason codes.
+pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<ConvergedReason> {
+    match stage {
+        FailureStage::Setup => match err {
+            KError::PcFailed(_)
+            | KError::FactorError(_)
+            | KError::ZeroPivot(_)
+            | KError::IndefinitePreconditioner
+            | KError::DivergedIndefinitePC => Some(ConvergedReason::from_failure_kind(
+                FailureReasonKind::PcSetup,
+            )),
+            _ => None,
+        },
+        FailureStage::Solve => match err {
+            KError::PcFailed(_) | KError::NestedPcFailed(_) => Some(
+                ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
+            ),
+            KError::BreakdownOrIndefinite => Some(ConvergedReason::from_failure_kind(
+                FailureReasonKind::Breakdown,
+            )),
+            KError::IndefiniteMatrix => Some(ConvergedReason::DivergedIndefiniteMatrix),
+            KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => {
+                Some(ConvergedReason::DivergedIndefinitePC)
+            }
+            _ => None,
+        },
+    }
+}
+
+/// Counters grouped by stable reason category.
+#[derive(Clone, Debug, Default)]
+pub struct ReasonDiagnosticsCounters {
+    pub breakdown: usize,
+    pub nan: usize,
+    pub inf: usize,
+    pub pc_setup: usize,
+    pub pc_apply: usize,
+}
+
+impl ReasonDiagnosticsCounters {
+    pub fn record_reason(&mut self, reason: ConvergedReason) {
+        match reason.category() {
+            Some(ReasonCategory::Breakdown) => self.breakdown += 1,
+            Some(ReasonCategory::Nan) => self.nan += 1,
+            Some(ReasonCategory::Inf) => self.inf += 1,
+            Some(ReasonCategory::PcSetup) => self.pc_setup += 1,
+            Some(ReasonCategory::PcApply) => self.pc_apply += 1,
+            None => {}
+        }
     }
 }
 
@@ -184,6 +291,8 @@ pub struct SolveStats<R> {
     /// Outer solves use this to preserve the inner component/reason/iteration
     /// context when KSP-as-PC or other nested preconditioners fail.
     pub nested_pc_failure: Option<NestedPcFailure>,
+    /// Stable per-category reason counters for diagnostics automation.
+    pub reason_counters: ReasonDiagnosticsCounters,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -199,6 +308,7 @@ impl<R: Default> SolveStats<R> {
             complex_drift_max_rel: R::default(),
             metrics: SolveMetrics::default(),
             nested_pc_failure: None,
+            reason_counters: ReasonDiagnosticsCounters::default(),
         }
     }
 
@@ -211,6 +321,15 @@ impl<R: Default> SolveStats<R> {
     /// Attach nested preconditioner failure metadata.
     pub fn with_nested_pc_failure(mut self, failure: NestedPcFailure) -> Self {
         self.nested_pc_failure = Some(failure);
+        self
+    }
+
+    /// Finalize stable reason diagnostics for this stats record.
+    pub fn finalize_reason_counters(mut self) -> Self {
+        self.reason_counters.record_reason(self.reason);
+        if let Some(inner) = self.nested_pc_failure.as_ref() {
+            self.reason_counters.record_reason(inner.reason);
+        }
         self
     }
 }

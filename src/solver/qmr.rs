@@ -20,7 +20,7 @@ use crate::solver::MonitorCallback;
 use crate::solver::common::{
     ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
 };
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, FailureReasonKind, SolveStats};
 use std::any::Any;
 
 pub struct QmrSolver {
@@ -134,7 +134,7 @@ impl QmrSolver {
             return Ok(SolveStats::new(
                 0,
                 res,
-                ConvergedReason::DivergedBreakdownBiCG,
+                ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
             ));
         }
 
@@ -148,7 +148,7 @@ impl QmrSolver {
                     return Ok(SolveStats::new(
                         k,
                         res,
-                        ConvergedReason::DivergedBreakdownBiCG,
+                        ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
                     ));
                 }
                 let beta = rho_new / rho;
@@ -172,7 +172,7 @@ impl QmrSolver {
                 return Ok(SolveStats::new(
                     k + 1,
                     res,
-                    ConvergedReason::DivergedBreakdownBiCG,
+                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
                 ));
             }
             let alpha = rho / sigma;
@@ -194,7 +194,7 @@ impl QmrSolver {
                 return Ok(SolveStats::new(
                     k + 1,
                     res,
-                    ConvergedReason::DivergedBreakdownBiCG,
+                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
                 ));
             }
             let ts = reductions[1];
