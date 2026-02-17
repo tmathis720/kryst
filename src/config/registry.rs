@@ -1001,7 +1001,14 @@ pub static SPECS: &[Spec] = &[
         key: "pc_shell_name",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "registered shell callback name",
+        doc: "registered shell callback name (legacy alias for -pc_shell_apply)",
+    },
+    Spec {
+        flag: "-pc_shell_apply",
+        key: "pc_shell_apply",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell apply hook name",
     },
     Spec {
         flag: "-pc_shell_apply_transpose",

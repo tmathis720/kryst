@@ -58,8 +58,8 @@ use crate::error::KError;
 pub use crate::matrix::format::OpFormat;
 use crate::matrix::op::LinOp;
 
-pub mod bridge;
 pub mod bddc;
+pub mod bridge;
 pub mod pc_bridge;
 #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use faer::Mat;
@@ -187,8 +187,13 @@ pub trait Preconditioner: Send + Sync {
     /// method should ignore the [`PcSide`] argument entirely and instead allow
     /// callers to decide left/right placement by where they invoke the method.
     fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let caps = self.capabilities();
         match op {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
+            Op::Trans if caps.supports_transpose => self.apply(PcSide::Left, x, y),
+            Op::ConjTrans if caps.supports_conj_trans || caps.supports_transpose => {
+                self.apply(PcSide::Left, x, y)
+            }
             Op::Trans | Op::ConjTrans => {
                 Err(KError::Unsupported("transpose application not supported"))
             }
@@ -503,8 +508,6 @@ impl Preconditioner for LegacyOpPreconditioner {
 #[cfg(feature = "backend-faer")]
 pub mod amg;
 #[cfg(feature = "backend-faer")]
-pub mod gamg;
-#[cfg(feature = "backend-faer")]
 pub mod approxinv;
 #[cfg(feature = "backend-faer")]
 pub mod approxinv_csr;
@@ -531,6 +534,8 @@ pub mod direct;
 #[cfg(feature = "backend-faer")]
 pub mod dist;
 pub mod fieldsplit;
+#[cfg(feature = "backend-faer")]
+pub mod gamg;
 #[cfg(feature = "backend-faer")]
 pub mod ilu;
 #[cfg(feature = "backend-faer")]
