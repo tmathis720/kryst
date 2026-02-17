@@ -5,6 +5,7 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::asm::AsmInnerPc;
+use crate::preconditioner::mg::MgLevelPolicy;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
@@ -314,6 +315,7 @@ pub enum PcConfig {
         coarse_ksp_type: Option<String>,
         coarse_ksp_maxits: Option<usize>,
         coarse_ksp_rtol: Option<R>,
+        level_policies: Vec<MgLevelPolicy>,
     },
     Bddc {
         coarse_ksp_type: Option<String>,
@@ -329,6 +331,42 @@ pub enum PcConfig {
     #[cfg_attr(docsrs, doc(cfg(feature = "superlu_dist")))]
     #[cfg(feature = "superlu_dist")]
     SuperLuDist,
+}
+
+fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
+    let mut policy = MgLevelPolicy::default();
+    for token in value.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some((k, v)) = token.split_once('=') {
+            match k.trim() {
+                "level" => {
+                    policy.level = v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid mg policy level: {v}"))
+                    })?
+                }
+                "smoother" => policy.smoother_type = Some(v.trim().to_lowercase()),
+                "steps" => {
+                    policy.smoother_steps = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid mg policy steps: {v}"))
+                    })?)
+                }
+                "coarse_pc" => policy.coarse_pc_type = Some(v.trim().to_lowercase()),
+                "coarse_ksp" => policy.coarse_ksp_type = Some(v.trim().to_lowercase()),
+                "coarse_maxits" => {
+                    policy.coarse_ksp_maxits = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid mg coarse maxits: {v}"))
+                    })?)
+                }
+                "coarse_rtol" => {
+                    policy.coarse_ksp_rtol = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid mg coarse rtol: {v}"))
+                    })?)
+                }
+                "coarse_side" => policy.coarse_side = Some(PcSide::from_str(v.trim())?),
+                _ => {}
+            }
+        }
+    }
+    Ok(policy)
 }
 
 impl PcConfig {
@@ -554,6 +592,16 @@ impl PcConfig {
                 coarse_ksp_type: o.pc_mg_coarse_ksp_type.clone(),
                 coarse_ksp_maxits: o.pc_mg_coarse_ksp_maxits,
                 coarse_ksp_rtol: o.pc_mg_coarse_ksp_rtol,
+                level_policies: o
+                    .pc_mg_level_policies
+                    .as_ref()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| parse_mg_level_policy(entry).ok())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
             },
             Bddc => PcConfig::Bddc {
                 coarse_ksp_type: o.pc_bddc_coarse_ksp_type.clone(),

@@ -309,6 +309,9 @@ pub struct PcOptions {
     pub pc_gamg_aggressive_levels: Option<usize>,
     /// PMIS/HMIS neighborhood depth for aggressive coarsening (>= 2).
     pub pc_gamg_aggressive_mis_k: Option<usize>,
+    pub pc_mg_level_policies: Option<Vec<String>>,
+    pub pc_gamg_level_policies: Option<Vec<String>>,
+    pub amg_dist_coarse_policy: Option<String>,
 
     /// Chain string, e.g. "jacobi->ilut".
     pub pc_chain: Option<String>,
@@ -1161,6 +1164,14 @@ impl Sink for PcOptions {
             "pc_mg_coarse_ksp_rtol" => {
                 set_opt!(&mut self.pc_mg_coarse_ksp_rtol, parse_as::<f64>(v, spec)?)
             }
+            "pc_mg_levels_policy" | "pc_mg_level_policies" => {
+                let parsed = v
+                    .split(';')
+                    .map(|part| part.trim().to_lowercase())
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>();
+                set_opt!(&mut self.pc_mg_level_policies, parsed)
+            }
             "pc_bddc_coarse_ksp_type" => {
                 set_opt!(&mut self.pc_bddc_coarse_ksp_type, v.to_lowercase())
             }
@@ -1183,6 +1194,17 @@ impl Sink for PcOptions {
                     &mut self.pc_gamg_aggressive_mis_k,
                     parse_as::<usize>(v, spec)?
                 )
+            }
+            "pc_gamg_levels_policy" | "pc_gamg_level_policies" => {
+                let parsed = v
+                    .split(';')
+                    .map(|part| part.trim().to_lowercase())
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>();
+                set_opt!(&mut self.pc_gamg_level_policies, parsed)
+            }
+            "pc_amg_dist_coarse_policy" | "pc_gamg_dist_coarse_policy" => {
+                set_opt!(&mut self.amg_dist_coarse_policy, v.to_lowercase())
             }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_composite_type" => set_opt!(&mut self.pc_composite_type, v.to_lowercase()),
@@ -2173,6 +2195,7 @@ impl PcOptions {
         o!(pc_mg_coarse_ksp_type);
         o!(pc_mg_coarse_ksp_maxits);
         o!(pc_mg_coarse_ksp_rtol);
+        o!(pc_mg_level_policies);
         o!(pc_bddc_coarse_ksp_type);
         o!(pc_bddc_coarse_pc_type);
         o!(pc_bddc_use_vertices);
@@ -2183,6 +2206,8 @@ impl PcOptions {
         o!(pc_gamg_interp_type);
         o!(pc_gamg_aggressive_levels);
         o!(pc_gamg_aggressive_mis_k);
+        o!(pc_gamg_level_policies);
+        o!(amg_dist_coarse_policy);
 
         o!(pc_chain);
         o!(pc_composite_type);

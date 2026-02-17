@@ -67,19 +67,24 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             coarse_ksp_type,
             coarse_ksp_maxits,
             coarse_ksp_rtol,
-        } => Ok(Some(Box::new(crate::preconditioner::mg::MgPc::new(
-            *levels,
-            cycle_type.clone().map(|v| v.to_lowercase()),
-            smoother.clone().map(|v| v.to_lowercase()),
-            *smoother_steps,
-            coarsen_type.clone().map(|v| v.to_lowercase()),
-            interpolation_type.clone().map(|v| v.to_lowercase()),
-            restriction_type.clone().map(|v| v.to_lowercase()),
-            coarse_pc_type.clone().map(|v| v.to_lowercase()),
-            coarse_ksp_type.clone().map(|v| v.to_lowercase()),
-            *coarse_ksp_maxits,
-            *coarse_ksp_rtol,
-        )))),
+            level_policies,
+        } => {
+            let mut mg = crate::preconditioner::mg::MgPc::new(
+                *levels,
+                cycle_type.clone().map(|v| v.to_lowercase()),
+                smoother.clone().map(|v| v.to_lowercase()),
+                *smoother_steps,
+                coarsen_type.clone().map(|v| v.to_lowercase()),
+                interpolation_type.clone().map(|v| v.to_lowercase()),
+                restriction_type.clone().map(|v| v.to_lowercase()),
+                coarse_pc_type.clone().map(|v| v.to_lowercase()),
+                coarse_ksp_type.clone().map(|v| v.to_lowercase()),
+                *coarse_ksp_maxits,
+                *coarse_ksp_rtol,
+            );
+            mg.set_level_policies(level_policies.clone());
+            Ok(Some(Box::new(mg)))
+        }
         PcConfig::Bddc {
             coarse_ksp_type,
             coarse_pc_type,
