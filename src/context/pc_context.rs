@@ -341,10 +341,24 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
                     })?
                 }
                 "smoother" => policy.smoother_type = Some(v.trim().to_lowercase()),
-                "steps" => {
+                "steps" | "sweeps" => {
                     policy.smoother_steps = Some(v.trim().parse().map_err(|_| {
                         KError::InvalidInput(format!("invalid mg policy steps: {v}"))
                     })?)
+                }
+                "pre_sweeps" => {
+                    policy.pre_sweeps =
+                        Some(v.trim().parse().map_err(|_| {
+                            KError::InvalidInput(format!("invalid mg pre sweeps: {v}"))
+                        })?)
+                }
+                "post_sweeps" => {
+                    policy.post_sweeps = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid mg post sweeps: {v}"))
+                    })?)
+                }
+                "side" | "smoother_side" => {
+                    policy.smoother_side = Some(PcSide::from_str(v.trim())?)
                 }
                 "coarse_pc" => policy.coarse_pc_type = Some(v.trim().to_lowercase()),
                 "coarse_ksp" => policy.coarse_ksp_type = Some(v.trim().to_lowercase()),
@@ -364,6 +378,29 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
         }
     }
     Ok(policy)
+}
+
+fn mg_policy_from_scoped_level(level: usize, scoped: &PcOptions) -> MgLevelPolicy {
+    MgLevelPolicy {
+        level,
+        smoother_type: scoped.pc_type.clone().map(|v| v.to_lowercase()),
+        smoother_steps: scoped.pc_mg_smoother_steps,
+        pre_sweeps: None,
+        post_sweeps: None,
+        smoother_side: None,
+        coarse_pc_type: scoped
+            .pc_mg_coarse_pc_type
+            .clone()
+            .or_else(|| scoped.pc_type.clone())
+            .map(|v| v.to_lowercase()),
+        coarse_ksp_type: scoped
+            .pc_mg_coarse_ksp_type
+            .clone()
+            .map(|v| v.to_lowercase()),
+        coarse_ksp_maxits: scoped.pc_mg_coarse_ksp_maxits.or(scoped.pc_ksp_maxits),
+        coarse_ksp_rtol: scoped.pc_mg_coarse_ksp_rtol.or(scoped.pc_ksp_rtol),
+        coarse_side: None,
+    }
 }
 
 impl PcConfig {
@@ -635,16 +672,23 @@ impl PcConfig {
                 coarse_ksp_type: o.pc_mg_coarse_ksp_type.clone(),
                 coarse_ksp_maxits: o.pc_mg_coarse_ksp_maxits,
                 coarse_ksp_rtol: o.pc_mg_coarse_ksp_rtol,
-                level_policies: o
-                    .pc_mg_level_policies
-                    .as_ref()
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter_map(|entry| parse_mg_level_policy(entry).ok())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                level_policies: {
+                    let mut policies = o
+                        .pc_mg_level_policies
+                        .as_ref()
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| parse_mg_level_policy(entry).ok())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for (level, scoped) in &o.pc_mg_level_scoped_options {
+                        policies.push(mg_policy_from_scoped_level(*level, scoped));
+                    }
+                    policies.sort_by_key(|p| p.level);
+                    policies
+                },
             },
             Bddc => PcConfig::Bddc {
                 coarse_ksp_type: o.pc_bddc_coarse_ksp_type.clone(),

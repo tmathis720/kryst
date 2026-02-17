@@ -26,6 +26,8 @@ pub struct GamgLevelPolicy {
     pub sweeps: Option<usize>,
     pub coarse_solver: Option<CoarseSolve>,
     pub side: Option<PcSide>,
+    pub ksp_type: Option<String>,
+    pub pc_type: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,7 +124,7 @@ impl GamgConfig {
             amg_config.dist_coarse_strategy = DistCoarseStrategy::from_str(policy)?;
         }
 
-        let level_policies = opts
+        let mut level_policies = opts
             .pc_gamg_level_policies
             .as_ref()
             .map(|entries| {
@@ -132,6 +134,10 @@ impl GamgConfig {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        for (level, scoped) in &opts.pc_gamg_level_scoped_options {
+            level_policies.push(gamg_policy_from_scoped(*level, scoped)?);
+        }
+        level_policies.sort_by_key(|p| p.level);
 
         Ok(GamgConfig {
             gamg_type,
@@ -141,6 +147,43 @@ impl GamgConfig {
     }
 }
 
+#[cfg(feature = "backend-faer")]
+fn parse_coarse_solver(value: &str) -> Result<CoarseSolve, KError> {
+    Ok(match value.trim().to_lowercase().as_str() {
+        "cg" => CoarseSolve::CG,
+        "direct" | "dense" => CoarseSolve::DirectDense,
+        "ilu" => CoarseSolve::ILU,
+        "smoother" => CoarseSolve::Smoother,
+        other => {
+            return Err(KError::InvalidInput(format!(
+                "invalid gamg coarse solver: {other}"
+            )));
+        }
+    })
+}
+
+#[cfg(feature = "backend-faer")]
+fn gamg_policy_from_scoped(level: usize, scoped: &PcOptions) -> Result<GamgLevelPolicy, KError> {
+    let coarse_solver = scoped
+        .amg_coarse_solver
+        .as_deref()
+        .or(scoped.pc_type.as_deref())
+        .map(parse_coarse_solver)
+        .transpose()?;
+    Ok(GamgLevelPolicy {
+        level,
+        smoother: scoped
+            .amg_smoother
+            .clone()
+            .or(scoped.pc_type.clone())
+            .map(|v| v.to_lowercase()),
+        sweeps: scoped.amg_smoother_steps.or(scoped.pc_mg_smoother_steps),
+        coarse_solver,
+        side: None,
+        ksp_type: scoped.pc_ksp_ksp_type.clone().map(|v| v.to_lowercase()),
+        pc_type: scoped.pc_type.clone().map(|v| v.to_lowercase()),
+    })
+}
 #[cfg(feature = "backend-faer")]
 fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
     let mut policy = GamgLevelPolicy::default();
@@ -159,19 +202,9 @@ fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
                             KError::InvalidInput(format!("invalid gamg sweeps: {v}"))
                         })?)
                 }
-                "coarse" | "coarse_solver" => {
-                    policy.coarse_solver = Some(match v.trim().to_lowercase().as_str() {
-                        "cg" => CoarseSolve::CG,
-                        "direct" | "dense" => CoarseSolve::DirectDense,
-                        "ilu" => CoarseSolve::ILU,
-                        "smoother" => CoarseSolve::Smoother,
-                        other => {
-                            return Err(KError::InvalidInput(format!(
-                                "invalid gamg coarse solver: {other}"
-                            )));
-                        }
-                    })
-                }
+                "coarse" | "coarse_solver" => policy.coarse_solver = Some(parse_coarse_solver(v)?),
+                "ksp" | "ksp_type" => policy.ksp_type = Some(v.trim().to_lowercase()),
+                "pc" | "pc_type" => policy.pc_type = Some(v.trim().to_lowercase()),
                 "side" => policy.side = Some(PcSide::from_str(v.trim())?),
                 _ => {}
             }
@@ -191,16 +224,10 @@ impl GamgConfig {
 
 #[cfg(feature = "backend-faer")]
 fn parse_gamg_dist_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
-    match value {
-        "none" => Ok(DistCoarseStrategy::None),
-        "root" | "root_gather" | "gather" => Ok(DistCoarseStrategy::RootGather),
-        "local" | "local_prototype" => Ok(DistCoarseStrategy::LocalPrototype),
-        "superlu_dist" => Ok(DistCoarseStrategy::SuperLuDist),
-        "auto" => Ok(DistCoarseStrategy::RootGather),
-        other => Err(KError::InvalidInput(format!(
-            "unsupported GAMG coarse apply mode: {other}"
-        ))),
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(DistCoarseStrategy::RootGather);
     }
+    DistCoarseStrategy::from_str(value)
 }
 
 #[cfg(feature = "backend-faer")]
@@ -282,7 +309,13 @@ impl Preconditioner for Gamg {
     }
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
-        for p in &self.config.level_policies {
+        for p in self
+            .config
+            .level_policies
+            .iter()
+            .filter(|p| p.level <= self.config.amg_config.max_levels)
+            .collect::<Vec<_>>()
+        {
             if let Some(solve) = p.coarse_solver {
                 self.amg.set_level_coarse_solver(p.level, solve);
             }
@@ -367,6 +400,25 @@ mod tests {
         assert!(!cfg.amg_config.dist_apply_instrumentation);
     }
 
+    #[test]
+    fn gamg_config_parses_scoped_level_options() {
+        let args = vec![
+            "-pc_gamg_levels_2_pc_type",
+            "ilu",
+            "-pc_gamg_levels_2_pc_ksp_ksp_type",
+            "cg",
+        ];
+        let opts = PcOptions::from_args(&args).expect("parse scoped options");
+        let cfg = GamgConfig::try_from_opts(&opts).expect("gamg config parse");
+        let lvl = cfg
+            .level_policies
+            .iter()
+            .find(|p| p.level == 2)
+            .expect("level policy");
+        assert_eq!(lvl.pc_type.as_deref(), Some("ilu"));
+        assert_eq!(lvl.ksp_type.as_deref(), Some("cg"));
+        assert_eq!(lvl.coarse_solver, Some(CoarseSolve::ILU));
+    }
     #[test]
     fn gamg_config_parses_dist_coarse_controls() {
         let opts = PcOptions {
