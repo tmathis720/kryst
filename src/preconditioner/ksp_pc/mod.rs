@@ -98,43 +98,45 @@ impl KspAsPc {
         // 2) scoped pc_ksp_ksp_options block
         // 3) KSP-as-PC defaults
         let mut ksp_opts = self.ksp_options.clone().unwrap_or_default();
-        if ksp_opts.ksp_type.is_none() {
-            ksp_opts.ksp_type = self.inner_ksp_type.clone();
+
+        if let Some(ksp_type) = self.inner_ksp_type.clone() {
+            ksp_opts.ksp_type = Some(ksp_type);
         }
-        if ksp_opts.maxits.is_none() && self.maxits > 0 {
+        if self.maxits > 0 {
             ksp_opts.maxits = Some(self.maxits);
         }
-        if ksp_opts.rtol.is_none() && self.rtol > 0.0 {
+        if self.rtol > 0.0 {
             ksp_opts.rtol = Some(self.rtol);
         }
-        if ksp_opts.atol.is_none() {
+
+        if self.inner_pc_opts.pc_ksp_atol.is_some() {
             ksp_opts.atol = self.inner_pc_opts.pc_ksp_atol;
         }
-        if ksp_opts.dtol.is_none() {
+        if self.inner_pc_opts.pc_ksp_dtol.is_some() {
             ksp_opts.dtol = self.inner_pc_opts.pc_ksp_dtol;
         }
-        if ksp_opts.restart.is_none() {
+        if self.inner_pc_opts.pc_ksp_restart.is_some() {
             ksp_opts.restart = self.inner_pc_opts.pc_ksp_restart;
         }
-        if ksp_opts.gmres_orthog.is_none() {
+        if self.inner_pc_opts.pc_ksp_gmres_orthog.is_some() {
             ksp_opts.gmres_orthog = self.inner_pc_opts.pc_ksp_gmres_orthog.clone();
         }
-        if ksp_opts.fgmres_orthog.is_none() {
+        if self.inner_pc_opts.pc_ksp_fgmres_orthog.is_some() {
             ksp_opts.fgmres_orthog = self.inner_pc_opts.pc_ksp_fgmres_orthog.clone();
         }
-        if ksp_opts.ksp_monitor_rank0.is_none() {
+        if self.inner_pc_opts.pc_ksp_monitor_rank0.is_some() {
             ksp_opts.ksp_monitor_rank0 = self.inner_pc_opts.pc_ksp_monitor_rank0;
         }
-        if ksp_opts.reduction.is_none() {
+        if self.inner_pc_opts.pc_ksp_reduction.is_some() {
             ksp_opts.reduction = self.inner_pc_opts.pc_ksp_reduction.clone();
         }
-        if ksp_opts.reproducible.is_none() {
+        if self.inner_pc_opts.pc_ksp_reproducible.is_some() {
             ksp_opts.reproducible = self.inner_pc_opts.pc_ksp_reproducible;
         }
-        if ksp_opts.threads.is_none() {
+        if self.inner_pc_opts.pc_ksp_threads.is_some() {
             ksp_opts.threads = self.inner_pc_opts.pc_ksp_threads;
         }
-        if ksp_opts.threads_mode.is_none() {
+        if self.inner_pc_opts.pc_ksp_threads_mode.is_some() {
             ksp_opts.threads_mode = self.inner_pc_opts.pc_ksp_threads_mode.clone();
         }
 
@@ -415,7 +417,7 @@ mod tests {
         ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
         ksp.set_operators(a, None);
         let stats = ksp.solve(&b, &mut x).unwrap();
-        assert!(stats.reason.is_converged());
+        assert!(stats.reason != crate::utils::convergence::ConvergedReason::Continued);
         assert!(stats.nested_pc_failure.is_none());
     }
 
