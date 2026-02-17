@@ -92,11 +92,6 @@ impl KspAsPc {
         })
     }
 
-    fn teardown_nested_ksp(&self) {
-        let mut guard = self.inner_ctx.lock().expect("ksp-pc nested lock");
-        *guard = None;
-    }
-
     fn effective_ksp_options(&self) -> KspOptions {
         // Precedence is explicit and stable:
         // 1) flat pc_ksp_* knobs (legacy)
@@ -111,6 +106,36 @@ impl KspAsPc {
         }
         if self.rtol > 0.0 {
             ksp_opts.rtol = Some(self.rtol);
+        }
+        if ksp_opts.atol.is_none() {
+            ksp_opts.atol = self.inner_pc_opts.pc_ksp_atol;
+        }
+        if ksp_opts.dtol.is_none() {
+            ksp_opts.dtol = self.inner_pc_opts.pc_ksp_dtol;
+        }
+        if ksp_opts.restart.is_none() {
+            ksp_opts.restart = self.inner_pc_opts.pc_ksp_restart;
+        }
+        if ksp_opts.gmres_orthog.is_none() {
+            ksp_opts.gmres_orthog = self.inner_pc_opts.pc_ksp_gmres_orthog.clone();
+        }
+        if ksp_opts.fgmres_orthog.is_none() {
+            ksp_opts.fgmres_orthog = self.inner_pc_opts.pc_ksp_fgmres_orthog.clone();
+        }
+        if ksp_opts.ksp_monitor_rank0.is_none() {
+            ksp_opts.ksp_monitor_rank0 = self.inner_pc_opts.pc_ksp_monitor_rank0;
+        }
+        if ksp_opts.reduction.is_none() {
+            ksp_opts.reduction = self.inner_pc_opts.pc_ksp_reduction.clone();
+        }
+        if ksp_opts.reproducible.is_none() {
+            ksp_opts.reproducible = self.inner_pc_opts.pc_ksp_reproducible;
+        }
+        if ksp_opts.threads.is_none() {
+            ksp_opts.threads = self.inner_pc_opts.pc_ksp_threads;
+        }
+        if ksp_opts.threads_mode.is_none() {
+            ksp_opts.threads_mode = self.inner_pc_opts.pc_ksp_threads_mode.clone();
         }
 
         if ksp_opts.ksp_type.is_none() {
@@ -151,13 +176,25 @@ impl KspAsPc {
         let pc_opts = self.effective_pc_options();
         let nested_exec = ExecutionPolicy::nested_from_options(&ksp_opts, a.comm().size())?;
 
+        let mut guard = self.inner_ctx.lock().expect("ksp-pc nested lock");
+        if let Some(existing) = guard.as_mut() {
+            existing.ksp.set_execution_policy(nested_exec);
+            existing.ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
+            existing
+                .ksp
+                .try_set_operators_with_comm(amat, None, a.comm())?;
+            existing.ksp.setup()?;
+            existing.ksp_options = ksp_opts;
+            existing.pc_options = pc_opts;
+            return Ok(true);
+        }
+
         let mut ksp = KspContext::new();
         ksp.set_execution_policy(nested_exec);
         ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
         ksp.try_set_operators_with_comm(amat, None, a.comm())?;
         ksp.setup()?;
 
-        let mut guard = self.inner_ctx.lock().expect("ksp-pc nested lock");
         *guard = Some(InnerKspContext {
             ksp,
             ksp_options: ksp_opts,
@@ -176,7 +213,6 @@ impl Preconditioner for KspAsPc {
         if let Some(ref ksp) = self.inner_ksp_type {
             crate::context::ksp_context::SolverType::from_str(ksp)?;
         }
-        self.teardown_nested_ksp();
         if self.configure_nested_ksp(a)? {
             return Ok(());
         }
@@ -193,7 +229,20 @@ impl Preconditioner for KspAsPc {
 
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
             y.fill(S::zero());
-            let stats = inner.ksp.solve(x, y)?;
+            let stats = inner.ksp.solve(x, y).map_err(|err| {
+                let detail = format!(
+                    "inner_ksp={:?} inner_pc={:?} nested_error={err}",
+                    inner.ksp_options.ksp_type, inner.pc_options.pc_type,
+                );
+                KError::NestedPcFailed(NestedPcFailure {
+                    component: "pc_ksp",
+                    reason: ConvergedReason::DivergedPcFailed,
+                    iterations: 0,
+                    detail,
+                    final_norm: None,
+                    residual_history_summary: None,
+                })
+            })?;
             if !Self::is_acceptable_inner_reason(stats.reason) {
                 let history = vec![stats.final_residual];
                 let history_summary = ResidualHistorySummary::from_history(&history)
@@ -219,6 +268,29 @@ impl Preconditioner for KspAsPc {
             return Ok(());
         }
         self.inner.apply(side, x, y)
+    }
+
+    fn on_restart(&mut self, outer_iter: usize, residual_norm: R) -> Result<(), KError> {
+        self.inner.on_restart(outer_iter, residual_norm)?;
+        if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
+            inner.ksp.setup()?;
+        }
+        Ok(())
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+
+    fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        if self.configure_nested_ksp(a)? {
+            return Ok(());
+        }
+        if self.inner.supports_numeric_update() {
+            self.inner.update_numeric(a)
+        } else {
+            self.inner.setup(a)
+        }
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {

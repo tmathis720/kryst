@@ -274,6 +274,16 @@ pub struct PcOptions {
     pub pc_ksp_pc_type: Option<String>,
     pub pc_ksp_maxits: Option<usize>,
     pub pc_ksp_rtol: Option<f64>,
+    pub pc_ksp_atol: Option<f64>,
+    pub pc_ksp_dtol: Option<f64>,
+    pub pc_ksp_restart: Option<usize>,
+    pub pc_ksp_gmres_orthog: Option<String>,
+    pub pc_ksp_fgmres_orthog: Option<String>,
+    pub pc_ksp_monitor_rank0: Option<bool>,
+    pub pc_ksp_reduction: Option<String>,
+    pub pc_ksp_reproducible: Option<bool>,
+    pub pc_ksp_threads: Option<usize>,
+    pub pc_ksp_threads_mode: Option<String>,
     /// Scoped KSP options for nested `pc_type = ksp` contexts.
     pub pc_ksp_ksp_options: Option<KspOptions>,
     /// Scoped PC options for nested `pc_type = ksp` contexts.
@@ -645,13 +655,46 @@ impl PcOptions {
         if !ksp_args.is_empty() {
             let ksp_opts =
                 KspOptions::from_args_with_prefix(&ksp_args, prefix.trim_start_matches('-'))?;
-            let ksp_opts = if ksp_opts.ksp_type.is_none() {
-                let mut ksp_opts = ksp_opts;
+            let mut ksp_opts = ksp_opts;
+            if ksp_opts.ksp_type.is_none() {
                 ksp_opts.ksp_type = self.pc_ksp_ksp_type.clone();
-                ksp_opts
-            } else {
-                ksp_opts
-            };
+            }
+            if ksp_opts.maxits.is_none() {
+                ksp_opts.maxits = self.pc_ksp_maxits;
+            }
+            if ksp_opts.rtol.is_none() {
+                ksp_opts.rtol = self.pc_ksp_rtol;
+            }
+            if ksp_opts.atol.is_none() {
+                ksp_opts.atol = self.pc_ksp_atol;
+            }
+            if ksp_opts.dtol.is_none() {
+                ksp_opts.dtol = self.pc_ksp_dtol;
+            }
+            if ksp_opts.restart.is_none() {
+                ksp_opts.restart = self.pc_ksp_restart;
+            }
+            if ksp_opts.gmres_orthog.is_none() {
+                ksp_opts.gmres_orthog = self.pc_ksp_gmres_orthog.clone();
+            }
+            if ksp_opts.fgmres_orthog.is_none() {
+                ksp_opts.fgmres_orthog = self.pc_ksp_fgmres_orthog.clone();
+            }
+            if ksp_opts.ksp_monitor_rank0.is_none() {
+                ksp_opts.ksp_monitor_rank0 = self.pc_ksp_monitor_rank0;
+            }
+            if ksp_opts.reduction.is_none() {
+                ksp_opts.reduction = self.pc_ksp_reduction.clone();
+            }
+            if ksp_opts.reproducible.is_none() {
+                ksp_opts.reproducible = self.pc_ksp_reproducible;
+            }
+            if ksp_opts.threads.is_none() {
+                ksp_opts.threads = self.pc_ksp_threads;
+            }
+            if ksp_opts.threads_mode.is_none() {
+                ksp_opts.threads_mode = self.pc_ksp_threads_mode.clone();
+            }
             self.pc_ksp_ksp_options = Some(ksp_opts);
         }
 
@@ -1135,6 +1178,20 @@ impl Sink for PcOptions {
             "pc_ksp_pc_type" => set_opt!(&mut self.pc_ksp_pc_type, v.to_lowercase()),
             "pc_ksp_maxits" => set_opt!(&mut self.pc_ksp_maxits, parse_as::<usize>(v, spec)?),
             "pc_ksp_rtol" => set_opt!(&mut self.pc_ksp_rtol, parse_as::<f64>(v, spec)?),
+            "pc_ksp_atol" => set_opt!(&mut self.pc_ksp_atol, parse_as::<f64>(v, spec)?),
+            "pc_ksp_dtol" => set_opt!(&mut self.pc_ksp_dtol, parse_as::<f64>(v, spec)?),
+            "pc_ksp_restart" => set_opt!(&mut self.pc_ksp_restart, parse_as::<usize>(v, spec)?),
+            "pc_ksp_gmres_orthog" => set_opt!(&mut self.pc_ksp_gmres_orthog, v.to_lowercase()),
+            "pc_ksp_fgmres_orthog" => set_opt!(&mut self.pc_ksp_fgmres_orthog, v.to_lowercase()),
+            "pc_ksp_monitor_rank0" => {
+                set_opt!(&mut self.pc_ksp_monitor_rank0, parse_as::<bool>(v, spec)?)
+            }
+            "pc_ksp_reduction" => set_opt!(&mut self.pc_ksp_reduction, v.to_lowercase()),
+            "pc_ksp_reproducible" => {
+                set_opt!(&mut self.pc_ksp_reproducible, parse_as::<bool>(v, spec)?)
+            }
+            "pc_ksp_threads" => set_opt!(&mut self.pc_ksp_threads, parse_as::<usize>(v, spec)?),
+            "pc_ksp_threads_mode" => set_opt!(&mut self.pc_ksp_threads_mode, v.to_lowercase()),
             "pc_mg_levels" => set_opt!(&mut self.pc_mg_levels, parse_as::<usize>(v, spec)?),
             "pc_mg_cycle_type" => set_opt!(&mut self.pc_mg_cycle_type, v.to_lowercase()),
             "pc_mg_smoother" => set_opt!(&mut self.pc_mg_smoother, v.to_lowercase()),
@@ -2182,6 +2239,16 @@ impl PcOptions {
         o!(pc_ksp_pc_type);
         o!(pc_ksp_maxits);
         o!(pc_ksp_rtol);
+        o!(pc_ksp_atol);
+        o!(pc_ksp_dtol);
+        o!(pc_ksp_restart);
+        o!(pc_ksp_gmres_orthog);
+        o!(pc_ksp_fgmres_orthog);
+        o!(pc_ksp_monitor_rank0);
+        o!(pc_ksp_reduction);
+        o!(pc_ksp_reproducible);
+        o!(pc_ksp_threads);
+        o!(pc_ksp_threads_mode);
         o!(pc_ksp_ksp_options);
         o!(pc_ksp_pc_options);
         o!(pc_mg_levels);
@@ -3108,6 +3175,51 @@ mod old_tests {
         assert_eq!(opts.chebyshev_degree, Some(10));
         assert_eq!(opts.ilut_drop_tol, Some(1e-4));
         assert_eq!(opts.ilut_max_fill, Some(20));
+    }
+
+    #[test]
+    fn test_pc_ksp_flat_controls_parse() {
+        let args = vec![
+            "-pc_type",
+            "ksp",
+            "-pc_ksp_type",
+            "gmres",
+            "-pc_ksp_maxits",
+            "7",
+            "-pc_ksp_rtol",
+            "1e-3",
+            "-pc_ksp_atol",
+            "1e-12",
+            "-pc_ksp_dtol",
+            "1e4",
+            "-pc_ksp_restart",
+            "9",
+            "-pc_ksp_gmres_orthog",
+            "cgs",
+            "-pc_ksp_monitor_rank0",
+            "true",
+            "-pc_ksp_reduction",
+            "deterministic",
+            "-pc_ksp_reproducible",
+            "true",
+            "-pc_ksp_threads",
+            "1",
+            "-pc_ksp_threads_mode",
+            "serial",
+        ];
+        let opts = PcOptions::from_args(&args).unwrap();
+        assert_eq!(opts.pc_ksp_ksp_type.as_deref(), Some("gmres"));
+        assert_eq!(opts.pc_ksp_maxits, Some(7));
+        assert_eq!(opts.pc_ksp_rtol, Some(1e-3));
+        assert_eq!(opts.pc_ksp_atol, Some(1e-12));
+        assert_eq!(opts.pc_ksp_dtol, Some(1e4));
+        assert_eq!(opts.pc_ksp_restart, Some(9));
+        assert_eq!(opts.pc_ksp_gmres_orthog.as_deref(), Some("cgs"));
+        assert_eq!(opts.pc_ksp_monitor_rank0, Some(true));
+        assert_eq!(opts.pc_ksp_reduction.as_deref(), Some("deterministic"));
+        assert_eq!(opts.pc_ksp_reproducible, Some(true));
+        assert_eq!(opts.pc_ksp_threads, Some(1));
+        assert_eq!(opts.pc_ksp_threads_mode.as_deref(), Some("serial"));
     }
 
     #[test]
