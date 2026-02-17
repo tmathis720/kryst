@@ -121,6 +121,26 @@ impl NativeCouplingPlan {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn maybe_native_plan(
+    dist_op: &DistCsrOp,
+    local_apply_mode: DistLocalApplyMode,
+    supports_native: bool,
+    local_pc_name: &str,
+) -> Result<Option<NativeCouplingPlan>, KError> {
+    if !local_apply_mode.is_distributed_native() {
+        return Ok(None);
+    }
+    if !supports_native {
+        if local_apply_mode.requires_native() {
+            return Err(KError::InvalidInput(format!(
+                "pc_dist_local_apply=strict requested but pc_local={local_pc_name} only supports wrapped_local mode"
+            )));
+        }
+        return Ok(None);
+    }
+    Ok(Some(NativeCouplingPlan::from_dist_op(dist_op, 1.0)?))
+}
+
 fn owner_of(gcol: usize, row_part: &[usize]) -> usize {
     let mut lo = 0usize;
     let mut hi = row_part.len().saturating_sub(2);
@@ -281,10 +301,7 @@ pub fn build_block_jacobi_ilu_pc(
         dist_op.comm(),
         ilu,
         dist_op.local_row_offset(),
-        local_apply_mode
-            .is_distributed_native()
-            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-            .transpose()?,
+        maybe_native_plan(dist_op, local_apply_mode, true, "ilu")?,
     ))
 }
 
@@ -304,10 +321,7 @@ pub fn build_block_jacobi_ilut_pc(
         dist_op.comm(),
         pc,
         dist_op.local_row_offset(),
-        local_apply_mode
-            .is_distributed_native()
-            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-            .transpose()?,
+        maybe_native_plan(dist_op, local_apply_mode, true, "ilut")?,
     ))
 }
 
@@ -328,10 +342,7 @@ pub fn build_block_jacobi_ilutp_pc(
         dist_op.comm(),
         pc,
         dist_op.local_row_offset(),
-        local_apply_mode
-            .is_distributed_native()
-            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-            .transpose()?,
+        maybe_native_plan(dist_op, local_apply_mode, true, "ilutp")?,
     ))
 }
 
@@ -374,10 +385,7 @@ pub fn build_block_jacobi_pc(
                         Box::new(pc),
                         dist_op.local_row_offset(),
                         dist_op.local_nrows(),
-                        opts.local_apply_mode
-                            .is_distributed_native()
-                            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-                            .transpose()?,
+                        maybe_native_plan(dist_op, opts.local_apply_mode, true, "sor")?,
                     ))
                 }
                 LocalPcKind::Chebyshev => {
@@ -390,10 +398,7 @@ pub fn build_block_jacobi_pc(
                         Box::new(pc),
                         dist_op.local_row_offset(),
                         dist_op.local_nrows(),
-                        opts.local_apply_mode
-                            .is_distributed_native()
-                            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-                            .transpose()?,
+                        maybe_native_plan(dist_op, opts.local_apply_mode, true, "chebyshev")?,
                     ))
                 }
                 LocalPcKind::Fsai => {
@@ -409,10 +414,7 @@ pub fn build_block_jacobi_pc(
                         Box::new(pc),
                         dist_op.local_row_offset(),
                         dist_op.local_nrows(),
-                        opts.local_apply_mode
-                            .is_distributed_native()
-                            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-                            .transpose()?,
+                        maybe_native_plan(dist_op, opts.local_apply_mode, false, "fsai")?,
                     ))
                 }
                 LocalPcKind::Spai => {
@@ -428,10 +430,7 @@ pub fn build_block_jacobi_pc(
                         Box::new(pc),
                         dist_op.local_row_offset(),
                         dist_op.local_nrows(),
-                        opts.local_apply_mode
-                            .is_distributed_native()
-                            .then(|| NativeCouplingPlan::from_dist_op(dist_op, 1.0))
-                            .transpose()?,
+                        maybe_native_plan(dist_op, opts.local_apply_mode, false, "spai")?,
                     ))
                 }
             };
