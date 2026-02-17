@@ -95,7 +95,7 @@ use std::sync::Arc;
 mod execution;
 mod workspace;
 pub use crate::core::block::BlockVec;
-pub use execution::{ExecutionPolicy, ThreadingPolicy};
+pub use execution::{AdaptiveExecutionDecision, ExecutionPolicy, OverlapStrategy, ThreadingPolicy};
 pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
 
 #[cfg(feature = "complex")]
@@ -315,6 +315,7 @@ pub struct KspContext {
     pending_pcg: PendingPcg,
     last_converged_reason: Option<ConvergedReason>,
     reason_counters: ReasonDiagnosticsCounters,
+    adaptive_exec: Option<AdaptiveExecutionDecision>,
 }
 
 impl fmt::Debug for KspContext {
@@ -352,7 +353,8 @@ impl fmt::Debug for KspContext {
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
             .field("last_converged_reason", &self.last_converged_reason)
-            .field("reason_counters", &self.reason_counters);
+            .field("reason_counters", &self.reason_counters)
+            .field("adaptive_exec", &self.adaptive_exec);
         dbg.finish()
     }
 }
@@ -551,6 +553,7 @@ impl KspContext {
             pending_pcg: PendingPcg::default(),
             last_converged_reason: None,
             reason_counters: ReasonDiagnosticsCounters::default(),
+            adaptive_exec: None,
         }
     }
 
@@ -1446,6 +1449,34 @@ impl KspContext {
             "execution_policy",
             format!("{:?}", self.exec),
         );
+        if let Some(adaptive) = &self.adaptive_exec {
+            insert_value(&mut solver_config, "adaptive_threading", adaptive.threading);
+            insert_value(
+                &mut solver_config,
+                "adaptive_recommended_threads",
+                adaptive.recommended_threads,
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_threading_reason",
+                adaptive.threading_reason,
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_reduction_selected",
+                format!("{:?}", adaptive.selected_reduction),
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_reduction_exec",
+                format!("{:?}", adaptive.reduction_exec),
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_overlap",
+                format!("{:?}", adaptive.overlap),
+            );
+        }
 
         let pc = self
             .pc_spec
@@ -2015,6 +2046,20 @@ impl KspContext {
         }
 
         let (m, _) = amat.dims();
+        let adaptive = AdaptiveExecutionDecision::decide(
+            m,
+            amat.comm().size(),
+            self.reproducible,
+            matches!(self.monitor_policy, MonitorPolicy::AllRanks) && self.monitors.len() > 1,
+            &self.reduction_opts,
+        );
+        self.reduction_opts.mode = adaptive.selected_reduction;
+        self.reduction_opts.exec = adaptive.reduction_exec;
+        if matches!(adaptive.threading, "serial") {
+            self.exec.threading = ThreadingPolicy::Serial;
+        }
+        self.adaptive_exec = Some(adaptive);
+
         let needs_new = self
             .work
             .as_ref()

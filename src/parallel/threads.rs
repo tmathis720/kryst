@@ -33,6 +33,8 @@ use std::sync::OnceLock;
 #[cfg(feature = "rayon")]
 use rayon::ThreadPoolBuilder;
 
+use crate::algebra::parallel_cfg::ParallelTune;
+
 /// Default row-count cutoff for enabling parallel SpMV in `CsrOp::matvec`.
 pub const DEFAULT_PAR_CUTOFF: usize = 4096;
 
@@ -125,6 +127,49 @@ pub struct ThreadPoolGuard {
     threads: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadExecFlavor {
+    Serial,
+    Rayon,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThreadHeuristicDecision {
+    pub flavor: ThreadExecFlavor,
+    pub threads: usize,
+    pub reason: &'static str,
+}
+
+/// Lightweight runtime recommendation for Krylov/PC apply threading.
+pub fn suggest_thread_policy(
+    problem_size: usize,
+    comm_size: usize,
+    tune: ParallelTune,
+) -> ThreadHeuristicDecision {
+    let base_threads = current_rayon_threads();
+    if problem_size <= tune.min_len_vec.saturating_div(2) || base_threads <= 1 {
+        return ThreadHeuristicDecision {
+            flavor: ThreadExecFlavor::Serial,
+            threads: 1,
+            reason: "small local problem or single worker",
+        };
+    }
+
+    let mpi_share = std::cmp::max(1, base_threads / std::cmp::max(1, comm_size));
+    let scaled = std::cmp::max(1, problem_size / std::cmp::max(1, tune.min_len_vec));
+    let threads = std::cmp::max(1, std::cmp::min(mpi_share, scaled.max(2)));
+
+    ThreadHeuristicDecision {
+        flavor: if threads == 1 {
+            ThreadExecFlavor::Serial
+        } else {
+            ThreadExecFlavor::Rayon
+        },
+        threads,
+        reason: "threshold-driven local throughput tuning",
+    }
+}
+
 impl ThreadPoolGuard {
     /// Initialize the global pool for a communicator of size `mpi_size`.
     pub fn new_per_rank(mpi_size: usize) -> Self {
@@ -135,5 +180,19 @@ impl ThreadPoolGuard {
     /// Number of threads being used.
     pub fn threads(&self) -> usize {
         self.threads
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algebra::parallel_cfg::ParallelTune;
+
+    #[test]
+    fn thread_heuristic_prefers_serial_for_small_problem() {
+        let tune = ParallelTune::default();
+        let d = suggest_thread_policy(tune.min_len_vec / 4, 1, tune);
+        assert_eq!(d.flavor, ThreadExecFlavor::Serial);
+        assert_eq!(d.threads, 1);
     }
 }

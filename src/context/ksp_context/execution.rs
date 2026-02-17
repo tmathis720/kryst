@@ -1,6 +1,9 @@
 use crate::algebra::parallel_cfg::serial_guard;
+use crate::algebra::parallel_cfg::{ParallelTune, parallel_tune};
 use crate::config::options::KspOptions;
 use crate::error::KError;
+use crate::reduction::ReproMode;
+use crate::utils::reduction::{ReductExec, ReductOptions};
 use std::sync::Arc;
 
 #[cfg(feature = "rayon")]
@@ -35,6 +38,100 @@ pub enum NestedExecutionPolicy {
 pub struct ExecutionPolicy {
     pub threading: ThreadingPolicy,
     pub reproducible: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlapStrategy {
+    Disabled,
+    Conservative,
+    Aggressive,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptiveExecutionDecision {
+    pub problem_size: usize,
+    pub comm_size: usize,
+    pub tune: ParallelTune,
+    pub threading: &'static str,
+    pub recommended_threads: usize,
+    pub threading_reason: &'static str,
+    pub requested_reduction: ReproMode,
+    pub selected_reduction: ReproMode,
+    pub reduction_exec: ReductExec,
+    pub overlap: OverlapStrategy,
+    pub monitor_overhead_sensitive: bool,
+}
+
+impl AdaptiveExecutionDecision {
+    pub fn decide(
+        problem_size: usize,
+        comm_size: usize,
+        reproducible: bool,
+        monitor_overhead_sensitive: bool,
+        reduction: &ReductOptions,
+    ) -> Self {
+        let tune = parallel_tune();
+
+        #[cfg(feature = "rayon")]
+        let threading = {
+            let rec =
+                crate::parallel::threads::suggest_thread_policy(problem_size, comm_size, tune);
+            (
+                match rec.flavor {
+                    crate::parallel::threads::ThreadExecFlavor::Serial => "serial",
+                    crate::parallel::threads::ThreadExecFlavor::Rayon => "rayon",
+                },
+                rec.threads,
+                rec.reason,
+            )
+        };
+        #[cfg(not(feature = "rayon"))]
+        let threading = ("serial", 1, "rayon feature disabled");
+
+        let requested_reduction = reduction.mode;
+        let selected_reduction = if reproducible {
+            match requested_reduction {
+                ReproMode::Fast => ReproMode::Deterministic,
+                mode => mode,
+            }
+        } else if comm_size > 1 && monitor_overhead_sensitive {
+            ReproMode::Fast
+        } else {
+            requested_reduction
+        };
+
+        let reduction_exec = if comm_size > 1
+            && !reproducible
+            && !monitor_overhead_sensitive
+            && problem_size >= tune.min_rows_spmv
+        {
+            ReductExec::Async
+        } else {
+            ReductExec::Sync
+        };
+
+        let overlap = if matches!(reduction_exec, ReductExec::Sync) {
+            OverlapStrategy::Disabled
+        } else if problem_size >= 4 * tune.min_rows_spmv {
+            OverlapStrategy::Aggressive
+        } else {
+            OverlapStrategy::Conservative
+        };
+
+        Self {
+            problem_size,
+            comm_size,
+            tune,
+            threading: threading.0,
+            recommended_threads: threading.1,
+            threading_reason: threading.2,
+            requested_reduction,
+            selected_reduction,
+            reduction_exec,
+            overlap,
+            monitor_overhead_sensitive,
+        }
+    }
 }
 
 impl Default for ExecutionPolicy {
@@ -146,6 +243,8 @@ impl ExecutionPolicy {
 mod tests {
     use super::*;
     use crate::config::options::KspOptions;
+    use crate::reduction::ReproMode;
+    use crate::utils::reduction::{ReductExec, ReductOptions};
 
     #[test]
     fn nested_policy_rejects_global_with_mpi() {
@@ -177,5 +276,23 @@ mod tests {
         };
         let pol = ExecutionPolicy::nested_from_options(&opts, 8).unwrap();
         assert!(matches!(pol.threading, ThreadingPolicy::Serial));
+    }
+
+    #[test]
+    fn adaptive_policy_uses_fast_sync_when_monitor_heavy() {
+        let opt = ReductOptions::default();
+        let d = AdaptiveExecutionDecision::decide(2048, 4, false, true, &opt);
+        assert_eq!(d.selected_reduction, ReproMode::Fast);
+        assert!(matches!(d.reduction_exec, ReductExec::Sync));
+    }
+
+    #[test]
+    fn adaptive_policy_forces_deterministic_when_reproducible() {
+        let opt = ReductOptions::default();
+        let d = AdaptiveExecutionDecision::decide(16384, 8, true, false, &opt);
+        assert!(matches!(
+            d.selected_reduction,
+            ReproMode::Deterministic | ReproMode::DeterministicAccurate
+        ));
     }
 }
