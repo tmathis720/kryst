@@ -85,7 +85,7 @@ use crate::utils::convergence::{
     SolveStats, map_kerror_to_reason,
 };
 use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
-use crate::utils::reduction::ReductOptions;
+use crate::utils::reduction::{ReductOptions, reduction_latency_estimate_us};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -95,6 +95,7 @@ use std::sync::Arc;
 mod execution;
 mod workspace;
 pub use crate::core::block::BlockVec;
+use execution::KrylovVariant;
 pub use execution::{AdaptiveExecutionDecision, ExecutionPolicy, OverlapStrategy, ThreadingPolicy};
 pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
 
@@ -1450,6 +1451,13 @@ impl KspContext {
             format!("{:?}", self.exec),
         );
         if let Some(adaptive) = &self.adaptive_exec {
+            insert_value(
+                &mut solver_config,
+                "execution_policy_auto",
+                adaptive.auto_report.concise(),
+            );
+        }
+        if let Some(adaptive) = &self.adaptive_exec {
             insert_value(&mut solver_config, "adaptive_threading", adaptive.threading);
             insert_value(
                 &mut solver_config,
@@ -1476,6 +1484,19 @@ impl KspContext {
                 "adaptive_overlap",
                 format!("{:?}", adaptive.overlap),
             );
+            insert_value(
+                &mut solver_config,
+                "adaptive_variant",
+                format!("{:?}", adaptive.variant),
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_reduction_latency_us",
+                adaptive.reduction_latency_us,
+            );
+            if let Some(s) = adaptive.sstep_block {
+                insert_value(&mut solver_config, "adaptive_sstep_block", s);
+            }
         }
 
         let pc = self
@@ -2046,9 +2067,17 @@ impl KspContext {
         }
 
         let (m, _) = amat.dims();
+        let local_work = self
+            .work
+            .as_ref()
+            .map(|w| w.local_work_estimate())
+            .unwrap_or(m.saturating_mul(self.restart.max(1)));
         let adaptive = AdaptiveExecutionDecision::decide(
             m,
             amat.comm().size(),
+            self.restart,
+            local_work,
+            reduction_latency_estimate_us(),
             self.reproducible,
             matches!(self.monitor_policy, MonitorPolicy::AllRanks) && self.monitors.len() > 1,
             &self.reduction_opts,
@@ -2057,6 +2086,43 @@ impl KspContext {
         self.reduction_opts.exec = adaptive.reduction_exec;
         if matches!(adaptive.threading, "serial") {
             self.exec.threading = ThreadingPolicy::Serial;
+        }
+        if let Some(solver) = self.solver.as_mut() {
+            match adaptive.variant {
+                KrylovVariant::Classical => {
+                    if let Some(gmres) = solver.as_any_mut().downcast_mut::<GmresSolver>() {
+                        gmres.set_variant(crate::solver::gmres::GmresVariant::Classical);
+                    }
+                    if let Some(fgmres) = solver.as_any_mut().downcast_mut::<FgmresSolver>() {
+                        fgmres.set_variant(crate::solver::fgmres::FgmresVariant::Classical);
+                    }
+                    if let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>() {
+                        pcg.set_variant(crate::solver::pcg::PcgVariant::Classic);
+                    }
+                }
+                KrylovVariant::Pipelined => {
+                    if let Some(gmres) = solver.as_any_mut().downcast_mut::<GmresSolver>() {
+                        gmres.set_variant(crate::solver::gmres::GmresVariant::Pipelined);
+                    }
+                    if let Some(fgmres) = solver.as_any_mut().downcast_mut::<FgmresSolver>() {
+                        fgmres.set_variant(crate::solver::fgmres::FgmresVariant::Pipelined);
+                    }
+                    if let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>() {
+                        pcg.set_variant(crate::solver::pcg::PcgVariant::Pipelined {
+                            replace_every: crate::solver::pcg::PCG_PIPELINED_DEFAULT_REPLACE_EVERY,
+                        });
+                    }
+                }
+                KrylovVariant::SStep => {
+                    if let Some(gmres) = solver.as_any_mut().downcast_mut::<GmresSolver>() {
+                        gmres.set_variant(crate::solver::gmres::GmresVariant::SStep {
+                            s: adaptive.sstep_block.unwrap_or(2),
+                            reorth: gmres.reorth_policy(),
+                            max_cond: 1e8,
+                        });
+                    }
+                }
+            }
         }
         self.adaptive_exec = Some(adaptive);
 
