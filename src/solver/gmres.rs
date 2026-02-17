@@ -28,16 +28,16 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::common::call_monitors;
-use crate::solver::common::ReductCtx;
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
+use crate::solver::common::ReductCtx;
+use crate::solver::common::call_monitors;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
-use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
 #[cfg(feature = "logging")]
-use crate::utils::monitor::{log_residuals, ResidualSnapshot};
+use crate::utils::monitor::{ResidualSnapshot, log_residuals};
+use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -309,12 +309,13 @@ impl GmresSolver {
         let mut total_iters = 0usize;
         res = beta;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let mut async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         if call_monitors(mons, 0, res, reduction_count) {
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
-                residual_replacements: 0,
+                residual_replacements: async_waits,
             };
             return Ok(
                 SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
@@ -379,7 +380,7 @@ impl GmresSolver {
             let reductions = reduction_count + async_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
-                residual_replacements: 0,
+                residual_replacements: async_waits,
             };
             let mut stats = stats.with_counters(counters);
             #[cfg(feature = "metrics")]
@@ -575,6 +576,7 @@ impl GmresSolver {
                                     reductions
                                 }
                                 crate::context::ksp_context::PipeReduct::Async { handle } => {
+                                    async_waits += 1;
                                     #[cfg(feature = "metrics")]
                                     let wait_start = std::time::Instant::now();
                                     let glob = handle.wait();
@@ -642,6 +644,7 @@ impl GmresSolver {
                                     reductions
                                 }
                                 crate::context::ksp_context::PipeReduct::Async { handle } => {
+                                    async_waits += 1;
                                     #[cfg(feature = "metrics")]
                                     let wait_start = std::time::Instant::now();
                                     let glob = handle.wait();
@@ -685,7 +688,7 @@ impl GmresSolver {
                 if call_monitors(mons, total_iters, res, reduction_count) {
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: reduction_count,
-                        residual_replacements: 0,
+                        residual_replacements: async_waits,
                     };
                     return Ok(SolveStats::new(
                         total_iters,
@@ -889,7 +892,7 @@ impl GmresSolver {
             if call_monitors(mons, total_iters, res, reduction_count) {
                 let counters = crate::utils::convergence::SolverCounters {
                     num_global_reductions: reduction_count,
-                    residual_replacements: 0,
+                    residual_replacements: async_waits,
                 };
                 return Ok(
                     SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
@@ -954,7 +957,7 @@ impl GmresSolver {
         let reductions = reduction_count + async_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
-            residual_replacements: 0,
+            residual_replacements: async_waits,
         };
         let mut stats = stats.with_counters(counters);
         #[cfg(feature = "metrics")]
@@ -1168,12 +1171,13 @@ impl GmresSolver {
         let mut total_iters = 0usize;
         res = beta;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let mut async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         if call_monitors(mons, 0, res, reduction_count) {
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
-                residual_replacements: 0,
+                residual_replacements: async_waits,
             };
             return Ok(
                 SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
@@ -1236,7 +1240,7 @@ impl GmresSolver {
             let reductions = reduction_count + async_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
-                residual_replacements: 0,
+                residual_replacements: async_waits,
             };
             let mut stats = stats.with_counters(counters);
             #[cfg(feature = "metrics")]
@@ -1358,7 +1362,7 @@ impl GmresSolver {
                         metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                     }
                 } // pairs dropped here; we can safely mutate w_block next.
-                  // W <- W - V C
+                // W <- W - V C
                 for i in 0..=k {
                     let vi = &ws.v_mem[i * n..(i + 1) * n];
                     for j in 0..block {
@@ -1555,7 +1559,7 @@ impl GmresSolver {
                     if call_monitors(mons, total_iters, res, reduction_count) {
                         let counters = crate::utils::convergence::SolverCounters {
                             num_global_reductions: reduction_count,
-                            residual_replacements: 0,
+                            residual_replacements: async_waits,
                         };
                         return Ok(SolveStats::new(
                             total_iters,
@@ -1746,7 +1750,7 @@ impl GmresSolver {
             if call_monitors(mons, total_iters, res, reduction_count) {
                 let counters = crate::utils::convergence::SolverCounters {
                     num_global_reductions: reduction_count,
-                    residual_replacements: 0,
+                    residual_replacements: async_waits,
                 };
                 return Ok(
                     SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
@@ -1809,7 +1813,7 @@ impl GmresSolver {
         let reductions = reduction_count + async_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
-            residual_replacements: 0,
+            residual_replacements: async_waits,
         };
         let mut stats = stats.with_counters(counters);
         #[cfg(feature = "metrics")]

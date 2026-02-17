@@ -188,12 +188,13 @@ impl FgmresSolver {
             .cloned()
             .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
         let mut pipeline_reductions = 0usize;
+        let mut async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         if call_monitors(mons, 0, res, pipeline_reductions) {
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: pipeline_reductions,
-                residual_replacements: 0,
+                residual_replacements: async_waits,
             };
             return Ok(
                 SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
@@ -250,7 +251,7 @@ impl FgmresSolver {
                 end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
-                residual_replacements: 0,
+                residual_replacements: async_waits,
             };
             let mut stats = stats.with_counters(counters);
             #[cfg(feature = "metrics")]
@@ -425,6 +426,7 @@ impl FgmresSolver {
                                 reductions
                             }
                             crate::context::ksp_context::PipeReduct::Async { handle } => {
+                                async_waits += 1;
                                 #[cfg(feature = "metrics")]
                                 let wait_start = std::time::Instant::now();
                                 let glob = handle.wait();
@@ -463,7 +465,7 @@ impl FgmresSolver {
                 if call_monitors(mons, total_iters, res, pipeline_reductions) {
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: pipeline_reductions,
-                        residual_replacements: 0,
+                        residual_replacements: async_waits,
                     };
                     return Ok(SolveStats::new(
                         total_iters,
@@ -636,7 +638,7 @@ impl FgmresSolver {
             end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
-            residual_replacements: 0,
+            residual_replacements: async_waits,
         };
         let mut stats = stats.with_counters(counters);
         #[cfg(feature = "metrics")]

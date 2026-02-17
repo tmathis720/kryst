@@ -9,6 +9,7 @@ use kryst::context::ksp_context::{ReorthPolicy, Workspace};
 use kryst::error::KError;
 use kryst::parallel::{MpiComm, UniverseComm};
 use kryst::preconditioner::PcSide;
+use kryst::reduction::ReproMode;
 use kryst::solver::gmres::{GmresSolver, GmresVariant};
 
 #[test]
@@ -64,6 +65,41 @@ fn mpi_gmres_sstep_reduces_reduction_count() -> Result<(), KError> {
         sstep_reductions <= classic_reductions,
         "expected s-step reductions <= classical (sstep={sstep_reductions}, classic={classic_reductions})"
     );
+
+    Ok(())
+}
+
+#[test]
+fn mpi_gmres_sstep_deterministic_reproducible_counters() -> Result<(), KError> {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+
+    let a = fixtures::csr_poisson_1d(64);
+    let b: Vec<f64> = (0..a.nrows()).map(|i| 2.0 + i as f64).collect();
+
+    let solve_once = |x: &mut [f64]| -> Result<kryst::utils::convergence::SolveStats<f64>, KError> {
+        let mut solver = GmresSolver::new(16, 1e-6, 2_000);
+        solver.set_variant(GmresVariant::SStep {
+            s: 2,
+            reorth: ReorthPolicy::Never,
+            max_cond: 1e8,
+        });
+        let mut ws = Workspace::default();
+        ws.set_reduction_mode(ReproMode::Deterministic);
+        solver.solve_f64(&a, None, &b, x, PcSide::Left, &comm, None, Some(&mut ws))
+    };
+
+    let mut x0 = vec![0.0; a.nrows()];
+    let mut x1 = vec![0.0; a.nrows()];
+    let s0 = solve_once(&mut x0)?;
+    let s1 = solve_once(&mut x1)?;
+
+    assert_eq!(s0.iterations, s1.iterations);
+    assert_eq!(
+        s0.counters.num_global_reductions,
+        s1.counters.num_global_reductions
+    );
+    assert!(s0.final_residual.is_finite());
+    assert!(s1.final_residual.is_finite());
 
     Ok(())
 }

@@ -484,6 +484,39 @@ pub fn dot2_async<C: AsyncComm + ?Sized>(
     AsyncDot2 { handle, local }
 }
 
+/// Launch a fused pair of dot products asynchronously on scalar slices.
+pub fn dot2_async_s<C: AsyncComm + ?Sized>(
+    comm: &C,
+    x1: &[S],
+    y1: &[S],
+    x2: &[S],
+    y2: &[S],
+    opt: &ReductOptions,
+) -> Result<(AllreduceHandle<(R, R)>, (R, R)), crate::error::KError> {
+    debug_assert_eq!(x1.len(), y1.len());
+    debug_assert_eq!(x2.len(), y2.len());
+
+    #[cfg(not(feature = "complex"))]
+    unsafe {
+        let x1r: &[f64] = &*(x1 as *const [S] as *const [f64]);
+        let y1r: &[f64] = &*(y1 as *const [S] as *const [f64]);
+        let x2r: &[f64] = &*(x2 as *const [S] as *const [f64]);
+        let y2r: &[f64] = &*(y2 as *const [S] as *const [f64]);
+        let req = dot2_async(comm, x1r, y1r, x2r, y2r, opt);
+        Ok((req.handle, req.local))
+    }
+
+    #[cfg(feature = "complex")]
+    {
+        let mode = opt.effective_mode();
+        let Packet { v: [a_re, a_im] } = dot_conj_components(x1, y1, mode);
+        let Packet { v: [b_re, b_im] } = dot_conj_components(x2, y2, mode);
+        let a = S::from_parts(a_re, a_im).real();
+        let b = S::from_parts(b_re, b_im).real();
+        comm.allreduce2_async(a, b, opt)
+    }
+}
+
 /// Launch a single dot product asynchronously. The result is encoded in the
 /// first entry of the returned pair.
 pub fn dot1_async<C: AsyncComm + ?Sized>(
