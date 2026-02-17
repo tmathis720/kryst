@@ -373,6 +373,13 @@ pub static SPECS: &[Spec] = &[
         doc: "local ILU variant for block Jacobi: ilu | ilut | ilutp",
     },
     Spec {
+        flag: "-pc_dist_local_apply",
+        key: "pc_dist_local_apply",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "distributed local apply mode: local_wrapper | distributed_native",
+    },
+    Spec {
         flag: "-pc_jacobi_block_size",
         key: "pc_jacobi_block_size",
         arity: Arity::One,

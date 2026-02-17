@@ -14,7 +14,7 @@ use crate::config::options_core::is_help_requested;
 use crate::config::options_core::{Arity, Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
 #[cfg(feature = "backend-faer")]
-use crate::preconditioner::dist::{GlobalPcKind, LocalPcKind, MpiPcOptions};
+use crate::preconditioner::dist::{DistLocalApplyMode, GlobalPcKind, LocalPcKind, MpiPcOptions};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::ilu::{
     IluConfig, IluType as IluVariant, ReorderingType as IluReorderingType,
@@ -407,6 +407,8 @@ pub struct PcOptions {
     pub pc_global: Option<String>,
     /// Choose the local ILU variant for distributed runs.
     pub pc_local: Option<String>,
+    /// Distributed local apply mode for block-Jacobi wrappers.
+    pub pc_dist_local_apply: Option<String>,
     /// ILU variant ("iluk", "ilut", ...).
     pub ilu_variant: Option<String>,
     /// Reordering strategy for ILU.
@@ -983,6 +985,7 @@ impl Sink for PcOptions {
             "pc_type" => set_opt!(&mut self.pc_type, v.to_string()),
             "pc_global" => set_opt!(&mut self.pc_global, v.to_lowercase()),
             "pc_local" => set_opt!(&mut self.pc_local, v.to_lowercase()),
+            "pc_dist_local_apply" => set_opt!(&mut self.pc_dist_local_apply, v.to_lowercase()),
             "pc_ilu_levels" => set_opt!(&mut self.ilu_level, parse_as::<usize>(v, spec)?),
             "pc_chebyshev_degree" => {
                 set_opt!(&mut self.chebyshev_degree, parse_as::<usize>(v, spec)?)
@@ -1932,6 +1935,9 @@ impl PcOptions {
         if let Ok(v) = std::env::var("KRYST_PC_LOCAL") {
             me.pc_local = Some(v.to_lowercase());
         }
+        if let Ok(v) = std::env::var("KRYST_PC_DIST_LOCAL_APPLY") {
+            me.pc_dist_local_apply = Some(v.to_lowercase());
+        }
         if let Ok(v) = std::env::var("KRYST_PC_JACOBI_BLOCK_SIZE") {
             me.jacobi_block_size = Some(v.parse().map_err(|_| {
                 KError::SolveError(format!("Invalid KRYST_PC_JACOBI_BLOCK_SIZE: {v}"))
@@ -2358,6 +2364,7 @@ impl PcOptions {
         o!(jacobi_block_size);
         o!(pc_global);
         o!(pc_local);
+        o!(pc_dist_local_apply);
         o!(ilu_variant);
         o!(ilu_reordering);
 
@@ -2473,6 +2480,12 @@ impl PcOptions {
         let mut opts = MpiPcOptions::default();
         opts.global_pc = global;
         opts.local_pc = local;
+        opts.local_apply_mode = self
+            .pc_dist_local_apply
+            .as_deref()
+            .map(DistLocalApplyMode::from_str)
+            .transpose()?
+            .unwrap_or(opts.local_apply_mode);
         opts.ilu_config = build_ilu_config(self)?;
         opts.conditioning = self.conditioning_options()?;
 
@@ -3910,6 +3923,7 @@ mod old_tests {
         let mut opts = PcOptions::default();
         opts.pc_global = Some("block_jacobi".to_string());
         opts.pc_local = Some("ilutp".to_string());
+        opts.pc_dist_local_apply = Some("distributed_native".to_string());
         opts.ilutp_max_fill = Some(25);
         opts.ilutp_drop_tol = Some(1e-4);
         opts.ilutp_perm_tol = Some(0.2);
@@ -3917,6 +3931,10 @@ mod old_tests {
         let mpi_opts = opts.mpi_pc_options().unwrap();
         assert_eq!(mpi_opts.global_pc, GlobalPcKind::BlockJacobi);
         assert_eq!(mpi_opts.local_pc, LocalPcKind::Ilutp);
+        assert_eq!(
+            mpi_opts.local_apply_mode,
+            DistLocalApplyMode::DistributedNative
+        );
         assert_eq!(mpi_opts.ilutp_max_fill, 25);
         assert!((mpi_opts.ilutp_drop_tol - 1e-4).abs() < 1e-12);
         assert!((mpi_opts.ilutp_perm_tol - 0.2).abs() < 1e-12);
