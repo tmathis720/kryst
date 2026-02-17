@@ -2,6 +2,9 @@ use crate::algebra::scalar::S;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner};
+use crate::utils::convergence::{
+    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure,
+};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -207,6 +210,38 @@ pub fn register_shell_apply_symmetric(name: impl Into<String>, callback: Arc<dyn
         .insert(name.into(), callback);
 }
 
+pub fn register_shell_apply_typed<T, F>(name: impl Into<String>, callback: F)
+where
+    T: ShellContext + 'static,
+    F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
+{
+    register_shell_callback(name, shell_apply_with_typed_context(callback));
+}
+
+pub fn register_shell_apply_transpose_typed<T, F>(name: impl Into<String>, callback: F)
+where
+    T: ShellContext + 'static,
+    F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
+{
+    register_shell_apply_transpose(name, shell_apply_with_typed_context(callback));
+}
+
+pub fn register_shell_apply_conjugate_transpose_typed<T, F>(name: impl Into<String>, callback: F)
+where
+    T: ShellContext + 'static,
+    F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
+{
+    register_shell_apply_conjugate_transpose(name, shell_apply_with_typed_context(callback));
+}
+
+pub fn register_shell_apply_symmetric_typed<T, F>(name: impl Into<String>, callback: F)
+where
+    T: ShellContext + 'static,
+    F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
+{
+    register_shell_apply_symmetric(name, shell_apply_with_typed_context(callback));
+}
+
 pub fn shell_apply<F>(callback: F) -> Arc<dyn ShellApply>
 where
     F: Fn(PcSide, &[S], &mut [S]) -> Result<(), KError> + Send + Sync + 'static,
@@ -377,8 +412,19 @@ impl ShellPc {
         Ok(guard)
     }
 
-    fn shell_error(stage: &str, err: KError) -> KError {
-        KError::PcFailed(format!("shell pc {stage} failed: {err}"))
+    fn shell_error(stage: FailureStage, hook: &'static str, err: KError) -> KError {
+        let reason = match stage {
+            FailureStage::Setup => ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup),
+            FailureStage::Solve => ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
+        };
+        KError::NestedPcFailed(NestedPcFailure {
+            component: "pc_shell",
+            reason,
+            iterations: 0,
+            final_norm: None,
+            residual_history_summary: None,
+            detail: format!("stage={stage:?} hook={hook} nested_error={err}"),
+        })
     }
 
     pub fn with_typed_context<T, F, R>(&self, callback: F) -> Result<R, KError>
@@ -413,7 +459,8 @@ impl ShellPc {
     fn invoke_apply(
         &self,
         callback: Option<&Arc<dyn ShellApply>>,
-        stage: &str,
+        hook: &'static str,
+        stage: FailureStage,
         side: PcSide,
         x: &[S],
         y: &mut [S],
@@ -423,7 +470,7 @@ impl ShellPc {
             let ctx = guard.as_mut().expect("shell context missing");
             return cb
                 .apply(side, x, y, ctx)
-                .map_err(|err| Self::shell_error(stage, err));
+                .map_err(|err| Self::shell_error(stage, hook, err));
         }
         if x.len() != y.len() {
             return Err(KError::InvalidInput(
@@ -546,7 +593,7 @@ impl Preconditioner for ShellPc {
             let ctx = guard.as_mut().expect("shell context missing");
             setup
                 .setup(a, ctx)
-                .map_err(|err| Self::shell_error("setup", err))?;
+                .map_err(|err| Self::shell_error(FailureStage::Setup, "setup", err))?;
         }
         Ok(())
     }
@@ -557,13 +604,21 @@ impl Preconditioner for ShellPc {
                 return self.invoke_apply(
                     self.callback_symmetric.as_ref(),
                     "apply_symmetric",
+                    FailureStage::Solve,
                     side,
                     x,
                     y,
                 );
             }
         }
-        self.invoke_apply(self.callback.as_ref(), "apply", side, x, y)
+        self.invoke_apply(
+            self.callback.as_ref(),
+            "apply",
+            FailureStage::Solve,
+            side,
+            x,
+            y,
+        )
     }
 
     fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -572,6 +627,7 @@ impl Preconditioner for ShellPc {
             Op::Trans => self.invoke_apply(
                 self.callback_transpose.as_ref().or(self.callback.as_ref()),
                 "apply_transpose",
+                FailureStage::Solve,
                 PcSide::Left,
                 x,
                 y,
@@ -582,6 +638,7 @@ impl Preconditioner for ShellPc {
                     .or(self.callback_transpose.as_ref())
                     .or(self.callback.as_ref()),
                 "apply_conjugate_transpose",
+                FailureStage::Solve,
                 PcSide::Left,
                 x,
                 y,
