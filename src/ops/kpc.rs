@@ -34,10 +34,7 @@ pub trait KPreconditioner: Send {
     ) -> Result<(), KError> {
         match op {
             Op::NoTrans => self.apply_s(PcSide::Left, x, y, scratch),
-            Op::Trans => Err(KError::Unsupported("transpose application not supported")),
-            Op::ConjTrans => Err(KError::Unsupported(
-                "conjugate-transpose application not supported",
-            )),
+            Op::Trans | Op::ConjTrans => self.apply_s(PcSide::Left, x, y, scratch),
         }
     }
 

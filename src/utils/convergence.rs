@@ -175,6 +175,7 @@ pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<Converg
             | KError::DivergedIndefinitePC => Some(ConvergedReason::from_failure_kind(
                 FailureReasonKind::PcSetup,
             )),
+            KError::NestedPcFailed(failure) => Some(failure.reason),
             _ => None,
         },
         FailureStage::Solve => match err {

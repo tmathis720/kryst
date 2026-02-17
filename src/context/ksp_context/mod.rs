@@ -2101,7 +2101,13 @@ impl KspContext {
                     } else {
                         R::default()
                     };
-                    let stats = SolveStats::new(0, res, reason).finalize_reason_counters();
+                    let mut stats = SolveStats::new(0, res, reason);
+                    if let Some(failure) =
+                        Self::pc_failure_metadata_for_stats(&err, FailureStage::Setup)
+                    {
+                        stats = stats.with_nested_pc_failure(failure);
+                    }
+                    let stats = stats.finalize_reason_counters();
                     self.last_converged_reason = Some(reason);
                     self.reason_counters.record_reason(reason);
                     if let Some(inner) = stats.nested_pc_failure.as_ref() {
@@ -2242,7 +2248,9 @@ impl KspContext {
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
-                        if let Some(failure) = Self::pc_failure_metadata_for_stats(&err) {
+                        if let Some(failure) =
+                            Self::pc_failure_metadata_for_stats(&err, FailureStage::Solve)
+                        {
                             stats = stats.with_nested_pc_failure(failure);
                         }
                         let stats = stats.finalize_reason_counters();
@@ -2506,7 +2514,9 @@ impl KspContext {
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
-                        if let Some(failure) = Self::pc_failure_metadata_for_stats(&err) {
+                        if let Some(failure) =
+                            Self::pc_failure_metadata_for_stats(&err, FailureStage::Solve)
+                        {
                             stats = stats.with_nested_pc_failure(failure);
                         }
                         let stats = stats.finalize_reason_counters();
@@ -2553,16 +2563,26 @@ impl KspContext {
         Ok(red.norm2_s(&tmp))
     }
 
-    fn pc_failure_metadata_for_stats(err: &KError) -> Option<NestedPcFailure> {
+    fn pc_failure_metadata_for_stats(err: &KError, stage: FailureStage) -> Option<NestedPcFailure> {
         match err {
-            KError::PcFailed(msg) => Some(NestedPcFailure {
-                component: "pc",
-                reason: ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
-                iterations: 0,
-                final_norm: None,
-                residual_history_summary: None,
-                detail: msg.clone(),
-            }),
+            KError::PcFailed(msg) => {
+                let reason = match stage {
+                    FailureStage::Setup => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup)
+                    }
+                    FailureStage::Solve => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
+                    }
+                };
+                Some(NestedPcFailure {
+                    component: "pc",
+                    reason,
+                    iterations: 0,
+                    final_norm: None,
+                    residual_history_summary: None,
+                    detail: format!("stage={stage:?} detail={msg}"),
+                })
+            }
             KError::NestedPcFailed(failure) => Some(failure.clone()),
             _ => None,
         }

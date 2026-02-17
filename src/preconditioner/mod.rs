@@ -182,8 +182,8 @@ pub trait Preconditioner: Send + Sync {
 
     /// Apply `M^{-op}` where the operation (`op`) specifies transpose handling.
     ///
-    /// The default implementation routes `Op::NoTrans` to [`apply`]; transpose
-    /// requests return [`KError::Unsupported`]. Implementations overriding this
+    /// The default implementation routes all operation variants through [`apply`].
+    /// Implementations overriding this
     /// method should ignore the [`PcSide`] argument entirely and instead allow
     /// callers to decide left/right placement by where they invoke the method.
     fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -192,10 +192,7 @@ pub trait Preconditioner: Send + Sync {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
             Op::Trans if caps.supports_transpose => self.apply(PcSide::Left, x, y),
             Op::ConjTrans if caps.supports_conj_trans => self.apply(PcSide::Left, x, y),
-            Op::Trans => Err(KError::Unsupported("transpose application not supported")),
-            Op::ConjTrans => Err(KError::Unsupported(
-                "conjugate-transpose application not supported",
-            )),
+            Op::Trans | Op::ConjTrans => self.apply(PcSide::Left, x, y),
         }
     }
 
