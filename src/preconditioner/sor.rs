@@ -46,6 +46,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+/// Complex arithmetic capability for this preconditioner implementation.
+pub const COMPLEX_SUPPORT: &str = "native_complex";
+
 bitflags! {
     /// Bitflags for SOR sweep types and options.
     ///
@@ -255,6 +258,10 @@ pub struct SorPc {
     fshift: f64,
     a_csr: Option<Arc<CsrMatrix<f64>>>,
     inv_diag: Vec<R>,
+    #[cfg(feature = "complex")]
+    a_csr_complex: Option<Arc<CsrMatrix<S>>>,
+    #[cfg(feature = "complex")]
+    inv_diag_complex: Vec<S>,
     color_of: Vec<usize>,
     color_blocks: Vec<Vec<usize>>,
     n: usize,
@@ -270,6 +277,10 @@ impl SorPc {
             fshift,
             a_csr: None,
             inv_diag: Vec::new(),
+            #[cfg(feature = "complex")]
+            a_csr_complex: None,
+            #[cfg(feature = "complex")]
+            inv_diag_complex: Vec::new(),
             color_of: Vec::new(),
             color_blocks: Vec::new(),
             n: 0,
@@ -302,6 +313,30 @@ impl SorPc {
         if s.len() != n {
             s.resize(n, R::zero());
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "complex")]
+    fn ensure_inv_diag_complex(&mut self, a: &CsrMatrix<S>) -> Result<(), KError> {
+        let n = a.nrows().min(a.ncols());
+        self.inv_diag_complex.resize(n, S::zero());
+        for i in 0..n {
+            let rs = a.row_ptr()[i];
+            let re = a.row_ptr()[i + 1];
+            let mut aii = S::zero();
+            for p in rs..re {
+                if a.col_idx()[p] == i {
+                    aii = a.values()[p];
+                    break;
+                }
+            }
+            let aii_shift = aii + S::from_real(self.fshift);
+            if aii_shift == S::zero() {
+                return Err(KError::ZeroPivot(i));
+            }
+            self.inv_diag_complex[i] = S::one() / aii_shift;
+        }
+        self.n = n;
         Ok(())
     }
 
@@ -488,6 +523,53 @@ impl SorPc {
         }
         Ok(())
     }
+
+    #[cfg(feature = "complex")]
+    fn apply_complex(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let a = self
+            .a_csr_complex
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("SOR not setup".into()))?;
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput(
+                "dimension mismatch in SorPc::apply".into(),
+            ));
+        }
+        y.fill(S::zero());
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let omega = S::from_real(self.omega);
+        for _ in 0..self.sweeps {
+            for i in 0..self.n {
+                let mut sigma = S::zero();
+                for p in rp[i]..rp[i + 1] {
+                    let j = cj[p];
+                    if j < i {
+                        sigma += vv[p] * y[j];
+                    } else if j > i {
+                        sigma += vv[p] * x[j];
+                    }
+                }
+                let yi = (x[i] - sigma) * self.inv_diag_complex[i];
+                y[i] = (S::one() - omega) * x[i] + omega * yi;
+            }
+            if self.mat_side.contains(MatSorType::SYMMETRIC_SWEEP) {
+                for ii in (0..self.n).rev() {
+                    let mut sigma = S::zero();
+                    for p in rp[ii]..rp[ii + 1] {
+                        let j = cj[p];
+                        if j != ii {
+                            sigma += vv[p] * y[j];
+                        }
+                    }
+                    let yi = (x[ii] - sigma) * self.inv_diag_complex[ii];
+                    y[ii] = (S::one() - omega) * x[ii] + omega * yi;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(feature = "complex"))]
@@ -530,46 +612,19 @@ impl ObjPreconditioner for SorPc {
 impl ObjPreconditioner for SorPc {
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
         let csr = if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
-            let values = csr.values().iter().map(|v| v.real()).collect();
-            Arc::new(CsrMatrix::from_csr(
-                csr.nrows(),
-                csr.ncols(),
-                csr.row_ptr().to_vec(),
-                csr.col_idx().to_vec(),
-                values,
-            ))
+            Arc::new(csr.clone())
         } else {
             return Err(KError::Unsupported(
                 "SOR complex setup currently requires a CSR operator".into(),
             ));
         };
-        self.a_csr = Some(csr.clone());
-        self.ensure_inv_diag(&csr)?;
-        self.ensure_coloring(&csr);
+        self.a_csr_complex = Some(csr.clone());
+        self.ensure_inv_diag_complex(&csr)?;
         Ok(())
     }
 
     fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        let n = self.n;
-        if x.len() != n || y.len() != n {
-            return Err(KError::InvalidInput(
-                "dimension mismatch in SorPc::apply".into(),
-            ));
-        }
-        let mut xr = vec![0.0; n];
-        let mut xi = vec![0.0; n];
-        let mut yr = vec![0.0; n];
-        let mut yi = vec![0.0; n];
-        for i in 0..n {
-            xr[i] = x[i].real();
-            xi[i] = x[i].imag();
-        }
-        self.apply_real(side, &xr, &mut yr)?;
-        self.apply_real(side, &xi, &mut yi)?;
-        for i in 0..n {
-            y[i] = S::from_parts(yr[i], yi[i]);
-        }
-        Ok(())
+        self.apply_complex(side, x, y)
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {

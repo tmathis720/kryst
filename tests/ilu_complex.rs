@@ -1,4 +1,3 @@
-#![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #![cfg(all(feature = "complex", feature = "complex_ilu"))]
 
 use faer::Mat;
@@ -109,4 +108,13 @@ fn ilu0_diagonally_dominant_has_finite_solution() {
         .map(|(&az, &rhs_i)| (az - rhs_i).abs())
         .fold(0.0, f64::max);
     assert!(residual < 1e-10, "residual too large: {residual}");
+}
+
+#[test]
+fn ilu_diagnostics_reports_projected_complex_mode() {
+    use kryst::context::pc_context::PcType;
+    use kryst::utils::diagnostics::PcDiagnostics;
+
+    let diag = PcDiagnostics::from_options(Some(PcType::Ilu0), None);
+    assert_eq!(diag.complex_support, "projected_complex");
 }
