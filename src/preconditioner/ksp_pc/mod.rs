@@ -98,13 +98,13 @@ impl KspAsPc {
         // 2) scoped pc_ksp_ksp_options block
         // 3) KSP-as-PC defaults
         let mut ksp_opts = self.ksp_options.clone().unwrap_or_default();
-        if let Some(ksp_type) = self.inner_ksp_type.clone() {
-            ksp_opts.ksp_type = Some(ksp_type);
+        if ksp_opts.ksp_type.is_none() {
+            ksp_opts.ksp_type = self.inner_ksp_type.clone();
         }
-        if self.maxits > 0 {
+        if ksp_opts.maxits.is_none() && self.maxits > 0 {
             ksp_opts.maxits = Some(self.maxits);
         }
-        if self.rtol > 0.0 {
+        if ksp_opts.rtol.is_none() && self.rtol > 0.0 {
             ksp_opts.rtol = Some(self.rtol);
         }
         if ksp_opts.atol.is_none() {
