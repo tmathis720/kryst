@@ -14,6 +14,9 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+/// Scalar carried through MG hierarchy operators and transfers.
+type MgScalar = S;
+
 #[derive(Clone, Debug, Default)]
 pub struct MgLevelPolicy {
     pub level: usize,
@@ -118,18 +121,18 @@ enum MgCoarseSolve {
 
 #[derive(Clone)]
 struct CsrLinOp {
-    csr: Arc<CsrMatrix<S>>,
+    csr: Arc<CsrMatrix<MgScalar>>,
     comm: UniverseComm,
 }
 
 impl CsrLinOp {
-    fn new(csr: Arc<CsrMatrix<S>>, comm: UniverseComm) -> Self {
+    fn new(csr: Arc<CsrMatrix<MgScalar>>, comm: UniverseComm) -> Self {
         Self { csr, comm }
     }
 }
 
 impl LinOp for CsrLinOp {
-    type S = S;
+    type S = MgScalar;
 
     fn dims(&self) -> (usize, usize) {
         (self.csr.nrows(), self.csr.ncols())
@@ -157,13 +160,13 @@ impl LinOp for CsrLinOp {
 pub struct MgLevel {
     pub level: usize,
     pub smoother: Option<Box<dyn Preconditioner>>,
-    pub operator: Arc<CsrMatrix<S>>,
-    pub prolongation: Option<Arc<CsrMatrix<S>>>,
-    pub restriction: Option<Arc<CsrMatrix<S>>>,
+    pub operator: Arc<CsrMatrix<MgScalar>>,
+    pub prolongation: Option<Arc<CsrMatrix<MgScalar>>>,
+    pub restriction: Option<Arc<CsrMatrix<MgScalar>>>,
 }
 
 impl MgLevel {
-    pub fn new(level: usize, operator: Arc<CsrMatrix<S>>) -> Self {
+    pub fn new(level: usize, operator: Arc<CsrMatrix<MgScalar>>) -> Self {
         Self {
             level,
             smoother: None,
@@ -217,7 +220,7 @@ pub struct MgPc {
     coarsen: MgCoarsenType,
     interp: MgInterpType,
     restrict: MgRestrictType,
-    user_transfers: Vec<(usize, Arc<CsrMatrix<S>>, Arc<CsrMatrix<S>>)>,
+    user_transfers: Vec<(usize, Arc<CsrMatrix<MgScalar>>, Arc<CsrMatrix<MgScalar>>)>,
     level_coarse_pc_types: BTreeMap<usize, String>,
     level_policies: Vec<MgLevelPolicy>,
     diagnostics: Vec<MgLevelDiagnostics>,
@@ -225,11 +228,11 @@ pub struct MgPc {
 }
 
 pub struct MgTransferOperators {
-    pub prolongation: Arc<CsrMatrix<S>>,
-    pub restriction: Arc<CsrMatrix<S>>,
+    pub prolongation: Arc<CsrMatrix<MgScalar>>,
+    pub restriction: Arc<CsrMatrix<MgScalar>>,
 }
 
-fn csr_from_linop_scalar(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<S>>, KError> {
+fn csr_from_linop_scalar(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrMatrix<MgScalar>>, KError> {
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
         return Ok(Arc::new(csr.clone()));
     }

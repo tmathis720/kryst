@@ -1181,7 +1181,7 @@ impl Preconditioner for IluCsr {
             ))
         } else {
             return Err(KError::Unsupported(
-                "IluCsr complex setup currently requires a CSR operator".into(),
+                "IluCsr complex setup currently requires a CSR operator; non-CSR LinOp paths have no lossless complex ILU fallback".into(),
             ));
         };
 

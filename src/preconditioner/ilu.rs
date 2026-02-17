@@ -20,11 +20,9 @@
 //!   [`Ilu::create_specialized`] routes `IluType::ILUT` to the simpler [`crate::preconditioner::ilut::Ilut`].
 //!
 //! # Real vs complex
-//! `Ilu` currently factorizes only real-valued matrices (`faer::Mat<f64>`). The factorization
-//! and triangular solves are all done in real arithmetic. Complex-valued Krylov solvers should
-//! use simpler preconditioners (Jacobi, diagonal scaling) or ILU variants with explicit
-//! [`KPreconditioner`] bridges (`Ilup`, `Ilut`, `Ilutp`), which internally factorize in real
-//! arithmetic and map complex vectors through a bridge.
+//! `Ilu` currently factorizes only real-valued matrices (`faer::Mat<f64>`). Complex execution
+//! is supported through a guarded degraded mode that projects the operator to real arithmetic
+//! and applies the same factorization to the real/imaginary vector parts independently.
 //!
 //! # Parallel execution
 //! [`IluConfig::enable_parallel_factorization`] and
@@ -73,7 +71,7 @@ type S = f64;
 type Real = f64;
 
 /// Complex arithmetic capability for this preconditioner implementation.
-pub const COMPLEX_SUPPORT: &str = "projected_complex";
+pub const COMPLEX_SUPPORT: &str = "degraded_real_projection";
 
 /// HYPRE-inspired ILU types
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
