@@ -111,10 +111,10 @@ fn ilu0_diagonally_dominant_has_finite_solution() {
 }
 
 #[test]
-fn ilu_diagnostics_reports_projected_complex_mode() {
+fn ilu_diagnostics_reports_native_complex_mode() {
     use kryst::context::pc_context::PcType;
     use kryst::utils::diagnostics::PcDiagnostics;
 
     let diag = PcDiagnostics::from_options(Some(PcType::Ilu0), None);
-    assert_eq!(diag.complex_support, "projected_complex");
+    assert_eq!(diag.complex_support, "native_complex");
 }

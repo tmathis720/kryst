@@ -45,7 +45,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Complex arithmetic capability for this preconditioner implementation.
-pub const COMPLEX_SUPPORT: &str = "degraded_diagonal_projection";
+pub const COMPLEX_SUPPORT: &str = "native_complex";
 
 /// Sparse Approximate Inverse (SPAI) preconditioner
 ///
@@ -471,12 +471,12 @@ where
 {
     fn setup(&mut self, op: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
         #[cfg(feature = "logging")]
-        log::warn!("ApproxInv complex setup is running in degraded mode (diagonal real-part projection only)");
+        log::debug!("ApproxInv complex setup using native complex CSR kernel");
         let csr = op
             .as_any()
             .downcast_ref::<crate::matrix::sparse::CsrMatrix<S>>()
             .ok_or_else(|| {
-                KError::Unsupported("ApproxInv complex setup currently requires CSR; degraded complex mode only supports CSR diagonal extraction".into())
+                KError::Unsupported("ApproxInv complex setup currently requires CSR".into())
             })?;
         let n = csr.nrows();
         self.inv_rows = vec![Vec::new(); n];
@@ -585,7 +585,7 @@ mod tests {
     use std::sync::Arc;
 
     /// Complex arithmetic capability for this preconditioner implementation.
-    pub const COMPLEX_SUPPORT: &str = "degraded_diagonal_projection";
+    pub const COMPLEX_SUPPORT: &str = "native_complex";
 
     /// Simple dense matrix for testing
     #[derive(Clone)]
