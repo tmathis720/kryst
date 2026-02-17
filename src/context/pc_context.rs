@@ -290,6 +290,7 @@ pub enum PcConfig {
     Shell {
         name: Option<String>,
         apply_transpose: Option<String>,
+        apply_conjugate_transpose: Option<String>,
         apply_symmetric: Option<String>,
         setup: Option<String>,
         destroy: Option<String>,
@@ -564,6 +565,7 @@ impl PcConfig {
             Shell => PcConfig::Shell {
                 name: o.pc_shell_apply.clone().or_else(|| o.pc_shell_name.clone()),
                 apply_transpose: o.pc_shell_apply_transpose.clone(),
+                apply_conjugate_transpose: o.pc_shell_apply_conjugate_transpose.clone(),
                 apply_symmetric: o.pc_shell_apply_symmetric.clone(),
                 setup: o.pc_shell_setup.clone(),
                 destroy: o.pc_shell_destroy.clone(),

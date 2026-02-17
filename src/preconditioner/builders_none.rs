@@ -21,6 +21,7 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         PcConfig::Shell {
             name,
             apply_transpose,
+            apply_conjugate_transpose,
             apply_symmetric,
             setup,
             destroy,
@@ -28,6 +29,7 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
         } => Ok(Some(Box::new(crate::preconditioner::shell::ShellPc::new(
             name.clone(),
             apply_transpose.clone(),
+            apply_conjugate_transpose.clone(),
             apply_symmetric.clone(),
             setup.clone(),
             destroy.clone(),

@@ -191,12 +191,11 @@ pub trait Preconditioner: Send + Sync {
         match op {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
             Op::Trans if caps.supports_transpose => self.apply(PcSide::Left, x, y),
-            Op::ConjTrans if caps.supports_conj_trans || caps.supports_transpose => {
-                self.apply(PcSide::Left, x, y)
-            }
-            Op::Trans | Op::ConjTrans => {
-                Err(KError::Unsupported("transpose application not supported"))
-            }
+            Op::ConjTrans if caps.supports_conj_trans => self.apply(PcSide::Left, x, y),
+            Op::Trans => Err(KError::Unsupported("transpose application not supported")),
+            Op::ConjTrans => Err(KError::Unsupported(
+                "conjugate-transpose application not supported",
+            )),
         }
     }
 

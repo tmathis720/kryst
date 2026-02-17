@@ -8,9 +8,10 @@ use crate::matrix::op_bridge::matvec_s as bridge_matvec_s;
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::preconditioner::bridge::{
-    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
+    apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_op_s as bridge_apply_pc_op_s,
+    apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{PcSide, Preconditioner as PreconditionerF64};
+use crate::preconditioner::{Op, PcCaps, PcSide, Preconditioner as PreconditionerF64};
 use core::marker::PhantomData;
 
 /// Adapter that exposes an `f64` operator via the scalar-generic [`KLinOp`] interface.
@@ -120,6 +121,22 @@ where
     ) -> Result<(), KError> {
         bridge_apply_pc_s(self.inner, side, x, y, scratch)
     }
+
+    #[inline]
+    fn apply_op_s(
+        &self,
+        op: Op,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_op_s(self.inner, op, x, y, scratch)
+    }
+
+    #[inline]
+    fn capabilities_s(&self) -> PcCaps {
+        <P as PreconditionerF64>::capabilities(self.inner)
+    }
 }
 
 /// Mutable adapter that exposes an `f64` preconditioner via [`KPreconditioner`].
@@ -168,6 +185,22 @@ where
         scratch: &mut BridgeScratch,
     ) -> Result<(), KError> {
         bridge_apply_pc_s(unsafe { &*self.inner }, side, x, y, scratch)
+    }
+
+    #[inline]
+    fn apply_op_s(
+        &self,
+        op: Op,
+        x: &[S],
+        y: &mut [S],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        bridge_apply_pc_op_s(unsafe { &*self.inner }, op, x, y, scratch)
+    }
+
+    #[inline]
+    fn capabilities_s(&self) -> PcCaps {
+        unsafe { <P as PreconditionerF64>::capabilities(&*self.inner) }
     }
 
     #[inline]

@@ -265,6 +265,7 @@ pub struct PcOptions {
     pub pc_shell_name: Option<String>,
     pub pc_shell_apply: Option<String>,
     pub pc_shell_apply_transpose: Option<String>,
+    pub pc_shell_apply_conjugate_transpose: Option<String>,
     pub pc_shell_apply_symmetric: Option<String>,
     pub pc_shell_setup: Option<String>,
     pub pc_shell_destroy: Option<String>,
@@ -1170,6 +1171,9 @@ impl Sink for PcOptions {
             "pc_shell_apply" => set_opt!(&mut self.pc_shell_apply, v.to_string()),
             "pc_shell_apply_transpose" => {
                 set_opt!(&mut self.pc_shell_apply_transpose, v.to_string())
+            }
+            "pc_shell_apply_conjugate_transpose" => {
+                set_opt!(&mut self.pc_shell_apply_conjugate_transpose, v.to_string())
             }
             "pc_shell_apply_symmetric" => {
                 set_opt!(&mut self.pc_shell_apply_symmetric, v.to_string())
@@ -2237,6 +2241,7 @@ impl PcOptions {
         o!(pc_shell_name);
         o!(pc_shell_apply);
         o!(pc_shell_apply_transpose);
+        o!(pc_shell_apply_conjugate_transpose);
         o!(pc_shell_apply_symmetric);
         o!(pc_shell_setup);
         o!(pc_shell_destroy);
@@ -3992,6 +3997,8 @@ mod old_tests {
             "base",
             "-pc_shell_apply_transpose",
             "t_hook",
+            "-pc_shell_apply_conjugate_transpose",
+            "ct_hook",
             "-pc_shell_apply_symmetric",
             "s_hook",
             "-pc_shell_context",
@@ -4000,6 +4007,10 @@ mod old_tests {
         let opts = PcOptions::from_args(&args).expect("pc options parse should succeed");
         assert_eq!(opts.pc_shell_apply.as_deref(), Some("base"));
         assert_eq!(opts.pc_shell_apply_transpose.as_deref(), Some("t_hook"));
+        assert_eq!(
+            opts.pc_shell_apply_conjugate_transpose.as_deref(),
+            Some("ct_hook")
+        );
         assert_eq!(opts.pc_shell_apply_symmetric.as_deref(), Some("s_hook"));
         assert_eq!(opts.pc_shell_context.as_deref(), Some("ctx"));
     }

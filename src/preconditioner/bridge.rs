@@ -1,7 +1,7 @@
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::error::KError;
-use crate::preconditioner::{PcSide, Preconditioner};
+use crate::preconditioner::{Op, PcSide, Preconditioner};
 
 #[inline]
 pub fn apply_pc_s<P>(
@@ -33,4 +33,20 @@ where
     let _ = scratch;
     debug_assert_eq!(x.len(), y.len());
     pc.apply_mut(side, x, y)
+}
+
+#[inline]
+pub fn apply_pc_op_s<P>(
+    pc: &P,
+    op: Op,
+    x: &[S],
+    y: &mut [S],
+    scratch: &mut BridgeScratch,
+) -> Result<(), KError>
+where
+    P: Preconditioner + ?Sized,
+{
+    let _ = scratch;
+    debug_assert_eq!(x.len(), y.len());
+    pc.apply_op(op, x, y)
 }
