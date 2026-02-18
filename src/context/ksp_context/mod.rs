@@ -2334,6 +2334,17 @@ impl KspContext {
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
             let stats = stats.finalize_reason_counters();
+            if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                log::warn!(
+                    "nested_pc_failure component={} reason={} iters={} detail={} final_norm={:?} residual_history={:?}",
+                    inner.component,
+                    inner.reason,
+                    inner.iterations,
+                    inner.detail,
+                    inner.final_norm,
+                    inner.residual_history_summary
+                );
+            }
             self.last_converged_reason = Some(stats.reason);
             self.reason_counters.record_reason(stats.reason);
             if let Some(inner) = stats.nested_pc_failure.as_ref() {
@@ -2600,6 +2611,17 @@ impl KspContext {
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
             let stats = stats.finalize_reason_counters();
+            if let Some(inner) = stats.nested_pc_failure.as_ref() {
+                log::warn!(
+                    "nested_pc_failure component={} reason={} iters={} detail={} final_norm={:?} residual_history={:?}",
+                    inner.component,
+                    inner.reason,
+                    inner.iterations,
+                    inner.detail,
+                    inner.final_norm,
+                    inner.residual_history_summary
+                );
+            }
             self.last_converged_reason = Some(stats.reason);
             self.reason_counters.record_reason(stats.reason);
             if let Some(inner) = stats.nested_pc_failure.as_ref() {

@@ -667,6 +667,9 @@ impl PcConfig {
                     if o.pc_ksp_threads_mode.is_some() {
                         ksp.threads_mode = o.pc_ksp_threads_mode.clone();
                     }
+                    if o.pc_ksp_pc_side.is_some() {
+                        ksp.pc_side = o.pc_ksp_pc_side.clone();
+                    }
                     ksp
                 },
                 pc_options: {
