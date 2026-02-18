@@ -122,6 +122,13 @@ impl Default for IluCsrConfig {
     }
 }
 
+#[cfg(feature = "complex")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IluComplexKernelMode {
+    Native,
+    DegradedRealProjection,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ReorderingKind {
     None,
@@ -189,6 +196,10 @@ pub struct IluCsr {
     c_tmp: Vec<S>,
     #[cfg(feature = "complex")]
     native_complex_active: bool,
+    #[cfg(feature = "complex")]
+    complex_kernel_mode: IluComplexKernelMode,
+    #[cfg(feature = "complex")]
+    complex_force_degraded: bool,
 }
 
 impl IluCsr {
@@ -223,6 +234,10 @@ impl IluCsr {
             c_tmp: Vec::new(),
             #[cfg(feature = "complex")]
             native_complex_active: false,
+            #[cfg(feature = "complex")]
+            complex_kernel_mode: IluComplexKernelMode::DegradedRealProjection,
+            #[cfg(feature = "complex")]
+            complex_force_degraded: false,
         }
     }
 
@@ -371,6 +386,73 @@ impl IluCsr {
         }
 
         self.native_complex_active = true;
+        self.complex_kernel_mode = IluComplexKernelMode::Native;
+        Ok(())
+    }
+
+    #[cfg(feature = "complex")]
+    fn factor_iluk_complex(&mut self, a: &CsrMatrix<S>, k: usize) -> Result<(), KError> {
+        let a_zero = CsrMatrix::from_csr(
+            a.nrows(),
+            a.ncols(),
+            a.row_ptr().to_vec(),
+            a.col_idx().to_vec(),
+            vec![0.0; a.values().len()],
+        );
+        self.factor_iluk(&a_zero, k)?;
+        self.c_l_val.resize(self.l_val.len(), S::zero());
+        self.c_u_val.resize(self.u_val.len(), S::zero());
+
+        let n = a.nrows();
+        let rp = a.row_ptr();
+        let cj = a.col_idx();
+        let vv = a.values();
+        let mut map = URowMap::new();
+        map.ensure_size(n);
+
+        for i in 0..n {
+            map.prime(&self.u_row, &self.u_col, i);
+            for p in rp[i]..rp[i + 1] {
+                let j = cj[p];
+                let val = vv[p];
+                if j < i {
+                    let ls = self.l_row[i];
+                    if let Ok(off) = self.l_col[ls..self.l_row[i + 1]].binary_search(&j) {
+                        self.c_l_val[ls + off] = val;
+                    }
+                } else if let Some(pos) = map.get(j) {
+                    self.c_u_val[pos] = val;
+                }
+            }
+
+            for p in self.l_row[i]..self.l_row[i + 1] {
+                let j = self.l_col[p];
+                let wij = self.c_l_val[p];
+                if wij == S::zero() {
+                    continue;
+                }
+                let djj = self.c_u_val[self.u_diag_ix[j]];
+                let mult = wij / djj;
+                self.c_l_val[p] = mult;
+                for q in self.u_row[j]..self.u_row[j + 1] {
+                    let kcol = self.u_col[q];
+                    if kcol <= j {
+                        continue;
+                    }
+                    let ujk = self.c_u_val[q];
+                    if let Some(pos_ik) = map.get(kcol) {
+                        self.c_u_val[pos_ik] -= mult * ujk;
+                    }
+                }
+            }
+
+            if self.c_u_val[self.u_diag_ix[i]].abs() <= self.cfg.pivot_threshold {
+                return Err(KError::ZeroPivot(i));
+            }
+        }
+
+        self.native_complex_active = true;
+        self.complex_kernel_mode = IluComplexKernelMode::Native;
         Ok(())
     }
 
@@ -1300,6 +1382,21 @@ impl Preconditioner for IluCsr {
 
             if matches!(self.cfg.kind, IluKind::Ilu0 | IluKind::Milu0) {
                 self.factor_ilu0_complex(&a_perm)?;
+            } else if let IluKind::Iluk { k } = self.cfg.kind {
+                if self.complex_force_degraded {
+                    let a_real = CsrMatrix::from_csr(
+                        a_perm.nrows(),
+                        a_perm.ncols(),
+                        a_perm.row_ptr().to_vec(),
+                        a_perm.col_idx().to_vec(),
+                        a_perm.values().iter().map(|v| v.real()).collect(),
+                    );
+                    self.native_complex_active = false;
+                    self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
+                    self.factor_symbolic_and_numeric(&a_real)?;
+                } else {
+                    self.factor_iluk_complex(&a_perm, k)?;
+                }
             } else {
                 let a_real = CsrMatrix::from_csr(
                     a_perm.nrows(),
@@ -1309,6 +1406,7 @@ impl Preconditioner for IluCsr {
                     a_perm.values().iter().map(|v| v.real()).collect(),
                 );
                 self.native_complex_active = false;
+                self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
                 self.factor_symbolic_and_numeric(&a_real)?;
             }
 
@@ -1393,6 +1491,21 @@ impl Preconditioner for IluCsr {
         let a_perm = permute_csr_symmetric(csr, &self.perm);
         if matches!(self.cfg.kind, IluKind::Ilu0 | IluKind::Milu0) {
             self.factor_ilu0_complex(&a_perm)?;
+        } else if let IluKind::Iluk { k } = self.cfg.kind {
+            if self.complex_force_degraded {
+                let a_real = CsrMatrix::from_csr(
+                    a_perm.nrows(),
+                    a_perm.ncols(),
+                    a_perm.row_ptr().to_vec(),
+                    a_perm.col_idx().to_vec(),
+                    a_perm.values().iter().map(|v| v.real()).collect(),
+                );
+                self.native_complex_active = false;
+                self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
+                self.factor_numeric_only(&a_real)?;
+            } else {
+                self.factor_iluk_complex(&a_perm, k)?;
+            }
         } else {
             let a_real = CsrMatrix::from_csr(
                 a_perm.nrows(),
@@ -1402,6 +1515,7 @@ impl Preconditioner for IluCsr {
                 a_perm.values().iter().map(|v| v.real()).collect(),
             );
             self.native_complex_active = false;
+            self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
             self.factor_numeric_only(&a_real)?;
         }
         self.last_vid = Some(op.values_id());
@@ -1471,6 +1585,16 @@ impl KPreconditioner for IluCsr {
 }
 
 impl IluCsr {
+    #[cfg(feature = "complex")]
+    pub fn complex_kernel_mode(&self) -> IluComplexKernelMode {
+        self.complex_kernel_mode
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn set_complex_force_degraded(&mut self, on: bool) {
+        self.complex_force_degraded = on;
+    }
+
     #[inline]
     pub(crate) fn n(&self) -> usize {
         self.n

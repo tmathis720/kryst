@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 enum PcComplexSupport {
     NativeComplex,
     ProjectedComplex,
+    NativeWithDegradedFallback,
 }
 
 impl PcComplexSupport {
@@ -18,6 +19,7 @@ impl PcComplexSupport {
         match self {
             Self::NativeComplex => "native_complex",
             Self::ProjectedComplex => "projected_complex",
+            Self::NativeWithDegradedFallback => "native_complex_with_degraded_fallback",
         }
     }
 }
@@ -27,9 +29,9 @@ fn pc_complex_support(pc_type: Option<PcType>) -> PcComplexSupport {
         Some(PcType::Sor) => PcComplexSupport::NativeComplex,
         Some(PcType::Jacobi) | Some(PcType::Chebyshev) => PcComplexSupport::NativeComplex,
         Some(PcType::Ilu0) | Some(PcType::Ilu) | Some(PcType::Ilut) => {
-            PcComplexSupport::NativeComplex
+            PcComplexSupport::NativeWithDegradedFallback
         }
-        Some(PcType::ApproxInverse) => PcComplexSupport::NativeComplex,
+        Some(PcType::ApproxInverse) => PcComplexSupport::NativeWithDegradedFallback,
         _ => PcComplexSupport::ProjectedComplex,
     }
 }
