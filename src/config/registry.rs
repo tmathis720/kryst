@@ -1158,6 +1158,13 @@ pub static SPECS: &[Spec] = &[
         doc: "inner KSP thread policy",
     },
     Spec {
+        flag: "-pc_ksp_pc_side",
+        key: "pc_ksp_pc_side",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "inner KSP preconditioning side",
+    },
+    Spec {
         flag: "-pc_mg_levels",
         key: "pc_mg_levels",
         arity: Arity::One,

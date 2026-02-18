@@ -201,6 +201,9 @@ fn build_nested_ksp_diagnostics(opts: &PcOptions) -> Option<KspDiagnostics> {
     if let Some(v) = opts.pc_ksp_rtol {
         ksp_opts.rtol = Some(v);
     }
+    if let Some(v) = opts.pc_ksp_pc_side.clone() {
+        ksp_opts.pc_side = Some(v);
+    }
     if ksp_opts.ksp_type.is_none() {
         ksp_opts.ksp_type = Some("richardson".to_string());
     }

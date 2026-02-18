@@ -1,18 +1,19 @@
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::config::options::{KspOptions, PcOptions};
-use crate::context::ksp_context::{ExecutionPolicy, KspContext};
+use crate::context::ksp_context::{ExecutionPolicy, KspContext, MonitorPolicy};
 use crate::error::KError;
 use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct InnerKspContext {
     ksp: KspContext,
     ksp_options: KspOptions,
     pc_options: PcOptions,
+    residual_history: Arc<Mutex<Vec<R>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -94,6 +95,8 @@ impl KspAsPc {
 
         let mut guard = self.inner_ctx.lock().expect("ksp-pc nested lock");
         if let Some(existing) = guard.as_mut() {
+            existing.ksp_options = ksp_opts;
+            existing.pc_options = pc_opts;
             existing
                 .ksp
                 .try_set_operators_with_comm(amat, None, a.comm())?;
@@ -105,6 +108,17 @@ impl KspAsPc {
         let mut ksp = KspContext::new();
         ksp.set_execution_policy(nested_exec);
         ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
+        let residual_history = Arc::new(Mutex::new(Vec::<R>::new()));
+        let monitor_history = residual_history.clone();
+        ksp.add_monitor(move |_, res, _| {
+            if let Ok(mut h) = monitor_history.lock() {
+                h.push(res);
+            }
+            crate::solver::MonitorAction::Continue
+        });
+        if ksp_opts.ksp_monitor_rank0.unwrap_or(false) {
+            ksp.set_monitor_policy(MonitorPolicy::Rank0Only);
+        }
         ksp.try_set_operators_with_comm(amat, None, a.comm())?;
         ksp.setup()?;
 
@@ -112,8 +126,32 @@ impl KspAsPc {
             ksp,
             ksp_options: ksp_opts,
             pc_options: pc_opts,
+            residual_history,
         });
         Ok(true)
+    }
+
+    fn set_inner_side_for_outer(side: PcSide, inner: &mut KspContext) {
+        let mapped = match side {
+            PcSide::Left => PcSide::Left,
+            PcSide::Right => PcSide::Right,
+            // Nested KSP-as-PC does not currently model split left/right factors;
+            // keep symmetric requests communicator-safe by mapping to left.
+            PcSide::Symmetric => PcSide::Left,
+        };
+        let _ = inner.try_set_pc_side(mapped);
+    }
+
+    fn summarize_history(history: &Arc<Mutex<Vec<R>>>, final_residual: R) -> String {
+        let mut values = history.lock().expect("ksp-pc nested history lock");
+        if values.is_empty() {
+            values.push(final_residual);
+        }
+        let summary = ResidualHistorySummary::from_history(&values)
+            .map(ResidualHistorySummary::detail_fragment)
+            .unwrap_or_else(|| "history_len=0".to_string());
+        values.clear();
+        summary
     }
 
     fn is_acceptable_inner_reason(reason: ConvergedReason) -> bool {
@@ -140,10 +178,12 @@ impl Preconditioner for KspAsPc {
         }
 
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
+            Self::set_inner_side_for_outer(side, &mut inner.ksp);
             y.fill(S::zero());
             let stats = inner.ksp.solve(x, y).map_err(|err| {
+                let history_summary = Self::summarize_history(&inner.residual_history, R::default());
                 let detail = format!(
-                    "inner_ksp={:?} inner_pc={:?} nested_error={err}",
+                    "outer_side={side:?} inner_ksp={:?} inner_pc={:?} nested_error={err} {history_summary}",
                     inner.ksp_options.ksp_type, inner.pc_options.pc_type,
                 );
                 KError::NestedPcFailed(NestedPcFailure {
@@ -152,16 +192,14 @@ impl Preconditioner for KspAsPc {
                     iterations: 0,
                     detail,
                     final_norm: None,
-                    residual_history_summary: None,
+                    residual_history_summary: Some(history_summary),
                 })
             })?;
             if !Self::is_acceptable_inner_reason(stats.reason) {
-                let history = vec![stats.final_residual];
-                let history_summary = ResidualHistorySummary::from_history(&history)
-                    .map(ResidualHistorySummary::detail_fragment)
-                    .unwrap_or_else(|| "history_len=0".to_string());
+                let history_summary =
+                    Self::summarize_history(&inner.residual_history, stats.final_residual);
                 let detail = format!(
-                    "inner_ksp={:?} inner_pc={:?} true_final_norm={:.3e} nested_reason={} {}",
+                    "outer_side={side:?} inner_ksp={:?} inner_pc={:?} true_final_norm={:.3e} nested_reason={} {}",
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
                     stats.final_residual,
@@ -177,6 +215,7 @@ impl Preconditioner for KspAsPc {
                     residual_history_summary: Some(history_summary),
                 }));
             }
+            let _ = Self::summarize_history(&inner.residual_history, stats.final_residual);
             return Ok(());
         }
         Err(KError::SolveError(
@@ -186,6 +225,9 @@ impl Preconditioner for KspAsPc {
 
     fn on_restart(&mut self, _outer_iter: usize, _residual_norm: R) -> Result<(), KError> {
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
+            if let Ok(mut h) = inner.residual_history.lock() {
+                h.clear();
+            }
             inner.ksp.setup()?;
         }
         Ok(())
@@ -338,20 +380,16 @@ mod tests {
             ),
             detail: "inner_ksp=Some(\"gmres\") inner_pc=Some(\"none\")".into(),
         };
-        assert!(
-            failure
-                .final_norm
-                .as_deref()
-                .unwrap_or_default()
-                .contains("true_residual_l2")
-        );
-        assert!(
-            failure
-                .residual_history_summary
-                .as_deref()
-                .unwrap_or_default()
-                .contains("history_len=")
-        );
+        assert!(failure
+            .final_norm
+            .as_deref()
+            .unwrap_or_default()
+            .contains("true_residual_l2"));
+        assert!(failure
+            .residual_history_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("history_len="));
     }
 
     #[test]

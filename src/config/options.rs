@@ -285,6 +285,7 @@ pub struct PcOptions {
     pub pc_ksp_reproducible: Option<bool>,
     pub pc_ksp_threads: Option<usize>,
     pub pc_ksp_threads_mode: Option<String>,
+    pub pc_ksp_pc_side: Option<String>,
     /// Scoped KSP options for nested `pc_type = ksp` contexts.
     pub pc_ksp_ksp_options: Option<KspOptions>,
     /// Scoped PC options for nested `pc_type = ksp` contexts.
@@ -702,6 +703,9 @@ impl PcOptions {
             }
             if ksp_opts.threads_mode.is_none() {
                 ksp_opts.threads_mode = self.pc_ksp_threads_mode.clone();
+            }
+            if ksp_opts.pc_side.is_none() {
+                ksp_opts.pc_side = self.pc_ksp_pc_side.clone();
             }
             self.pc_ksp_ksp_options = Some(ksp_opts);
         }
@@ -1267,6 +1271,7 @@ impl Sink for PcOptions {
             }
             "pc_ksp_threads" => set_opt!(&mut self.pc_ksp_threads, parse_as::<usize>(v, spec)?),
             "pc_ksp_threads_mode" => set_opt!(&mut self.pc_ksp_threads_mode, v.to_lowercase()),
+            "pc_ksp_pc_side" => set_opt!(&mut self.pc_ksp_pc_side, v.to_lowercase()),
             "pc_mg_levels" => set_opt!(&mut self.pc_mg_levels, parse_as::<usize>(v, spec)?),
             "pc_mg_cycle_type" => set_opt!(&mut self.pc_mg_cycle_type, v.to_lowercase()),
             "pc_mg_smoother" => set_opt!(&mut self.pc_mg_smoother, v.to_lowercase()),
@@ -2337,6 +2342,7 @@ impl PcOptions {
         o!(pc_ksp_reproducible);
         o!(pc_ksp_threads);
         o!(pc_ksp_threads_mode);
+        o!(pc_ksp_pc_side);
         o!(pc_ksp_ksp_options);
         o!(pc_ksp_pc_options);
         o!(pc_mg_levels);
@@ -3301,6 +3307,8 @@ mod old_tests {
             "1",
             "-pc_ksp_threads_mode",
             "serial",
+            "-pc_ksp_pc_side",
+            "right",
         ];
         let opts = PcOptions::from_args(&args).unwrap();
         assert_eq!(opts.pc_ksp_ksp_type.as_deref(), Some("gmres"));
@@ -3315,6 +3323,7 @@ mod old_tests {
         assert_eq!(opts.pc_ksp_reproducible, Some(true));
         assert_eq!(opts.pc_ksp_threads, Some(1));
         assert_eq!(opts.pc_ksp_threads_mode.as_deref(), Some("serial"));
+        assert_eq!(opts.pc_ksp_pc_side.as_deref(), Some("right"));
     }
 
     #[test]
