@@ -13,6 +13,7 @@ use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Scalar carried through MG hierarchy operators and transfers.
 type MgScalar = S;
@@ -30,6 +31,17 @@ pub struct MgLevelPolicy {
     pub coarse_ksp_maxits: Option<usize>,
     pub coarse_ksp_rtol: Option<f64>,
     pub coarse_side: Option<PcSide>,
+    pub level_ksp_type: Option<String>,
+    pub level_pc_type: Option<String>,
+    pub level_ksp_maxits: Option<usize>,
+    pub level_ksp_rtol: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MgPerfCounters {
+    pub setup_per_level: Vec<Duration>,
+    pub apply_per_level: Vec<Duration>,
+    pub comm_bytes_per_level: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +69,10 @@ struct MgResolvedPolicy {
     coarse_ksp_maxits: Option<usize>,
     coarse_ksp_rtol: Option<f64>,
     coarse_side: PcSide,
+    level_ksp_type: Option<String>,
+    level_pc_type: Option<String>,
+    level_ksp_maxits: Option<usize>,
+    level_ksp_rtol: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +261,8 @@ pub struct MgPc {
     level_coarse_pc_types: BTreeMap<usize, String>,
     level_policies: Vec<MgLevelPolicy>,
     diagnostics: Vec<MgLevelDiagnostics>,
+    perf: Arc<Mutex<MgPerfCounters>>,
+    hierarchy_pattern_hash: Option<u64>,
     comm: UniverseComm,
 }
 
@@ -340,6 +358,8 @@ impl MgPc {
             level_coarse_pc_types: BTreeMap::new(),
             level_policies: Vec::new(),
             diagnostics: Vec::new(),
+            perf: Arc::new(Mutex::new(MgPerfCounters::default())),
+            hierarchy_pattern_hash: None,
             comm: UniverseComm::NoComm(crate::parallel::NoComm),
         }
     }
@@ -350,6 +370,10 @@ impl MgPc {
 
     pub fn diagnostics(&self) -> &[MgLevelDiagnostics] {
         &self.diagnostics
+    }
+
+    pub fn perf_counters(&self) -> MgPerfCounters {
+        self.perf.lock().map(|p| p.clone()).unwrap_or_default()
     }
 
     pub fn set_level_transfer_operators(
@@ -446,6 +470,34 @@ impl MgPc {
             return Err(KError::InvalidInput("pc_mg_smoother cannot be none".into()));
         }
         PcFactory::create_preconditioner(pc_type, None)
+    }
+
+    fn build_level_solver(
+        &self,
+        policy: &MgResolvedPolicy,
+    ) -> Result<Box<dyn Preconditioner>, KError> {
+        if let Some(ksp_type) = policy.level_ksp_type.as_ref() {
+            let mut inner_pc = PcOptions {
+                pc_type: policy
+                    .level_pc_type
+                    .clone()
+                    .or_else(|| Some(policy.smoother.clone())),
+                ..Default::default()
+            };
+            if inner_pc.pc_type.is_none() {
+                inner_pc.pc_type = Some("jacobi".to_string());
+            }
+            return Ok(Box::new(KspAsPc::new(
+                KspOptions {
+                    ksp_type: Some(ksp_type.clone()),
+                    maxits: policy.level_ksp_maxits,
+                    rtol: policy.level_ksp_rtol,
+                    ..Default::default()
+                },
+                inner_pc,
+            )?));
+        }
+        self.build_smoother(&policy.smoother)
     }
 
     fn build_transfer(
@@ -555,6 +607,10 @@ impl MgPc {
             coarse_ksp_maxits: self.coarse_ksp_maxits,
             coarse_ksp_rtol: self.coarse_ksp_rtol,
             coarse_side: PcSide::Left,
+            level_ksp_type: None,
+            level_pc_type: None,
+            level_ksp_maxits: None,
+            level_ksp_rtol: None,
         };
         for p in self.level_policies.iter().filter(|p| p.level <= level) {
             if let Some(v) = p.smoother_type.as_ref() {
@@ -588,6 +644,18 @@ impl MgPc {
             if let Some(v) = p.coarse_side {
                 resolved.coarse_side = v;
             }
+            if let Some(v) = p.level_ksp_type.as_ref() {
+                resolved.level_ksp_type = Some(v.clone());
+            }
+            if let Some(v) = p.level_pc_type.as_ref() {
+                resolved.level_pc_type = Some(v.clone());
+            }
+            if let Some(v) = p.level_ksp_maxits {
+                resolved.level_ksp_maxits = Some(v);
+            }
+            if let Some(v) = p.level_ksp_rtol {
+                resolved.level_ksp_rtol = Some(v);
+            }
         }
         resolved
     }
@@ -604,6 +672,7 @@ impl MgPc {
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("multigrid hierarchy not set up".into()))?;
         let level = &hierarchy.levels[level_ix];
+        let t0 = Instant::now();
         let is_coarse = level_ix + 1 == hierarchy.levels.len();
         if is_coarse {
             if let Some(coarse) = &self.coarse_solve {
@@ -634,6 +703,12 @@ impl MgPc {
                         }
                     }
                 }
+            }
+            if let Ok(mut perf) = self.perf.lock() {
+                if perf.apply_per_level.len() <= level_ix {
+                    perf.apply_per_level.resize(level_ix + 1, Duration::ZERO);
+                }
+                perf.apply_per_level[level_ix] += t0.elapsed();
             }
             return Ok(());
         }
@@ -682,6 +757,19 @@ impl MgPc {
 
         let post_sweeps = level_policy.post_sweeps;
         Self::smooth_level(level, post_sweeps, level_policy.smoother_side, b, x)?;
+        if let Ok(mut perf) = self.perf.lock() {
+            if perf.apply_per_level.len() <= level_ix {
+                perf.apply_per_level.resize(level_ix + 1, Duration::ZERO);
+            }
+            perf.apply_per_level[level_ix] += t0.elapsed();
+            if perf.comm_bytes_per_level.len() <= level_ix {
+                perf.comm_bytes_per_level.resize(level_ix + 1, 0);
+            }
+            let bytes = restriction.nnz() * std::mem::size_of::<S>()
+                + prolongation.nnz() * std::mem::size_of::<S>();
+            perf.comm_bytes_per_level[level_ix] =
+                perf.comm_bytes_per_level[level_ix].saturating_add(bytes);
+        }
         Ok(())
     }
 }
@@ -697,6 +785,16 @@ impl Preconditioner for MgPc {
         self.restrict = MgRestrictType::from_option(self.restriction_type.as_deref())?;
 
         let a = csr_from_linop_scalar(_a, 0.0)?;
+        let pattern_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            a.row_ptr().hash(&mut h);
+            a.col_idx().hash(&mut h);
+            h.finish()
+        };
+        if self.hierarchy.is_some() && self.hierarchy_pattern_hash == Some(pattern_hash) {
+            return Ok(());
+        }
         let mut levels = Vec::new();
         levels.push(MgLevel::new(0, a.clone()));
         let mut current = a;
@@ -751,9 +849,16 @@ impl Preconditioner for MgPc {
         self.comm = op_comm.clone();
         for lvl in hierarchy.levels_mut().iter_mut().take(self.levels - 1) {
             let policy = self.resolved_policy_for_level(lvl.level);
-            let mut smoother = self.build_smoother(&policy.smoother)?;
+            let mut smoother = self.build_level_solver(&policy)?;
             let op = CsrLinOp::new(lvl.operator.clone(), op_comm.clone());
+            let ts = Instant::now();
             smoother.setup(&op)?;
+            if let Ok(mut perf) = self.perf.lock() {
+                if perf.setup_per_level.len() <= lvl.level {
+                    perf.setup_per_level.resize(lvl.level + 1, Duration::ZERO);
+                }
+                perf.setup_per_level[lvl.level] += ts.elapsed();
+            }
             lvl.smoother = Some(smoother);
         }
 
@@ -836,6 +941,7 @@ impl Preconditioner for MgPc {
             })
             .collect();
         self.hierarchy = Some(hierarchy);
+        self.hierarchy_pattern_hash = Some(pattern_hash);
         Ok(())
     }
 

@@ -373,6 +373,19 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
                     })?)
                 }
                 "coarse_side" => policy.coarse_side = Some(PcSide::from_str(v.trim())?),
+                "ksp" | "ksp_type" => policy.level_ksp_type = Some(v.trim().to_lowercase()),
+                "pc" | "pc_type" => policy.level_pc_type = Some(v.trim().to_lowercase()),
+                "ksp_maxits" | "maxits" => {
+                    policy.level_ksp_maxits = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid mg level maxits: {v}"))
+                    })?)
+                }
+                "ksp_rtol" | "rtol" => {
+                    policy.level_ksp_rtol =
+                        Some(v.trim().parse().map_err(|_| {
+                            KError::InvalidInput(format!("invalid mg level rtol: {v}"))
+                        })?)
+                }
                 _ => {}
             }
         }
@@ -400,6 +413,14 @@ fn mg_policy_from_scoped_level(level: usize, scoped: &PcOptions) -> MgLevelPolic
         coarse_ksp_maxits: scoped.pc_mg_coarse_ksp_maxits.or(scoped.pc_ksp_maxits),
         coarse_ksp_rtol: scoped.pc_mg_coarse_ksp_rtol.or(scoped.pc_ksp_rtol),
         coarse_side: None,
+        level_ksp_type: scoped.pc_ksp_ksp_type.clone().map(|v| v.to_lowercase()),
+        level_pc_type: scoped
+            .pc_ksp_pc_type
+            .clone()
+            .or_else(|| scoped.pc_type.clone())
+            .map(|v| v.to_lowercase()),
+        level_ksp_maxits: scoped.pc_ksp_maxits,
+        level_ksp_rtol: scoped.pc_ksp_rtol,
     }
 }
 
