@@ -49,6 +49,13 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// Complex arithmetic capability for this preconditioner implementation.
 pub const COMPLEX_SUPPORT: &str = "native_complex";
 
+#[cfg(feature = "complex")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SorComplexKernelMode {
+    Native,
+    DegradedSplitRealImag,
+}
+
 bitflags! {
     /// Bitflags for SOR sweep types and options.
     ///
@@ -262,6 +269,8 @@ pub struct SorPc {
     a_csr_complex: Option<Arc<CsrMatrix<S>>>,
     #[cfg(feature = "complex")]
     inv_diag_complex: Vec<S>,
+    #[cfg(feature = "complex")]
+    complex_force_split_fallback: bool,
     color_of: Vec<usize>,
     color_blocks: Vec<Vec<usize>>,
     n: usize,
@@ -281,10 +290,26 @@ impl SorPc {
             a_csr_complex: None,
             #[cfg(feature = "complex")]
             inv_diag_complex: Vec::new(),
+            #[cfg(feature = "complex")]
+            complex_force_split_fallback: false,
             color_of: Vec::new(),
             color_blocks: Vec::new(),
             n: 0,
             scratch: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn set_complex_force_split_fallback(&mut self, on: bool) {
+        self.complex_force_split_fallback = on;
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn complex_kernel_mode(&self) -> SorComplexKernelMode {
+        if self.complex_force_split_fallback {
+            SorComplexKernelMode::DegradedSplitRealImag
+        } else {
+            SorComplexKernelMode::Native
         }
     }
 
@@ -525,7 +550,23 @@ impl SorPc {
     }
 
     #[cfg(feature = "complex")]
-    fn apply_complex(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_complex(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        if self.complex_force_split_fallback {
+            let mut xr = vec![0.0; x.len()];
+            let mut xi = vec![0.0; x.len()];
+            let mut yr = vec![0.0; y.len()];
+            let mut yi = vec![0.0; y.len()];
+            for i in 0..x.len() {
+                xr[i] = x[i].real();
+                xi[i] = x[i].imag();
+            }
+            self.apply_real(side, &xr, &mut yr)?;
+            self.apply_real(side, &xi, &mut yi)?;
+            for i in 0..y.len() {
+                y[i] = S::from_parts(yr[i], yi[i]);
+            }
+            return Ok(());
+        }
         let a = self
             .a_csr_complex
             .as_ref()
@@ -695,6 +736,33 @@ mod tests {
         let mut scratch = BridgeScratch::default();
         pc.apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
             .unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn complex_fallback_mode_switches_to_split_real_imag() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                S::from_parts(4.0, 0.1),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(4.0, -0.1),
+            ],
+        );
+        let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
+        pc.set_complex_force_split_fallback(true);
+        pc.setup(&a).unwrap();
+        assert_eq!(
+            pc.complex_kernel_mode(),
+            SorComplexKernelMode::DegradedSplitRealImag
+        );
+        let rhs = vec![S::from_parts(1.0, 0.5); 2];
+        let mut out = vec![S::zero(); rhs.len()];
+        pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
         assert!(out.iter().all(|v| v.is_finite()));
     }
 }

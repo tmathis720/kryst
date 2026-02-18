@@ -10732,3 +10732,51 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "complex"))]
+mod tests_complex {
+    use crate::algebra::prelude::*;
+    use crate::matrix::sparse::CsrMatrix;
+    use crate::preconditioner::approxinv_csr::{ApproxInvBuilder, ApproxInvKind};
+    use crate::preconditioner::{PcSide, Preconditioner};
+
+    fn poisson_1d_complex() -> CsrMatrix<S> {
+        CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 5, 7],
+            vec![0, 1, 0, 1, 2, 1, 2],
+            vec![
+                S::from_parts(2.0, 0.1),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(2.0, -0.2),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(2.0, 0.1),
+            ],
+        )
+    }
+
+    #[test]
+    fn approxinv_complex_in_amg_scope_produces_finite_apply() {
+        let a = poisson_1d_complex();
+        let a_real = CsrMatrix::from_csr(
+            a.nrows(),
+            a.ncols(),
+            a.row_ptr().to_vec(),
+            a.col_idx().to_vec(),
+            a.values().iter().map(|v| v.real()).collect(),
+        );
+        let mut fsai = ApproxInvBuilder::new(ApproxInvKind::FSAI)
+            .levels(1)
+            .build_fsai(&a_real)
+            .unwrap();
+
+        let rhs = vec![S::from_parts(1.0, -0.4); 3];
+        let mut y = vec![S::zero(); 3];
+        fsai.setup(&a).unwrap();
+        fsai.apply(PcSide::Left, &rhs, &mut y).unwrap();
+        assert!(y.iter().all(|v| v.is_finite()));
+    }
+}

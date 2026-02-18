@@ -72,3 +72,6 @@ mod near_nullspace;
 mod nodal;
 mod post_interp;
 mod spd;
+
+#[cfg(feature = "complex")]
+mod ilu_csr_complex;

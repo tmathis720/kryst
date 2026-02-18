@@ -6,6 +6,7 @@ pub struct PcStats {
     pub nnz_pc: usize,
     pub fill_ratio: f64,
     pub applies: u64,
+    pub complex_kernel: Option<&'static str>,
 }
 
 pub trait PcIntrospect {
