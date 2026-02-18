@@ -3829,6 +3829,12 @@ impl AMG {
             None
         };
 
+        if let Some(stats_ref) = stats.as_mut()
+            && stats_ref.per_level_comm_bytes.is_empty()
+        {
+            stats_ref.per_level_comm_bytes = vec![0; 1];
+        }
+
         let strategy = self.resolve_dist_coarse_strategy(&dist.comm)?;
         let result = match strategy {
             DistCoarseStrategy::RootGather => {
@@ -3893,9 +3899,11 @@ impl AMG {
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_gather) {
             stats.gather = toc(t0);
             let n = row_part.last().copied().unwrap_or_default();
-            stats.comm_bytes = stats
-                .comm_bytes
-                .saturating_add(n * std::mem::size_of::<f64>());
+            let bytes = n * std::mem::size_of::<f64>();
+            stats.comm_bytes = stats.comm_bytes.saturating_add(bytes);
+            if !stats.per_level_comm_bytes.is_empty() {
+                stats.per_level_comm_bytes[0] = stats.per_level_comm_bytes[0].saturating_add(bytes);
+            }
         }
         let mut global_z = if rank == root {
             vec![0.0f64; dist.n_global]
@@ -3922,9 +3930,11 @@ impl AMG {
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_scatter) {
             stats.scatter = toc(t0);
             let n = row_part.last().copied().unwrap_or_default();
-            stats.comm_bytes = stats
-                .comm_bytes
-                .saturating_add(n * std::mem::size_of::<f64>());
+            let bytes = n * std::mem::size_of::<f64>();
+            stats.comm_bytes = stats.comm_bytes.saturating_add(bytes);
+            if !stats.per_level_comm_bytes.is_empty() {
+                stats.per_level_comm_bytes[0] = stats.per_level_comm_bytes[0].saturating_add(bytes);
+            }
         }
         Ok(())
     }
@@ -3967,6 +3977,10 @@ impl AMG {
                     .map(|cols| cols.len() * std::mem::size_of::<f64>())
                     .sum();
                 stats.comm_bytes = stats.comm_bytes.saturating_add(halo_bytes);
+                if !stats.per_level_comm_bytes.is_empty() {
+                    stats.per_level_comm_bytes[0] =
+                        stats.per_level_comm_bytes[0].saturating_add(halo_bytes);
+                }
             }
             if self.cfg.dist_coarse_ghost_scale > 0.0 {
                 let ghost = halo.ghost_slice_ref();
@@ -9306,6 +9320,7 @@ pub struct DistApplyStats {
     pub setup_total: Duration,
     pub per_level_apply: Vec<Duration>,
     pub comm_bytes: usize,
+    pub per_level_comm_bytes: Vec<usize>,
     pub reductions: usize,
 }
 
@@ -9322,6 +9337,7 @@ impl Default for DistApplyStats {
             setup_total: Duration::default(),
             per_level_apply: Vec::new(),
             comm_bytes: 0,
+            per_level_comm_bytes: Vec::new(),
             reductions: 0,
         }
     }

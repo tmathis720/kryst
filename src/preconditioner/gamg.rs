@@ -28,6 +28,8 @@ pub struct GamgLevelPolicy {
     pub side: Option<PcSide>,
     pub ksp_type: Option<String>,
     pub pc_type: Option<String>,
+    pub ksp_maxits: Option<usize>,
+    pub ksp_rtol: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +165,16 @@ fn parse_coarse_solver(value: &str) -> Result<CoarseSolve, KError> {
 }
 
 #[cfg(feature = "backend-faer")]
+fn coarse_solve_from_pc_name(pc: &str) -> Option<CoarseSolve> {
+    match pc.trim().to_lowercase().as_str() {
+        "ilu" | "ilu0" | "ilut" | "iluk" => Some(CoarseSolve::ILU),
+        "jacobi" | "sor" | "gs" | "gauss_seidel" => Some(CoarseSolve::Smoother),
+        "lu" | "qr" | "direct" => Some(CoarseSolve::DirectDense),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "backend-faer")]
 fn gamg_policy_from_scoped(level: usize, scoped: &PcOptions) -> Result<GamgLevelPolicy, KError> {
     let coarse_solver = scoped
         .amg_coarse_solver
@@ -181,7 +193,13 @@ fn gamg_policy_from_scoped(level: usize, scoped: &PcOptions) -> Result<GamgLevel
         coarse_solver,
         side: None,
         ksp_type: scoped.pc_ksp_ksp_type.clone().map(|v| v.to_lowercase()),
-        pc_type: scoped.pc_type.clone().map(|v| v.to_lowercase()),
+        pc_type: scoped
+            .pc_ksp_pc_type
+            .clone()
+            .or_else(|| scoped.pc_type.clone())
+            .map(|v| v.to_lowercase()),
+        ksp_maxits: scoped.pc_ksp_maxits,
+        ksp_rtol: scoped.pc_ksp_rtol,
     })
 }
 #[cfg(feature = "backend-faer")]
@@ -205,6 +223,17 @@ fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
                 "coarse" | "coarse_solver" => policy.coarse_solver = Some(parse_coarse_solver(v)?),
                 "ksp" | "ksp_type" => policy.ksp_type = Some(v.trim().to_lowercase()),
                 "pc" | "pc_type" => policy.pc_type = Some(v.trim().to_lowercase()),
+                "ksp_maxits" | "maxits" => {
+                    policy.ksp_maxits = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid gamg ksp maxits: {v}"))
+                    })?)
+                }
+                "ksp_rtol" | "rtol" => {
+                    policy.ksp_rtol =
+                        Some(v.trim().parse().map_err(|_| {
+                            KError::InvalidInput(format!("invalid gamg ksp rtol: {v}"))
+                        })?)
+                }
                 "side" => policy.side = Some(PcSide::from_str(v.trim())?),
                 _ => {}
             }
@@ -316,7 +345,11 @@ impl Preconditioner for Gamg {
             .filter(|p| p.level <= self.config.amg_config.max_levels)
             .collect::<Vec<_>>()
         {
-            if let Some(solve) = p.coarse_solver {
+            if let Some(solve) = p
+                .coarse_solver
+                .or_else(|| p.pc_type.as_deref().and_then(coarse_solve_from_pc_name))
+                .or_else(|| p.ksp_type.as_ref().map(|_| CoarseSolve::CG))
+            {
                 self.amg.set_level_coarse_solver(p.level, solve);
             }
         }

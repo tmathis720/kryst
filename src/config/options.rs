@@ -1335,8 +1335,16 @@ impl Sink for PcOptions {
                     .collect::<Vec<_>>();
                 set_opt!(&mut self.pc_gamg_level_policies, parsed)
             }
-            "pc_amg_dist_coarse_policy" | "pc_gamg_dist_coarse_policy" => {
+            "pc_amg_dist_coarse_policy"
+            | "pc_gamg_dist_coarse_policy"
+            | "pc_mg_dist_coarse_policy" => {
                 set_opt!(&mut self.amg_dist_coarse_policy, v.to_lowercase())
+            }
+            "pc_mg_repartition" | "pc_mg_dist_coarse_repartition" => {
+                set_opt!(&mut self.amg_dist_coarse_repartition, v.to_lowercase())
+            }
+            "pc_mg_coarse_solver_route" | "pc_mg_dist_coarse_solver_route" => {
+                set_opt!(&mut self.amg_dist_coarse_solver_route, v.to_lowercase())
             }
             "pc_chain" => set_opt!(&mut self.pc_chain, v.to_string()),
             "pc_composite_type" => set_opt!(&mut self.pc_composite_type, v.to_lowercase()),

@@ -1319,6 +1319,27 @@ pub static SPECS: &[Spec] = &[
         doc: "alias for -pc_amg_dist_coarse_solver_route",
     },
     Spec {
+        flag: "-pc_mg_repartition",
+        key: "pc_mg_repartition",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_amg_dist_coarse_repartition",
+    },
+    Spec {
+        flag: "-pc_mg_coarse_solver_route",
+        key: "pc_mg_coarse_solver_route",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_amg_dist_coarse_solver_route",
+    },
+    Spec {
+        flag: "-pc_mg_dist_coarse_policy",
+        key: "pc_mg_dist_coarse_policy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_amg_dist_apply_mode",
+    },
+    Spec {
         flag: "-pc_chain",
         key: "pc_chain",
         arity: Arity::One,
