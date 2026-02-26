@@ -1004,6 +1004,13 @@ pub static SPECS: &[Spec] = &[
         doc: "Schur preconditioning strategy (self/diag/a11)",
     },
     Spec {
+        flag: "-pc_fieldsplit_extraction",
+        key: "pc_fieldsplit_extraction",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "fieldsplit block extraction strategy (extract/cached/zero_copy)",
+    },
+    Spec {
         flag: "-pc_shell_name",
         key: "pc_shell_name",
         arity: Arity::One,
