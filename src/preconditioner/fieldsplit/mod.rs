@@ -26,11 +26,12 @@ pub struct FieldSplitPc {
     schur_apply_hook: Option<SchurApplyHook>,
     last_structure_id: Option<StructureId>,
     last_values_id: Option<ValuesId>,
+    extraction_mode: BlockExtractionMode,
 }
 
 type SchurApplyHook = Arc<dyn Fn(&[S], &mut [S]) -> Result<(), KError> + Send + Sync>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BlockSpan {
     start: usize,
     end: usize,
@@ -74,6 +75,13 @@ enum SchurPrecondition {
 struct SchurBlocks {
     a12: Arc<CsrMatrix<S>>,
     a21: Arc<CsrMatrix<S>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockExtractionMode {
+    Extract,
+    Cached,
+    ZeroCopy,
 }
 
 impl FieldSplitPc {
@@ -125,7 +133,25 @@ impl FieldSplitPc {
             schur_apply_hook: None,
             last_structure_id: None,
             last_values_id: None,
+            extraction_mode: Self::extraction_mode_from_options(&opts)?,
         })
+    }
+
+    fn extraction_mode_from_options(opts: &PcOptions) -> Result<BlockExtractionMode, KError> {
+        match opts
+            .pc_fieldsplit_extraction
+            .as_deref()
+            .unwrap_or("extract")
+            .to_lowercase()
+            .as_str()
+        {
+            "extract" => Ok(BlockExtractionMode::Extract),
+            "cached" | "cache" => Ok(BlockExtractionMode::Cached),
+            "zero_copy" | "zerocopy" | "view" => Ok(BlockExtractionMode::ZeroCopy),
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_fieldsplit_extraction: {other}"
+            ))),
+        }
     }
 
     fn split_type_from_options(opts: &PcOptions) -> Result<FieldSplitType, KError> {
@@ -136,8 +162,11 @@ impl FieldSplitPc {
             .to_lowercase();
         match kind.as_str() {
             "additive" | "diag" | "blockdiag" => Ok(FieldSplitType::Additive),
+            "composite_additive" => Ok(FieldSplitType::Additive),
             "multiplicative" | "mul" => Ok(FieldSplitType::Multiplicative),
+            "composite_multiplicative" => Ok(FieldSplitType::Multiplicative),
             "symmetric" | "sym" => Ok(FieldSplitType::Symmetric),
+            "composite_symmetric_multiplicative" => Ok(FieldSplitType::Symmetric),
             "schur" => {
                 let factorization = match opts
                     .pc_fieldsplit_schur_fact_type
@@ -274,13 +303,35 @@ impl FieldSplitPc {
         csr: &CsrMatrix<S>,
         spans: &[BlockSpan],
     ) -> Vec<Arc<CsrMatrix<S>>> {
+        if self.extraction_mode == BlockExtractionMode::Cached
+            && spans.len() == self.block_spans.len()
+            && spans == self.block_spans.as_slice()
+            && !self.block_matrices.is_empty()
+        {
+            return self.block_matrices.clone();
+        }
         spans
             .iter()
             .map(|span| {
+                if self.extraction_mode == BlockExtractionMode::ZeroCopy
+                    && span.start == 0
+                    && span.end == csr.nrows()
+                    && csr.nrows() == csr.ncols()
+                {
+                    return Arc::new(csr.clone());
+                }
                 let indices: Vec<usize> = (span.start..span.end).collect();
                 Arc::new(csr.extract_submatrix(&indices, &indices))
             })
             .collect()
+    }
+
+    fn restrict_rhs<'a>(&self, x: &'a [S], span: BlockSpan) -> &'a [S] {
+        &x[span.start..span.end]
+    }
+
+    fn prolong_assign(&self, y: &mut [S], span: BlockSpan, block_y: &[S]) {
+        y[span.start..span.end].copy_from_slice(block_y);
     }
 
     fn extract_schur_blocks(&self, csr: &CsrMatrix<S>, spans: &[BlockSpan]) -> Option<SchurBlocks> {
@@ -431,8 +482,8 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, &x[span.start..span.end], &mut zout)?;
-            y[span.start..span.end].copy_from_slice(&zout);
+            child.apply(side, self.restrict_rhs(x, *span), &mut zout)?;
+            self.prolong_assign(y, *span, &zout);
         }
         Ok(())
     }
@@ -446,7 +497,7 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, &residual[span.start..span.end], &mut zout)?;
+            child.apply(side, self.restrict_rhs(&residual, *span), &mut zout)?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
@@ -465,7 +516,7 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, &residual[span.start..span.end], &mut zout)?;
+            child.apply(side, self.restrict_rhs(&residual, *span), &mut zout)?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
@@ -476,7 +527,7 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, &residual[span.start..span.end], &mut zout)?;
+            child.apply(side, self.restrict_rhs(&residual, *span), &mut zout)?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }

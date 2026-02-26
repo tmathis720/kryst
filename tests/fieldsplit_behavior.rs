@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use kryst::KError;
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcFactory;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::op::DistLayout;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::prelude::*;
+use kryst::KError;
 
 fn diag_csr(diag: &[f64]) -> CsrMatrix<S> {
     let n = diag.len();
@@ -71,22 +71,124 @@ fn fieldsplit_schur_factorization_variants_apply() -> Result<(), KError> {
     );
     let op = CsrOp::new(Arc::new(csr));
     for fact in ["diag", "lower", "upper", "full"] {
+        for pre in ["self", "diag", "a11", "full", "full_matfree"] {
+            let opts = PcOptions {
+                pc_type: Some("fieldsplit".into()),
+                pc_fieldsplit_block_sizes: Some(vec![1, 1]),
+                pc_fieldsplit_child_pc_type: Some("jacobi".into()),
+                pc_fieldsplit_type: Some("schur".into()),
+                pc_fieldsplit_schur_fact_type: Some(fact.into()),
+                pc_fieldsplit_schur_precondition: Some(pre.into()),
+                ..Default::default()
+            };
+            let mut pc = PcFactory::create_from_options(&opts)?;
+            pc.setup(&op)?;
+
+            let x = vec![S::from_real(2.0), S::from_real(3.0)];
+            let mut y = vec![S::zero(); 2];
+            pc.apply(PcSide::Left, &x, &mut y)?;
+            assert!(y.iter().all(|v| v.abs() > 0.0));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fieldsplit_composite_aliases_apply() -> Result<(), KError> {
+    let csr = diag_csr(&[2.0, 3.0, 4.0, 5.0]);
+    let op = CsrOp::new(Arc::new(csr));
+    for split in [
+        "composite_additive",
+        "composite_multiplicative",
+        "composite_symmetric_multiplicative",
+    ] {
         let opts = PcOptions {
             pc_type: Some("fieldsplit".into()),
-            pc_fieldsplit_block_sizes: Some(vec![1, 1]),
+            pc_fieldsplit_block_sizes: Some(vec![2, 2]),
             pc_fieldsplit_child_pc_type: Some("jacobi".into()),
-            pc_fieldsplit_type: Some("schur".into()),
-            pc_fieldsplit_schur_fact_type: Some(fact.into()),
-            pc_fieldsplit_schur_precondition: Some("self".into()),
+            pc_fieldsplit_type: Some(split.into()),
             ..Default::default()
         };
         let mut pc = PcFactory::create_from_options(&opts)?;
         pc.setup(&op)?;
-
-        let x = vec![S::from_real(2.0), S::from_real(3.0)];
-        let mut y = vec![S::zero(); 2];
+        let x = vec![
+            S::from_real(2.0),
+            S::from_real(6.0),
+            S::from_real(8.0),
+            S::from_real(10.0),
+        ];
+        let mut y = vec![S::zero(); x.len()];
         pc.apply(PcSide::Left, &x, &mut y)?;
         assert!(y.iter().all(|v| v.abs() > 0.0));
+    }
+    Ok(())
+}
+
+#[test]
+fn fieldsplit_subksp_and_child_pc_prefixes_parse() {
+    let args = [
+        "-pc_type",
+        "fieldsplit",
+        "-pc_fieldsplit_block_sizes",
+        "1,1",
+        "-pc_fieldsplit_prefixes",
+        "pc_fieldsplit_0_,pc_fieldsplit_1_",
+        "-pc_fieldsplit_0_pc_type",
+        "ksp",
+        "-pc_fieldsplit_0_pc_ksp_ksp_type",
+        "gmres",
+        "-pc_fieldsplit_0_pc_ksp_pc_type",
+        "jacobi",
+        "-pc_fieldsplit_1_pc_type",
+        "ilu",
+    ];
+    let opts = PcOptions::from_args(&args).expect("parse fieldsplit scoped args");
+    let c0 = opts
+        .scoped_child("pc_fieldsplit_0_")
+        .expect("first child options");
+    let c1 = opts
+        .scoped_child("pc_fieldsplit_1_")
+        .expect("second child options");
+    assert_eq!(c0.pc_type.as_deref(), Some("ksp"));
+    assert_eq!(
+        c0.pc_ksp_ksp_options
+            .as_ref()
+            .and_then(|k| k.ksp_type.as_deref()),
+        Some("gmres")
+    );
+    assert_eq!(
+        c0.pc_ksp_pc_options
+            .as_ref()
+            .and_then(|pc| pc.pc_type.as_deref()),
+        Some("jacobi")
+    );
+    assert_eq!(c1.pc_type.as_deref(), Some("ilu"));
+}
+
+#[test]
+fn fieldsplit_extraction_modes_parse_and_apply() -> Result<(), KError> {
+    let csr = diag_csr(&[2.0, 2.0]);
+    let op = CsrOp::new(Arc::new(csr));
+    for mode in ["extract", "cached", "zero_copy"] {
+        let args = [
+            "-pc_type",
+            "fieldsplit",
+            "-pc_fieldsplit_block_sizes",
+            "2",
+            "-pc_fieldsplit_type",
+            "additive",
+            "-pc_fieldsplit_child_pc_type",
+            "jacobi",
+            "-pc_fieldsplit_extraction",
+            mode,
+        ];
+        let opts = PcOptions::from_args(&args)?;
+        let mut pc = PcFactory::create_from_options(&opts)?;
+        pc.setup(&op)?;
+        let x = vec![S::from_real(2.0), S::from_real(4.0)];
+        let mut y = vec![S::zero(); 2];
+        pc.apply(PcSide::Left, &x, &mut y)?;
+        assert_eq!(y, vec![S::from_real(1.0), S::from_real(2.0)]);
     }
     Ok(())
 }
@@ -198,8 +300,7 @@ fn fieldsplit_complex_rejects_diag_schur_precondition() {
     };
     let mut pc = PcFactory::create_from_options(&opts).expect("create fieldsplit");
     let err = pc.setup(&op).expect_err("complex diag schur should fail");
-    assert!(
-        err.to_string()
-            .contains("not supported for complex scalars")
-    );
+    assert!(err
+        .to_string()
+        .contains("not supported for complex scalars"));
 }

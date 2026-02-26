@@ -261,6 +261,7 @@ pub struct PcOptions {
     pub pc_fieldsplit_type: Option<String>,
     pub pc_fieldsplit_schur_fact_type: Option<String>,
     pub pc_fieldsplit_schur_precondition: Option<String>,
+    pub pc_fieldsplit_extraction: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
     pub pc_shell_apply: Option<String>,
@@ -1235,6 +1236,9 @@ impl Sink for PcOptions {
             }
             "pc_fieldsplit_schur_precondition" => {
                 set_opt!(&mut self.pc_fieldsplit_schur_precondition, v.to_lowercase())
+            }
+            "pc_fieldsplit_extraction" => {
+                set_opt!(&mut self.pc_fieldsplit_extraction, v.to_lowercase())
             }
             "pc_shell_name" => {
                 set_opt!(&mut self.pc_shell_name, v.to_string())?;
@@ -2320,6 +2324,7 @@ impl PcOptions {
         o!(pc_fieldsplit_type);
         o!(pc_fieldsplit_schur_fact_type);
         o!(pc_fieldsplit_schur_precondition);
+        o!(pc_fieldsplit_extraction);
         o!(pc_shell_name);
         o!(pc_shell_apply);
         o!(pc_shell_apply_transpose);
