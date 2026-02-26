@@ -19,7 +19,7 @@ use crate::solver::MonitorCallback;
 use crate::solver::common::{ReductCtx, call_monitors, recompute_true_residual_norm_s};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
-use crate::utils::convergence::{ConvergedReason, SolveStats};
+use crate::utils::convergence::{ConvergedReason, ReductionModel, SolveStats};
 use crate::utils::monitor::{
     ResidualSnapshot, log_krylov_stagnation, log_residuals, stagnation_detected,
 };
@@ -76,6 +76,23 @@ impl FgmresSolver {
             variant: FgmresVariant::Classical,
             reorth: ReorthPolicy::IfNeeded,
             reorth_tol: 0.7,
+        }
+    }
+
+    fn reduction_model(&self) -> ReductionModel {
+        match self.variant {
+            FgmresVariant::Classical => ReductionModel {
+                variant: "fgmres-classical",
+                startup: 2,
+                per_iteration: 2.0,
+                tail: 1,
+            },
+            FgmresVariant::Pipelined => ReductionModel {
+                variant: "fgmres-pipelined",
+                startup: 2,
+                per_iteration: 1.0,
+                tail: 1,
+            },
         }
     }
 
@@ -646,7 +663,7 @@ impl FgmresSolver {
             metrics.reductions = reductions;
             stats.metrics = metrics;
         }
-        Ok(stats)
+        Ok(stats.with_reduction_model(self.reduction_model()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -689,7 +706,7 @@ impl FgmresSolver {
         )?;
 
         copy_scalar_to_real_in(&x_s, x);
-        Ok(stats)
+        Ok(stats.with_reduction_model(self.reduction_model()))
     }
 }
 

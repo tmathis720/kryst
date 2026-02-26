@@ -263,6 +263,26 @@ pub struct SolveMetrics {
 #[derive(Clone, Debug, Default)]
 pub struct SolveMetrics;
 
+/// Reduction accounting model for a solver/variant.
+#[derive(Clone, Debug)]
+pub struct ReductionModel {
+    /// Variant/algorithm label used in diagnostics output.
+    pub variant: &'static str,
+    /// One-time reductions before the main iteration loop.
+    pub startup: usize,
+    /// Typical global reductions performed per iteration.
+    pub per_iteration: f64,
+    /// Additional reductions paid on finalize/restart paths.
+    pub tail: usize,
+}
+
+impl ReductionModel {
+    /// Conservative estimate for `num_global_reductions` given observed iterations.
+    pub fn estimate_total(&self, iterations: usize) -> usize {
+        self.startup + (self.per_iteration * iterations as f64).ceil() as usize + self.tail
+    }
+}
+
 /// Statistics from a solve operation.
 #[must_use]
 #[derive(Clone, Debug)]
@@ -279,6 +299,8 @@ pub struct SolveStats<R> {
     pub reason: ConvergedReason,
     /// Additional counters collected during the solve.
     pub counters: SolverCounters,
+    /// Reduction accounting model for the selected solver variant.
+    pub reduction_model: Option<ReductionModel>,
     /// Total number of complex drift events observed during reductions.
     pub complex_drift_events: usize,
     /// Per-kind complex drift counts captured by the solver.
@@ -304,6 +326,7 @@ impl<R: Default> SolveStats<R> {
             final_residual,
             reason,
             counters: SolverCounters::default(),
+            reduction_model: None,
             complex_drift_events: 0,
             complex_drift_counts: [0; 6],
             complex_drift_max_rel: R::default(),
@@ -316,6 +339,11 @@ impl<R: Default> SolveStats<R> {
     /// Attach solver counters to an existing statistics record.
     pub fn with_counters(mut self, counters: SolverCounters) -> Self {
         self.counters = counters;
+        self
+    }
+
+    pub fn with_reduction_model(mut self, model: ReductionModel) -> Self {
+        self.reduction_model = Some(model);
         self
     }
 
