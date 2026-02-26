@@ -172,6 +172,10 @@ static APPLY_CONJ_TRANSPOSE_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellA
     Lazy::new(|| RwLock::new(HashMap::new()));
 static APPLY_SYMMETRIC_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+static APPLY_SYMMETRIC_LEFT_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static APPLY_SYMMETRIC_RIGHT_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellApply>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 static SETUP_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellSetup>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static DESTROY_REGISTRY: Lazy<RwLock<HashMap<String, Arc<dyn ShellDestroy>>>> =
@@ -210,6 +214,23 @@ pub fn register_shell_apply_symmetric(name: impl Into<String>, callback: Arc<dyn
         .insert(name.into(), callback);
 }
 
+pub fn register_shell_apply_symmetric_left(name: impl Into<String>, callback: Arc<dyn ShellApply>) {
+    APPLY_SYMMETRIC_LEFT_REGISTRY
+        .write()
+        .expect("shell symmetric-left callback registry poisoned")
+        .insert(name.into(), callback);
+}
+
+pub fn register_shell_apply_symmetric_right(
+    name: impl Into<String>,
+    callback: Arc<dyn ShellApply>,
+) {
+    APPLY_SYMMETRIC_RIGHT_REGISTRY
+        .write()
+        .expect("shell symmetric-right callback registry poisoned")
+        .insert(name.into(), callback);
+}
+
 pub fn register_shell_apply_typed<T, F>(name: impl Into<String>, callback: F)
 where
     T: ShellContext + 'static,
@@ -240,6 +261,22 @@ where
     F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
 {
     register_shell_apply_symmetric(name, shell_apply_with_typed_context(callback));
+}
+
+pub fn register_shell_apply_symmetric_left_typed<T, F>(name: impl Into<String>, callback: F)
+where
+    T: ShellContext + 'static,
+    F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
+{
+    register_shell_apply_symmetric_left(name, shell_apply_with_typed_context(callback));
+}
+
+pub fn register_shell_apply_symmetric_right_typed<T, F>(name: impl Into<String>, callback: F)
+where
+    T: ShellContext + 'static,
+    F: Fn(PcSide, &[S], &mut [S], &mut T) -> Result<(), KError> + Send + Sync + 'static,
+{
+    register_shell_apply_symmetric_right(name, shell_apply_with_typed_context(callback));
 }
 
 pub fn shell_apply<F>(callback: F) -> Arc<dyn ShellApply>
@@ -324,6 +361,26 @@ where
     register_shell_context(name, shell_context_factory(factory));
 }
 
+pub fn register_shell_context_shared<T>(name: impl Into<String>, shared: Arc<T>)
+where
+    T: Send + Sync + 'static,
+{
+    register_shell_context(
+        name,
+        shell_context_factory(move || shared.clone() as Arc<T>),
+    );
+}
+
+pub fn register_shell_context_shared_rwlock<T>(name: impl Into<String>, shared: Arc<RwLock<T>>)
+where
+    T: Send + Sync + 'static,
+{
+    register_shell_context(
+        name,
+        shell_context_factory(move || shared.clone() as Arc<RwLock<T>>),
+    );
+}
+
 pub fn shell_apply_with_typed_context<T, F>(callback: F) -> Arc<dyn ShellApply>
 where
     T: ShellContext + 'static,
@@ -355,6 +412,8 @@ pub struct ShellPc {
     callback_transpose_name: Option<String>,
     callback_conjugate_transpose_name: Option<String>,
     callback_symmetric_name: Option<String>,
+    callback_symmetric_left_name: Option<String>,
+    callback_symmetric_right_name: Option<String>,
     setup_name: Option<String>,
     destroy_name: Option<String>,
     context_name: Option<String>,
@@ -362,6 +421,8 @@ pub struct ShellPc {
     callback_transpose: Option<Arc<dyn ShellApply>>,
     callback_conjugate_transpose: Option<Arc<dyn ShellApply>>,
     callback_symmetric: Option<Arc<dyn ShellApply>>,
+    callback_symmetric_left: Option<Arc<dyn ShellApply>>,
+    callback_symmetric_right: Option<Arc<dyn ShellApply>>,
     setup: Option<Arc<dyn ShellSetup>>,
     destroy: Option<Arc<dyn ShellDestroy>>,
     context_factory: Option<Arc<dyn ShellContextFactory>>,
@@ -374,6 +435,8 @@ impl ShellPc {
         callback_transpose_name: Option<String>,
         callback_conjugate_transpose_name: Option<String>,
         callback_symmetric_name: Option<String>,
+        callback_symmetric_left_name: Option<String>,
+        callback_symmetric_right_name: Option<String>,
         setup_name: Option<String>,
         destroy_name: Option<String>,
         context_name: Option<String>,
@@ -383,6 +446,8 @@ impl ShellPc {
             callback_transpose_name,
             callback_conjugate_transpose_name,
             callback_symmetric_name,
+            callback_symmetric_left_name,
+            callback_symmetric_right_name,
             setup_name,
             destroy_name,
             context_name,
@@ -390,6 +455,8 @@ impl ShellPc {
             callback_transpose: None,
             callback_conjugate_transpose: None,
             callback_symmetric: None,
+            callback_symmetric_left: None,
+            callback_symmetric_right: None,
             setup: None,
             destroy: None,
             context_factory: None,
@@ -417,13 +484,20 @@ impl ShellPc {
             FailureStage::Setup => ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup),
             FailureStage::Solve => ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
         };
+        let nested_detail = match &err {
+            KError::NestedPcFailed(inner) => format!(
+                " inner_component={} inner_reason={} inner_detail={}",
+                inner.component, inner.reason, inner.detail
+            ),
+            _ => String::new(),
+        };
         KError::NestedPcFailed(NestedPcFailure {
             component: "pc_shell",
             reason,
             iterations: 0,
             final_norm: None,
             residual_history_summary: None,
-            detail: format!("stage={stage:?} hook={hook} nested_error={err}"),
+            detail: format!("stage={stage:?} hook={hook} nested_error={err}{nested_detail}"),
         })
     }
 
@@ -454,6 +528,22 @@ impl ShellPc {
         };
         let typed = shell_context_downcast_ref::<T>(ctx.as_ref())?;
         callback(typed)
+    }
+
+    pub fn with_shared_context<T, F, R>(&self, callback: F) -> Result<R, KError>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce(&Arc<T>) -> Result<R, KError>,
+    {
+        self.with_typed_context_ref::<Arc<T>, _, _>(callback)
+    }
+
+    pub fn with_shared_context_rwlock<T, F, R>(&self, callback: F) -> Result<R, KError>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce(&Arc<RwLock<T>>) -> Result<R, KError>,
+    {
+        self.with_typed_context_ref::<Arc<RwLock<T>>, _, _>(callback)
     }
 
     fn invoke_apply(
@@ -562,6 +652,34 @@ impl Preconditioner for ShellPc {
                     })?,
             );
         }
+        if let Some(name) = self.callback_symmetric_left_name.as_ref() {
+            self.callback_symmetric_left = Some(
+                APPLY_SYMMETRIC_LEFT_REGISTRY
+                    .read()
+                    .expect("shell symmetric-left callback registry poisoned")
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        KError::InvalidInput(format!(
+                            "shell symmetric-left callback not registered: {name}"
+                        ))
+                    })?,
+            );
+        }
+        if let Some(name) = self.callback_symmetric_right_name.as_ref() {
+            self.callback_symmetric_right = Some(
+                APPLY_SYMMETRIC_RIGHT_REGISTRY
+                    .read()
+                    .expect("shell symmetric-right callback registry poisoned")
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        KError::InvalidInput(format!(
+                            "shell symmetric-right callback not registered: {name}"
+                        ))
+                    })?,
+            );
+        }
         if let Some(name) = self.destroy_name.as_ref() {
             self.destroy = Some(
                 DESTROY_REGISTRY
@@ -600,6 +718,27 @@ impl Preconditioner for ShellPc {
 
     fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if matches!(side, PcSide::Symmetric) {
+            if self.callback_symmetric_left.is_some() {
+                self.invoke_apply(
+                    self.callback_symmetric_left.as_ref(),
+                    "apply_symmetric_left",
+                    FailureStage::Solve,
+                    PcSide::Left,
+                    x,
+                    y,
+                )?;
+                let tmp = y.to_vec();
+                return self.invoke_apply(
+                    self.callback_symmetric_right
+                        .as_ref()
+                        .or(self.callback_symmetric_left.as_ref()),
+                    "apply_symmetric_right",
+                    FailureStage::Solve,
+                    PcSide::Right,
+                    &tmp,
+                    y,
+                );
+            }
             if self.callback_symmetric.is_some() {
                 return self.invoke_apply(
                     self.callback_symmetric.as_ref(),
@@ -779,6 +918,8 @@ mod tests {
                 Some(format!("{tag}_transpose")),
                 Some(format!("{tag}_conj_transpose")),
                 Some(format!("{tag}_symmetric")),
+                None,
+                None,
                 Some(format!("{tag}_setup")),
                 Some(format!("{tag}_destroy")),
                 Some(format!("{tag}_ctx")),
@@ -834,6 +975,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             Some(format!("{tag}_ctx")),
         );
         pc.setup(&TestOp).expect("setup should succeed");
@@ -856,6 +999,32 @@ mod tests {
     }
 
     #[test]
+    fn shared_context_helpers_expose_arc_state() {
+        let tag = "shell_shared_ctx";
+        let shared = Arc::new(RwLock::new(HookCtx::default()));
+        register_shell_context_shared_rwlock(format!("{tag}_ctx"), shared.clone());
+        let mut pc = ShellPc::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(format!("{tag}_ctx")),
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+        pc.with_shared_context_rwlock::<HookCtx, _, _>(|ctx| {
+            let mut guard = ctx.write().expect("rwlock poisoned");
+            guard.apply_calls += 2;
+            Ok(())
+        })
+        .expect("shared rwlock context access should succeed");
+        assert_eq!(shared.read().expect("rwlock poisoned").apply_calls, 2);
+    }
+
+    #[test]
     fn typed_context_helpers_reject_wrong_type() {
         let mut ctx: Box<dyn ShellContext> = Box::new(7usize);
         let err = match shell_context_downcast_mut::<HookCtx>(ctx.as_mut()) {
@@ -866,8 +1035,79 @@ mod tests {
     }
 
     #[test]
+    fn symmetric_left_right_callbacks_chain_in_order() {
+        #[derive(Default)]
+        struct Ctx {
+            trace: Vec<&'static str>,
+        }
+        let tag = "shell_symmetric_lr";
+        register_shell_context_typed(format!("{tag}_ctx"), Ctx::default);
+        register_shell_apply_symmetric_left_typed(
+            format!("{tag}_left"),
+            |_side, x, y, ctx: &mut Ctx| {
+                ctx.trace.push("left");
+                for (yi, xi) in y.iter_mut().zip(x.iter()) {
+                    *yi = *xi * 2.0;
+                }
+                Ok(())
+            },
+        );
+        register_shell_apply_symmetric_right_typed(
+            format!("{tag}_right"),
+            |_side, x, y, ctx: &mut Ctx| {
+                ctx.trace.push("right");
+                for (yi, xi) in y.iter_mut().zip(x.iter()) {
+                    *yi = *xi + 1.0;
+                }
+                Ok(())
+            },
+        );
+
+        let mut pc = ShellPc::new(
+            None,
+            None,
+            None,
+            None,
+            Some(format!("{tag}_left")),
+            Some(format!("{tag}_right")),
+            None,
+            None,
+            Some(format!("{tag}_ctx")),
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+        let mut y = vec![0.0, 0.0];
+        pc.apply(PcSide::Symmetric, &[1.0, 2.0], &mut y)
+            .expect("symmetric split apply should succeed");
+        assert_eq!(y, vec![3.0, 5.0]);
+        pc.with_typed_context_ref::<Ctx, _, _>(|ctx| {
+            assert_eq!(ctx.trace, vec!["left", "right"]);
+            Ok(())
+        })
+        .expect("context read should succeed");
+    }
+
+    #[test]
+    fn shell_error_preserves_nested_failure_diagnostics() {
+        let inner = KError::NestedPcFailed(NestedPcFailure {
+            component: "pc_ksp",
+            reason: ConvergedReason::DivergedPcFailed,
+            iterations: 4,
+            final_norm: None,
+            residual_history_summary: None,
+            detail: "inner exploded".into(),
+        });
+        let wrapped = ShellPc::shell_error(FailureStage::Solve, "apply", inner);
+        let KError::NestedPcFailed(failure) = wrapped else {
+            panic!("expected nested failure");
+        };
+        assert_eq!(failure.reason, ConvergedReason::DivergedPcFailed);
+        assert!(failure.detail.contains("inner_component=pc_ksp"));
+        assert!(failure.detail.contains("inner_detail=inner exploded"));
+    }
+
+    #[test]
     fn transpose_and_symmetric_fallback_to_apply_when_unregistered() {
-        let mut pc = ShellPc::new(None, None, None, None, None, None, None);
+        let mut pc = ShellPc::new(None, None, None, None, None, None, None, None, None);
         pc.setup(&TestOp).expect("setup should succeed");
 
         let x = vec![1.0, 2.0];
