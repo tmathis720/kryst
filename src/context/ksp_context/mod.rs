@@ -2771,6 +2771,37 @@ impl KspContext {
         if !is_distributed {
             return Ok(false);
         }
+
+        if let Some(pending) = self.pending_mpi_pc.as_ref()
+            && pending.mpi_opts.global_pc == GlobalPcKind::BlockJacobi
+            && pending.mpi_opts.local_apply_mode.is_distributed_native()
+        {
+            let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
+                return Err(KError::InvalidInput(
+                    "distributed native preconditioner routes require DistCsrOp".into(),
+                ));
+            };
+            log::info!(
+                "Selecting native distributed block-Jacobi route (strategy={}) before pc_global fallback adaptation.",
+                pending
+                    .mpi_opts
+                    .local_apply_mode
+                    .communication_strategy_name()
+            );
+            let mut new_pc = self.build_mpi_global_pc(pending, dist_op)?;
+            let want = new_pc.required_format();
+            let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
+            let pmat_view = materialize(pmat.clone(), want, tol)?;
+            if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
+                self.handle_pc_setup_failure(err, pmat, sid, vid)?;
+                return Ok(false);
+            }
+            self.pc = Some(new_pc);
+            self.last_pc_sid = Some(sid);
+            self.last_pc_vid = Some(vid);
+            return Ok(true);
+        }
+
         if pc.distributed_support() != PcDistributedSupport::LocalOnly {
             return Ok(false);
         }

@@ -451,7 +451,7 @@ impl Preconditioner for FsaiCsr {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 
@@ -748,7 +748,7 @@ impl Preconditioner for SpaiCsr {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 

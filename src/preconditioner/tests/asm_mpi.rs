@@ -11,6 +11,9 @@ use crate::parallel::{Comm, MpiComm, UniverseComm};
 use crate::preconditioner::Preconditioner;
 use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmPc, Weighting};
 use crate::preconditioner::builders::{build_block_jacobi, build_ilu0_with_conditioning};
+use crate::preconditioner::dist::{
+    DistLocalApplyMode, DistPcAdapter, DistPcBuilder, GlobalPcKind, LocalPcKind, MpiPcOptions,
+};
 use crate::utils::conditioning::ConditioningOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -215,4 +218,77 @@ fn mpi_ras_apply_injects_owned_rows() {
     let owned_offset = row_start - sub_start;
     let expected = &sol_sub[owned_offset..owned_offset + n_per];
     assert_vec_close!("ras injects owned rows", &y_local, expected);
+}
+
+#[test]
+fn mpi_block_jacobi_strict_rejects_unsupported_local_pc() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let opts = MpiPcOptions {
+        global_pc: GlobalPcKind::BlockJacobi,
+        local_pc: LocalPcKind::Fsai,
+        local_apply_mode: DistLocalApplyMode::NativeStrict,
+        ..MpiPcOptions::default()
+    };
+    let err = match DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts }) {
+        Ok(_) => panic!("strict mode should reject unsupported local pc"),
+        Err(err) => err,
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("pc_dist_local_apply=strict") && msg.contains("supports wrapped_local"),
+        "unexpected strict-mode error: {msg}"
+    );
+}
+
+#[test]
+fn mpi_block_jacobi_hybrid_differs_from_halo_only() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, row_start, _) = make_dist_poisson(&comm, 2);
+
+    let halo_opts = MpiPcOptions {
+        global_pc: GlobalPcKind::BlockJacobi,
+        local_pc: LocalPcKind::Chebyshev,
+        local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
+        ..MpiPcOptions::default()
+    };
+    let hybrid_opts = MpiPcOptions {
+        local_apply_mode: DistLocalApplyMode::NativeHybrid,
+        ..halo_opts.clone()
+    };
+
+    let halo = DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts: halo_opts })
+        .expect("halo-only build");
+    let hybrid = DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts: hybrid_opts })
+        .expect("hybrid build");
+
+    let mut rhs = vec![0.0; dist.local_nrows()];
+    if row_start == 0 {
+        rhs[0] = 1.0;
+    }
+    let mut y_halo = vec![0.0; rhs.len()];
+    let mut y_hybrid = vec![0.0; rhs.len()];
+    halo.apply(PcSide::Left, &rhs, &mut y_halo)
+        .expect("halo apply");
+    hybrid
+        .apply(PcSide::Left, &rhs, &mut y_hybrid)
+        .expect("hybrid apply");
+
+    let l1_local: f64 = y_halo
+        .iter()
+        .zip(y_hybrid.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    let l1_global = comm.all_reduce_f64(l1_local);
+    assert!(
+        l1_global > 1e-12,
+        "expected hybrid strategy to alter distributed correction"
+    );
 }

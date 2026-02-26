@@ -43,11 +43,16 @@ struct NativeCouplingPlan {
     remote_entries_by_row: Vec<Vec<(usize, f64)>>,
     diag_inv: Vec<f64>,
     omega: f64,
+    coarse_weight: f64,
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 impl NativeCouplingPlan {
-    fn from_dist_op(dist_op: &DistCsrOp, omega: f64) -> Result<Self, KError> {
+    fn from_dist_op(
+        dist_op: &DistCsrOp,
+        omega: f64,
+        local_apply_mode: DistLocalApplyMode,
+    ) -> Result<Self, KError> {
         let local = dist_op.local_matrix();
         let row_start = dist_op.local_row_offset();
         let row_end = row_start + dist_op.local_nrows();
@@ -95,6 +100,11 @@ impl NativeCouplingPlan {
             remote_entries_by_row,
             diag_inv,
             omega,
+            coarse_weight: if matches!(local_apply_mode, DistLocalApplyMode::NativeHybrid) {
+                0.1
+            } else {
+                0.0
+            },
         })
     }
 
@@ -117,6 +127,17 @@ impl NativeCouplingPlan {
             }
             y_local[row] -= self.omega * self.diag_inv[row] * remote_sum;
         }
+
+        if self.coarse_weight != 0.0 && !x_local.is_empty() {
+            let comm = &self.halo.index.comm;
+            let local_sum: f64 = x_local.iter().copied().sum();
+            let global_sum = comm.all_reduce_f64(local_sum);
+            let global_n = comm.all_reduce_f64(x_local.len() as f64).max(1.0);
+            let coarse_avg = global_sum / global_n;
+            for yi in y_local.iter_mut() {
+                *yi += self.coarse_weight * coarse_avg;
+            }
+        }
     }
 }
 
@@ -138,7 +159,11 @@ fn maybe_native_plan(
         }
         return Ok(None);
     }
-    Ok(Some(NativeCouplingPlan::from_dist_op(dist_op, 1.0)?))
+    Ok(Some(NativeCouplingPlan::from_dist_op(
+        dist_op,
+        1.0,
+        local_apply_mode,
+    )?))
 }
 
 fn owner_of(gcol: usize, row_part: &[usize]) -> usize {

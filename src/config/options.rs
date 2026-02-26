@@ -4039,7 +4039,7 @@ mod old_tests {
         assert_eq!(mpi_opts.local_pc, LocalPcKind::Ilutp);
         assert_eq!(
             mpi_opts.local_apply_mode,
-            DistLocalApplyMode::NativeDistributed
+            DistLocalApplyMode::NativeLocalHalo
         );
         assert_eq!(mpi_opts.ilutp_max_fill, 25);
         assert!((mpi_opts.ilutp_drop_tol - 1e-4).abs() < 1e-12);
