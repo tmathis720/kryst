@@ -605,7 +605,7 @@ impl ObjPreconditioner for ChebyshevPc {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 
@@ -629,7 +629,7 @@ impl ObjPreconditioner for ChebyshevPc {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 

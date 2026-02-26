@@ -1464,7 +1464,7 @@ impl Preconditioner for IluCsr {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 
     fn apply_op(&self, op: Op, x: &[f64], y: &mut [f64]) -> Result<(), KError> {

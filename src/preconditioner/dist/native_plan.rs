@@ -7,8 +7,10 @@ use std::str::FromStr;
 pub enum DistLocalApplyMode {
     /// Legacy behavior: apply local factors only.
     WrappedLocal,
-    /// Distributed-native behavior: local factors plus halo-coupling correction.
-    NativeDistributed,
+    /// Distributed-native behavior with neighborhood halo exchange only.
+    NativeLocalHalo,
+    /// Distributed-native behavior with halo exchange and optional coarse coupling.
+    NativeHybrid,
     /// Require distributed-native apply, failing setup when unavailable.
     NativeStrict,
 }
@@ -20,8 +22,20 @@ impl Default for DistLocalApplyMode {
 }
 
 impl DistLocalApplyMode {
+    pub fn communication_strategy_name(self) -> &'static str {
+        match self {
+            Self::WrappedLocal => "local",
+            Self::NativeLocalHalo => "local-halo",
+            Self::NativeHybrid => "hybrid",
+            Self::NativeStrict => "strict",
+        }
+    }
+
     pub fn is_distributed_native(self) -> bool {
-        matches!(self, Self::NativeDistributed | Self::NativeStrict)
+        matches!(
+            self,
+            Self::NativeLocalHalo | Self::NativeHybrid | Self::NativeStrict
+        )
     }
 
     pub fn requires_native(self) -> bool {
@@ -35,7 +49,9 @@ impl FromStr for DistLocalApplyMode {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_lowercase().as_str() {
             "local" | "local_wrapper" | "wrapped_local" | "wrapper" => Ok(Self::WrappedLocal),
-            "distributed" | "distributed_native" | "native" => Ok(Self::NativeDistributed),
+            "distributed" | "distributed_native" | "native" | "local-halo" | "halo"
+            | "distributed_halo" => Ok(Self::NativeLocalHalo),
+            "hybrid" | "distributed_hybrid" | "native_hybrid" => Ok(Self::NativeHybrid),
             "distributed_strict" | "strict" | "native_strict" => Ok(Self::NativeStrict),
             other => Err(KError::InvalidInput(format!(
                 "invalid pc_dist_local_apply mode: {other}"
@@ -57,9 +73,14 @@ mod tests {
         assert!(!wrapped.requires_native());
 
         let native = DistLocalApplyMode::from_str("distributed_native").expect("native");
-        assert_eq!(native, DistLocalApplyMode::NativeDistributed);
+        assert_eq!(native, DistLocalApplyMode::NativeLocalHalo);
         assert!(native.is_distributed_native());
         assert!(!native.requires_native());
+
+        let hybrid = DistLocalApplyMode::from_str("hybrid").expect("hybrid");
+        assert_eq!(hybrid, DistLocalApplyMode::NativeHybrid);
+        assert!(hybrid.is_distributed_native());
+        assert!(!hybrid.requires_native());
 
         let strict = DistLocalApplyMode::from_str("strict").expect("strict");
         assert_eq!(strict, DistLocalApplyMode::NativeStrict);
