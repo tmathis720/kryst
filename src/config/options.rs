@@ -268,6 +268,8 @@ pub struct PcOptions {
     pub pc_shell_apply_transpose: Option<String>,
     pub pc_shell_apply_conjugate_transpose: Option<String>,
     pub pc_shell_apply_symmetric: Option<String>,
+    pub pc_shell_apply_symmetric_left: Option<String>,
+    pub pc_shell_apply_symmetric_right: Option<String>,
     pub pc_shell_setup: Option<String>,
     pub pc_shell_destroy: Option<String>,
     pub pc_shell_context: Option<String>,
@@ -1253,6 +1255,12 @@ impl Sink for PcOptions {
             }
             "pc_shell_apply_symmetric" => {
                 set_opt!(&mut self.pc_shell_apply_symmetric, v.to_string())
+            }
+            "pc_shell_apply_symmetric_left" => {
+                set_opt!(&mut self.pc_shell_apply_symmetric_left, v.to_string())
+            }
+            "pc_shell_apply_symmetric_right" => {
+                set_opt!(&mut self.pc_shell_apply_symmetric_right, v.to_string())
             }
             "pc_shell_setup" => set_opt!(&mut self.pc_shell_setup, v.to_string()),
             "pc_shell_destroy" => set_opt!(&mut self.pc_shell_destroy, v.to_string()),
@@ -2330,6 +2338,8 @@ impl PcOptions {
         o!(pc_shell_apply_transpose);
         o!(pc_shell_apply_conjugate_transpose);
         o!(pc_shell_apply_symmetric);
+        o!(pc_shell_apply_symmetric_left);
+        o!(pc_shell_apply_symmetric_right);
         o!(pc_shell_setup);
         o!(pc_shell_destroy);
         o!(pc_shell_context);
@@ -4131,6 +4141,10 @@ mod old_tests {
             "ct_hook",
             "-pc_shell_apply_symmetric",
             "s_hook",
+            "-pc_shell_apply_symmetric_left",
+            "s_left_hook",
+            "-pc_shell_apply_symmetric_right",
+            "s_right_hook",
             "-pc_shell_context",
             "ctx",
         ];
@@ -4142,6 +4156,14 @@ mod old_tests {
             Some("ct_hook")
         );
         assert_eq!(opts.pc_shell_apply_symmetric.as_deref(), Some("s_hook"));
+        assert_eq!(
+            opts.pc_shell_apply_symmetric_left.as_deref(),
+            Some("s_left_hook")
+        );
+        assert_eq!(
+            opts.pc_shell_apply_symmetric_right.as_deref(),
+            Some("s_right_hook")
+        );
         assert_eq!(opts.pc_shell_context.as_deref(), Some("ctx"));
     }
 

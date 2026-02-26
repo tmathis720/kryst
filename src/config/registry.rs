@@ -1046,6 +1046,20 @@ pub static SPECS: &[Spec] = &[
         doc: "registered shell symmetric apply hook name",
     },
     Spec {
+        flag: "-pc_shell_apply_symmetric_left",
+        key: "pc_shell_apply_symmetric_left",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell symmetric-left apply hook name",
+    },
+    Spec {
+        flag: "-pc_shell_apply_symmetric_right",
+        key: "pc_shell_apply_symmetric_right",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "registered shell symmetric-right apply hook name",
+    },
+    Spec {
         flag: "-pc_shell_setup",
         key: "pc_shell_setup",
         arity: Arity::One,
