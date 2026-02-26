@@ -152,3 +152,7 @@ harness = false
 [[bench]]
 name = "pcg_pipelined_scaling"
 harness = false
+
+[[bench]]
+name = "solver_reduction_scaling"
+harness = false

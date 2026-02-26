@@ -9,8 +9,8 @@
 //! 2. Else if `RAYON_NUM_THREADS` is set, use that value.
 //! 3. Else use `num_cpus::get()`.
 //!
-//! If running under MPI, we size the pool per rank as
-//! `max(1, total_threads / mpi_size)` to avoid oversubscription.
+//! If running under MPI, we size the pool per local rank using launcher hints
+//! (`OMPI_COMM_WORLD_LOCAL_SIZE`, `MPI_LOCALNRANKS`, `SLURM_NTASKS_PER_NODE`) to avoid oversubscription.
 //!
 //! # Environment variables
 //! - `KRYST_THREADS`: total Rayon threads (preferred; overrides Rayon default).
@@ -47,6 +47,21 @@ pub fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn env_usize_opt(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+}
+
+fn detect_local_mpi_size(global_mpi_size: usize) -> usize {
+    env_usize_opt("KRYST_MPI_LOCAL_SIZE")
+        .or_else(|| env_usize_opt("OMPI_COMM_WORLD_LOCAL_SIZE"))
+        .or_else(|| env_usize_opt("MPI_LOCALNRANKS"))
+        .or_else(|| env_usize_opt("SLURM_NTASKS_PER_NODE"))
+        .unwrap_or(global_mpi_size.max(1))
+}
+
 /// One-time computed number of Rayon worker threads we actually use.
 #[cfg(feature = "rayon")]
 static EFFECTIVE_THREADS: OnceLock<usize> = OnceLock::new();
@@ -68,6 +83,7 @@ pub fn init_global_rayon_pool(mpi_size: usize) -> usize {
     #[cfg(feature = "rayon")]
     {
         *EFFECTIVE_THREADS.get_or_init(|| {
+            let local_mpi_size = detect_local_mpi_size(mpi_size.max(1));
             let total = std::env::var("KRYST_THREADS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
@@ -76,9 +92,10 @@ pub fn init_global_rayon_pool(mpi_size: usize) -> usize {
                         .ok()
                         .and_then(|s| s.parse().ok())
                 })
+                .or_else(|| env_usize_opt("SLURM_CPUS_PER_TASK"))
                 .unwrap_or_else(num_cpus::get);
 
-            let threads = std::cmp::max(1, total / std::cmp::max(1, mpi_size));
+            let threads = std::cmp::max(1, total / local_mpi_size);
             // Build the global pool once. If someone built it earlier, this is a no-op.
             let _ = ThreadPoolBuilder::new().num_threads(threads).build_global();
             threads
@@ -155,7 +172,11 @@ pub fn suggest_thread_policy(
         };
     }
 
-    let mpi_share = std::cmp::max(1, base_threads / std::cmp::max(1, comm_size));
+    let mpi_share = if comm_size > 1 {
+        std::cmp::max(1, base_threads.saturating_sub(1))
+    } else {
+        base_threads
+    };
     let scaled = std::cmp::max(1, problem_size / std::cmp::max(1, tune.min_len_vec));
     let threads = std::cmp::max(1, std::cmp::min(mpi_share, scaled.max(2)));
 

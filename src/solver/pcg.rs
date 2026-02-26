@@ -19,7 +19,9 @@ use crate::solver::common::call_monitors;
 #[cfg(feature = "complex")]
 use crate::solver::common::dot_result_to_real;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
+use crate::utils::convergence::{
+    ConvergedReason, Convergence, ReductionModel, SolveStats, SolverCounters,
+};
 use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
 use smallvec::SmallVec;
 use std::any::Any;
@@ -172,6 +174,23 @@ impl PcgSolver {
 
     pub fn set_async_reduction_options(&mut self, opt: ReductOptions) {
         self.async_reduction = opt;
+    }
+
+    fn reduction_model(&self) -> ReductionModel {
+        match self.variant {
+            PcgVariant::Classic => ReductionModel {
+                variant: "pcg-classic",
+                startup: 2,
+                per_iteration: 2.0,
+                tail: 0,
+            },
+            PcgVariant::Pipelined { .. } => ReductionModel {
+                variant: "pcg-pipelined",
+                startup: 2,
+                per_iteration: 1.0,
+                tail: 0,
+            },
+        }
     }
 
     fn async_options(&self) -> ReductOptions {
@@ -1067,7 +1086,7 @@ impl PcgSolver {
             }
         }
 
-        Ok(stats)
+        Ok(stats.with_reduction_model(self.reduction_model()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1129,7 +1148,7 @@ impl PcgSolver {
             }
         }
 
-        Ok(stats)
+        Ok(stats.with_reduction_model(self.reduction_model()))
     }
 }
 

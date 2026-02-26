@@ -34,7 +34,7 @@ use crate::solver::common::ReductCtx;
 use crate::solver::common::call_monitors;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, ReductionModel, SolveStats};
 #[cfg(feature = "logging")]
 use crate::utils::monitor::{ResidualSnapshot, log_residuals};
 use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
@@ -83,6 +83,29 @@ pub struct GmresSolver {
 }
 
 impl GmresSolver {
+    fn reduction_model(&self) -> ReductionModel {
+        match self.variant {
+            GmresVariant::Classical => ReductionModel {
+                variant: "gmres-classical",
+                startup: 2,
+                per_iteration: 2.0,
+                tail: 1,
+            },
+            GmresVariant::Pipelined => ReductionModel {
+                variant: "gmres-pipelined",
+                startup: 2,
+                per_iteration: 1.0,
+                tail: 1,
+            },
+            GmresVariant::SStep { .. } => ReductionModel {
+                variant: "gmres-sstep",
+                startup: 2,
+                per_iteration: 1.0,
+                tail: 1,
+            },
+        }
+    }
+
     pub fn new(restart: usize, rtol: f64, maxits: usize) -> Self {
         Self {
             restart: restart.max(1),
@@ -200,7 +223,9 @@ impl GmresSolver {
         P: KPreconditioner<Scalar = S> + ?Sized,
     {
         if matches!(self.variant, GmresVariant::SStep { .. }) {
-            return self.solve_sstep(a, pc, b, x, pc_side, comm, monitors, work);
+            return self
+                .solve_sstep(a, pc, b, x, pc_side, comm, monitors, work)
+                .map(|stats| stats.with_reduction_model(self.reduction_model()));
         }
         let (m, n) = a.dims();
         if m != n || b.len() != n || x.len() != n {
@@ -965,7 +990,7 @@ impl GmresSolver {
             metrics.reductions = reductions;
             stats.metrics = metrics;
         }
-        Ok(stats)
+        Ok(stats.with_reduction_model(self.reduction_model()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -994,12 +1019,15 @@ impl GmresSolver {
             let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
             let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
             self.solve(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                .map(|stats| stats.with_reduction_model(self.reduction_model()))
         }
         #[cfg(feature = "complex")]
         {
             let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
             let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
-            let result = self.solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            let result = self
+                .solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work)
+                .map(|stats| stats.with_reduction_model(self.reduction_model()));
             if let Ok(_) = result {
                 for (dst, src) in x.iter_mut().zip(x_s.iter()) {
                     *dst = src.real();
