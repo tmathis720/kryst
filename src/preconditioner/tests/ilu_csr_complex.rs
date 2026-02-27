@@ -191,3 +191,46 @@ fn ilut_complex_native_beats_degraded_residual() {
         "native residual {rn} should be <= degraded {rd}"
     );
 }
+
+#[test]
+fn iluk_complex_native_beats_degraded_residual() {
+    let n = 18;
+    let a = tridiag_csr_complex(
+        n,
+        S::from_parts(-1.1, 0.45),
+        S::from_parts(4.0, -0.35),
+        S::from_parts(-0.9, 0.4),
+    );
+    let rhs: Vec<S> = (0..n)
+        .map(|i| S::from_parts(0.5 + i as f64 / n as f64, -0.15))
+        .collect();
+
+    let cfg = IluCsrConfig {
+        kind: IluKind::Iluk { k: 2 },
+        reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
+        ..IluCsrConfig::default()
+    };
+
+    let mut native = IluCsr::new_with_config(cfg.clone());
+    native.setup(&a).unwrap();
+    let mut degraded = IluCsr::new_with_config(cfg);
+    degraded.set_complex_force_degraded(true);
+    degraded.setup(&a).unwrap();
+
+    let mut y_native = vec![S::zero(); n];
+    let mut y_degraded = vec![S::zero(); n];
+    native
+        .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_native)
+        .unwrap();
+    degraded
+        .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_degraded)
+        .unwrap();
+
+    let rn = residual_norm(&a, &y_native, &rhs);
+    let rd = residual_norm(&a, &y_degraded, &rhs);
+    assert!(
+        rn <= rd * 1.1,
+        "ILU(k) native residual {rn} should be <= degraded residual {rd}"
+    );
+}
