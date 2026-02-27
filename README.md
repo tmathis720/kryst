@@ -483,8 +483,12 @@ Example AMG invocation:
 
 #### Composite Preconditioning Options
 - `-pc_type fieldsplit` with `-pc_fieldsplit_block_sizes 2,2,...`, optional `-pc_fieldsplit_child_pc_type <pc>`, and `-pc_fieldsplit_type <additive|multiplicative|symmetric|schur>` configures block splits. `-pc_fieldsplit_schur_fact_type <diag|lower|upper|full>` and `-pc_fieldsplit_schur_precondition <self|diag|a11>` tune Schur factorizations.
-- `-pc_type shell` with `-pc_shell_name <name>` resolves a registered shell callback.
+- `-pc_type shell` with `-pc_shell_apply <name>` (or legacy `-pc_shell_name`) resolves a registered shell callback.
+- Optional hook overrides: `-pc_shell_apply_transpose`, `-pc_shell_apply_conjugate_transpose`, `-pc_shell_apply_symmetric`, `-pc_shell_apply_symmetric_left`, `-pc_shell_apply_symmetric_right`, `-pc_shell_setup`, `-pc_shell_destroy`, and `-pc_shell_context`.
+- Shell hook errors propagate as explicit `KSP_DIVERGED_PCSETUP_FAILED` / `KSP_DIVERGED_PC_FAILED` reasons with nested diagnostics (`component=pc_shell`, hook name, and inner error details).
 - `-pc_type ksp` with `-pc_ksp_type <solver>`, `-pc_ksp_pc_type <pc>`, `-pc_ksp_maxits <n>`, `-pc_ksp_rtol <tol>` configures inner KSP-as-PC behavior.
+  - See `examples/shell_pc_matrix_free.rs` for real-valued shell hooks (setup/apply/transpose/conjugate-transpose/symmetric-left+symmetric-right) and context wiring.
+  - See `examples/shell_pc_matrix_free_complex.rs` for complex-valued shell hooks, including conjugate-transpose behavior (`cargo run --example shell_pc_matrix_free_complex --features complex`).
 - `-pc_type mg` with `-pc_mg_levels <n>`, `-pc_mg_cycle_type <v|w>`, and optional `-pc_mg_smoother <name>` / `-pc_mg_smoother_steps <n>` enables basic multigrid-style placeholder wiring.
 - `-pc_type bddc` is parsed but currently returns an explicit unsupported error (documented placeholder).
 - `-pc_type gamg` is parsed but currently returns an explicit unsupported error (documented placeholder).

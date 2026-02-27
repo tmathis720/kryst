@@ -823,6 +823,8 @@ impl Drop for ShellPc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::options::{KspOptions, PcOptions};
+    use crate::context::ksp_context::{KspContext, SolverType};
     use crate::matrix::op::LinOp;
     use std::sync::{Arc, Mutex};
 
@@ -1121,5 +1123,48 @@ mod tests {
         pc.apply(PcSide::Symmetric, &x, &mut y)
             .expect("symmetric fallback should succeed");
         assert_eq!(y, x);
+    }
+
+    #[test]
+    fn ksp_context_reports_shell_symmetric_hook_failures() {
+        let tag = "shell_sym_failure";
+        register_shell_apply_typed(format!("{tag}_apply"), |_side, x, y, _ctx: &mut ()| {
+            y.copy_from_slice(x);
+            Ok(())
+        });
+        register_shell_apply_symmetric_typed(
+            format!("{tag}_sym"),
+            |_side, _x, _y, _ctx: &mut ()| Err(KError::SolveError("sym boom".into())),
+        );
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Richardson)
+            .expect("solver selection should succeed");
+        let ksp_opts = KspOptions {
+            maxits: Some(2),
+            rtol: Some(1e-12),
+            pc_side: Some("symmetric".into()),
+            ..Default::default()
+        };
+        let pc_opts = PcOptions {
+            pc_type: Some("shell".into()),
+            pc_shell_apply: Some(format!("{tag}_apply")),
+            pc_shell_apply_symmetric: Some(format!("{tag}_sym")),
+            ..Default::default()
+        };
+        ksp.set_from_all_options(&ksp_opts, &pc_opts)
+            .expect("options should apply");
+        ksp.set_operators(Arc::new(TestOp), None);
+
+        let b = vec![1.0, 2.0];
+        let mut x = vec![0.0, 0.0];
+        let stats = ksp.solve(&b, &mut x).expect("solve should return stats");
+        assert_eq!(stats.reason, ConvergedReason::DivergedPcFailed);
+        let failure = stats
+            .nested_pc_failure
+            .as_ref()
+            .expect("nested failure metadata should be present");
+        assert_eq!(failure.component, "pc_shell");
+        assert!(failure.detail.contains("hook=apply_symmetric"));
     }
 }
