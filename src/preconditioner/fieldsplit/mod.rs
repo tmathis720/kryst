@@ -27,6 +27,7 @@ pub struct FieldSplitPc {
     last_structure_id: Option<StructureId>,
     last_values_id: Option<ValuesId>,
     extraction_mode: BlockExtractionMode,
+    all_children_local: bool,
 }
 
 type SchurApplyHook = Arc<dyn Fn(&[S], &mut [S]) -> Result<(), KError> + Send + Sync>;
@@ -96,13 +97,10 @@ impl FieldSplitPc {
             .transpose()?
             .unwrap_or(PcType::Jacobi);
         let mut children = Vec::with_capacity(block_sizes.len());
-        let prefixes = opts.pc_fieldsplit_prefixes.clone().unwrap_or_default();
         for (i, _) in block_sizes.iter().enumerate() {
             let mut child_opts = opts.clone();
             child_opts.pc_type = None;
-            if let Some(prefix) = prefixes.get(i)
-                && let Some(scoped) = opts.scoped_child(prefix)
-            {
+            if let Some(scoped) = opts.fieldsplit_child_scoped_options(i) {
                 child_opts.overlay_from(scoped.clone());
             }
             let scoped_type = child_opts
@@ -115,6 +113,9 @@ impl FieldSplitPc {
                 Some(&child_opts),
             )?);
         }
+        let all_children_local = children
+            .iter()
+            .all(|pc| pc.distributed_support() == PcDistributedSupport::LocalOnly);
         let split_type = Self::split_type_from_options(&opts)?;
         if matches!(split_type, FieldSplitType::Schur { .. }) && block_sizes.len() != 2 {
             return Err(KError::InvalidInput(
@@ -134,6 +135,7 @@ impl FieldSplitPc {
             last_structure_id: None,
             last_values_id: None,
             extraction_mode: Self::extraction_mode_from_options(&opts)?,
+            all_children_local,
         })
     }
 
@@ -330,10 +332,6 @@ impl FieldSplitPc {
         &x[span.start..span.end]
     }
 
-    fn prolong_assign(&self, y: &mut [S], span: BlockSpan, block_y: &[S]) {
-        y[span.start..span.end].copy_from_slice(block_y);
-    }
-
     fn extract_schur_blocks(&self, csr: &CsrMatrix<S>, spans: &[BlockSpan]) -> Option<SchurBlocks> {
         if spans.len() != 2 {
             return None;
@@ -483,7 +481,9 @@ impl FieldSplitPc {
             }
             let mut zout = vec![S::zero(); span.len()];
             child.apply(side, self.restrict_rhs(x, *span), &mut zout)?;
-            self.prolong_assign(y, *span, &zout);
+            for (yi, zi) in y[span.start..span.end].iter_mut().zip(zout.iter()) {
+                *yi += *zi;
+            }
         }
         Ok(())
     }
@@ -749,14 +749,120 @@ impl Preconditioner for FieldSplitPc {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        if self
-            .children
-            .iter()
-            .any(|pc| pc.distributed_support() == PcDistributedSupport::Distributed)
-        {
-            PcDistributedSupport::Distributed
-        } else {
+        if self.all_children_local {
             PcDistributedSupport::LocalOnly
+        } else {
+            PcDistributedSupport::Distributed
         }
+    }
+}
+
+#[cfg(all(test, feature = "backend-faer", not(feature = "complex")))]
+mod tests {
+    use super::*;
+    use crate::config::options::KspOptions;
+    use crate::context::ksp_context::{KspContext, SolverType};
+    use crate::matrix::op::DenseOp;
+    use faer::Mat;
+    use std::sync::Arc;
+
+    fn tri_diag_2x2_blocks(n: usize) -> Arc<DenseOp<f64>> {
+        let m = Mat::<f64>::from_fn(n, n, |i, j| {
+            if i == j {
+                3.5
+            } else if (i as isize - j as isize).abs() == 1 {
+                -1.0
+            } else if (i as isize - j as isize).abs() == 2 {
+                -0.2
+            } else {
+                0.0
+            }
+        });
+        Arc::new(DenseOp::new(Arc::new(m)))
+    }
+
+    #[test]
+    fn fieldsplit_schur_full_composition_solves_outer_system() {
+        let a = tri_diag_2x2_blocks(12);
+        let n = a.dims().0;
+        let b = vec![1.0; n];
+        let mut x = vec![0.0; n];
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).unwrap();
+        let ksp_opts = KspOptions {
+            maxits: Some(40),
+            rtol: Some(1e-8),
+            ..Default::default()
+        };
+        let pc_opts = PcOptions {
+            pc_type: Some("fieldsplit".into()),
+            pc_fieldsplit_block_sizes: Some(vec![6, 6]),
+            pc_fieldsplit_type: Some("schur".into()),
+            pc_fieldsplit_schur_fact_type: Some("full".into()),
+            pc_fieldsplit_schur_precondition: Some("full".into()),
+            pc_fieldsplit_prefixes: Some(vec![
+                "pc_fieldsplit_0_".into(),
+                "pc_fieldsplit_1_".into(),
+            ]),
+            scoped_children: vec![
+                (
+                    "pc_fieldsplit_0_".into(),
+                    Box::new(PcOptions {
+                        pc_type: Some("jacobi".into()),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    "pc_fieldsplit_1_".into(),
+                    Box::new(PcOptions {
+                        pc_type: Some("none".into()),
+                        ..Default::default()
+                    }),
+                ),
+            ],
+            ..Default::default()
+        };
+
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+        ksp.set_operators(a, None);
+        let stats = ksp.solve(&b, &mut x).unwrap();
+        assert!(stats.reason.is_converged());
+    }
+
+    #[test]
+    fn fieldsplit_distributed_support_is_local_when_children_local() {
+        let pc =
+            FieldSplitPc::new(vec![2, 2], Some("jacobi".into()), PcOptions::default()).unwrap();
+        assert_eq!(pc.distributed_support(), PcDistributedSupport::LocalOnly);
+    }
+
+    #[test]
+    fn fieldsplit_distributed_support_is_distributed_for_mixed_children() {
+        let opts = PcOptions {
+            pc_fieldsplit_prefixes: Some(vec![
+                "pc_fieldsplit_0_".into(),
+                "pc_fieldsplit_1_".into(),
+            ]),
+            scoped_children: vec![
+                (
+                    "pc_fieldsplit_0_".into(),
+                    Box::new(PcOptions {
+                        pc_type: Some("ksp".into()),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    "pc_fieldsplit_1_".into(),
+                    Box::new(PcOptions {
+                        pc_type: Some("jacobi".into()),
+                        ..Default::default()
+                    }),
+                ),
+            ],
+            ..Default::default()
+        };
+        let pc = FieldSplitPc::new(vec![2, 2], Some("jacobi".into()), opts).unwrap();
+        assert_eq!(pc.distributed_support(), PcDistributedSupport::Distributed);
     }
 }
