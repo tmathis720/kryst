@@ -11,6 +11,22 @@
 
 High-performance Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with advanced preconditioning strategies and automated parameter optimization.
 
+## PETSc KSP/PC parity snapshot and roadmap focus
+
+- **Current parity estimate (KSP+PC surface):** ~68% practical parity with PETSc for full workflow depth, and ~87% weighted parity on the currently documented compatibility matrix (`Supported=1.0`, `Partial=0.5`).
+- **What this means:** core KSP lifecycle, major Krylov methods, option plumbing, monitoring hooks, and many PC types are already in place; the remaining work is concentrated in advanced composition and distributed/complex depth.
+- **Primary project focus:** maintain high customizability and computational efficiency first (MPI/Rayon scaling, reduction-aware Krylov variants, reusable setup paths), rather than adding low-impact parity flags.
+
+Top roadmap priorities are:
+
+1. **Native complex preconditioner kernels** for high-value PCs (ILU_CSR, ApproxInv, and MG smoother/coarse paths where practical), reducing reliance on real-part projected degraded paths.
+2. **Native distributed implementations** for currently rank-local preconditioners with explicit communication plans, minimizing adapter-only behavior in large MPI runs.
+3. **Multigrid/GAMG policy depth** (per-level KSP/PC/smoother/coarse controls, stronger distributed coarse-policy tuning) to improve strong-scaling performance and configurability.
+4. **Advanced nested composition parity** for KSP-as-PC and FieldSplit (inner lifecycle, richer split strategies, option routing) to better support coupled multiphysics workflows.
+5. **Shell PC + convergence diagnostics parity** (transpose/symmetric hooks, uniform divergence reason reporting) for robust custom solver stacks.
+
+See `docs/petsc_mapping.md` for detailed status tables and the maintained feature-parity roadmap.
+
 ## Features
 
 ### Iterative Solvers

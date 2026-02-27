@@ -184,6 +184,34 @@ features, options, and monitoring/convergence hooks.
 | GAMG hierarchy transfer/coarse overrides | `Gamg::set_level_transfer_operators`, `Gamg::set_level_coarse_solver` | Partial | Uses AMG hierarchy override hooks; useful for prototypes and tuning. |
 | AMG diagnostics (complexity + level nnz) | `AmgStats::{grid_complexity, operator_complexity, levels[]}` | Supported | Includes per-level `nnz_a/nnz_p/nnz_r`, effective nnz, and smoothing-work estimates. |
 
+
+## Parity estimate and prioritized roadmap
+
+### Current estimate
+
+- **Weighted matrix parity:** ~87% on this page's compatibility tables when weighting `Supported=1.0` and `Partial=0.5`.
+- **Practical full PETSc KSP/PC parity:** ~68% once advanced workflow depth is included (nested composition semantics, MG/GAMG policy depth, complex-preconditioner quality paths, and distributed-native PC coverage).
+
+### Prioritized roadmap (efficiency/customization first)
+
+1. **Native complex kernels for high-impact preconditioners**
+   - Move ILU_CSR and ApproxInv complex setup/apply away from real-part projected degraded paths where mathematically feasible.
+   - Preserve structure/value reuse and existing option controls while improving numerical quality for complex workloads.
+2. **Distributed-native PC expansion (beyond adapter-only paths)**
+   - Promote currently `LocalOnly` high-value PCs toward explicit distributed execution plans for `DistCsrOp` workflows.
+   - Keep `pc_global` adapters as compatibility tools, but prefer native distributed implementations for performance-critical runs.
+3. **MG/GAMG per-level policy depth and scalable coarse strategies**
+   - Expand per-level KSP/PC/smoother/coarse control and distributed coarse policy tuning to close major PETSc multigrid workflow gaps.
+4. **Nested composition parity (KSP-as-PC + FieldSplit)**
+   - Improve inner lifecycle controls, richer split strategy support, and hierarchical option routing for coupled systems.
+5. **Shell/transposed apply and convergence reason consistency**
+   - Add remaining shell hooks and unify divergence reason semantics across solver families for better production diagnostics.
+
+### Scope guardrails
+
+- Favor changes that improve **scalability**, **customizability**, and **numerical robustness** over low-impact option-count parity.
+- Ensure new KSP/PC capabilities remain compatible with `mpi`/`rayon` execution and real/complex scalar modes where applicable.
+
 ## Known parity gaps
 
 High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
