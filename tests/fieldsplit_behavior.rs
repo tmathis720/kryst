@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
+use kryst::KError;
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcFactory;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::op::DistLayout;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::prelude::*;
-use kryst::KError;
 
 fn diag_csr(diag: &[f64]) -> CsrMatrix<S> {
     let n = diag.len();
@@ -71,7 +71,15 @@ fn fieldsplit_schur_factorization_variants_apply() -> Result<(), KError> {
     );
     let op = CsrOp::new(Arc::new(csr));
     for fact in ["diag", "lower", "upper", "full"] {
-        for pre in ["self", "diag", "a11", "full", "full_matfree"] {
+        for pre in [
+            "self",
+            "selfp",
+            "diag",
+            "a11",
+            "full",
+            "full_matfree",
+            "user",
+        ] {
             let opts = PcOptions {
                 pc_type: Some("fieldsplit".into()),
                 pc_fieldsplit_block_sizes: Some(vec![1, 1]),
@@ -237,6 +245,57 @@ fn fieldsplit_schur_full_precondition_and_nested_children() -> Result<(), KError
 }
 
 #[test]
+fn fieldsplit_schur_distributed_global_block_sizes_apply() -> Result<(), KError> {
+    let csr = CsrMatrix::from_csr(
+        4,
+        4,
+        vec![0, 2, 5, 8, 10],
+        vec![0, 2, 1, 2, 3, 0, 2, 3, 1, 3],
+        vec![
+            S::from_real(4.0),
+            S::from_real(-1.0),
+            S::from_real(3.0),
+            S::from_real(-1.0),
+            S::from_real(-0.5),
+            S::from_real(-1.0),
+            S::from_real(4.0),
+            S::from_real(-1.0),
+            S::from_real(-1.0),
+            S::from_real(3.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr)).with_layout(DistLayout {
+        global_rows: 8,
+        global_cols: 8,
+        row_start: 2,
+        row_end: 6,
+        col_start: 2,
+        col_end: 6,
+    });
+    let opts = PcOptions {
+        pc_type: Some("fieldsplit".into()),
+        pc_fieldsplit_block_sizes: Some(vec![4, 4]),
+        pc_fieldsplit_child_pc_type: Some("jacobi".into()),
+        pc_fieldsplit_type: Some("schur".into()),
+        pc_fieldsplit_schur_fact_type: Some("upper".into()),
+        pc_fieldsplit_schur_precondition: Some("user".into()),
+        ..Default::default()
+    };
+    let mut pc = PcFactory::create_from_options(&opts)?;
+    pc.setup(&op)?;
+    let x = vec![
+        S::from_real(1.0),
+        S::from_real(2.0),
+        S::from_real(3.0),
+        S::from_real(4.0),
+    ];
+    let mut y = vec![S::zero(); x.len()];
+    pc.apply(PcSide::Left, &x, &mut y)?;
+    assert!(y.iter().all(|v| v.abs().is_finite()));
+    Ok(())
+}
+
+#[test]
 fn fieldsplit_layout_rejects_mixed_block_sizes() {
     let csr = diag_csr(&[1.0, 2.0, 3.0]);
     let op = CsrOp::new(Arc::new(csr)).with_layout(DistLayout {
@@ -300,7 +359,8 @@ fn fieldsplit_complex_rejects_diag_schur_precondition() {
     };
     let mut pc = PcFactory::create_from_options(&opts).expect("create fieldsplit");
     let err = pc.setup(&op).expect_err("complex diag schur should fail");
-    assert!(err
-        .to_string()
-        .contains("not supported for complex scalars"));
+    assert!(
+        err.to_string()
+            .contains("not supported for complex scalars")
+    );
 }

@@ -66,10 +66,12 @@ enum SchurFactorization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchurPrecondition {
     Self_,
+    SelfP,
     Diag,
     A11,
     Full,
     FullMatFree,
+    User,
 }
 
 #[derive(Debug, Clone)]
@@ -195,10 +197,12 @@ impl FieldSplitPc {
                     .as_str()
                 {
                     "self" => SchurPrecondition::Self_,
+                    "selfp" | "self_p" => SchurPrecondition::SelfP,
                     "diag" => SchurPrecondition::Diag,
                     "a11" => SchurPrecondition::A11,
                     "full" => SchurPrecondition::Full,
                     "full_matfree" | "matfree" => SchurPrecondition::FullMatFree,
+                    "user" => SchurPrecondition::User,
                     other => {
                         return Err(KError::InvalidInput(format!(
                             "unknown pc_fieldsplit_schur_precondition: {other}"
@@ -475,12 +479,24 @@ impl FieldSplitPc {
 
     fn apply_additive(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         y.fill(S::zero());
-        for (span, child) in self.block_spans.iter().zip(self.children.iter()) {
+        for (idx, (span, child)) in self
+            .block_spans
+            .iter()
+            .zip(self.children.iter())
+            .enumerate()
+        {
             if span.len() == 0 {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, self.restrict_rhs(x, *span), &mut zout)?;
+            child
+                .apply(side, self.restrict_rhs(x, *span), &mut zout)
+                .map_err(|err| {
+                    KError::PcFailed(format!(
+                        "fieldsplit additive apply failed for block {idx} ({:?}): {err}",
+                        self.split_type
+                    ))
+                })?;
             for (yi, zi) in y[span.start..span.end].iter_mut().zip(zout.iter()) {
                 *yi += *zi;
             }
@@ -492,12 +508,24 @@ impl FieldSplitPc {
         let n = x.len();
         let mut y_accum = vec![S::zero(); n];
         let mut residual = x.to_vec();
-        for (span, child) in self.block_spans.iter().zip(self.children.iter()) {
+        for (idx, (span, child)) in self
+            .block_spans
+            .iter()
+            .zip(self.children.iter())
+            .enumerate()
+        {
             if span.len() == 0 {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, self.restrict_rhs(&residual, *span), &mut zout)?;
+            child
+                .apply(side, self.restrict_rhs(&residual, *span), &mut zout)
+                .map_err(|err| {
+                    KError::PcFailed(format!(
+                        "fieldsplit multiplicative apply failed for block {idx} ({:?}): {err}",
+                        self.split_type
+                    ))
+                })?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
@@ -511,23 +539,48 @@ impl FieldSplitPc {
         let n = x.len();
         let mut y_accum = vec![S::zero(); n];
         let mut residual = x.to_vec();
-        for (span, child) in self.block_spans.iter().zip(self.children.iter()) {
+        for (idx, (span, child)) in self
+            .block_spans
+            .iter()
+            .zip(self.children.iter())
+            .enumerate()
+        {
             if span.len() == 0 {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, self.restrict_rhs(&residual, *span), &mut zout)?;
+            child
+                .apply(side, self.restrict_rhs(&residual, *span), &mut zout)
+                .map_err(|err| {
+                    KError::PcFailed(format!(
+                        "fieldsplit symmetric-forward apply failed for block {idx} ({:?}): {err}",
+                        self.split_type
+                    ))
+                })?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
             self.update_residual(x, &y_accum, &mut residual)?;
         }
-        for (span, child) in self.block_spans.iter().zip(self.children.iter()).rev() {
+        for (idx, (span, child)) in self
+            .block_spans
+            .iter()
+            .zip(self.children.iter())
+            .enumerate()
+            .rev()
+        {
             if span.len() == 0 {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child.apply(side, self.restrict_rhs(&residual, *span), &mut zout)?;
+            child
+                .apply(side, self.restrict_rhs(&residual, *span), &mut zout)
+                .map_err(|err| {
+                    KError::PcFailed(format!(
+                        "fieldsplit symmetric-backward apply failed for block {idx} ({:?}): {err}",
+                        self.split_type
+                    ))
+                })?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
@@ -669,7 +722,7 @@ impl Preconditioner for FieldSplitPc {
                 schur_precondition_matrix = Some(Arc::new(schur_mat));
             } else if matches!(
                 precondition,
-                SchurPrecondition::Full | SchurPrecondition::FullMatFree
+                SchurPrecondition::Full | SchurPrecondition::FullMatFree | SchurPrecondition::User
             ) {
                 let schur = self
                     .extract_schur_blocks(csr.as_ref(), &spans)

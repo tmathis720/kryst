@@ -101,13 +101,6 @@ impl KspAsPc {
                 h.clear();
             }
             existing.ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
-            existing
-                .ksp
-                .set_monitor_policy(if ksp_opts.ksp_monitor_rank0.unwrap_or(false) {
-                    MonitorPolicy::Rank0Only
-                } else {
-                    MonitorPolicy::AllRanks
-                });
             existing.ksp_options = ksp_opts;
             existing.pc_options = pc_opts;
             existing.monitor_rank0 = existing.ksp_options.ksp_monitor_rank0.unwrap_or(false);
@@ -115,6 +108,7 @@ impl KspAsPc {
                 .ksp
                 .try_set_operators_with_comm(amat, None, a.comm())?;
             existing.ksp.setup()?;
+            Self::apply_runtime_controls_from_options(existing);
             return Ok(true);
         }
 
@@ -159,6 +153,25 @@ impl KspAsPc {
         let _ = inner.try_set_pc_side(mapped);
     }
 
+    fn apply_runtime_controls_from_options(inner: &mut InnerKspContext) {
+        if let (Some(rtol), Some(atol), Some(dtol), Some(maxits)) = (
+            inner.ksp_options.rtol,
+            inner.ksp_options.atol,
+            inner.ksp_options.dtol,
+            inner.ksp_options.maxits,
+        ) {
+            inner.ksp.set_tolerances(rtol, atol, dtol, maxits);
+        }
+        if let Some(restart) = inner.ksp_options.restart {
+            inner.ksp.set_restart(restart);
+        }
+        inner.ksp.set_monitor_policy(if inner.monitor_rank0 {
+            MonitorPolicy::Rank0Only
+        } else {
+            MonitorPolicy::AllRanks
+        });
+    }
+
     fn summarize_history(history: &Arc<Mutex<Vec<R>>>, final_residual: R) -> String {
         let mut values = history.lock().expect("ksp-pc nested history lock");
         if values.is_empty() {
@@ -196,12 +209,20 @@ impl Preconditioner for KspAsPc {
 
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
             Self::set_inner_side_for_outer(side, &mut inner.ksp);
+            Self::apply_runtime_controls_from_options(inner);
             y.fill(S::zero());
             let stats = inner.ksp.solve(x, y).map_err(|err| {
                 let history_summary = Self::summarize_history(&inner.residual_history, R::default());
                 let detail = format!(
-                    "outer_side={side:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} nested_error={err} {history_summary}",
-                    inner.ksp_options.ksp_type, inner.pc_options.pc_type, inner.monitor_rank0,
+                    "component=pc_ksp stage=solve outer_side={side:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) nested_error={err} {history_summary}",
+                    inner.ksp_options.ksp_type,
+                    inner.pc_options.pc_type,
+                    inner.monitor_rank0,
+                    inner.ksp_options.restart,
+                    inner.ksp_options.rtol,
+                    inner.ksp_options.atol,
+                    inner.ksp_options.dtol,
+                    inner.ksp_options.maxits,
                 );
                 KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
@@ -216,10 +237,15 @@ impl Preconditioner for KspAsPc {
                 let history_summary =
                     Self::summarize_history(&inner.residual_history, stats.final_residual);
                 let detail = format!(
-                    "outer_side={side:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} true_final_norm={:.3e} nested_reason={} {}",
+                    "component=pc_ksp stage=solve outer_side={side:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) true_final_norm={:.3e} nested_reason={} {}",
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
                     inner.monitor_rank0,
+                    inner.ksp_options.restart,
+                    inner.ksp_options.rtol,
+                    inner.ksp_options.atol,
+                    inner.ksp_options.dtol,
+                    inner.ksp_options.maxits,
                     stats.final_residual,
                     stats.reason,
                     history_summary
@@ -247,6 +273,7 @@ impl Preconditioner for KspAsPc {
                 h.clear();
             }
             inner.ksp.setup()?;
+            Self::apply_runtime_controls_from_options(inner);
         }
         Ok(())
     }
