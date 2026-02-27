@@ -4,16 +4,16 @@
 use super::*;
 use crate::algebra::prelude::*;
 use crate::assert_vec_close;
-use crate::matrix::DistCsrOp;
 use crate::matrix::op::CsrOp;
 use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::DistCsrOp;
 use crate::parallel::{Comm, MpiComm, UniverseComm};
-use crate::preconditioner::Preconditioner;
 use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmPc, Weighting};
 use crate::preconditioner::builders::{build_block_jacobi, build_ilu0_with_conditioning};
 use crate::preconditioner::dist::{
     DistLocalApplyMode, DistPcAdapter, DistPcBuilder, GlobalPcKind, LocalPcKind, MpiPcOptions,
 };
+use crate::preconditioner::Preconditioner;
 use crate::utils::conditioning::ConditioningOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -67,6 +67,35 @@ fn make_dist_poisson(comm: &UniverseComm, n_per: usize) -> (DistCsrOp, CsrMatrix
     let dist = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
         .expect("dist csr");
     (dist, global, row_start, n_global)
+}
+
+fn make_dist_block_diag(comm: &UniverseComm, n_per: usize) -> DistCsrOp {
+    let rank = comm.rank();
+    let size = comm.size();
+    let n_global = n_per * size;
+    let row_start = rank * n_per;
+    let mut row_ptr = Vec::with_capacity(n_per + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for i in 0..n_per {
+        let gi = row_start + i;
+        if i > 0 {
+            col_idx.push(gi - 1);
+            vals.push(-1.0);
+        }
+        col_idx.push(gi);
+        vals.push(4.0);
+        if i + 1 < n_per {
+            col_idx.push(gi + 1);
+            vals.push(-1.0);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    let local = CsrMatrix::from_csr(n_per, n_global, row_ptr, col_idx, vals);
+    let part_prefix: Vec<usize> = (0..=size).map(|p| p * n_per).collect();
+    DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
+        .expect("dist block-diag")
 }
 
 fn subdomain_from_global(global: &CsrMatrix<R>, subdofs: &[usize]) -> CsrMatrix<R> {
@@ -290,5 +319,96 @@ fn mpi_block_jacobi_hybrid_differs_from_halo_only() {
     assert!(
         l1_global > 1e-12,
         "expected hybrid strategy to alter distributed correction"
+    );
+}
+
+#[test]
+fn mpi_block_jacobi_sor_native_matches_wrapped_on_block_diag() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let dist = make_dist_block_diag(&comm, 3);
+
+    let wrapped_opts = MpiPcOptions {
+        global_pc: GlobalPcKind::BlockJacobi,
+        local_pc: LocalPcKind::Sor,
+        local_apply_mode: DistLocalApplyMode::WrappedLocal,
+        ..MpiPcOptions::default()
+    };
+    let native_opts = MpiPcOptions {
+        local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
+        ..wrapped_opts.clone()
+    };
+
+    let wrapped = DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts: wrapped_opts })
+        .expect("wrapped sor build");
+    let native = DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts: native_opts })
+        .expect("native sor build");
+
+    let rhs: Vec<f64> = (0..dist.local_nrows()).map(|i| (i + 1) as f64).collect();
+    let mut y_wrapped = vec![0.0; rhs.len()];
+    let mut y_native = vec![0.0; rhs.len()];
+    wrapped
+        .apply(PcSide::Left, &rhs, &mut y_wrapped)
+        .expect("wrapped sor apply");
+    native
+        .apply(PcSide::Left, &rhs, &mut y_native)
+        .expect("native sor apply");
+
+    assert_vec_close!(
+        "sor native equals wrapped on uncoupled blocks",
+        &y_native,
+        &y_wrapped
+    );
+}
+
+#[test]
+fn mpi_block_jacobi_sor_native_differs_from_wrapped_with_coupling() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, row_start, _) = make_dist_poisson(&comm, 2);
+
+    let wrapped_opts = MpiPcOptions {
+        global_pc: GlobalPcKind::BlockJacobi,
+        local_pc: LocalPcKind::Sor,
+        local_apply_mode: DistLocalApplyMode::WrappedLocal,
+        ..MpiPcOptions::default()
+    };
+    let native_opts = MpiPcOptions {
+        local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
+        ..wrapped_opts.clone()
+    };
+
+    let wrapped = DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts: wrapped_opts })
+        .expect("wrapped sor build");
+    let native = DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts: native_opts })
+        .expect("native sor build");
+
+    let mut rhs = vec![0.0; dist.local_nrows()];
+    if row_start == 0 {
+        rhs[0] = 1.0;
+    }
+
+    let mut y_wrapped = vec![0.0; rhs.len()];
+    let mut y_native = vec![0.0; rhs.len()];
+    wrapped
+        .apply(PcSide::Left, &rhs, &mut y_wrapped)
+        .expect("wrapped sor apply");
+    native
+        .apply(PcSide::Left, &rhs, &mut y_native)
+        .expect("native sor apply");
+
+    let l1_local: f64 = y_wrapped
+        .iter()
+        .zip(y_native.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    let l1_global = comm.all_reduce_f64(l1_local);
+    assert!(
+        l1_global > 1e-12,
+        "expected native SOR halo correction to differ from wrapper mode"
     );
 }

@@ -5,18 +5,22 @@ use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::error::KError;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::DistCsrOp;
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::spmv::csr_spmm_dense;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
+#[cfg(not(feature = "complex"))]
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::amg::AMG;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{OpFormat, PcCaps, PcSide, Preconditioner};
+use crate::preconditioner::{OpFormat, PcCaps, PcDistributedSupport, PcSide, Preconditioner};
 use faer::{Mat, MatRef};
 
 /// Dense coarse space extracted from an AMG hierarchy or provided externally.
@@ -273,6 +277,8 @@ pub struct DeflationPC<PB> {
     az: Mat<f64>,
     e: Mat<f64>,
     e_factor: EFactor,
+    local_range: Option<(usize, usize)>,
+    dist_comm: Option<UniverseComm>,
     augment_initial_guess: bool,
     work: Mutex<DeflationWorkspace>,
 }
@@ -316,6 +322,27 @@ fn gram_schmidt(z: &Mat<f64>, tol: f64) -> Mat<f64> {
     out
 }
 
+fn reduce_e_if_needed(e: &mut Mat<f64>, comm: Option<&UniverseComm>) {
+    let Some(comm) = comm else {
+        return;
+    };
+    if comm.size() <= 1 {
+        return;
+    }
+    let mut flat = vec![0.0; e.nrows() * e.ncols()];
+    for i in 0..e.nrows() {
+        for j in 0..e.ncols() {
+            flat[i * e.ncols() + j] = e[(i, j)];
+        }
+    }
+    comm.allreduce_sum_slice(&mut flat);
+    for i in 0..e.nrows() {
+        for j in 0..e.ncols() {
+            e[(i, j)] = flat[i * e.ncols() + j];
+        }
+    }
+}
+
 fn build_e(z: &Mat<f64>, az: &Mat<f64>) -> Mat<f64> {
     let k = z.ncols();
     let mut e = Mat::<f64>::zeros(k, k);
@@ -347,6 +374,13 @@ where
                 "coarse space dimension mismatch".into(),
             ));
         }
+        if let Some((start, end)) = coarse.local_range
+            && end.saturating_sub(start) != n
+        {
+            return Err(KError::InvalidInput(
+                "coarse space local_range must match local matrix rows".into(),
+            ));
+        }
         let tol = opts.cond_cap.map(|cap| (1.0 / cap).abs()).unwrap_or(1e-12);
         let z = gram_schmidt(&coarse.z, tol.max(1e-12));
         if z.ncols() == 0 {
@@ -355,7 +389,8 @@ where
         let k = z.ncols();
         let mut az = Mat::<f64>::zeros(n, k);
         csr_spmm_dense(a, z.as_ref(), az.as_mut())?;
-        let e = build_e(&z, &az);
+        let mut e = build_e(&z, &az);
+        reduce_e_if_needed(&mut e, None);
         let e_factor = match CholeskyFactor::decompose(&e.as_ref()) {
             Ok(ch) => EFactor::Chol(ch),
             Err(_) => {
@@ -370,6 +405,8 @@ where
             az,
             e,
             e_factor,
+            local_range: coarse.local_range,
+            dist_comm: None,
             augment_initial_guess: opts.augment_initial_guess,
             work: Mutex::new(DeflationWorkspace::default()),
         })
@@ -431,6 +468,7 @@ where
 
     fn refresh_e(&mut self) -> Result<(), KError> {
         self.e = build_e(&self.z, &self.az);
+        reduce_e_if_needed(&mut self.e, self.dist_comm.as_ref());
         self.e_factor = match CholeskyFactor::decompose(&self.e.as_ref()) {
             Ok(ch) => EFactor::Chol(ch),
             Err(_) => {
@@ -453,6 +491,19 @@ where
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        #[cfg(all(feature = "mpi", not(feature = "complex")))]
+        {
+            if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+                self.dist_comm = Some(dist.comm());
+            }
+        }
+        if self.dist_comm.is_none() {
+            let comm = op.comm();
+            if comm.size() > 1 {
+                self.dist_comm = Some(comm);
+            }
+        }
+        self.refresh_e()?;
         self.base.setup(op)
     }
 
@@ -481,6 +532,12 @@ where
             }
             coarse[j] = acc;
             coarse_sol[j] = acc;
+        }
+        if let Some(comm) = self.dist_comm.as_ref()
+            && self.local_range.is_some()
+            && comm.size() > 1
+        {
+            comm.allreduce_sum_slice(coarse_sol);
         }
         self.solve_e(coarse_sol);
 
@@ -511,6 +568,14 @@ where
         }
 
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        if self.local_range.is_some() {
+            PcDistributedSupport::Distributed
+        } else {
+            self.base.distributed_support()
+        }
     }
 
     fn supports_numeric_update(&self) -> bool {

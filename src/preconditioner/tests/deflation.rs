@@ -2,7 +2,7 @@ use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::amg::{AMGBuilder, RelaxType};
 use crate::preconditioner::{
-    DeflationOptions, DeflationPC, Jacobi, PcSide, Preconditioner, ZSource,
+    DeflationOptions, DeflationPC, Jacobi, PcDistributedSupport, PcSide, Preconditioner, ZSource,
 };
 use faer::Mat;
 
@@ -94,4 +94,21 @@ fn gram_schmidt_drops_dependent_columns() {
     let jacobi = Jacobi::new();
     let def = DeflationPC::new(jacobi, &diag, coarse, &opts).unwrap();
     assert_eq!(def.coarse_dim(), 1);
+}
+
+#[test]
+fn deflation_reports_distributed_support_for_local_range() {
+    let n = 4;
+    let diag = CsrMatrix::from_csr(n, n, (0..=n).collect(), (0..n).collect(), vec![1.0; n]);
+    let mut z = Mat::<R>::zeros(n, 1);
+    for i in 0..n {
+        z[(i, 0)] = 1.0;
+    }
+    let coarse = crate::preconditioner::AmgCoarseSpace {
+        z,
+        local_range: Some((0, n)),
+    };
+    let opts = DeflationOptions::default();
+    let def = DeflationPC::new(Jacobi::new(), &diag, coarse, &opts).unwrap();
+    assert_eq!(def.distributed_support(), PcDistributedSupport::Distributed);
 }
