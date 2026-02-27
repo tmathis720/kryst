@@ -1088,6 +1088,13 @@ pub static SPECS: &[Spec] = &[
         doc: "inner KSP type for pc_type=ksp",
     },
     Spec {
+        flag: "-pc_ksp_ksp_type",
+        key: "pc_ksp_type",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "legacy alias for inner KSP type for pc_type=ksp",
+    },
+    Spec {
         flag: "-pc_ksp_pc_type",
         key: "pc_ksp_pc_type",
         arity: Arity::One,
