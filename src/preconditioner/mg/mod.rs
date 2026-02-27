@@ -58,6 +58,8 @@ pub struct MgLevelDiagnostics {
     pub post_sweeps: usize,
     pub side: PcSide,
     pub coarse_route: Option<String>,
+    pub native_complex_path: bool,
+    pub complex_diagnostic: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1003,6 +1005,8 @@ impl Preconditioner for MgPc {
                     } else {
                         None
                     },
+                    native_complex_path: true,
+                    complex_diagnostic: None,
                 }
             })
             .collect();

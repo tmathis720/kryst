@@ -156,3 +156,7 @@ harness = false
 [[bench]]
 name = "solver_reduction_scaling"
 harness = false
+
+[[bench]]
+name = "preconditioner_complex_quality"
+harness = false
