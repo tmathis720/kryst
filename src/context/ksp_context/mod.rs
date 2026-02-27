@@ -81,8 +81,7 @@ use crate::solver::{
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
 use crate::utils::convergence::{
-    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, ReasonDiagnosticsCounters,
-    SolveStats, map_kerror_to_reason,
+    ConvergedReason, FailureStage, ReasonDiagnosticsCounters, ReasonEmitter, SolveStats,
 };
 use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
 use crate::utils::reduction::{ReductOptions, reduction_latency_estimate_us};
@@ -2159,7 +2158,7 @@ impl KspContext {
     fn solve_impl(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         if !self.setup_called {
             if let Err(err) = self.setup_impl() {
-                if let Some(reason) = Self::map_setup_error_to_reason(&err) {
+                if let Some(reason) = ReasonEmitter::from_error(&err, FailureStage::Setup) {
                     let amat = self.amat.clone();
                     let res = if let Some(amat) = amat.as_ref() {
                         self.residual_norm_for_stats(amat.as_ref(), b, x)
@@ -2169,7 +2168,7 @@ impl KspContext {
                     };
                     let mut stats = SolveStats::new(0, res, reason);
                     if let Some(failure) =
-                        Self::pc_failure_metadata_for_stats(&err, FailureStage::Setup)
+                        ReasonEmitter::nested_pc_failure(&err, FailureStage::Setup)
                     {
                         stats = stats.with_nested_pc_failure(failure);
                     }
@@ -2306,7 +2305,7 @@ impl KspContext {
             ) {
                 Ok(stats) => stats,
                 Err(err) => {
-                    if let Some(reason) = Self::map_solve_error_to_reason(&err) {
+                    if let Some(reason) = ReasonEmitter::from_error(&err, FailureStage::Solve) {
                         if matches!(err, KError::PcFailed(_)) {
                             if let KError::PcFailed(ref msg) = err {
                                 log::warn!("KSP diverged due to preconditioner failure: {msg}");
@@ -2315,7 +2314,7 @@ impl KspContext {
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
                         if let Some(failure) =
-                            Self::pc_failure_metadata_for_stats(&err, FailureStage::Solve)
+                            ReasonEmitter::nested_pc_failure(&err, FailureStage::Solve)
                         {
                             stats = stats.with_nested_pc_failure(failure);
                         }
@@ -2585,14 +2584,14 @@ impl KspContext {
             })() {
                 Ok(stats) => stats,
                 Err(err) => {
-                    if let Some(reason) = Self::map_solve_error_to_reason(&err) {
+                    if let Some(reason) = ReasonEmitter::from_error(&err, FailureStage::Solve) {
                         if let KError::PcFailed(ref msg) = err {
                             log::warn!("KSP diverged due to preconditioner failure: {msg}");
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
                         if let Some(failure) =
-                            Self::pc_failure_metadata_for_stats(&err, FailureStage::Solve)
+                            ReasonEmitter::nested_pc_failure(&err, FailureStage::Solve)
                         {
                             stats = stats.with_nested_pc_failure(failure);
                         }
@@ -2649,39 +2648,6 @@ impl KspContext {
         let comm = mat.comm();
         let red = comm.reduction_engine(&self.reduction_opts);
         Ok(red.norm2_s(&tmp))
-    }
-
-    fn pc_failure_metadata_for_stats(err: &KError, stage: FailureStage) -> Option<NestedPcFailure> {
-        match err {
-            KError::PcFailed(msg) => {
-                let reason = match stage {
-                    FailureStage::Setup => {
-                        ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup)
-                    }
-                    FailureStage::Solve => {
-                        ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
-                    }
-                };
-                Some(NestedPcFailure {
-                    component: "pc",
-                    reason,
-                    iterations: 0,
-                    final_norm: None,
-                    residual_history_summary: None,
-                    detail: format!("stage={stage:?} detail={msg}"),
-                })
-            }
-            KError::NestedPcFailed(failure) => Some(failure.clone()),
-            _ => None,
-        }
-    }
-
-    fn map_solve_error_to_reason(err: &KError) -> Option<ConvergedReason> {
-        map_kerror_to_reason(err, FailureStage::Solve)
-    }
-
-    fn map_setup_error_to_reason(err: &KError) -> Option<ConvergedReason> {
-        map_kerror_to_reason(err, FailureStage::Setup)
     }
 
     fn true_residual_norm_in_place(

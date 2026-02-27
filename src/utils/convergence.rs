@@ -19,6 +19,8 @@ pub enum ReasonCategory {
 pub enum FailureReasonKind {
     Breakdown,
     BreakdownBiCG,
+    IndefiniteMatrix,
+    IndefinitePc,
     Nan,
     Inf,
     PcSetup,
@@ -93,6 +95,8 @@ impl ConvergedReason {
         match kind {
             FailureReasonKind::Breakdown => ConvergedReason::DivergedBreakdown,
             FailureReasonKind::BreakdownBiCG => ConvergedReason::DivergedBreakdownBiCG,
+            FailureReasonKind::IndefiniteMatrix => ConvergedReason::DivergedIndefiniteMatrix,
+            FailureReasonKind::IndefinitePc => ConvergedReason::DivergedIndefinitePC,
             FailureReasonKind::Nan => ConvergedReason::DivergedNan,
             FailureReasonKind::Inf => ConvergedReason::DivergedInf,
             FailureReasonKind::PcSetup => ConvergedReason::DivergedPcSetupFailed,
@@ -139,9 +143,9 @@ impl ConvergedReason {
     /// Classify a non-finite value as a dedicated convergence reason.
     pub fn from_non_finite(value: R) -> Option<Self> {
         if value.is_nan() {
-            Some(ConvergedReason::DivergedNan)
+            Some(ConvergedReason::from_failure_kind(FailureReasonKind::Nan))
         } else if value.is_infinite() {
-            Some(ConvergedReason::DivergedInf)
+            Some(ConvergedReason::from_failure_kind(FailureReasonKind::Inf))
         } else {
             None
         }
@@ -161,6 +165,67 @@ impl ConvergedReason {
     /// Whether the reason indicates divergence.
     pub fn is_diverged(self) -> bool {
         !matches!(self, ConvergedReason::Continued) && !self.is_converged()
+    }
+}
+
+/// Lightweight helper for emitting stable convergence reasons on hot paths.
+pub struct ReasonEmitter;
+
+impl ReasonEmitter {
+    #[inline(always)]
+    pub fn non_finite(value: R) -> Option<ConvergedReason> {
+        ConvergedReason::from_non_finite(value)
+    }
+
+    #[inline(always)]
+    pub fn breakdown() -> ConvergedReason {
+        ConvergedReason::from_failure_kind(FailureReasonKind::Breakdown)
+    }
+
+    #[inline(always)]
+    pub fn breakdown_bicg() -> ConvergedReason {
+        ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG)
+    }
+
+    #[inline(always)]
+    pub fn indefinite_matrix() -> ConvergedReason {
+        ConvergedReason::from_failure_kind(FailureReasonKind::IndefiniteMatrix)
+    }
+
+    #[inline(always)]
+    pub fn indefinite_pc() -> ConvergedReason {
+        ConvergedReason::from_failure_kind(FailureReasonKind::IndefinitePc)
+    }
+
+    #[inline]
+    pub fn from_error(err: &KError, stage: FailureStage) -> Option<ConvergedReason> {
+        map_kerror_to_reason(err, stage)
+    }
+
+    #[inline]
+    pub fn nested_pc_failure(err: &KError, stage: FailureStage) -> Option<NestedPcFailure> {
+        match err {
+            KError::PcFailed(msg) => {
+                let reason = match stage {
+                    FailureStage::Setup => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup)
+                    }
+                    FailureStage::Solve => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
+                    }
+                };
+                Some(NestedPcFailure {
+                    component: "pc",
+                    reason,
+                    iterations: 0,
+                    final_norm: None,
+                    residual_history_summary: None,
+                    detail: format!("stage={stage:?} detail={msg}"),
+                })
+            }
+            KError::NestedPcFailed(failure) => Some(failure.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -185,10 +250,12 @@ pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<Converg
             KError::BreakdownOrIndefinite => Some(ConvergedReason::from_failure_kind(
                 FailureReasonKind::Breakdown,
             )),
-            KError::IndefiniteMatrix => Some(ConvergedReason::DivergedIndefiniteMatrix),
-            KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => {
-                Some(ConvergedReason::DivergedIndefinitePC)
-            }
+            KError::IndefiniteMatrix => Some(ConvergedReason::from_failure_kind(
+                FailureReasonKind::IndefiniteMatrix,
+            )),
+            KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => Some(
+                ConvergedReason::from_failure_kind(FailureReasonKind::IndefinitePc),
+            ),
             _ => None,
         },
     }

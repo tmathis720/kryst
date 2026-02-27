@@ -15,11 +15,11 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
-use crate::solver::LinearSolver;
 use crate::solver::common::call_monitors;
-use crate::solver::common::{ReductCtx, dot_result_to_real, take_or_resize};
+use crate::solver::common::{dot_result_to_real, take_or_resize, ReductCtx};
+use crate::solver::LinearSolver;
 use crate::solver::{MonitorAction, MonitorCallback};
-use crate::utils::convergence::{ConvergedReason, Convergence, FailureReasonKind, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, ReasonEmitter, SolveStats};
 use std::any::Any;
 
 pub struct TfqmrSolver {
@@ -117,7 +117,7 @@ impl TfqmrSolver {
             res_sq = R::default();
         }
         let res0: R = res_sq.sqrt();
-        if let Some(reason) = ConvergedReason::from_non_finite(res0) {
+        if let Some(reason) = ReasonEmitter::non_finite(res0) {
             return Ok(SolveStats::new(0, res0, reason));
         }
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
@@ -131,13 +131,13 @@ impl TfqmrSolver {
             stats.final_residual = res0;
             return Ok(stats);
         }
-        if let Some(reason) = ConvergedReason::from_non_finite(rho.abs()) {
+        if let Some(reason) = ReasonEmitter::non_finite(rho.abs()) {
             stats.reason = reason;
             stats.final_residual = res0;
             return Ok(stats);
         }
         if rho.abs() < self.breakdown_eps {
-            stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+            stats.reason = ReasonEmitter::breakdown_bicg();
             stats.final_residual = res0;
             return Ok(stats);
         }
@@ -159,7 +159,7 @@ impl TfqmrSolver {
             }
 
             let sigma: S = red.dot(r_tld, v);
-            if let Some(reason) = ConvergedReason::from_non_finite(sigma.abs()) {
+            if let Some(reason) = ReasonEmitter::non_finite(sigma.abs()) {
                 stats.iterations = k;
                 stats.final_residual = true_res;
                 stats.reason = reason;
@@ -168,11 +168,11 @@ impl TfqmrSolver {
             if sigma.abs() < self.breakdown_eps {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats);
             }
             let alpha = rho / sigma;
-            if let Some(reason) = ConvergedReason::from_non_finite(alpha.abs()) {
+            if let Some(reason) = ReasonEmitter::non_finite(alpha.abs()) {
                 stats.iterations = k;
                 stats.final_residual = true_res;
                 stats.reason = reason;
@@ -181,7 +181,7 @@ impl TfqmrSolver {
             if alpha.abs() <= R::default() {
                 stats.iterations = k;
                 stats.final_residual = true_res;
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats);
             }
 
@@ -279,7 +279,7 @@ impl TfqmrSolver {
             let update_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
             red.dot_many_into(&update_pairs, &mut reductions);
             let rho_new: S = reductions[0];
-            if let Some(reason) = ConvergedReason::from_non_finite(rho_new.abs()) {
+            if let Some(reason) = ReasonEmitter::non_finite(rho_new.abs()) {
                 stats.iterations = k;
                 stats.reason = reason;
                 stats.final_residual = true_res;
@@ -287,7 +287,7 @@ impl TfqmrSolver {
             }
             if rho_new.abs() < self.breakdown_eps {
                 stats.iterations = k;
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 stats.final_residual = true_res;
                 return Ok(stats);
             }
@@ -679,10 +679,7 @@ mod tests {
                 Some(&mut w),
             )
             .unwrap();
-        assert_eq!(
-            stats.reason,
-            ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG)
-        );
+        assert_eq!(stats.reason, ReasonEmitter::breakdown_bicg());
     }
 
     #[test]
