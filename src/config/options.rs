@@ -924,7 +924,7 @@ impl Sink for KspOptions {
 
     fn set_val(&mut self, spec: &Spec, v: &str) -> Result<(), KError> {
         match spec.key {
-            "ksp_type" => set_opt!(&mut self.ksp_type, v.to_string()),
+            "ksp_type" | "pc_ksp_type" => set_opt!(&mut self.ksp_type, v.to_string()),
             "ksp_rtol" => set_opt!(&mut self.rtol, parse_as::<f64>(v, spec)?),
             "ksp_atol" => set_opt!(&mut self.atol, parse_as::<f64>(v, spec)?),
             "ksp_dtol" => set_opt!(&mut self.dtol, parse_as::<f64>(v, spec)?),
