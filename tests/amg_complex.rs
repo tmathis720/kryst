@@ -72,3 +72,47 @@ fn amg_complex_transfer_override_plumbing() {
             .all(|v| v.real().is_finite() && v.imag().is_finite())
     );
 }
+
+#[test]
+fn amg_complex_apply_residual_acceptance() {
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_parts(4.0, 0.0),
+            S::from_parts(-1.0, 0.2),
+            S::from_parts(0.0, -0.1),
+            S::from_parts(-1.0, -0.2),
+            S::from_parts(4.2, 0.0),
+            S::from_parts(-1.1, 0.1),
+            S::from_parts(0.0, 0.1),
+            S::from_parts(-1.1, -0.1),
+            S::from_parts(3.8, 0.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr.clone()));
+    let mut amg = AMG::default();
+    amg.setup(&op).unwrap();
+
+    let rhs = vec![
+        S::from_parts(1.0, -0.3),
+        S::from_parts(-0.5, 0.7),
+        S::from_parts(0.25, 0.4),
+    ];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+
+    let mut a_out = vec![S::zero(); rhs.len()];
+    kryst::core::traits::MatVec::matvec(&csr, &out, &mut a_out);
+    let r_inf = a_out
+        .iter()
+        .zip(rhs.iter())
+        .map(|(l, r)| (*l - *r).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        r_inf.is_finite() && r_inf < 2.5,
+        "residual too large: {r_inf}"
+    );
+}

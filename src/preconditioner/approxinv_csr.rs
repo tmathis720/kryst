@@ -114,6 +114,10 @@ pub struct FsaiCsr {
     // book-keeping for update reuse
     last_sid: Option<StructureId>,
     last_vid: Option<ValuesId>,
+    #[cfg(feature = "complex")]
+    native_complex_active: bool,
+    #[cfg(feature = "complex")]
+    c_g: Option<CsrMatrix<S>>,
 }
 
 /// SPAI: full sparse approximate inverse M in CSR and per-column patterns.
@@ -124,6 +128,10 @@ pub struct SpaiCsr {
     // book-keeping for update reuse
     last_sid: Option<StructureId>,
     last_vid: Option<ValuesId>,
+    #[cfg(feature = "complex")]
+    native_complex_active: bool,
+    #[cfg(feature = "complex")]
+    c_m: Option<CsrMatrix<S>>,
 }
 
 // ----------------------------- Utilities ---------------------------------
@@ -138,6 +146,20 @@ fn csr_find(a: &CsrMatrix<f64>, row: usize, col: usize) -> f64 {
     match cols.binary_search(&col) {
         Ok(k) => vv[rs + k],
         Err(_) => R::default(),
+    }
+}
+
+#[cfg(feature = "complex")]
+#[inline]
+fn csr_find_complex(a: &CsrMatrix<S>, row: usize, col: usize) -> S {
+    let rp = a.row_ptr();
+    let ci = a.col_idx();
+    let vv = a.values();
+    let (rs, re) = (rp[row], rp[row + 1]);
+    let cols = &ci[rs..re];
+    match cols.binary_search(&col) {
+        Ok(k) => vv[rs + k],
+        Err(_) => S::zero(),
     }
 }
 
@@ -182,7 +204,12 @@ fn spmv_csr_transpose(a: &CsrMatrix<f64>, x: &[S], y: &mut [S]) {
 }
 
 /// Grow a sparsity pattern around column `i` using the row-adjacency graph.
-fn grow_pattern_row_graph(a: &CsrMatrix<f64>, i: usize, levels: usize, cap: usize) -> Vec<usize> {
+fn grow_pattern_row_graph<T: KrystScalar>(
+    a: &CsrMatrix<T>,
+    i: usize,
+    levels: usize,
+    cap: usize,
+) -> Vec<usize> {
     // Start with {i}
     let n = a.nrows();
     assert!(i < n);
@@ -346,12 +373,118 @@ impl FsaiCsr {
             params: cfg,
             last_sid: None,
             last_vid: None,
+            #[cfg(feature = "complex")]
+            native_complex_active: false,
+            #[cfg(feature = "complex")]
+            c_g: None,
+        })
+    }
+
+    #[cfg(feature = "complex")]
+    fn build_from_csr_complex(a: CsrMatrix<S>, cfg: ApproxInvParams) -> Result<Self, KError> {
+        let n = a.nrows().min(a.ncols());
+        let mut pat: Vec<Vec<usize>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut s = grow_pattern_row_graph(&a, i, cfg.levels, cfg.max_per_col);
+            s.retain(|&r| r >= i);
+            if !s.contains(&i) {
+                s.insert(0, i);
+            }
+            s.sort_unstable();
+            s.dedup();
+            if s.len() > cfg.max_per_col {
+                s.truncate(cfg.max_per_col);
+            }
+            pat.push(s);
+        }
+
+        let mut trips: Vec<(usize, usize, S)> = Vec::new();
+        for i in 0..n {
+            let s = &pat[i];
+            let m = s.len();
+            if m == 0 {
+                continue;
+            }
+            let mut a_ss = Mat::<S>::from_fn(m, m, |_, _| S::zero());
+            let mut b = vec![S::zero(); m];
+            for p in 0..m {
+                for q in 0..=p {
+                    let v = csr_find_complex(&a, s[p], s[q]);
+                    a_ss[(p, q)] = v;
+                    a_ss[(q, p)] = v.conj();
+                }
+            }
+            for d in 0..m {
+                a_ss[(d, d)] += S::from_real(cfg.reg);
+            }
+            if let Ok(pos) = s.binary_search(&i) {
+                b[pos] = S::one();
+            } else {
+                continue;
+            }
+            let rhs = Mat::<S>::from_fn(m, 1, |r, _| b[r]);
+            let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
+            let mut norm2 = 0.0;
+            for r in 0..m {
+                let ar = sol[(r, 0)].abs();
+                norm2 += ar * ar;
+            }
+            let thr = cfg.drop_tol * norm2.sqrt().max(1e-32);
+            let mut kept: Vec<usize> = Vec::with_capacity(m);
+            for (k, &row) in s.iter().enumerate() {
+                let val = sol[(k, 0)];
+                if val.abs() >= thr {
+                    trips.push((row, i, val));
+                    kept.push(row);
+                }
+            }
+            pat[i] = kept;
+        }
+
+        let c_g = assemble_csr_complex(n, n, &mut trips);
+        Ok(Self {
+            g: CsrMatrix::from_csr(
+                n,
+                n,
+                c_g.row_ptr().to_vec(),
+                c_g.col_idx().to_vec(),
+                c_g.values().iter().map(|v| v.real()).collect(),
+            ),
+            pat,
+            params: cfg,
+            last_sid: None,
+            last_vid: None,
+            native_complex_active: true,
+            c_g: Some(c_g),
         })
     }
 }
 
 impl Preconditioner for FsaiCsr {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
+            let sid = a.structure_id();
+            let vid = a.values_id();
+            if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
+                && ls == sid
+                && lv != vid
+            {
+                self.update_numeric(a)?;
+                self.last_vid = Some(vid);
+                return Ok(());
+            }
+            let rebuilt = FsaiCsr::build_from_csr_complex(csr.clone(), self.params)?;
+            *self = rebuilt;
+            self.last_sid = Some(sid);
+            self.last_vid = Some(vid);
+            return Ok(());
+        }
+        #[cfg(feature = "complex")]
+        {
+            log::debug!("FsaiCsr complex setup falling back to projected-real CSR conversion path");
+        }
+
         // Always require CSR view
         let csr = csr_from_linop(a, R::default())?; // no drop on A
         let sid = a.structure_id();
@@ -386,6 +519,18 @@ impl Preconditioner for FsaiCsr {
                 y.len()
             )));
         }
+        #[cfg(feature = "complex")]
+        if self.native_complex_active {
+            let g = self.c_g.as_ref().ok_or_else(|| {
+                KError::InvalidInput("FsaiCsr complex kernel missing factor".into())
+            })?;
+            let n = x.len();
+            let mut t = vec![S::zero(); n];
+            spmv_csr_transpose_complex(g, x, &mut t);
+            spmv_csr_complex(g, &t, y);
+            return Ok(());
+        }
+
         let n = x.len();
         let mut t = vec![S::zero(); n];
         spmv_csr_transpose(&self.g, x, &mut t);
@@ -398,6 +543,58 @@ impl Preconditioner for FsaiCsr {
     }
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
+            let n = self.pat.len();
+            let mut trips: Vec<(usize, usize, S)> = Vec::new();
+            for i in 0..n {
+                let s = &self.pat[i];
+                let m = s.len();
+                if m == 0 {
+                    continue;
+                }
+                let mut a_ss = Mat::<S>::from_fn(m, m, |_, _| S::zero());
+                let mut b = vec![S::zero(); m];
+                for p in 0..m {
+                    for q in 0..=p {
+                        let v = csr_find_complex(csr, s[p], s[q]);
+                        a_ss[(p, q)] = v;
+                        a_ss[(q, p)] = v.conj();
+                    }
+                }
+                for d in 0..m {
+                    a_ss[(d, d)] += S::from_real(self.params.reg);
+                }
+                if let Ok(pos) = s.binary_search(&i) {
+                    b[pos] = S::one();
+                } else {
+                    continue;
+                }
+                let rhs = Mat::<S>::from_fn(m, 1, |r, _| b[r]);
+                let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
+                for (k, &row) in s.iter().enumerate() {
+                    trips.push((row, i, sol[(k, 0)]));
+                }
+            }
+            let c_g = assemble_csr_complex(n, n, &mut trips);
+            self.g = CsrMatrix::from_csr(
+                n,
+                n,
+                c_g.row_ptr().to_vec(),
+                c_g.col_idx().to_vec(),
+                c_g.values().iter().map(|v| v.real()).collect(),
+            );
+            self.c_g = Some(c_g);
+            self.native_complex_active = true;
+            return Ok(());
+        }
+        #[cfg(feature = "complex")]
+        {
+            log::debug!(
+                "FsaiCsr complex numeric update falling back to projected-real CSR conversion path"
+            );
+        }
+
         // Re-solve per-column with fixed pattern and write values back into existing G
         let csr = csr_from_linop(a, R::default())?;
         let n = self.g.nrows().min(self.g.ncols());
@@ -443,6 +640,11 @@ impl Preconditioner for FsaiCsr {
             }
         }
         self.g = assemble_csr(n, n, &mut trips);
+        #[cfg(feature = "complex")]
+        {
+            self.native_complex_active = false;
+            self.c_g = None;
+        }
         Ok(())
     }
 
@@ -630,12 +832,139 @@ impl SpaiCsr {
             params: cfg,
             last_sid: None,
             last_vid: None,
+            #[cfg(feature = "complex")]
+            native_complex_active: false,
+            #[cfg(feature = "complex")]
+            c_m: None,
+        })
+    }
+
+    #[cfg(feature = "complex")]
+    fn build_from_csr_complex(a: CsrMatrix<S>, cfg: ApproxInvParams) -> Result<Self, KError> {
+        let n = a.nrows().min(a.ncols());
+        let mut pat: Vec<Vec<usize>> = Vec::with_capacity(n);
+        for j in 0..n {
+            let mut s = grow_pattern_row_graph(&a, j, cfg.levels, cfg.max_per_col);
+            if !s.contains(&j) {
+                s.push(j);
+            }
+            s.sort_unstable();
+            s.dedup();
+            if s.len() > cfg.max_per_col {
+                s.truncate(cfg.max_per_col);
+            }
+            pat.push(s);
+        }
+        let rp = a.row_ptr();
+        let ci = a.col_idx();
+        let vv = a.values();
+        let mut trips: Vec<(usize, usize, S)> = Vec::new();
+        for j in 0..n {
+            let s = &pat[j];
+            let m = s.len();
+            if m == 0 {
+                continue;
+            }
+            let mut idx_in_s = vec![-1i32; n];
+            for (pos, &g) in s.iter().enumerate() {
+                idx_in_s[g] = pos as i32;
+            }
+            let mut nmat = Mat::<S>::from_fn(m, m, |_, _| S::zero());
+            let mut cvec = Mat::<S>::from_fn(m, 1, |_, _| S::zero());
+            let (rj, rj2) = (rp[j], rp[j + 1]);
+            for pidx in rj..rj2 {
+                let col = ci[pidx];
+                let pos = idx_in_s[col];
+                if pos >= 0 {
+                    cvec[(pos as usize, 0)] = vv[pidx].conj();
+                }
+            }
+            for i in 0..n {
+                let (rs, re) = (rp[i], rp[i + 1]);
+                let mut pos_tmp: smallvec::SmallVec<[(usize, S); 32]> = smallvec::SmallVec::new();
+                for p in rs..re {
+                    let col = ci[p];
+                    let pos = idx_in_s[col];
+                    if pos >= 0 {
+                        pos_tmp.push((pos as usize, vv[p]));
+                    }
+                }
+                for ix in 0..pos_tmp.len() {
+                    let (px, vx) = pos_tmp[ix];
+                    for iy in 0..=ix {
+                        let (py, vy) = pos_tmp[iy];
+                        let v = vx.conj() * vy;
+                        nmat[(px, py)] += v;
+                        if px != py {
+                            nmat[(py, px)] += v.conj();
+                        }
+                    }
+                }
+            }
+            for d in 0..m {
+                nmat[(d, d)] += S::from_real(cfg.reg);
+            }
+            let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
+            let mut norm2 = 0.0;
+            for r in 0..m {
+                let ar = sol[(r, 0)].abs();
+                norm2 += ar * ar;
+            }
+            let thr = cfg.drop_tol * norm2.sqrt().max(1e-32);
+            let mut kept = Vec::with_capacity(m);
+            for (k, &row) in s.iter().enumerate() {
+                let val = sol[(k, 0)];
+                if val.abs() >= thr {
+                    trips.push((row, j, val));
+                    kept.push(row);
+                }
+            }
+            pat[j] = kept;
+        }
+        let c_m = assemble_csr_complex(n, n, &mut trips);
+        Ok(Self {
+            m: CsrMatrix::from_csr(
+                n,
+                n,
+                c_m.row_ptr().to_vec(),
+                c_m.col_idx().to_vec(),
+                c_m.values().iter().map(|v| v.real()).collect(),
+            ),
+            pat,
+            params: cfg,
+            last_sid: None,
+            last_vid: None,
+            native_complex_active: true,
+            c_m: Some(c_m),
         })
     }
 }
 
 impl Preconditioner for SpaiCsr {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
+            let sid = a.structure_id();
+            let vid = a.values_id();
+            if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
+                && ls == sid
+                && lv != vid
+            {
+                self.update_numeric(a)?;
+                self.last_vid = Some(vid);
+                return Ok(());
+            }
+            let rebuilt = SpaiCsr::build_from_csr_complex(csr.clone(), self.params)?;
+            *self = rebuilt;
+            self.last_sid = Some(sid);
+            self.last_vid = Some(vid);
+            return Ok(());
+        }
+        #[cfg(feature = "complex")]
+        {
+            log::debug!("SpaiCsr complex setup falling back to projected-real CSR conversion path");
+        }
+
         let csr = csr_from_linop(a, R::default())?;
         let sid = a.structure_id();
         let vid = a.values_id();
@@ -666,6 +995,14 @@ impl Preconditioner for SpaiCsr {
                 y.len()
             )));
         }
+        #[cfg(feature = "complex")]
+        if self.native_complex_active {
+            let m = self.c_m.as_ref().ok_or_else(|| {
+                KError::InvalidInput("SpaiCsr complex kernel missing factor".into())
+            })?;
+            spmv_csr_complex(m, x, y);
+            return Ok(());
+        }
         spmv_csr(&self.m, x, y);
         Ok(())
     }
@@ -675,6 +1012,86 @@ impl Preconditioner for SpaiCsr {
     }
 
     fn update_numeric(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
+            let n = self.pat.len();
+            let rp = csr.row_ptr();
+            let ci = csr.col_idx();
+            let vv = csr.values();
+            let mut idx_in_s: Vec<i32> = vec![-1; n];
+            let mut trips: Vec<(usize, usize, S)> = Vec::new();
+            for j in 0..n {
+                let s = &self.pat[j];
+                let m = s.len();
+                if m == 0 {
+                    continue;
+                }
+                for (pos, &g) in s.iter().enumerate() {
+                    idx_in_s[g] = pos as i32;
+                }
+                let mut nmat = Mat::<S>::from_fn(m, m, |_, _| S::zero());
+                let mut cvec = Mat::<S>::from_fn(m, 1, |_, _| S::zero());
+                let (rj, rj2) = (rp[j], rp[j + 1]);
+                for pidx in rj..rj2 {
+                    let col = ci[pidx];
+                    let pos = idx_in_s[col];
+                    if pos >= 0 {
+                        cvec[(pos as usize, 0)] = vv[pidx].conj();
+                    }
+                }
+                for i in 0..n {
+                    let (rs, re) = (rp[i], rp[i + 1]);
+                    let mut pos_tmp: smallvec::SmallVec<[(usize, S); 32]> =
+                        smallvec::SmallVec::new();
+                    for p in rs..re {
+                        let col = ci[p];
+                        let pos = idx_in_s[col];
+                        if pos >= 0 {
+                            pos_tmp.push((pos as usize, vv[p]));
+                        }
+                    }
+                    for ix in 0..pos_tmp.len() {
+                        let (px, vx) = pos_tmp[ix];
+                        for iy in 0..=ix {
+                            let (py, vy) = pos_tmp[iy];
+                            let v = vx.conj() * vy;
+                            nmat[(px, py)] += v;
+                            if px != py {
+                                nmat[(py, px)] += v.conj();
+                            }
+                        }
+                    }
+                }
+                for d in 0..m {
+                    nmat[(d, d)] += S::from_real(self.params.reg);
+                }
+                let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
+                for (k, &row) in s.iter().enumerate() {
+                    trips.push((row, j, sol[(k, 0)]));
+                }
+                for &g in s {
+                    idx_in_s[g] = -1;
+                }
+            }
+            let c_m = assemble_csr_complex(n, n, &mut trips);
+            self.m = CsrMatrix::from_csr(
+                n,
+                n,
+                c_m.row_ptr().to_vec(),
+                c_m.col_idx().to_vec(),
+                c_m.values().iter().map(|v| v.real()).collect(),
+            );
+            self.c_m = Some(c_m);
+            self.native_complex_active = true;
+            return Ok(());
+        }
+        #[cfg(feature = "complex")]
+        {
+            log::debug!(
+                "SpaiCsr complex numeric update falling back to projected-real CSR conversion path"
+            );
+        }
+
         let csr = csr_from_linop(a, R::default())?;
         let n = self.m.nrows().min(self.m.ncols());
         let rp = csr.row_ptr();
@@ -740,6 +1157,11 @@ impl Preconditioner for SpaiCsr {
             }
         }
         self.m = assemble_csr(n, n, &mut trips);
+        #[cfg(feature = "complex")]
+        {
+            self.native_complex_active = false;
+            self.c_m = None;
+        }
         Ok(())
     }
 
@@ -824,6 +1246,76 @@ fn assemble_csr(nrows: usize, ncols: usize, trips: &mut Vec<(usize, usize, R)>) 
     CsrMatrix::from_csr(nrows, ncols, row_ptr, col_idx, vals)
 }
 
+#[cfg(feature = "complex")]
+fn assemble_csr_complex(
+    nrows: usize,
+    ncols: usize,
+    trips: &mut Vec<(usize, usize, S)>,
+) -> CsrMatrix<S> {
+    trips.sort_unstable_by(|a, b| match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+        o => o,
+    });
+    let mut row_ptr = vec![0usize; nrows + 1];
+    let mut col_idx: Vec<usize> = Vec::with_capacity(trips.len());
+    let mut vals: Vec<S> = Vec::with_capacity(trips.len());
+    let mut cur_row = 0usize;
+    let mut acc = 0usize;
+    let mut k = 0usize;
+    while k < trips.len() {
+        let (r, c, mut v) = trips[k];
+        while cur_row < r {
+            row_ptr[cur_row + 1] = acc;
+            cur_row += 1;
+        }
+        k += 1;
+        while k < trips.len() && trips[k].0 == r && trips[k].1 == c {
+            v += trips[k].2;
+            k += 1;
+        }
+        col_idx.push(c);
+        vals.push(v);
+        acc += 1;
+    }
+    while cur_row < nrows {
+        row_ptr[cur_row + 1] = acc;
+        cur_row += 1;
+    }
+    CsrMatrix::from_csr(nrows, ncols, row_ptr, col_idx, vals)
+}
+
+#[cfg(feature = "complex")]
+fn spmv_csr_complex(a: &CsrMatrix<S>, x: &[S], y: &mut [S]) {
+    for yi in y.iter_mut() {
+        *yi = S::zero();
+    }
+    let rp = a.row_ptr();
+    let ci = a.col_idx();
+    let vv = a.values();
+    for i in 0..a.nrows() {
+        let mut sum = S::zero();
+        for p in rp[i]..rp[i + 1] {
+            sum += vv[p] * x[ci[p]];
+        }
+        y[i] = sum;
+    }
+}
+
+#[cfg(feature = "complex")]
+fn spmv_csr_transpose_complex(a: &CsrMatrix<S>, x: &[S], y: &mut [S]) {
+    for yi in y.iter_mut() {
+        *yi = S::zero();
+    }
+    let rp = a.row_ptr();
+    let ci = a.col_idx();
+    let vv = a.values();
+    for i in 0..a.nrows() {
+        for p in rp[i]..rp[i + 1] {
+            y[ci[p]] += vv[p].conj() * x[i];
+        }
+    }
+}
+
 // ---------------------------- Public entrypoints -------------------------
 
 impl FsaiCsr {
@@ -835,6 +1327,10 @@ impl FsaiCsr {
             params,
             last_sid: None,
             last_vid: None,
+            #[cfg(feature = "complex")]
+            native_complex_active: false,
+            #[cfg(feature = "complex")]
+            c_g: None,
         }
     }
 }
@@ -848,6 +1344,10 @@ impl SpaiCsr {
             params,
             last_sid: None,
             last_vid: None,
+            #[cfg(feature = "complex")]
+            native_complex_active: false,
+            #[cfg(feature = "complex")]
+            c_m: None,
         }
     }
 }

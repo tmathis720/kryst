@@ -7,6 +7,7 @@ use kryst::matrix::sparse::CsrMatrix;
 use kryst::preconditioner::PcSide;
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::preconditioner::sor::{MatSorType, SorPc};
+use kryst::preconditioner::{ApproxInvKind, ApproxInvParams, SpaiCsr};
 use kryst::utils::diagnostics::PcDiagnostics;
 
 #[test]
@@ -103,4 +104,52 @@ fn ilu_csr_native_complex_beats_split_baseline_on_coupled_system() {
         rn < rs * 0.2,
         "native residual {rn} not better than split {rs}"
     );
+}
+
+#[test]
+fn approxinv_spai_complex_setup_apply_residual_acceptance() {
+    let a = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_parts(4.0, 0.2),
+            S::from_parts(-1.0, 0.4),
+            S::from_parts(0.5, -0.2),
+            S::from_parts(-1.2, -0.3),
+            S::from_parts(3.8, 0.1),
+            S::from_parts(-0.7, 0.25),
+            S::from_parts(0.4, 0.15),
+            S::from_parts(-0.9, -0.35),
+            S::from_parts(3.2, -0.1),
+        ],
+    );
+    let rhs = vec![
+        S::from_parts(1.0, -0.5),
+        S::from_parts(-0.25, 0.75),
+        S::from_parts(0.5, 0.25),
+    ];
+
+    let mut pc = SpaiCsr::new_with_params(ApproxInvParams {
+        kind: ApproxInvKind::SPAI,
+        levels: 1,
+        max_per_col: 3,
+        drop_tol: 1e-6,
+        ..ApproxInvParams::default()
+    });
+    pc.setup(&a).expect("spai complex setup");
+
+    let mut out = vec![S::zero(); rhs.len()];
+    pc.apply(PcSide::Left, &rhs, &mut out)
+        .expect("spai complex apply");
+
+    let mut az = vec![S::zero(); rhs.len()];
+    kryst::core::traits::MatVec::matvec(&a, &out, &mut az);
+    let rn = az
+        .iter()
+        .zip(rhs.iter())
+        .map(|(l, r)| (*l - *r).abs())
+        .fold(0.0f64, f64::max);
+    assert!(rn.is_finite() && rn < 3.0, "SPAI residual too large: {rn}");
 }
