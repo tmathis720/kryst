@@ -28,23 +28,31 @@ use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::dist::halo::HaloPlan;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::DistCsrOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::parallel::Comm;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::{PcDistributedSupport, PcSide, legacy::Preconditioner};
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
+use crate::preconditioner::{legacy::Preconditioner, PcDistributedSupport, PcSide};
 use crate::utils::coloring::{build_blocks_from_colors, csr_distance2_coloring};
 use bitflags::bitflags;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Complex arithmetic capability for this preconditioner implementation.
 pub const COMPLEX_SUPPORT: &str = "native_complex";
@@ -265,6 +273,8 @@ pub struct SorPc {
     fshift: f64,
     a_csr: Option<Arc<CsrMatrix<f64>>>,
     inv_diag: Vec<R>,
+    #[cfg(all(feature = "mpi", not(feature = "complex")))]
+    dist_plan: Option<SorDistPlan>,
     #[cfg(feature = "complex")]
     a_csr_complex: Option<Arc<CsrMatrix<S>>>,
     #[cfg(feature = "complex")]
@@ -277,6 +287,34 @@ pub struct SorPc {
     color_blocks: Vec<Vec<usize>>,
     n: usize,
     scratch: Mutex<Vec<R>>, // reuse for symmetric sweep without heap activity
+}
+
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+#[derive(Clone)]
+struct SorDistPlan {
+    halo: Arc<HaloPlan>,
+    remote_entries_by_row: Vec<Vec<(usize, f64)>>,
+}
+
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+fn owner_of(gcol: usize, row_part: &[usize]) -> usize {
+    let mut lo = 0usize;
+    let mut hi = row_part.len().saturating_sub(2);
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if gcol < row_part[mid + 1] {
+            if gcol >= row_part[mid] {
+                return mid;
+            }
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
 }
 
 impl SorPc {
@@ -300,6 +338,72 @@ impl SorPc {
             color_blocks: Vec::new(),
             n: 0,
             scratch: Mutex::new(Vec::new()),
+            #[cfg(all(feature = "mpi", not(feature = "complex")))]
+            dist_plan: None,
+        }
+    }
+
+    #[cfg(all(feature = "mpi", not(feature = "complex")))]
+    fn build_dist_plan(&self, dist: &DistCsrOp) -> Result<SorDistPlan, KError> {
+        let local = dist.local_matrix();
+        let row_start = dist.local_row_offset();
+        let row_end = row_start + dist.local_nrows();
+        let part = dist.row_partition();
+        let rank = dist.comm().rank();
+        let mut recv_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut remote_entries_by_row = vec![Vec::new(); local.nrows()];
+
+        for (row, entries) in remote_entries_by_row.iter_mut().enumerate() {
+            for idx in local.row_ptr()[row]..local.row_ptr()[row + 1] {
+                let gcol = local.col_idx()[idx];
+                if gcol >= row_start && gcol < row_end {
+                    continue;
+                }
+                let owner = owner_of(gcol, part.as_ref());
+                if owner == rank {
+                    continue;
+                }
+                recv_map.entry(owner).or_default().push(gcol);
+                entries.push((gcol, local.values()[idx]));
+            }
+        }
+
+        let halo = Arc::new(HaloPlan::new(
+            dist.comm(),
+            part,
+            row_start,
+            row_end,
+            recv_map,
+        )?);
+
+        Ok(SorDistPlan {
+            halo,
+            remote_entries_by_row,
+        })
+    }
+
+    #[cfg(all(feature = "mpi", not(feature = "complex")))]
+    fn apply_dist_coupling(&self, x: &[f64], y: &mut [f64]) {
+        let Some(plan) = &self.dist_plan else {
+            return;
+        };
+        if plan.halo.index.n_ghost == 0 {
+            return;
+        }
+        let req = plan.halo.post_halo(x);
+        plan.halo.complete_halo(req);
+        let ghost = plan.halo.ghost_slice_ref();
+        for (row, entries) in plan.remote_entries_by_row.iter().enumerate() {
+            if entries.is_empty() {
+                continue;
+            }
+            let mut sigma_remote = 0.0;
+            for &(gcol, aij) in entries {
+                if let Some(&gidx) = plan.halo.index.ghost_index_of.get(&gcol) {
+                    sigma_remote = f64::mul_add(aij, ghost[gidx], sigma_remote);
+                }
+            }
+            y[row] -= self.omega * self.inv_diag[row] * sigma_remote;
         }
     }
 
@@ -557,6 +661,8 @@ impl SorPc {
                     }
                 }
             }
+            #[cfg(all(feature = "mpi", not(feature = "complex")))]
+            self.apply_dist_coupling(x, y);
         }
         Ok(())
     }
@@ -634,6 +740,18 @@ impl SorPc {
 #[cfg(not(feature = "complex"))]
 impl ObjPreconditioner for SorPc {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        #[cfg(all(feature = "mpi", not(feature = "complex")))]
+        {
+            if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+                let local = Arc::new(dist.local_block_csr());
+                self.a_csr = Some(local.clone());
+                self.ensure_inv_diag(&local)?;
+                self.ensure_coloring(&local);
+                self.dist_plan = Some(self.build_dist_plan(dist)?);
+                return Ok(());
+            }
+            self.dist_plan = None;
+        }
         let csr = csr_from_linop(op, 0.0)?;
         self.a_csr = Some(csr.clone());
         self.ensure_inv_diag(&csr)?;
@@ -646,6 +764,18 @@ impl ObjPreconditioner for SorPc {
     }
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        #[cfg(all(feature = "mpi", not(feature = "complex")))]
+        {
+            if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
+                let local = Arc::new(dist.local_block_csr());
+                self.a_csr = Some(local.clone());
+                self.ensure_inv_diag(&local)?;
+                self.ensure_coloring(&local);
+                self.dist_plan = Some(self.build_dist_plan(dist)?);
+                return Ok(());
+            }
+            self.dist_plan = None;
+        }
         // Re-extract CSR (values may have changed) and recompute inverse diagonal
         let csr = csr_from_linop(op, 0.0)?;
         self.a_csr = Some(csr.clone());
@@ -663,7 +793,7 @@ impl ObjPreconditioner for SorPc {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 
@@ -778,11 +908,10 @@ mod tests {
         let mut out = vec![S::zero(); 2];
         pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
         let diag = pc.complex_fallback_diagnostics();
-        assert!(
-            diag.as_deref()
-                .unwrap_or("")
-                .contains("degraded_split_real_imag")
-        );
+        assert!(diag
+            .as_deref()
+            .unwrap_or("")
+            .contains("degraded_split_real_imag"));
     }
 
     #[test]
