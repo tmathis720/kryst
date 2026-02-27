@@ -261,3 +261,54 @@ fn ksp_pc_uses_inner_pc_options() {
 
     assert!(CALLS.load(Ordering::SeqCst) > 0);
 }
+
+#[test]
+fn ksp_pc_failure_reports_nested_diagnostics_consistently() {
+    let diag = vec![S::from_real(2.0), S::from_real(3.0), S::from_real(4.0)];
+    let op = tridiag_op(&diag, S::from_real(-1.0));
+
+    register_shell_callback(
+        "ksp_pc_fail_shell",
+        shell_apply(|_, _, _| Err(kryst::KError::SolveError("inner shell boom".into()))),
+    );
+
+    let mut ksp_pc = PcFactory::create_from_options(&PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("richardson".into()),
+        pc_ksp_maxits: Some(2),
+        pc_ksp_rtol: Some(1e-12),
+        pc_ksp_atol: Some(1e-14),
+        pc_ksp_dtol: Some(1e4),
+        pc_ksp_restart: Some(3),
+        pc_ksp_monitor_rank0: Some(true),
+        pc_ksp_pc_options: Some(Box::new(PcOptions {
+            pc_type: Some("shell".into()),
+            pc_shell_name: Some("ksp_pc_fail_shell".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
+    .expect("ksp pc create");
+
+    ksp_pc.setup(op.as_ref()).expect("ksp setup");
+    let b = vec![S::from_real(1.0); diag.len()];
+    let mut y = vec![S::zero(); diag.len()];
+    let err = ksp_pc
+        .apply(PcSide::Right, &b, &mut y)
+        .expect_err("nested shell failure should surface");
+    let msg = err.to_string();
+    assert!(msg.contains("pc_ksp"));
+    assert!(msg.contains("DivergedPcFailed") || msg.contains("nested preconditioner failed"));
+
+    if let kryst::KError::NestedPcFailed(failure) = err {
+        assert_eq!(failure.component, "pc_ksp");
+        assert!(failure.detail.contains("stage=solve"));
+        assert!(failure.detail.contains("restart=Some(3)"));
+        assert!(failure.detail.contains(
+            "tolerances=(rtol=Some(1e-12),atol=Some(1e-14),dtol=Some(10000.0),maxits=Some(2))"
+        ));
+        assert!(failure.residual_history_summary.is_some());
+    } else {
+        panic!("expected nested failure metadata");
+    }
+}
