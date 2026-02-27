@@ -73,8 +73,8 @@ use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
-    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, CrSolver, FgmresSolver, GcrSolver,
-    GmresSolver, LinearSolver, MinresSolver, MonitorAction, MonitorCallback,
+    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, ChebyshevSolver, CrSolver, FgmresSolver,
+    GcrSolver, GmresSolver, LinearSolver, MinresSolver, MonitorAction, MonitorCallback,
     PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver, PcgVariant,
     PipeGcrSolver, RichardsonSolver, TcqmrSolver,
 };
@@ -647,7 +647,7 @@ impl KspContext {
             SolverType::Tcqmr => Some(Box::new(TcqmrSolver::new(self.rtol, self.maxits))),
             SolverType::Richardson => Some(Box::new(RichardsonSolver::new(self.rtol, self.maxits))),
             SolverType::Chebyshev => {
-                let mut s = RichardsonSolver::new(self.rtol, self.maxits);
+                let mut s = ChebyshevSolver::new(self.rtol, self.maxits);
                 s.set_omega(0.8);
                 Some(Box::new(s))
             }
@@ -2469,9 +2469,20 @@ impl KspContext {
                         )?
                     }
                     SolverType::Pcg => {
-                        return Err(KError::Unsupported(
-                            "PCG is not yet available for complex scalars".into(),
-                        ));
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<PcgSolver>()
+                            .ok_or_else(|| KError::SolveError("PCG solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
                     }
                     SolverType::Minres => {
                         let s = solver
@@ -2569,15 +2580,74 @@ impl KspContext {
                             work,
                         )?
                     }
-                    SolverType::Tcqmr
-                    | SolverType::Richardson
-                    | SolverType::Chebyshev
-                    | SolverType::Cr
-                    | SolverType::Gcr
-                    | SolverType::PipeGcr => {
+                    SolverType::Tcqmr | SolverType::Richardson => {
                         return Err(KError::Unsupported(
                             "Selected solver is not yet available for complex scalars".into(),
                         ));
+                    }
+                    SolverType::Chebyshev => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<ChebyshevSolver>()
+                            .ok_or_else(|| KError::SolveError("Chebyshev solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Cr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<CrSolver>()
+                            .ok_or_else(|| KError::SolveError("CR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::Gcr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<GcrSolver>()
+                            .ok_or_else(|| KError::SolveError("GCR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref_mut(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
+                    }
+                    SolverType::PipeGcr => {
+                        let s = solver
+                            .as_any_mut()
+                            .downcast_mut::<PipeGcrSolver>()
+                            .ok_or_else(|| KError::SolveError("PipeGCR solver missing".into()))?;
+                        s.solve_k(
+                            &op,
+                            pc_k.as_deref_mut(),
+                            b,
+                            x,
+                            self.pc_side,
+                            &comm,
+                            monitors,
+                            work,
+                        )?
                     }
                     SolverType::Preonly => unreachable!("PREONLY handled earlier"),
                 })
