@@ -845,6 +845,18 @@ impl PcOptions {
             .find(|(p, _)| p == prefix)
             .map(|(_, o)| o.as_ref())
     }
+
+    pub fn fieldsplit_child_prefix_for_index(&self, index: usize) -> String {
+        self.pc_fieldsplit_prefixes
+            .as_ref()
+            .and_then(|prefixes| prefixes.get(index).cloned())
+            .unwrap_or_else(|| format!("pc_fieldsplit_{index}_"))
+    }
+
+    pub fn fieldsplit_child_scoped_options(&self, index: usize) -> Option<&PcOptions> {
+        let prefix = self.fieldsplit_child_prefix_for_index(index);
+        self.scoped_child(&prefix)
+    }
 }
 
 /// Side enum kept as-is.
@@ -4072,6 +4084,40 @@ mod old_tests {
         assert_eq!(p.pc_type.as_deref(), Some("amg"));
         assert_eq!(p.amg_levels, Some(3));
         assert_eq!(p.ilu_level, None);
+    }
+
+    #[test]
+    fn test_fieldsplit_index_prefix_fallback_and_override_lookup() {
+        let args = vec![
+            "-pc_fieldsplit_0_pc_type",
+            "jacobi",
+            "-pc_fieldsplit_1_pc_type",
+            "none",
+            "-pc_fieldsplit_prefixes",
+            "u_,p_",
+            "-u_pc_type",
+            "ilu",
+            "-p_pc_type",
+            "amg",
+        ];
+        let opts = PcOptions::from_args(&args).unwrap();
+
+        assert_eq!(opts.fieldsplit_child_prefix_for_index(0), "u_");
+        assert_eq!(opts.fieldsplit_child_prefix_for_index(1), "p_");
+        assert_eq!(
+            opts.fieldsplit_child_prefix_for_index(8),
+            "pc_fieldsplit_8_"
+        );
+        assert_eq!(
+            opts.fieldsplit_child_scoped_options(0)
+                .and_then(|o| o.pc_type.as_deref()),
+            Some("ilu")
+        );
+        assert_eq!(
+            opts.fieldsplit_child_scoped_options(1)
+                .and_then(|o| o.pc_type.as_deref()),
+            Some("amg")
+        );
     }
 
     #[test]
