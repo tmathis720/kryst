@@ -381,6 +381,18 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
                     })?)
                 }
                 "coarse_side" => policy.coarse_side = Some(PcSide::from_str(v.trim())?),
+                "coarse_route" | "coarse_routes" => {
+                    let routes = v
+                        .split('|')
+                        .flat_map(|chunk| chunk.split(','))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_lowercase())
+                        .collect::<Vec<_>>();
+                    if !routes.is_empty() {
+                        policy.coarse_routes = Some(routes);
+                    }
+                }
                 "ksp" | "ksp_type" => policy.level_ksp_type = Some(v.trim().to_lowercase()),
                 "pc" | "pc_type" => policy.level_pc_type = Some(v.trim().to_lowercase()),
                 "ksp_maxits" | "maxits" => {
@@ -401,12 +413,30 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
     Ok(policy)
 }
 
-fn mg_policy_from_scoped_level(level: usize, scoped: &PcOptions) -> MgLevelPolicy {
+fn mg_policy_from_scoped_level(
+    global: &PcOptions,
+    level: usize,
+    scoped: &PcOptions,
+) -> MgLevelPolicy {
+    let inherited_pc_type = scoped
+        .pc_type
+        .clone()
+        .or_else(|| global.pc_mg_smoother.clone());
+    let inherited_ksp_type = scoped
+        .pc_ksp_ksp_type
+        .clone()
+        .or_else(|| global.pc_ksp_ksp_type.clone());
+    let inherited_ksp_pc = scoped
+        .pc_ksp_pc_type
+        .clone()
+        .or_else(|| scoped.pc_type.clone())
+        .or_else(|| global.pc_ksp_pc_type.clone())
+        .or_else(|| global.pc_mg_smoother.clone());
     MgLevelPolicy {
         level,
-        smoother_type: scoped.pc_type.clone().map(|v| v.to_lowercase()),
-        smoother_family: scoped.pc_type.clone().map(|v| v.to_lowercase()),
-        smoother_steps: scoped.pc_mg_smoother_steps,
+        smoother_type: inherited_pc_type.clone().map(|v| v.to_lowercase()),
+        smoother_family: inherited_pc_type.map(|v| v.to_lowercase()),
+        smoother_steps: scoped.pc_mg_smoother_steps.or(global.pc_mg_smoother_steps),
         pre_sweeps: None,
         post_sweeps: None,
         smoother_side: None,
@@ -414,22 +444,49 @@ fn mg_policy_from_scoped_level(level: usize, scoped: &PcOptions) -> MgLevelPolic
             .pc_mg_coarse_pc_type
             .clone()
             .or_else(|| scoped.pc_type.clone())
+            .or_else(|| global.pc_mg_coarse_pc_type.clone())
             .map(|v| v.to_lowercase()),
         coarse_ksp_type: scoped
             .pc_mg_coarse_ksp_type
             .clone()
+            .or_else(|| global.pc_mg_coarse_ksp_type.clone())
             .map(|v| v.to_lowercase()),
-        coarse_ksp_maxits: scoped.pc_mg_coarse_ksp_maxits.or(scoped.pc_ksp_maxits),
-        coarse_ksp_rtol: scoped.pc_mg_coarse_ksp_rtol.or(scoped.pc_ksp_rtol),
+        coarse_ksp_maxits: scoped
+            .pc_mg_coarse_ksp_maxits
+            .or(scoped.pc_ksp_maxits)
+            .or(global.pc_mg_coarse_ksp_maxits)
+            .or(global.pc_ksp_maxits),
+        coarse_ksp_rtol: scoped
+            .pc_mg_coarse_ksp_rtol
+            .or(scoped.pc_ksp_rtol)
+            .or(global.pc_mg_coarse_ksp_rtol)
+            .or(global.pc_ksp_rtol),
         coarse_side: None,
-        level_ksp_type: scoped.pc_ksp_ksp_type.clone().map(|v| v.to_lowercase()),
-        level_pc_type: scoped
-            .pc_ksp_pc_type
-            .clone()
-            .or_else(|| scoped.pc_type.clone())
-            .map(|v| v.to_lowercase()),
-        level_ksp_maxits: scoped.pc_ksp_maxits,
-        level_ksp_rtol: scoped.pc_ksp_rtol,
+        coarse_routes: scoped
+            .amg_dist_coarse_solver_route
+            .as_ref()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                global.amg_dist_coarse_solver_route.as_ref().map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_lowercase())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .filter(|v| !v.is_empty()),
+        level_ksp_type: inherited_ksp_type.map(|v| v.to_lowercase()),
+        level_pc_type: inherited_ksp_pc.map(|v| v.to_lowercase()),
+        level_ksp_maxits: scoped.pc_ksp_maxits.or(global.pc_ksp_maxits),
+        level_ksp_rtol: scoped.pc_ksp_rtol.or(global.pc_ksp_rtol),
     }
 }
 
@@ -719,7 +776,7 @@ impl PcConfig {
                         })
                         .unwrap_or_default();
                     for (level, scoped) in &o.pc_mg_level_scoped_options {
-                        policies.push(mg_policy_from_scoped_level(*level, scoped));
+                        policies.push(mg_policy_from_scoped_level(o, *level, scoped));
                     }
                     policies.sort_by_key(|p| p.level);
                     policies

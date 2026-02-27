@@ -32,6 +32,7 @@ pub struct MgLevelPolicy {
     pub coarse_ksp_maxits: Option<usize>,
     pub coarse_ksp_rtol: Option<f64>,
     pub coarse_side: Option<PcSide>,
+    pub coarse_routes: Option<Vec<String>>,
     pub level_ksp_type: Option<String>,
     pub level_pc_type: Option<String>,
     pub level_ksp_maxits: Option<usize>,
@@ -70,6 +71,7 @@ struct MgResolvedPolicy {
     coarse_ksp_maxits: Option<usize>,
     coarse_ksp_rtol: Option<f64>,
     coarse_side: PcSide,
+    coarse_routes: Vec<String>,
     level_ksp_type: Option<String>,
     level_pc_type: Option<String>,
     level_ksp_maxits: Option<usize>,
@@ -608,6 +610,7 @@ impl MgPc {
             coarse_ksp_maxits: self.coarse_ksp_maxits,
             coarse_ksp_rtol: self.coarse_ksp_rtol,
             coarse_side: PcSide::Left,
+            coarse_routes: vec!["nested_ksp".to_string(), "pc_apply".to_string()],
             level_ksp_type: None,
             level_pc_type: None,
             level_ksp_maxits: None,
@@ -645,6 +648,9 @@ impl MgPc {
             if let Some(v) = p.coarse_side {
                 resolved.coarse_side = v;
             }
+            if let Some(v) = p.coarse_routes.as_ref() {
+                resolved.coarse_routes = v.clone();
+            }
             if let Some(v) = p.level_ksp_type.as_ref() {
                 resolved.level_ksp_type = Some(v.clone());
             }
@@ -662,6 +668,26 @@ impl MgPc {
             resolved.coarse_pc_type = Some(v.clone());
         }
         resolved
+    }
+
+    fn normalized_coarse_routes(policy: &MgResolvedPolicy) -> Vec<String> {
+        let mut routes = Vec::new();
+        for route in &policy.coarse_routes {
+            let canonical = match route.trim().to_lowercase().as_str() {
+                "ksp" | "nested_ksp" => "nested_ksp",
+                "pc" | "pc_apply" | "apply" => "pc_apply",
+                _ => continue,
+            }
+            .to_string();
+            if !routes.contains(&canonical) {
+                routes.push(canonical);
+            }
+        }
+        if routes.is_empty() {
+            routes.push("nested_ksp".to_string());
+            routes.push("pc_apply".to_string());
+        }
+        routes
     }
 
     fn mg_cycle(
@@ -868,36 +894,72 @@ impl Preconditioner for MgPc {
 
         let coarse_level = self.levels.saturating_sub(1);
         let coarse_policy = self.resolved_policy_for_level(coarse_level);
+        let coarse_routes = Self::normalized_coarse_routes(&coarse_policy);
         let coarse_pc_type = coarse_policy
             .coarse_pc_type
             .as_deref()
             .map(PcType::from_str)
             .transpose()?
             .unwrap_or(smoother_pc_type);
-        let mut coarse_solver: Box<dyn Preconditioner> =
-            if let Some(ksp_type) = coarse_policy.coarse_ksp_type.as_ref() {
-                let mut coarse_pc_opts = PcOptions {
-                    pc_type: Some(Self::pc_type_name(coarse_pc_type).to_string()),
-                    ..Default::default()
-                };
-                if coarse_pc_type == PcType::Ksp {
-                    coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
+        let mut coarse_solver: Option<Box<dyn Preconditioner>> = None;
+        for route in &coarse_routes {
+            match route.as_str() {
+                "nested_ksp" => {
+                    if let Some(ksp_type) = coarse_policy.coarse_ksp_type.as_ref() {
+                        let mut coarse_pc_opts = PcOptions {
+                            pc_type: Some(Self::pc_type_name(coarse_pc_type).to_string()),
+                            ..Default::default()
+                        };
+                        if coarse_pc_type == PcType::Ksp {
+                            coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
+                        }
+                        if coarse_pc_opts.pc_type.is_none() {
+                            coarse_pc_opts.pc_type = Some("jacobi".to_string());
+                        }
+                        coarse_solver = Some(Box::new(KspAsPc::new(
+                            KspOptions {
+                                ksp_type: Some(ksp_type.clone()),
+                                maxits: coarse_policy.coarse_ksp_maxits,
+                                rtol: coarse_policy.coarse_ksp_rtol,
+                                ..Default::default()
+                            },
+                            coarse_pc_opts,
+                        )?));
+                        break;
+                    }
                 }
-                if coarse_pc_opts.pc_type.is_none() {
-                    coarse_pc_opts.pc_type = Some("jacobi".to_string());
+                "pc_apply" => {
+                    coarse_solver = Some(PcFactory::create_preconditioner(coarse_pc_type, None)?);
+                    break;
                 }
-                Box::new(KspAsPc::new(
-                    KspOptions {
-                        ksp_type: Some(ksp_type.clone()),
-                        maxits: coarse_policy.coarse_ksp_maxits,
-                        rtol: coarse_policy.coarse_ksp_rtol,
-                        ..Default::default()
-                    },
-                    coarse_pc_opts,
-                )?)
-            } else {
-                PcFactory::create_preconditioner(coarse_pc_type, None)?
+                _ => {}
+            }
+        }
+        let mut coarse_solver = if let Some(solver) = coarse_solver {
+            solver
+        } else if let Some(ksp_type) = coarse_policy.coarse_ksp_type.as_ref() {
+            let mut coarse_pc_opts = PcOptions {
+                pc_type: Some(Self::pc_type_name(coarse_pc_type).to_string()),
+                ..Default::default()
             };
+            if coarse_pc_type == PcType::Ksp {
+                coarse_pc_opts.pc_ksp_pc_type = Some("jacobi".to_string());
+            }
+            if coarse_pc_opts.pc_type.is_none() {
+                coarse_pc_opts.pc_type = Some("jacobi".to_string());
+            }
+            Box::new(KspAsPc::new(
+                KspOptions {
+                    ksp_type: Some(ksp_type.clone()),
+                    maxits: coarse_policy.coarse_ksp_maxits,
+                    rtol: coarse_policy.coarse_ksp_rtol,
+                    ..Default::default()
+                },
+                coarse_pc_opts,
+            )?)
+        } else {
+            PcFactory::create_preconditioner(coarse_pc_type, None)?
+        };
 
         let coarse_op = CsrLinOp::new(
             hierarchy
@@ -937,12 +999,7 @@ impl Preconditioner for MgPc {
                     post_sweeps: policy.post_sweeps,
                     side: policy.smoother_side,
                     coarse_route: if lvl.level == coarse_level {
-                        let route = if coarse_policy.coarse_ksp_type.is_some() {
-                            "nested_ksp"
-                        } else {
-                            "pc_apply"
-                        };
-                        Some(route.to_string())
+                        Some(coarse_routes.join("->"))
                     } else {
                         None
                     },
@@ -1074,6 +1131,69 @@ mod tests {
         assert_eq!(l2.pre_sweeps, 1);
     }
 
+    #[test]
+    fn mg_level_policy_supports_mixed_ksp_pc_and_sweep_budgets() {
+        let mut mg = MgPc::new(
+            4,
+            Some("v".into()),
+            Some("jacobi".into()),
+            Some(1),
+            None,
+            None,
+            None,
+            Some("ilu0".into()),
+            Some("cg".into()),
+            Some(5),
+            Some(1e-3),
+        );
+        mg.set_level_policies(vec![MgLevelPolicy {
+            level: 1,
+            level_ksp_type: Some("gmres".into()),
+            level_pc_type: Some("sor".into()),
+            level_ksp_maxits: Some(4),
+            pre_sweeps: Some(3),
+            post_sweeps: Some(1),
+            coarse_routes: Some(vec!["pc_apply".into(), "nested_ksp".into()]),
+            ..Default::default()
+        }]);
+
+        let l1 = mg.resolved_policy_for_level(1);
+        assert_eq!(l1.level_ksp_type.as_deref(), Some("gmres"));
+        assert_eq!(l1.level_pc_type.as_deref(), Some("sor"));
+        assert_eq!(l1.level_ksp_maxits, Some(4));
+        assert_eq!(l1.pre_sweeps, 3);
+        assert_eq!(l1.post_sweeps, 1);
+        assert_eq!(l1.coarse_routes, vec!["pc_apply", "nested_ksp"]);
+
+        let l2 = mg.resolved_policy_for_level(2);
+        assert_eq!(l2.level_ksp_type, None);
+        assert_eq!(l2.pre_sweeps, 1);
+        assert_eq!(l2.post_sweeps, 1);
+    }
+
+    #[test]
+    fn mg_coarse_route_normalization_is_deterministic() {
+        let policy = MgResolvedPolicy {
+            smoother: "jacobi".into(),
+            pre_sweeps: 1,
+            post_sweeps: 1,
+            smoother_side: PcSide::Left,
+            coarse_pc_type: None,
+            coarse_ksp_type: None,
+            coarse_ksp_maxits: None,
+            coarse_ksp_rtol: None,
+            coarse_side: PcSide::Left,
+            coarse_routes: vec!["ksp".into(), "pc".into(), "ksp".into(), "bogus".into()],
+            level_ksp_type: None,
+            level_pc_type: None,
+            level_ksp_maxits: None,
+            level_ksp_rtol: None,
+        };
+        assert_eq!(
+            MgPc::normalized_coarse_routes(&policy),
+            vec!["nested_ksp".to_string(), "pc_apply".to_string()]
+        );
+    }
     #[test]
     fn mg_level_specific_coarse_map_takes_precedence() {
         let mut mg = MgPc::new(
