@@ -112,6 +112,25 @@ impl CholeskyFactor {
             rhs[i] = acc / self.data[i * self.n + i];
         }
     }
+
+    #[cfg(feature = "complex")]
+    fn solve_in_place_complex(&self, rhs: &mut [S]) {
+        debug_assert_eq!(rhs.len(), self.n);
+        for i in 0..self.n {
+            let mut acc = rhs[i];
+            for k in 0..i {
+                acc -= S::from_real(self.data[i * self.n + k]) * rhs[k];
+            }
+            rhs[i] = acc / S::from_real(self.data[i * self.n + i]);
+        }
+        for i in (0..self.n).rev() {
+            let mut acc = rhs[i];
+            for k in (i + 1)..self.n {
+                acc -= S::from_real(self.data[k * self.n + i]) * rhs[k];
+            }
+            rhs[i] = acc / S::from_real(self.data[i * self.n + i]);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +206,30 @@ impl LuFactor {
                 acc -= self.lu[i * self.n + k] * permuted[k];
             }
             permuted[i] = acc / self.lu[i * self.n + i];
+        }
+        rhs.copy_from_slice(&permuted);
+    }
+
+    #[cfg(feature = "complex")]
+    fn solve_in_place_complex(&self, rhs: &mut [S]) {
+        debug_assert_eq!(rhs.len(), self.n);
+        let mut permuted = vec![S::zero(); self.n];
+        for (i, &p) in self.piv.iter().enumerate() {
+            permuted[i] = rhs[p];
+        }
+        for i in 0..self.n {
+            let mut acc = permuted[i];
+            for k in 0..i {
+                acc -= S::from_real(self.lu[i * self.n + k]) * permuted[k];
+            }
+            permuted[i] = acc;
+        }
+        for i in (0..self.n).rev() {
+            let mut acc = permuted[i];
+            for k in (i + 1)..self.n {
+                acc -= S::from_real(self.lu[i * self.n + k]) * permuted[k];
+            }
+            permuted[i] = acc / S::from_real(self.lu[i * self.n + i]);
         }
         rhs.copy_from_slice(&permuted);
     }
@@ -344,6 +387,14 @@ where
         match &self.e_factor {
             EFactor::Chol(ch) => ch.solve_in_place(rhs),
             EFactor::Lu(lu) => lu.solve_in_place(rhs),
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    fn solve_e_complex(&self, rhs: &mut [S]) {
+        match &self.e_factor {
+            EFactor::Chol(ch) => ch.solve_in_place_complex(rhs),
+            EFactor::Lu(lu) => lu.solve_in_place_complex(rhs),
         }
     }
 
@@ -530,27 +581,25 @@ where
         let k = self.z.ncols();
         let mut work = self.work.lock().unwrap();
         work.ensure(n, k);
-        let DeflationWorkspace {
-            coarse,
-            coarse_sol,
-            fine_tmp,
-            base_out,
-        } = &mut *work;
+        let DeflationWorkspace { base_out, .. } = &mut *work;
+        let mut coarse = vec![S::zero(); k];
+        let mut coarse_sol = vec![S::zero(); k];
+        let mut fine_tmp = vec![S::zero(); n];
 
         for j in 0..k {
             let mut acc = S::zero();
             for i in 0..n {
                 acc += S::from_real(self.z[(i, j)]) * r[i];
             }
-            coarse[j] = acc.real();
-            coarse_sol[j] = coarse[j];
+            coarse[j] = acc;
+            coarse_sol[j] = acc;
         }
-        self.solve_e(coarse_sol);
+        self.solve_e_complex(&mut coarse_sol);
 
         for i in 0..n {
             let mut acc = S::zero();
             for j in 0..k {
-                acc += S::from_real(self.z[(i, j)] * coarse_sol[j]);
+                acc += S::from_real(self.z[(i, j)]) * coarse_sol[j];
             }
             y[i] = acc;
         }
@@ -558,14 +607,13 @@ where
         for i in 0..n {
             let mut acc = S::zero();
             for j in 0..k {
-                acc += S::from_real(self.az[(i, j)] * coarse_sol[j]);
+                acc += S::from_real(self.az[(i, j)]) * coarse_sol[j];
             }
-            fine_tmp[i] = (r[i] - acc).real();
+            fine_tmp[i] = r[i] - acc;
         }
 
-        let fine_rhs: Vec<S> = fine_tmp.iter().copied().map(S::from_real).collect();
         let mut base_y = vec![S::zero(); n];
-        self.base.apply(side, &fine_rhs, &mut base_y)?;
+        self.base.apply(side, &fine_tmp, &mut base_y)?;
         for i in 0..n {
             y[i] += base_y[i];
         }
@@ -632,6 +680,32 @@ mod tests {
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::{DeflationOptions, Jacobi, PcSide, ZSource};
     use faer::Mat;
+
+    #[test]
+    fn deflation_complex_path_preserves_imaginary_component() {
+        let n = 3;
+        let a = CsrMatrix::from_csr(n, n, vec![0, 1, 2, 3], vec![0, 1, 2], vec![2.0, 3.0, 4.0]);
+        let mut z = Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            z[(i, 0)] = 1.0;
+        }
+        let coarse = AmgCoarseSpace {
+            z,
+            local_range: None,
+        };
+        let opts = DeflationOptions {
+            z_source: ZSource::External,
+            cond_cap: None,
+            augment_initial_guess: false,
+        };
+        let base = Jacobi::new();
+        let pc = DeflationPC::new(base, &a, coarse, &opts).expect("deflation construction");
+
+        let rhs = vec![S::from_parts(1.0, 0.75); n];
+        let mut out = vec![S::zero(); n];
+        pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
+        assert!(out.iter().any(|v| v.imag().abs() > 1e-12));
+    }
 
     #[test]
     fn apply_s_runs_for_complex_rhs() {

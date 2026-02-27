@@ -271,6 +271,8 @@ pub struct SorPc {
     inv_diag_complex: Vec<S>,
     #[cfg(feature = "complex")]
     complex_force_split_fallback: bool,
+    #[cfg(feature = "complex")]
+    complex_fallback_diagnostics: Mutex<Option<String>>,
     color_of: Vec<usize>,
     color_blocks: Vec<Vec<usize>>,
     n: usize,
@@ -292,6 +294,8 @@ impl SorPc {
             inv_diag_complex: Vec::new(),
             #[cfg(feature = "complex")]
             complex_force_split_fallback: false,
+            #[cfg(feature = "complex")]
+            complex_fallback_diagnostics: Mutex::new(None),
             color_of: Vec::new(),
             color_blocks: Vec::new(),
             n: 0,
@@ -311,6 +315,14 @@ impl SorPc {
         } else {
             SorComplexKernelMode::Native
         }
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn complex_fallback_diagnostics(&self) -> Option<String> {
+        self.complex_fallback_diagnostics
+            .lock()
+            .ok()
+            .and_then(|msg| msg.clone())
     }
 
     fn ensure_inv_diag(&mut self, a: &CsrMatrix<f64>) -> Result<(), KError> {
@@ -552,6 +564,9 @@ impl SorPc {
     #[cfg(feature = "complex")]
     fn apply_complex(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if self.complex_force_split_fallback {
+            if let Ok(mut msg) = self.complex_fallback_diagnostics.lock() {
+                *msg = Some("sor_complex_degraded_split_real_imag: forced fallback enabled; disable it to use native complex sweep".to_string());
+            }
             let mut xr = vec![0.0; x.len()];
             let mut xi = vec![0.0; x.len()];
             let mut yr = vec![0.0; y.len()];
@@ -566,6 +581,9 @@ impl SorPc {
                 y[i] = S::from_parts(yr[i], yi[i]);
             }
             return Ok(());
+        }
+        if let Ok(mut msg) = self.complex_fallback_diagnostics.lock() {
+            *msg = None;
         }
         let a = self
             .a_csr_complex
@@ -737,6 +755,34 @@ mod tests {
         pc.apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
             .unwrap();
         assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn complex_fallback_diagnostics_reports_forced_degradation() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                S::from_parts(4.0, 0.0),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(4.0, 0.0),
+            ],
+        );
+        let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
+        pc.set_complex_force_split_fallback(true);
+        pc.setup(&a).unwrap();
+        let rhs = vec![S::from_parts(1.0, 0.25); 2];
+        let mut out = vec![S::zero(); 2];
+        pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
+        let diag = pc.complex_fallback_diagnostics();
+        assert!(
+            diag.as_deref()
+                .unwrap_or("")
+                .contains("degraded_split_real_imag")
+        );
     }
 
     #[test]
