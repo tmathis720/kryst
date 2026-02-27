@@ -2,50 +2,68 @@
 
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::error::KError;
-use crate::matrix::op::{DistLayout, LinOp};
+use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BddcConstraintSelection {
+    Vertices,
+    Interface,
+    VerticesAndInterface,
+}
+
+impl BddcConstraintSelection {
+    fn from_use_vertices(use_vertices: bool) -> Self {
+        if use_vertices {
+            Self::VerticesAndInterface
+        } else {
+            Self::Interface
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BddcScaling {
+    Uniform,
+    DeluxeLike,
+}
 
 #[derive(Debug, Clone)]
 pub struct BddcConfig {
     pub coarse_ksp_type: Option<String>,
     pub coarse_pc_type: Option<String>,
     pub use_vertices: bool,
+    pub constraint_selection: Option<BddcConstraintSelection>,
+    pub scaling: Option<BddcScaling>,
 }
 
 #[derive(Debug, Clone)]
-pub struct BddcCoarseSpace {
-    pub dofs: Vec<usize>,
-    pub weights: Vec<R>,
+struct BddcSymbolic {
+    dims: (usize, usize),
+    local_n: usize,
+    layout: Option<DistLayout>,
+    subdomains: Vec<(usize, usize)>,
+    interface_dofs: Vec<usize>,
+    coarse_dofs: Vec<usize>,
+    interface_multiplicity: Vec<R>,
+    structure_id: StructureId,
 }
 
 #[derive(Debug, Clone)]
-pub struct BddcConstraints {
-    pub vertex_dofs: Vec<usize>,
-    pub interface_dofs: Vec<usize>,
+struct BddcNumeric {
+    operator: Vec<Vec<S>>,
+    coarse_operator: Vec<Vec<S>>,
+    values_id: ValuesId,
 }
 
-#[derive(Debug, Clone)]
-pub struct BddcInterfaceCoupling {
-    pub interface_dofs: Vec<usize>,
-    pub subdomains: Vec<(usize, usize)>,
-}
-
-/// Prototype BDDC preconditioner.
-///
-/// Currently builds coarse space metadata and constraint/interface sets, while
-/// applying a no-op preconditioning operator.
+/// BDDC preconditioner with reusable symbolic and numeric phases.
 pub struct BddcPc {
     config: BddcConfig,
     dims: (usize, usize),
-    local_n: usize,
     comm: UniverseComm,
-    layout: Option<DistLayout>,
-    coarse_space: Option<BddcCoarseSpace>,
-    constraints: Option<BddcConstraints>,
-    interface: Option<BddcInterfaceCoupling>,
-    operator: Option<Vec<Vec<S>>>,
-    coarse_operator: Option<Vec<Vec<S>>>,
+    symbolic: Option<BddcSymbolic>,
+    numeric: Option<BddcNumeric>,
 }
 
 impl BddcPc {
@@ -53,14 +71,9 @@ impl BddcPc {
         Self {
             config,
             dims: (0, 0),
-            local_n: 0,
             comm: UniverseComm::NoComm(crate::parallel::NoComm),
-            layout: None,
-            coarse_space: None,
-            constraints: None,
-            interface: None,
-            operator: None,
-            coarse_operator: None,
+            symbolic: None,
+            numeric: None,
         }
     }
 
@@ -95,41 +108,71 @@ impl BddcPc {
     fn build_constraints(
         subdomains: &[(usize, usize)],
         interface_dofs: &[usize],
-        use_vertices: bool,
-    ) -> BddcConstraints {
-        let mut vertex_dofs = Vec::new();
-        if use_vertices {
+        selection: BddcConstraintSelection,
+    ) -> Vec<usize> {
+        let mut coarse_dofs = Vec::new();
+        if matches!(
+            selection,
+            BddcConstraintSelection::Vertices | BddcConstraintSelection::VerticesAndInterface
+        ) {
             for (start, end) in subdomains {
                 if *start < *end {
-                    vertex_dofs.push(*start);
-                    vertex_dofs.push(end.saturating_sub(1));
+                    coarse_dofs.push(*start);
+                    coarse_dofs.push(end.saturating_sub(1));
                 }
             }
-            vertex_dofs.sort_unstable();
-            vertex_dofs.dedup();
         }
-        BddcConstraints {
-            vertex_dofs,
-            interface_dofs: interface_dofs.to_vec(),
+        if matches!(
+            selection,
+            BddcConstraintSelection::Interface | BddcConstraintSelection::VerticesAndInterface
+        ) {
+            coarse_dofs.extend_from_slice(interface_dofs);
         }
+        coarse_dofs.sort_unstable();
+        coarse_dofs.dedup();
+        coarse_dofs
     }
 
-    fn build_coarse_space(constraints: &BddcConstraints) -> BddcCoarseSpace {
-        let mut dofs = constraints.vertex_dofs.clone();
-        dofs.extend_from_slice(&constraints.interface_dofs);
-        dofs.sort_unstable();
-        dofs.dedup();
-        let weights = dofs.iter().map(|_| 1.0).collect();
-        BddcCoarseSpace { dofs, weights }
-    }
+    fn assemble_interface_multiplicity(
+        local_n: usize,
+        interface_dofs: &[usize],
+        subdomains: &[(usize, usize)],
+        layout: Option<&DistLayout>,
+        comm: &UniverseComm,
+    ) -> Vec<R> {
+        let mut local_counts = vec![S::zero(); local_n];
+        for &(start, end) in subdomains {
+            for i in start..end {
+                local_counts[i] = local_counts[i] + S::one();
+            }
+        }
 
-    fn prune_constraints(constraints: &mut BddcConstraints, n: usize) {
-        constraints.vertex_dofs.retain(|&d| d < n);
-        constraints.interface_dofs.retain(|&d| d < n);
-        constraints.vertex_dofs.sort_unstable();
-        constraints.vertex_dofs.dedup();
-        constraints.interface_dofs.sort_unstable();
-        constraints.interface_dofs.dedup();
+        let mut global_counts = if let Some(l) = layout {
+            let mut owned = vec![S::zero(); l.global_rows];
+            for (local_i, val) in local_counts.iter().copied().enumerate() {
+                let gi = l.row_start + local_i;
+                if gi < owned.len() {
+                    owned[gi] = val;
+                }
+            }
+            comm.allreduce_sum_scalars(&mut owned);
+            owned
+        } else {
+            comm.allreduce_sum_scalars(&mut local_counts);
+            local_counts
+        };
+
+        interface_dofs
+            .iter()
+            .map(|&i| {
+                let idx = layout.map(|l| l.row_start + i).unwrap_or(i);
+                if idx < global_counts.len() {
+                    global_counts[idx].real().max(1.0)
+                } else {
+                    1.0
+                }
+            })
+            .collect()
     }
 
     fn extract_dense_operator(op: &dyn LinOp<S = S>, n: usize) -> Result<Vec<Vec<S>>, KError> {
@@ -249,6 +292,16 @@ impl BddcPc {
         }
         out
     }
+
+    fn apply_scaling(&self, value: S, diag: S, multiplicity: R) -> S {
+        match self.config.scaling.unwrap_or(BddcScaling::Uniform) {
+            BddcScaling::Uniform => value * S::from_real(1.0 / multiplicity.max(1.0)),
+            BddcScaling::DeluxeLike => {
+                let denom = diag.abs().max(1e-12) * multiplicity.max(1.0);
+                value * S::from_real(1.0 / denom)
+            }
+        }
+    }
 }
 
 impl Preconditioner for BddcPc {
@@ -278,57 +331,89 @@ impl Preconditioner for BddcPc {
                 ));
             }
         }
-        let local_n = dims.0;
-        let subdomains = Self::build_subdomains(local_n);
-        let interface_dofs = Self::build_interface(&subdomains);
-        let mut constraints =
-            Self::build_constraints(&subdomains, &interface_dofs, self.config.use_vertices);
-        Self::prune_constraints(&mut constraints, local_n);
-        let coarse_space = Self::build_coarse_space(&constraints);
-        let operator = Self::extract_dense_operator(op, local_n)?;
-        let coarse_operator = Self::submatrix(&operator, &coarse_space.dofs);
 
-        self.interface = Some(BddcInterfaceCoupling {
-            interface_dofs,
-            subdomains,
-        });
-        self.constraints = Some(constraints);
-        self.coarse_space = Some(coarse_space);
-        self.coarse_operator = Some(coarse_operator);
-        self.operator = Some(operator);
-        self.local_n = local_n;
+        let structure_id = op.structure_id();
+        let values_id = op.values_id();
+        let mut symbolic_rebuild = true;
+        if let Some(sym) = &self.symbolic {
+            symbolic_rebuild = sym.structure_id != structure_id || sym.dims != dims;
+        }
+
+        if symbolic_rebuild {
+            let local_n = dims.0;
+            let subdomains = Self::build_subdomains(local_n);
+            let interface_dofs = Self::build_interface(&subdomains);
+            let selection = self.config.constraint_selection.unwrap_or_else(|| {
+                BddcConstraintSelection::from_use_vertices(self.config.use_vertices)
+            });
+            let coarse_dofs = Self::build_constraints(&subdomains, &interface_dofs, selection);
+            let comm = op.comm();
+            let interface_multiplicity = Self::assemble_interface_multiplicity(
+                local_n,
+                &interface_dofs,
+                &subdomains,
+                layout.as_ref(),
+                &comm,
+            );
+
+            self.symbolic = Some(BddcSymbolic {
+                dims,
+                local_n,
+                layout: layout.clone(),
+                subdomains,
+                interface_dofs,
+                coarse_dofs,
+                interface_multiplicity,
+                structure_id,
+            });
+        }
+
+        let mut numeric_rebuild = true;
+        if let Some(num) = &self.numeric {
+            numeric_rebuild = num.values_id != values_id || symbolic_rebuild;
+        }
+        if numeric_rebuild {
+            let sym = self
+                .symbolic
+                .as_ref()
+                .ok_or_else(|| KError::PcFailed("BDDC symbolic phase missing".into()))?;
+            let operator = Self::extract_dense_operator(op, sym.local_n)?;
+            let coarse_operator = Self::submatrix(&operator, &sym.coarse_dofs);
+            self.numeric = Some(BddcNumeric {
+                operator,
+                coarse_operator,
+                values_id,
+            });
+        }
+
         self.comm = op.comm();
-        self.layout = layout;
         self.dims = dims;
         Ok(())
     }
 
     fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        if self.coarse_space.is_none()
-            || self.constraints.is_none()
-            || self.interface.is_none()
-            || self.operator.is_none()
-            || self.coarse_operator.is_none()
-        {
-            return Err(KError::InvalidInput("BDDC preconditioner not setup".into()));
-        }
-        if x.len() != self.local_n || y.len() != self.local_n {
+        let sym = self
+            .symbolic
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("BDDC preconditioner not setup".into()))?;
+        let num = self
+            .numeric
+            .as_ref()
+            .ok_or_else(|| KError::InvalidInput("BDDC numeric phase not setup".into()))?;
+
+        if x.len() != sym.local_n || y.len() != sym.local_n {
             return Err(KError::InvalidInput(
                 "BDDC apply expects vectors matching local ownership size".into(),
             ));
         }
 
-        let a = self.operator.as_ref().expect("checked above");
-        let interface = self.interface.as_ref().expect("checked above");
-        let coarse_space = self.coarse_space.as_ref().expect("checked above");
-        let coarse_op = self.coarse_operator.as_ref().expect("checked above");
-
+        // Phase 1: subdomain interior solve.
         y.fill(S::zero());
-        let mut multiplicity = vec![0usize; self.local_n];
-        for &(start, end) in &interface.subdomains {
+        let mut multiplicity = vec![0usize; sym.local_n];
+        for &(start, end) in &sym.subdomains {
             let dofs: Vec<usize> = (start..end).collect();
             let rhs: Vec<S> = dofs.iter().map(|&i| x[i]).collect();
-            let a_sub = Self::submatrix(a, &dofs);
+            let a_sub = Self::submatrix(&num.operator, &dofs);
             let local_sol = Self::solve_dense(a_sub, rhs)?;
             for (&dof, &val) in dofs.iter().zip(local_sol.iter()) {
                 y[dof] = y[dof] + val;
@@ -337,13 +422,13 @@ impl Preconditioner for BddcPc {
         }
         for (i, yi) in y.iter_mut().enumerate() {
             if multiplicity[i] > 0 {
-                let w = S::from_real(1.0 / multiplicity[i] as R);
-                *yi = *yi * w;
+                *yi = *yi * S::from_real(1.0 / multiplicity[i] as R);
             }
         }
 
-        let mut az = vec![S::zero(); self.local_n];
-        for (i, row) in a.iter().enumerate() {
+        // Phase 2: primal coarse correction.
+        let mut az = vec![S::zero(); sym.local_n];
+        for (i, row) in num.operator.iter().enumerate() {
             let mut sum = S::zero();
             for (aij, zj) in row.iter().zip(y.iter()) {
                 sum = sum + (*aij * *zj);
@@ -356,23 +441,22 @@ impl Preconditioner for BddcPc {
             .map(|(&xi, &azi)| xi - azi)
             .collect();
 
-        if !coarse_space.dofs.is_empty() {
-            let mut rc = vec![S::zero(); coarse_space.dofs.len()];
-            for (k, &dof) in coarse_space.dofs.iter().enumerate() {
-                rc[k] = residual[dof] * S::from_real(coarse_space.weights[k]);
-            }
-            let ec = self.coarse_solve(coarse_op, rc)?;
-            for (k, &dof) in coarse_space.dofs.iter().enumerate() {
-                let wk = S::from_real(coarse_space.weights[k]);
-                y[dof] = y[dof] + wk * ec[k];
+        if !sym.coarse_dofs.is_empty() {
+            let rc: Vec<S> = sym.coarse_dofs.iter().map(|&dof| residual[dof]).collect();
+            let ec = self.coarse_solve(&num.coarse_operator, rc)?;
+            for (k, &dof) in sym.coarse_dofs.iter().enumerate() {
+                y[dof] = y[dof] + ec[k];
             }
         }
 
-        for &dof in &interface.interface_dofs {
-            if dof < self.local_n && multiplicity[dof] > 1 {
-                let w = S::from_real(1.0 / multiplicity[dof] as R);
-                y[dof] = y[dof] * w;
+        // Phase 3: interface constraint enforcement with selectable scaling.
+        for (k, &dof) in sym.interface_dofs.iter().enumerate() {
+            if dof >= sym.local_n {
+                continue;
             }
+            let diag = num.operator[dof][dof];
+            let multiplicity = sym.interface_multiplicity.get(k).copied().unwrap_or(1.0);
+            y[dof] = self.apply_scaling(y[dof], diag, multiplicity);
         }
         Ok(())
     }

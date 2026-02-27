@@ -50,6 +50,8 @@ fn bddc_reduces_iterations_vs_none_on_domain_decomposed_spd() {
         coarse_ksp_type: Some("preonly".into()),
         coarse_pc_type: Some("lu".into()),
         use_vertices: true,
+        constraint_selection: None,
+        scaling: None,
     });
     bddc.setup(&a).unwrap();
 
@@ -96,6 +98,8 @@ fn bddc_rejects_non_square_operator() {
         coarse_ksp_type: None,
         coarse_pc_type: None,
         use_vertices: true,
+        constraint_selection: None,
+        scaling: None,
     });
     let err = bddc.setup(&Rect).unwrap_err();
     assert!(matches!(err, KError::InvalidInput(_)));
@@ -132,6 +136,8 @@ fn bddc_validates_distributed_layout_consistency() {
         coarse_ksp_type: None,
         coarse_pc_type: None,
         use_vertices: false,
+        constraint_selection: None,
+        scaling: None,
     });
     let err = bddc.setup(&LayoutMismatch).unwrap_err();
     assert!(matches!(err, KError::InvalidInput(_)));

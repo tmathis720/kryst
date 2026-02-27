@@ -1291,6 +1291,20 @@ pub static SPECS: &[Spec] = &[
         doc: "BDDC vertex constraints (placeholder)",
     },
     Spec {
+        flag: "-pc_bddc_constraint_selection",
+        key: "pc_bddc_constraint_selection",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "BDDC primal constraints: interface|vertices|vertices_and_interface",
+    },
+    Spec {
+        flag: "-pc_bddc_scaling",
+        key: "pc_bddc_scaling",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "BDDC interface scaling: uniform|deluxe_like",
+    },
+    Spec {
         flag: "-pc_gamg_type",
         key: "pc_gamg_type",
         arity: Arity::One,

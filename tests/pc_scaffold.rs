@@ -42,6 +42,10 @@ fn pc_options_parse_scaffold_prefixes() {
         "-pc_bddc_coarse_pc_type",
         "jacobi",
         "-pc_bddc_use_vertices",
+        "-pc_bddc_constraint_selection",
+        "vertices_and_interface",
+        "-pc_bddc_scaling",
+        "deluxe_like",
         "-pc_gamg_type",
         "agg",
         "-pc_gamg_threshold",
@@ -73,6 +77,11 @@ fn pc_options_parse_scaffold_prefixes() {
     assert_eq!(opts.pc_bddc_coarse_ksp_type.as_deref(), Some("cg"));
     assert_eq!(opts.pc_bddc_coarse_pc_type.as_deref(), Some("jacobi"));
     assert_eq!(opts.pc_bddc_use_vertices, Some(true));
+    assert_eq!(
+        opts.pc_bddc_constraint_selection.as_deref(),
+        Some("vertices_and_interface")
+    );
+    assert_eq!(opts.pc_bddc_scaling.as_deref(), Some("deluxe_like"));
     assert_eq!(opts.pc_gamg_type.as_deref(), Some("agg"));
     assert_eq!(opts.pc_gamg_threshold, Some(0.1));
     assert_eq!(opts.pc_gamg_levels, Some(3));

@@ -309,6 +309,8 @@ pub struct PcOptions {
     pub pc_bddc_coarse_ksp_type: Option<String>,
     pub pc_bddc_coarse_pc_type: Option<String>,
     pub pc_bddc_use_vertices: Option<bool>,
+    pub pc_bddc_constraint_selection: Option<String>,
+    pub pc_bddc_scaling: Option<String>,
     // GAMG
     /// GAMG variant profile (`agg` or `classical`).
     pub pc_gamg_type: Option<String>,
@@ -1339,6 +1341,10 @@ impl Sink for PcOptions {
             "pc_bddc_coarse_pc_type" => {
                 set_opt!(&mut self.pc_bddc_coarse_pc_type, v.to_lowercase())
             }
+            "pc_bddc_constraint_selection" => {
+                set_opt!(&mut self.pc_bddc_constraint_selection, v.to_lowercase())
+            }
+            "pc_bddc_scaling" => set_opt!(&mut self.pc_bddc_scaling, v.to_lowercase()),
             "pc_gamg_type" => set_opt!(&mut self.pc_gamg_type, v.to_lowercase()),
             "pc_gamg_threshold" => set_opt!(&mut self.pc_gamg_threshold, parse_as::<f64>(v, spec)?),
             "pc_gamg_levels" => set_opt!(&mut self.pc_gamg_levels, parse_as::<usize>(v, spec)?),
@@ -2387,6 +2393,8 @@ impl PcOptions {
         o!(pc_bddc_coarse_ksp_type);
         o!(pc_bddc_coarse_pc_type);
         o!(pc_bddc_use_vertices);
+        o!(pc_bddc_constraint_selection);
+        o!(pc_bddc_scaling);
         o!(pc_gamg_type);
         o!(pc_gamg_threshold);
         o!(pc_gamg_levels);
