@@ -23,6 +23,7 @@ use std::str::FromStr;
 pub struct GamgLevelPolicy {
     pub level: usize,
     pub smoother: Option<String>,
+    pub smoother_family: Option<String>,
     pub sweeps: Option<usize>,
     pub coarse_solver: Option<CoarseSolve>,
     pub side: Option<PcSide>,
@@ -179,12 +180,22 @@ fn gamg_policy_from_scoped(level: usize, scoped: &PcOptions) -> Result<GamgLevel
     let coarse_solver = scoped
         .amg_coarse_solver
         .as_deref()
-        .or(scoped.pc_type.as_deref())
         .map(parse_coarse_solver)
-        .transpose()?;
+        .transpose()?
+        .or_else(|| {
+            scoped
+                .pc_type
+                .as_deref()
+                .and_then(coarse_solve_from_pc_name)
+        });
     Ok(GamgLevelPolicy {
         level,
         smoother: scoped
+            .amg_smoother
+            .clone()
+            .or(scoped.pc_type.clone())
+            .map(|v| v.to_lowercase()),
+        smoother_family: scoped
             .amg_smoother
             .clone()
             .or(scoped.pc_type.clone())
@@ -214,6 +225,9 @@ fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
                     })?
                 }
                 "smoother" => policy.smoother = Some(v.trim().to_lowercase()),
+                "smoother_family" | "family" => {
+                    policy.smoother_family = Some(v.trim().to_lowercase())
+                }
                 "sweeps" => {
                     policy.sweeps =
                         Some(v.trim().parse().map_err(|_| {
@@ -338,6 +352,40 @@ impl Preconditioner for Gamg {
     }
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        let mut effective_cfg = self.config.amg_config.clone();
+        if let Some(fine_policy) = self
+            .config
+            .level_policies
+            .iter()
+            .filter(|p| p.level == 0)
+            .last()
+        {
+            if let Some(smoother) = fine_policy
+                .smoother_family
+                .as_ref()
+                .or(fine_policy.smoother.as_ref())
+            {
+                effective_cfg.relax_type = match smoother.as_str() {
+                    "jacobi" => RelaxType::Jacobi,
+                    "gs" | "gauss_seidel" => RelaxType::GaussSeidel,
+                    "sor" => RelaxType::SymmetricGaussSeidel,
+                    "l1jacobi" | "l1_jacobi" => RelaxType::L1Jacobi,
+                    "chebyshev" | "cheby" => RelaxType::Chebyshev,
+                    _ => effective_cfg.relax_type,
+                };
+                for phase in RelaxPhase::ALL {
+                    effective_cfg.grid_relax_type[phase.ix()] = effective_cfg.relax_type;
+                }
+            }
+            if let Some(sweeps) = fine_policy.sweeps {
+                effective_cfg.pre_sweeps = sweeps;
+                effective_cfg.post_sweeps = sweeps;
+                effective_cfg.num_grid_sweeps[RelaxPhase::Fine.ix()] = sweeps;
+                effective_cfg.num_grid_sweeps[RelaxPhase::Down.ix()] = sweeps;
+                effective_cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = sweeps;
+            }
+        }
+        self.amg = AMG::with_config(effective_cfg);
         for p in self
             .config
             .level_policies
@@ -452,6 +500,28 @@ mod tests {
         assert_eq!(lvl.ksp_type.as_deref(), Some("cg"));
         assert_eq!(lvl.coarse_solver, Some(CoarseSolve::ILU));
     }
+
+    #[test]
+    fn gamg_level_policy_parses_smoother_family() {
+        let parsed = parse_gamg_level_policy("level=2,smoother_family=chebyshev,sweeps=3")
+            .expect("parse policy");
+        assert_eq!(parsed.level, 2);
+        assert_eq!(parsed.smoother_family.as_deref(), Some("chebyshev"));
+        assert_eq!(parsed.sweeps, Some(3));
+    }
+
+    #[test]
+    fn gamg_scoped_policy_sets_family() {
+        let args = vec!["-pc_gamg_levels_1_pc_type", "jacobi"];
+        let opts = PcOptions::from_args(&args).expect("parse scoped options");
+        let cfg = GamgConfig::try_from_opts(&opts).expect("gamg config parse");
+        let lvl = cfg
+            .level_policies
+            .iter()
+            .find(|p| p.level == 1)
+            .expect("level policy");
+        assert_eq!(lvl.smoother_family.as_deref(), Some("jacobi"));
+    }
     #[test]
     fn gamg_config_parses_dist_coarse_controls() {
         let opts = PcOptions {
@@ -485,6 +555,29 @@ mod tests {
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected invalid route failure");
         assert!(err.to_string().contains("invalid dist coarse solver route"));
+    }
+
+    #[test]
+    fn gamg_config_accepts_hybrid_dist_aliases() {
+        let opts = PcOptions {
+            amg_dist_apply_mode: Some("hybrid".into()),
+            amg_dist_coarse_repartition: Some("hybrid".into()),
+            amg_dist_coarse_solver_route: Some("hybrid".into()),
+            ..Default::default()
+        };
+        let cfg = GamgConfig::try_from_opts(&opts).expect("parse hybrid aliases");
+        assert_eq!(
+            cfg.amg_config.dist_coarse_strategy,
+            DistCoarseStrategy::LocalPrototype
+        );
+        assert_eq!(
+            cfg.amg_config.dist_coarse_repartition,
+            DistCoarseRepartition::Uniform
+        );
+        assert_eq!(
+            cfg.amg_config.dist_coarse_solver_route,
+            DistCoarseSolverRoute::Local
+        );
     }
 
     #[test]

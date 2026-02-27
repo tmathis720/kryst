@@ -343,6 +343,9 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
                     })?
                 }
                 "smoother" => policy.smoother_type = Some(v.trim().to_lowercase()),
+                "smoother_family" | "family" => {
+                    policy.smoother_family = Some(v.trim().to_lowercase())
+                }
                 "steps" | "sweeps" => {
                     policy.smoother_steps = Some(v.trim().parse().map_err(|_| {
                         KError::InvalidInput(format!("invalid mg policy steps: {v}"))
@@ -399,6 +402,7 @@ fn mg_policy_from_scoped_level(level: usize, scoped: &PcOptions) -> MgLevelPolic
     MgLevelPolicy {
         level,
         smoother_type: scoped.pc_type.clone().map(|v| v.to_lowercase()),
+        smoother_family: scoped.pc_type.clone().map(|v| v.to_lowercase()),
         smoother_steps: scoped.pc_mg_smoother_steps,
         pre_sweeps: None,
         post_sweeps: None,

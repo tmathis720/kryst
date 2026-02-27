@@ -71,6 +71,7 @@ impl FromStr for DistCoarseRepartition {
         match value.to_lowercase().as_str() {
             "keep" | "fine" | "inherit" => Ok(Self::Keep),
             "uniform" | "block" | "contiguous" => Ok(Self::Uniform),
+            "hybrid" | "local" => Ok(Self::Uniform),
             "root" | "root_owned" => Ok(Self::Root),
             other => Err(KError::InvalidInput(format!(
                 "invalid dist coarse repartition policy: {other}"
@@ -105,7 +106,7 @@ impl FromStr for DistCoarseSolverRoute {
         match value.to_lowercase().as_str() {
             "auto" => Ok(Self::Auto),
             "root" | "root_gather" | "gather" => Ok(Self::Root),
-            "local" | "local_prototype" => Ok(Self::Local),
+            "local" | "local_prototype" | "hybrid" => Ok(Self::Local),
             "superlu_dist" | "superludist" => Ok(Self::SuperLuDist),
             other => Err(KError::InvalidInput(format!(
                 "invalid dist coarse solver route: {other}"
@@ -155,7 +156,9 @@ impl FromStr for DistCoarseStrategy {
         match value.to_lowercase().as_str() {
             "none" | "off" => Ok(DistCoarseStrategy::None),
             "root" | "root_gather" | "gather" => Ok(DistCoarseStrategy::RootGather),
-            "local" | "local_prototype" | "prototype" => Ok(DistCoarseStrategy::LocalPrototype),
+            "local" | "local_prototype" | "prototype" | "hybrid" => {
+                Ok(DistCoarseStrategy::LocalPrototype)
+            }
             "superlu_dist" | "superludist" => Ok(DistCoarseStrategy::SuperLuDist),
             other => Err(KError::InvalidInput(format!(
                 "invalid dist coarse strategy: {other}"

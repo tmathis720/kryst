@@ -22,6 +22,7 @@ type MgScalar = S;
 pub struct MgLevelPolicy {
     pub level: usize,
     pub smoother_type: Option<String>,
+    pub smoother_family: Option<String>,
     pub smoother_steps: Option<usize>,
     pub pre_sweeps: Option<usize>,
     pub post_sweeps: Option<usize>,
@@ -612,8 +613,8 @@ impl MgPc {
             level_ksp_maxits: None,
             level_ksp_rtol: None,
         };
-        for p in self.level_policies.iter().filter(|p| p.level <= level) {
-            if let Some(v) = p.smoother_type.as_ref() {
+        for p in self.level_policies.iter().filter(|p| p.level == level) {
+            if let Some(v) = p.smoother_family.as_ref().or(p.smoother_type.as_ref()) {
                 resolved.smoother = v.clone();
             }
             if let Some(v) = p.smoother_steps {
@@ -656,6 +657,9 @@ impl MgPc {
             if let Some(v) = p.level_ksp_rtol {
                 resolved.level_ksp_rtol = Some(v);
             }
+        }
+        if let Some(v) = self.level_coarse_pc_types.get(&level) {
+            resolved.coarse_pc_type = Some(v.clone());
         }
         resolved
     }
@@ -915,29 +919,34 @@ impl Preconditioner for MgPc {
         self.diagnostics = hierarchy
             .levels()
             .iter()
-            .map(|lvl| MgLevelDiagnostics {
-                level: lvl.level,
-                nnz: lvl.operator.nnz(),
-                work_estimate: {
-                    let policy = self.resolved_policy_for_level(lvl.level);
-                    lvl.operator.nnz() * (policy.pre_sweeps + policy.post_sweeps)
-                },
-                reduction_count: 0,
-                selected_pc: self.resolved_policy_for_level(lvl.level).smoother,
-                selected_ksp: None,
-                pre_sweeps: self.resolved_policy_for_level(lvl.level).pre_sweeps,
-                post_sweeps: self.resolved_policy_for_level(lvl.level).post_sweeps,
-                side: self.resolved_policy_for_level(lvl.level).smoother_side,
-                coarse_route: if lvl.level == coarse_level {
-                    let route = if coarse_policy.coarse_ksp_type.is_some() {
-                        "nested_ksp"
+            .map(|lvl| {
+                let policy = self.resolved_policy_for_level(lvl.level);
+                MgLevelDiagnostics {
+                    level: lvl.level,
+                    nnz: lvl.operator.nnz(),
+                    work_estimate: {
+                        lvl.operator.nnz() * (policy.pre_sweeps + policy.post_sweeps)
+                    },
+                    reduction_count: 0,
+                    selected_pc: policy
+                        .level_pc_type
+                        .clone()
+                        .unwrap_or_else(|| policy.smoother.clone()),
+                    selected_ksp: policy.level_ksp_type.clone(),
+                    pre_sweeps: policy.pre_sweeps,
+                    post_sweeps: policy.post_sweeps,
+                    side: policy.smoother_side,
+                    coarse_route: if lvl.level == coarse_level {
+                        let route = if coarse_policy.coarse_ksp_type.is_some() {
+                            "nested_ksp"
+                        } else {
+                            "pc_apply"
+                        };
+                        Some(route.to_string())
                     } else {
-                        "pc_apply"
-                    };
-                    Some(route.to_string())
-                } else {
-                    None
-                },
+                        None
+                    },
+                }
             })
             .collect();
         self.hierarchy = Some(hierarchy);
@@ -1033,5 +1042,61 @@ mod tests {
             mg.level_coarse_pc_types.get(&1).map(String::as_str),
             Some("ilu0")
         );
+    }
+
+    #[test]
+    fn mg_level_policy_is_explicit_per_level_not_cascaded() {
+        let mut mg = MgPc::new(
+            4,
+            Some("v".into()),
+            Some("jacobi".into()),
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        mg.set_level_policies(vec![MgLevelPolicy {
+            level: 1,
+            smoother_type: Some("gs".into()),
+            smoother_family: None,
+            smoother_steps: Some(3),
+            ..Default::default()
+        }]);
+        let l1 = mg.resolved_policy_for_level(1);
+        let l2 = mg.resolved_policy_for_level(2);
+        assert_eq!(l1.smoother, "gs");
+        assert_eq!(l1.pre_sweeps, 3);
+        assert_eq!(l2.smoother, "jacobi");
+        assert_eq!(l2.pre_sweeps, 1);
+    }
+
+    #[test]
+    fn mg_level_specific_coarse_map_takes_precedence() {
+        let mut mg = MgPc::new(
+            3,
+            Some("v".into()),
+            Some("jacobi".into()),
+            Some(1),
+            None,
+            None,
+            None,
+            Some("ilu0".into()),
+            None,
+            None,
+            None,
+        );
+        mg.set_level_policies(vec![MgLevelPolicy {
+            level: 2,
+            coarse_pc_type: Some("jacobi".into()),
+            ..Default::default()
+        }]);
+        mg.set_level_coarse_solver_type(2, "lu")
+            .expect("set override map");
+        let coarse = mg.resolved_policy_for_level(2);
+        assert_eq!(coarse.coarse_pc_type.as_deref(), Some("lu"));
     }
 }
