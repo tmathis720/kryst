@@ -8,8 +8,8 @@ use crate::preconditioner::{Op, OpFormat, PcCaps, PcDistributedSupport, PcSide, 
 use crate::config::kinds::{AmgCoarsenKind, AmgInterpKind};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::amg::{
-    AMG, AMGConfig, AmgTransferOperators, CoarseSolve, CoarsenType, InterpType, RelaxPhase,
-    RelaxType,
+    AMGConfig, AmgTransferOperators, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType,
+    AMG,
 };
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{
@@ -25,6 +25,8 @@ pub struct GamgLevelPolicy {
     pub smoother: Option<String>,
     pub smoother_family: Option<String>,
     pub sweeps: Option<usize>,
+    pub pre_sweeps: Option<usize>,
+    pub post_sweeps: Option<usize>,
     pub coarse_solver: Option<CoarseSolve>,
     pub side: Option<PcSide>,
     pub ksp_type: Option<String>,
@@ -57,6 +59,7 @@ pub struct GamgConfig {
     pub gamg_type: GamgType,
     pub amg_config: AMGConfig,
     pub level_policies: Vec<GamgLevelPolicy>,
+    pub dist_coarse_route_fallback: Vec<DistCoarseSolverRoute>,
 }
 
 #[cfg(not(feature = "backend-faer"))]
@@ -121,7 +124,7 @@ impl GamgConfig {
             amg_config.dist_coarse_repartition = DistCoarseRepartition::from_str(policy)?;
         }
         if let Some(route) = opts.amg_dist_coarse_solver_route.as_deref() {
-            amg_config.dist_coarse_solver_route = DistCoarseSolverRoute::from_str(route)?;
+            amg_config.dist_coarse_solver_route = parse_route_head(route)?;
         }
         if let Some(policy) = opts.amg_dist_coarse_policy.as_deref() {
             amg_config.dist_coarse_strategy = DistCoarseStrategy::from_str(policy)?;
@@ -138,14 +141,21 @@ impl GamgConfig {
             })
             .unwrap_or_default();
         for (level, scoped) in &opts.pc_gamg_level_scoped_options {
-            level_policies.push(gamg_policy_from_scoped(*level, scoped)?);
+            level_policies.push(gamg_policy_from_scoped(opts, *level, scoped)?);
         }
         level_policies.sort_by_key(|p| p.level);
+
+        let dist_coarse_route_fallback = route_fallback_order(
+            amg_config.dist_coarse_solver_route,
+            amg_config.dist_coarse_strategy,
+            opts.amg_dist_coarse_solver_route.as_deref(),
+        )?;
 
         Ok(GamgConfig {
             gamg_type,
             amg_config,
             level_policies,
+            dist_coarse_route_fallback,
         })
     }
 }
@@ -176,16 +186,22 @@ fn coarse_solve_from_pc_name(pc: &str) -> Option<CoarseSolve> {
 }
 
 #[cfg(feature = "backend-faer")]
-fn gamg_policy_from_scoped(level: usize, scoped: &PcOptions) -> Result<GamgLevelPolicy, KError> {
+fn gamg_policy_from_scoped(
+    global: &PcOptions,
+    level: usize,
+    scoped: &PcOptions,
+) -> Result<GamgLevelPolicy, KError> {
     let coarse_solver = scoped
         .amg_coarse_solver
         .as_deref()
+        .or(global.amg_coarse_solver.as_deref())
         .map(parse_coarse_solver)
         .transpose()?
         .or_else(|| {
             scoped
                 .pc_type
                 .as_deref()
+                .or(global.pc_type.as_deref())
                 .and_then(coarse_solve_from_pc_name)
         });
     Ok(GamgLevelPolicy {
@@ -194,23 +210,39 @@ fn gamg_policy_from_scoped(level: usize, scoped: &PcOptions) -> Result<GamgLevel
             .amg_smoother
             .clone()
             .or(scoped.pc_type.clone())
+            .or(global.amg_smoother.clone())
+            .or(global.pc_type.clone())
             .map(|v| v.to_lowercase()),
         smoother_family: scoped
             .amg_smoother
             .clone()
             .or(scoped.pc_type.clone())
+            .or(global.amg_smoother.clone())
+            .or(global.pc_type.clone())
             .map(|v| v.to_lowercase()),
-        sweeps: scoped.amg_smoother_steps.or(scoped.pc_mg_smoother_steps),
+        sweeps: scoped
+            .amg_smoother_steps
+            .or(scoped.pc_mg_smoother_steps)
+            .or(global.amg_smoother_steps)
+            .or(global.pc_mg_smoother_steps),
+        pre_sweeps: scoped.amg_sweeps_down.or(global.amg_sweeps_down),
+        post_sweeps: scoped.amg_sweeps_up.or(global.amg_sweeps_up),
         coarse_solver,
         side: None,
-        ksp_type: scoped.pc_ksp_ksp_type.clone().map(|v| v.to_lowercase()),
+        ksp_type: scoped
+            .pc_ksp_ksp_type
+            .clone()
+            .or(global.pc_ksp_ksp_type.clone())
+            .map(|v| v.to_lowercase()),
         pc_type: scoped
             .pc_ksp_pc_type
             .clone()
+            .or(global.pc_ksp_pc_type.clone())
             .or_else(|| scoped.pc_type.clone())
+            .or(global.pc_type.clone())
             .map(|v| v.to_lowercase()),
-        ksp_maxits: scoped.pc_ksp_maxits,
-        ksp_rtol: scoped.pc_ksp_rtol,
+        ksp_maxits: scoped.pc_ksp_maxits.or(global.pc_ksp_maxits),
+        ksp_rtol: scoped.pc_ksp_rtol.or(global.pc_ksp_rtol),
     })
 }
 #[cfg(feature = "backend-faer")]
@@ -233,6 +265,16 @@ fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
                         Some(v.trim().parse().map_err(|_| {
                             KError::InvalidInput(format!("invalid gamg sweeps: {v}"))
                         })?)
+                }
+                "pre_sweeps" => {
+                    policy.pre_sweeps = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid gamg pre sweeps: {v}"))
+                    })?)
+                }
+                "post_sweeps" => {
+                    policy.post_sweeps = Some(v.trim().parse().map_err(|_| {
+                        KError::InvalidInput(format!("invalid gamg post sweeps: {v}"))
+                    })?)
                 }
                 "coarse" | "coarse_solver" => policy.coarse_solver = Some(parse_coarse_solver(v)?),
                 "ksp" | "ksp_type" => policy.ksp_type = Some(v.trim().to_lowercase()),
@@ -263,6 +305,56 @@ impl GamgConfig {
             "GAMG requires backend-faer; enable backend-faer to use GAMG options",
         ))
     }
+}
+
+#[cfg(feature = "backend-faer")]
+fn parse_route_head(value: &str) -> Result<DistCoarseSolverRoute, KError> {
+    let head = value.split(',').next().map(str::trim).unwrap_or(value);
+    DistCoarseSolverRoute::from_str(head)
+}
+
+#[cfg(feature = "backend-faer")]
+fn route_fallback_order(
+    selected: DistCoarseSolverRoute,
+    strategy: DistCoarseStrategy,
+    raw: Option<&str>,
+) -> Result<Vec<DistCoarseSolverRoute>, KError> {
+    let mut ordered = Vec::new();
+    let mut push_unique = |route: DistCoarseSolverRoute| {
+        if !ordered.contains(&route) {
+            ordered.push(route);
+        }
+    };
+
+    if let Some(raw) = raw {
+        for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            push_unique(DistCoarseSolverRoute::from_str(item)?);
+        }
+    }
+
+    push_unique(selected);
+    match strategy {
+        DistCoarseStrategy::RootGather => {
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+        }
+        DistCoarseStrategy::LocalPrototype => {
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+        }
+        DistCoarseStrategy::SuperLuDist => {
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::Local);
+        }
+        DistCoarseStrategy::None => {
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::Root);
+        }
+    }
+    Ok(ordered)
 }
 
 #[cfg(feature = "backend-faer")]
@@ -383,6 +475,15 @@ impl Preconditioner for Gamg {
                 effective_cfg.num_grid_sweeps[RelaxPhase::Fine.ix()] = sweeps;
                 effective_cfg.num_grid_sweeps[RelaxPhase::Down.ix()] = sweeps;
                 effective_cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = sweeps;
+            }
+            if let Some(pre) = fine_policy.pre_sweeps {
+                effective_cfg.pre_sweeps = pre;
+                effective_cfg.num_grid_sweeps[RelaxPhase::Fine.ix()] = pre;
+                effective_cfg.num_grid_sweeps[RelaxPhase::Down.ix()] = pre;
+            }
+            if let Some(post) = fine_policy.post_sweeps {
+                effective_cfg.post_sweeps = post;
+                effective_cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = post;
             }
         }
         self.amg = AMG::with_config(effective_cfg);
@@ -508,6 +609,8 @@ mod tests {
         assert_eq!(parsed.level, 2);
         assert_eq!(parsed.smoother_family.as_deref(), Some("chebyshev"));
         assert_eq!(parsed.sweeps, Some(3));
+        assert_eq!(parsed.pre_sweeps, None);
+        assert_eq!(parsed.post_sweeps, None);
     }
 
     #[test]
@@ -521,6 +624,90 @@ mod tests {
             .find(|p| p.level == 1)
             .expect("level policy");
         assert_eq!(lvl.smoother_family.as_deref(), Some("jacobi"));
+    }
+
+    #[test]
+    fn gamg_level_policy_parses_independent_pre_post_sweeps() {
+        let parsed = parse_gamg_level_policy("level=1,smoother=jacobi,pre_sweeps=3,post_sweeps=1")
+            .expect("parse policy");
+        assert_eq!(parsed.level, 1);
+        assert_eq!(parsed.pre_sweeps, Some(3));
+        assert_eq!(parsed.post_sweeps, Some(1));
+    }
+
+    #[test]
+    fn gamg_scoped_policy_inherits_global_ksp_pairing() {
+        let args = vec![
+            "-pc_ksp_type",
+            "gmres",
+            "-pc_ksp_pc_type",
+            "ilu",
+            "-pc_ksp_maxits",
+            "8",
+            "-pc_gamg_levels_1_pc_type",
+            "jacobi",
+        ];
+        let opts = PcOptions::from_args(&args).expect("parse scoped options");
+        let cfg = GamgConfig::try_from_opts(&opts).expect("gamg config parse");
+        let lvl = cfg
+            .level_policies
+            .iter()
+            .find(|p| p.level == 1)
+            .expect("level policy");
+        assert_eq!(lvl.ksp_type.as_deref(), Some("gmres"));
+        assert_eq!(lvl.pc_type.as_deref(), Some("ilu"));
+        assert_eq!(lvl.ksp_maxits, Some(8));
+    }
+
+    #[test]
+    fn gamg_dist_route_fallback_order_is_explicit_and_deterministic() {
+        let opts = PcOptions {
+            amg_dist_apply_mode: Some("root".into()),
+            amg_dist_coarse_solver_route: Some("superlu_dist,root,local".into()),
+            ..Default::default()
+        };
+        let cfg = GamgConfig::try_from_opts(&opts).expect("parse distributed options");
+        assert_eq!(
+            cfg.amg_config.dist_coarse_solver_route,
+            DistCoarseSolverRoute::SuperLuDist
+        );
+        assert_eq!(
+            cfg.dist_coarse_route_fallback,
+            vec![
+                DistCoarseSolverRoute::SuperLuDist,
+                DistCoarseSolverRoute::Root,
+                DistCoarseSolverRoute::Local,
+            ]
+        );
+    }
+
+    #[test]
+    fn gamg_cli_string_round_trip_for_scoped_and_routes() {
+        let args = vec![
+            "-pc_gamg_levels_2_pc_type",
+            "ilu",
+            "-pc_gamg_levels_2_pc_ksp_type",
+            "cg",
+            "-pc_amg_dist_coarse_solver_route",
+            "local,root",
+        ];
+        let opts = PcOptions::from_args(&args).expect("parse options");
+        let cfg = GamgConfig::try_from_opts(&opts).expect("build config");
+        let lvl = cfg
+            .level_policies
+            .iter()
+            .find(|p| p.level == 2)
+            .expect("level policy");
+        assert_eq!(lvl.pc_type.as_deref(), Some("ilu"));
+        assert_eq!(lvl.ksp_type.as_deref(), Some("cg"));
+        assert_eq!(
+            cfg.dist_coarse_route_fallback,
+            vec![
+                DistCoarseSolverRoute::Local,
+                DistCoarseSolverRoute::Root,
+                DistCoarseSolverRoute::SuperLuDist
+            ]
+        );
     }
     #[test]
     fn gamg_config_parses_dist_coarse_controls() {
@@ -587,19 +774,17 @@ mod tests {
             ..Default::default()
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected aggressive levels to fail");
-        assert!(
-            err.to_string()
-                .contains("pc_gamg_aggressive_levels must be >= 1")
-        );
+        assert!(err
+            .to_string()
+            .contains("pc_gamg_aggressive_levels must be >= 1"));
 
         let opts = PcOptions {
             pc_gamg_aggressive_mis_k: Some(1),
             ..Default::default()
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected mis k to fail");
-        assert!(
-            err.to_string()
-                .contains("pc_gamg_aggressive_mis_k must be >= 2")
-        );
+        assert!(err
+            .to_string()
+            .contains("pc_gamg_aggressive_mis_k must be >= 2"));
     }
 }
