@@ -118,6 +118,12 @@ impl PcDiagnostics {
                 "pc_bddc_use_vertices",
                 opts.pc_bddc_use_vertices,
             );
+            insert_opt(
+                &mut config,
+                "pc_bddc_constraint_selection",
+                opts.pc_bddc_constraint_selection.clone(),
+            );
+            insert_opt(&mut config, "pc_bddc_scaling", opts.pc_bddc_scaling.clone());
         }
 
         let complex_support = pc_complex_support(pc_type).as_str().to_string();

@@ -83,11 +83,15 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             coarse_ksp_type,
             coarse_pc_type,
             use_vertices,
+            constraint_selection,
+            scaling,
         } => Ok(Some(crate::preconditioner::builders::build_bddc(
             crate::preconditioner::bddc::BddcConfig {
                 coarse_ksp_type: coarse_ksp_type.clone(),
                 coarse_pc_type: coarse_pc_type.clone(),
                 use_vertices: *use_vertices,
+                constraint_selection: Some(*constraint_selection),
+                scaling: Some(*scaling),
             },
         )?)),
         PcConfig::Gamg { .. } => Ok(None),

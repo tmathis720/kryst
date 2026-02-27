@@ -5,6 +5,7 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::asm::AsmInnerPc;
+use crate::preconditioner::bddc::{BddcConstraintSelection, BddcScaling};
 use crate::preconditioner::mg::MgLevelPolicy;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
@@ -320,6 +321,8 @@ pub enum PcConfig {
         coarse_ksp_type: Option<String>,
         coarse_pc_type: Option<String>,
         use_vertices: bool,
+        constraint_selection: BddcConstraintSelection,
+        scaling: BddcScaling,
     },
     Gamg {
         config: GamgConfig,
@@ -726,6 +729,17 @@ impl PcConfig {
                 coarse_ksp_type: o.pc_bddc_coarse_ksp_type.clone(),
                 coarse_pc_type: o.pc_bddc_coarse_pc_type.clone(),
                 use_vertices: o.pc_bddc_use_vertices.unwrap_or(false),
+                constraint_selection: match o.pc_bddc_constraint_selection.as_deref() {
+                    Some("vertices") => BddcConstraintSelection::Vertices,
+                    Some("vertices_and_interface") | Some("all") => {
+                        BddcConstraintSelection::VerticesAndInterface
+                    }
+                    _ => BddcConstraintSelection::Interface,
+                },
+                scaling: match o.pc_bddc_scaling.as_deref() {
+                    Some("deluxe") | Some("deluxe_like") => BddcScaling::DeluxeLike,
+                    _ => BddcScaling::Uniform,
+                },
             },
             Gamg => {
                 let cfg = GamgConfig::try_from_opts(o)?;
