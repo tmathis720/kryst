@@ -8,6 +8,7 @@ mod gmres_right_z_basis;
 mod gmres_variants;
 mod gmres_workspace_reuse;
 mod idrs;
+mod reason_mapping;
 mod stability;
 mod sync_counts;
 

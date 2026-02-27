@@ -22,10 +22,10 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
+use crate::solver::common::{call_monitors, dot2_async_s, ReductCtx};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
-use crate::utils::convergence::{ConvergedReason, FailureReasonKind, SolveStats, SolverCounters};
+use crate::utils::convergence::{ConvergedReason, ReasonEmitter, SolveStats, SolverCounters};
 use crate::utils::reduction::{AllreduceOps, ReductOptions};
 
 #[cfg(feature = "logging")]
@@ -210,7 +210,7 @@ impl BiCgStabSolver {
         let bnorm = red.norm2(b).max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
-        if let Some(reason) = ConvergedReason::from_non_finite(res0) {
+        if let Some(reason) = ReasonEmitter::non_finite(res0) {
             return Ok(
                 SolveStats::new(0, res0, reason).with_counters(SolverCounters {
                     num_global_reductions: 2,
@@ -270,7 +270,7 @@ impl BiCgStabSolver {
                 } else {
                     red.norm2(r)
                 };
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -331,7 +331,7 @@ impl BiCgStabSolver {
                 } else {
                     red.norm2(r)
                 };
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -351,7 +351,7 @@ impl BiCgStabSolver {
 
             let s_norm = red.norm2(s);
             sync_reductions += 1;
-            if let Some(reason) = ConvergedReason::from_non_finite(s_norm) {
+            if let Some(reason) = ReasonEmitter::non_finite(s_norm) {
                 stats.iterations = k;
                 stats.final_residual = s_norm;
                 stats.reason = reason;
@@ -444,7 +444,7 @@ impl BiCgStabSolver {
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -456,7 +456,7 @@ impl BiCgStabSolver {
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
                 stats.iterations = k;
                 stats.final_residual = red.norm2(s);
-                stats.reason = ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG);
+                stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     residual_replacements: async_reduction_waits,
@@ -528,7 +528,7 @@ impl BiCgStabSolver {
                 red.norm2(r)
             };
             sync_reductions += 1;
-            if let Some(reason) = ConvergedReason::from_non_finite(r_norm) {
+            if let Some(reason) = ReasonEmitter::non_finite(r_norm) {
                 stats.iterations = k;
                 stats.final_residual = r_norm;
                 stats.reason = reason;

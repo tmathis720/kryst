@@ -15,12 +15,12 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
+use crate::solver::common::{
+    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::{
-    ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
-};
-use crate::utils::convergence::{ConvergedReason, Convergence, FailureReasonKind, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, ReasonEmitter, SolveStats};
 use std::any::Any;
 
 pub struct QmrSolver {
@@ -131,11 +131,7 @@ impl QmrSolver {
         let eps = 1e-300;
         let mut rho = red.dot(r_tld, r);
         if rho.abs() <= eps {
-            return Ok(SolveStats::new(
-                0,
-                res,
-                ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-            ));
+            return Ok(SolveStats::new(0, res, ReasonEmitter::breakdown_bicg()));
         }
 
         for k in 0..self.conv.max_iters {
@@ -145,11 +141,7 @@ impl QmrSolver {
             } else {
                 let rho_new = red.dot(r_tld, r);
                 if rho_new.abs() <= eps {
-                    return Ok(SolveStats::new(
-                        k,
-                        res,
-                        ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-                    ));
+                    return Ok(SolveStats::new(k, res, ReasonEmitter::breakdown_bicg()));
                 }
                 let beta = rho_new / rho;
                 for i in 0..ncols {
@@ -169,11 +161,7 @@ impl QmrSolver {
 
             let sigma = red.dot(p_tld, v);
             if sigma.abs() <= eps {
-                return Ok(SolveStats::new(
-                    k + 1,
-                    res,
-                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-                ));
+                return Ok(SolveStats::new(k + 1, res, ReasonEmitter::breakdown_bicg()));
             }
             let alpha = rho / sigma;
 
@@ -187,15 +175,11 @@ impl QmrSolver {
             let s_view: &[S] = &s[..];
             red.dot_many_into(&[(t_view, t_view), (t_view, s_view)], &mut reductions);
             let tt = dot_result_to_real(reductions[0]);
-            if let Some(reason) = ConvergedReason::from_non_finite(tt) {
+            if let Some(reason) = ReasonEmitter::non_finite(tt) {
                 return Ok(SolveStats::new(k + 1, res, reason));
             }
             if tt <= eps {
-                return Ok(SolveStats::new(
-                    k + 1,
-                    res,
-                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-                ));
+                return Ok(SolveStats::new(k + 1, res, ReasonEmitter::breakdown_bicg()));
             }
             let ts = reductions[1];
             let omega = ts / S::from_real(tt);

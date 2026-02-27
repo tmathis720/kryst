@@ -21,12 +21,12 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
+use crate::solver::common::{
+    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
+};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::{
-    ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
-};
-use crate::utils::convergence::{ConvergedReason, Convergence, FailureReasonKind, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, ReasonEmitter, SolveStats};
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
@@ -186,11 +186,7 @@ impl CgsSolver {
         let mut rho_abs = rho.abs();
         let mut rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
         if rho_abs <= rho_thr {
-            return Ok(SolveStats::new(
-                0,
-                rnorm,
-                ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-            ));
+            return Ok(SolveStats::new(0, rnorm, ReasonEmitter::breakdown_bicg()));
         }
 
         u.copy_from_slice(r);
@@ -210,11 +206,7 @@ impl CgsSolver {
             let v_norm = norm_from_dot(dot_results[1]);
             let sigma_thr = BRK_ABS.max(BRK_REL * rtld_norm * v_norm);
             if sigma_abs <= sigma_thr {
-                return Ok(SolveStats::new(
-                    k,
-                    rnorm,
-                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-                ));
+                return Ok(SolveStats::new(k, rnorm, ReasonEmitter::breakdown_bicg()));
             }
             let alpha = rho / sigma;
 
@@ -253,11 +245,7 @@ impl CgsSolver {
             rho_abs = rho.abs();
             rho_thr = BRK_ABS.max(BRK_REL * rtld_norm * r_norm);
             if rho_abs <= rho_thr {
-                return Ok(SolveStats::new(
-                    k,
-                    rnorm,
-                    ConvergedReason::from_failure_kind(FailureReasonKind::BreakdownBiCG),
-                ));
+                return Ok(SolveStats::new(k, rnorm, ReasonEmitter::breakdown_bicg()));
             }
             let beta = rho / rho_old;
 
