@@ -3,6 +3,7 @@ use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::config::options::CgVariant;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
@@ -13,12 +14,13 @@ use crate::preconditioner::{PcSide, Preconditioner};
 #[cfg(feature = "complex")]
 use crate::reduction::Packet;
 use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
-use crate::solver::LinearSolver;
-use crate::solver::MonitorCallback;
+use crate::solver::cg::CgSolver;
 use crate::solver::common::call_monitors;
 #[cfg(feature = "complex")]
 use crate::solver::common::dot_result_to_real;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
+use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::utils::convergence::{
     ConvergedReason, Convergence, ReductionModel, SolveStats, SolverCounters,
 };
@@ -991,6 +993,38 @@ impl PcgSolver {
             SolveStats::new(iterations, final_res, ConvergedReason::DivergedMaxIts)
                 .with_counters(counters),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_k<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn crate::ops::kpc::KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: crate::ops::klinop::KLinOp<Scalar = S> + ?Sized,
+    {
+        let mut cg = CgSolver::new(self.conv.rtol, self.conv.max_iters);
+        cg.conv.atol = self.conv.atol;
+        cg.conv.dtol = self.conv.dtol;
+        cg.set_nonzero_guess(self.initial_guess_nonzero);
+        cg.set_variant(match self.variant {
+            PcgVariant::Classic => CgVariant::Classic,
+            PcgVariant::Pipelined { .. } => CgVariant::Pipelined,
+        });
+        cg.set_norm(match self.norm_type {
+            CgNormType::Preconditioned => crate::solver::cg::CgNormType::Preconditioned,
+            CgNormType::Unpreconditioned => crate::solver::cg::CgNormType::Unpreconditioned,
+            CgNormType::Natural => crate::solver::cg::CgNormType::Natural,
+            CgNormType::None => crate::solver::cg::CgNormType::None,
+        });
+        cg.solve_with_comm(a, pc, b, x, pc_side, comm, monitors, work)
     }
 
     #[allow(clippy::too_many_arguments)]
