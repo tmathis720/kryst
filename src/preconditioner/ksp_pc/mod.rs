@@ -1,5 +1,5 @@
 use crate::algebra::scalar::{KrystScalar, R, S};
-use crate::config::options::{KspOptions, PcOptions};
+use crate::config::options::{KspOptions, KspType, PcOptions};
 use crate::context::ksp_context::{ExecutionPolicy, KspContext, MonitorPolicy};
 use crate::error::KError;
 use crate::matrix::backend::materialize_ref;
@@ -7,6 +7,7 @@ use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 struct InnerKspContext {
@@ -153,16 +154,40 @@ impl KspAsPc {
         let _ = inner.try_set_pc_side(mapped);
     }
 
-    fn apply_runtime_controls_from_options(inner: &mut InnerKspContext) {
-        if let (Some(rtol), Some(atol), Some(dtol), Some(maxits)) = (
-            inner.ksp_options.rtol,
-            inner.ksp_options.atol,
-            inner.ksp_options.dtol,
-            inner.ksp_options.maxits,
-        ) {
-            inner.ksp.set_tolerances(rtol, atol, dtol, maxits);
+    fn configured_inner_side(options: &KspOptions) -> Option<PcSide> {
+        options
+            .pc_side
+            .as_deref()
+            .and_then(|side| PcSide::from_str(side).ok())
+    }
+
+    fn inner_ksp_type(options: &KspOptions) -> KspType {
+        match options.ksp_type.as_deref().map(|s| s.to_ascii_lowercase()) {
+            Some(kind) if kind == "gmres" || kind == "pca_gmres" || kind == "pcagmres" => {
+                KspType::GMRES
+            }
+            Some(kind) if kind == "fgmres" => KspType::FGMRES,
+            _ => KspType::Other,
         }
-        if let Some(restart) = inner.ksp_options.restart {
+    }
+
+    fn apply_runtime_controls_from_options(inner: &mut InnerKspContext) {
+        if inner.ksp_options.rtol.is_some()
+            || inner.ksp_options.atol.is_some()
+            || inner.ksp_options.dtol.is_some()
+            || inner.ksp_options.maxits.is_some()
+        {
+            inner.ksp.set_tolerances(
+                inner.ksp_options.rtol.unwrap_or(inner.ksp.rtol),
+                inner.ksp_options.atol.unwrap_or(inner.ksp.atol),
+                inner.ksp_options.dtol.unwrap_or(inner.ksp.dtol),
+                inner.ksp_options.maxits.unwrap_or(inner.ksp.maxits),
+            );
+        }
+        if let Some(restart) = inner
+            .ksp_options
+            .effective_restart_for(Self::inner_ksp_type(&inner.ksp_options))
+        {
             inner.ksp.set_restart(restart);
         }
         inner.ksp.set_monitor_policy(if inner.monitor_rank0 {
@@ -208,7 +233,11 @@ impl Preconditioner for KspAsPc {
         }
 
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
-            Self::set_inner_side_for_outer(side, &mut inner.ksp);
+            if let Some(configured_side) = Self::configured_inner_side(&inner.ksp_options) {
+                let _ = inner.ksp.try_set_pc_side(configured_side);
+            } else {
+                Self::set_inner_side_for_outer(side, &mut inner.ksp);
+            }
             Self::apply_runtime_controls_from_options(inner);
             y.fill(S::zero());
             let stats = inner.ksp.solve(x, y).map_err(|err| {
@@ -492,6 +521,46 @@ mod tests {
             .expect("nested failure metadata should be present");
         assert_eq!(failure.component, "pc_ksp");
         assert!(failure.detail.contains("inner_pc=Some(\"shell\")"));
+    }
+
+    #[test]
+    fn nested_ksp_pc_respects_inner_pc_side_restart_and_variant() {
+        let a = tri_diag(10);
+        let n = a.dims().0;
+        let b = vec![1.0; n];
+        let mut x = vec![0.0; n];
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).unwrap();
+        let ksp_opts = KspOptions {
+            pc_side: Some("right".into()),
+            maxits: Some(25),
+            rtol: Some(1e-8),
+            ..Default::default()
+        };
+        let pc_opts = PcOptions {
+            pc_type: Some("ksp".into()),
+            pc_ksp_ksp_options: Some(KspOptions {
+                ksp_type: Some("gmres".into()),
+                pc_side: Some("left".into()),
+                gmres_variant: Some("classical".into()),
+                gmres_restart: Some(3),
+                maxits: Some(3),
+                rtol: Some(1e-2),
+                ..Default::default()
+            }),
+            pc_ksp_pc_options: Some(Box::new(PcOptions {
+                pc_type: Some("jacobi".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+        ksp.set_operators(a, None);
+        let stats = ksp.solve(&b, &mut x).unwrap();
+        assert!(stats.reason != crate::utils::convergence::ConvergedReason::Continued);
+        assert!(stats.nested_pc_failure.is_none());
     }
 
     #[test]

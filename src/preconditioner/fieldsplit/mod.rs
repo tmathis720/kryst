@@ -166,11 +166,13 @@ impl FieldSplitPc {
             .to_lowercase();
         match kind.as_str() {
             "additive" | "diag" | "blockdiag" => Ok(FieldSplitType::Additive),
-            "composite_additive" => Ok(FieldSplitType::Additive),
-            "multiplicative" | "mul" => Ok(FieldSplitType::Multiplicative),
+            "composite_additive" | "basic" => Ok(FieldSplitType::Additive),
+            "multiplicative" | "mul" | "gs" | "gauss_seidel" => Ok(FieldSplitType::Multiplicative),
             "composite_multiplicative" => Ok(FieldSplitType::Multiplicative),
-            "symmetric" | "sym" => Ok(FieldSplitType::Symmetric),
-            "composite_symmetric_multiplicative" => Ok(FieldSplitType::Symmetric),
+            "symmetric" | "sym" | "symmetric_multiplicative" => Ok(FieldSplitType::Symmetric),
+            "composite_symmetric_multiplicative" | "multiplicative_symmetric" => {
+                Ok(FieldSplitType::Symmetric)
+            }
             "schur" => {
                 let factorization = match opts
                     .pc_fieldsplit_schur_fact_type
@@ -404,6 +406,42 @@ impl FieldSplitPc {
         );
         let product = spgemm_with_drop_tol_generic(schur.a21.as_ref(), &scaled_a12, 1e-12)?;
         Self::csr_subtract(a22, &product, 1e-12)
+    }
+
+    fn complex_safe_schur_precondition(
+        &self,
+        precondition: SchurPrecondition,
+        a22: &Arc<CsrMatrix<S>>,
+        schur_mat: Arc<CsrMatrix<S>>,
+    ) -> (Option<Arc<CsrMatrix<S>>>, Option<SchurApplyHook>) {
+        if !is_complex_scalar::<S>() {
+            return match precondition {
+                SchurPrecondition::Full => (Some(schur_mat), None),
+                SchurPrecondition::FullMatFree | SchurPrecondition::User => {
+                    let schur = schur_mat.clone();
+                    (
+                        None,
+                        Some(Arc::new(move |rhs: &[S], out: &mut [S]| {
+                            schur.try_spmv(rhs, out)
+                        })),
+                    )
+                }
+                _ => (None, None),
+            };
+        }
+        match precondition {
+            SchurPrecondition::Full
+            | SchurPrecondition::FullMatFree
+            | SchurPrecondition::User
+            | SchurPrecondition::Self_
+            | SchurPrecondition::SelfP => {
+                // Complex-safe fallback mirrors PETSc's preference for stable Schur-side
+                // composition semantics when inexpensive real-valued approximations are
+                // unavailable.
+                (Some(a22.clone()), None)
+            }
+            _ => (None, None),
+        }
     }
 
     fn csr_subtract(
@@ -722,7 +760,11 @@ impl Preconditioner for FieldSplitPc {
                 schur_precondition_matrix = Some(Arc::new(schur_mat));
             } else if matches!(
                 precondition,
-                SchurPrecondition::Full | SchurPrecondition::FullMatFree | SchurPrecondition::User
+                SchurPrecondition::Full
+                    | SchurPrecondition::FullMatFree
+                    | SchurPrecondition::User
+                    | SchurPrecondition::Self_
+                    | SchurPrecondition::SelfP
             ) {
                 let schur = self
                     .extract_schur_blocks(csr.as_ref(), &spans)
@@ -733,16 +775,12 @@ impl Preconditioner for FieldSplitPc {
                 let a11 = block_mats
                     .first()
                     .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?;
-                let schur_mat = self.schur_full_approx(a11.as_ref(), a22.as_ref(), &schur)?;
-                let schur_arc = Arc::new(schur_mat);
-                if precondition == SchurPrecondition::Full {
-                    schur_precondition_matrix = Some(schur_arc);
-                } else {
-                    let schur_mat = schur_arc.clone();
-                    schur_apply_hook = Some(Arc::new(move |rhs: &[S], out: &mut [S]| {
-                        schur_mat.try_spmv(rhs, out)
-                    }));
-                }
+                let schur_mat =
+                    Arc::new(self.schur_full_approx(a11.as_ref(), a22.as_ref(), &schur)?);
+                let (precondition_mat, apply_hook) =
+                    self.complex_safe_schur_precondition(precondition, a22, schur_mat.clone());
+                schur_precondition_matrix = precondition_mat;
+                schur_apply_hook = apply_hook;
             }
         }
         for (idx, child) in self.children.iter_mut().enumerate() {
@@ -760,9 +798,14 @@ impl Preconditioner for FieldSplitPc {
                     .as_ref()
                     .ok_or_else(|| KError::InvalidInput("missing Schur approximation".into()))?,
                 FieldSplitType::Schur {
-                    precondition: SchurPrecondition::Full,
+                    precondition:
+                        SchurPrecondition::Full
+                        | SchurPrecondition::FullMatFree
+                        | SchurPrecondition::User
+                        | SchurPrecondition::Self_
+                        | SchurPrecondition::SelfP,
                     ..
-                } if idx == 1 => schur_precondition_matrix
+                } if idx == 1 && schur_precondition_matrix.is_some() => schur_precondition_matrix
                     .as_ref()
                     .ok_or_else(|| KError::InvalidInput("missing Schur approximation".into()))?,
                 _ => block_mats

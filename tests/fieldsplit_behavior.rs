@@ -102,6 +102,33 @@ fn fieldsplit_schur_factorization_variants_apply() -> Result<(), KError> {
 }
 
 #[test]
+fn fieldsplit_extended_split_aliases_apply() -> Result<(), KError> {
+    let csr = diag_csr(&[2.0, 3.0, 4.0, 5.0]);
+    let op = CsrOp::new(Arc::new(csr));
+    for split in ["basic", "gs", "symmetric_multiplicative"] {
+        let opts = PcOptions {
+            pc_type: Some("fieldsplit".into()),
+            pc_fieldsplit_block_sizes: Some(vec![2, 2]),
+            pc_fieldsplit_child_pc_type: Some("jacobi".into()),
+            pc_fieldsplit_type: Some(split.into()),
+            ..Default::default()
+        };
+        let mut pc = PcFactory::create_from_options(&opts)?;
+        pc.setup(&op)?;
+        let x = vec![
+            S::from_real(2.0),
+            S::from_real(4.0),
+            S::from_real(6.0),
+            S::from_real(8.0),
+        ];
+        let mut y = vec![S::zero(); x.len()];
+        pc.apply(PcSide::Left, &x, &mut y)?;
+        assert!(y.iter().all(|v| v.abs() > 0.0));
+    }
+    Ok(())
+}
+
+#[test]
 fn fieldsplit_composite_aliases_apply() -> Result<(), KError> {
     let csr = diag_csr(&[2.0, 3.0, 4.0, 5.0]);
     let op = CsrOp::new(Arc::new(csr));
@@ -363,4 +390,22 @@ fn fieldsplit_complex_rejects_diag_schur_precondition() {
         err.to_string()
             .contains("not supported for complex scalars")
     );
+}
+
+#[cfg(feature = "complex")]
+#[test]
+fn fieldsplit_complex_allows_schur_self_precondition() {
+    let csr = diag_csr(&[2.0, 3.0]);
+    let op = CsrOp::new(Arc::new(csr));
+    let opts = PcOptions {
+        pc_type: Some("fieldsplit".into()),
+        pc_fieldsplit_block_sizes: Some(vec![1, 1]),
+        pc_fieldsplit_child_pc_type: Some("jacobi".into()),
+        pc_fieldsplit_type: Some("schur".into()),
+        pc_fieldsplit_schur_fact_type: Some("full".into()),
+        pc_fieldsplit_schur_precondition: Some("self".into()),
+        ..Default::default()
+    };
+    let mut pc = PcFactory::create_from_options(&opts).expect("create fieldsplit");
+    pc.setup(&op).expect("complex-safe schur self setup");
 }

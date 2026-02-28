@@ -103,7 +103,7 @@ features, options, and monitoring/convergence hooks.
 | `-pc_composite_type` | [`PcOptions::pc_composite_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_composite_type) | Supported | `multiplicative` or `additive`. |
 | `-pc_composite_prefixes` | [`PcOptions::pc_composite_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_composite_prefixes) | Supported | Per-stage options scoping. |
 | `-pc_fieldsplit_block_sizes` | [`PcOptions::pc_fieldsplit_block_sizes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_block_sizes) | Supported | Splits local or distributed operators into per-field blocks. |
-| `-pc_fieldsplit_type` | [`PcOptions::pc_fieldsplit_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_type) | Supported | Supports `additive`, `multiplicative`, `symmetric`, and `schur`. |
+| `-pc_fieldsplit_type` | [`PcOptions::pc_fieldsplit_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_type) | Supported | Supports `additive`, `multiplicative`, `symmetric`, `schur`, and composite aliases (`composite_*`, `basic`, `gs`). |
 | `-pc_fieldsplit_prefixes` | [`PcOptions::pc_fieldsplit_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_prefixes) | Supported | Per-field scoping for nested sub-KSP/PC options. |
 | `-pc_ksp_type` | [`PcOptions::pc_ksp_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_ksp_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_ksp_pc_type` | [`PcOptions::pc_ksp_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_pc_type) | Partial | Used by `PcType::Ksp`. |
@@ -221,6 +221,24 @@ When multiple policy entries target the same level, later entries are merged det
 
 - Favor changes that improve **scalability**, **customizability**, and **numerical robustness** over low-impact option-count parity.
 - Ensure new KSP/PC capabilities remain compatible with `mpi`/`rayon` execution and real/complex scalar modes where applicable.
+
+
+## Recommended nested + split templates
+
+For PETSc-like nested workflows, these templates are the most robust defaults in kryst:
+
+- **Outer GMRES/FGMRES + inner KSP-as-PC (Jacobi)**
+  - `-pc_type ksp -pc_ksp_ksp_type gmres -pc_ksp_pc_type jacobi`
+  - Prefer explicit inner side (`-pc_ksp_pc_side left|right`) when outer side differs.
+  - Inner restart precedence follows PETSc-style solver-specific keys: `pc_ksp_gmres_restart` / `pc_ksp_fgmres_restart` then `pc_ksp_restart`.
+- **FieldSplit Schur for coupled systems**
+  - Start with `-pc_fieldsplit_type schur -pc_fieldsplit_schur_fact_type full -pc_fieldsplit_schur_precondition full`.
+  - For complex scalars, use `self`, `selfp`, `full`, `full_matfree`, or `user` Schur preconditioning paths (avoid `diag`).
+- **Composite aliases**
+  - PETSc-style `composite_additive`, `composite_multiplicative`, and `composite_symmetric_multiplicative` are accepted.
+  - kryst additionally accepts `basic`, `gs`, and `symmetric_multiplicative` for migration convenience.
+
+All templates preserve structured nested diagnostics through `SolveStats.nested_pc_failure` and PETSc-style converged reason mapping.
 
 ## Known parity gaps
 
