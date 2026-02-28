@@ -156,7 +156,7 @@ impl Preconditioner for Jacobi {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 

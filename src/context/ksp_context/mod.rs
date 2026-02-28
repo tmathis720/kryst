@@ -1925,20 +1925,20 @@ impl KspContext {
         if self.pc.is_none() {
             #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
             {
-                if let Some(ref pending) = self.pending_mpi_pc
-                    && pending.mpi_opts.global_pc != GlobalPcKind::None
-                {
-                    let dist_op = pmat
-                        .as_any()
-                        .downcast_ref::<DistCsrOp>()
-                        .or_else(|| amat.as_any().downcast_ref::<DistCsrOp>());
-                    if let Some(dist_op) = dist_op
-                        && dist_op.comm().size() > 1
+                if self.pending_pc.is_none() && self.pc_chain_plan.is_none() {
+                    if let Some(ref pending) = self.pending_mpi_pc
+                        && pending.mpi_opts.global_pc != GlobalPcKind::None
                     {
-                        let pc = self.build_mpi_global_pc(pending, dist_op)?;
-                        self.pc = Some(pc);
-                        self.pending_pc = None;
-                        self.pc_chain_plan = None;
+                        let dist_op = pmat
+                            .as_any()
+                            .downcast_ref::<DistCsrOp>()
+                            .or_else(|| amat.as_any().downcast_ref::<DistCsrOp>());
+                        if let Some(dist_op) = dist_op
+                            && dist_op.comm().size() > 1
+                        {
+                            let pc = self.build_mpi_global_pc(pending, dist_op)?;
+                            self.pc = Some(pc);
+                        }
                     }
                 }
             }
@@ -2817,8 +2817,8 @@ impl KspContext {
                     "distributed native preconditioner routes require DistCsrOp".into(),
                 ));
             };
-            log::info!(
-                "Selecting native distributed block-Jacobi route (strategy={}) before pc_global fallback adaptation.",
+            log::debug!(
+                "Using native distributed block-Jacobi route (strategy={}).",
                 pending
                     .mpi_opts
                     .local_apply_mode
@@ -2859,7 +2859,7 @@ impl KspContext {
             ));
         };
         log::info!(
-            "Upgrading rank-local preconditioner to distributed {:?} based on pc_global.",
+            "Falling back from rank-local preconditioner to distributed {:?} based on pc_global.",
             pending.mpi_opts.global_pc
         );
         let mut new_pc = self.build_mpi_global_pc(pending, dist_op)?;

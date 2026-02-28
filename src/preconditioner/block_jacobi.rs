@@ -442,7 +442,7 @@ impl Preconditioner for BlockJacobi {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        PcDistributedSupport::Distributed
     }
 }
 
