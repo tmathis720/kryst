@@ -776,6 +776,9 @@ impl AMGConfig {
         if let Some(ref mode) = opts.amg_dist_apply_mode {
             cfg.dist_coarse_strategy = parse_dist_apply_mode(mode)?;
         }
+        if let Some(ref policy) = opts.amg_dist_coarse_policy {
+            cfg.dist_coarse_strategy = parse_dist_apply_mode(policy)?;
+        }
         if let Some(ref repartition) = opts.amg_dist_coarse_repartition {
             cfg.dist_coarse_repartition = parse_dist_coarse_repartition(repartition)?;
         }
@@ -1050,6 +1053,19 @@ mod config_mapping_tests {
         assert_eq!(cfg.interp_type, InterpType::Direct);
     }
 
+    #[test]
+    fn amg_dist_coarse_policy_overrides_apply_mode() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_dist_apply_mode",
+            "root",
+            "-pc_mg_dist_coarse_policy",
+            "local",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert_eq!(cfg.dist_coarse_strategy, DistCoarseStrategy::LocalPrototype);
+    }
     #[test]
     fn amg_levels_zero_is_invalid() {
         let opts = opts_from(&["-pc_type", "amg", "-pc_amg_levels", "0"]);
@@ -3819,9 +3835,10 @@ impl AMG {
         dist: &DistAmgInfo,
     ) -> Result<(), KError> {
         let do_prof = self.cfg.dist_apply_instrumentation;
+        let strategy = self.resolve_dist_coarse_strategy(&dist.comm)?;
         let mut stats = if do_prof {
             let mut stats = DistApplyStats::default();
-            stats.mode = self.cfg.dist_coarse_strategy;
+            stats.mode = strategy;
             stats.coarse_solver_route = self.cfg.dist_coarse_solver_route;
             stats.coarse_repartition = self.cfg.dist_coarse_repartition;
             Some(stats)
@@ -3835,7 +3852,6 @@ impl AMG {
             stats_ref.per_level_comm_bytes = vec![0; 1];
         }
 
-        let strategy = self.resolve_dist_coarse_strategy(&dist.comm)?;
         let result = match strategy {
             DistCoarseStrategy::RootGather => {
                 self.apply_dist_root(side, r, z, dist, stats.as_mut())

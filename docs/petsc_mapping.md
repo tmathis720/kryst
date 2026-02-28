@@ -182,7 +182,17 @@ features, options, and monitoring/convergence hooks.
 | User-supplied MG transfers (`P`,`R`) | `MgPc::set_level_transfer_operators` / `set_level_transfer_from_linops` | Supported | Overrides generated transfers level-by-level. |
 | GAMG distributed coarse policy | `-pc_amg_dist_apply_mode {root_gather,local_prototype,...}` | Supported | `GamgConfig::try_from_opts` forwards these controls into AMG. |
 | GAMG hierarchy transfer/coarse overrides | `Gamg::set_level_transfer_operators`, `Gamg::set_level_coarse_solver` | Partial | Uses AMG hierarchy override hooks; useful for prototypes and tuning. |
-| AMG diagnostics (complexity + level nnz) | `AmgStats::{grid_complexity, operator_complexity, levels[]}` | Supported | Includes per-level `nnz_a/nnz_p/nnz_r`, effective nnz, and smoothing-work estimates. |
+| AMG diagnostics (complexity + level nnz) | `AmgStats::{grid_complexity, operator_complexity, levels[]}` | Supported | Includes per-level `nnz_a/nnz_p/nnz_r`, effective nnz, smoothing-work estimates, and selected distributed coarse-route diagnostics. |
+
+### Per-level override precedence
+
+MG/GAMG option resolution follows an explicit precedence chain:
+
+1. Global defaults (for example `-pc_mg_smoother`, `-pc_mg_coarse_*`, `-pc_amg_sweeps_*`).
+2. Family-level policy entries (`-pc_mg_levels_policy` / `-pc_gamg_levels_policy`).
+3. Exact scoped level overrides (`-pc_mg_levels_<i>_*` / `-pc_gamg_levels_<i>_*`).
+
+When multiple policy entries target the same level, later entries are merged deterministically and exact scoped level options win field-by-field.
 
 
 ## Parity estimate and prioritized roadmap

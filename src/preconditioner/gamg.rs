@@ -130,7 +130,9 @@ impl GamgConfig {
             amg_config.dist_coarse_strategy = DistCoarseStrategy::from_str(policy)?;
         }
 
-        let mut level_policies = opts
+        let mut merged: std::collections::BTreeMap<usize, GamgLevelPolicy> =
+            std::collections::BTreeMap::new();
+        for policy in opts
             .pc_gamg_level_policies
             .as_ref()
             .map(|entries| {
@@ -139,11 +141,25 @@ impl GamgConfig {
                     .filter_map(|entry| parse_gamg_level_policy(entry).ok())
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-        for (level, scoped) in &opts.pc_gamg_level_scoped_options {
-            level_policies.push(gamg_policy_from_scoped(opts, *level, scoped)?);
+            .unwrap_or_default()
+        {
+            let entry = merged
+                .entry(policy.level)
+                .or_insert_with(|| GamgLevelPolicy {
+                    level: policy.level,
+                    ..Default::default()
+                });
+            merge_gamg_policy(entry, &policy);
         }
-        level_policies.sort_by_key(|p| p.level);
+        for (level, scoped) in &opts.pc_gamg_level_scoped_options {
+            let scoped_policy = gamg_policy_from_scoped(opts, *level, scoped)?;
+            let entry = merged.entry(*level).or_insert_with(|| GamgLevelPolicy {
+                level: *level,
+                ..Default::default()
+            });
+            merge_gamg_policy(entry, &scoped_policy);
+        }
+        let level_policies = merged.into_values().collect::<Vec<_>>();
 
         let dist_coarse_route_fallback = route_fallback_order(
             amg_config.dist_coarse_solver_route,
@@ -244,6 +260,42 @@ fn gamg_policy_from_scoped(
         ksp_maxits: scoped.pc_ksp_maxits.or(global.pc_ksp_maxits),
         ksp_rtol: scoped.pc_ksp_rtol.or(global.pc_ksp_rtol),
     })
+}
+#[cfg(feature = "backend-faer")]
+fn merge_gamg_policy(dst: &mut GamgLevelPolicy, src: &GamgLevelPolicy) {
+    if let Some(v) = src.smoother.as_ref() {
+        dst.smoother = Some(v.clone());
+    }
+    if let Some(v) = src.smoother_family.as_ref() {
+        dst.smoother_family = Some(v.clone());
+    }
+    if let Some(v) = src.sweeps {
+        dst.sweeps = Some(v);
+    }
+    if let Some(v) = src.pre_sweeps {
+        dst.pre_sweeps = Some(v);
+    }
+    if let Some(v) = src.post_sweeps {
+        dst.post_sweeps = Some(v);
+    }
+    if let Some(v) = src.coarse_solver {
+        dst.coarse_solver = Some(v);
+    }
+    if let Some(v) = src.side {
+        dst.side = Some(v);
+    }
+    if let Some(v) = src.ksp_type.as_ref() {
+        dst.ksp_type = Some(v.clone());
+    }
+    if let Some(v) = src.pc_type.as_ref() {
+        dst.pc_type = Some(v.clone());
+    }
+    if let Some(v) = src.ksp_maxits {
+        dst.ksp_maxits = Some(v);
+    }
+    if let Some(v) = src.ksp_rtol {
+        dst.ksp_rtol = Some(v);
+    }
 }
 #[cfg(feature = "backend-faer")]
 fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
@@ -767,6 +819,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gamg_level_policy_precedence_scoped_over_family_level() {
+        let opts = PcOptions {
+            pc_gamg_level_policies: Some(vec!["level=2,smoother=jacobi,ksp=gmres,maxits=3".into()]),
+            pc_gamg_level_scoped_options: vec![(
+                2,
+                Box::new(PcOptions {
+                    pc_type: Some("ilu".into()),
+                    pc_ksp_ksp_type: Some("cg".into()),
+                    pc_ksp_maxits: Some(9),
+                    ..Default::default()
+                }),
+            )],
+            ..Default::default()
+        };
+        let cfg = GamgConfig::try_from_opts(&opts).expect("build config");
+        let lvl = cfg
+            .level_policies
+            .iter()
+            .find(|p| p.level == 2)
+            .expect("level policy");
+        assert_eq!(lvl.pc_type.as_deref(), Some("ilu"));
+        assert_eq!(lvl.ksp_type.as_deref(), Some("cg"));
+        assert_eq!(lvl.ksp_maxits, Some(9));
+    }
+
+    #[test]
+    fn gamg_dist_policy_overrides_apply_mode_for_route_fallback() {
+        let opts = PcOptions {
+            amg_dist_apply_mode: Some("root".into()),
+            amg_dist_coarse_policy: Some("local".into()),
+            amg_dist_coarse_solver_route: Some("auto".into()),
+            ..Default::default()
+        };
+        let cfg = GamgConfig::try_from_opts(&opts).expect("parse distributed options");
+        assert_eq!(
+            cfg.amg_config.dist_coarse_strategy,
+            DistCoarseStrategy::LocalPrototype
+        );
+        assert_eq!(
+            cfg.dist_coarse_route_fallback,
+            vec![
+                DistCoarseSolverRoute::Auto,
+                DistCoarseSolverRoute::Local,
+                DistCoarseSolverRoute::Root,
+                DistCoarseSolverRoute::SuperLuDist,
+            ]
+        );
+    }
     #[test]
     fn gamg_config_rejects_invalid_aggressive_controls() {
         let opts = PcOptions {
