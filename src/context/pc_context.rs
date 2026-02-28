@@ -418,6 +418,19 @@ fn mg_policy_from_scoped_level(
     level: usize,
     scoped: &PcOptions,
 ) -> MgLevelPolicy {
+    let coarse_routes_from_policy = scoped
+        .amg_dist_coarse_policy
+        .as_deref()
+        .or(global.amg_dist_coarse_policy.as_deref())
+        .map(|policy| match policy {
+            "local" | "local_prototype" | "hybrid" => {
+                vec!["pc_apply".to_string(), "nested_ksp".to_string()]
+            }
+            "root" | "root_gather" | "auto" | "superlu_dist" => {
+                vec!["nested_ksp".to_string(), "pc_apply".to_string()]
+            }
+            _ => vec!["nested_ksp".to_string(), "pc_apply".to_string()],
+        });
     let inherited_pc_type = scoped
         .pc_type
         .clone()
@@ -437,8 +450,8 @@ fn mg_policy_from_scoped_level(
         smoother_type: inherited_pc_type.clone().map(|v| v.to_lowercase()),
         smoother_family: inherited_pc_type.map(|v| v.to_lowercase()),
         smoother_steps: scoped.pc_mg_smoother_steps.or(global.pc_mg_smoother_steps),
-        pre_sweeps: None,
-        post_sweeps: None,
+        pre_sweeps: scoped.amg_sweeps_down.or(global.amg_sweeps_down),
+        post_sweeps: scoped.amg_sweeps_up.or(global.amg_sweeps_up),
         smoother_side: None,
         coarse_pc_type: scoped
             .pc_mg_coarse_pc_type
@@ -473,6 +486,7 @@ fn mg_policy_from_scoped_level(
                     .collect::<Vec<_>>()
             })
             .filter(|v| !v.is_empty())
+            .or(coarse_routes_from_policy)
             .or_else(|| {
                 global.amg_dist_coarse_solver_route.as_ref().map(|v| {
                     v.split(',')
@@ -487,6 +501,57 @@ fn mg_policy_from_scoped_level(
         level_pc_type: inherited_ksp_pc.map(|v| v.to_lowercase()),
         level_ksp_maxits: scoped.pc_ksp_maxits.or(global.pc_ksp_maxits),
         level_ksp_rtol: scoped.pc_ksp_rtol.or(global.pc_ksp_rtol),
+    }
+}
+
+fn merge_mg_policy(dst: &mut MgLevelPolicy, src: &MgLevelPolicy) {
+    if let Some(v) = src.smoother_type.as_ref() {
+        dst.smoother_type = Some(v.clone());
+    }
+    if let Some(v) = src.smoother_family.as_ref() {
+        dst.smoother_family = Some(v.clone());
+    }
+    if let Some(v) = src.smoother_steps {
+        dst.smoother_steps = Some(v);
+    }
+    if let Some(v) = src.pre_sweeps {
+        dst.pre_sweeps = Some(v);
+    }
+    if let Some(v) = src.post_sweeps {
+        dst.post_sweeps = Some(v);
+    }
+    if let Some(v) = src.smoother_side {
+        dst.smoother_side = Some(v);
+    }
+    if let Some(v) = src.coarse_pc_type.as_ref() {
+        dst.coarse_pc_type = Some(v.clone());
+    }
+    if let Some(v) = src.coarse_ksp_type.as_ref() {
+        dst.coarse_ksp_type = Some(v.clone());
+    }
+    if let Some(v) = src.coarse_ksp_maxits {
+        dst.coarse_ksp_maxits = Some(v);
+    }
+    if let Some(v) = src.coarse_ksp_rtol {
+        dst.coarse_ksp_rtol = Some(v);
+    }
+    if let Some(v) = src.coarse_side {
+        dst.coarse_side = Some(v);
+    }
+    if let Some(v) = src.coarse_routes.as_ref() {
+        dst.coarse_routes = Some(v.clone());
+    }
+    if let Some(v) = src.level_ksp_type.as_ref() {
+        dst.level_ksp_type = Some(v.clone());
+    }
+    if let Some(v) = src.level_pc_type.as_ref() {
+        dst.level_pc_type = Some(v.clone());
+    }
+    if let Some(v) = src.level_ksp_maxits {
+        dst.level_ksp_maxits = Some(v);
+    }
+    if let Some(v) = src.level_ksp_rtol {
+        dst.level_ksp_rtol = Some(v);
     }
 }
 
@@ -765,7 +830,9 @@ impl PcConfig {
                 coarse_ksp_maxits: o.pc_mg_coarse_ksp_maxits,
                 coarse_ksp_rtol: o.pc_mg_coarse_ksp_rtol,
                 level_policies: {
-                    let mut policies = o
+                    let mut merged: std::collections::BTreeMap<usize, MgLevelPolicy> =
+                        std::collections::BTreeMap::new();
+                    for policy in o
                         .pc_mg_level_policies
                         .as_ref()
                         .map(|entries| {
@@ -774,12 +841,23 @@ impl PcConfig {
                                 .filter_map(|entry| parse_mg_level_policy(entry).ok())
                                 .collect::<Vec<_>>()
                         })
-                        .unwrap_or_default();
-                    for (level, scoped) in &o.pc_mg_level_scoped_options {
-                        policies.push(mg_policy_from_scoped_level(o, *level, scoped));
+                        .unwrap_or_default()
+                    {
+                        let entry = merged.entry(policy.level).or_insert_with(|| MgLevelPolicy {
+                            level: policy.level,
+                            ..Default::default()
+                        });
+                        merge_mg_policy(entry, &policy);
                     }
-                    policies.sort_by_key(|p| p.level);
-                    policies
+                    for (level, scoped) in &o.pc_mg_level_scoped_options {
+                        let scoped_policy = mg_policy_from_scoped_level(o, *level, scoped);
+                        let entry = merged.entry(*level).or_insert_with(|| MgLevelPolicy {
+                            level: *level,
+                            ..Default::default()
+                        });
+                        merge_mg_policy(entry, &scoped_policy);
+                    }
+                    merged.into_values().collect()
                 },
             },
             Bddc => PcConfig::Bddc {
