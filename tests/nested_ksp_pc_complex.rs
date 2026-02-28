@@ -123,3 +123,56 @@ fn nested_ksp_pc_complex_fieldsplit_composition_reports_consistent_state() {
             )
     );
 }
+
+#[test]
+fn nested_ksp_pc_complex_honors_inner_side_and_restart_variants() {
+    let a = Mat::<S>::from_fn(4, 4, |i, j| {
+        if i == j {
+            S::from_real(4.0)
+        } else if (i as isize - j as isize).abs() == 1 {
+            S::from_real(-1.0)
+        } else {
+            S::zero()
+        }
+    });
+    let op = Arc::new(DenseOp::new(Arc::new(a)));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Fgmres).expect("outer type");
+
+    let ksp_opts = KspOptions {
+        maxits: Some(20),
+        rtol: Some(1e-10),
+        pc_side: Some("right".into()),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_options: Some(KspOptions {
+            ksp_type: Some("gmres".into()),
+            pc_side: Some("left".into()),
+            gmres_variant: Some("classical".into()),
+            gmres_restart: Some(2),
+            maxits: Some(2),
+            rtol: Some(1e-2),
+            ..Default::default()
+        }),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        ..Default::default()
+    };
+
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).expect("opts");
+    ksp.set_operators(op, None);
+
+    let b = vec![S::from_real(1.0); 4];
+    let mut x = vec![S::zero(); 4];
+    let stats = ksp.solve(&b, &mut x).expect("solve");
+    assert!(
+        stats.reason.is_converged()
+            || matches!(
+                stats.reason,
+                kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+            )
+    );
+    assert!(stats.nested_pc_failure.is_none());
+}

@@ -39,3 +39,16 @@ Use:
 - `cargo bench --bench solver_reduction_scaling`
 
 Compare both runtime and `num_global_reductions` trends across strong/weak scaling points.
+
+
+## 5) Nested KSP + FieldSplit tuning quick picks
+
+- For mixed outer/inner solvers under MPI, use **outer FGMRES + inner GMRES/Jacobi** first:
+  - `-ksp_type fgmres -pc_type ksp -pc_ksp_ksp_type gmres -pc_ksp_pc_type jacobi`
+  - Set inner monitor behavior with `-pc_ksp_monitor_rank0 true` to reduce log fanout.
+- For block-coupled operators in distributed runs:
+  - `-pc_type fieldsplit -pc_fieldsplit_type schur -pc_fieldsplit_schur_fact_type full`
+  - Prefer `-pc_fieldsplit_schur_precondition self|full` for complex builds.
+- When outer/inner sides differ, set inner explicitly with `-pc_ksp_pc_side` rather than relying on outer-side inheritance.
+
+These settings pair well with pipelined outer Krylov variants on higher-latency fabrics.

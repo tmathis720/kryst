@@ -711,6 +711,25 @@ mod tests {
     }
 
     #[test]
+    fn nested_pc_failure_mapping_preserves_structured_inner_reason() {
+        let err = KError::NestedPcFailed(NestedPcFailure {
+            component: "pc_ksp",
+            reason: ConvergedReason::DivergedBreakdown,
+            iterations: 4,
+            final_norm: Some("true_residual_l2=1.0e+00".into()),
+            residual_history_summary: Some("history_len=4".into()),
+            detail: "inner failure".into(),
+        });
+        let reason = map_kerror_to_reason(&err, FailureStage::Solve).expect("reason");
+        assert_eq!(reason, ConvergedReason::DivergedPcFailed);
+        let nested =
+            ReasonEmitter::nested_pc_failure(&err, FailureStage::Solve).expect("nested metadata");
+        assert_eq!(nested.component, "pc_ksp");
+        assert_eq!(nested.reason, ConvergedReason::DivergedBreakdown);
+        assert_eq!(nested.iterations, 4);
+    }
+
+    #[test]
     fn test_different_numeric_types() {
         // Test with f64 (which implements From<f64>)
         let conv_f64 = Convergence::new(1e-6f64, 1e-12f64, 1e3f64, 100);
