@@ -1,4 +1,4 @@
-//! Complex-scalar shell PC hooks (transpose / conjugate-transpose / symmetric).
+//! Complex-scalar shell PC callbacks with transpose/conjugate/symmetric hooks.
 
 #[cfg(not(feature = "complex"))]
 fn main() {
@@ -12,8 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use kryst::parallel::{NoComm, UniverseComm};
     use kryst::preconditioner::shell::{
         ShellPc, register_shell_apply_conjugate_transpose_typed,
-        register_shell_apply_symmetric_typed, register_shell_apply_transpose_typed,
-        register_shell_apply_typed, register_shell_context_typed,
+        register_shell_apply_symmetric_left_typed, register_shell_apply_symmetric_right_typed,
+        register_shell_apply_transpose_typed, register_shell_apply_typed,
+        register_shell_context_typed,
     };
     use kryst::preconditioner::{Op, PcSide, Preconditioner};
 
@@ -70,19 +71,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         },
     );
-    register_shell_apply_symmetric_typed(format!("{tag}_sym"), |_side, x, y, ctx: &mut Ctx| {
-        ctx.calls.push("symmetric");
-        y.copy_from_slice(x);
-        Ok(())
-    });
+    register_shell_apply_symmetric_left_typed(
+        format!("{tag}_sym_l"),
+        |_side, x, y, ctx: &mut Ctx| {
+            ctx.calls.push("sym_left");
+            y.copy_from_slice(x);
+            Ok(())
+        },
+    );
+    register_shell_apply_symmetric_right_typed(
+        format!("{tag}_sym_r"),
+        |_side, x, y, ctx: &mut Ctx| {
+            ctx.calls.push("sym_right");
+            y.copy_from_slice(x);
+            Ok(())
+        },
+    );
 
     let mut pc = ShellPc::new(
         Some(format!("{tag}_apply")),
         Some(format!("{tag}_transpose")),
         Some(format!("{tag}_conj")),
-        Some(format!("{tag}_sym")),
         None,
-        None,
+        Some(format!("{tag}_sym_l")),
+        Some(format!("{tag}_sym_r")),
         None,
         None,
         Some(format!("{tag}_ctx")),
