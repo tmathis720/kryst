@@ -3,6 +3,7 @@ use kryst::matrix::utils::{poisson_3d, poisson2d_5pt_csr};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::LinearSolver;
+use kryst::solver::bicgstab::{BiCgStabSolver, BiCgStabVariant};
 use kryst::solver::fgmres::{FgmresSolver, FgmresVariant};
 use kryst::solver::gmres::{GmresSolver, GmresVariant};
 use kryst::solver::pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
@@ -167,6 +168,90 @@ fn main() {
             s.counters.num_global_reductions,
             t0.elapsed().as_secs_f64() * 1e3,
             s.reduction_model.as_ref().map(|m| m.variant),
+        );
+
+        // Nonsymmetric latency-sensitive family: BiCGStab variants.
+        let mut xb = vec![0.0; a3.nrows()];
+        let mut bicg_classic = BiCgStabSolver::new(1e-8, 600);
+        bicg_classic.set_variant(BiCgStabVariant::Classic);
+        let mut ws = Workspace::default();
+        let t0 = Instant::now();
+        let s_bicg_classic = bicg_classic
+            .solve_f64(
+                &a3,
+                None,
+                &b3,
+                &mut xb,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
+            .expect("bicgstab classic");
+        report(
+            "bicgstab-classic",
+            s_bicg_classic.iterations,
+            s_bicg_classic.counters.num_global_reductions,
+            t0.elapsed().as_secs_f64() * 1e3,
+            s_bicg_classic.reduction_model.as_ref().map(|m| m.variant),
+        );
+
+        xb.fill(0.0);
+        let mut bicg_lowsync = BiCgStabSolver::new(1e-8, 600);
+        bicg_lowsync.set_variant(BiCgStabVariant::LowSync);
+        let mut ws = Workspace::default();
+        let t0 = Instant::now();
+        let s_bicg_lowsync = bicg_lowsync
+            .solve_f64(
+                &a3,
+                None,
+                &b3,
+                &mut xb,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
+            .expect("bicgstab lowsync");
+        report(
+            "bicgstab-lowsync",
+            s_bicg_lowsync.iterations,
+            s_bicg_lowsync.counters.num_global_reductions,
+            t0.elapsed().as_secs_f64() * 1e3,
+            s_bicg_lowsync.reduction_model.as_ref().map(|m| m.variant),
+        );
+
+        xb.fill(0.0);
+        let mut bicg_reliable = BiCgStabSolver::new(1e-8, 600);
+        bicg_reliable.set_variant(BiCgStabVariant::Reliable {
+            residual_replace_every: 12,
+        });
+        let mut ws = Workspace::default();
+        let t0 = Instant::now();
+        let s_bicg_reliable = bicg_reliable
+            .solve_f64(
+                &a3,
+                None,
+                &b3,
+                &mut xb,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
+            .expect("bicgstab reliable");
+        report(
+            "bicgstab-reliable",
+            s_bicg_reliable.iterations,
+            s_bicg_reliable.counters.num_global_reductions,
+            t0.elapsed().as_secs_f64() * 1e3,
+            s_bicg_reliable.reduction_model.as_ref().map(|m| m.variant),
+        );
+
+        assert!(
+            s_bicg_lowsync.counters.num_global_reductions
+                <= s_bicg_classic.counters.num_global_reductions,
+            "benchmark gate failed: lowsync did not reduce synchronization"
         );
     }
 }

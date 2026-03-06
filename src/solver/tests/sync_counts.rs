@@ -8,6 +8,7 @@ use crate::preconditioner::PcSide;
 use crate::preconditioner::Preconditioner;
 use crate::preconditioner::jacobi::Jacobi;
 use crate::solver::LinearSolver;
+use crate::solver::bicgstab::{BiCgStabSolver, BiCgStabVariant};
 use crate::solver::gmres::{GmresSolver, GmresVariant};
 use crate::solver::pcg::{PcgSolver, PcgVariant};
 
@@ -97,5 +98,52 @@ fn gmres_classic_reduction_count_within_expected_bounds() -> Result<(), KError> 
             solver.restart
         );
     }
+    Ok(())
+}
+
+#[test]
+fn bicgstab_lowsync_reduces_reported_syncs_vs_classic() -> Result<(), KError> {
+    let a = util::nonsym_convdiff_2d(8, 3.0);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 9);
+    let comm = UniverseComm::NoComm(NoComm);
+
+    let mut classic = BiCgStabSolver::new(1e-8, 200);
+    classic.set_variant(BiCgStabVariant::Classic);
+    let mut xc = vec![R::default(); a.nrows()];
+    let mut ws = Workspace::default();
+    let stats_classic = classic.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut xc,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
+
+    let mut lowsync = BiCgStabSolver::new(1e-8, 200);
+    lowsync.set_variant(BiCgStabVariant::LowSync);
+    let mut xl = vec![R::default(); a.nrows()];
+    let mut ws = Workspace::default();
+    let stats_lowsync = lowsync.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut xl,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
+
+    assert!(stats_lowsync.final_residual <= 1e-6 * b.norm2() + 1e-8);
+    assert!(
+        stats_lowsync.counters.num_global_reductions
+            <= stats_classic.counters.num_global_reductions,
+        "expected lowsync reductions <= classic (lowsync={}, classic={})",
+        stats_lowsync.counters.num_global_reductions,
+        stats_classic.counters.num_global_reductions
+    );
     Ok(())
 }
