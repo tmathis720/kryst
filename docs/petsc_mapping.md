@@ -199,28 +199,42 @@ When multiple policy entries target the same level, later entries are merged det
 
 ### Current estimate
 
-- **Weighted matrix parity:** ~87% on this page's compatibility tables when weighting `Supported=1.0` and `Partial=0.5`.
-- **Practical full PETSc KSP/PC parity:** ~68% once advanced workflow depth is included (nested composition semantics, MG/GAMG policy depth, complex-preconditioner quality paths, and distributed-native PC coverage).
+- **Surface parity (KSP/PC type and option presence): ~84%**
+  - Most commonly used PETSc Krylov and PC categories are present, but several entries are still marked partial because they route through simplified kernels or compatibility adapters.
+- **Behavioral parity (runtime semantics + diagnostics): ~72%**
+  - Core lifecycle, converged-reason mapping, and nested diagnostics are strong, while advanced nested composition and some method-specific divergence semantics remain uneven.
+- **Performance-oriented parity (native distributed + complex-quality paths): ~61%**
+  - This is the gating score for production parity: the biggest gaps are native distributed preconditioners, scalable MG/GAMG policy depth, and mathematically strong complex-scalar preconditioning paths.
+
+> **Overall estimate for full PETSc KSP/PC parity in practical HPC use:** **~69% complete**.
 
 ### Prioritized roadmap (efficiency/customization first)
 
-1. **Native complex kernels for high-impact preconditioners**
-   - Move ILU_CSR and ApproxInv complex setup/apply away from real-part projected degraded paths where mathematically feasible.
-   - Preserve structure/value reuse and existing option controls while improving numerical quality for complex workloads.
-2. **Distributed-native PC expansion (beyond adapter-only paths)**
-   - Promote currently `LocalOnly` high-value PCs toward explicit distributed execution plans for `DistCsrOp` workflows.
-   - Keep `pc_global` adapters as compatibility tools, but prefer native distributed implementations for performance-critical runs.
-3. **MG/GAMG per-level policy depth and scalable coarse strategies**
-   - Expand per-level KSP/PC/smoother/coarse control and distributed coarse policy tuning to close major PETSc multigrid workflow gaps.
-4. **Nested composition parity (KSP-as-PC + FieldSplit)**
-   - Improve inner lifecycle controls, richer split strategy support, and hierarchical option routing for coupled systems.
-5. **Shell/transposed apply and convergence reason consistency**
-   - Add remaining shell hooks and unify divergence reason semantics across solver families for better production diagnostics.
+1. **Close complex-preconditioner quality gaps in existing high-value PCs (highest ROI)**
+   - Prioritize **ILU_CSR**, **ApproxInv**, and **SOR/Deflation-adjacent** complex paths so they avoid real-part projection whenever mathematically valid.
+   - Add per-PC quality diagnostics (residual reduction vs. setup/apply time, stability flags) to keep implementations performance-driven instead of parity-driven.
+   - Ensure every complex upgrade keeps matrix reuse (`symbolic`/`numeric`) and no-allocation apply paths intact.
+2. **Promote native MPI distributed preconditioners over compatibility adapters**
+   - Expand `DistCsrOp`-native implementations for Block-Jacobi/ILU family, coarse corrections, and selected AMG/GAMG components.
+   - Keep adapter/global modes as migration fallbacks, but make native distributed the default recommendation for large runs.
+   - Add scaling-focused acceptance criteria (strong/weak scaling + reduction count budgets).
+3. **Strengthen MPI + rayon co-design in Krylov and PC internals**
+   - Push overlap-friendly reductions and thread-parallel local kernels into more solver/PC paths, not just flagship variants.
+   - Add tuning hooks that expose reproducibility/performance tradeoffs (e.g., overlap strategies, thread policy, reduction engine choices) at KSP/PC boundaries.
+4. **Deepen MG/GAMG policy control where it impacts scalability**
+   - Extend per-level solver/smoother/coarse controls and distributed coarse routing, but prioritize options with measurable complexity and time-to-solution impact.
+   - Improve hierarchy diagnostics so users can tune operator/grid complexity with predictable outcomes.
+5. **Complete nested composition controls (KSP-as-PC + FieldSplit) for real coupled systems**
+   - Fill high-impact lifecycle/monitor/tolerance routing gaps for nested KSP, including inner/outer convergence coordination.
+   - Expand split strategy flexibility that affects throughput and robustness for block multiphysics problems.
+6. **Finish shell/transposed-apply and reason consistency work as an observability multiplier**
+   - Add missing shell hooks and align divergence reason emission across methods so custom operator/preconditioner stacks are easier to debug at scale.
 
 ### Scope guardrails
 
-- Favor changes that improve **scalability**, **customizability**, and **numerical robustness** over low-impact option-count parity.
-- Ensure new KSP/PC capabilities remain compatible with `mpi`/`rayon` execution and real/complex scalar modes where applicable.
+- Favor changes that improve **time-to-solution**, **customizability**, and **numerical robustness** over low-impact option-count parity.
+- Treat **real + complex scalar correctness** and **MPI + rayon execution quality** as first-class acceptance criteria for any new solver/PC capability.
+- Require evidence for major parity work: benchmark deltas, reduction counts, and convergence-quality diagnostics on representative sparse systems.
 
 
 ## Recommended nested + split templates
