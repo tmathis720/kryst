@@ -146,6 +146,10 @@ pub struct KspOptions {
     pub chebyshev_omega: Option<f64>,
     /// Restart length for GCR family (falls back to ksp_restart).
     pub gcr_restart: Option<usize>,
+    /// BiCGStab algorithm variant: "classic" | "lowsync" | "reliable"
+    pub bicgstab_variant: Option<String>,
+    /// Residual replacement interval for reliable BiCGStab.
+    pub bicgstab_replace_every: Option<usize>,
 }
 
 /// KSP type tag for option resolution helpers.
@@ -1015,6 +1019,11 @@ impl Sink for KspOptions {
                 &mut self.gcr_restart,
                 ensure_ge_1("ksp_gcr_restart", parse_as::<usize>(v, spec)?)?
             ),
+            "ksp_bicgstab_variant" => set_opt!(&mut self.bicgstab_variant, v.to_string()),
+            "ksp_bicgstab_replace_every" => set_opt!(
+                &mut self.bicgstab_replace_every,
+                ensure_ge_1("ksp_bicgstab_replace_every", parse_as::<usize>(v, spec)?)?
+            ),
             "options_file" => Ok(()), // consumed earlier by expansion
             _ => Err(KError::SolveError(format!("Unknown KSP key: {}", spec.key))),
         }
@@ -1847,6 +1856,8 @@ impl KspOptions {
         o!(richardson_omega);
         o!(chebyshev_omega);
         o!(gcr_restart);
+        o!(bicgstab_variant);
+        o!(bicgstab_replace_every);
     }
 
     /// Configure the Rayon worker pool. Requires `feature="rayon"` to take effect.

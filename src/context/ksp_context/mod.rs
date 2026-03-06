@@ -73,10 +73,10 @@ use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
-    BiCgStabSolver, CgSolver, CgnrSolver, CgsSolver, ChebyshevSolver, CrSolver, FgmresSolver,
-    GcrSolver, GmresSolver, LinearSolver, MinresSolver, MonitorAction, MonitorCallback,
-    PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver, PcgVariant,
-    PipeGcrSolver, RichardsonSolver, TcqmrSolver,
+    BiCgStabSolver, BiCgStabVariant, CgSolver, CgnrSolver, CgsSolver, ChebyshevSolver, CrSolver,
+    FgmresSolver, GcrSolver, GmresSolver, LinearSolver, MinresSolver, MonitorAction,
+    MonitorCallback, PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcaGmresSolver, PcaPcMode, PcgSolver,
+    PcgVariant, PipeGcrSolver, RichardsonSolver, TcqmrSolver,
 };
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
@@ -313,6 +313,7 @@ pub struct KspContext {
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
     pending_pcg: PendingPcg,
+    pending_bicgstab: PendingBiCgStab,
     last_converged_reason: Option<ConvergedReason>,
     reason_counters: ReasonDiagnosticsCounters,
     adaptive_exec: Option<AdaptiveExecutionDecision>,
@@ -352,6 +353,7 @@ impl fmt::Debug for KspContext {
         dbg.field("pending_gmres", &self.pending_gmres)
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
+            .field("pending_bicgstab", &self.pending_bicgstab)
             .field("last_converged_reason", &self.last_converged_reason)
             .field("reason_counters", &self.reason_counters)
             .field("adaptive_exec", &self.adaptive_exec);
@@ -391,6 +393,12 @@ struct PendingFgmres {
 #[derive(Clone, Debug, Default)]
 struct PendingPcg {
     pipelined: Option<bool>,
+    replace_every: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingBiCgStab {
+    variant: Option<BiCgStabVariant>,
     replace_every: Option<usize>,
 }
 
@@ -551,6 +559,7 @@ impl KspContext {
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
+            pending_bicgstab: PendingBiCgStab::default(),
             last_converged_reason: None,
             reason_counters: ReasonDiagnosticsCounters::default(),
             adaptive_exec: None,
@@ -614,7 +623,11 @@ impl KspContext {
                 self.apply_fgmres_pending_to(&mut s);
                 Some(Box::new(s))
             }
-            SolverType::BiCgStab => Some(Box::new(BiCgStabSolver::new(self.rtol, self.maxits))),
+            SolverType::BiCgStab => Some(Box::new({
+                let mut s = BiCgStabSolver::new(self.rtol, self.maxits);
+                Self::apply_bicgstab_pending(&self.pending_bicgstab, &mut s);
+                s
+            })),
             SolverType::Cgs => Some(Box::new(CgsSolver::new(self.rtol, self.maxits))),
             SolverType::Pcg => Some(Box::new({
                 let mut s = PcgSolver::new(self.rtol, self.maxits)
@@ -1245,6 +1258,46 @@ impl KspContext {
                 Self::apply_pcg_pending(&snapshot, s);
             }
         }
+        let mut bicg_pending_updated = false;
+        if let Some(ref variant) = opts.bicgstab_variant {
+            let parsed = match variant.as_str() {
+                "classic" => BiCgStabVariant::Classic,
+                "lowsync" | "low_sync" | "low-sync" => BiCgStabVariant::LowSync,
+                "reliable" => BiCgStabVariant::Reliable {
+                    residual_replace_every: self
+                        .pending_bicgstab
+                        .replace_every
+                        .unwrap_or(32)
+                        .max(1),
+                },
+                other => {
+                    return Err(KError::SolveError(format!(
+                        "Unrecognized ksp_bicgstab_variant: {other} (expected 'classic'|'lowsync'|'reliable')"
+                    )));
+                }
+            };
+            self.pending_bicgstab.variant = Some(parsed);
+            bicg_pending_updated = true;
+        }
+        if let Some(repl) = opts.bicgstab_replace_every {
+            self.pending_bicgstab.replace_every = Some(repl);
+            if self.pending_bicgstab.variant.is_none() {
+                self.pending_bicgstab.variant = Some(BiCgStabVariant::Reliable {
+                    residual_replace_every: repl,
+                });
+            }
+            bicg_pending_updated = true;
+        }
+        if bicg_pending_updated {
+            let snapshot = self.pending_bicgstab.clone();
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<BiCgStabSolver>())
+            {
+                Self::apply_bicgstab_pending(&snapshot, s);
+            }
+        }
         self.invalidate_solver_setup();
         Ok(self)
     }
@@ -1334,6 +1387,26 @@ impl KspContext {
         }
         if let Some(v) = self.pending_fgmres.variant {
             s.set_variant(v);
+        }
+    }
+
+    fn apply_bicgstab_pending(pending: &PendingBiCgStab, s: &mut BiCgStabSolver) {
+        if let Some(variant) = pending.variant {
+            s.set_variant(match variant {
+                BiCgStabVariant::Reliable {
+                    residual_replace_every: _,
+                } => {
+                    let replace_every = pending.replace_every.unwrap_or(32).max(1);
+                    BiCgStabVariant::Reliable {
+                        residual_replace_every: replace_every,
+                    }
+                }
+                other => other,
+            });
+        } else if let Some(replace_every) = pending.replace_every {
+            s.set_variant(BiCgStabVariant::Reliable {
+                residual_replace_every: replace_every.max(1),
+            });
         }
     }
 
@@ -2451,6 +2524,7 @@ impl KspContext {
                             monitors,
                             work,
                         )?
+                        .with_reduction_model(s.reduction_model())
                     }
                     SolverType::Cgs => {
                         let s = solver

@@ -22,10 +22,12 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
-use crate::solver::common::{call_monitors, dot2_async_s, ReductCtx};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::utils::convergence::{ConvergedReason, ReasonEmitter, SolveStats, SolverCounters};
+use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
+use crate::utils::convergence::{
+    ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
+};
 use crate::utils::reduction::{AllreduceOps, ReductOptions};
 
 #[cfg(feature = "logging")]
@@ -104,11 +106,19 @@ impl<'a> BiCgWorkspace<'a> {
 }
 
 /// BiCGStab solver (scalar-generic internal variant)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BiCgStabVariant {
+    Classic,
+    LowSync,
+    Reliable { residual_replace_every: usize },
+}
+
 pub struct BiCgStabSolver {
     pub rtol: R,
     pub atol: R,
     pub dtol: R,
     pub maxits: usize,
+    pub variant: BiCgStabVariant,
 }
 
 impl BiCgStabSolver {
@@ -118,6 +128,34 @@ impl BiCgStabSolver {
             atol: 1e-12,
             dtol: 1e3,
             maxits,
+            variant: BiCgStabVariant::Classic,
+        }
+    }
+
+    pub fn set_variant(&mut self, variant: BiCgStabVariant) {
+        self.variant = variant;
+    }
+
+    pub fn reduction_model(&self) -> ReductionModel {
+        match self.variant {
+            BiCgStabVariant::Classic => ReductionModel {
+                variant: "bicgstab-classic",
+                startup: 2,
+                per_iteration: 5.0,
+                tail: 1,
+            },
+            BiCgStabVariant::LowSync => ReductionModel {
+                variant: "bicgstab-lowsync",
+                startup: 2,
+                per_iteration: 4.0,
+                tail: 1,
+            },
+            BiCgStabVariant::Reliable { .. } => ReductionModel {
+                variant: "bicgstab-reliable",
+                startup: 2,
+                per_iteration: 5.0,
+                tail: 1,
+            },
         }
     }
 
@@ -254,6 +292,14 @@ impl BiCgStabSolver {
         let mut sync_reductions = 2usize;
         let mut async_reduction_waits = 0usize;
 
+        let (check_s_norm, replace_every) = match self.variant {
+            BiCgStabVariant::Classic => (true, None),
+            BiCgStabVariant::LowSync => (false, None),
+            BiCgStabVariant::Reliable {
+                residual_replace_every,
+            } => (true, Some(residual_replace_every.max(1))),
+        };
+
         for k in 1..=self.maxits {
             let rho = if need_left {
                 red.dot(r_hat, s)
@@ -349,63 +395,64 @@ impl BiCgStabSolver {
                 }
             }
 
-            let s_norm = red.norm2(s);
-            sync_reductions += 1;
-            if let Some(reason) = ReasonEmitter::non_finite(s_norm) {
-                stats.iterations = k;
-                stats.final_residual = s_norm;
-                stats.reason = reason;
-                return Ok(stats.with_counters(SolverCounters {
-                    num_global_reductions: sync_reductions + async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
-                }));
-            }
-            if call_monitors(mons, k, s_norm, 0) {
-                return Ok(
-                    SolveStats::new(k, s_norm, ConvergedReason::StoppedByMonitor).with_counters(
-                        SolverCounters {
-                            num_global_reductions: sync_reductions + async_reduction_waits,
-                            residual_replacements: async_reduction_waits,
-                        },
-                    ),
-                );
-            }
-            if s_norm <= thr {
-                if need_left {
-                    if let Some(yp) = z_p.as_deref() {
-                        for i in 0..n {
-                            x[i] += alpha * yp[i];
-                        }
-                    } else {
-                        for i in 0..n {
-                            x[i] += alpha * p[i];
-                        }
-                    }
-                } else {
-                    match (side, pc, z_p.as_deref()) {
-                        (PcSide::Right, Some(_), Some(zp)) => {
+            if check_s_norm {
+                let s_norm = red.norm2(s);
+                sync_reductions += 1;
+                if let Some(reason) = ReasonEmitter::non_finite(s_norm) {
+                    stats.iterations = k;
+                    stats.final_residual = s_norm;
+                    stats.reason = reason;
+                    return Ok(stats.with_counters(SolverCounters {
+                        num_global_reductions: sync_reductions + async_reduction_waits,
+                        residual_replacements: async_reduction_waits,
+                    }));
+                }
+                if call_monitors(mons, k, s_norm, 0) {
+                    return Ok(
+                        SolveStats::new(k, s_norm, ConvergedReason::StoppedByMonitor)
+                            .with_counters(SolverCounters {
+                                num_global_reductions: sync_reductions + async_reduction_waits,
+                                residual_replacements: async_reduction_waits,
+                            }),
+                    );
+                }
+                if s_norm <= thr {
+                    if need_left {
+                        if let Some(yp) = z_p.as_deref() {
                             for i in 0..n {
-                                x[i] += alpha * zp[i];
+                                x[i] += alpha * yp[i];
                             }
-                        }
-                        _ => {
+                        } else {
                             for i in 0..n {
                                 x[i] += alpha * p[i];
                             }
                         }
+                    } else {
+                        match (side, pc, z_p.as_deref()) {
+                            (PcSide::Right, Some(_), Some(zp)) => {
+                                for i in 0..n {
+                                    x[i] += alpha * zp[i];
+                                }
+                            }
+                            _ => {
+                                for i in 0..n {
+                                    x[i] += alpha * p[i];
+                                }
+                            }
+                        }
                     }
+                    stats.iterations = k;
+                    stats.final_residual = s_norm;
+                    stats.reason = if s_norm <= self.atol {
+                        ConvergedReason::ConvergedAtol
+                    } else {
+                        ConvergedReason::ConvergedRtol
+                    };
+                    return Ok(stats.with_counters(SolverCounters {
+                        num_global_reductions: sync_reductions + async_reduction_waits,
+                        residual_replacements: async_reduction_waits,
+                    }));
                 }
-                stats.iterations = k;
-                stats.final_residual = s_norm;
-                stats.reason = if s_norm <= self.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                };
-                return Ok(stats.with_counters(SolverCounters {
-                    num_global_reductions: sync_reductions + async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
-                }));
             }
 
             if need_left {
@@ -522,6 +569,27 @@ impl BiCgStabSolver {
                 }
             }
 
+            if let Some(every) = replace_every {
+                if k % every == 0 {
+                    a.matvec_s(x, &mut v[..], &mut *scratch);
+                    for i in 0..n {
+                        r[i] = b[i] - v[i];
+                    }
+                    if need_left {
+                        if let Some(zs) = z_s.as_deref_mut() {
+                            if let Some(pc) = pc {
+                                pc.apply_s(pc_apply_side, r, zs, &mut *scratch)?;
+                            } else {
+                                zs.copy_from_slice(r);
+                            }
+                            s.copy_from_slice(zs);
+                        } else {
+                            s.copy_from_slice(r);
+                        }
+                    }
+                }
+            }
+
             let r_norm = if need_left {
                 red.norm2(s)
             } else {
@@ -613,12 +681,15 @@ impl BiCgStabSolver {
             let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
             let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
             self.solve(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                .map(|stats| stats.with_reduction_model(self.reduction_model()))
         }
         #[cfg(feature = "complex")]
         {
             let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
             let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
-            let result = self.solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            let result = self
+                .solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work)
+                .map(|stats| stats.with_reduction_model(self.reduction_model()));
             if result.is_ok() {
                 for (dst, src) in x.iter_mut().zip(x_s.iter()) {
                     *dst = src.real();

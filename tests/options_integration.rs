@@ -293,3 +293,19 @@ fn test_preonly_options_integration() {
     // PREONLY with LU should configure successfully
     assert!(ksp.set_from_all_options(&ksp_opts, &pc_opts).is_ok());
 }
+
+#[test]
+fn test_bicgstab_variant_options_parse() {
+    let args = vec![
+        "-ksp_type",
+        "bicgstab",
+        "-ksp_bicgstab_variant",
+        "reliable",
+        "-ksp_bicgstab_replace_every",
+        "7",
+    ];
+    let opts = KspOptions::from_args(&args).unwrap();
+    assert_eq!(opts.ksp_type.as_deref(), Some("bicgstab"));
+    assert_eq!(opts.bicgstab_variant.as_deref(), Some("reliable"));
+    assert_eq!(opts.bicgstab_replace_every, Some(7));
+}

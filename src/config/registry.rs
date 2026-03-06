@@ -70,6 +70,20 @@ pub static SPECS: &[Spec] = &[
         doc: "GCR restart length (overrides -ksp_restart for gcr)",
     },
     Spec {
+        flag: "-ksp_bicgstab_variant",
+        key: "ksp_bicgstab_variant",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "BiCGStab variant: classic|lowsync|reliable",
+    },
+    Spec {
+        flag: "-ksp_bicgstab_replace_every",
+        key: "ksp_bicgstab_replace_every",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "BiCGStab reliable residual replacement interval",
+    },
+    Spec {
         flag: "-ksp_richardson_omega",
         key: "ksp_richardson_omega",
         arity: Arity::One,
