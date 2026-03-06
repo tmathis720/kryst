@@ -1,4 +1,4 @@
-//! Matrix-free `PCSHELL`-style preconditioner callbacks with communicator-aware context.
+//! Matrix-free `PCSHELL` callbacks with communicator-aware, allocation-free kernels.
 
 #[cfg(feature = "complex")]
 fn main() {
@@ -14,10 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ShellPc, register_shell_apply_conjugate_transpose_typed,
         register_shell_apply_symmetric_left_typed, register_shell_apply_symmetric_right_typed,
         register_shell_apply_transpose_typed, register_shell_apply_typed,
-        register_shell_context_typed, register_shell_setup, shell_context_downcast_mut,
-        shell_setup_with_context,
+        register_shell_context_shared_rwlock, register_shell_setup, shell_setup,
     };
     use kryst::preconditioner::{Op, PcSide, Preconditioner};
+    use std::sync::{Arc, RwLock};
 
     #[derive(Clone)]
     struct DiagMat {
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[derive(Default)]
-    struct ShellState {
+    struct SharedStats {
         rank: usize,
         size: usize,
         left_calls: usize,
@@ -50,50 +50,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let tag = "shell_pc_matrix_free_demo";
-    register_shell_context_typed(format!("{tag}_ctx"), ShellState::default);
+    let shared = Arc::new(RwLock::new(SharedStats::default()));
+    register_shell_context_shared_rwlock(format!("{tag}_ctx"), Arc::clone(&shared));
+
     register_shell_setup(
         format!("{tag}_setup"),
-        shell_setup_with_context(|a, ctx| {
-            let state = shell_context_downcast_mut::<ShellState>(ctx)?;
-            let comm = a.comm();
-            state.rank = comm.rank();
-            state.size = comm.size();
-            Ok(())
+        shell_setup({
+            let shared = Arc::clone(&shared);
+            move |a| {
+                let comm = a.comm();
+                let mut guard = shared.write().expect("stats rwlock poisoned");
+                guard.rank = comm.rank();
+                guard.size = comm.size();
+                Ok(())
+            }
         }),
     );
+
     register_shell_apply_typed(
         format!("{tag}_apply"),
-        |_side, x, y, _ctx: &mut ShellState| {
-            y.copy_from_slice(x);
+        |_side, x, y, _ctx: &mut Arc<RwLock<SharedStats>>| {
+            y.copy_from_slice(x); // zero-allocation fast path
             Ok(())
         },
     );
     register_shell_apply_transpose_typed(
         format!("{tag}_transpose"),
-        |_side, x, y, _ctx: &mut ShellState| {
+        |_side, x, y, _ctx: &mut Arc<RwLock<SharedStats>>| {
             y.copy_from_slice(x);
             Ok(())
         },
     );
     register_shell_apply_conjugate_transpose_typed(
         format!("{tag}_conj"),
-        |_side, x, y, _ctx: &mut ShellState| {
+        |_side, x, y, _ctx: &mut Arc<RwLock<SharedStats>>| {
             y.copy_from_slice(x);
             Ok(())
         },
     );
     register_shell_apply_symmetric_left_typed(
         format!("{tag}_sym_l"),
-        |_side, x, y, ctx: &mut ShellState| {
-            ctx.left_calls += 1;
+        |_side, x, y, ctx: &mut Arc<RwLock<SharedStats>>| {
+            ctx.write().expect("stats rwlock poisoned").left_calls += 1;
             y.copy_from_slice(x);
             Ok(())
         },
     );
     register_shell_apply_symmetric_right_typed(
         format!("{tag}_sym_r"),
-        |_side, x, y, ctx: &mut ShellState| {
-            ctx.right_calls += 1;
+        |_side, x, y, ctx: &mut Arc<RwLock<SharedStats>>| {
+            ctx.write().expect("stats rwlock poisoned").right_calls += 1;
             y.copy_from_slice(x);
             Ok(())
         },
@@ -121,13 +127,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pc.apply_op(Op::ConjTrans, &x, &mut y)?;
     pc.apply(PcSide::Symmetric, &x, &mut y)?;
 
-    pc.with_typed_context_ref::<ShellState, _, _>(|state| {
-        println!("comm rank={} size={}", state.rank, state.size);
-        println!(
-            "symmetric callbacks: left={} right={}",
-            state.left_calls, state.right_calls
-        );
-        Ok(())
-    })?;
+    let stats = shared.read().expect("stats rwlock poisoned");
+    println!("comm rank={} size={}", stats.rank, stats.size);
+    println!(
+        "symmetric callbacks: left={} right={}",
+        stats.left_calls, stats.right_calls
+    );
     Ok(())
 }

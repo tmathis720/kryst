@@ -427,6 +427,7 @@ pub struct ShellPc {
     destroy: Option<Arc<dyn ShellDestroy>>,
     context_factory: Option<Arc<dyn ShellContextFactory>>,
     context: Mutex<Option<Box<dyn ShellContext>>>,
+    symmetric_scratch: Mutex<Vec<S>>,
 }
 
 impl ShellPc {
@@ -461,6 +462,7 @@ impl ShellPc {
             destroy: None,
             context_factory: None,
             context: Mutex::new(None),
+            symmetric_scratch: Mutex::new(Vec::new()),
         }
     }
 
@@ -558,6 +560,29 @@ impl ShellPc {
         if let Some(cb) = callback {
             let mut guard = self.ensure_context(self.context_factory.clone())?;
             let ctx = guard.as_mut().expect("shell context missing");
+            return cb
+                .apply(side, x, y, ctx)
+                .map_err(|err| Self::shell_error(stage, hook, err));
+        }
+        if x.len() != y.len() {
+            return Err(KError::InvalidInput(
+                "shell pc input/output length mismatch".into(),
+            ));
+        }
+        y.copy_from_slice(x);
+        Ok(())
+    }
+
+    fn invoke_apply_with_context(
+        callback: Option<&Arc<dyn ShellApply>>,
+        hook: &'static str,
+        stage: FailureStage,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        ctx: &mut dyn ShellContext,
+    ) -> Result<(), KError> {
+        if let Some(cb) = callback {
             return cb
                 .apply(side, x, y, ctx)
                 .map_err(|err| Self::shell_error(stage, hook, err));
@@ -718,25 +743,39 @@ impl Preconditioner for ShellPc {
 
     fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         if matches!(side, PcSide::Symmetric) {
-            if self.callback_symmetric_left.is_some() {
-                self.invoke_apply(
-                    self.callback_symmetric_left.as_ref(),
+            if self.callback_symmetric_left.is_some() || self.callback_symmetric_right.is_some() {
+                let mut guard = self.ensure_context(self.context_factory.clone())?;
+                let ctx = guard.as_mut().expect("shell context missing").as_mut();
+                let left_cb = self
+                    .callback_symmetric_left
+                    .as_ref()
+                    .or(self.callback_symmetric_right.as_ref());
+                Self::invoke_apply_with_context(
+                    left_cb,
                     "apply_symmetric_left",
                     FailureStage::Solve,
                     PcSide::Left,
                     x,
                     y,
+                    ctx,
                 )?;
-                let tmp = y.to_vec();
-                return self.invoke_apply(
-                    self.callback_symmetric_right
-                        .as_ref()
-                        .or(self.callback_symmetric_left.as_ref()),
+                let mut scratch = self.symmetric_scratch.lock().map_err(|_| {
+                    KError::SolveError("shell pc symmetric scratch mutex poisoned".into())
+                })?;
+                scratch.resize(y.len(), S::default());
+                scratch.copy_from_slice(y);
+                let right_cb = self
+                    .callback_symmetric_right
+                    .as_ref()
+                    .or(self.callback_symmetric_left.as_ref());
+                return Self::invoke_apply_with_context(
+                    right_cb,
                     "apply_symmetric_right",
                     FailureStage::Solve,
                     PcSide::Right,
-                    &tmp,
+                    scratch.as_slice(),
                     y,
+                    ctx,
                 );
             }
             if self.callback_symmetric.is_some() {
@@ -1166,5 +1205,188 @@ mod tests {
             .expect("nested failure metadata should be present");
         assert_eq!(failure.component, "pc_shell");
         assert!(failure.detail.contains("hook=apply_symmetric"));
+    }
+}
+
+#[cfg(test)]
+mod hook_failure_tests {
+    use super::*;
+    use crate::matrix::op::LinOp;
+
+    #[derive(Default)]
+    struct TestOp;
+
+    impl LinOp for TestOp {
+        type S = S;
+
+        fn dims(&self) -> (usize, usize) {
+            (2, 2)
+        }
+
+        fn matvec(&self, x: &[S], y: &mut [S]) {
+            y.copy_from_slice(x);
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn extract_detail(err: KError) -> String {
+        match err {
+            KError::NestedPcFailed(inner) => inner.detail,
+            other => panic!("expected nested pc failure, got {other}"),
+        }
+    }
+
+    #[test]
+    fn transpose_failure_reports_hook_name() {
+        let tag = "shell_transpose_failure";
+        register_shell_callback(
+            format!("{tag}_apply"),
+            shell_apply(|_, x, y| {
+                y.copy_from_slice(x);
+                Ok(())
+            }),
+        );
+        register_shell_apply_transpose(
+            format!("{tag}_transpose"),
+            shell_apply(|_, _x, _y| Err(KError::SolveError("transpose fail".into()))),
+        );
+
+        let mut pc = ShellPc::new(
+            Some(format!("{tag}_apply")),
+            Some(format!("{tag}_transpose")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+        let mut y = vec![0.0; 2];
+        let err = pc
+            .apply_op(Op::Trans, &[1.0, 2.0], &mut y)
+            .expect_err("transpose hook should fail");
+        let detail = extract_detail(err);
+        assert!(detail.contains("hook=apply_transpose"));
+        assert!(detail.contains("transpose fail"));
+    }
+
+    #[test]
+    fn conjugate_transpose_failure_reports_hook_name() {
+        let tag = "shell_conj_failure";
+        register_shell_callback(
+            format!("{tag}_apply"),
+            shell_apply(|_, x, y| {
+                y.copy_from_slice(x);
+                Ok(())
+            }),
+        );
+        register_shell_apply_conjugate_transpose(
+            format!("{tag}_conj"),
+            shell_apply(|_, _x, _y| Err(KError::SolveError("conj fail".into()))),
+        );
+
+        let mut pc = ShellPc::new(
+            Some(format!("{tag}_apply")),
+            None,
+            Some(format!("{tag}_conj")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+        let mut y = vec![0.0; 2];
+        let err = pc
+            .apply_op(Op::ConjTrans, &[1.0, 2.0], &mut y)
+            .expect_err("conjugate-transpose hook should fail");
+        let detail = extract_detail(err);
+        assert!(detail.contains("hook=apply_conjugate_transpose"));
+        assert!(detail.contains("conj fail"));
+    }
+
+    #[test]
+    fn symmetric_right_only_callback_executes_both_stages() {
+        #[derive(Default)]
+        struct Ctx {
+            sides: Vec<PcSide>,
+        }
+        let tag = "shell_symmetric_right_only";
+        register_shell_context_typed(format!("{tag}_ctx"), Ctx::default);
+        register_shell_apply_symmetric_right_typed(
+            format!("{tag}_right"),
+            |side, x, y, ctx: &mut Ctx| {
+                ctx.sides.push(side);
+                for (yi, xi) in y.iter_mut().zip(x.iter()) {
+                    *yi = *xi + 1.0;
+                }
+                Ok(())
+            },
+        );
+
+        let mut pc = ShellPc::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(format!("{tag}_right")),
+            None,
+            None,
+            Some(format!("{tag}_ctx")),
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+        let mut y = vec![0.0; 2];
+        pc.apply(PcSide::Symmetric, &[1.0, 2.0], &mut y)
+            .expect("symmetric apply should succeed");
+        assert_eq!(y, vec![3.0, 4.0]);
+        pc.with_typed_context_ref::<Ctx, _, _>(|ctx| {
+            assert_eq!(ctx.sides, vec![PcSide::Left, PcSide::Right]);
+            Ok(())
+        })
+        .expect("context read should succeed");
+    }
+
+    #[test]
+    fn symmetric_right_failure_reports_hook_name() {
+        let tag = "shell_symmetric_right_failure";
+        register_shell_apply_symmetric_left(
+            format!("{tag}_left"),
+            shell_apply(|_, x, y| {
+                y.copy_from_slice(x);
+                Ok(())
+            }),
+        );
+        register_shell_apply_symmetric_right(
+            format!("{tag}_right"),
+            shell_apply(|_, _x, _y| Err(KError::SolveError("right fail".into()))),
+        );
+
+        let mut pc = ShellPc::new(
+            None,
+            None,
+            None,
+            None,
+            Some(format!("{tag}_left")),
+            Some(format!("{tag}_right")),
+            None,
+            None,
+            None,
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+
+        let mut y = vec![0.0; 2];
+        let err = pc
+            .apply(PcSide::Symmetric, &[1.0, 2.0], &mut y)
+            .expect_err("symmetric right hook should fail");
+        let detail = extract_detail(err);
+        assert!(detail.contains("hook=apply_symmetric_right"));
+        assert!(detail.contains("right fail"));
     }
 }
