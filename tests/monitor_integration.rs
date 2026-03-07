@@ -3,10 +3,15 @@
 
 use faer::Mat;
 use kryst::algebra::prelude::*;
+use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
+use kryst::preconditioner::shell::{
+    register_shell_apply_symmetric, register_shell_apply_typed, shell_apply,
+};
 use kryst::solver::MonitorAction;
+use kryst::utils::convergence::ConvergedReason;
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -137,4 +142,54 @@ fn test_stage_guard() {
     {
         let _inner = StageGuard::new("InnerStage");
     }
+}
+
+#[test]
+fn monitor_observes_mapped_shell_pc_failure_reason() {
+    let tag = "monitor_shell_pc_fail";
+    register_shell_apply_typed(format!("{tag}_base"), |_side, x, y, _ctx: &mut ()| {
+        y.copy_from_slice(x);
+        Ok(())
+    });
+    register_shell_apply_symmetric(
+        format!("{tag}_sym"),
+        shell_apply(|_, _, _| Err(KError::SolveError("forced shell failure".into()))),
+    );
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Richardson)
+        .expect("solver selection should succeed");
+    let ksp_opts = KspOptions {
+        maxits: Some(3),
+        rtol: Some(1e-18),
+        pc_side: Some("symmetric".into()),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("shell".into()),
+        pc_shell_apply: Some(format!("{tag}_base")),
+        pc_shell_apply_symmetric: Some(format!("{tag}_sym")),
+        ..Default::default()
+    };
+    ksp.set_from_all_options(&ksp_opts, &pc_opts)
+        .expect("options should apply");
+
+    use kryst::matrix::op::LinOp;
+    let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.0 });
+    let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a);
+    ksp.set_operators(amat, None);
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed_cl = Arc::clone(&observed);
+    ksp.add_monitor(move |iter, residual, _| {
+        observed_cl.lock().unwrap().push((iter, residual));
+        MonitorAction::Continue
+    });
+
+    let b = vec![1.0, 1.0];
+    let mut x = vec![0.0, 0.0];
+    let stats = ksp.solve(&b, &mut x).expect("solve returns mapped stats");
+    assert_eq!(stats.reason, ConvergedReason::DivergedPcFailed);
+    assert!(stats.nested_pc_failure.is_some());
+    assert!(!observed.lock().unwrap().is_empty());
 }

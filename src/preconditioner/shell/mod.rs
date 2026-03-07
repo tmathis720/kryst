@@ -803,7 +803,10 @@ impl Preconditioner for ShellPc {
         match op {
             Op::NoTrans => self.apply(PcSide::Left, x, y),
             Op::Trans => self.invoke_apply(
-                self.callback_transpose.as_ref().or(self.callback.as_ref()),
+                self.callback_transpose
+                    .as_ref()
+                    .or(self.callback_conjugate_transpose.as_ref())
+                    .or(self.callback.as_ref()),
                 "apply_transpose",
                 FailureStage::Solve,
                 PcSide::Left,
@@ -825,7 +828,9 @@ impl Preconditioner for ShellPc {
     }
 
     fn capabilities(&self) -> PcCaps {
-        let supports_transpose = self.callback_transpose.is_some() || self.callback.is_some();
+        let supports_transpose = self.callback_transpose.is_some()
+            || self.callback_conjugate_transpose.is_some()
+            || self.callback.is_some();
         let supports_conj_trans = self.callback_conjugate_transpose.is_some()
             || self.callback_transpose.is_some()
             || self.callback.is_some();
@@ -1239,6 +1244,41 @@ mod hook_failure_tests {
         }
     }
 
+    #[test]
+    fn transpose_falls_back_to_conjugate_transpose_hook() {
+        let tag = "shell_transpose_fallback_to_conj";
+        register_shell_apply_conjugate_transpose(
+            format!("{tag}_conj"),
+            shell_apply(|_, x, y| {
+                for (yi, xi) in y.iter_mut().zip(x.iter()) {
+                    *yi = *xi + 2.0;
+                }
+                Ok(())
+            }),
+        );
+
+        let mut pc = ShellPc::new(
+            None,
+            None,
+            Some(format!("{tag}_conj")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        pc.setup(&TestOp).expect("setup should succeed");
+
+        let mut y = vec![0.0; 2];
+        pc.apply_op(Op::Trans, &[1.0, 3.0], &mut y)
+            .expect("transpose fallback to conjugate-transpose should succeed");
+        assert_eq!(y, vec![3.0, 5.0]);
+
+        let caps = pc.capabilities();
+        assert!(caps.supports_transpose);
+        assert!(caps.supports_conj_trans);
+    }
     #[test]
     fn transpose_failure_reports_hook_name() {
         let tag = "shell_transpose_failure";

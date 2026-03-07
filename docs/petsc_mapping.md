@@ -64,7 +64,7 @@ features, options, and monitoring/convergence hooks.
 | `amg` | [`PcType::Amg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Amg) | Supported | Algebraic multigrid with `PcOptions::amg_*`. |
 | `approxinv` | [`PcType::ApproxInverse`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.ApproxInverse) | Supported | CSR approximate inverse (FSAI/SPAI). |
 | `fieldsplit` | [`PcType::FieldSplit`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.FieldSplit) | Partial | Block-diagonal split only; Tracking: [FieldSplit advanced](#tracking-fieldsplit-advanced). |
-| `shell` | [`PcType::Shell`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Shell) + [`register_shell_callback`](https://docs.rs/kryst/latest/kryst/preconditioner/shell/fn.register_shell_callback.html) | Partial | Supports apply/setup/destroy hooks with context bindings; Tracking: [Shell PC parity](#tracking-shell-pc). |
+| `shell` | [`PcType::Shell`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Shell) + [`register_shell_callback`](https://docs.rs/kryst/latest/kryst/preconditioner/shell/fn.register_shell_callback.html) | Supported | Includes apply/setup/destroy + transpose/conjugate-transpose/symmetric hook plumbing and typed context helpers; see tracking notes for broader option parity. |
 | `ksp` | [`PcType::Ksp`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Ksp) | Partial | Uses simple inner-PC loop; Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc). |
 | `mg` | [`PcType::Mg`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Mg) | Partial | Injection hierarchy with Galerkin coarse operators and V/W/F cycles; Tracking: [Multigrid parity](#tracking-mg-parity). |
 | `bddc` | [`PcType::Bddc`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html#variant.Bddc) | Partial | Prototype coarse space/constraints + interface metadata; Tracking: [BDDC support](#tracking-bddc). |
@@ -290,8 +290,8 @@ High-impact PETSc APIs or workflows that are not yet equivalent in kryst:
 
 1. **Multigrid hierarchy management** (remaining parity for full PETSc per-level KSP stacks and advanced adaptive policies). Tracking: [Multigrid parity](#tracking-mg-parity).
 2. **KSP-as-PC parity** (nested KSP choices, full inner KSP lifecycle). Tracking: [KSP-as-PC parity](#tracking-ksp-as-pc).
-3. **Shell PC parity** (remaining PETSc `PCSHELL` hooks like transpose/symmetric apply, richer context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
-4. **Convergence-reason method coverage** (some reasons are implemented but remain method-specific). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
+3. **Shell PC option-surface parity** (broader PETSc `PCSHELL` option completeness beyond implemented apply variants/context helpers). Tracking: [Shell PC parity](#tracking-shell-pc).
+4. **Convergence-reason method coverage** (continue extending explicit reason mapping in less common solver/back-end paths). Tracking: [Convergence reason parity](#tracking-breakdown-reason).
 5. **BDDC advanced features** (`-pc_type bddc`). Tracking: [BDDC support](#tracking-bddc).
 6. **GAMG advanced options** (`-pc_type gamg`), especially full PETSc-level smoother and repartition controls. Tracking: [GAMG support](#tracking-gamg).
 
@@ -307,7 +307,7 @@ Scope: full nested KSP configuration (inner tolerances, monitors, solver selecti
 
 <a id="tracking-shell-pc"></a>
 ### Tracking issue: Shell PC parity
-Scope: remaining `PCSHELL` hooks (transpose/symmetric apply), helper APIs for typed context binding, and broader option parity beyond setup/destroy/context.
+Scope: remaining broad PETSc option-surface parity and lifecycle polish beyond already-plumbed apply/setup/destroy/transpose/conjugate-transpose/symmetric hooks.
 
 <a id="tracking-bddc"></a>
 ### Tracking issue: BDDC support
@@ -319,11 +319,11 @@ Scope: remaining PETSc GAMG parity (e.g., repartitioning and full smoother stack
 
 <a id="tracking-breakdown-reason"></a>
 ### Tracking issue: Breakdown reason parity
-Scope: explicit divergence reasons (breakdown, NaN/Inf, PC failure) matching PETSc enums.
+Scope: keep explicit divergence reasons (breakdown, NaN/Inf, PC failure) uniform across all solver/back-end variants.
 
 <a id="tracking-pc-failure-reason"></a>
 ### Tracking issue: PC failure reasons
-Scope: extend PC failure propagation beyond shell hooks (e.g., factorization/solver failures).
+Scope: continue expanding nested failure metadata/reason propagation across additional factorization and inner-solver failure sites.
 
 ## Complex-scalar exclusions by method
 

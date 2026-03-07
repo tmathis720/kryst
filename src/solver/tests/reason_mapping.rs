@@ -50,6 +50,14 @@ fn kerror_stage_mapping_is_consistent_across_pc_setup_apply_and_indefiniteness()
         Some(ConvergedReason::DivergedPcFailed)
     );
     assert_eq!(
+        map_kerror_to_reason(&KError::FactorError("ilu fail".into()), FailureStage::Setup),
+        Some(ConvergedReason::DivergedPcSetupFailed)
+    );
+    assert_eq!(
+        map_kerror_to_reason(&KError::ZeroPivot(3), FailureStage::Setup),
+        Some(ConvergedReason::DivergedPcSetupFailed)
+    );
+    assert_eq!(
         map_kerror_to_reason(&KError::IndefiniteMatrix, FailureStage::Solve),
         Some(ConvergedReason::DivergedIndefiniteMatrix)
     );
@@ -111,4 +119,37 @@ fn failure_reason_kind_indefinite_variants_are_canonical() {
         ConvergedReason::from_failure_kind(FailureReasonKind::IndefinitePc),
         ConvergedReason::DivergedIndefinitePC
     );
+}
+
+#[test]
+fn nested_failure_reason_is_preserved_when_mapping_error() {
+    let nested = KError::NestedPcFailed(NestedPcFailure {
+        component: "pc_ksp",
+        reason: ConvergedReason::DivergedMaxIts,
+        iterations: 11,
+        final_norm: Some("true_residual_l2=1.000000e+00".into()),
+        residual_history_summary: Some("history_len=11".into()),
+        detail: "inner max iters".into(),
+    });
+    assert_eq!(
+        map_kerror_to_reason(&nested, FailureStage::Solve),
+        Some(ConvergedReason::DivergedMaxIts)
+    );
+}
+
+#[test]
+fn reason_emitter_nested_metadata_captures_factorization_failures() {
+    let setup_factor = ReasonEmitter::nested_pc_failure(
+        &KError::FactorError("symbolic factorization failed".into()),
+        FailureStage::Setup,
+    )
+    .expect("setup factor metadata");
+    assert_eq!(setup_factor.component, "factorization");
+    assert_eq!(setup_factor.reason, ConvergedReason::DivergedPcSetupFailed);
+
+    let apply_factor = ReasonEmitter::nested_pc_failure(&KError::ZeroPivot(9), FailureStage::Solve)
+        .expect("apply factor metadata");
+    assert_eq!(apply_factor.component, "factorization");
+    assert_eq!(apply_factor.reason, ConvergedReason::DivergedPcFailed);
+    assert!(apply_factor.detail.contains("zero_pivot_row=9"));
 }

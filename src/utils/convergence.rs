@@ -223,6 +223,42 @@ impl ReasonEmitter {
                     detail: format!("stage={stage:?} detail={msg}"),
                 })
             }
+            KError::FactorError(msg) => {
+                let reason = match stage {
+                    FailureStage::Setup => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup)
+                    }
+                    FailureStage::Solve => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
+                    }
+                };
+                Some(NestedPcFailure {
+                    component: "factorization",
+                    reason,
+                    iterations: 0,
+                    final_norm: None,
+                    residual_history_summary: None,
+                    detail: format!("stage={stage:?} detail={msg}"),
+                })
+            }
+            KError::ZeroPivot(row) => {
+                let reason = match stage {
+                    FailureStage::Setup => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup)
+                    }
+                    FailureStage::Solve => {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
+                    }
+                };
+                Some(NestedPcFailure {
+                    component: "factorization",
+                    reason,
+                    iterations: 0,
+                    final_norm: None,
+                    residual_history_summary: None,
+                    detail: format!("stage={stage:?} zero_pivot_row={row}"),
+                })
+            }
             KError::NestedPcFailed(failure) => Some(failure.clone()),
             _ => None,
         }
@@ -233,6 +269,7 @@ impl ReasonEmitter {
 pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<ConvergedReason> {
     match stage {
         FailureStage::Setup => match err {
+            KError::NestedPcFailed(failure) => Some(failure.reason),
             KError::PcFailed(_)
             | KError::FactorError(_)
             | KError::ZeroPivot(_)
@@ -240,11 +277,17 @@ pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<Converg
             | KError::DivergedIndefinitePC => Some(ConvergedReason::from_failure_kind(
                 FailureReasonKind::PcSetup,
             )),
-            KError::NestedPcFailed(failure) => Some(failure.reason),
+            KError::BreakdownOrIndefinite => Some(ConvergedReason::from_failure_kind(
+                FailureReasonKind::Breakdown,
+            )),
+            KError::IndefiniteMatrix => Some(ConvergedReason::from_failure_kind(
+                FailureReasonKind::IndefiniteMatrix,
+            )),
             _ => None,
         },
         FailureStage::Solve => match err {
-            KError::PcFailed(_) | KError::NestedPcFailed(_) => Some(
+            KError::NestedPcFailed(failure) => Some(failure.reason),
+            KError::PcFailed(_) | KError::FactorError(_) | KError::ZeroPivot(_) => Some(
                 ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
             ),
             KError::BreakdownOrIndefinite => Some(ConvergedReason::from_failure_kind(
