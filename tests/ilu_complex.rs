@@ -2,9 +2,9 @@
 
 use faer::Mat;
 use kryst::algebra::prelude::*;
-use kryst::preconditioner::PcSide;
 use kryst::preconditioner::ilu::{IluBuilder, IluType};
 use kryst::preconditioner::legacy::Preconditioner;
+use kryst::preconditioner::PcSide;
 
 fn make_diagonal_matrix(diag: &[S]) -> Mat<S> {
     let n = diag.len();
@@ -39,6 +39,8 @@ fn ilu0_complex_diagonal_matches_inverse() {
         .build::<S>()
         .expect("complex ILU0 build");
     ilu.setup(&matrix).expect("complex ILU0 setup");
+    assert!(ilu.complex_setup_used_native());
+    assert!(ilu.complex_setup_fallback_reason().is_none());
 
     let rhs = [
         S::from_parts(1.0, -2.0),
@@ -81,6 +83,7 @@ fn ilu0_diagonally_dominant_has_finite_solution() {
         .expect("complex ILU0 build");
     ilu.setup(&matrix)
         .expect("complex ILU0 setup for diagonally dominant matrix");
+    assert!(ilu.complex_setup_used_native());
 
     assert_eq!(ilu.pivot_stats().num_floors, 0, "unexpected pivot floors");
 

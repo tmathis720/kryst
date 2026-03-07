@@ -1316,6 +1316,20 @@ fn spmv_csr_transpose_complex(a: &CsrMatrix<S>, x: &[S], y: &mut [S]) {
     }
 }
 
+#[cfg(feature = "complex")]
+impl FsaiCsr {
+    pub fn complex_setup_used_native(&self) -> bool {
+        self.native_complex_active
+    }
+}
+
+#[cfg(feature = "complex")]
+impl SpaiCsr {
+    pub fn complex_setup_used_native(&self) -> bool {
+        self.native_complex_active
+    }
+}
+
 // ---------------------------- Public entrypoints -------------------------
 
 impl FsaiCsr {

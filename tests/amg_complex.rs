@@ -67,10 +67,9 @@ fn amg_complex_transfer_override_plumbing() {
     let mut out = vec![S::zero(); rhs.len()];
     amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
 
-    assert!(
-        out.iter()
-            .all(|v| v.real().is_finite() && v.imag().is_finite())
-    );
+    assert!(out
+        .iter()
+        .all(|v| v.real().is_finite() && v.imag().is_finite()));
 }
 
 #[test]
@@ -115,4 +114,21 @@ fn amg_complex_apply_residual_acceptance() {
         r_inf.is_finite() && r_inf < 2.5,
         "residual too large: {r_inf}"
     );
+}
+
+#[test]
+fn amg_complex_residual_reason_code_guard() {
+    let csr = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![S::from_real(2.0)]);
+    let op = CsrOp::new(Arc::new(csr.clone()));
+    let mut amg = AMG::default();
+    amg.setup(&op).unwrap();
+
+    let rhs = vec![S::from_parts(1.0, 1.0)];
+    let mut out = vec![S::zero(); 1];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+
+    let mut ax = vec![S::zero(); 1];
+    kryst::core::traits::MatVec::matvec(&csr, &out, &mut ax);
+    let r = (ax[0] - rhs[0]).abs();
+    assert!(r < 1e-10, "unexpected residual guard trip: {r}");
 }

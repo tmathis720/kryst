@@ -4,9 +4,9 @@ use kryst::algebra::prelude::*;
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcType;
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::PcSide;
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::preconditioner::sor::{MatSorType, SorPc};
+use kryst::preconditioner::PcSide;
 use kryst::preconditioner::{ApproxInvKind, ApproxInvParams, SpaiCsr};
 use kryst::utils::diagnostics::PcDiagnostics;
 
@@ -15,10 +15,13 @@ fn pc_diagnostics_reports_complex_capability_mode() {
     let sor = PcDiagnostics::from_options(Some(PcType::Sor), Some(&PcOptions::default()));
     let ilutp = PcDiagnostics::from_options(Some(PcType::Ilutp), Some(&PcOptions::default()));
     let ilu0 = PcDiagnostics::from_options(Some(PcType::Ilu0), Some(&PcOptions::default()));
+    let ainv =
+        PcDiagnostics::from_options(Some(PcType::ApproxInverse), Some(&PcOptions::default()));
 
     assert_eq!(sor.complex_support, "native_complex");
     assert_eq!(ilu0.complex_support, "native_complex");
     assert_eq!(ilutp.complex_support, "projected_complex");
+    assert_eq!(ainv.complex_support, "native_complex");
 }
 
 #[test]
@@ -49,8 +52,8 @@ fn sor_native_complex_preserves_imaginary_coupling() {
 
 #[test]
 fn ilu_csr_native_complex_beats_split_baseline_on_coupled_system() {
-    use kryst::preconditioner::Preconditioner as _;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
+    use kryst::preconditioner::Preconditioner as _;
 
     let a = CsrMatrix::from_csr(
         2,
@@ -139,6 +142,7 @@ fn approxinv_spai_complex_setup_apply_residual_acceptance() {
         ..ApproxInvParams::default()
     });
     pc.setup(&a).expect("spai complex setup");
+    assert!(pc.complex_setup_used_native());
 
     let mut out = vec![S::zero(); rhs.len()];
     pc.apply(PcSide::Left, &rhs, &mut out)
