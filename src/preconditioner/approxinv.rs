@@ -35,10 +35,10 @@ use crate::matrix::op::{StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::SparsityPattern;
 use crate::preconditioner::legacy::Preconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::pc_bridge::apply_pc_s;
+use crate::preconditioner::SparsityPattern;
 use faer::linalg::solvers::{SolveCore, SolveLstsq};
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -89,6 +89,12 @@ pub struct ApproxInv<M, V, T> {
     pub last_vid: Option<ValuesId>,
     /// Drop tolerance used when converting dense->CSR in setup
     pub drop_tol: R,
+    #[cfg(feature = "complex")]
+    complex_inv_rows: Vec<Vec<(usize, S)>>,
+    #[cfg(feature = "complex")]
+    complex_setup_used_native: bool,
+    #[cfg(feature = "complex")]
+    complex_setup_fallback_reason: Option<String>,
     _phantom: PhantomData<V>,
 }
 
@@ -129,8 +135,25 @@ where
             last_sid: None,
             last_vid: None,
             drop_tol: 1e-12,
+            #[cfg(feature = "complex")]
+            complex_inv_rows: Vec::new(),
+            #[cfg(feature = "complex")]
+            complex_setup_used_native: false,
+            #[cfg(feature = "complex")]
+            complex_setup_fallback_reason: None,
             _phantom: PhantomData,
         }
+    }
+}
+
+#[cfg(feature = "complex")]
+impl<M, V, T> ApproxInv<M, V, T> {
+    pub fn complex_setup_used_native(&self) -> bool {
+        self.complex_setup_used_native
+    }
+
+    pub fn complex_setup_fallback_reason(&self) -> Option<&str> {
+        self.complex_setup_fallback_reason.as_deref()
     }
 }
 
@@ -470,8 +493,8 @@ where
     M: MatVec<Vec<f64>>,
 {
     fn setup(&mut self, op: &dyn crate::matrix::op::LinOp<S = S>) -> Result<(), KError> {
-        #[cfg(feature = "logging")]
-        log::debug!("ApproxInv complex setup using native complex CSR kernel");
+        self.complex_setup_used_native = false;
+        self.complex_setup_fallback_reason = None;
         let csr = op
             .as_any()
             .downcast_ref::<crate::matrix::sparse::CsrMatrix<S>>()
@@ -479,20 +502,22 @@ where
                 KError::Unsupported("ApproxInv complex setup currently requires CSR".into())
             })?;
         let n = csr.nrows();
+        self.complex_inv_rows = vec![Vec::new(); n];
         self.inv_rows = vec![Vec::new(); n];
         for i in 0..n {
-            let mut diag = 0.0;
+            let mut diag = S::zero();
             for p in csr.row_ptr()[i]..csr.row_ptr()[i + 1] {
                 if csr.col_idx()[p] == i {
-                    diag = csr.values()[p].real();
+                    diag = csr.values()[p];
                     break;
                 }
             }
-            if diag == 0.0 {
+            if diag.abs() <= self.tol {
                 return Err(KError::ZeroPivot(i));
             }
-            self.inv_rows[i].push((i, 1.0 / diag));
+            self.complex_inv_rows[i].push((i, S::one() / diag));
         }
+        self.complex_setup_used_native = true;
         Ok(())
     }
 
@@ -510,12 +535,22 @@ where
         for yi in y.iter_mut() {
             *yi = S::zero();
         }
-        for i in 0..x.len() {
-            let mut sum = S::zero();
-            for &(j, val) in &self.inv_rows[i] {
-                sum += S::from_real(val) * x[j];
+        if self.complex_setup_used_native {
+            for i in 0..x.len() {
+                let mut sum = S::zero();
+                for &(j, val) in &self.complex_inv_rows[i] {
+                    sum += val * x[j];
+                }
+                y[i] = sum;
             }
-            y[i] = sum;
+        } else {
+            for i in 0..x.len() {
+                let mut sum = S::zero();
+                for &(j, val) in &self.inv_rows[i] {
+                    sum += S::from_real(val) * x[j];
+                }
+                y[i] = sum;
+            }
         }
         Ok(())
     }
@@ -709,9 +744,9 @@ mod tests {
     #[cfg(feature = "complex")]
     #[test]
     fn approxinv_apply_s_matches_real_path() {
-        use crate::matrix::Csr;
         use crate::matrix::op::CsrOp;
         use crate::matrix::sparse::CsrMatrix;
+        use crate::matrix::Csr;
 
         let n = 3;
         let pattern = SparsityPattern::Manual((0..n).map(|i| vec![i]).collect());

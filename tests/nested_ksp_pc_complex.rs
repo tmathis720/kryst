@@ -176,3 +176,51 @@ fn nested_ksp_pc_complex_honors_inner_side_and_restart_variants() {
     );
     assert!(stats.nested_pc_failure.is_none());
 }
+
+#[test]
+fn nested_ksp_pc_complex_reports_non_breakdown_reason_codes() {
+    let a = Mat::<S>::from_fn(3, 3, |i, j| {
+        if i == j {
+            S::from_real(3.0)
+        } else if (i as isize - j as isize).abs() == 1 {
+            S::from_real(-1.0)
+        } else {
+            S::zero()
+        }
+    });
+    let op = Arc::new(DenseOp::new(Arc::new(a)));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("outer type");
+    ksp.set_from_all_options(
+        &KspOptions {
+            maxits: Some(20),
+            rtol: Some(1e-8),
+            ..Default::default()
+        },
+        &PcOptions {
+            pc_type: Some("ksp".into()),
+            pc_ksp_ksp_type: Some("richardson".into()),
+            pc_ksp_maxits: Some(2),
+            pc_ksp_pc_type: Some("jacobi".into()),
+            ..Default::default()
+        },
+    )
+    .expect("opts");
+    ksp.set_operators(op, None);
+
+    let b = vec![S::from_real(1.0); 3];
+    let mut x = vec![S::zero(); 3];
+    let stats = ksp.solve(&b, &mut x).expect("solve");
+    assert!(
+        stats.reason.is_converged()
+            || matches!(
+                stats.reason,
+                kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+            )
+    );
+    assert!(!matches!(
+        stats.reason,
+        kryst::utils::convergence::ConvergedReason::DivergedBreakdown
+    ));
+}

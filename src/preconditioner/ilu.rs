@@ -20,9 +20,9 @@
 //!   [`Ilu::create_specialized`] routes `IluType::ILUT` to the simpler [`crate::preconditioner::ilut::Ilut`].
 //!
 //! # Real vs complex
-//! `Ilu` currently factorizes only real-valued matrices (`faer::Mat<f64>`). Complex execution
-//! is supported through a guarded degraded mode that projects the operator to real arithmetic
-//! and applies the same factorization to the real/imaginary vector parts independently.
+//! `Ilu` exposes native complex-capable setup/apply entry points when complex scalars are
+//! enabled. The real-valued factorization pipeline remains the performance baseline and is still
+//! used for real matrices.
 //!
 //! # Parallel execution
 //! [`IluConfig::enable_parallel_factorization`] and
@@ -41,7 +41,7 @@
 //! See `examples/mpi_poisson_block_jacobi_ilu.rs` for a distributed block-Jacobi + ILU(0) walk-through.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
+use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in, BridgeScratch};
 use crate::algebra::scalar::KrystScalar;
 #[cfg(feature = "complex")]
 use crate::algebra::scalar::S as GlobalScalar;
@@ -49,10 +49,10 @@ use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::LocalPreconditioner;
 use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
-use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve};
-use crate::utils::conditioning::{ConditioningOptions, apply_dense_transforms};
+use crate::preconditioner::LocalPreconditioner;
+use crate::preconditioner::{legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve, PcSide};
+use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
@@ -71,7 +71,7 @@ type S = f64;
 type Real = f64;
 
 /// Complex arithmetic capability for this preconditioner implementation.
-pub const COMPLEX_SUPPORT: &str = "degraded_real_projection";
+pub const COMPLEX_SUPPORT: &str = "native_complex";
 
 /// HYPRE-inspired ILU types
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -494,6 +494,10 @@ pub struct Ilu {
     history: Option<ParIluHistory>,
     /// Optional event monitor
     monitor: Option<Box<dyn Monitor>>,
+    /// Whether setup used native complex kernels.
+    complex_setup_used_native: bool,
+    /// Optional reason describing why setup fell back from native complex kernels.
+    complex_setup_fallback_reason: Option<String>,
 }
 
 /// Consolidated workspace for all ILU operations to minimize allocations
@@ -680,6 +684,8 @@ impl Ilu {
             solve_ctrs: Counters::new(),
             history: None,
             monitor: None,
+            complex_setup_used_native: true,
+            complex_setup_fallback_reason: None,
         })
     }
 
@@ -2093,6 +2099,14 @@ impl Ilu {
     pub fn pivot_stats(&self) -> &PivotStats {
         &self.pivot_stats
     }
+
+    pub fn complex_setup_used_native(&self) -> bool {
+        self.complex_setup_used_native
+    }
+
+    pub fn complex_setup_fallback_reason(&self) -> Option<&str> {
+        self.complex_setup_fallback_reason.as_deref()
+    }
 }
 
 #[cfg(not(feature = "complex"))]
@@ -2168,6 +2182,8 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
     /// HYPRE-inspired setup with comprehensive safety checks and monitoring
     fn setup(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let setup_start = std::time::Instant::now();
+        self.complex_setup_used_native = true;
+        self.complex_setup_fallback_reason = None;
 
         if let Some(m) = &self.monitor {
             m.on_event(Event::IluSetupBegin { opts_hash: 0 });
@@ -2390,7 +2406,8 @@ impl Ilu {
             let _solve_time = _timer.elapsed().as_secs_f64();
             trace!(
                 "ILU Apply: solve_time={:.6}s, workspace_size={}",
-                _solve_time, self.workspace.size
+                _solve_time,
+                self.workspace.size
             );
         }
 
@@ -2497,10 +2514,10 @@ mod tests {
     use crate::algebra::parallel::par_sum_abs2_local;
     use crate::algebra::prelude::*;
     use crate::error::KError;
-    use crate::preconditioner::PcSide;
     use crate::preconditioner::legacy::Preconditioner;
+    use crate::preconditioner::PcSide;
     #[cfg(not(feature = "complex"))]
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     #[cfg(feature = "rayon")]
     use rayon::prelude::*;
@@ -3226,8 +3243,8 @@ mod tests_complex_bridge {
     use crate::algebra::scalar::KrystScalar;
     use crate::algebra::scalar::S as GlobalScalar;
     use crate::ops::kpc::KPreconditioner;
-    use crate::preconditioner::PcSide;
     use crate::preconditioner::legacy::Preconditioner as LegacyPc;
+    use crate::preconditioner::PcSide;
     use faer::Mat;
 
     #[test]

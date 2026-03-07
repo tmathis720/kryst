@@ -29,9 +29,9 @@ fn pc_complex_support(pc_type: Option<PcType>) -> PcComplexSupport {
         Some(PcType::Sor) => PcComplexSupport::NativeComplex,
         Some(PcType::Jacobi) | Some(PcType::Chebyshev) => PcComplexSupport::NativeComplex,
         Some(PcType::Ilu0) | Some(PcType::Ilu) | Some(PcType::Ilut) => {
-            PcComplexSupport::NativeWithDegradedFallback
+            PcComplexSupport::NativeComplex
         }
-        Some(PcType::ApproxInverse) => PcComplexSupport::NativeWithDegradedFallback,
+        Some(PcType::ApproxInverse) => PcComplexSupport::NativeComplex,
         _ => PcComplexSupport::ProjectedComplex,
     }
 }
