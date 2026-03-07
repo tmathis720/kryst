@@ -176,3 +176,31 @@ fn mpi_local_only_pc_auto_promotes_to_native_unless_adapted_route_forced() {
         "local-only MG preconditioner should converge when explicit pc_global fallback is enabled, got {reason:?}"
     );
 }
+
+#[cfg(feature = "backend-faer")]
+#[test]
+fn mpi_gamg_route_hint_accepts_explicit_choice() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    if comm.size() <= 1 {
+        return;
+    }
+    let n_per = 6;
+    let dist = Arc::new(make_dist_poisson(&comm, n_per));
+    let rhs = vec![1.0; n_per];
+    let reason = solve_with_pc(
+        dist,
+        &rhs,
+        &PcOptions {
+            pc_type: Some("gamg".to_string()),
+            amg_dist_coarse_solver_route: Some("root,local".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ),
+        "GAMG with explicit coarse route hint should converge, got {reason:?}"
+    );
+}

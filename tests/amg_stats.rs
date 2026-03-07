@@ -24,6 +24,10 @@ fn amg_level_stats() {
     for l in 1..stats.levels.len() {
         assert!(stats.levels[l - 1].n > stats.levels[l].n);
     }
+    assert!(stats.operator_complexity >= 1.0);
+    assert!(stats.grid_complexity >= 1.0);
+    assert!(stats.total_nnz >= stats.levels[0].nnz_a);
+    assert!(stats.total_smoothing_work >= 0.0);
     let observed = S::from_real(stats.levels[0].max_row_sum_a);
     let expected = S::from_real(R::from(4.0));
     assert_s_close!("amg level row sum", expected, observed);

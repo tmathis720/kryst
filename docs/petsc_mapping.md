@@ -195,6 +195,29 @@ MG/GAMG option resolution follows an explicit precedence chain:
 When multiple policy entries target the same level, later entries are merged deterministically and exact scoped level options win field-by-field.
 
 
+
+### New MG/GAMG per-level precedence keys
+
+`kryst` supports precedence-resolved policy layering for per-level smoother/KSP/PC stacks:
+
+1. Global defaults (`-pc_mg_smoother`, `-pc_mg_coarse_*`, `-pc_ksp_*`).
+2. Family-level policy keys via `level_key` in `-pc_mg_level_policies` / `-pc_gamg_level_policies`:
+   - `level_key=all|fine|intermediate|coarse`.
+3. Exact level entries from scoped options (`-pc_mg_levels_<i>_*`, `-pc_gamg_levels_<i>_*`) and explicit `level=<i>` policies.
+
+Exact level entries always override family/global values field-by-field.
+
+### Distributed coarse diagnostics surfaced in stats
+
+AMG hierarchy stats report:
+
+- `grid_complexity`, `operator_complexity`
+- total hierarchy `nnz`
+- per-level `nnz(A/P/R)` and smoothing work estimate
+- selected distributed coarse route and ordered fallback list
+
+MG diagnostics expose the chosen coarse route and resolved fallback chain at the coarse level.
+
 ## Parity estimate and prioritized roadmap
 
 ### Current estimate

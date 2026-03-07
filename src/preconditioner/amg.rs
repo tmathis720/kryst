@@ -4615,8 +4615,10 @@ impl AMG {
         if self.cfg.logging_level > 0 {
             let mut st = AmgStats::from_hierarchy(h);
             st.levels = collect_level_stats(h, &self.cfg);
+            st.total_smoothing_work = st.levels.iter().map(|l| l.smoothing_work_estimate).sum();
             st.selected_dist_coarse_route =
                 Some(format!("{:?}", self.cfg.dist_coarse_solver_route));
+            st.dist_route_fallback = vec![format!("{:?}", self.cfg.dist_coarse_solver_route)];
             st.diagnostics = diag_stats;
             self.stats = Some(st);
         }
@@ -7606,7 +7608,9 @@ fn build_hierarchy(
     let stats_opt = if do_stats {
         let mut stats = AmgStats::from_hierarchy(&hier);
         stats.levels = level_stats;
+        stats.total_smoothing_work = stats.levels.iter().map(|l| l.smoothing_work_estimate).sum();
         stats.selected_dist_coarse_route = Some(format!("{:?}", cfg.dist_coarse_solver_route));
+        stats.dist_route_fallback = vec![format!("{:?}", cfg.dist_coarse_solver_route)];
         stats.diagnostics = diag_stats;
         let mut setup = SetupTimings::default();
         setup.per_level = timings;
@@ -7747,6 +7751,8 @@ fn build_smoother_only_hierarchy(
             selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
             coarse_solver: Some(format!("{:?}", CoarseSolve::Smoother)),
         }];
+        stats.total_smoothing_work = stats.levels.iter().map(|l| l.smoothing_work_estimate).sum();
+        stats.dist_route_fallback = vec![format!("{:?}", cfg.dist_coarse_solver_route)];
         stats.diagnostics = vec![AmgLevelStats {
             p_min_col_norm: 0.0,
             p_cond_sketched: 0.0,
@@ -9363,12 +9369,15 @@ impl Default for DistApplyStats {
 pub struct AmgStats {
     pub grid_complexity: f64,
     pub operator_complexity: f64,
+    pub total_nnz: usize,
+    pub total_smoothing_work: f64,
     pub num_levels: usize,
     pub levels: Vec<LevelStats>,
     pub diagnostics: Vec<AmgLevelStats>,
     pub setup: SetupTimings,
     pub last_cycle: Option<CycleTimings>,
     pub selected_dist_coarse_route: Option<String>,
+    pub dist_route_fallback: Vec<String>,
 }
 
 impl AmgStats {
@@ -9384,12 +9393,15 @@ impl AmgStats {
         Self {
             grid_complexity: ng_sum / n0,
             operator_complexity: nnz_sum / nnz0,
+            total_nnz: h.levels.iter().map(|l| l.a.nnz()).sum(),
+            total_smoothing_work: 0.0,
             num_levels: h.levels.len(),
             levels: Vec::new(),
             diagnostics: Vec::new(),
             setup: SetupTimings::default(),
             last_cycle: None,
             selected_dist_coarse_route: None,
+            dist_route_fallback: Vec::new(),
         }
     }
 }
@@ -9463,6 +9475,12 @@ fn print_setup_tables(stats: &AmgStats) {
     println!(
         "AMG hierarchy: {} levels\nGrid complexity: {:.3}, Operator complexity: {:.3}",
         stats.num_levels, stats.grid_complexity, stats.operator_complexity
+    );
+    println!(
+        "Total nnz: {}, smoothing work estimate: {:.1}, dist route: {}",
+        stats.total_nnz,
+        stats.total_smoothing_work,
+        stats.selected_dist_coarse_route.as_deref().unwrap_or("n/a")
     );
     println!(
         "{:>5} {:>10} {:>10} {:>10} {:>10} {:>12}",

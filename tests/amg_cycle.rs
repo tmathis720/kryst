@@ -61,3 +61,20 @@ fn w_cycle_reduces_residual_more_than_v() {
 }
 
 mod fixtures;
+
+#[test]
+fn amg_cycle_stats_include_work_estimate() {
+    let a = csr_poisson_1d(64);
+    let rhs = vec![R::from(1.0); a.nrows()];
+    let mut amg = AMGBuilder::new()
+        .logging_level(2)
+        .relaxation_type(RelaxType::Jacobi)
+        .grid_relax_type_all(RelaxType::Jacobi)
+        .build(&Mat::<R>::zeros(0, 0))
+        .unwrap();
+    amg.setup(&a).unwrap();
+    let mut z = vec![R::default(); a.nrows()];
+    amg.apply(PcSide::Left, &rhs, &mut z).unwrap();
+    let stats = amg.stats().expect("stats");
+    assert!(stats.total_smoothing_work > 0.0);
+}
