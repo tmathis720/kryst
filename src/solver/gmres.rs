@@ -340,6 +340,7 @@ impl GmresSolver {
         if call_monitors(mons, 0, res, reduction_count) {
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
+                overlap_global_reductions: 0,
                 residual_replacements: async_waits,
             };
             return Ok(
@@ -405,6 +406,7 @@ impl GmresSolver {
             let reductions = reduction_count + async_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
+                overlap_global_reductions: 0,
                 residual_replacements: async_waits,
             };
             let mut stats = stats.with_counters(counters);
@@ -713,6 +715,7 @@ impl GmresSolver {
                 if call_monitors(mons, total_iters, res, reduction_count) {
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: reduction_count,
+                        overlap_global_reductions: 0,
                         residual_replacements: async_waits,
                     };
                     return Ok(SolveStats::new(
@@ -917,6 +920,7 @@ impl GmresSolver {
             if call_monitors(mons, total_iters, res, reduction_count) {
                 let counters = crate::utils::convergence::SolverCounters {
                     num_global_reductions: reduction_count,
+                    overlap_global_reductions: 0,
                     residual_replacements: async_waits,
                 };
                 return Ok(
@@ -982,6 +986,7 @@ impl GmresSolver {
         let reductions = reduction_count + async_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
+            overlap_global_reductions: 0,
             residual_replacements: async_waits,
         };
         let mut stats = stats.with_counters(counters);
@@ -1205,6 +1210,7 @@ impl GmresSolver {
         if call_monitors(mons, 0, res, reduction_count) {
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
+                overlap_global_reductions: 0,
                 residual_replacements: async_waits,
             };
             return Ok(
@@ -1268,6 +1274,7 @@ impl GmresSolver {
             let reductions = reduction_count + async_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
+                overlap_global_reductions: 0,
                 residual_replacements: async_waits,
             };
             let mut stats = stats.with_counters(counters);
@@ -1587,6 +1594,7 @@ impl GmresSolver {
                     if call_monitors(mons, total_iters, res, reduction_count) {
                         let counters = crate::utils::convergence::SolverCounters {
                             num_global_reductions: reduction_count,
+                            overlap_global_reductions: 0,
                             residual_replacements: async_waits,
                         };
                         return Ok(SolveStats::new(
@@ -1778,6 +1786,7 @@ impl GmresSolver {
             if call_monitors(mons, total_iters, res, reduction_count) {
                 let counters = crate::utils::convergence::SolverCounters {
                     num_global_reductions: reduction_count,
+                    overlap_global_reductions: 0,
                     residual_replacements: async_waits,
                 };
                 return Ok(
@@ -1841,6 +1850,7 @@ impl GmresSolver {
         let reductions = reduction_count + async_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
+            overlap_global_reductions: 0,
             residual_replacements: async_waits,
         };
         let mut stats = stats.with_counters(counters);

@@ -1,13 +1,13 @@
 use crate::error::KError;
 use crate::preconditioner::amg::AMGConfig;
-use crate::preconditioner::gamg::GamgConfig;
 #[cfg(feature = "dense-direct")]
 use crate::preconditioner::direct::{LuPc, QrPc};
+use crate::preconditioner::gamg::GamgConfig;
 use crate::preconditioner::{
     Preconditioner,
-    bddc::BddcConfig,
     asm::{AsmCombine, AsmConfig, AsmLocalSolver},
     asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
+    bddc::BddcConfig,
     block_jacobi::BlockJacobi,
     jacobi::Jacobi,
     sor::MatSorType,
@@ -105,9 +105,7 @@ pub fn build_qr() -> Result<Box<dyn Preconditioner>, KError> {
 }
 
 pub fn build_bddc(config: BddcConfig) -> Result<Box<dyn Preconditioner>, KError> {
-    Ok(Box::new(crate::preconditioner::bddc::BddcPc::new(
-        config,
-    )))
+    Ok(Box::new(crate::preconditioner::bddc::BddcPc::new(config)))
 }
 
 pub fn build_superlu_dist() -> Result<Box<dyn Preconditioner>, KError> {

@@ -36,8 +36,8 @@ use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use crate::algebra::prelude::*;
-use crate::utils::convergence::ConvergedReason;
 use crate::preconditioner::stats::ParIluIterSample;
+use crate::utils::convergence::ConvergedReason;
 
 pub enum Event<'a> {
     IluSetupBegin {

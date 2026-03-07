@@ -61,6 +61,10 @@ fn solve_case(label: &str, ranks: usize, dims: (usize, usize, usize)) {
         pipelined_stats.iterations
     );
 
+    assert!(
+        pipelined_stats.counters.overlap_global_reductions > 0,
+        "pipelined benchmark expected overlap-aware reductions"
+    );
     let speedup = classic_time.as_secs_f64() / pipelined_time.as_secs_f64();
     println!(
         "    classic  : {:>6} iters | {:>8.3} ms",

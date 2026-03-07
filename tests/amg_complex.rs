@@ -67,9 +67,10 @@ fn amg_complex_transfer_override_plumbing() {
     let mut out = vec![S::zero(); rhs.len()];
     amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
 
-    assert!(out
-        .iter()
-        .all(|v| v.real().is_finite() && v.imag().is_finite()));
+    assert!(
+        out.iter()
+            .all(|v| v.real().is_finite() && v.imag().is_finite())
+    );
 }
 
 #[test]

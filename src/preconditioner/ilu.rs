@@ -41,7 +41,7 @@
 //! See `examples/mpi_poisson_block_jacobi_ilu.rs` for a distributed block-Jacobi + ILU(0) walk-through.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::{copy_real_into_scalar, copy_scalar_to_real_in, BridgeScratch};
+use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
 use crate::algebra::scalar::KrystScalar;
 #[cfg(feature = "complex")]
 use crate::algebra::scalar::S as GlobalScalar;
@@ -49,10 +49,10 @@ use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
 use crate::preconditioner::LocalPreconditioner;
-use crate::preconditioner::{legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve, PcSide};
-use crate::utils::conditioning::{apply_dense_transforms, ConditioningOptions};
+use crate::preconditioner::stats::{ParIluHistory, ParIluIterSample};
+use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve::TriangularSolve};
+use crate::utils::conditioning::{ConditioningOptions, apply_dense_transforms};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
 use faer::Mat;
@@ -2406,8 +2406,7 @@ impl Ilu {
             let _solve_time = _timer.elapsed().as_secs_f64();
             trace!(
                 "ILU Apply: solve_time={:.6}s, workspace_size={}",
-                _solve_time,
-                self.workspace.size
+                _solve_time, self.workspace.size
             );
         }
 
@@ -2514,10 +2513,10 @@ mod tests {
     use crate::algebra::parallel::par_sum_abs2_local;
     use crate::algebra::prelude::*;
     use crate::error::KError;
-    use crate::preconditioner::legacy::Preconditioner;
     use crate::preconditioner::PcSide;
+    use crate::preconditioner::legacy::Preconditioner;
     #[cfg(not(feature = "complex"))]
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[cfg(feature = "rayon")]
     use rayon::prelude::*;
@@ -3243,8 +3242,8 @@ mod tests_complex_bridge {
     use crate::algebra::scalar::KrystScalar;
     use crate::algebra::scalar::S as GlobalScalar;
     use crate::ops::kpc::KPreconditioner;
-    use crate::preconditioner::legacy::Preconditioner as LegacyPc;
     use crate::preconditioner::PcSide;
+    use crate::preconditioner::legacy::Preconditioner as LegacyPc;
     use faer::Mat;
 
     #[test]

@@ -21,11 +21,11 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
-use crate::solver::common::{
-    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
-};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
+use crate::solver::common::{
+    ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
+};
 use crate::utils::convergence::{ConvergedReason, Convergence, ReasonEmitter, SolveStats};
 
 #[cfg(feature = "logging")]

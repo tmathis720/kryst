@@ -15,12 +15,14 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
-use crate::solver::common::{
-    dot_result_to_real, recompute_true_residual_norm_s, take_or_resize, ReductCtx,
-};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::utils::convergence::{ConvergedReason, Convergence, ReasonEmitter, SolveStats};
+use crate::solver::common::{
+    ReductCtx, dot_result_to_real, recompute_true_residual_norm_s, take_or_resize,
+};
+use crate::utils::convergence::{
+    ConvergedReason, Convergence, ReasonEmitter, SolveStats, SolverCounters,
+};
 use std::any::Any;
 
 pub struct QmrSolver {
@@ -110,14 +112,16 @@ impl QmrSolver {
         }
         r_tld.copy_from_slice(r);
 
+        let mut counters = SolverCounters::default();
         let mut norms = [0.0; 2];
         let r_view: &[S] = &r[..];
         red.norm2_many_into(&[r_view, b], &mut norms);
+        counters.num_global_reductions += 1;
         let mut res = norms[0];
         let bnorm = norms[1].max(1e-32);
 
         for m in monitors {
-            let _ = m(0, res, 0);
+            let _ = m(0, res, counters.num_global_reductions);
         }
 
         let (reason0, mut stats0) = self.conv.check(res, bnorm, 0);
@@ -125,13 +129,18 @@ impl QmrSolver {
             let true_res =
                 recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
             stats0.final_residual = true_res;
+            counters.overlap_global_reductions = counters.num_global_reductions;
+            stats0.counters = counters;
             return Ok(stats0);
         }
 
         let eps = 1e-300;
         let mut rho = red.dot(r_tld, r);
+        counters.num_global_reductions += 1;
         if rho.abs() <= eps {
-            return Ok(SolveStats::new(0, res, ReasonEmitter::breakdown_bicg()));
+            return Ok(
+                SolveStats::new(0, res, ReasonEmitter::breakdown_bicg()).with_counters(counters)
+            );
         }
 
         for k in 0..self.conv.max_iters {
@@ -140,8 +149,10 @@ impl QmrSolver {
                 p_tld.copy_from_slice(r_tld);
             } else {
                 let rho_new = red.dot(r_tld, r);
+                counters.num_global_reductions += 1;
                 if rho_new.abs() <= eps {
-                    return Ok(SolveStats::new(k, res, ReasonEmitter::breakdown_bicg()));
+                    return Ok(SolveStats::new(k, res, ReasonEmitter::breakdown_bicg())
+                        .with_counters(counters));
                 }
                 let beta = rho_new / rho;
                 for i in 0..ncols {
@@ -160,8 +171,10 @@ impl QmrSolver {
             a.t_matvec_s(p_tld, v_tld, scratch);
 
             let sigma = red.dot(p_tld, v);
+            counters.num_global_reductions += 1;
             if sigma.abs() <= eps {
-                return Ok(SolveStats::new(k + 1, res, ReasonEmitter::breakdown_bicg()));
+                return Ok(SolveStats::new(k + 1, res, ReasonEmitter::breakdown_bicg())
+                    .with_counters(counters));
             }
             let alpha = rho / sigma;
 
@@ -174,12 +187,14 @@ impl QmrSolver {
             let t_view: &[S] = &t[..];
             let s_view: &[S] = &s[..];
             red.dot_many_into(&[(t_view, t_view), (t_view, s_view)], &mut reductions);
+            counters.num_global_reductions += 1;
             let tt = dot_result_to_real(reductions[0]);
             if let Some(reason) = ReasonEmitter::non_finite(tt) {
-                return Ok(SolveStats::new(k + 1, res, reason));
+                return Ok(SolveStats::new(k + 1, res, reason).with_counters(counters));
             }
             if tt <= eps {
-                return Ok(SolveStats::new(k + 1, res, ReasonEmitter::breakdown_bicg()));
+                return Ok(SolveStats::new(k + 1, res, ReasonEmitter::breakdown_bicg())
+                    .with_counters(counters));
             }
             let ts = reductions[1];
             let omega = ts / S::from_real(tt);
@@ -195,8 +210,9 @@ impl QmrSolver {
             }
 
             res = red.norm2(r);
+            counters.num_global_reductions += 1;
             for m in monitors {
-                let _ = m(k + 1, res, 0);
+                let _ = m(k + 1, res, counters.num_global_reductions);
             }
 
             let (reason, mut stats) = self.conv.check(res, bnorm, k + 1);
@@ -204,17 +220,21 @@ impl QmrSolver {
                 let true_res =
                     recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
                 stats.final_residual = true_res;
+                counters.overlap_global_reductions = counters.num_global_reductions;
+                stats.counters = counters;
                 return Ok(stats);
             }
         }
 
         let true_res =
             recompute_true_residual_norm_s(a, b, x, comm, red.engine(), tmp_true, scratch);
+        counters.overlap_global_reductions = counters.num_global_reductions;
         Ok(SolveStats::new(
             self.conv.max_iters,
             true_res,
             ConvergedReason::DivergedMaxIts,
-        ))
+        )
+        .with_counters(counters))
     }
 
     #[allow(clippy::too_many_arguments)]

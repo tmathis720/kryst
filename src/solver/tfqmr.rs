@@ -15,11 +15,13 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
-use crate::solver::common::call_monitors;
-use crate::solver::common::{dot_result_to_real, take_or_resize, ReductCtx};
 use crate::solver::LinearSolver;
+use crate::solver::common::call_monitors;
+use crate::solver::common::{ReductCtx, dot_result_to_real, take_or_resize};
 use crate::solver::{MonitorAction, MonitorCallback};
-use crate::utils::convergence::{ConvergedReason, Convergence, ReasonEmitter, SolveStats};
+use crate::utils::convergence::{
+    ConvergedReason, Convergence, ReasonEmitter, SolveStats, SolverCounters,
+};
 use std::any::Any;
 
 pub struct TfqmrSolver {
@@ -108,9 +110,11 @@ impl TfqmrSolver {
 
         r_tld.copy_from_slice(r);
 
+        let mut counters = SolverCounters::default();
         let mut reductions = [S::zero(); 2];
         let initial_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
         red.dot_many_into(&initial_pairs, &mut reductions);
+        counters.num_global_reductions += 1;
         let mut rho: S = reductions[0];
         let mut res_sq: R = dot_result_to_real(reductions[1]);
         if res_sq < R::default() {
@@ -121,24 +125,33 @@ impl TfqmrSolver {
             return Ok(SolveStats::new(0, res0, reason));
         }
         let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
-        if call_monitors(monitors, 0, res0, 0) {
-            return Ok(SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor));
+        if call_monitors(monitors, 0, res0, counters.num_global_reductions) {
+            counters.overlap_global_reductions = counters.num_global_reductions;
+            return Ok(
+                SolveStats::new(0, res0, ConvergedReason::StoppedByMonitor).with_counters(counters)
+            );
         }
 
         let tol0 = self.conv.atol.max(self.conv.rtol * res0.max(1e-300));
         if res0 <= tol0 {
             stats.reason = ConvergedReason::ConvergedAtol;
             stats.final_residual = res0;
+            counters.overlap_global_reductions = counters.num_global_reductions;
+            stats.counters = counters;
             return Ok(stats);
         }
         if let Some(reason) = ReasonEmitter::non_finite(rho.abs()) {
             stats.reason = reason;
             stats.final_residual = res0;
+            counters.overlap_global_reductions = counters.num_global_reductions;
+            stats.counters = counters;
             return Ok(stats);
         }
         if rho.abs() < self.breakdown_eps {
             stats.reason = ReasonEmitter::breakdown_bicg();
             stats.final_residual = res0;
+            counters.overlap_global_reductions = counters.num_global_reductions;
+            stats.counters = counters;
             return Ok(stats);
         }
 
@@ -159,6 +172,7 @@ impl TfqmrSolver {
             }
 
             let sigma: S = red.dot(r_tld, v);
+            counters.num_global_reductions += 1;
             if let Some(reason) = ReasonEmitter::non_finite(sigma.abs()) {
                 stats.iterations = k;
                 stats.final_residual = true_res;
@@ -228,11 +242,13 @@ impl TfqmrSolver {
                 let iter_count = 2 * (k - 1) + mstep + 1;
                 let dpest: R = ((2 * k + mstep + 1) as f64).sqrt() * tau_local;
                 if call_monitors(monitors, iter_count, dpest, 0) {
+                    counters.overlap_global_reductions = counters.num_global_reductions;
                     return Ok(SolveStats::new(
                         iter_count,
                         dpest,
                         ConvergedReason::StoppedByMonitor,
-                    ));
+                    )
+                    .with_counters(counters));
                 }
                 let (reason, s2) = self.conv.check(dpest, res0, iter_count);
                 stats = s2;
@@ -256,6 +272,7 @@ impl TfqmrSolver {
                         pc.apply_s(pc_apply_side, tmp_pc, au, scratch)?;
                     }
                     true_res = red.norm2(au);
+                    counters.num_global_reductions += 1;
                     stats.final_residual = true_res;
                 } else {
                     stats.final_residual = dpest;
@@ -265,6 +282,8 @@ impl TfqmrSolver {
                     reason,
                     ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                 ) {
+                    counters.overlap_global_reductions = counters.num_global_reductions;
+                    stats.counters = counters;
                     return Ok(stats);
                 }
 
@@ -278,6 +297,7 @@ impl TfqmrSolver {
 
             let update_pairs = [(&r_tld[..], &r[..]), (&r[..], &r[..])];
             red.dot_many_into(&update_pairs, &mut reductions);
+            counters.num_global_reductions += 1;
             let rho_new: S = reductions[0];
             if let Some(reason) = ReasonEmitter::non_finite(rho_new.abs()) {
                 stats.iterations = k;
@@ -315,6 +335,7 @@ impl TfqmrSolver {
                     pc.apply_s(pc_apply_side, tmp_pc, au, scratch)?;
                 }
                 true_res = red.norm2(au);
+                counters.num_global_reductions += 1;
                 stats.final_residual = true_res;
                 let (reason, s2) = self.conv.check(true_res, res0, 2 * k);
                 stats = s2;
@@ -322,6 +343,8 @@ impl TfqmrSolver {
                     reason,
                     ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                 ) {
+                    counters.overlap_global_reductions = counters.num_global_reductions;
+                    stats.counters = counters;
                     return Ok(stats);
                 }
             }
@@ -334,6 +357,8 @@ impl TfqmrSolver {
         ) {
             stats.reason = ConvergedReason::DivergedMaxIts;
         }
+        counters.overlap_global_reductions = counters.num_global_reductions;
+        stats.counters = counters;
         Ok(stats)
     }
 
