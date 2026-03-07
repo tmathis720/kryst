@@ -1158,6 +1158,20 @@ pub static SPECS: &[Spec] = &[
         doc: "inner KSP restart",
     },
     Spec {
+        flag: "-pc_ksp_gmres_restart",
+        key: "pc_ksp_gmres_restart",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "inner GMRES restart",
+    },
+    Spec {
+        flag: "-pc_ksp_fgmres_restart",
+        key: "pc_ksp_fgmres_restart",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "inner FGMRES restart",
+    },
+    Spec {
         flag: "-pc_ksp_gmres_orthog",
         key: "pc_ksp_gmres_orthog",
         arity: Arity::One,
@@ -1177,6 +1191,27 @@ pub static SPECS: &[Spec] = &[
         arity: Arity::One,
         kind: ValueKind::Bool,
         doc: "inner KSP monitors rank0-only",
+    },
+    Spec {
+        flag: "-pc_ksp_monitor_policy",
+        key: "pc_ksp_monitor_policy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "inner KSP monitor policy (all|rank0)",
+    },
+    Spec {
+        flag: "-pc_ksp_propagate_converged_reason",
+        key: "pc_ksp_propagate_converged_reason",
+        arity: Arity::One,
+        kind: ValueKind::Bool,
+        doc: "propagate inner KSP converged reason to outer nested-pc failure",
+    },
+    Spec {
+        flag: "-pc_ksp_allow_maxits",
+        key: "pc_ksp_allow_maxits",
+        arity: Arity::One,
+        kind: ValueKind::Bool,
+        doc: "treat inner KSP_DIVERGED_ITS as acceptable for nested pc_type=ksp",
     },
     Spec {
         flag: "-pc_ksp_reduction",

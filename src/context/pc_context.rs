@@ -784,6 +784,12 @@ impl PcConfig {
                     if ksp.restart.is_none() && o.pc_ksp_restart.is_some() {
                         ksp.restart = o.pc_ksp_restart;
                     }
+                    if ksp.gmres_restart.is_none() && o.pc_ksp_gmres_restart.is_some() {
+                        ksp.gmres_restart = o.pc_ksp_gmres_restart;
+                    }
+                    if ksp.fgmres_restart.is_none() && o.pc_ksp_fgmres_restart.is_some() {
+                        ksp.fgmres_restart = o.pc_ksp_fgmres_restart;
+                    }
                     if ksp.gmres_orthog.is_none() && o.pc_ksp_gmres_orthog.is_some() {
                         ksp.gmres_orthog = o.pc_ksp_gmres_orthog.clone();
                     }

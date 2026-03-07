@@ -16,6 +16,8 @@ struct InnerKspContext {
     pc_options: PcOptions,
     residual_history: Arc<Mutex<Vec<R>>>,
     monitor_rank0: bool,
+    allow_maxits: bool,
+    propagate_converged_reason: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +97,11 @@ impl KspAsPc {
         let ksp_opts = self.ksp_options.clone();
         let pc_opts = self.pc_options.clone();
         let monitor_rank0 = ksp_opts.ksp_monitor_rank0.unwrap_or(false);
+        let allow_maxits = self.pc_options.pc_ksp_allow_maxits.unwrap_or(true);
+        let propagate_converged_reason = self
+            .pc_options
+            .pc_ksp_propagate_converged_reason
+            .unwrap_or(true);
 
         let mut guard = self.inner_ctx.lock().expect("ksp-pc nested lock");
         if let Some(existing) = guard.as_mut() {
@@ -105,6 +112,8 @@ impl KspAsPc {
             existing.ksp_options = ksp_opts;
             existing.pc_options = pc_opts;
             existing.monitor_rank0 = existing.ksp_options.ksp_monitor_rank0.unwrap_or(false);
+            existing.allow_maxits = allow_maxits;
+            existing.propagate_converged_reason = propagate_converged_reason;
             existing
                 .ksp
                 .try_set_operators_with_comm(amat, None, a.comm())?;
@@ -139,6 +148,8 @@ impl KspAsPc {
             pc_options: pc_opts,
             residual_history,
             monitor_rank0,
+            allow_maxits,
+            propagate_converged_reason,
         });
         Ok(true)
     }
@@ -190,10 +201,14 @@ impl KspAsPc {
         {
             inner.ksp.set_restart(restart);
         }
-        inner.ksp.set_monitor_policy(if inner.monitor_rank0 {
-            MonitorPolicy::Rank0Only
-        } else {
-            MonitorPolicy::AllRanks
+        let monitor_policy = inner
+            .pc_options
+            .pc_ksp_monitor_policy
+            .as_deref()
+            .unwrap_or(if inner.monitor_rank0 { "rank0" } else { "all" });
+        inner.ksp.set_monitor_policy(match monitor_policy {
+            "rank0" | "rank0only" | "rank_0" => MonitorPolicy::Rank0Only,
+            _ => MonitorPolicy::AllRanks,
         });
     }
 
@@ -209,8 +224,8 @@ impl KspAsPc {
         summary
     }
 
-    fn is_acceptable_inner_reason(reason: ConvergedReason) -> bool {
-        reason.is_converged() || matches!(reason, ConvergedReason::DivergedMaxIts)
+    fn is_acceptable_inner_reason(reason: ConvergedReason, allow_maxits: bool) -> bool {
+        reason.is_converged() || (allow_maxits && matches!(reason, ConvergedReason::DivergedMaxIts))
     }
 }
 
@@ -262,7 +277,7 @@ impl Preconditioner for KspAsPc {
                     residual_history_summary: Some(history_summary),
                 })
             })?;
-            if !Self::is_acceptable_inner_reason(stats.reason) {
+            if !Self::is_acceptable_inner_reason(stats.reason, inner.allow_maxits) {
                 let history_summary =
                     Self::summarize_history(&inner.residual_history, stats.final_residual);
                 let detail = format!(
@@ -281,7 +296,11 @@ impl Preconditioner for KspAsPc {
                 );
                 return Err(KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
-                    reason: stats.reason,
+                    reason: if inner.propagate_converged_reason {
+                        stats.reason
+                    } else {
+                        ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
+                    },
                     iterations: stats.iterations,
                     detail,
                     final_norm: Some(format!("true_residual_l2={:.6e}", stats.final_residual)),
