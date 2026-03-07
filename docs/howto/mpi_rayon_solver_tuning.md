@@ -52,3 +52,23 @@ Compare both runtime and `num_global_reductions` trends across strong/weak scali
 - When outer/inner sides differ, set inner explicitly with `-pc_ksp_pc_side` rather than relying on outer-side inheritance.
 
 These settings pair well with pipelined outer Krylov variants on higher-latency fabrics.
+
+
+## 6) MG/GAMG distributed coarse route playbook
+
+When tuning multigrid in distributed mode, set route controls explicitly and verify them in hierarchy diagnostics:
+
+- Primary route selection:
+  - `-pc_amg_dist_coarse_solver_route auto|root|local|superlu_dist`
+  - MG aliases also map: `-pc_mg_coarse_solver_route ...`
+- Strategy policy:
+  - `-pc_amg_dist_coarse_policy root|local|superlu_dist|none`
+- Repartition policy:
+  - `-pc_mg_dist_coarse_repartition keep|uniform|root`
+
+Suggested sequence:
+
+1. Start with `route=auto`, `policy=root` for robust setup.
+2. Move to `policy=local` and `route=local,root` once communication dominates.
+3. Keep a fallback route list (`local,root` or `root,local`) so setup can recover predictably.
+4. Use AMG/MG stats to confirm selected route, fallback chain, per-level nnz, and smoothing work.

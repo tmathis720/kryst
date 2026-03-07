@@ -21,6 +21,7 @@ type MgScalar = S;
 #[derive(Clone, Debug, Default)]
 pub struct MgLevelPolicy {
     pub level: usize,
+    pub level_key: Option<String>,
     pub smoother_type: Option<String>,
     pub smoother_family: Option<String>,
     pub smoother_steps: Option<usize>,
@@ -58,6 +59,7 @@ pub struct MgLevelDiagnostics {
     pub post_sweeps: usize,
     pub side: PcSide,
     pub coarse_route: Option<String>,
+    pub route_fallback: Option<String>,
     pub native_complex_path: bool,
     pub complex_diagnostic: Option<String>,
 }
@@ -618,7 +620,40 @@ impl MgPc {
             level_ksp_maxits: None,
             level_ksp_rtol: None,
         };
-        for p in self.level_policies.iter().filter(|p| p.level == level) {
+        let is_coarse = level + 1 == self.levels;
+        let is_fine = level == 0;
+        let mut family_matches: Vec<&MgLevelPolicy> = self
+            .level_policies
+            .iter()
+            .filter(|p| {
+                p.level_key
+                    .as_deref()
+                    .map(|k| {
+                        matches!(
+                            k,
+                            "all" | "any" | "fine" | "coarse" | "intermediate" | "mid"
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        family_matches.sort_by_key(|p| p.level);
+        let mut exact_matches: Vec<&MgLevelPolicy> = self
+            .level_policies
+            .iter()
+            .filter(|p| p.level == level)
+            .collect();
+        exact_matches.sort_by_key(|p| p.level);
+        for p in family_matches.into_iter().chain(exact_matches.into_iter()) {
+            if let Some(key) = p.level_key.as_deref() {
+                match key {
+                    "all" | "any" => {}
+                    "fine" if !is_fine => continue,
+                    "coarse" if !is_coarse => continue,
+                    "intermediate" | "mid" if is_fine || is_coarse => continue,
+                    _ => {}
+                }
+            }
             if let Some(v) = p.smoother_family.as_ref().or(p.smoother_type.as_ref()) {
                 resolved.smoother = v.clone();
             }
@@ -1005,6 +1040,11 @@ impl Preconditioner for MgPc {
                     } else {
                         None
                     },
+                    route_fallback: if lvl.level == coarse_level {
+                        Some(coarse_routes.join(","))
+                    } else {
+                        None
+                    },
                     native_complex_path: true,
                     complex_diagnostic: None,
                 }
@@ -1198,6 +1238,54 @@ mod tests {
             vec!["nested_ksp".to_string(), "pc_apply".to_string()]
         );
     }
+
+    #[test]
+    fn mg_level_policy_precedence_global_family_exact() {
+        let mut mg = MgPc::new(
+            4,
+            Some("v".into()),
+            Some("jacobi".into()),
+            Some(1),
+            None,
+            None,
+            None,
+            Some("ilu0".into()),
+            None,
+            None,
+            None,
+        );
+        mg.set_level_policies(vec![
+            MgLevelPolicy {
+                level: 0,
+                level_key: Some("all".into()),
+                smoother_type: Some("sor".into()),
+                coarse_pc_type: Some("jacobi".into()),
+                smoother_steps: Some(2),
+                ..Default::default()
+            },
+            MgLevelPolicy {
+                level: 0,
+                level_key: Some("coarse".into()),
+                coarse_ksp_type: Some("cg".into()),
+                ..Default::default()
+            },
+            MgLevelPolicy {
+                level: 2,
+                smoother_type: Some("gs".into()),
+                pre_sweeps: Some(5),
+                ..Default::default()
+            },
+        ]);
+        let l2 = mg.resolved_policy_for_level(2);
+        assert_eq!(l2.smoother, "gs");
+        assert_eq!(l2.pre_sweeps, 5);
+        assert_eq!(l2.post_sweeps, 2);
+        let lc = mg.resolved_policy_for_level(3);
+        assert_eq!(lc.smoother, "sor");
+        assert_eq!(lc.coarse_pc_type.as_deref(), Some("jacobi"));
+        assert_eq!(lc.coarse_ksp_type.as_deref(), Some("cg"));
+    }
+
     #[test]
     fn mg_level_specific_coarse_map_takes_precedence() {
         let mut mg = MgPc::new(

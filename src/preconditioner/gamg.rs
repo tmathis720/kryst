@@ -8,8 +8,8 @@ use crate::preconditioner::{Op, OpFormat, PcCaps, PcDistributedSupport, PcSide, 
 use crate::config::kinds::{AmgCoarsenKind, AmgInterpKind};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::amg::{
-    AMGConfig, AmgTransferOperators, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType,
-    AMG,
+    AMG, AMGConfig, AmgTransferOperators, CoarseSolve, CoarsenType, InterpType, RelaxPhase,
+    RelaxType,
 };
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{
@@ -22,6 +22,7 @@ use std::str::FromStr;
 #[derive(Clone, Debug, Default)]
 pub struct GamgLevelPolicy {
     pub level: usize,
+    pub level_key: Option<String>,
     pub smoother: Option<String>,
     pub smoother_family: Option<String>,
     pub sweeps: Option<usize>,
@@ -177,6 +178,46 @@ impl GamgConfig {
 }
 
 #[cfg(feature = "backend-faer")]
+fn gamg_policy_applies(policy: &GamgLevelPolicy, level: usize, max_levels: usize) -> bool {
+    let is_fine = level == 0;
+    let is_coarse = level + 1 == max_levels;
+    match policy.level_key.as_deref() {
+        None => policy.level == level,
+        Some("all") | Some("any") => true,
+        Some("fine") => is_fine,
+        Some("coarse") => is_coarse,
+        Some("intermediate") | Some("mid") => !is_fine && !is_coarse,
+        _ => policy.level == level,
+    }
+}
+
+#[cfg(feature = "backend-faer")]
+fn resolved_gamg_policy_for_level(
+    policies: &[GamgLevelPolicy],
+    level: usize,
+    max_levels: usize,
+) -> Option<GamgLevelPolicy> {
+    let mut out = GamgLevelPolicy {
+        level,
+        ..Default::default()
+    };
+    let mut applied = false;
+    for p in policies.iter().filter(|p| p.level_key.is_some()) {
+        if gamg_policy_applies(p, level, max_levels) {
+            merge_gamg_policy(&mut out, p);
+            applied = true;
+        }
+    }
+    for p in policies
+        .iter()
+        .filter(|p| p.level_key.is_none() && p.level == level)
+    {
+        merge_gamg_policy(&mut out, p);
+        applied = true;
+    }
+    if applied { Some(out) } else { None }
+}
+#[cfg(feature = "backend-faer")]
 fn parse_coarse_solver(value: &str) -> Result<CoarseSolve, KError> {
     Ok(match value.trim().to_lowercase().as_str() {
         "cg" => CoarseSolve::CG,
@@ -222,6 +263,7 @@ fn gamg_policy_from_scoped(
         });
     Ok(GamgLevelPolicy {
         level,
+        level_key: None,
         smoother: scoped
             .amg_smoother
             .clone()
@@ -263,6 +305,9 @@ fn gamg_policy_from_scoped(
 }
 #[cfg(feature = "backend-faer")]
 fn merge_gamg_policy(dst: &mut GamgLevelPolicy, src: &GamgLevelPolicy) {
+    if let Some(v) = src.level_key.as_ref() {
+        dst.level_key = Some(v.clone());
+    }
     if let Some(v) = src.smoother.as_ref() {
         dst.smoother = Some(v.clone());
     }
@@ -308,6 +353,7 @@ fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
                         KError::InvalidInput(format!("invalid gamg policy level: {v}"))
                     })?
                 }
+                "level_key" | "family_key" => policy.level_key = Some(v.trim().to_lowercase()),
                 "smoother" => policy.smoother = Some(v.trim().to_lowercase()),
                 "smoother_family" | "family" => {
                     policy.smoother_family = Some(v.trim().to_lowercase())
@@ -497,12 +543,8 @@ impl Preconditioner for Gamg {
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         let mut effective_cfg = self.config.amg_config.clone();
-        if let Some(fine_policy) = self
-            .config
-            .level_policies
-            .iter()
-            .filter(|p| p.level == 0)
-            .last()
+        if let Some(fine_policy) =
+            resolved_gamg_policy_for_level(&self.config.level_policies, 0, effective_cfg.max_levels)
         {
             if let Some(smoother) = fine_policy
                 .smoother_family
@@ -538,20 +580,20 @@ impl Preconditioner for Gamg {
                 effective_cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = post;
             }
         }
-        self.amg = AMG::with_config(effective_cfg);
-        for p in self
-            .config
-            .level_policies
-            .iter()
-            .filter(|p| p.level <= self.config.amg_config.max_levels)
-            .collect::<Vec<_>>()
-        {
-            if let Some(solve) = p
-                .coarse_solver
-                .or_else(|| p.pc_type.as_deref().and_then(coarse_solve_from_pc_name))
-                .or_else(|| p.ksp_type.as_ref().map(|_| CoarseSolve::CG))
-            {
-                self.amg.set_level_coarse_solver(p.level, solve);
+        self.amg = AMG::with_config(effective_cfg.clone());
+        for level in 0..=effective_cfg.max_levels {
+            if let Some(p) = resolved_gamg_policy_for_level(
+                &self.config.level_policies,
+                level,
+                effective_cfg.max_levels,
+            ) {
+                if let Some(solve) = p
+                    .coarse_solver
+                    .or_else(|| p.pc_type.as_deref().and_then(coarse_solve_from_pc_name))
+                    .or_else(|| p.ksp_type.as_ref().map(|_| CoarseSolve::CG))
+                {
+                    self.amg.set_level_coarse_solver(level, solve);
+                }
             }
         }
         self.amg.setup(a)
@@ -868,6 +910,27 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn gamg_level_policy_precedence_global_family_exact() {
+        let opts = PcOptions {
+            pc_gamg_level_policies: Some(vec![
+                "level=0,level_key=all,smoother=jacobi,sweeps=2,pc=ilu".into(),
+                "level=0,level_key=coarse,ksp=cg".into(),
+                "level=2,smoother=chebyshev,pre_sweeps=5".into(),
+            ]),
+            ..Default::default()
+        };
+        let cfg = GamgConfig::try_from_opts(&opts).expect("build config");
+        let l2 = resolved_gamg_policy_for_level(&cfg.level_policies, 2, 4).expect("l2");
+        assert_eq!(l2.smoother.as_deref(), Some("chebyshev"));
+        assert_eq!(l2.pre_sweeps, Some(5));
+        assert_eq!(l2.sweeps, Some(2));
+        let lc = resolved_gamg_policy_for_level(&cfg.level_policies, 3, 4).expect("coarse");
+        assert_eq!(lc.ksp_type.as_deref(), Some("cg"));
+        assert_eq!(lc.pc_type.as_deref(), Some("ilu"));
+    }
+
     #[test]
     fn gamg_config_rejects_invalid_aggressive_controls() {
         let opts = PcOptions {
@@ -875,17 +938,19 @@ mod tests {
             ..Default::default()
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected aggressive levels to fail");
-        assert!(err
-            .to_string()
-            .contains("pc_gamg_aggressive_levels must be >= 1"));
+        assert!(
+            err.to_string()
+                .contains("pc_gamg_aggressive_levels must be >= 1")
+        );
 
         let opts = PcOptions {
             pc_gamg_aggressive_mis_k: Some(1),
             ..Default::default()
         };
         let err = GamgConfig::try_from_opts(&opts).expect_err("expected mis k to fail");
-        assert!(err
-            .to_string()
-            .contains("pc_gamg_aggressive_mis_k must be >= 2"));
+        assert!(
+            err.to_string()
+                .contains("pc_gamg_aggressive_mis_k must be >= 2")
+        );
     }
 }

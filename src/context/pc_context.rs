@@ -345,6 +345,7 @@ fn parse_mg_level_policy(value: &str) -> Result<MgLevelPolicy, KError> {
                         KError::InvalidInput(format!("invalid mg policy level: {v}"))
                     })?
                 }
+                "level_key" | "family_key" => policy.level_key = Some(v.trim().to_lowercase()),
                 "smoother" => policy.smoother_type = Some(v.trim().to_lowercase()),
                 "smoother_family" | "family" => {
                     policy.smoother_family = Some(v.trim().to_lowercase())
@@ -447,6 +448,7 @@ fn mg_policy_from_scoped_level(
         .or_else(|| global.pc_mg_smoother.clone());
     MgLevelPolicy {
         level,
+        level_key: None,
         smoother_type: inherited_pc_type.clone().map(|v| v.to_lowercase()),
         smoother_family: inherited_pc_type.map(|v| v.to_lowercase()),
         smoother_steps: scoped.pc_mg_smoother_steps.or(global.pc_mg_smoother_steps),
@@ -505,6 +507,9 @@ fn mg_policy_from_scoped_level(
 }
 
 fn merge_mg_policy(dst: &mut MgLevelPolicy, src: &MgLevelPolicy) {
+    if let Some(v) = src.level_key.as_ref() {
+        dst.level_key = Some(v.clone());
+    }
     if let Some(v) = src.smoother_type.as_ref() {
         dst.smoother_type = Some(v.clone());
     }
