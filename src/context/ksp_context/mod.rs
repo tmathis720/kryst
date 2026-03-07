@@ -69,7 +69,7 @@ use crate::preconditioner::PcDistributedSupport;
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::MpiPcOptions;
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
-use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, GlobalPcKind};
+use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, DistRoutePolicy, GlobalPcKind};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
@@ -2922,8 +2922,36 @@ impl KspContext {
             ));
         };
         if pending.mpi_opts.global_pc == GlobalPcKind::None {
+            if pending.mpi_opts.route_policy == DistRoutePolicy::Native {
+                let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
+                    return Err(KError::InvalidInput(
+                        "native distributed fallback requires DistCsrOp".into(),
+                    ));
+                };
+                let mut promoted = pending.clone();
+                promoted.mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
+                if !promoted.mpi_opts.local_apply_mode.is_distributed_native() {
+                    promoted.mpi_opts.local_apply_mode =
+                        crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
+                }
+                log::warn!(
+                    "Auto-promoting rank-local preconditioner to native distributed BlockJacobi route (pc_dist_route=native)."
+                );
+                let mut new_pc = self.build_mpi_global_pc(&promoted, dist_op)?;
+                let want = new_pc.required_format();
+                let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
+                let pmat_view = materialize(pmat.clone(), want, tol)?;
+                if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
+                    self.handle_pc_setup_failure(err, pmat, sid, vid)?;
+                    return Ok(false);
+                }
+                self.pc = Some(new_pc);
+                self.last_pc_sid = Some(sid);
+                self.last_pc_vid = Some(vid);
+                return Ok(true);
+            }
             return Err(KError::InvalidInput(
-                "selected preconditioner is rank-local for a distributed operator; -pc_global must be set"
+                "selected preconditioner is rank-local for a distributed operator; -pc_global must be set or choose -pc_dist_route native for auto distributed promotion"
                     .into(),
             ));
         }

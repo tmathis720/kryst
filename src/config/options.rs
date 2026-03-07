@@ -14,7 +14,9 @@ use crate::config::options_core::is_help_requested;
 use crate::config::options_core::{Arity, Sink, Spec, expand_options_files, parse_as};
 use crate::config::registry::registry;
 #[cfg(feature = "backend-faer")]
-use crate::preconditioner::dist::{DistLocalApplyMode, GlobalPcKind, LocalPcKind, MpiPcOptions};
+use crate::preconditioner::dist::{
+    DistLocalApplyMode, DistRoutePolicy, GlobalPcKind, LocalPcKind, MpiPcOptions,
+};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::ilu::{
     IluConfig, IluType as IluVariant, ReorderingType as IluReorderingType,
@@ -424,6 +426,8 @@ pub struct PcOptions {
     pub pc_local: Option<String>,
     /// Distributed local apply mode for block-Jacobi wrappers.
     pub pc_dist_local_apply: Option<String>,
+    /// Route selection policy for distributed PCs: native|adapted|root_gather.
+    pub pc_dist_route: Option<String>,
     /// ILU variant ("iluk", "ilut", ...).
     pub ilu_variant: Option<String>,
     /// Reordering strategy for ILU.
@@ -1085,6 +1089,7 @@ impl Sink for PcOptions {
             "pc_global" => set_opt!(&mut self.pc_global, v.to_lowercase()),
             "pc_local" => set_opt!(&mut self.pc_local, v.to_lowercase()),
             "pc_dist_local_apply" => set_opt!(&mut self.pc_dist_local_apply, v.to_lowercase()),
+            "pc_dist_route" => set_opt!(&mut self.pc_dist_route, v.to_lowercase()),
             "pc_ilu_levels" => set_opt!(&mut self.ilu_level, parse_as::<usize>(v, spec)?),
             "pc_chebyshev_degree" => {
                 set_opt!(&mut self.chebyshev_degree, parse_as::<usize>(v, spec)?)
@@ -2499,6 +2504,7 @@ impl PcOptions {
         o!(pc_global);
         o!(pc_local);
         o!(pc_dist_local_apply);
+        o!(pc_dist_route);
         o!(ilu_variant);
         o!(ilu_reordering);
 
@@ -2620,6 +2626,12 @@ impl PcOptions {
             .map(DistLocalApplyMode::from_str)
             .transpose()?
             .unwrap_or(opts.local_apply_mode);
+        opts.route_policy = self
+            .pc_dist_route
+            .as_deref()
+            .map(DistRoutePolicy::from_str)
+            .transpose()?
+            .unwrap_or(opts.route_policy);
         opts.ilu_config = build_ilu_config(self)?;
         opts.conditioning = self.conditioning_options()?;
 
@@ -4052,6 +4064,27 @@ mod old_tests {
         assert!(config.enable_parallel_factorization);
         assert!(config.enable_parallel_triangular_solve);
         assert_eq!(config.parallel_chunk_size, 128);
+    }
+
+    #[cfg(feature = "backend-faer")]
+    #[test]
+    fn test_default_mpi_route_prefers_native() {
+        let opts = PcOptions::default();
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        assert_eq!(
+            mpi_opts.local_apply_mode,
+            DistLocalApplyMode::NativeLocalHalo
+        );
+        assert_eq!(mpi_opts.route_policy, DistRoutePolicy::Native);
+    }
+
+    #[cfg(feature = "backend-faer")]
+    #[test]
+    fn test_dist_route_cli_to_mpi_options() {
+        let mut opts = PcOptions::default();
+        opts.pc_dist_route = Some("adapted".to_string());
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        assert_eq!(mpi_opts.route_policy, DistRoutePolicy::Adapted);
     }
 
     #[cfg(feature = "backend-faer")]

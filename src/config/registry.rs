@@ -394,6 +394,13 @@ pub static SPECS: &[Spec] = &[
         doc: "distributed local apply mode: wrapped_local | distributed_native | strict",
     },
     Spec {
+        flag: "-pc_dist_route",
+        key: "pc_dist_route",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "distributed route preference: native | adapted | root_gather",
+    },
+    Spec {
         flag: "-pc_jacobi_block_size",
         key: "pc_jacobi_block_size",
         arity: Arity::One,

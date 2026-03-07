@@ -112,7 +112,7 @@ fn mpi_block_jacobi_runs_without_pc_global_fallback() {
 }
 
 #[test]
-fn mpi_local_only_pc_errors_without_fallback_but_works_with_pc_global() {
+fn mpi_local_only_pc_auto_promotes_to_native_unless_adapted_route_forced() {
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     if comm.size() <= 1 {
         return;
@@ -121,25 +121,43 @@ fn mpi_local_only_pc_errors_without_fallback_but_works_with_pc_global() {
     let dist = Arc::new(make_dist_poisson(&comm, n_per));
     let rhs = vec![1.0; n_per];
 
-    let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Gmres).expect("set gmres");
-    ksp.set_operators(dist.clone(), None);
     let base_opts = KspOptions {
         ksp_type: Some("gmres".to_string()),
         maxits: Some(20),
         ..Default::default()
     };
-    let lu_local_only = PcOptions {
+
+    let promoted_reason = solve_with_pc(
+        dist.clone(),
+        &rhs,
+        &PcOptions {
+            pc_type: Some("mg".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            promoted_reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ),
+        "MG should auto-promote to native distributed route by default, got {promoted_reason:?}"
+    );
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("set gmres");
+    ksp.set_operators(dist.clone(), None);
+    let adapted_only = PcOptions {
         pc_type: Some("mg".to_string()),
+        pc_dist_route: Some("adapted".to_string()),
         ..Default::default()
     };
-    ksp.set_from_all_options(&base_opts, &lu_local_only)
+    ksp.set_from_all_options(&base_opts, &adapted_only)
         .expect("set opts");
     let err = ksp
         .setup()
-        .expect_err("MG should require distributed fallback");
+        .expect_err("MG adapted route should require explicit distributed fallback");
     assert!(
-        err.to_string().contains("-pc_global must be set"),
+        err.to_string().contains("pc_dist_route native"),
         "unexpected error: {err}"
     );
 
