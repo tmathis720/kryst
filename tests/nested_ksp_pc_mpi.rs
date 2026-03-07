@@ -129,3 +129,47 @@ fn nested_ksp_pc_mpi_fgmres_inner_gmres_variant_path() {
     );
     assert!(stats.nested_pc_failure.is_none());
 }
+
+#[test]
+fn nested_ksp_pc_mpi_inner_maxits_failure_maps_consistently() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let n_local = 4;
+    let a = Arc::new(make_dist_poisson(&comm, n_local));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("outer type");
+    let ksp_opts = KspOptions {
+        maxits: Some(8),
+        rtol: Some(1e-12),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("richardson".into()),
+        pc_ksp_maxits: Some(1),
+        pc_ksp_rtol: Some(1e-30),
+        pc_ksp_allow_maxits: Some(false),
+        pc_ksp_propagate_converged_reason: Some(true),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        ..Default::default()
+    };
+
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).expect("opts");
+    ksp.set_operators(a, None);
+    let rhs = vec![1.0; n_local];
+    let mut x = vec![0.0; n_local];
+    let stats = ksp.solve(&rhs, &mut x).expect("solve");
+
+    assert_eq!(
+        stats.reason,
+        kryst::utils::convergence::ConvergedReason::DivergedPcFailed
+    );
+    let inner = stats
+        .nested_pc_failure
+        .as_ref()
+        .expect("nested failure metadata");
+    assert_eq!(
+        inner.reason,
+        kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+    );
+}

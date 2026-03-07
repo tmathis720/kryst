@@ -107,6 +107,11 @@ features, options, and monitoring/convergence hooks.
 | `-pc_fieldsplit_prefixes` | [`PcOptions::pc_fieldsplit_prefixes`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_fieldsplit_prefixes) | Supported | Per-field scoping for nested sub-KSP/PC options. |
 | `-pc_ksp_type` | [`PcOptions::pc_ksp_ksp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_ksp_type) | Partial | Used by `PcType::Ksp`. |
 | `-pc_ksp_pc_type` | [`PcOptions::pc_ksp_pc_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_pc_type) | Partial | Used by `PcType::Ksp`. |
+| `-pc_ksp_maxits` / `-pc_ksp_rtol` / `-pc_ksp_atol` / `-pc_ksp_dtol` | `PcOptions::pc_ksp_*tol/maxits` | Supported | Inner KSP tolerance/iteration controls for `PcType::Ksp`; scoped `pc_ksp_ksp_options` still takes precedence field-by-field. |
+| `-pc_ksp_gmres_restart` / `-pc_ksp_fgmres_restart` / `-pc_ksp_restart` | `PcOptions::pc_ksp_*restart` | Supported | Restart precedence is solver-specific then generic: GMRES/FGMRES-specific key first, then `pc_ksp_restart`. |
+| `-pc_ksp_monitor_policy` / `-pc_ksp_monitor_rank0` | `PcOptions::pc_ksp_monitor_policy` / `pc_ksp_monitor_rank0` | Supported | Explicit policy key (`all`/`rank0`) overrides boolean compatibility flag. |
+| `-pc_ksp_allow_maxits` | [`PcOptions::pc_ksp_allow_maxits`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_allow_maxits) | Supported | Controls whether inner `KSP_DIVERGED_ITS` is treated as acceptable (`true`, default) or nested failure (`false`). |
+| `-pc_ksp_propagate_converged_reason` | [`PcOptions::pc_ksp_propagate_converged_reason`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_propagate_converged_reason) | Supported | If true (default), `SolveStats::nested_pc_failure.reason` preserves the inner reason; if false, normalizes to `DivergedPcFailed`. |
 | `-pc_mg_levels` | [`PcOptions::pc_mg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_levels) | Partial | Controls number of MG levels (injection coarsening). |
 | `-pc_mg_cycle_type` | [`PcOptions::pc_mg_cycle_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_cycle_type) | Partial | `v`/`w`/`f` cycles supported. |
 | `-pc_mg_smoother` | [`PcOptions::pc_mg_smoother`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother) | Partial | Smoother applied per-level; direct smoothers (`lu`/`qr`) become the coarse solve. |
@@ -171,6 +176,7 @@ features, options, and monitoring/convergence hooks.
 - `KSP_DIVERGED_PCSETUP_FAILED`: emitted during `KspContext::setup` (or implicit setup within `solve`) when PC setup/factorization fails.
 - `KSP_DIVERGED_PC_FAILED`: emitted when preconditioner apply paths fail (including shell PC hooks and nested KSP-as-PC inner failures).
 - For nested preconditioners, `SolveStats::nested_pc_failure` captures the inner reason/iterations/component metadata so monitor output can explain the outer failure.
+- Outer `SolveStats.reason` remains `DivergedPcFailed` for nested apply failures, while `SolveStats::nested_pc_failure.reason` carries the inner reason (or normalized `DivergedPcFailed` when `-pc_ksp_propagate_converged_reason false`).
 
 
 ## MG/GAMG hierarchy and coarse-policy mapping
@@ -268,6 +274,7 @@ For PETSc-like nested workflows, these templates are the most robust defaults in
   - `-pc_type ksp -pc_ksp_ksp_type gmres -pc_ksp_pc_type jacobi`
   - Prefer explicit inner side (`-pc_ksp_pc_side left|right`) when outer side differs.
   - Inner restart precedence follows PETSc-style solver-specific keys: `pc_ksp_gmres_restart` / `pc_ksp_fgmres_restart` then `pc_ksp_restart`.
+  - Inner failure coordination knobs: `-pc_ksp_allow_maxits {true|false}`, `-pc_ksp_propagate_converged_reason {true|false}`, and `-pc_ksp_monitor_policy {all|rank0}`.
 - **FieldSplit Schur for coupled systems**
   - Start with `-pc_fieldsplit_type schur -pc_fieldsplit_schur_fact_type full -pc_fieldsplit_schur_precondition full`.
   - For complex scalars, use `self`, `selfp`, `full`, `full_matfree`, or `user` Schur preconditioning paths (avoid `diag`).

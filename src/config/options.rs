@@ -287,9 +287,14 @@ pub struct PcOptions {
     pub pc_ksp_atol: Option<f64>,
     pub pc_ksp_dtol: Option<f64>,
     pub pc_ksp_restart: Option<usize>,
+    pub pc_ksp_gmres_restart: Option<usize>,
+    pub pc_ksp_fgmres_restart: Option<usize>,
     pub pc_ksp_gmres_orthog: Option<String>,
     pub pc_ksp_fgmres_orthog: Option<String>,
     pub pc_ksp_monitor_rank0: Option<bool>,
+    pub pc_ksp_monitor_policy: Option<String>,
+    pub pc_ksp_propagate_converged_reason: Option<bool>,
+    pub pc_ksp_allow_maxits: Option<bool>,
     pub pc_ksp_reduction: Option<String>,
     pub pc_ksp_reproducible: Option<bool>,
     pub pc_ksp_threads: Option<usize>,
@@ -695,6 +700,12 @@ impl PcOptions {
             }
             if ksp_opts.restart.is_none() {
                 ksp_opts.restart = self.pc_ksp_restart;
+            }
+            if ksp_opts.gmres_restart.is_none() {
+                ksp_opts.gmres_restart = self.pc_ksp_gmres_restart;
+            }
+            if ksp_opts.fgmres_restart.is_none() {
+                ksp_opts.fgmres_restart = self.pc_ksp_fgmres_restart;
             }
             if ksp_opts.gmres_orthog.is_none() {
                 ksp_opts.gmres_orthog = self.pc_ksp_gmres_orthog.clone();
@@ -1300,10 +1311,28 @@ impl Sink for PcOptions {
             "pc_ksp_atol" => set_opt!(&mut self.pc_ksp_atol, parse_as::<f64>(v, spec)?),
             "pc_ksp_dtol" => set_opt!(&mut self.pc_ksp_dtol, parse_as::<f64>(v, spec)?),
             "pc_ksp_restart" => set_opt!(&mut self.pc_ksp_restart, parse_as::<usize>(v, spec)?),
+            "pc_ksp_gmres_restart" => {
+                set_opt!(&mut self.pc_ksp_gmres_restart, parse_as::<usize>(v, spec)?)
+            }
+            "pc_ksp_fgmres_restart" => {
+                set_opt!(&mut self.pc_ksp_fgmres_restart, parse_as::<usize>(v, spec)?)
+            }
             "pc_ksp_gmres_orthog" => set_opt!(&mut self.pc_ksp_gmres_orthog, v.to_lowercase()),
             "pc_ksp_fgmres_orthog" => set_opt!(&mut self.pc_ksp_fgmres_orthog, v.to_lowercase()),
             "pc_ksp_monitor_rank0" => {
                 set_opt!(&mut self.pc_ksp_monitor_rank0, parse_as::<bool>(v, spec)?)
+            }
+            "pc_ksp_monitor_policy" => {
+                set_opt!(&mut self.pc_ksp_monitor_policy, v.to_lowercase())
+            }
+            "pc_ksp_propagate_converged_reason" => {
+                set_opt!(
+                    &mut self.pc_ksp_propagate_converged_reason,
+                    parse_as::<bool>(v, spec)?
+                )
+            }
+            "pc_ksp_allow_maxits" => {
+                set_opt!(&mut self.pc_ksp_allow_maxits, parse_as::<bool>(v, spec)?)
             }
             "pc_ksp_reduction" => set_opt!(&mut self.pc_ksp_reduction, v.to_lowercase()),
             "pc_ksp_reproducible" => {
@@ -2384,9 +2413,14 @@ impl PcOptions {
         o!(pc_ksp_atol);
         o!(pc_ksp_dtol);
         o!(pc_ksp_restart);
+        o!(pc_ksp_gmres_restart);
+        o!(pc_ksp_fgmres_restart);
         o!(pc_ksp_gmres_orthog);
         o!(pc_ksp_fgmres_orthog);
         o!(pc_ksp_monitor_rank0);
+        o!(pc_ksp_monitor_policy);
+        o!(pc_ksp_propagate_converged_reason);
+        o!(pc_ksp_allow_maxits);
         o!(pc_ksp_reduction);
         o!(pc_ksp_reproducible);
         o!(pc_ksp_threads);
@@ -3353,10 +3387,20 @@ mod old_tests {
             "1e4",
             "-pc_ksp_restart",
             "9",
+            "-pc_ksp_gmres_restart",
+            "11",
+            "-pc_ksp_fgmres_restart",
+            "13",
             "-pc_ksp_gmres_orthog",
             "cgs",
             "-pc_ksp_monitor_rank0",
             "true",
+            "-pc_ksp_monitor_policy",
+            "rank0",
+            "-pc_ksp_propagate_converged_reason",
+            "false",
+            "-pc_ksp_allow_maxits",
+            "false",
             "-pc_ksp_reduction",
             "deterministic",
             "-pc_ksp_reproducible",
@@ -3375,8 +3419,13 @@ mod old_tests {
         assert_eq!(opts.pc_ksp_atol, Some(1e-12));
         assert_eq!(opts.pc_ksp_dtol, Some(1e4));
         assert_eq!(opts.pc_ksp_restart, Some(9));
+        assert_eq!(opts.pc_ksp_gmres_restart, Some(11));
+        assert_eq!(opts.pc_ksp_fgmres_restart, Some(13));
         assert_eq!(opts.pc_ksp_gmres_orthog.as_deref(), Some("cgs"));
         assert_eq!(opts.pc_ksp_monitor_rank0, Some(true));
+        assert_eq!(opts.pc_ksp_monitor_policy.as_deref(), Some("rank0"));
+        assert_eq!(opts.pc_ksp_propagate_converged_reason, Some(false));
+        assert_eq!(opts.pc_ksp_allow_maxits, Some(false));
         assert_eq!(opts.pc_ksp_reduction.as_deref(), Some("deterministic"));
         assert_eq!(opts.pc_ksp_reproducible, Some(true));
         assert_eq!(opts.pc_ksp_threads, Some(1));

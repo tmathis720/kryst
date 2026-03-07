@@ -272,6 +272,41 @@ fn fieldsplit_schur_full_precondition_and_nested_children() -> Result<(), KError
 }
 
 #[test]
+fn fieldsplit_schur_accepts_matfree_aliases() -> Result<(), KError> {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(4.0),
+            S::from_real(1.0),
+            S::from_real(1.0),
+            S::from_real(3.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    for pre in ["self_p", "matfree"] {
+        let opts = PcOptions {
+            pc_type: Some("fieldsplit".into()),
+            pc_fieldsplit_block_sizes: Some(vec![1, 1]),
+            pc_fieldsplit_child_pc_type: Some("jacobi".into()),
+            pc_fieldsplit_type: Some("schur".into()),
+            pc_fieldsplit_schur_fact_type: Some("full".into()),
+            pc_fieldsplit_schur_precondition: Some(pre.into()),
+            ..Default::default()
+        };
+        let mut pc = PcFactory::create_from_options(&opts)?;
+        pc.setup(&op)?;
+        let x = vec![S::from_real(1.0), S::from_real(2.0)];
+        let mut y = vec![S::zero(); 2];
+        pc.apply(PcSide::Left, &x, &mut y)?;
+        assert!(y.iter().all(|v| v.abs().is_finite()));
+    }
+    Ok(())
+}
+
+#[test]
 fn fieldsplit_schur_distributed_global_block_sizes_apply() -> Result<(), KError> {
     let csr = CsrMatrix::from_csr(
         4,
