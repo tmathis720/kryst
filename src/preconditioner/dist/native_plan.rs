@@ -1,6 +1,38 @@
 use crate::error::KError;
 use std::str::FromStr;
 
+/// High-level route selection policy for distributed preconditioners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistRoutePolicy {
+    /// Prefer native distributed operator routes.
+    Native,
+    /// Prefer compatibility adapter routes over native distributed kernels.
+    Adapted,
+    /// Prefer root-gather routes for coarse/global correction phases.
+    RootGather,
+}
+
+impl Default for DistRoutePolicy {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl FromStr for DistRoutePolicy {
+    type Err = KError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "native" | "distributed_native" => Ok(Self::Native),
+            "adapted" | "adapter" | "wrapped_local" => Ok(Self::Adapted),
+            "root" | "root_gather" | "gather" => Ok(Self::RootGather),
+            other => Err(KError::InvalidInput(format!(
+                "invalid pc_dist_route mode: {other}"
+            ))),
+        }
+    }
+}
+
 /// Controls whether distributed block-Jacobi uses a pure local wrapper
 /// or a distributed-native apply path with neighborhood coupling exchange.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +49,7 @@ pub enum DistLocalApplyMode {
 
 impl Default for DistLocalApplyMode {
     fn default() -> Self {
-        Self::WrappedLocal
+        Self::NativeLocalHalo
     }
 }
 

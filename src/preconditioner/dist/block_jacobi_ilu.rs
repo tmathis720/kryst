@@ -157,6 +157,9 @@ fn maybe_native_plan(
                 "pc_dist_local_apply=strict requested but pc_local={local_pc_name} only supports wrapped_local mode"
             )));
         }
+        log::warn!(
+            "Distributed native route unavailable for pc_local={local_pc_name}; falling back to wrapped_local compatibility adapter"
+        );
         return Ok(None);
     }
     Ok(Some(NativeCouplingPlan::from_dist_op(

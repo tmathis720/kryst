@@ -1,7 +1,7 @@
 #[path = "infra/datasets.rs"]
 mod datasets;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};
@@ -91,6 +91,24 @@ fn build_case(
     (ksp, b, x)
 }
 
+fn check_reduction_budget(tag: &str, reductions: usize, n_local: usize) {
+    let enforce = std::env::var("KRYST_BENCH_ENFORCE_SCALING")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let budget = ((4.0 * n_local.max(1) as f64).ceil() as usize).max(24);
+    if reductions > budget {
+        let msg = format!(
+            "{tag}: reduction budget exceeded (reductions={reductions}, budget={budget}, n_local={n_local})"
+        );
+        if enforce {
+            panic!("{msg}");
+        } else {
+            eprintln!("WARN: {msg}");
+        }
+    }
+}
+
 fn bench_suite(c: &mut Criterion) {
     let comm = bench_comm();
     let sizes = [("small", 16usize), ("medium", 48usize), ("large", 96usize)];
@@ -102,6 +120,13 @@ fn bench_suite(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("dist_{pc_type}"));
         for (label, grid) in sizes {
             let (mut ksp, b, mut x) = build_case(grid, pc_type, &comm, threads);
+            x.fill(0.0);
+            let stats = ksp.solve(&b, &mut x).unwrap();
+            check_reduction_budget(
+                &format!("{pc_type}:{label}:g{grid}"),
+                stats.counters.num_global_reductions,
+                b.len(),
+            );
             let bench_id = format!("{label}_g{grid}");
             group.bench_function(bench_id, |ben| {
                 ben.iter(|| {

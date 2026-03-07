@@ -8,7 +8,7 @@ mod coarse;
 mod native_plan;
 
 pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
-pub use native_plan::DistLocalApplyMode;
+pub use native_plan::{DistLocalApplyMode, DistRoutePolicy};
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
@@ -98,6 +98,7 @@ pub struct MpiPcOptions {
     pub ilutp_drop_tol: f64,
     pub ilutp_perm_tol: f64,
     pub local_apply_mode: DistLocalApplyMode,
+    pub route_policy: DistRoutePolicy,
 }
 
 impl Default for MpiPcOptions {
@@ -113,7 +114,8 @@ impl Default for MpiPcOptions {
             ilutp_max_fill: 10,
             ilutp_drop_tol: 1e-4,
             ilutp_perm_tol: 0.1,
-            local_apply_mode: DistLocalApplyMode::WrappedLocal,
+            local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
+            route_policy: DistRoutePolicy::Native,
         }
     }
 }
