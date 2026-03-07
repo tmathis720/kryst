@@ -27,32 +27,32 @@ use crate::algebra::parallel;
 use crate::algebra::prelude::*;
 use crate::core::traits::{Indexing, MatVec};
 use crate::error::KError;
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
+use crate::matrix::DistCsrOp;
 use crate::matrix::convert::csr_from_linop;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::dist::halo::HaloPlan;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
-#[cfg(all(feature = "mpi", not(feature = "complex")))]
-use crate::matrix::DistCsrOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::parallel::Comm;
+use crate::preconditioner::Preconditioner as ObjPreconditioner;
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
 };
-use crate::preconditioner::Preconditioner as ObjPreconditioner;
-use crate::preconditioner::{legacy::Preconditioner, PcDistributedSupport, PcSide};
+use crate::preconditioner::{PcDistributedSupport, PcSide, legacy::Preconditioner};
 use crate::utils::coloring::{build_blocks_from_colors, csr_distance2_coloring};
 use bitflags::bitflags;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Complex arithmetic capability for this preconditioner implementation.
 pub const COMPLEX_SUPPORT: &str = "native_complex";
@@ -908,10 +908,11 @@ mod tests {
         let mut out = vec![S::zero(); 2];
         pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
         let diag = pc.complex_fallback_diagnostics();
-        assert!(diag
-            .as_deref()
-            .unwrap_or("")
-            .contains("degraded_split_real_imag"));
+        assert!(
+            diag.as_deref()
+                .unwrap_or("")
+                .contains("degraded_split_real_imag")
+        );
     }
 
     #[test]

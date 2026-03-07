@@ -696,6 +696,7 @@ impl IdrsSolver {
             let mut out = SolveStats::new(0, res_norm, ConvergedReason::ConvergedRtol);
             out.counters = SolverCounters {
                 num_global_reductions: stats.dots,
+                overlap_global_reductions: 0,
                 residual_replacements: stats.residual_replacements,
             };
             return Ok(out);
@@ -775,6 +776,7 @@ impl IdrsSolver {
                 let mut out = SolveStats::new(step + 1, res_norm, ConvergedReason::ConvergedRtol);
                 out.counters = SolverCounters {
                     num_global_reductions: stats.dots,
+                    overlap_global_reductions: 0,
                     residual_replacements: stats.residual_replacements,
                 };
                 return Ok(out);
@@ -922,6 +924,7 @@ impl IdrsSolver {
                             SolveStats::new(iteration, res_norm, ConvergedReason::ConvergedRtol);
                         out.counters = SolverCounters {
                             num_global_reductions: stats.dots,
+                            overlap_global_reductions: 0,
                             residual_replacements: stats.residual_replacements,
                         };
                         return Ok(out);
@@ -945,6 +948,7 @@ impl IdrsSolver {
         let mut out = SolveStats::new(iteration, res_norm, ConvergedReason::DivergedMaxIts);
         out.counters = SolverCounters {
             num_global_reductions: stats.dots,
+            overlap_global_reductions: 0,
             residual_replacements: stats.residual_replacements,
         };
         Ok(out)

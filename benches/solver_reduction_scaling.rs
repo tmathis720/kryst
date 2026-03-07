@@ -95,6 +95,11 @@ fn main() {
             s.reduction_model.as_ref().map(|m| m.variant),
         );
 
+        assert!(
+            s.counters.overlap_global_reductions > 0,
+            "benchmark gate failed: pcg pipelined should record overlap reductions"
+        );
+
         let b3 = vec![1.0; a3.nrows()];
         let mut x3 = vec![0.0; a3.nrows()];
         let mut gmres = GmresSolver::new(30, 1e-8, 600);
@@ -248,6 +253,10 @@ fn main() {
             s_bicg_reliable.reduction_model.as_ref().map(|m| m.variant),
         );
 
+        assert!(
+            s_bicg_lowsync.counters.overlap_global_reductions > 0,
+            "benchmark gate failed: bicgstab lowsync should record overlap reductions"
+        );
         assert!(
             s_bicg_lowsync.counters.num_global_reductions
                 <= s_bicg_classic.counters.num_global_reductions,

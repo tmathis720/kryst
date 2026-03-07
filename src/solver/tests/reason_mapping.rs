@@ -2,8 +2,8 @@
 
 use crate::error::KError;
 use crate::utils::convergence::{
-    map_kerror_to_reason, ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure,
-    ReasonEmitter,
+    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, ReasonEmitter,
+    map_kerror_to_reason,
 };
 
 #[test]

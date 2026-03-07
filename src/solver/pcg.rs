@@ -14,13 +14,13 @@ use crate::preconditioner::{PcSide, Preconditioner};
 #[cfg(feature = "complex")]
 use crate::reduction::Packet;
 use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
+use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::cg::CgSolver;
 use crate::solver::common::call_monitors;
 #[cfg(feature = "complex")]
 use crate::solver::common::dot_result_to_real;
 use crate::solver::common::{dot1_async_s, nrm2_async_s};
-use crate::solver::LinearSolver;
-use crate::solver::MonitorCallback;
 use crate::utils::convergence::{
     ConvergedReason, Convergence, ReductionModel, SolveStats, SolverCounters,
 };
@@ -657,8 +657,10 @@ impl PcgSolver {
         let rnorm0 = rnorm0_sq.sqrt();
         if rnorm0 == R::default() {
             return Ok(
-                SolveStats::new(0, R::default(), ConvergedReason::ConvergedRtol)
-                    .with_counters(counters),
+                SolveStats::new(0, R::default(), ConvergedReason::ConvergedRtol).with_counters({
+                    counters.overlap_global_reductions = counters.num_global_reductions;
+                    counters
+                }),
             );
         }
 
@@ -676,8 +678,10 @@ impl PcgSolver {
         counters.num_global_reductions += 1;
         if call_monitors(monitors, 0, actual_res0, counters.num_global_reductions) {
             return Ok(
-                SolveStats::new(0, actual_res0, ConvergedReason::StoppedByMonitor)
-                    .with_counters(counters),
+                SolveStats::new(0, actual_res0, ConvergedReason::StoppedByMonitor).with_counters({
+                    counters.overlap_global_reductions = counters.num_global_reductions;
+                    counters
+                }),
             );
         }
         if let Some(m) = &self.true_residual_monitor {
@@ -688,6 +692,7 @@ impl PcgSolver {
         if !matches!(reason0, ConvergedReason::Continued) {
             stats0.final_residual = actual_res0;
             counters.residual_replacements = 0;
+            counters.overlap_global_reductions = counters.num_global_reductions;
             stats0.counters = counters;
             return Ok(stats0);
         }
@@ -746,7 +751,10 @@ impl PcgSolver {
                             actual_res,
                             ConvergedReason::StoppedByMonitor,
                         )
-                        .with_counters(counters));
+                        .with_counters({
+                            counters.overlap_global_reductions = counters.num_global_reductions;
+                            counters
+                        }));
                     }
                     if let Some(m) = &self.true_residual_monitor {
                         m(iterations, actual_res, 0);
@@ -922,7 +930,10 @@ impl PcgSolver {
                         actual_res,
                         ConvergedReason::StoppedByMonitor,
                     )
-                    .with_counters(counters));
+                    .with_counters({
+                        counters.overlap_global_reductions = counters.num_global_reductions;
+                        counters
+                    }));
                 }
                 if let Some(m) = &self.true_residual_monitor {
                     m(iterations, actual_res, 0);
@@ -979,6 +990,7 @@ impl PcgSolver {
                     }
 
                     counters.residual_replacements = residual_replacements;
+                    counters.overlap_global_reductions = counters.num_global_reductions;
                     stats.counters = counters;
                     return Ok(stats);
                 }
@@ -988,10 +1000,15 @@ impl PcgSolver {
         }
 
         counters.residual_replacements = residual_replacements;
+        counters.overlap_global_reductions = counters.num_global_reductions;
         let final_res = self.nrm2_scalar(r, comm);
         Ok(
-            SolveStats::new(iterations, final_res, ConvergedReason::DivergedMaxIts)
-                .with_counters(counters),
+            SolveStats::new(iterations, final_res, ConvergedReason::DivergedMaxIts).with_counters(
+                {
+                    counters.overlap_global_reductions = counters.num_global_reductions;
+                    counters
+                },
+            ),
         )
     }
 

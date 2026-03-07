@@ -1,7 +1,7 @@
 #[path = "infra/datasets.rs"]
 mod datasets;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};

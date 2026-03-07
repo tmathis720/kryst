@@ -4,9 +4,9 @@ use kryst::algebra::prelude::*;
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcType;
 use kryst::matrix::sparse::CsrMatrix;
+use kryst::preconditioner::PcSide;
 use kryst::preconditioner::legacy::Preconditioner;
 use kryst::preconditioner::sor::{MatSorType, SorPc};
-use kryst::preconditioner::PcSide;
 use kryst::preconditioner::{ApproxInvKind, ApproxInvParams, SpaiCsr};
 use kryst::utils::diagnostics::PcDiagnostics;
 
@@ -52,8 +52,8 @@ fn sor_native_complex_preserves_imaginary_coupling() {
 
 #[test]
 fn ilu_csr_native_complex_beats_split_baseline_on_coupled_system() {
-    use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::Preconditioner as _;
+    use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
 
     let a = CsrMatrix::from_csr(
         2,

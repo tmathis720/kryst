@@ -2,9 +2,9 @@
 
 use faer::Mat;
 use kryst::algebra::prelude::*;
+use kryst::preconditioner::PcSide;
 use kryst::preconditioner::ilu::{IluBuilder, IluType};
 use kryst::preconditioner::legacy::Preconditioner;
-use kryst::preconditioner::PcSide;
 
 fn make_diagonal_matrix(diag: &[S]) -> Mat<S> {
     let n = diag.len();

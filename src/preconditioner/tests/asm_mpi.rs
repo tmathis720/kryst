@@ -4,16 +4,16 @@
 use super::*;
 use crate::algebra::prelude::*;
 use crate::assert_vec_close;
+use crate::matrix::DistCsrOp;
 use crate::matrix::op::CsrOp;
 use crate::matrix::sparse::CsrMatrix;
-use crate::matrix::DistCsrOp;
 use crate::parallel::{Comm, MpiComm, UniverseComm};
+use crate::preconditioner::Preconditioner;
 use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmPc, Weighting};
 use crate::preconditioner::builders::{build_block_jacobi, build_ilu0_with_conditioning};
 use crate::preconditioner::dist::{
     DistLocalApplyMode, DistPcAdapter, DistPcBuilder, GlobalPcKind, LocalPcKind, MpiPcOptions,
 };
-use crate::preconditioner::Preconditioner;
 use crate::utils::conditioning::ConditioningOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};

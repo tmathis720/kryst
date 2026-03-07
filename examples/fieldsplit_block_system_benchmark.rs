@@ -5,12 +5,12 @@
 //! - Per-field prefixes with sub-KSP/sub-PC options
 //! - Setup reuse and repeated-apply timings
 
+use kryst::KError;
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcFactory;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::prelude::*;
-use kryst::KError;
 use std::sync::Arc;
 use std::time::Instant;
 

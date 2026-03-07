@@ -295,6 +295,8 @@ impl std::fmt::Display for ConvergedReason {
 pub struct SolverCounters {
     /// Number of global reduction operations executed by the solver.
     pub num_global_reductions: usize,
+    /// Number of reductions that were launched in overlap-friendly/nonblocking paths.
+    pub overlap_global_reductions: usize,
     /// Number of residual replacement events performed during the solve.
     pub residual_replacements: usize,
 }
