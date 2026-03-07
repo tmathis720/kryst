@@ -1,11 +1,16 @@
 #![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use faer::Mat;
 use kryst::algebra::prelude::*;
+use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::op::LinOp;
 use kryst::preconditioner::PcSide;
+use kryst::preconditioner::shell::{
+    register_shell_apply_symmetric, register_shell_apply_typed, shell_apply,
+};
 use kryst::solver::MonitorAction;
+use kryst::utils::convergence::ConvergedReason;
 use kryst::{assert_s_close, testkit};
 use std::sync::Arc;
 
@@ -200,4 +205,44 @@ fn monitors_reported_norms_and_final_true_residual() {
         )
     };
     assert_s_close!("qmr monitor", S::from_real(qmr_first), S::from_real(bnorm));
+}
+
+#[test]
+fn monitor_consistency_includes_reason_counters_for_nested_pc_failures() {
+    let tag = "mon_consistency_shell_fail";
+    register_shell_apply_typed(format!("{tag}_base"), |_side, x, y, _ctx: &mut ()| {
+        y.copy_from_slice(x);
+        Ok(())
+    });
+    register_shell_apply_symmetric(
+        format!("{tag}_sym"),
+        shell_apply(|_, _, _| Err(kryst::error::KError::SolveError("sym fail".into()))),
+    );
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Richardson).unwrap();
+    let ksp_opts = KspOptions {
+        maxits: Some(2),
+        rtol: Some(1e-16),
+        pc_side: Some("symmetric".into()),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("shell".into()),
+        pc_shell_apply: Some(format!("{tag}_base")),
+        pc_shell_apply_symmetric: Some(format!("{tag}_sym")),
+        ..Default::default()
+    };
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
+    let a = diag_mat(&[S::from_real(2.0), S::from_real(3.0)]);
+    let amat: Arc<dyn LinOp<S = S>> = Arc::new(a);
+    ksp.set_operators(amat, None);
+
+    let mut x = vec![S::zero(); 2];
+    let b = vec![S::one(); 2];
+    let stats = ksp.solve(&b, &mut x).unwrap();
+    assert_eq!(stats.reason, ConvergedReason::DivergedPcFailed);
+    assert_eq!(stats.reason_counters.pc_apply, 2);
+    let nested = stats.nested_pc_failure.expect("nested metadata");
+    assert_eq!(nested.reason, ConvergedReason::DivergedPcFailed);
 }
