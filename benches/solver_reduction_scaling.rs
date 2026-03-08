@@ -6,7 +6,9 @@ use kryst::solver::LinearSolver;
 use kryst::solver::bicgstab::{BiCgStabSolver, BiCgStabVariant};
 use kryst::solver::fgmres::{FgmresSolver, FgmresVariant};
 use kryst::solver::gmres::{GmresSolver, GmresVariant};
+use kryst::solver::idrs::IdrsBuilder;
 use kryst::solver::pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
+use kryst::solver::qmr::QmrSolver;
 use std::time::Instant;
 
 fn report(name: &str, iters: usize, reductions: usize, elapsed_ms: f64, model: Option<&str>) {
@@ -181,6 +183,7 @@ fn main() {
         bicg_classic.set_variant(BiCgStabVariant::Classic);
         let mut ws = Workspace::default();
         let t0 = Instant::now();
+        let bicg_classic_start = Instant::now();
         let s_bicg_classic = bicg_classic
             .solve_f64(
                 &a3,
@@ -200,12 +203,14 @@ fn main() {
             t0.elapsed().as_secs_f64() * 1e3,
             s_bicg_classic.reduction_model.as_ref().map(|m| m.variant),
         );
+        let bicg_classic_ms = bicg_classic_start.elapsed().as_secs_f64() * 1e3;
 
         xb.fill(0.0);
         let mut bicg_lowsync = BiCgStabSolver::new(1e-8, 600);
         bicg_lowsync.set_variant(BiCgStabVariant::LowSync);
         let mut ws = Workspace::default();
         let t0 = Instant::now();
+        let bicg_lowsync_start = Instant::now();
         let s_bicg_lowsync = bicg_lowsync
             .solve_f64(
                 &a3,
@@ -225,32 +230,60 @@ fn main() {
             t0.elapsed().as_secs_f64() * 1e3,
             s_bicg_lowsync.reduction_model.as_ref().map(|m| m.variant),
         );
+        let bicg_lowsync_ms = bicg_lowsync_start.elapsed().as_secs_f64() * 1e3;
 
-        xb.fill(0.0);
-        let mut bicg_reliable = BiCgStabSolver::new(1e-8, 600);
-        bicg_reliable.set_variant(BiCgStabVariant::Reliable {
-            residual_replace_every: 12,
-        });
+        let mut xq = vec![0.0; a3.nrows()];
+        let mut qmr = QmrSolver::new(1e-8, 600);
         let mut ws = Workspace::default();
         let t0 = Instant::now();
-        let s_bicg_reliable = bicg_reliable
+        let s_qmr = qmr
             .solve_f64(
                 &a3,
                 None,
                 &b3,
-                &mut xb,
+                &mut xq,
                 PcSide::Left,
                 &comm,
                 None,
                 Some(&mut ws),
             )
-            .expect("bicgstab reliable");
+            .expect("qmr");
         report(
-            "bicgstab-reliable",
-            s_bicg_reliable.iterations,
-            s_bicg_reliable.counters.num_global_reductions,
+            "qmr",
+            s_qmr.iterations,
+            s_qmr.counters.num_global_reductions,
             t0.elapsed().as_secs_f64() * 1e3,
-            s_bicg_reliable.reduction_model.as_ref().map(|m| m.variant),
+            s_qmr.reduction_model.as_ref().map(|m| m.variant),
+        );
+
+        let mut xi = vec![0.0; a3.nrows()];
+        let mut idrs = IdrsBuilder::new().s(4).tol(1e-8).maxit(600).build();
+        let t0 = Instant::now();
+        let s_idrs = idrs
+            .solve_f64(
+                &a3,
+                None,
+                &b3,
+                &mut xi,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&ws),
+            )
+            .expect("idrs");
+        report(
+            "idrs",
+            s_idrs.iterations,
+            s_idrs.counters.num_global_reductions,
+            t0.elapsed().as_secs_f64() * 1e3,
+            s_idrs.reduction_model.as_ref().map(|m| m.variant),
+        );
+
+        println!(
+            "      deltas: bicg-lowsync vs classic => reductions={} runtime_ms={:.3}",
+            s_bicg_classic.counters.num_global_reductions as isize
+                - s_bicg_lowsync.counters.num_global_reductions as isize,
+            bicg_classic_ms - bicg_lowsync_ms
         );
 
         assert!(

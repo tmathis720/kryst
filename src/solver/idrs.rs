@@ -3,6 +3,7 @@ use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
+use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
@@ -12,7 +13,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::{ReductCtx, dot_result_to_real};
+use crate::solver::common::ReductCtx;
 use crate::utils::convergence::{ConvergedReason, SolveStats, SolverCounters};
 #[cfg(feature = "backend-faer")]
 use faer::Mat;
@@ -629,6 +630,7 @@ impl IdrsSolver {
         pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: KLinOp<Scalar = S> + ?Sized,
@@ -654,7 +656,7 @@ impl IdrsSolver {
         }
 
         self.ws.ensure(n, self.opts.s);
-        let red = ReductCtx::new(comm, None);
+        let red = ReductCtx::new(comm, work);
         let mut stats = IdrsStats::default();
 
         let monitors = monitors.unwrap_or(&[]);
@@ -963,11 +965,12 @@ impl IdrsSolver {
         pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&Workspace>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: KLinOp<Scalar = S> + ?Sized,
     {
-        self.solve_internal(a, pc, b, x, pc_side, comm, monitors)
+        self.solve_internal(a, pc, b, x, pc_side, comm, monitors, work)
     }
 
     pub fn solve_f64<A>(
@@ -979,6 +982,7 @@ impl IdrsSolver {
         pc_side: PcSide,
         comm: &UniverseComm,
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
+        work: Option<&Workspace>,
     ) -> Result<SolveStats<f64>, KError>
     where
         A: LinOpF64 + LinOp<S = f64> + Send + Sync + ?Sized,
@@ -993,14 +997,15 @@ impl IdrsSolver {
         {
             let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
             let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
-            self.solve_internal(&op, pc_ref, b_s, x_s, pc_side, comm, monitors)
+            self.solve_internal(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
         }
 
         #[cfg(feature = "complex")]
         {
             let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
             let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
-            let result = self.solve_internal(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors);
+            let result =
+                self.solve_internal(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
             if result.is_ok() {
                 for (dst, src) in x.iter_mut().zip(x_s.iter()) {
                     *dst = src.real();
@@ -1032,6 +1037,15 @@ impl LinearSolver for IdrsSolver {
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         _work: Option<&mut crate::context::ksp_context::Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors)
+        self.solve_f64(
+            a,
+            pc.as_deref(),
+            b,
+            x,
+            pc_side,
+            comm,
+            monitors,
+            _work.as_deref(),
+        )
     }
 }
