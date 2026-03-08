@@ -91,6 +91,19 @@ fn build_case(
     (ksp, b, x)
 }
 
+fn run_once(
+    grid: usize,
+    pc_type: &str,
+    comm: &UniverseComm,
+    threads: Option<usize>,
+) -> (std::time::Duration, usize) {
+    let (mut ksp, b, mut x) = build_case(grid, pc_type, comm, threads);
+    x.fill(0.0);
+    let start = std::time::Instant::now();
+    let stats = ksp.solve(&b, &mut x).unwrap();
+    (start.elapsed(), stats.counters.num_global_reductions)
+}
+
 fn check_reduction_budget(tag: &str, reductions: usize, n_local: usize) {
     let enforce = std::env::var("KRYST_BENCH_ENFORCE_SCALING")
         .ok()
@@ -119,6 +132,15 @@ fn bench_suite(c: &mut Criterion) {
     for pc_type in ["ilu", "asm"] {
         let mut group = c.benchmark_group(format!("dist_{pc_type}"));
         for (label, grid) in sizes {
+            let (base_time, base_red) = run_once(grid, pc_type, &comm, Some(1));
+            let (cfg_time, cfg_red) = run_once(grid, pc_type, &comm, threads);
+            println!(
+                "{pc_type}:{label}:g{grid} delta => reductions={} runtime_ms={:.3} (threads={:?})",
+                base_red as isize - cfg_red as isize,
+                (base_time.as_secs_f64() - cfg_time.as_secs_f64()) * 1.0e3,
+                threads
+            );
+
             let (mut ksp, b, mut x) = build_case(grid, pc_type, &comm, threads);
             x.fill(0.0);
             let stats = ksp.solve(&b, &mut x).unwrap();

@@ -76,6 +76,12 @@ fn solve_case(label: &str, ranks: usize, dims: (usize, usize, usize)) {
         pipelined_stats.iterations,
         pipelined_time.as_secs_f64() * 1.0e3
     );
+    println!(
+        "    delta: reductions={} runtime_ms={:.3}",
+        classic_stats.counters.num_global_reductions as isize
+            - pipelined_stats.counters.num_global_reductions as isize,
+        (classic_time.as_secs_f64() - pipelined_time.as_secs_f64()) * 1.0e3
+    );
     println!();
 }
 

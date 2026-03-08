@@ -18,6 +18,7 @@ struct InnerKspContext {
     monitor_rank0: bool,
     allow_maxits: bool,
     propagate_converged_reason: bool,
+    comm_size: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -118,6 +119,7 @@ impl KspAsPc {
             existing.monitor_rank0 = existing.ksp_options.ksp_monitor_rank0.unwrap_or(false);
             existing.allow_maxits = allow_maxits;
             existing.propagate_converged_reason = propagate_converged_reason;
+            existing.comm_size = a.comm().size();
             existing
                 .ksp
                 .try_set_operators_with_comm(amat, None, a.comm())?;
@@ -154,6 +156,7 @@ impl KspAsPc {
             monitor_rank0,
             allow_maxits,
             propagate_converged_reason,
+            comm_size: a.comm().size(),
         });
         Ok(true)
     }
@@ -187,6 +190,10 @@ impl KspAsPc {
     }
 
     fn apply_runtime_controls_from_options(inner: &mut InnerKspContext) {
+        if let Ok(exec) = ExecutionPolicy::nested_from_options(&inner.ksp_options, inner.comm_size)
+        {
+            inner.ksp.set_execution_policy(exec);
+        }
         if inner.ksp_options.rtol.is_some()
             || inner.ksp_options.atol.is_some()
             || inner.ksp_options.dtol.is_some()
