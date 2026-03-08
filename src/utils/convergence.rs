@@ -270,13 +270,12 @@ pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<Converg
     match stage {
         FailureStage::Setup => match err {
             KError::NestedPcFailed(failure) => Some(failure.reason),
-            KError::PcFailed(_)
-            | KError::FactorError(_)
-            | KError::ZeroPivot(_)
-            | KError::IndefinitePreconditioner
-            | KError::DivergedIndefinitePC => Some(ConvergedReason::from_failure_kind(
-                FailureReasonKind::PcSetup,
-            )),
+            KError::PcFailed(_) | KError::FactorError(_) | KError::ZeroPivot(_) => Some(
+                ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup),
+            ),
+            KError::IndefinitePreconditioner | KError::DivergedIndefinitePC => Some(
+                ConvergedReason::from_failure_kind(FailureReasonKind::IndefinitePc),
+            ),
             KError::BreakdownOrIndefinite => Some(ConvergedReason::from_failure_kind(
                 FailureReasonKind::Breakdown,
             )),
@@ -766,7 +765,7 @@ mod tests {
             detail: "inner failure".into(),
         });
         let reason = map_kerror_to_reason(&err, FailureStage::Solve).expect("reason");
-        assert_eq!(reason, ConvergedReason::DivergedPcFailed);
+        assert_eq!(reason, ConvergedReason::DivergedBreakdown);
         let nested =
             ReasonEmitter::nested_pc_failure(&err, FailureStage::Solve).expect("nested metadata");
         assert_eq!(nested.component, "pc_ksp");

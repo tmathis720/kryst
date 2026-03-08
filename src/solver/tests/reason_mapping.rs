@@ -58,6 +58,14 @@ fn kerror_stage_mapping_is_consistent_across_pc_setup_apply_and_indefiniteness()
         Some(ConvergedReason::DivergedPcSetupFailed)
     );
     assert_eq!(
+        map_kerror_to_reason(&KError::IndefinitePreconditioner, FailureStage::Setup),
+        Some(ConvergedReason::DivergedIndefinitePC)
+    );
+    assert_eq!(
+        map_kerror_to_reason(&KError::DivergedIndefinitePC, FailureStage::Setup),
+        Some(ConvergedReason::DivergedIndefinitePC)
+    );
+    assert_eq!(
         map_kerror_to_reason(&KError::IndefiniteMatrix, FailureStage::Solve),
         Some(ConvergedReason::DivergedIndefiniteMatrix)
     );
@@ -133,6 +141,10 @@ fn nested_failure_reason_is_preserved_when_mapping_error() {
     });
     assert_eq!(
         map_kerror_to_reason(&nested, FailureStage::Solve),
+        Some(ConvergedReason::DivergedMaxIts)
+    );
+    assert_eq!(
+        map_kerror_to_reason(&nested, FailureStage::Setup),
         Some(ConvergedReason::DivergedMaxIts)
     );
 }
