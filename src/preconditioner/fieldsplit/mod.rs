@@ -10,6 +10,7 @@ use crate::matrix::op::{StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::spgemm_with_drop_tol_generic;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
+use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
 use std::cmp::{max, min};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -174,13 +175,7 @@ impl FieldSplitPc {
                 Ok(FieldSplitType::Symmetric)
             }
             "schur" => {
-                let factorization = match opts
-                    .pc_fieldsplit_schur_fact_type
-                    .as_deref()
-                    .unwrap_or("full")
-                    .to_lowercase()
-                    .as_str()
-                {
+                let factorization = match opts.resolved_fieldsplit_schur_fact_type().as_str() {
                     "diag" => SchurFactorization::Diag,
                     "lower" => SchurFactorization::Lower,
                     "upper" => SchurFactorization::Upper,
@@ -191,13 +186,7 @@ impl FieldSplitPc {
                         )));
                     }
                 };
-                let precondition = match opts
-                    .pc_fieldsplit_schur_precondition
-                    .as_deref()
-                    .unwrap_or("self")
-                    .to_lowercase()
-                    .as_str()
-                {
+                let precondition = match opts.resolved_fieldsplit_schur_precondition().as_str() {
                     "self" => SchurPrecondition::Self_,
                     "selfp" | "self_p" => SchurPrecondition::SelfP,
                     "diag" => SchurPrecondition::Diag,
@@ -515,9 +504,49 @@ impl FieldSplitPc {
         Ok(())
     }
 
+    fn nested_apply_failure(&self, idx: usize, side: PcSide, stage: &str, err: &KError) -> KError {
+        match err {
+            KError::NestedPcFailed(inner) => KError::NestedPcFailed(NestedPcFailure {
+                component: "pc_fieldsplit",
+                reason: inner.reason,
+                iterations: inner.iterations,
+                final_norm: inner.final_norm.clone(),
+                residual_history_summary: inner.residual_history_summary.clone(),
+                detail: format!(
+                    "component=pc_fieldsplit split={:?} block={idx} side={side:?} stage={stage} inner_component={} inner_reason={} inner_detail={}",
+                    self.split_type, inner.component, inner.reason, inner.detail
+                ),
+            }),
+            _ => KError::NestedPcFailed(NestedPcFailure {
+                component: "pc_fieldsplit",
+                reason: ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
+                iterations: 0,
+                final_norm: None,
+                residual_history_summary: None,
+                detail: format!(
+                    "component=pc_fieldsplit split={:?} block={idx} side={side:?} stage={stage} error={err}",
+                    self.split_type
+                ),
+            }),
+        }
+    }
+
+    fn apply_child(
+        &self,
+        idx: usize,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        stage: &str,
+    ) -> Result<(), KError> {
+        self.children[idx]
+            .apply(side, x, y)
+            .map_err(|err| self.nested_apply_failure(idx, side, stage, &err))
+    }
+
     fn apply_additive(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         y.fill(S::zero());
-        for (idx, (span, child)) in self
+        for (idx, (span, _)) in self
             .block_spans
             .iter()
             .zip(self.children.iter())
@@ -527,14 +556,13 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child
-                .apply(side, self.restrict_rhs(x, *span), &mut zout)
-                .map_err(|err| {
-                    KError::PcFailed(format!(
-                        "fieldsplit additive apply failed for block {idx} ({:?}): {err}",
-                        self.split_type
-                    ))
-                })?;
+            self.apply_child(
+                idx,
+                side,
+                self.restrict_rhs(x, *span),
+                &mut zout,
+                "additive",
+            )?;
             for (yi, zi) in y[span.start..span.end].iter_mut().zip(zout.iter()) {
                 *yi += *zi;
             }
@@ -546,7 +574,7 @@ impl FieldSplitPc {
         let n = x.len();
         let mut y_accum = vec![S::zero(); n];
         let mut residual = x.to_vec();
-        for (idx, (span, child)) in self
+        for (idx, (span, _)) in self
             .block_spans
             .iter()
             .zip(self.children.iter())
@@ -556,14 +584,13 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child
-                .apply(side, self.restrict_rhs(&residual, *span), &mut zout)
-                .map_err(|err| {
-                    KError::PcFailed(format!(
-                        "fieldsplit multiplicative apply failed for block {idx} ({:?}): {err}",
-                        self.split_type
-                    ))
-                })?;
+            self.apply_child(
+                idx,
+                side,
+                self.restrict_rhs(&residual, *span),
+                &mut zout,
+                "multiplicative",
+            )?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
@@ -577,7 +604,7 @@ impl FieldSplitPc {
         let n = x.len();
         let mut y_accum = vec![S::zero(); n];
         let mut residual = x.to_vec();
-        for (idx, (span, child)) in self
+        for (idx, (span, _)) in self
             .block_spans
             .iter()
             .zip(self.children.iter())
@@ -587,20 +614,19 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child
-                .apply(side, self.restrict_rhs(&residual, *span), &mut zout)
-                .map_err(|err| {
-                    KError::PcFailed(format!(
-                        "fieldsplit symmetric-forward apply failed for block {idx} ({:?}): {err}",
-                        self.split_type
-                    ))
-                })?;
+            self.apply_child(
+                idx,
+                side,
+                self.restrict_rhs(&residual, *span),
+                &mut zout,
+                "symmetric_forward",
+            )?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
             self.update_residual(x, &y_accum, &mut residual)?;
         }
-        for (idx, (span, child)) in self
+        for (idx, (span, _)) in self
             .block_spans
             .iter()
             .zip(self.children.iter())
@@ -611,14 +637,13 @@ impl FieldSplitPc {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            child
-                .apply(side, self.restrict_rhs(&residual, *span), &mut zout)
-                .map_err(|err| {
-                    KError::PcFailed(format!(
-                        "fieldsplit symmetric-backward apply failed for block {idx} ({:?}): {err}",
-                        self.split_type
-                    ))
-                })?;
+            self.apply_child(
+                idx,
+                side,
+                self.restrict_rhs(&residual, *span),
+                &mut zout,
+                "symmetric_backward",
+            )?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
@@ -654,11 +679,11 @@ impl FieldSplitPc {
 
         match factorization {
             SchurFactorization::Diag => {
-                self.children[0].apply(side, x1, &mut y1)?;
-                self.children[1].apply(side, x2, &mut y2)?;
+                self.apply_child(0, side, x1, &mut y1, "schur_diag_a11")?;
+                self.apply_child(1, side, x2, &mut y2, "schur_diag_s")?;
             }
             SchurFactorization::Lower => {
-                self.children[0].apply(side, x1, &mut y1)?;
+                self.apply_child(0, side, x1, &mut y1, "schur_lower_a11")?;
                 let mut tmp2 = vec![S::zero(); span1.len()];
                 schur.a21.try_spmv(&y1, &mut tmp2)?;
                 for i in 0..tmp2.len() {
@@ -667,20 +692,20 @@ impl FieldSplitPc {
                 if let Some(hook) = &self.schur_apply_hook {
                     hook(&tmp2, &mut y2)?;
                 } else {
-                    self.children[1].apply(side, &tmp2, &mut y2)?;
+                    self.apply_child(1, side, &tmp2, &mut y2, "schur_lower_s")?;
                 }
             }
             SchurFactorization::Upper => {
-                self.children[1].apply(side, x2, &mut y2)?;
+                self.apply_child(1, side, x2, &mut y2, "schur_upper_s")?;
                 let mut tmp1 = vec![S::zero(); span0.len()];
                 schur.a12.try_spmv(&y2, &mut tmp1)?;
                 for i in 0..tmp1.len() {
                     tmp1[i] = x1[i] - tmp1[i];
                 }
-                self.children[0].apply(side, &tmp1, &mut y1)?;
+                self.apply_child(0, side, &tmp1, &mut y1, "schur_upper_a11")?;
             }
             SchurFactorization::Full => {
-                self.children[0].apply(side, x1, &mut y1)?;
+                self.apply_child(0, side, x1, &mut y1, "schur_full_a11")?;
                 let mut tmp2 = vec![S::zero(); span1.len()];
                 schur.a21.try_spmv(&y1, &mut tmp2)?;
                 for i in 0..tmp2.len() {
@@ -689,12 +714,12 @@ impl FieldSplitPc {
                 if let Some(hook) = &self.schur_apply_hook {
                     hook(&tmp2, &mut y2)?;
                 } else {
-                    self.children[1].apply(side, &tmp2, &mut y2)?;
+                    self.apply_child(1, side, &tmp2, &mut y2, "schur_full_s")?;
                 }
                 let mut tmp1 = vec![S::zero(); span0.len()];
                 schur.a12.try_spmv(&y2, &mut tmp1)?;
                 let mut corr = vec![S::zero(); span0.len()];
-                self.children[0].apply(side, &tmp1, &mut corr)?;
+                self.apply_child(0, side, &tmp1, &mut corr, "schur_full_correction")?;
                 for i in 0..y1.len() {
                     y1[i] -= corr[i];
                 }
