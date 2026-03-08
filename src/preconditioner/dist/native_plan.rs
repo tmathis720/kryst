@@ -6,7 +6,7 @@ use std::str::FromStr;
 pub enum DistRoutePolicy {
     /// Prefer native distributed operator routes.
     Native,
-    /// Prefer compatibility adapter routes over native distributed kernels.
+    /// Force compatibility adapter routes (fallback-only mode).
     Adapted,
     /// Prefer root-gather routes for coarse/global correction phases.
     RootGather,

@@ -87,7 +87,7 @@ pub enum DistCoarseSolverRoute {
     Auto,
     /// Force gathered root-level solve path.
     Root,
-    /// Force local prototype coarse path.
+    /// Force local prototype coarse path (fallback/prototyping).
     Local,
     /// Force SuperLU_DIST coarse routing when available.
     SuperLuDist,
