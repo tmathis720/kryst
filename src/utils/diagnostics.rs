@@ -41,6 +41,12 @@ pub struct PcDiagnostics {
     pub pc_type: Option<String>,
     pub config: BTreeMap<String, Value>,
     pub complex_support: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_reduction_per_time: Option<f64>,
     /// Nested KSP diagnostics when `pc_type = Ksp`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nested_ksp: Option<Box<KspDiagnostics>>,
@@ -132,6 +138,9 @@ impl PcDiagnostics {
             pc_type: pc_type.map(|pct| format!("{pct:?}")),
             config,
             complex_support,
+            setup_mode: None,
+            fallback_reason: None,
+            residual_reduction_per_time: None,
             nested_ksp,
         }
     }

@@ -41,7 +41,7 @@
 //! See `examples/mpi_poisson_block_jacobi_ilu.rs` for a distributed block-Jacobi + ILU(0) walk-through.
 
 #[cfg(feature = "complex")]
-use crate::algebra::bridge::{BridgeScratch, copy_real_into_scalar, copy_scalar_to_real_in};
+use crate::algebra::bridge::{BridgeScratch, copy_scalar_to_real_in};
 use crate::algebra::scalar::KrystScalar;
 #[cfg(feature = "complex")]
 use crate::algebra::scalar::S as GlobalScalar;
@@ -2480,7 +2480,19 @@ impl KPreconditioner for Ilu {
         scratch.with_pair(n, |xr, yr| {
             copy_scalar_to_real_in(x, xr);
             self.apply_slice(side, xr, yr)?;
-            copy_real_into_scalar(yr, y);
+
+            for (dst, &re) in y.iter_mut().zip(yr.iter()) {
+                *dst = GlobalScalar::from_parts(re, 0.0);
+            }
+
+            let mut yi = self.workspace.temp2.lock().unwrap();
+            for (dst, &src) in xr.iter_mut().zip(x.iter()) {
+                *dst = src.imag();
+            }
+            self.apply_slice(side, xr, &mut yi[..n])?;
+            for (dst, &im) in y.iter_mut().zip(yi[..n].iter()) {
+                *dst = GlobalScalar::from_parts(dst.real(), im);
+            }
             Ok(())
         })
     }

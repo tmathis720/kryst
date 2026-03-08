@@ -268,6 +268,9 @@ impl PcIntrospect for Jacobi {
             fill_ratio: 0.0,
             applies: self.applies.load(Ordering::Relaxed),
             complex_kernel: None,
+            setup_mode: None,
+            fallback_reason: None,
+            residual_reduction_per_time: None,
         }
     }
 }
