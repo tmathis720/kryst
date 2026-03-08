@@ -764,69 +764,8 @@ impl PcConfig {
                 context: o.pc_shell_context.clone(),
             },
             Ksp => PcConfig::Ksp {
-                ksp_options: {
-                    let mut ksp = o.pc_ksp_ksp_options.clone().unwrap_or_default();
-                    if ksp.ksp_type.is_none() && o.pc_ksp_ksp_type.is_some() {
-                        ksp.ksp_type = o.pc_ksp_ksp_type.clone();
-                    }
-                    if ksp.maxits.is_none() && o.pc_ksp_maxits.is_some() {
-                        ksp.maxits = o.pc_ksp_maxits;
-                    }
-                    if ksp.rtol.is_none() && o.pc_ksp_rtol.is_some() {
-                        ksp.rtol = o.pc_ksp_rtol;
-                    }
-                    if ksp.atol.is_none() && o.pc_ksp_atol.is_some() {
-                        ksp.atol = o.pc_ksp_atol;
-                    }
-                    if ksp.dtol.is_none() && o.pc_ksp_dtol.is_some() {
-                        ksp.dtol = o.pc_ksp_dtol;
-                    }
-                    if ksp.restart.is_none() && o.pc_ksp_restart.is_some() {
-                        ksp.restart = o.pc_ksp_restart;
-                    }
-                    if ksp.gmres_restart.is_none() && o.pc_ksp_gmres_restart.is_some() {
-                        ksp.gmres_restart = o.pc_ksp_gmres_restart;
-                    }
-                    if ksp.fgmres_restart.is_none() && o.pc_ksp_fgmres_restart.is_some() {
-                        ksp.fgmres_restart = o.pc_ksp_fgmres_restart;
-                    }
-                    if ksp.gmres_orthog.is_none() && o.pc_ksp_gmres_orthog.is_some() {
-                        ksp.gmres_orthog = o.pc_ksp_gmres_orthog.clone();
-                    }
-                    if ksp.fgmres_orthog.is_none() && o.pc_ksp_fgmres_orthog.is_some() {
-                        ksp.fgmres_orthog = o.pc_ksp_fgmres_orthog.clone();
-                    }
-                    if ksp.ksp_monitor_rank0.is_none() && o.pc_ksp_monitor_rank0.is_some() {
-                        ksp.ksp_monitor_rank0 = o.pc_ksp_monitor_rank0;
-                    }
-                    if ksp.reduction.is_none() && o.pc_ksp_reduction.is_some() {
-                        ksp.reduction = o.pc_ksp_reduction.clone();
-                    }
-                    if ksp.reproducible.is_none() && o.pc_ksp_reproducible.is_some() {
-                        ksp.reproducible = o.pc_ksp_reproducible;
-                    }
-                    if ksp.threads.is_none() && o.pc_ksp_threads.is_some() {
-                        ksp.threads = o.pc_ksp_threads;
-                    }
-                    if ksp.threads_mode.is_none() && o.pc_ksp_threads_mode.is_some() {
-                        ksp.threads_mode = o.pc_ksp_threads_mode.clone();
-                    }
-                    if ksp.pc_side.is_none() && o.pc_ksp_pc_side.is_some() {
-                        ksp.pc_side = o.pc_ksp_pc_side.clone();
-                    }
-                    ksp
-                },
-                pc_options: {
-                    let mut pc = o
-                        .pc_ksp_pc_options
-                        .as_ref()
-                        .map(|opts| opts.as_ref().clone())
-                        .unwrap_or_default();
-                    if pc.pc_type.is_none() && o.pc_ksp_pc_type.is_some() {
-                        pc.pc_type = o.pc_ksp_pc_type.clone();
-                    }
-                    pc
-                },
+                ksp_options: o.resolved_pc_ksp_ksp_options(),
+                pc_options: o.resolved_pc_ksp_pc_options(),
             },
             Mg => PcConfig::Mg {
                 levels: o.pc_mg_levels.unwrap_or(2),

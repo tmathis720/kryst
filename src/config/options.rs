@@ -1935,6 +1935,85 @@ impl KspOptions {
 }
 
 impl PcOptions {
+    pub fn resolved_pc_ksp_ksp_options(&self) -> KspOptions {
+        let mut ksp = self.pc_ksp_ksp_options.clone().unwrap_or_default();
+        if ksp.ksp_type.is_none() {
+            ksp.ksp_type = self.pc_ksp_ksp_type.clone();
+        }
+        if ksp.maxits.is_none() {
+            ksp.maxits = self.pc_ksp_maxits;
+        }
+        if ksp.rtol.is_none() {
+            ksp.rtol = self.pc_ksp_rtol;
+        }
+        if ksp.atol.is_none() {
+            ksp.atol = self.pc_ksp_atol;
+        }
+        if ksp.dtol.is_none() {
+            ksp.dtol = self.pc_ksp_dtol;
+        }
+        if ksp.restart.is_none() {
+            ksp.restart = self.pc_ksp_restart;
+        }
+        if ksp.gmres_restart.is_none() {
+            ksp.gmres_restart = self.pc_ksp_gmres_restart;
+        }
+        if ksp.fgmres_restart.is_none() {
+            ksp.fgmres_restart = self.pc_ksp_fgmres_restart;
+        }
+        if ksp.gmres_orthog.is_none() {
+            ksp.gmres_orthog = self.pc_ksp_gmres_orthog.clone();
+        }
+        if ksp.fgmres_orthog.is_none() {
+            ksp.fgmres_orthog = self.pc_ksp_fgmres_orthog.clone();
+        }
+        if ksp.ksp_monitor_rank0.is_none() {
+            ksp.ksp_monitor_rank0 = self.pc_ksp_monitor_rank0;
+        }
+        if ksp.reduction.is_none() {
+            ksp.reduction = self.pc_ksp_reduction.clone();
+        }
+        if ksp.reproducible.is_none() {
+            ksp.reproducible = self.pc_ksp_reproducible;
+        }
+        if ksp.threads.is_none() {
+            ksp.threads = self.pc_ksp_threads;
+        }
+        if ksp.threads_mode.is_none() {
+            ksp.threads_mode = self.pc_ksp_threads_mode.clone();
+        }
+        if ksp.pc_side.is_none() {
+            ksp.pc_side = self.pc_ksp_pc_side.clone();
+        }
+        ksp
+    }
+
+    pub fn resolved_pc_ksp_pc_options(&self) -> PcOptions {
+        let mut pc = self
+            .pc_ksp_pc_options
+            .as_ref()
+            .map(|opts| opts.as_ref().clone())
+            .unwrap_or_default();
+        if pc.pc_type.is_none() {
+            pc.pc_type = self.pc_ksp_pc_type.clone();
+        }
+        pc
+    }
+
+    pub fn resolved_fieldsplit_schur_fact_type(&self) -> String {
+        self.pc_fieldsplit_schur_fact_type
+            .as_deref()
+            .unwrap_or("full")
+            .to_ascii_lowercase()
+    }
+
+    pub fn resolved_fieldsplit_schur_precondition(&self) -> String {
+        self.pc_fieldsplit_schur_precondition
+            .as_deref()
+            .unwrap_or("self")
+            .to_ascii_lowercase()
+    }
+
     fn update_ilu_kind(&mut self) {
         if let Some(ref ty) = self.ilu_type {
             match ty.as_str() {
@@ -3431,6 +3510,54 @@ mod old_tests {
         assert_eq!(opts.pc_ksp_threads, Some(1));
         assert_eq!(opts.pc_ksp_threads_mode.as_deref(), Some("serial"));
         assert_eq!(opts.pc_ksp_pc_side.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn test_pc_ksp_resolved_nested_options_precedence() {
+        let opts = PcOptions {
+            pc_ksp_ksp_type: Some("gmres".into()),
+            pc_ksp_maxits: Some(8),
+            pc_ksp_restart: Some(12),
+            pc_ksp_gmres_restart: Some(18),
+            pc_ksp_pc_side: Some("right".into()),
+            pc_ksp_ksp_options: Some(KspOptions {
+                ksp_type: Some("fgmres".into()),
+                maxits: Some(3),
+                fgmres_restart: Some(7),
+                ..Default::default()
+            }),
+            pc_ksp_pc_type: Some("jacobi".into()),
+            pc_ksp_pc_options: Some(Box::new(PcOptions {
+                pc_type: Some("none".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let ksp = opts.resolved_pc_ksp_ksp_options();
+        assert_eq!(ksp.ksp_type.as_deref(), Some("fgmres"));
+        assert_eq!(ksp.maxits, Some(3));
+        assert_eq!(ksp.pc_side.as_deref(), Some("right"));
+        assert_eq!(ksp.effective_restart_for(KspType::GMRES), Some(18));
+        assert_eq!(ksp.effective_restart_for(KspType::FGMRES), Some(7));
+
+        let pc = opts.resolved_pc_ksp_pc_options();
+        assert_eq!(pc.pc_type.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn test_fieldsplit_schur_resolved_defaults_and_normalization() {
+        let defaults = PcOptions::default();
+        assert_eq!(defaults.resolved_fieldsplit_schur_fact_type(), "full");
+        assert_eq!(defaults.resolved_fieldsplit_schur_precondition(), "self");
+
+        let opts = PcOptions {
+            pc_fieldsplit_schur_fact_type: Some("LOWER".into()),
+            pc_fieldsplit_schur_precondition: Some("SeLfP".into()),
+            ..Default::default()
+        };
+        assert_eq!(opts.resolved_fieldsplit_schur_fact_type(), "lower");
+        assert_eq!(opts.resolved_fieldsplit_schur_precondition(), "selfp");
     }
 
     #[test]

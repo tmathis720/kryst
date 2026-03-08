@@ -65,6 +65,9 @@ pub struct KspAsPc {
 
 impl KspAsPc {
     pub fn new(mut ksp_options: KspOptions, mut pc_options: PcOptions) -> Result<Self, KError> {
+        let mut resolved_ksp = pc_options.resolved_pc_ksp_ksp_options();
+        resolved_ksp.overlay_from(ksp_options.clone());
+        ksp_options = resolved_ksp;
         if ksp_options.ksp_type.is_none() {
             ksp_options.ksp_type = Some("richardson".to_string());
         }
@@ -94,8 +97,9 @@ impl KspAsPc {
             return Ok(false);
         };
 
-        let ksp_opts = self.ksp_options.clone();
-        let pc_opts = self.pc_options.clone();
+        let mut ksp_opts = self.pc_options.resolved_pc_ksp_ksp_options();
+        ksp_opts.overlay_from(self.ksp_options.clone());
+        let pc_opts = self.pc_options.resolved_pc_ksp_pc_options();
         let monitor_rank0 = ksp_opts.ksp_monitor_rank0.unwrap_or(false);
         let allow_maxits = self.pc_options.pc_ksp_allow_maxits.unwrap_or(true);
         let propagate_converged_reason = self
@@ -258,11 +262,12 @@ impl Preconditioner for KspAsPc {
             let stats = inner.ksp.solve(x, y).map_err(|err| {
                 let history_summary = Self::summarize_history(&inner.residual_history, R::default());
                 let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) nested_error={err} {history_summary}",
+                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) nested_error={err} {history_summary}",
+                    Self::configured_inner_side(&inner.ksp_options),
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
                     inner.monitor_rank0,
-                    inner.ksp_options.restart,
+                    inner.ksp_options.effective_restart_for(Self::inner_ksp_type(&inner.ksp_options)),
                     inner.ksp_options.rtol,
                     inner.ksp_options.atol,
                     inner.ksp_options.dtol,
@@ -281,11 +286,14 @@ impl Preconditioner for KspAsPc {
                 let history_summary =
                     Self::summarize_history(&inner.residual_history, stats.final_residual);
                 let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) true_final_norm={:.3e} nested_reason={} {}",
+                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) true_final_norm={:.3e} nested_reason={} {}",
+                    Self::configured_inner_side(&inner.ksp_options),
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
                     inner.monitor_rank0,
-                    inner.ksp_options.restart,
+                    inner
+                        .ksp_options
+                        .effective_restart_for(Self::inner_ksp_type(&inner.ksp_options)),
                     inner.ksp_options.rtol,
                     inner.ksp_options.atol,
                     inner.ksp_options.dtol,
