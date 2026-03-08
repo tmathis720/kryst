@@ -60,6 +60,29 @@ cargo mpirun -n 4 --example matrix_market_demo --features backend-faer,mpi -- \
   -pc_ilutp_perm_tol 0.1
 ```
 
+## Distributed route selection policy (`pc_dist_route`)
+
+Selection policy is native-first by default:
+
+- `pc_dist_route=native` (default) prefers DistCsr-native distributed preconditioner kernels whenever possible.
+- `pc_dist_route=adapted` forces compatibility adapter behavior and should be treated as fallback-only.
+- `pc_dist_route=root_gather` is reserved for coarse/global gather-heavy workflows.
+
+When running with `DistCsrOp` and communicator size > 1, Kryst attempts native distributed Block-Jacobi/ILU routes first (including auto-promotion from local PC settings when safe), then records fallback transitions when native setup fails.
+
+For large MPI jobs, recommended defaults are:
+
+- `-pc_dist_route native`
+- `-pc_dist_local_apply distributed_native`
+- leave `-pc_global` unset unless you explicitly need `asm|ras|block_jacobi`
+
+Use `ksp_view` / `pc_view` diagnostics to confirm runtime route choices:
+
+- `pc_dist_route_policy`
+- `pc_dist_selected_route`
+- `pc_dist_fallback_chain`
+- `pc_dist_fallback_reason`
+
 ## Common errors
 
 - Communicator mismatch: `Amat.comm()` and `Pmat.comm()` are not congruent.

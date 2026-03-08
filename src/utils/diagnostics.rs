@@ -74,6 +74,7 @@ impl PcDiagnostics {
                 "pc_dist_local_apply",
                 opts.pc_dist_local_apply.clone(),
             );
+            insert_opt(&mut config, "pc_dist_route", opts.pc_dist_route.clone());
             insert_opt(&mut config, "asm_weighting", opts.asm_weighting.clone());
             insert_opt(&mut config, "chebyshev_degree", opts.chebyshev_degree);
             insert_opt(

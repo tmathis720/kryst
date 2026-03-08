@@ -55,21 +55,32 @@ Compare both runtime and `num_global_reductions` trends across strong/weak scali
 These settings pair well with pipelined outer Krylov variants on higher-latency fabrics.
 
 
-## 6) MG/GAMG distributed coarse route playbook
+## 6) MG/GAMG + distributed PC route playbook (recommended defaults for large MPI jobs)
 
-When tuning multigrid in distributed mode, set route controls explicitly and verify them in hierarchy diagnostics:
+For large runs (`O(10^2+)` ranks), prefer DistCsr-native kernels first and keep adapter paths as explicit fallback-only routes.
 
-- Primary route selection:
-  - `-pc_amg_dist_coarse_solver_route auto|root|local|superlu_dist`
-  - MG aliases also map: `-pc_mg_coarse_solver_route ...`
-- Strategy policy:
-  - `-pc_amg_dist_coarse_policy root|local|superlu_dist|none`
-- Repartition policy:
-  - `-pc_mg_dist_coarse_repartition keep|uniform|root`
+Recommended defaults:
 
-Suggested sequence:
+- Keep native distributed route preference:
+  - `-pc_dist_route native`
+  - `-pc_dist_local_apply distributed_native` (or `hybrid` if coarse coupling helps)
+- Let distributed Block-Jacobi auto-promote when `DistCsrOp` + communicator constraints are satisfied:
+  - keep `-pc_global none` unless you need to force `asm|ras|block_jacobi`
+- Coarse correction route defaults:
+  - `-pc_amg_dist_coarse_solver_route auto`
+  - `-pc_amg_dist_coarse_policy root` (switch to `local` after validation)
+  - `-pc_mg_dist_coarse_repartition keep` initially, then test `uniform`
 
-1. Start with `route=auto`, `policy=root` for robust setup.
-2. Move to `policy=local` and `route=local,root` once communication dominates.
-3. Keep a fallback route list (`local,root` or `root,local`) so setup can recover predictably.
-4. Use AMG/MG stats to confirm selected route, fallback chain, per-level nnz, and smoothing work.
+Diagnostics to verify native routing:
+
+- `KSPView` / PC diagnostics now include route-selection fields:
+  - `pc_dist_selected_route`
+  - `pc_dist_fallback_chain`
+  - `pc_dist_fallback_reason` (when fallback is used)
+- AMG/MG diagnostics should show coarse-route selection and fallback chain that match your policy.
+
+Fallback policy guidance:
+
+1. Start native-first (`pc_dist_route=native`) and inspect diagnostics for `distcsr_native_block_jacobi:*`.
+2. If native setup fails on a path, keep fallback explicit (`pc_dist_route=adapted`) only for that workload.
+3. Track fallback frequency in production runs; repeated fallback means tune local PC/coarse settings before scaling out.

@@ -85,6 +85,10 @@ impl FromStr for LocalPcKind {
 }
 
 /// Parsed MPI-specific PC options.
+///
+/// Default policy favors DistCsr-native distributed kernels whenever
+/// communicator and operator constraints are satisfied. Adapter routes are
+/// treated as explicit fallback paths via `pc_dist_route=adapted`.
 #[derive(Clone, Debug)]
 pub struct MpiPcOptions {
     pub global_pc: GlobalPcKind,

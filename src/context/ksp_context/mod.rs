@@ -309,6 +309,8 @@ pub struct KspContext {
     exec: ExecutionPolicy,
     #[cfg(feature = "backend-faer")]
     pending_mpi_pc: Option<PendingMpiPc>,
+    #[cfg(feature = "backend-faer")]
+    dist_route_diag: DistRouteDiagnosticsState,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
@@ -407,6 +409,14 @@ struct PendingBiCgStab {
 struct PendingMpiPc {
     mpi_opts: MpiPcOptions,
     pc_opts: PcOptions,
+}
+
+#[derive(Clone, Debug, Default)]
+#[cfg(feature = "backend-faer")]
+struct DistRouteDiagnosticsState {
+    selected_route: Option<String>,
+    fallback_chain: Vec<String>,
+    fallback_reason: Option<String>,
 }
 
 fn insert_value<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, value: T) {
@@ -556,6 +566,8 @@ impl KspContext {
             exec: ExecutionPolicy::default(),
             #[cfg(feature = "backend-faer")]
             pending_mpi_pc: None,
+            #[cfg(feature = "backend-faer")]
+            dist_route_diag: DistRouteDiagnosticsState::default(),
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
@@ -1466,6 +1478,7 @@ impl KspContext {
                 mpi_opts: pc_opts.mpi_pc_options()?,
                 pc_opts: pc_opts.clone(),
             });
+            self.dist_route_diag = DistRouteDiagnosticsState::default();
         }
         let diagnostics = self.view();
         if ksp_opts.ksp_view.unwrap_or(false) {
@@ -1571,15 +1584,58 @@ impl KspContext {
             }
         }
 
+        #[cfg(feature = "backend-faer")]
+        if let Some(pending) = self.pending_mpi_pc.as_ref() {
+            insert_value(
+                &mut solver_config,
+                "pc_dist_route_policy",
+                format!("{:?}", pending.mpi_opts.route_policy),
+            );
+            insert_value(
+                &mut solver_config,
+                "pc_dist_selected_route",
+                self.dist_route_diag
+                    .selected_route
+                    .clone()
+                    .unwrap_or_else(|| "unresolved".to_string()),
+            );
+            insert_value(
+                &mut solver_config,
+                "pc_dist_fallback_chain",
+                self.dist_route_diag.fallback_chain.clone(),
+            );
+            if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
+                insert_value(&mut solver_config, "pc_dist_fallback_reason", reason);
+            }
+        }
+
         let pc = self
             .pc_spec
             .as_ref()
             .or(self.pending_pc.as_ref())
             .map(|spec| {
-                Box::new(PcDiagnostics::from_options(
-                    Some(spec.pc_type),
-                    spec.options.as_ref(),
-                ))
+                let mut diag =
+                    PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref());
+                #[cfg(feature = "backend-faer")]
+                if self.pending_mpi_pc.is_some() {
+                    insert_value(
+                        &mut diag.config,
+                        "dist_selected_route",
+                        self.dist_route_diag
+                            .selected_route
+                            .clone()
+                            .unwrap_or_else(|| "unresolved".to_string()),
+                    );
+                    insert_value(
+                        &mut diag.config,
+                        "dist_fallback_chain",
+                        self.dist_route_diag.fallback_chain.clone(),
+                    );
+                    if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
+                        insert_value(&mut diag.config, "dist_fallback_reason", reason);
+                    }
+                }
+                Box::new(diag)
             });
         let pc_chain = self
             .pc_chain_plan
@@ -1588,7 +1644,25 @@ impl KspContext {
                 plan.active_specs()
                     .iter()
                     .map(|spec| {
-                        PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref())
+                        let mut diag =
+                            PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref());
+                        #[cfg(feature = "backend-faer")]
+                        if self.pending_mpi_pc.is_some() {
+                            insert_value(
+                                &mut diag.config,
+                                "dist_selected_route",
+                                self.dist_route_diag
+                                    .selected_route
+                                    .clone()
+                                    .unwrap_or_else(|| "unresolved".to_string()),
+                            );
+                            insert_value(
+                                &mut diag.config,
+                                "dist_fallback_chain",
+                                self.dist_route_diag.fallback_chain.clone(),
+                            );
+                        }
+                        diag
                     })
                     .collect::<Vec<_>>()
             })
@@ -2837,6 +2911,21 @@ impl KspContext {
         self.reset_pc_ids();
     }
 
+    #[cfg(feature = "backend-faer")]
+    fn set_dist_route_selected(&mut self, route: impl Into<String>) {
+        self.dist_route_diag.selected_route = Some(route.into());
+    }
+
+    #[cfg(feature = "backend-faer")]
+    fn push_dist_route_fallback(&mut self, route: impl Into<String>) {
+        self.dist_route_diag.fallback_chain.push(route.into());
+    }
+
+    #[cfg(feature = "backend-faer")]
+    fn set_dist_route_fallback_reason(&mut self, reason: impl Into<String>) {
+        self.dist_route_diag.fallback_reason = Some(reason.into());
+    }
+
     #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
     fn build_mpi_global_pc(
         &self,
@@ -2871,8 +2960,9 @@ impl KspContext {
         sid: StructureId,
         vid: ValuesId,
     ) -> Result<bool, KError> {
-        let Some(pc) = self.pc.as_ref() else {
-            return Ok(false);
+        let local_only_pc = match self.pc.as_ref() {
+            Some(pc) => pc.distributed_support() == PcDistributedSupport::LocalOnly,
+            None => return Ok(false),
         };
         let comm = pmat.comm();
         let is_distributed = comm.size() > 1
@@ -2882,27 +2972,82 @@ impl KspContext {
             return Ok(false);
         }
 
-        if let Some(pending) = self.pending_mpi_pc.as_ref()
-            && pending.mpi_opts.global_pc == GlobalPcKind::BlockJacobi
-            && pending.mpi_opts.local_apply_mode.is_distributed_native()
-        {
-            let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
-                return Err(KError::InvalidInput(
-                    "distributed native preconditioner routes require DistCsrOp".into(),
-                ));
-            };
-            log::debug!(
-                "Using native distributed block-Jacobi route (strategy={}).",
-                pending
+        let Some(pending) = self.pending_mpi_pc.as_ref().cloned() else {
+            return Err(KError::InvalidInput(
+                "selected preconditioner is rank-local for a distributed operator; set -pc_global block_jacobi|asm|ras"
+                    .into(),
+            ));
+        };
+
+        let explicit_global = pending.mpi_opts.global_pc != GlobalPcKind::None;
+        let dist_op = pmat.as_any().downcast_ref::<DistCsrOp>();
+        let native_eligible = dist_op.is_some()
+            && matches!(
+                pending.mpi_opts.global_pc,
+                GlobalPcKind::None | GlobalPcKind::BlockJacobi
+            )
+            && pending.mpi_opts.route_policy != DistRoutePolicy::Adapted;
+
+        if native_eligible {
+            let dist_op = dist_op.expect("checked");
+            let mut native_pending = pending.clone();
+            native_pending.mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
+            if !native_pending
+                .mpi_opts
+                .local_apply_mode
+                .is_distributed_native()
+            {
+                native_pending.mpi_opts.local_apply_mode =
+                    crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
+            }
+            self.set_dist_route_selected(format!(
+                "distcsr_native_block_jacobi:{}",
+                native_pending
                     .mpi_opts
                     .local_apply_mode
                     .communication_strategy_name()
-            );
-            let mut new_pc = self.build_mpi_global_pc(pending, dist_op)?;
+            ));
+            if !explicit_global {
+                self.push_dist_route_fallback("auto_promoted_from_local");
+            }
+            let mut new_pc = self.build_mpi_global_pc(&native_pending, dist_op)?;
+            let want = new_pc.required_format();
+            let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
+            let pmat_view = materialize(pmat.clone(), want, tol)?;
+            match new_pc.setup(pmat_view.as_ref()) {
+                Ok(()) => {
+                    self.pc = Some(new_pc);
+                    self.last_pc_sid = Some(sid);
+                    self.last_pc_vid = Some(vid);
+                    return Ok(true);
+                }
+                Err(err) => {
+                    self.push_dist_route_fallback("native_setup_failed");
+                    self.set_dist_route_fallback_reason(err.to_string());
+                    log::warn!(
+                        "Native distributed preconditioner setup failed, enabling fallback chain: {err}"
+                    );
+                }
+            }
+        }
+
+        if explicit_global {
+            let Some(dist_op) = dist_op else {
+                return Err(KError::InvalidInput(
+                    "-pc_global requires DistCsrOp when running distributed".into(),
+                ));
+            };
+            self.set_dist_route_selected(format!(
+                "configured_global_{:?}",
+                pending.mpi_opts.global_pc
+            ));
+            self.push_dist_route_fallback("configured_global_fallback");
+            let mut new_pc = self.build_mpi_global_pc(&pending, dist_op)?;
             let want = new_pc.required_format();
             let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
             let pmat_view = materialize(pmat.clone(), want, tol)?;
             if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
+                self.set_dist_route_fallback_reason(err.to_string());
                 self.handle_pc_setup_failure(err, pmat, sid, vid)?;
                 return Ok(false);
             }
@@ -2912,70 +3057,20 @@ impl KspContext {
             return Ok(true);
         }
 
-        if pc.distributed_support() != PcDistributedSupport::LocalOnly {
+        if !local_only_pc {
             return Ok(false);
         }
-        let Some(pending) = self.pending_mpi_pc.as_ref() else {
-            return Err(KError::InvalidInput(
-                "selected preconditioner is rank-local for a distributed operator; set -pc_global block_jacobi|asm|ras"
-                    .into(),
-            ));
-        };
-        if pending.mpi_opts.global_pc == GlobalPcKind::None {
-            if pending.mpi_opts.route_policy == DistRoutePolicy::Native {
-                let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
-                    return Err(KError::InvalidInput(
-                        "native distributed fallback requires DistCsrOp".into(),
-                    ));
-                };
-                let mut promoted = pending.clone();
-                promoted.mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
-                if !promoted.mpi_opts.local_apply_mode.is_distributed_native() {
-                    promoted.mpi_opts.local_apply_mode =
-                        crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
-                }
-                log::warn!(
-                    "Auto-promoting rank-local preconditioner to native distributed BlockJacobi route (pc_dist_route=native)."
-                );
-                let mut new_pc = self.build_mpi_global_pc(&promoted, dist_op)?;
-                let want = new_pc.required_format();
-                let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
-                let pmat_view = materialize(pmat.clone(), want, tol)?;
-                if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
-                    self.handle_pc_setup_failure(err, pmat, sid, vid)?;
-                    return Ok(false);
-                }
-                self.pc = Some(new_pc);
-                self.last_pc_sid = Some(sid);
-                self.last_pc_vid = Some(vid);
-                return Ok(true);
-            }
-            return Err(KError::InvalidInput(
-                "selected preconditioner is rank-local for a distributed operator; -pc_global must be set or choose -pc_dist_route native for auto distributed promotion"
-                    .into(),
-            ));
-        }
-        let Some(dist_op) = pmat.as_any().downcast_ref::<DistCsrOp>() else {
-            return Err(KError::InvalidInput(
-                "-pc_global requires DistCsrOp when running distributed".into(),
-            ));
-        };
-        log::info!(
-            "Falling back from rank-local preconditioner to distributed {:?} based on pc_global.",
-            pending.mpi_opts.global_pc
-        );
-        let mut new_pc = self.build_mpi_global_pc(pending, dist_op)?;
-        let want = new_pc.required_format();
-        let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
-        let pmat_view = materialize(pmat.clone(), want, tol)?;
-        if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
-            self.handle_pc_setup_failure(err, pmat, sid, vid)?;
+
+        if pending.mpi_opts.route_policy == DistRoutePolicy::Adapted {
+            self.set_dist_route_selected("local_adapter".to_string());
+            self.push_dist_route_fallback("adapter_only_policy");
             return Ok(false);
         }
-        self.pc = Some(new_pc);
-        self.last_pc_sid = Some(sid);
-        self.last_pc_vid = Some(vid);
-        Ok(true)
+
+        Err(KError::InvalidInput(
+            "distributed operator detected but no native DistCsr route available; set -pc_global block_jacobi|asm|ras or select -pc_dist_route adapted for explicit local adapter fallback"
+                .into(),
+        ))
     }
 
     /// Add an iteration monitor callback.
