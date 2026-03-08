@@ -7,6 +7,9 @@ pub struct PcStats {
     pub fill_ratio: f64,
     pub applies: u64,
     pub complex_kernel: Option<&'static str>,
+    pub setup_mode: Option<&'static str>,
+    pub fallback_reason: Option<String>,
+    pub residual_reduction_per_time: Option<f64>,
 }
 
 pub trait PcIntrospect {

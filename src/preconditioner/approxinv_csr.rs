@@ -118,6 +118,7 @@ pub struct FsaiCsr {
     native_complex_active: bool,
     #[cfg(feature = "complex")]
     c_g: Option<CsrMatrix<S>>,
+    apply_scratch: std::sync::Mutex<Vec<S>>,
 }
 
 /// SPAI: full sparse approximate inverse M in CSR and per-column patterns.
@@ -132,6 +133,7 @@ pub struct SpaiCsr {
     native_complex_active: bool,
     #[cfg(feature = "complex")]
     c_m: Option<CsrMatrix<S>>,
+    complex_setup_fallback_reason: Option<String>,
 }
 
 // ----------------------------- Utilities ---------------------------------
@@ -377,6 +379,7 @@ impl FsaiCsr {
             native_complex_active: false,
             #[cfg(feature = "complex")]
             c_g: None,
+            apply_scratch: std::sync::Mutex::new(vec![S::zero(); n]),
         })
     }
 
@@ -456,6 +459,7 @@ impl FsaiCsr {
             last_vid: None,
             native_complex_active: true,
             c_g: Some(c_g),
+            apply_scratch: std::sync::Mutex::new(vec![S::zero(); n]),
         })
     }
 }
@@ -525,16 +529,24 @@ impl Preconditioner for FsaiCsr {
                 KError::InvalidInput("FsaiCsr complex kernel missing factor".into())
             })?;
             let n = x.len();
-            let mut t = vec![S::zero(); n];
-            spmv_csr_transpose_complex(g, x, &mut t);
-            spmv_csr_complex(g, &t, y);
+            let mut t = self.apply_scratch.lock().unwrap();
+            if t.len() < n {
+                t.resize(n, S::zero());
+            }
+            let t = &mut t[..n];
+            spmv_csr_transpose_complex(g, x, t);
+            spmv_csr_complex(g, t, y);
             return Ok(());
         }
 
         let n = x.len();
-        let mut t = vec![S::zero(); n];
-        spmv_csr_transpose(&self.g, x, &mut t);
-        spmv_csr(&self.g, &t, y);
+        let mut t = self.apply_scratch.lock().unwrap();
+        if t.len() < n {
+            t.resize(n, S::zero());
+        }
+        let t = &mut t[..n];
+        spmv_csr_transpose(&self.g, x, t);
+        spmv_csr(&self.g, t, y);
         Ok(())
     }
 
@@ -836,6 +848,7 @@ impl SpaiCsr {
             native_complex_active: false,
             #[cfg(feature = "complex")]
             c_m: None,
+            complex_setup_fallback_reason: None,
         })
     }
 
@@ -936,12 +949,17 @@ impl SpaiCsr {
             last_vid: None,
             native_complex_active: true,
             c_m: Some(c_m),
+            complex_setup_fallback_reason: None,
         })
     }
 }
 
 impl Preconditioner for SpaiCsr {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        {
+            self.complex_setup_fallback_reason = None;
+        }
         #[cfg(feature = "complex")]
         if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
             let sid = a.structure_id();
@@ -963,6 +981,7 @@ impl Preconditioner for SpaiCsr {
         #[cfg(feature = "complex")]
         {
             log::debug!("SpaiCsr complex setup falling back to projected-real CSR conversion path");
+            self.complex_setup_fallback_reason = Some("projected_real_csr_conversion".to_string());
         }
 
         let csr = csr_from_linop(a, R::default())?;
@@ -1328,6 +1347,10 @@ impl SpaiCsr {
     pub fn complex_setup_used_native(&self) -> bool {
         self.native_complex_active
     }
+
+    pub fn complex_setup_fallback_reason(&self) -> Option<&str> {
+        self.complex_setup_fallback_reason.as_deref()
+    }
 }
 
 // ---------------------------- Public entrypoints -------------------------
@@ -1345,6 +1368,7 @@ impl FsaiCsr {
             native_complex_active: false,
             #[cfg(feature = "complex")]
             c_g: None,
+            apply_scratch: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -1362,6 +1386,7 @@ impl SpaiCsr {
             native_complex_active: false,
             #[cfg(feature = "complex")]
             c_m: None,
+            complex_setup_fallback_reason: None,
         }
     }
 }
