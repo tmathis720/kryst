@@ -34,6 +34,7 @@ pub struct GamgLevelPolicy {
     pub pc_type: Option<String>,
     pub ksp_maxits: Option<usize>,
     pub ksp_rtol: Option<f64>,
+    pub coarse_routes: Option<Vec<DistCoarseSolverRoute>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,6 +302,13 @@ fn gamg_policy_from_scoped(
             .map(|v| v.to_lowercase()),
         ksp_maxits: scoped.pc_ksp_maxits.or(global.pc_ksp_maxits),
         ksp_rtol: scoped.pc_ksp_rtol.or(global.pc_ksp_rtol),
+        coarse_routes: scoped
+            .amg_dist_coarse_solver_route
+            .as_deref()
+            .or(global.amg_dist_coarse_solver_route.as_deref())
+            .map(parse_route_list)
+            .transpose()?
+            .filter(|v| !v.is_empty()),
     })
 }
 #[cfg(feature = "backend-faer")]
@@ -340,6 +348,9 @@ fn merge_gamg_policy(dst: &mut GamgLevelPolicy, src: &GamgLevelPolicy) {
     }
     if let Some(v) = src.ksp_rtol {
         dst.ksp_rtol = Some(v);
+    }
+    if let Some(v) = src.coarse_routes.as_ref() {
+        dst.coarse_routes = Some(v.clone());
     }
 }
 #[cfg(feature = "backend-faer")]
@@ -389,6 +400,12 @@ fn parse_gamg_level_policy(value: &str) -> Result<GamgLevelPolicy, KError> {
                         })?)
                 }
                 "side" => policy.side = Some(PcSide::from_str(v.trim())?),
+                "coarse_route" | "coarse_routes" => {
+                    let routes = parse_route_list(v)?;
+                    if !routes.is_empty() {
+                        policy.coarse_routes = Some(routes);
+                    }
+                }
                 _ => {}
             }
         }
@@ -409,6 +426,15 @@ impl GamgConfig {
 fn parse_route_head(value: &str) -> Result<DistCoarseSolverRoute, KError> {
     let head = value.split(',').next().map(str::trim).unwrap_or(value);
     DistCoarseSolverRoute::from_str(head)
+}
+
+fn parse_route_list(value: &str) -> Result<Vec<DistCoarseSolverRoute>, KError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(DistCoarseSolverRoute::from_str)
+        .collect()
 }
 
 #[cfg(feature = "backend-faer")]
@@ -543,6 +569,17 @@ impl Preconditioner for Gamg {
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         let mut effective_cfg = self.config.amg_config.clone();
+        if let Some(coarse_policy) = resolved_gamg_policy_for_level(
+            &self.config.level_policies,
+            effective_cfg.max_levels.saturating_sub(1),
+            effective_cfg.max_levels,
+        ) && let Some(route) = coarse_policy
+            .coarse_routes
+            .as_ref()
+            .and_then(|routes| routes.first().copied())
+        {
+            effective_cfg.dist_coarse_solver_route = route;
+        }
         if let Some(fine_policy) =
             resolved_gamg_policy_for_level(&self.config.level_policies, 0, effective_cfg.max_levels)
         {
@@ -587,6 +624,25 @@ impl Preconditioner for Gamg {
                 level,
                 effective_cfg.max_levels,
             ) {
+                if let Some(smoother) = p.smoother_family.as_ref().or(p.smoother.as_ref()) {
+                    let relax = match smoother.as_str() {
+                        "jacobi" => Some(RelaxType::Jacobi),
+                        "gs" | "gauss_seidel" => Some(RelaxType::GaussSeidel),
+                        "sor" => Some(RelaxType::SymmetricGaussSeidel),
+                        "l1jacobi" | "l1_jacobi" => Some(RelaxType::L1Jacobi),
+                        "chebyshev" | "cheby" => Some(RelaxType::Chebyshev),
+                        _ => None,
+                    };
+                    if let Some(relax) = relax {
+                        self.amg.set_level_relax_type(level, relax);
+                    }
+                }
+                if p.sweeps.is_some() || p.pre_sweeps.is_some() || p.post_sweeps.is_some() {
+                    let sweeps = p.sweeps.unwrap_or(1);
+                    let pre = p.pre_sweeps.unwrap_or(sweeps);
+                    let post = p.post_sweeps.unwrap_or(sweeps);
+                    self.amg.set_level_sweeps(level, pre, post);
+                }
                 if let Some(solve) = p
                     .coarse_solver
                     .or_else(|| p.pc_type.as_deref().and_then(coarse_solve_from_pc_name))

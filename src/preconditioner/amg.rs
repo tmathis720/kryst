@@ -842,6 +842,41 @@ fn map_cycle_type(kind: AmgCycleKind, gamma: Option<usize>) -> CycleType {
     }
 }
 
+fn dist_route_fallback_order(
+    selected: DistCoarseSolverRoute,
+    strategy: DistCoarseStrategy,
+) -> Vec<DistCoarseSolverRoute> {
+    let mut routes = Vec::new();
+    let mut push_unique = |route: DistCoarseSolverRoute| {
+        if !routes.contains(&route) {
+            routes.push(route);
+        }
+    };
+    push_unique(selected);
+    match strategy {
+        DistCoarseStrategy::RootGather => {
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+        }
+        DistCoarseStrategy::LocalPrototype => {
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+        }
+        DistCoarseStrategy::SuperLuDist => {
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::Local);
+        }
+        DistCoarseStrategy::None => {
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::Root);
+        }
+    }
+    routes
+}
+
 fn parse_dist_apply_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
     DistCoarseStrategy::from_str(value)
         .map_err(|_| KError::InvalidInput(format!("invalid amg_dist_apply_mode: {value}")))
@@ -3265,6 +3300,8 @@ pub struct AMG {
     dist: Option<DistAmgInfo>,
     transfer_overrides: BTreeMap<usize, AmgTransferOperators>,
     coarse_level_overrides: BTreeMap<usize, CoarseSolve>,
+    relax_level_overrides: BTreeMap<usize, RelaxType>,
+    sweep_level_overrides: BTreeMap<usize, (usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -3286,6 +3323,8 @@ impl Default for AMG {
             dist: None,
             transfer_overrides: BTreeMap::new(),
             coarse_level_overrides: BTreeMap::new(),
+            relax_level_overrides: BTreeMap::new(),
+            sweep_level_overrides: BTreeMap::new(),
         }
     }
 }
@@ -3320,6 +3359,16 @@ impl AMG {
     pub fn clear_hierarchy_overrides(&mut self) {
         self.transfer_overrides.clear();
         self.coarse_level_overrides.clear();
+        self.relax_level_overrides.clear();
+        self.sweep_level_overrides.clear();
+    }
+
+    pub fn set_level_relax_type(&mut self, level: usize, relax: RelaxType) {
+        self.relax_level_overrides.insert(level, relax);
+    }
+
+    pub fn set_level_sweeps(&mut self, level: usize, pre: usize, post: usize) {
+        self.sweep_level_overrides.insert(level, (pre, post));
     }
 
     fn make_cycle_policy(cfg: &AMGConfig) -> Box<dyn CyclePolicy + Send + Sync> {
@@ -4614,11 +4663,26 @@ impl AMG {
 
         if self.cfg.logging_level > 0 {
             let mut st = AmgStats::from_hierarchy(h);
-            st.levels = collect_level_stats(h, &self.cfg);
-            st.total_smoothing_work = st.levels.iter().map(|l| l.smoothing_work_estimate).sum();
+            st.levels = collect_level_stats(
+                h,
+                &self.cfg,
+                Some(&self.relax_level_overrides),
+                Some(&self.sweep_level_overrides),
+            );
+            st.total_smoothing_work = st
+                .levels
+                .iter()
+                .map(|l| l.pre_work_estimate + l.post_work_estimate)
+                .sum();
             st.selected_dist_coarse_route =
                 Some(format!("{:?}", self.cfg.dist_coarse_solver_route));
-            st.dist_route_fallback = vec![format!("{:?}", self.cfg.dist_coarse_solver_route)];
+            st.dist_route_fallback = dist_route_fallback_order(
+                self.cfg.dist_coarse_solver_route,
+                self.cfg.dist_coarse_strategy,
+            )
+            .into_iter()
+            .map(|r| format!("{:?}", r))
+            .collect();
             st.diagnostics = diag_stats;
             self.stats = Some(st);
         }
@@ -6051,6 +6115,63 @@ impl AMG {
         Ok(())
     }
 
+    fn effective_relax_type(&self, level: usize, phase: RelaxPhase, lc: usize) -> RelaxType {
+        if level == lc {
+            self.relax_level_overrides
+                .get(&level)
+                .copied()
+                .unwrap_or(self.cfg.grid_relax_type[RelaxPhase::Coarsest.ix()])
+        } else if let Some(relax) = self.relax_level_overrides.get(&level).copied() {
+            relax
+        } else {
+            self.cfg.grid_relax_type[phase.ix()]
+        }
+    }
+
+    fn effective_relax_sweeps(&self, level: usize, phase: RelaxPhase, lc: usize) -> usize {
+        if level == lc {
+            return self
+                .sweep_level_overrides
+                .get(&level)
+                .map(|(pre, _)| *pre)
+                .unwrap_or(self.cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()]);
+        }
+        if let Some((pre, post)) = self.sweep_level_overrides.get(&level) {
+            return if matches!(phase, RelaxPhase::Up) {
+                *post
+            } else {
+                *pre
+            };
+        }
+        self.cfg.num_grid_sweeps[phase.ix()]
+    }
+
+    fn apply_relax_effective(
+        &self,
+        phase: RelaxPhase,
+        where_: RelaxWhere,
+        level_ix: usize,
+        lvl: &AMGLevel,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        let lc = match &self.state {
+            AmgState::Ready { hierarchy, .. } => hierarchy.coarsest_ix(),
+            _ => return Err(KError::InvalidInput("AMG not set up".into())),
+        };
+        let mut eff = RelaxPolicy {
+            kind: self.cfg.grid_relax_type,
+            sweeps: self.cfg.num_grid_sweeps,
+            omega: self.cfg.jacobi_omega,
+        };
+        let relax = self.effective_relax_type(level_ix, phase, lc);
+        let sweeps = self.effective_relax_sweeps(level_ix, phase, lc);
+        eff.kind[phase.ix()] = relax;
+        eff.sweeps[phase.ix()] = sweeps;
+        Self::apply_relax(&eff, phase, where_, lvl, rhs, sol, ws, &self.cfg)
+    }
+
     fn restrict_apply(
         lvl: &AMGLevel,
         fine_res: &[f64],
@@ -6091,15 +6212,14 @@ impl AMG {
                 let n = a.nrows();
                 if matches!(h.coarse_solve, CoarseSolve::Smoother) {
                     ws.ensure(n);
-                    return Self::apply_relax(
-                        pol,
+                    return self.apply_relax_effective(
                         RelaxPhase::Coarsest,
                         RelaxWhere::Pre,
+                        level,
                         &h.levels[level],
                         rhs,
                         sol,
                         ws,
-                        &self.cfg,
                     );
                 }
                 let prefer_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
@@ -6180,15 +6300,14 @@ impl AMG {
                     ws,
                 )
             } else {
-                Self::apply_relax(
-                    pol,
+                self.apply_relax_effective(
                     phase_pre,
                     RelaxWhere::Pre,
+                    level,
                     &h.levels[level],
                     rhs,
                     sol,
                     ws,
-                    &self.cfg,
                 )
             }
         })?;
@@ -6318,15 +6437,14 @@ impl AMG {
             RelaxPhase::Up
         };
         with_timing(prof, &mut lv.post_smooth, || {
-            Self::apply_relax(
-                pol,
+            self.apply_relax_effective(
                 phase_post,
                 RelaxWhere::Post,
+                level,
                 &h.levels[level],
                 rhs,
                 sol,
                 ws,
-                &self.cfg,
             )
         })?;
 
@@ -6875,10 +6993,14 @@ fn build_hierarchy(
             nnz_r: 0,
             max_row_sum_a: max_row_sum_abs(&a_cur),
             eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
-            smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
-            smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
+            pre_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+            post_sweeps: cfg.num_grid_sweeps[RelaxPhase::Up.ix()],
+            pre_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
                 * a_cur.nnz() as f64,
-            selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+            post_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Up.ix()] as f64)
+                * a_cur.nnz() as f64,
+            selected_relax_pre: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+            selected_relax_post: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Up.ix()]),
             coarse_solver: None,
         });
         timings.push(lt0);
@@ -7544,10 +7666,14 @@ fn build_hierarchy(
                 nnz_r: 0,
                 max_row_sum_a: max_row_sum_abs(&a_cur),
                 eff_nnz_a: Some(eff_nnz(&a_cur, cfg.stats_eps)),
-                smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
-                smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
+                pre_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+                post_sweeps: cfg.num_grid_sweeps[RelaxPhase::Up.ix()],
+                pre_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
                     * a_cur.nnz() as f64,
-                selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+                post_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Up.ix()] as f64)
+                    * a_cur.nnz() as f64,
+                selected_relax_pre: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+                selected_relax_post: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Up.ix()]),
                 coarse_solver: None,
             });
             let ls_len = level_stats.len();
@@ -7608,9 +7734,17 @@ fn build_hierarchy(
     let stats_opt = if do_stats {
         let mut stats = AmgStats::from_hierarchy(&hier);
         stats.levels = level_stats;
-        stats.total_smoothing_work = stats.levels.iter().map(|l| l.smoothing_work_estimate).sum();
+        stats.total_smoothing_work = stats
+            .levels
+            .iter()
+            .map(|l| l.pre_work_estimate + l.post_work_estimate)
+            .sum();
         stats.selected_dist_coarse_route = Some(format!("{:?}", cfg.dist_coarse_solver_route));
-        stats.dist_route_fallback = vec![format!("{:?}", cfg.dist_coarse_solver_route)];
+        stats.dist_route_fallback =
+            dist_route_fallback_order(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
+                .into_iter()
+                .map(|r| format!("{:?}", r))
+                .collect();
         stats.diagnostics = diag_stats;
         let mut setup = SetupTimings::default();
         setup.per_level = timings;
@@ -7745,14 +7879,26 @@ fn build_smoother_only_hierarchy(
             nnz_r: 0,
             max_row_sum_a: max_row_sum_abs(fine),
             eff_nnz_a: Some(eff_nnz(fine, cfg.stats_eps)),
-            smoother_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
-            smoothing_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
+            pre_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+            post_sweeps: cfg.num_grid_sweeps[RelaxPhase::Up.ix()],
+            pre_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64)
                 * fine.nnz() as f64,
-            selected_relax: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+            post_work_estimate: (cfg.num_grid_sweeps[RelaxPhase::Up.ix()] as f64)
+                * fine.nnz() as f64,
+            selected_relax_pre: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+            selected_relax_post: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Up.ix()]),
             coarse_solver: Some(format!("{:?}", CoarseSolve::Smoother)),
         }];
-        stats.total_smoothing_work = stats.levels.iter().map(|l| l.smoothing_work_estimate).sum();
-        stats.dist_route_fallback = vec![format!("{:?}", cfg.dist_coarse_solver_route)];
+        stats.total_smoothing_work = stats
+            .levels
+            .iter()
+            .map(|l| l.pre_work_estimate + l.post_work_estimate)
+            .sum();
+        stats.dist_route_fallback =
+            dist_route_fallback_order(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
+                .into_iter()
+                .map(|r| format!("{:?}", r))
+                .collect();
         stats.diagnostics = vec![AmgLevelStats {
             p_min_col_norm: 0.0,
             p_cond_sketched: 0.0,
@@ -9266,9 +9412,12 @@ pub struct LevelStats {
     pub nnz_r: usize,
     pub max_row_sum_a: f64,
     pub eff_nnz_a: Option<usize>,
-    pub smoother_sweeps: usize,
-    pub smoothing_work_estimate: f64,
-    pub selected_relax: String,
+    pub pre_sweeps: usize,
+    pub post_sweeps: usize,
+    pub pre_work_estimate: f64,
+    pub post_work_estimate: f64,
+    pub selected_relax_pre: String,
+    pub selected_relax_post: String,
     pub coarse_solver: Option<String>,
 }
 
@@ -9421,14 +9570,48 @@ fn operator_complexity_estimate(levels: &[AMGLevel]) -> f64 {
     nnz_sum / nnz0
 }
 
-fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
+fn collect_level_stats(
+    h: &AmgHierarchy,
+    cfg: &AMGConfig,
+    relax_overrides: Option<&BTreeMap<usize, RelaxType>>,
+    sweep_overrides: Option<&BTreeMap<usize, (usize, usize)>>,
+) -> Vec<LevelStats> {
     let mut out = Vec::with_capacity(h.levels.len());
+    let relax_overrides = relax_overrides.cloned().unwrap_or_default();
+    let sweep_overrides = sweep_overrides.cloned().unwrap_or_default();
     for (i, lvl) in h.levels.iter().enumerate() {
-        let sweeps = h.policy.sweeps[if i == h.coarsest_ix() {
-            RelaxPhase::Coarsest.ix()
+        let coarsest = i == h.coarsest_ix();
+        let default_pre_phase = if i == 0 {
+            RelaxPhase::Fine
         } else {
-            RelaxPhase::Down.ix()
-        }];
+            RelaxPhase::Down
+        };
+        let default_post_phase = if i == 0 {
+            RelaxPhase::Fine
+        } else {
+            RelaxPhase::Up
+        };
+        let (pre_sweeps, post_sweeps, relax_pre, relax_post) = if coarsest {
+            let sweeps = sweep_overrides
+                .get(&i)
+                .map(|(pre, _)| *pre)
+                .unwrap_or(h.policy.sweeps[RelaxPhase::Coarsest.ix()]);
+            let relax = relax_overrides
+                .get(&i)
+                .copied()
+                .unwrap_or(h.policy.kind[RelaxPhase::Coarsest.ix()]);
+            (sweeps, sweeps, relax, relax)
+        } else {
+            let (pre, post) = sweep_overrides.get(&i).copied().unwrap_or((
+                h.policy.sweeps[default_pre_phase.ix()],
+                h.policy.sweeps[default_post_phase.ix()],
+            ));
+            let relax = relax_overrides
+                .get(&i)
+                .copied()
+                .unwrap_or(h.policy.kind[default_pre_phase.ix()]);
+            (pre, post, relax, relax)
+        };
         out.push(LevelStats {
             level: i,
             n: lvl.a.nrows(),
@@ -9448,16 +9631,12 @@ fn collect_level_stats(h: &AmgHierarchy, cfg: &AMGConfig) -> Vec<LevelStats> {
             },
             max_row_sum_a: max_row_sum_abs(&lvl.a),
             eff_nnz_a: Some(eff_nnz(&lvl.a, cfg.stats_eps)),
-            smoother_sweeps: sweeps,
-            smoothing_work_estimate: sweeps as f64 * lvl.a.nnz() as f64,
-            selected_relax: format!(
-                "{:?}",
-                h.policy.kind[if i == h.coarsest_ix() {
-                    RelaxPhase::Coarsest.ix()
-                } else {
-                    RelaxPhase::Down.ix()
-                }]
-            ),
+            pre_sweeps,
+            post_sweeps,
+            pre_work_estimate: pre_sweeps as f64 * lvl.a.nnz() as f64,
+            post_work_estimate: post_sweeps as f64 * lvl.a.nnz() as f64,
+            selected_relax_pre: format!("{:?}", relax_pre),
+            selected_relax_post: format!("{:?}", relax_post),
             coarse_solver: if i == h.coarsest_ix() {
                 Some(format!("{:?}", cfg.coarse_solve))
             } else {
@@ -9477,19 +9656,42 @@ fn print_setup_tables(stats: &AmgStats) {
         stats.num_levels, stats.grid_complexity, stats.operator_complexity
     );
     println!(
-        "Total nnz: {}, smoothing work estimate: {:.1}, dist route: {}",
+        "Total nnz: {}, smoothing work estimate: {:.1}, dist route: {}, fallback: {}",
         stats.total_nnz,
         stats.total_smoothing_work,
-        stats.selected_dist_coarse_route.as_deref().unwrap_or("n/a")
+        stats.selected_dist_coarse_route.as_deref().unwrap_or("n/a"),
+        if stats.dist_route_fallback.is_empty() {
+            "n/a".to_string()
+        } else {
+            stats.dist_route_fallback.join(" -> ")
+        }
     );
     println!(
-        "{:>5} {:>10} {:>10} {:>10} {:>10} {:>12}",
-        "lev", "n", "nnz(A)", "nnz(P)", "nnz(R)", "max_row_sum"
+        "{:>5} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14} {:>14}",
+        "lev",
+        "n",
+        "nnz(A)",
+        "nnz(P)",
+        "nnz(R)",
+        "pre_sw",
+        "post_sw",
+        "max_row_sum",
+        "relax(pre)",
+        "relax(post)"
     );
     for ls in &stats.levels {
         println!(
-            "{:>5} {:>10} {:>10} {:>10} {:>10} {:>12.4e}",
-            ls.level, ls.n, ls.nnz_a, ls.nnz_p, ls.nnz_r, ls.max_row_sum_a
+            "{:>5} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12.4e} {:>14} {:>14}",
+            ls.level,
+            ls.n,
+            ls.nnz_a,
+            ls.nnz_p,
+            ls.nnz_r,
+            ls.pre_sweeps,
+            ls.post_sweeps,
+            ls.max_row_sum_a,
+            ls.selected_relax_pre,
+            ls.selected_relax_post,
         );
     }
     if !stats.setup.per_level.is_empty() {
