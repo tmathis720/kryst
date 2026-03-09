@@ -17,6 +17,7 @@ struct InnerKspContext {
     residual_history: Arc<Mutex<Vec<R>>>,
     monitor_rank0: bool,
     allow_maxits: bool,
+    inner_tol_policy: InnerTolPolicy,
     propagate_converged_reason: bool,
     comm_size: usize,
 }
@@ -28,6 +29,30 @@ struct ResidualHistorySummary {
     last: R,
     min: R,
     max: R,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InnerTolPolicy {
+    Strict,
+    AllowMaxIts,
+}
+
+impl InnerTolPolicy {
+    fn from_pc_options(pc_options: &PcOptions) -> Result<Self, KError> {
+        match pc_options.resolved_pc_ksp_inner_tol_policy().as_str() {
+            "strict" => Ok(Self::Strict),
+            "allow_maxits" | "maxits" | "allow_diverged_its" => Ok(Self::AllowMaxIts),
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_ksp_inner_tol_policy: {other}"
+            ))),
+        }
+    }
+
+    fn accepts(self, reason: ConvergedReason, allow_maxits_compat: bool) -> bool {
+        reason.is_converged()
+            || ((matches!(self, Self::AllowMaxIts) || allow_maxits_compat)
+                && matches!(reason, ConvergedReason::DivergedMaxIts))
+    }
 }
 
 impl ResidualHistorySummary {
@@ -103,6 +128,7 @@ impl KspAsPc {
         let pc_opts = self.pc_options.resolved_pc_ksp_pc_options();
         let monitor_rank0 = ksp_opts.ksp_monitor_rank0.unwrap_or(false);
         let allow_maxits = self.pc_options.pc_ksp_allow_maxits.unwrap_or(true);
+        let inner_tol_policy = InnerTolPolicy::from_pc_options(&self.pc_options)?;
         let propagate_converged_reason = self
             .pc_options
             .pc_ksp_propagate_converged_reason
@@ -118,6 +144,7 @@ impl KspAsPc {
             existing.pc_options = pc_opts;
             existing.monitor_rank0 = existing.ksp_options.ksp_monitor_rank0.unwrap_or(false);
             existing.allow_maxits = allow_maxits;
+            existing.inner_tol_policy = inner_tol_policy;
             existing.propagate_converged_reason = propagate_converged_reason;
             existing.comm_size = a.comm().size();
             existing
@@ -155,6 +182,7 @@ impl KspAsPc {
             residual_history,
             monitor_rank0,
             allow_maxits,
+            inner_tol_policy,
             propagate_converged_reason,
             comm_size: a.comm().size(),
         });
@@ -235,8 +263,12 @@ impl KspAsPc {
         summary
     }
 
-    fn is_acceptable_inner_reason(reason: ConvergedReason, allow_maxits: bool) -> bool {
-        reason.is_converged() || (allow_maxits && matches!(reason, ConvergedReason::DivergedMaxIts))
+    fn is_acceptable_inner_reason(
+        reason: ConvergedReason,
+        inner_tol_policy: InnerTolPolicy,
+        allow_maxits_compat: bool,
+    ) -> bool {
+        inner_tol_policy.accepts(reason, allow_maxits_compat)
     }
 }
 
@@ -269,7 +301,7 @@ impl Preconditioner for KspAsPc {
             let stats = inner.ksp.solve(x, y).map_err(|err| {
                 let history_summary = Self::summarize_history(&inner.residual_history, R::default());
                 let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) nested_error={err} {history_summary}",
+                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} nested_error={err} {history_summary}",
                     Self::configured_inner_side(&inner.ksp_options),
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
@@ -279,6 +311,7 @@ impl Preconditioner for KspAsPc {
                     inner.ksp_options.atol,
                     inner.ksp_options.dtol,
                     inner.ksp_options.maxits,
+                    inner.inner_tol_policy,
                 );
                 KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
@@ -289,11 +322,15 @@ impl Preconditioner for KspAsPc {
                     residual_history_summary: Some(history_summary),
                 })
             })?;
-            if !Self::is_acceptable_inner_reason(stats.reason, inner.allow_maxits) {
+            if !Self::is_acceptable_inner_reason(
+                stats.reason,
+                inner.inner_tol_policy,
+                inner.allow_maxits,
+            ) {
                 let history_summary =
                     Self::summarize_history(&inner.residual_history, stats.final_residual);
                 let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) true_final_norm={:.3e} nested_reason={} {}",
+                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} true_final_norm={:.3e} nested_reason={} {}",
                     Self::configured_inner_side(&inner.ksp_options),
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
@@ -305,6 +342,7 @@ impl Preconditioner for KspAsPc {
                     inner.ksp_options.atol,
                     inner.ksp_options.dtol,
                     inner.ksp_options.maxits,
+                    inner.inner_tol_policy,
                     stats.final_residual,
                     stats.reason,
                     history_summary

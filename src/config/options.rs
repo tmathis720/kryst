@@ -265,8 +265,12 @@ pub struct PcOptions {
     pub pc_fieldsplit_block_sizes: Option<Vec<usize>>,
     pub pc_fieldsplit_child_pc_type: Option<String>,
     pub pc_fieldsplit_type: Option<String>,
+    /// Alias for `pc_fieldsplit_type` to better mirror PETSc strategy naming.
+    pub pc_fieldsplit_strategy: Option<String>,
     pub pc_fieldsplit_schur_fact_type: Option<String>,
     pub pc_fieldsplit_schur_precondition: Option<String>,
+    /// Schur complement approximation workflow: `diag` (default) or `full`.
+    pub pc_fieldsplit_schur_approx: Option<String>,
     pub pc_fieldsplit_extraction: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
@@ -293,6 +297,8 @@ pub struct PcOptions {
     pub pc_ksp_fgmres_orthog: Option<String>,
     pub pc_ksp_monitor_rank0: Option<bool>,
     pub pc_ksp_monitor_policy: Option<String>,
+    /// Inner convergence policy for nested KSP-as-PC (`strict|allow_maxits`).
+    pub pc_ksp_inner_tol_policy: Option<String>,
     pub pc_ksp_propagate_converged_reason: Option<bool>,
     pub pc_ksp_allow_maxits: Option<bool>,
     pub pc_ksp_reduction: Option<String>,
@@ -1290,11 +1296,17 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.pc_fieldsplit_child_pc_type, v.to_lowercase())
             }
             "pc_fieldsplit_type" => set_opt!(&mut self.pc_fieldsplit_type, v.to_lowercase()),
+            "pc_fieldsplit_strategy" => {
+                set_opt!(&mut self.pc_fieldsplit_strategy, v.to_lowercase())
+            }
             "pc_fieldsplit_schur_fact_type" => {
                 set_opt!(&mut self.pc_fieldsplit_schur_fact_type, v.to_lowercase())
             }
             "pc_fieldsplit_schur_precondition" => {
                 set_opt!(&mut self.pc_fieldsplit_schur_precondition, v.to_lowercase())
+            }
+            "pc_fieldsplit_schur_approx" => {
+                set_opt!(&mut self.pc_fieldsplit_schur_approx, v.to_lowercase())
             }
             "pc_fieldsplit_extraction" => {
                 set_opt!(&mut self.pc_fieldsplit_extraction, v.to_lowercase())
@@ -1342,6 +1354,9 @@ impl Sink for PcOptions {
             }
             "pc_ksp_monitor_policy" => {
                 set_opt!(&mut self.pc_ksp_monitor_policy, v.to_lowercase())
+            }
+            "pc_ksp_inner_tol_policy" => {
+                set_opt!(&mut self.pc_ksp_inner_tol_policy, v.to_lowercase())
             }
             "pc_ksp_propagate_converged_reason" => {
                 set_opt!(
@@ -2032,6 +2047,34 @@ impl PcOptions {
             .to_ascii_lowercase()
     }
 
+    pub fn resolved_fieldsplit_type(&self) -> String {
+        self.pc_fieldsplit_type
+            .as_deref()
+            .or(self.pc_fieldsplit_strategy.as_deref())
+            .unwrap_or("additive")
+            .to_ascii_lowercase()
+    }
+
+    pub fn resolved_fieldsplit_schur_approx(&self) -> String {
+        self.pc_fieldsplit_schur_approx
+            .as_deref()
+            .unwrap_or("diag")
+            .to_ascii_lowercase()
+    }
+
+    pub fn resolved_pc_ksp_inner_tol_policy(&self) -> String {
+        self.pc_ksp_inner_tol_policy
+            .as_deref()
+            .unwrap_or_else(|| {
+                if self.pc_ksp_allow_maxits.unwrap_or(true) {
+                    "allow_maxits"
+                } else {
+                    "strict"
+                }
+            })
+            .to_ascii_lowercase()
+    }
+
     fn update_ilu_kind(&mut self) {
         if let Some(ref ty) = self.ilu_type {
             match ty.as_str() {
@@ -2490,8 +2533,10 @@ impl PcOptions {
         o!(pc_fieldsplit_block_sizes);
         o!(pc_fieldsplit_child_pc_type);
         o!(pc_fieldsplit_type);
+        o!(pc_fieldsplit_strategy);
         o!(pc_fieldsplit_schur_fact_type);
         o!(pc_fieldsplit_schur_precondition);
+        o!(pc_fieldsplit_schur_approx);
         o!(pc_fieldsplit_extraction);
         o!(pc_shell_name);
         o!(pc_shell_apply);
@@ -2516,6 +2561,7 @@ impl PcOptions {
         o!(pc_ksp_fgmres_orthog);
         o!(pc_ksp_monitor_rank0);
         o!(pc_ksp_monitor_policy);
+        o!(pc_ksp_inner_tol_policy);
         o!(pc_ksp_propagate_converged_reason);
         o!(pc_ksp_allow_maxits);
         o!(pc_ksp_reduction);

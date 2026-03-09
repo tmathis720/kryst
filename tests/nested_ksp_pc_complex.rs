@@ -277,3 +277,56 @@ fn nested_ksp_pc_complex_inner_maxits_failure_propagation_toggle() {
         kryst::utils::convergence::ConvergedReason::DivergedPcFailed
     );
 }
+
+#[test]
+fn nested_ksp_pc_complex_inner_tol_policy_strict_propagates_maxits_reason() {
+    let a = Mat::<S>::from_fn(3, 3, |i, j| {
+        if i == j {
+            S::from_real(4.0)
+        } else if (i as isize - j as isize).abs() == 1 {
+            S::from_real(-1.0)
+        } else {
+            S::zero()
+        }
+    });
+    let op = Arc::new(DenseOp::new(Arc::new(a)));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("outer type");
+    ksp.set_from_all_options(
+        &KspOptions {
+            maxits: Some(8),
+            rtol: Some(1e-12),
+            ..Default::default()
+        },
+        &PcOptions {
+            pc_type: Some("ksp".into()),
+            pc_ksp_ksp_type: Some("richardson".into()),
+            pc_ksp_maxits: Some(1),
+            pc_ksp_rtol: Some(1e-30),
+            pc_ksp_inner_tol_policy: Some("strict".into()),
+            pc_ksp_propagate_converged_reason: Some(true),
+            pc_ksp_pc_type: Some("jacobi".into()),
+            ..Default::default()
+        },
+    )
+    .expect("opts");
+    ksp.set_operators(op, None);
+
+    let b = vec![S::from_real(1.0); 3];
+    let mut x = vec![S::zero(); 3];
+    let stats = ksp.solve(&b, &mut x).expect("solve");
+
+    assert_eq!(
+        stats.reason,
+        kryst::utils::convergence::ConvergedReason::DivergedPcFailed
+    );
+    let inner = stats
+        .nested_pc_failure
+        .as_ref()
+        .expect("nested failure metadata");
+    assert_eq!(
+        inner.reason,
+        kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+    );
+}

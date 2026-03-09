@@ -444,3 +444,20 @@ fn fieldsplit_complex_allows_schur_self_precondition() {
     let mut pc = PcFactory::create_from_options(&opts).expect("create fieldsplit");
     pc.setup(&op).expect("complex-safe schur self setup");
 }
+
+#[test]
+fn fieldsplit_strategy_and_schur_approx_parse() {
+    let args = [
+        "-pc_type",
+        "fieldsplit",
+        "-pc_fieldsplit_block_sizes",
+        "1,1",
+        "-pc_fieldsplit_strategy",
+        "schur",
+        "-pc_fieldsplit_schur_approx",
+        "full",
+    ];
+    let opts = PcOptions::from_args(&args).expect("parse fieldsplit strategy/schur approx");
+    assert_eq!(opts.resolved_fieldsplit_type(), "schur");
+    assert_eq!(opts.resolved_fieldsplit_schur_approx(), "full");
+}
