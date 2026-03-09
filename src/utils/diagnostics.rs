@@ -88,6 +88,21 @@ impl PcDiagnostics {
                 opts.chebyshev_lambda_max,
             );
             insert_opt(&mut config, "amg_levels", opts.amg_levels);
+            insert_opt(
+                &mut config,
+                "pc_amg_level_scoped_count",
+                Some(opts.pc_amg_level_scoped_options.len()),
+            );
+            insert_opt(
+                &mut config,
+                "pc_mg_level_scoped_count",
+                Some(opts.pc_mg_level_scoped_options.len()),
+            );
+            insert_opt(
+                &mut config,
+                "pc_gamg_level_scoped_count",
+                Some(opts.pc_gamg_level_scoped_options.len()),
+            );
             insert_opt(&mut config, "amg_cycle_type", opts.amg_cycle_type.clone());
             insert_opt(
                 &mut config,

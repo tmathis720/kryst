@@ -62,6 +62,9 @@ pub struct MgLevelDiagnostics {
     pub route_fallback: Option<String>,
     pub native_complex_path: bool,
     pub complex_diagnostic: Option<String>,
+    pub grid_complexity: f64,
+    pub operator_complexity: f64,
+    pub comm_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1047,9 +1050,27 @@ impl Preconditioner for MgPc {
                     },
                     native_complex_path: true,
                     complex_diagnostic: None,
+                    grid_complexity: 0.0,
+                    operator_complexity: 0.0,
+                    comm_bytes: 0,
                 }
             })
             .collect();
+        if let Some(first) = hierarchy.levels().first() {
+            let n0 = first.operator.nrows() as f64;
+            let nnz0 = first.operator.nnz() as f64;
+            let mut nsum = 0.0;
+            let mut nnzsum = 0.0;
+            for d in &mut self.diagnostics {
+                nsum += hierarchy.levels()[d.level].operator.nrows() as f64;
+                nnzsum += d.nnz as f64;
+                d.grid_complexity = if n0 > 0.0 { nsum / n0 } else { 0.0 };
+                d.operator_complexity = if nnz0 > 0.0 { nnzsum / nnz0 } else { 0.0 };
+                if let Ok(perf) = self.perf.lock() {
+                    d.comm_bytes = perf.comm_bytes_per_level.get(d.level).copied().unwrap_or(0);
+                }
+            }
+        }
         self.hierarchy = Some(hierarchy);
         self.hierarchy_pattern_hash = Some(pattern_hash);
         Ok(())

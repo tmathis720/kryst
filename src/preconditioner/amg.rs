@@ -397,6 +397,9 @@ pub struct AMGConfig {
     pub dist_coarse_solver_route: DistCoarseSolverRoute,
     pub dist_apply_instrumentation: bool,
     pub dist_coarse_ghost_scale: f64,
+    pub level_relax_overrides: BTreeMap<usize, RelaxType>,
+    pub level_sweep_overrides: BTreeMap<usize, (usize, usize)>,
+    pub level_coarse_overrides: BTreeMap<usize, CoarseSolve>,
 }
 
 impl Default for AMGConfig {
@@ -507,6 +510,9 @@ impl Default for AMGConfig {
             dist_coarse_solver_route: DistCoarseSolverRoute::Auto,
             dist_apply_instrumentation: false,
             dist_coarse_ghost_scale: 0.0,
+            level_relax_overrides: BTreeMap::new(),
+            level_sweep_overrides: BTreeMap::new(),
+            level_coarse_overrides: BTreeMap::new(),
         };
         cfg.grid_relax_type = [
             cfg.relax_type,
@@ -790,6 +796,31 @@ impl AMGConfig {
         }
         if let Some(scale) = opts.amg_dist_coarse_ghost_scale {
             cfg.dist_coarse_ghost_scale = ensure_finite("amg_dist_coarse_ghost_scale", scale)?;
+        }
+        for (level, scoped) in &opts.pc_amg_level_scoped_options {
+            if let Some(relax) = scoped
+                .amg_smoother
+                .as_deref()
+                .or(scoped.amg_relax_type.as_deref())
+            {
+                cfg.level_relax_overrides
+                    .insert(*level, map_relax(AmgRelaxKind::from_str(relax)?));
+            }
+            if scoped.amg_smoother_steps.is_some()
+                || scoped.amg_sweeps_down.is_some()
+                || scoped.amg_sweeps_up.is_some()
+            {
+                let sweeps = scoped.amg_smoother_steps.unwrap_or(1);
+                let pre = scoped.amg_sweeps_down.unwrap_or(sweeps);
+                let post = scoped.amg_sweeps_up.unwrap_or(sweeps);
+                cfg.level_sweep_overrides.insert(*level, (pre, post));
+            }
+            if let Some(coarse) = scoped.amg_coarse_solver.as_deref() {
+                cfg.level_coarse_overrides.insert(
+                    *level,
+                    map_coarse_solve(AmgCoarseSolveKind::from_str(coarse)?),
+                );
+            }
         }
         if per_phase_relax {
             cfg.relax_type = cfg.grid_relax_type[RelaxPhase::Fine.ix()];
@@ -3340,8 +3371,14 @@ impl AMG {
         if cfg.spd_diag_floor < 0.0 {
             cfg.spd_diag_floor = 0.0;
         }
+        let coarse_level_overrides = cfg.level_coarse_overrides.clone();
+        let relax_level_overrides = cfg.level_relax_overrides.clone();
+        let sweep_level_overrides = cfg.level_sweep_overrides.clone();
         Self {
             cycle_policy: Self::make_cycle_policy(&cfg),
+            coarse_level_overrides,
+            relax_level_overrides,
+            sweep_level_overrides,
             cfg,
             state: AmgState::Uninitialized,
             ..Default::default()

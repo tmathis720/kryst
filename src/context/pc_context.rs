@@ -435,6 +435,7 @@ fn mg_policy_from_scoped_level(
     let inherited_pc_type = scoped
         .pc_type
         .clone()
+        .or_else(|| scoped.amg_smoother.clone())
         .or_else(|| global.pc_mg_smoother.clone());
     let inherited_ksp_type = scoped
         .pc_ksp_ksp_type
@@ -458,8 +459,10 @@ fn mg_policy_from_scoped_level(
         coarse_pc_type: scoped
             .pc_mg_coarse_pc_type
             .clone()
+            .or(scoped.amg_coarse_solver.clone())
             .or_else(|| scoped.pc_type.clone())
             .or_else(|| global.pc_mg_coarse_pc_type.clone())
+            .or_else(|| global.amg_coarse_solver.clone())
             .map(|v| v.to_lowercase()),
         coarse_ksp_type: scoped
             .pc_mg_coarse_ksp_type

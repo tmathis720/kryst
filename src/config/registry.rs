@@ -1326,6 +1326,20 @@ pub static SPECS: &[Spec] = &[
         doc: "MG coarse KSP relative tolerance",
     },
     Spec {
+        flag: "-pc_mg_levels_policy",
+        key: "pc_mg_levels_policy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "semicolon-separated MG level policies; level-scoped options also accepted as -pc_mg_levels_<i>_* or -pc_mg_level_<i>_*",
+    },
+    Spec {
+        flag: "-pc_mg_level_policies",
+        key: "pc_mg_level_policies",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_mg_levels_policy",
+    },
+    Spec {
         flag: "-pc_bddc_coarse_ksp_type",
         key: "pc_bddc_coarse_ksp_type",
         arity: Arity::One,
@@ -1408,6 +1422,20 @@ pub static SPECS: &[Spec] = &[
         arity: Arity::One,
         kind: ValueKind::UInt,
         doc: "GAMG aggressive coarsening MIS neighborhood depth",
+    },
+    Spec {
+        flag: "-pc_gamg_levels_policy",
+        key: "pc_gamg_levels_policy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "semicolon-separated GAMG level policies; level-scoped options also accepted as -pc_gamg_levels_<i>_* or -pc_gamg_level_<i>_*",
+    },
+    Spec {
+        flag: "-pc_gamg_level_policies",
+        key: "pc_gamg_level_policies",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "alias for -pc_gamg_levels_policy",
     },
     Spec {
         flag: "-pc_gamg_repartition",
