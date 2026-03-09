@@ -343,6 +343,8 @@ pub struct PcOptions {
     pub pc_mg_level_scoped_options: Vec<(usize, Box<PcOptions>)>,
     /// Parsed `-pc_gamg_levels_<i>_*` scoped options keyed by level index.
     pub pc_gamg_level_scoped_options: Vec<(usize, Box<PcOptions>)>,
+    /// Parsed `-pc_amg_levels_<i>_*` scoped options keyed by level index.
+    pub pc_amg_level_scoped_options: Vec<(usize, Box<PcOptions>)>,
     pub amg_dist_coarse_policy: Option<String>,
 
     /// Chain string, e.g. "jacobi->ilut".
@@ -752,36 +754,38 @@ impl PcOptions {
 
     fn discover_level_scoped_prefixes(
         args: &[&str],
-        root: &str,
+        roots: &[&str],
         current_prefix: Option<&str>,
     ) -> Vec<(usize, String)> {
         let mut out = Vec::new();
-        let prefix = match current_prefix {
-            Some(current) => format!("-{current}{root}_"),
-            None => format!("-{root}_"),
-        };
-        for arg in args {
-            let Some(rest) = arg.strip_prefix(&prefix) else {
-                continue;
+        for root in roots {
+            let prefix = match current_prefix {
+                Some(current) => format!("-{current}{root}_"),
+                None => format!("-{root}_"),
             };
-            let mut parts = rest.splitn(2, '_');
-            let Some(level) = parts.next() else {
-                continue;
-            };
-            let Some(suffix) = parts.next() else {
-                continue;
-            };
-            if suffix.is_empty() || !level.chars().all(|c| c.is_ascii_digit()) {
-                continue;
+            for arg in args {
+                let Some(rest) = arg.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let mut parts = rest.splitn(2, '_');
+                let Some(level) = parts.next() else {
+                    continue;
+                };
+                let Some(suffix) = parts.next() else {
+                    continue;
+                };
+                if suffix.is_empty() || !level.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                let Ok(level) = level.parse::<usize>() else {
+                    continue;
+                };
+                let discovered = match current_prefix {
+                    Some(current) => format!("{current}{root}_{level}_"),
+                    None => format!("{root}_{level}_"),
+                };
+                out.push((level, discovered));
             }
-            let Ok(level) = level.parse::<usize>() else {
-                continue;
-            };
-            let discovered = match current_prefix {
-                Some(current) => format!("{current}{root}_{level}_"),
-                None => format!("{root}_{level}_"),
-            };
-            out.push((level, discovered));
         }
         out.sort_by_key(|(level, _)| *level);
         out.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
@@ -795,19 +799,33 @@ impl PcOptions {
     ) -> Result<(), KError> {
         self.pc_mg_level_scoped_options.clear();
         self.pc_gamg_level_scoped_options.clear();
+        self.pc_amg_level_scoped_options.clear();
 
-        for (level, prefix) in
-            Self::discover_level_scoped_prefixes(args, "pc_mg_levels", current_prefix)
-        {
+        for (level, prefix) in Self::discover_level_scoped_prefixes(
+            args,
+            &["pc_mg_levels", "pc_mg_level"],
+            current_prefix,
+        ) {
             let child = Self::from_args_with_prefix(args, &prefix)?;
             self.pc_mg_level_scoped_options
                 .push((level, Box::new(child)));
         }
-        for (level, prefix) in
-            Self::discover_level_scoped_prefixes(args, "pc_gamg_levels", current_prefix)
-        {
+        for (level, prefix) in Self::discover_level_scoped_prefixes(
+            args,
+            &["pc_gamg_levels", "pc_gamg_level"],
+            current_prefix,
+        ) {
             let child = Self::from_args_with_prefix(args, &prefix)?;
             self.pc_gamg_level_scoped_options
+                .push((level, Box::new(child)));
+        }
+        for (level, prefix) in Self::discover_level_scoped_prefixes(
+            args,
+            &["pc_amg_levels", "pc_amg_level"],
+            current_prefix,
+        ) {
+            let child = Self::from_args_with_prefix(args, &prefix)?;
+            self.pc_amg_level_scoped_options
                 .push((level, Box::new(child)));
         }
         Ok(())
@@ -4353,15 +4371,23 @@ mod old_tests {
         let args = vec![
             "-pc_mg_levels_2_pc_type",
             "ilu0",
+            "-pc_mg_level_3_pc_type",
+            "jacobi",
             "-pc_mg_levels_2_pc_mg_smoother_steps",
             "3",
             "-pc_gamg_levels_1_pc_type",
             "jacobi",
+            "-pc_gamg_level_2_pc_type",
+            "ilu",
             "-pc_gamg_levels_1_pc_ksp_ksp_type",
             "cg",
+            "-pc_amg_levels_2_pc_amg_smoother",
+            "chebyshev",
+            "-pc_amg_level_3_pc_amg_coarse_solver",
+            "direct",
         ];
         let opts = PcOptions::from_args(&args).expect("parse level scoped options");
-        assert_eq!(opts.pc_mg_level_scoped_options.len(), 1);
+        assert_eq!(opts.pc_mg_level_scoped_options.len(), 2);
         assert_eq!(opts.pc_mg_level_scoped_options[0].0, 2);
         assert_eq!(
             opts.pc_mg_level_scoped_options[0].1.pc_type.as_deref(),
@@ -4371,8 +4397,13 @@ mod old_tests {
             opts.pc_mg_level_scoped_options[0].1.pc_mg_smoother_steps,
             Some(3)
         );
+        assert_eq!(opts.pc_mg_level_scoped_options[1].0, 3);
+        assert_eq!(
+            opts.pc_mg_level_scoped_options[1].1.pc_type.as_deref(),
+            Some("jacobi")
+        );
 
-        assert_eq!(opts.pc_gamg_level_scoped_options.len(), 1);
+        assert_eq!(opts.pc_gamg_level_scoped_options.len(), 2);
         assert_eq!(opts.pc_gamg_level_scoped_options[0].0, 1);
         assert_eq!(
             opts.pc_gamg_level_scoped_options[0].1.pc_type.as_deref(),
@@ -4384,6 +4415,29 @@ mod old_tests {
                 .pc_ksp_ksp_type
                 .as_deref(),
             Some("cg")
+        );
+        assert_eq!(opts.pc_gamg_level_scoped_options[1].0, 2);
+        assert_eq!(
+            opts.pc_gamg_level_scoped_options[1].1.pc_type.as_deref(),
+            Some("ilu")
+        );
+
+        assert_eq!(opts.pc_amg_level_scoped_options.len(), 2);
+        assert_eq!(opts.pc_amg_level_scoped_options[0].0, 2);
+        assert_eq!(
+            opts.pc_amg_level_scoped_options[0]
+                .1
+                .amg_smoother
+                .as_deref(),
+            Some("chebyshev")
+        );
+        assert_eq!(opts.pc_amg_level_scoped_options[1].0, 3);
+        assert_eq!(
+            opts.pc_amg_level_scoped_options[1]
+                .1
+                .amg_coarse_solver
+                .as_deref(),
+            Some("direct")
         );
     }
 
