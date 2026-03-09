@@ -1011,6 +1011,13 @@ pub static SPECS: &[Spec] = &[
         doc: "fieldsplit mode hint (additive/multiplicative/symmetric/schur)",
     },
     Spec {
+        flag: "-pc_fieldsplit_strategy",
+        key: "pc_fieldsplit_strategy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "fieldsplit split strategy alias (additive/multiplicative/symmetric/schur)",
+    },
+    Spec {
         flag: "-pc_fieldsplit_schur_fact_type",
         key: "pc_fieldsplit_schur_fact_type",
         arity: Arity::One,
@@ -1022,7 +1029,14 @@ pub static SPECS: &[Spec] = &[
         key: "pc_fieldsplit_schur_precondition",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "Schur preconditioning strategy (self/diag/a11)",
+        doc: "Schur preconditioning strategy (self/diag/a11/full/full_matfree/user)",
+    },
+    Spec {
+        flag: "-pc_fieldsplit_schur_approx",
+        key: "pc_fieldsplit_schur_approx",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "Schur complement approximation workflow (diag/full)",
     },
     Spec {
         flag: "-pc_fieldsplit_extraction",
@@ -1198,6 +1212,13 @@ pub static SPECS: &[Spec] = &[
         arity: Arity::One,
         kind: ValueKind::Str,
         doc: "inner KSP monitor policy (all|rank0)",
+    },
+    Spec {
+        flag: "-pc_ksp_inner_tol_policy",
+        key: "pc_ksp_inner_tol_policy",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "inner KSP convergence policy (strict|allow_maxits)",
     },
     Spec {
         flag: "-pc_ksp_propagate_converged_reason",

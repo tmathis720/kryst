@@ -28,6 +28,7 @@ pub struct FieldSplitPc {
     last_structure_id: Option<StructureId>,
     last_values_id: Option<ValuesId>,
     extraction_mode: BlockExtractionMode,
+    schur_approx_workflow: String,
     all_children_local: bool,
 }
 
@@ -138,6 +139,7 @@ impl FieldSplitPc {
             last_structure_id: None,
             last_values_id: None,
             extraction_mode: Self::extraction_mode_from_options(&opts)?,
+            schur_approx_workflow: opts.resolved_fieldsplit_schur_approx(),
             all_children_local,
         })
     }
@@ -160,11 +162,7 @@ impl FieldSplitPc {
     }
 
     fn split_type_from_options(opts: &PcOptions) -> Result<FieldSplitType, KError> {
-        let kind = opts
-            .pc_fieldsplit_type
-            .as_deref()
-            .unwrap_or("additive")
-            .to_lowercase();
+        let kind = opts.resolved_fieldsplit_type();
         match kind.as_str() {
             "additive" | "diag" | "blockdiag" => Ok(FieldSplitType::Additive),
             "composite_additive" | "basic" => Ok(FieldSplitType::Additive),
@@ -347,10 +345,19 @@ impl FieldSplitPc {
         a11: &CsrMatrix<S>,
         a22: &CsrMatrix<S>,
         schur: &SchurBlocks,
+        workflow: &str,
     ) -> Result<CsrMatrix<S>, KError> {
-        // Reuse the reusable block-factorization path with a higher-fidelity approximation
-        // placeholder; currently this delegates to the diagonal-inverse A11 approximation.
-        self.schur_diag_approx(a11, a22, schur)
+        match workflow {
+            "diag" => self.schur_diag_approx(a11, a22, schur),
+            "full" => {
+                // Placeholder for stronger Schur workflows; currently uses the same
+                // structurally complete sparse path as diag for determinism.
+                self.schur_diag_approx(a11, a22, schur)
+            }
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_fieldsplit_schur_approx: {other}"
+            ))),
+        }
     }
 
     fn schur_diag_approx(
@@ -800,8 +807,12 @@ impl Preconditioner for FieldSplitPc {
                 let a11 = block_mats
                     .first()
                     .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?;
-                let schur_mat =
-                    Arc::new(self.schur_full_approx(a11.as_ref(), a22.as_ref(), &schur)?);
+                let schur_mat = Arc::new(self.schur_full_approx(
+                    a11.as_ref(),
+                    a22.as_ref(),
+                    &schur,
+                    self.schur_approx_workflow.as_str(),
+                )?);
                 let (precondition_mat, apply_hook) =
                     self.complex_safe_schur_precondition(precondition, a22, schur_mat.clone());
                 schur_precondition_matrix = precondition_mat;
