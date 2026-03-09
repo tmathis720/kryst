@@ -41,3 +41,36 @@ fn mpi_complex_dot_conj_matches_expected() {
         expected
     );
 }
+
+#[test]
+fn mpi_complex_dot_many_matches_pairwise() {
+    let _guard = mpi_test_guard();
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    if comm.size() < 2 {
+        return;
+    }
+
+    let rank = comm.rank() as f64;
+    let x0 = [S::from_parts(rank + 1.0, 0.1 * rank)];
+    let y0 = [S::from_parts(0.25, -0.5)];
+    let x1 = [S::from_parts(2.0 - rank, -0.2 * rank)];
+    let y1 = [S::from_parts(-1.5, 0.75)];
+
+    let many = kryst::parallel::global_dot_conj_many(&comm, &[(&x0, &y0), (&x1, &y1)]);
+    let d0 = global_dot_conj(&comm, &x0, &y0);
+    let d1 = global_dot_conj(&comm, &x1, &y1);
+
+    let tol = 1e-12 * (comm.size() as f64);
+    assert!(
+        (many[0] - d0).abs() < tol,
+        "many0={:?} d0={:?}",
+        many[0],
+        d0
+    );
+    assert!(
+        (many[1] - d1).abs() < tol,
+        "many1={:?} d1={:?}",
+        many[1],
+        d1
+    );
+}

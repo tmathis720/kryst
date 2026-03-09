@@ -212,3 +212,46 @@ fn complex_smoke_convergence_for_gcr_and_pipegcr() {
         }
     }
 }
+
+#[test]
+fn complex_gmres_with_sor_pc_converges() {
+    let a = Arc::new(CsrOp::new(Arc::new(hermitian_2x2())));
+    let x_true = vec![S::from_parts(0.4, -0.3), S::from_parts(-0.8, 0.9)];
+    let b = apply_csr(&hermitian_2x2(), &x_true);
+    let mut x = vec![S::zero(); 2];
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).unwrap();
+    ksp.set_pc_type(PcType::Sor, None).unwrap();
+    ksp.set_tolerances(1e-10, 1e-12, 1e8, 40);
+    ksp.set_operators(a, None);
+
+    let stats = ksp.solve(&b, &mut x).unwrap();
+    assert!(stats.reason.is_converged());
+    for (xi, xt) in x.iter().zip(x_true.iter()) {
+        assert_abs_diff_eq!(xi.real(), xt.real(), epsilon = 1e-8);
+        assert_abs_diff_eq!(xi.imag(), xt.imag(), epsilon = 1e-8);
+    }
+}
+
+#[test]
+fn complex_gmres_with_ilu_pc_converges() {
+    let a_mat = nonhermitian_2x2();
+    let a = Arc::new(CsrOp::new(Arc::new(a_mat.clone())));
+    let x_true = vec![S::from_parts(0.3, -0.2), S::from_parts(0.7, 0.4)];
+    let b = apply_csr(&a_mat, &x_true);
+    let mut x = vec![S::zero(); 2];
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).unwrap();
+    ksp.set_pc_type(PcType::Ilu, None).unwrap();
+    ksp.set_tolerances(1e-10, 1e-12, 1e8, 40);
+    ksp.set_operators(a, None);
+
+    let stats = ksp.solve(&b, &mut x).unwrap();
+    assert!(stats.reason.is_converged());
+    for (xi, xt) in x.iter().zip(x_true.iter()) {
+        assert_abs_diff_eq!(xi.real(), xt.real(), epsilon = 1e-8);
+        assert_abs_diff_eq!(xi.imag(), xt.imag(), epsilon = 1e-8);
+    }
+}
