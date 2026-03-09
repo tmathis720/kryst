@@ -485,11 +485,12 @@ impl Preconditioner for FsaiCsr {
             return Ok(());
         }
         #[cfg(feature = "complex")]
-        {
-            log::debug!("FsaiCsr complex setup falling back to projected-real CSR conversion path");
-        }
+        return Err(KError::Unsupported(
+            "FsaiCsr complex setup requires a CSR complex operator".into(),
+        ));
 
         // Always require CSR view
+        #[cfg(not(feature = "complex"))]
         let csr = csr_from_linop(a, R::default())?; // no drop on A
         let sid = a.structure_id();
         let vid = a.values_id();
@@ -601,13 +602,12 @@ impl Preconditioner for FsaiCsr {
             return Ok(());
         }
         #[cfg(feature = "complex")]
-        {
-            log::debug!(
-                "FsaiCsr complex numeric update falling back to projected-real CSR conversion path"
-            );
-        }
+        return Err(KError::Unsupported(
+            "FsaiCsr complex numeric update requires a CSR complex operator".into(),
+        ));
 
         // Re-solve per-column with fixed pattern and write values back into existing G
+        #[cfg(not(feature = "complex"))]
         let csr = csr_from_linop(a, R::default())?;
         let n = self.g.nrows().min(self.g.ncols());
         let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default());
@@ -980,10 +980,13 @@ impl Preconditioner for SpaiCsr {
         }
         #[cfg(feature = "complex")]
         {
-            log::debug!("SpaiCsr complex setup falling back to projected-real CSR conversion path");
-            self.complex_setup_fallback_reason = Some("projected_real_csr_conversion".to_string());
+            self.complex_setup_fallback_reason = Some("non_csr_operator_unsupported".to_string());
+            return Err(KError::Unsupported(
+                "SpaiCsr complex setup requires a CSR complex operator".into(),
+            ));
         }
 
+        #[cfg(not(feature = "complex"))]
         let csr = csr_from_linop(a, R::default())?;
         let sid = a.structure_id();
         let vid = a.values_id();
@@ -1105,12 +1108,11 @@ impl Preconditioner for SpaiCsr {
             return Ok(());
         }
         #[cfg(feature = "complex")]
-        {
-            log::debug!(
-                "SpaiCsr complex numeric update falling back to projected-real CSR conversion path"
-            );
-        }
+        return Err(KError::Unsupported(
+            "SpaiCsr complex numeric update requires a CSR complex operator".into(),
+        ));
 
+        #[cfg(not(feature = "complex"))]
         let csr = csr_from_linop(a, R::default())?;
         let n = self.m.nrows().min(self.m.ncols());
         let rp = csr.row_ptr();

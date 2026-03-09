@@ -280,8 +280,6 @@ pub struct SorPc {
     #[cfg(feature = "complex")]
     inv_diag_complex: Vec<S>,
     #[cfg(feature = "complex")]
-    complex_force_split_fallback: bool,
-    #[cfg(feature = "complex")]
     complex_fallback_diagnostics: Mutex<Option<String>>,
     color_of: Vec<usize>,
     color_blocks: Vec<Vec<usize>>,
@@ -330,8 +328,6 @@ impl SorPc {
             a_csr_complex: None,
             #[cfg(feature = "complex")]
             inv_diag_complex: Vec::new(),
-            #[cfg(feature = "complex")]
-            complex_force_split_fallback: false,
             #[cfg(feature = "complex")]
             complex_fallback_diagnostics: Mutex::new(None),
             color_of: Vec::new(),
@@ -408,17 +404,11 @@ impl SorPc {
     }
 
     #[cfg(feature = "complex")]
-    pub fn set_complex_force_split_fallback(&mut self, on: bool) {
-        self.complex_force_split_fallback = on;
-    }
+    pub fn set_complex_force_split_fallback(&mut self, _on: bool) {}
 
     #[cfg(feature = "complex")]
     pub fn complex_kernel_mode(&self) -> SorComplexKernelMode {
-        if self.complex_force_split_fallback {
-            SorComplexKernelMode::DegradedSplitRealImag
-        } else {
-            SorComplexKernelMode::Native
-        }
+        SorComplexKernelMode::Native
     }
 
     #[cfg(feature = "complex")]
@@ -669,25 +659,6 @@ impl SorPc {
 
     #[cfg(feature = "complex")]
     fn apply_complex(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        if self.complex_force_split_fallback {
-            if let Ok(mut msg) = self.complex_fallback_diagnostics.lock() {
-                *msg = Some("sor_complex_degraded_split_real_imag: forced fallback enabled; disable it to use native complex sweep".to_string());
-            }
-            let mut xr = vec![0.0; x.len()];
-            let mut xi = vec![0.0; x.len()];
-            let mut yr = vec![0.0; y.len()];
-            let mut yi = vec![0.0; y.len()];
-            for i in 0..x.len() {
-                xr[i] = x[i].real();
-                xi[i] = x[i].imag();
-            }
-            self.apply_real(side, &xr, &mut yr)?;
-            self.apply_real(side, &xi, &mut yi)?;
-            for i in 0..y.len() {
-                y[i] = S::from_parts(yr[i], yi[i]);
-            }
-            return Ok(());
-        }
         if let Ok(mut msg) = self.complex_fallback_diagnostics.lock() {
             *msg = None;
         }
@@ -888,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn complex_fallback_diagnostics_reports_forced_degradation() {
+    fn complex_fallback_diagnostics_is_empty_for_native_path() {
         let a = CsrMatrix::from_csr(
             2,
             2,
@@ -902,21 +873,16 @@ mod tests {
             ],
         );
         let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
-        pc.set_complex_force_split_fallback(true);
         pc.setup(&a).unwrap();
         let rhs = vec![S::from_parts(1.0, 0.25); 2];
         let mut out = vec![S::zero(); 2];
         pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
         let diag = pc.complex_fallback_diagnostics();
-        assert!(
-            diag.as_deref()
-                .unwrap_or("")
-                .contains("degraded_split_real_imag")
-        );
+        assert!(diag.is_none());
     }
 
     #[test]
-    fn complex_fallback_mode_switches_to_split_real_imag() {
+    fn complex_kernel_mode_reports_native() {
         let a = CsrMatrix::from_csr(
             2,
             2,
@@ -930,12 +896,8 @@ mod tests {
             ],
         );
         let mut pc = SorPc::new(1.0, 1, MatSorType::APPLY_LOWER, 0.0);
-        pc.set_complex_force_split_fallback(true);
         pc.setup(&a).unwrap();
-        assert_eq!(
-            pc.complex_kernel_mode(),
-            SorComplexKernelMode::DegradedSplitRealImag
-        );
+        assert_eq!(pc.complex_kernel_mode(), SorComplexKernelMode::Native);
         let rhs = vec![S::from_parts(1.0, 0.5); 2];
         let mut out = vec![S::zero(); rhs.len()];
         pc.apply(PcSide::Left, &rhs, &mut out).unwrap();
