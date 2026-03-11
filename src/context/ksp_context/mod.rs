@@ -67,7 +67,7 @@ use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use crate::preconditioner::PcDistributedSupport;
 #[cfg(feature = "backend-faer")]
-use crate::preconditioner::dist::MpiPcOptions;
+use crate::preconditioner::dist::{DistRouteFallbackReason, MpiPcOptions};
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, DistRoutePolicy, GlobalPcKind};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
@@ -417,6 +417,7 @@ struct DistRouteDiagnosticsState {
     selected_route: Option<String>,
     fallback_chain: Vec<String>,
     fallback_reason: Option<String>,
+    fallback_counters: BTreeMap<String, usize>,
 }
 
 fn insert_value<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, value: T) {
@@ -1604,6 +1605,11 @@ impl KspContext {
                 "pc_dist_fallback_chain",
                 self.dist_route_diag.fallback_chain.clone(),
             );
+            insert_value(
+                &mut solver_config,
+                "pc_dist_fallback_counters",
+                self.dist_route_diag.fallback_counters.clone(),
+            );
             if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                 insert_value(&mut solver_config, "pc_dist_fallback_reason", reason);
             }
@@ -1630,6 +1636,11 @@ impl KspContext {
                         &mut diag.config,
                         "dist_fallback_chain",
                         self.dist_route_diag.fallback_chain.clone(),
+                    );
+                    insert_value(
+                        &mut diag.config,
+                        "dist_fallback_counters",
+                        self.dist_route_diag.fallback_counters.clone(),
                     );
                     if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                         insert_value(&mut diag.config, "dist_fallback_reason", reason);
@@ -1660,6 +1671,11 @@ impl KspContext {
                                 &mut diag.config,
                                 "dist_fallback_chain",
                                 self.dist_route_diag.fallback_chain.clone(),
+                            );
+                            insert_value(
+                                &mut diag.config,
+                                "dist_fallback_counters",
+                                self.dist_route_diag.fallback_counters.clone(),
                             );
                         }
                         diag
@@ -2917,8 +2933,14 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
-    fn push_dist_route_fallback(&mut self, route: impl Into<String>) {
-        self.dist_route_diag.fallback_chain.push(route.into());
+    fn push_dist_route_fallback(&mut self, reason: DistRouteFallbackReason) {
+        let key = reason.as_str().to_string();
+        self.dist_route_diag.fallback_chain.push(key.clone());
+        *self
+            .dist_route_diag
+            .fallback_counters
+            .entry(key)
+            .or_insert(0) += 1;
     }
 
     #[cfg(feature = "backend-faer")]
@@ -2986,7 +3008,10 @@ impl KspContext {
                 pending.mpi_opts.global_pc,
                 GlobalPcKind::None | GlobalPcKind::BlockJacobi
             )
-            && pending.mpi_opts.route_policy != DistRoutePolicy::Adapted;
+            && !matches!(
+                pending.mpi_opts.route_policy,
+                DistRoutePolicy::Adapted | DistRoutePolicy::RootGather
+            );
 
         if native_eligible {
             let dist_op = dist_op.expect("checked");
@@ -3008,7 +3033,7 @@ impl KspContext {
                     .communication_strategy_name()
             ));
             if !explicit_global {
-                self.push_dist_route_fallback("auto_promoted_from_local");
+                self.push_dist_route_fallback(DistRouteFallbackReason::AutoPromotedFromLocal);
             }
             let mut new_pc = self.build_mpi_global_pc(&native_pending, dist_op)?;
             let want = new_pc.required_format();
@@ -3022,7 +3047,7 @@ impl KspContext {
                     return Ok(true);
                 }
                 Err(err) => {
-                    self.push_dist_route_fallback("native_setup_failed");
+                    self.push_dist_route_fallback(DistRouteFallbackReason::NativeSetupFailed);
                     self.set_dist_route_fallback_reason(err.to_string());
                     log::warn!(
                         "Native distributed preconditioner setup failed, enabling fallback chain: {err}"
@@ -3033,6 +3058,7 @@ impl KspContext {
 
         if explicit_global {
             let Some(dist_op) = dist_op else {
+                self.push_dist_route_fallback(DistRouteFallbackReason::MissingDistCsrOperator);
                 return Err(KError::InvalidInput(
                     "-pc_global requires DistCsrOp when running distributed".into(),
                 ));
@@ -3041,7 +3067,7 @@ impl KspContext {
                 "configured_global_{:?}",
                 pending.mpi_opts.global_pc
             ));
-            self.push_dist_route_fallback("configured_global_fallback");
+            self.push_dist_route_fallback(DistRouteFallbackReason::ConfiguredGlobalFallback);
             let mut new_pc = self.build_mpi_global_pc(&pending, dist_op)?;
             let want = new_pc.required_format();
             let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
@@ -3063,7 +3089,13 @@ impl KspContext {
 
         if pending.mpi_opts.route_policy == DistRoutePolicy::Adapted {
             self.set_dist_route_selected("local_adapter".to_string());
-            self.push_dist_route_fallback("adapter_only_policy");
+            self.push_dist_route_fallback(DistRouteFallbackReason::AdapterOnlyPolicy);
+            return Ok(false);
+        }
+
+        if pending.mpi_opts.route_policy == DistRoutePolicy::RootGather {
+            self.set_dist_route_selected("root_gather".to_string());
+            self.push_dist_route_fallback(DistRouteFallbackReason::RootGatherPolicy);
             return Ok(false);
         }
 

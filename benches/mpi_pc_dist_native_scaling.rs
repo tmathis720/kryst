@@ -8,6 +8,7 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
+use serde_json::Value;
 use std::sync::Arc;
 
 #[cfg(feature = "mpi")]
@@ -96,6 +97,14 @@ fn build_case(
     (ksp, b, x)
 }
 
+fn dist_fallback_total(ksp: &KspContext) -> usize {
+    let view = ksp.view();
+    let Some(Value::Object(obj)) = view.solver_config.get("pc_dist_fallback_counters") else {
+        return 0;
+    };
+    obj.values().filter_map(|v| v.as_u64()).sum::<u64>() as usize
+}
+
 fn reduction_budget(limit_per_unknown: f64, n_local: usize) -> usize {
     ((limit_per_unknown * n_local.max(1) as f64).ceil() as usize).max(16)
 }
@@ -151,6 +160,13 @@ fn bench_suite(c: &mut Criterion) {
                 build_case(grid, &comm, pc_local, "distributed_native");
             x_native.fill(0.0);
             let native_stats = ksp_native.solve(&b_native, &mut x_native).unwrap();
+            let wrapped_fallbacks = dist_fallback_total(&ksp_wrapped);
+            let native_fallbacks = dist_fallback_total(&ksp_native);
+            if native_fallbacks > wrapped_fallbacks {
+                eprintln!(
+                    "WARN: strong:{label}:{pc_local}: native route had more fallbacks than wrapped (native={native_fallbacks}, wrapped={wrapped_fallbacks})"
+                );
+            }
             run_acceptance_checks(
                 &format!("strong:{label}:{pc_local}"),
                 wrapped_stats.counters.num_global_reductions,
@@ -187,6 +203,13 @@ fn bench_suite(c: &mut Criterion) {
                 build_case(global_grid, &comm, pc_local, "distributed_native");
             x_native.fill(0.0);
             let native_stats = ksp_native.solve(&b_native, &mut x_native).unwrap();
+            let wrapped_fallbacks = dist_fallback_total(&ksp_wrapped);
+            let native_fallbacks = dist_fallback_total(&ksp_native);
+            if native_fallbacks > wrapped_fallbacks {
+                eprintln!(
+                    "WARN: weak:{base}:{pc_local}: native route had more fallbacks than wrapped (native={native_fallbacks}, wrapped={wrapped_fallbacks})"
+                );
+            }
             run_acceptance_checks(
                 &format!("weak:{base}:{pc_local}"),
                 wrapped_stats.counters.num_global_reductions,
