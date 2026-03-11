@@ -1,11 +1,11 @@
+use kryst::Comm;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::utils::poisson_3d;
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::Comm;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -397,12 +397,33 @@ fn main() {
         let stats = ksp.solve(&b, &mut x).expect("solve");
         let view = ksp.view();
 
+        let route_policy = view
+            .solver_config
+            .get("pc_dist_route_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let selected_route = view
             .solver_config
             .get("pc_dist_selected_route")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
+        let fallback_chain = view
+            .solver_config
+            .get("pc_dist_fallback_chain")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let fallback_reason = view
+            .solver_config
+            .get("pc_dist_fallback_reason")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let fallback_counters = view
+            .solver_config
+            .get("pc_dist_fallback_counters")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         let fallback_count = fallback_total(&view.solver_config);
         let residual = stats.final_residual;
         let pass = (expectation.iterations.min..=expectation.iterations.max)
@@ -419,7 +440,11 @@ fn main() {
             "num_global_reductions".into(),
             Value::from(stats.counters.num_global_reductions as u64),
         );
-        details.insert("selected_route".into(), Value::from(selected_route));
+        details.insert("pc_dist_route_policy".into(), Value::from(route_policy));
+        details.insert("pc_dist_selected_route".into(), Value::from(selected_route));
+        details.insert("pc_dist_fallback_chain".into(), fallback_chain);
+        details.insert("pc_dist_fallback_reason".into(), fallback_reason);
+        details.insert("pc_dist_fallback_counters".into(), fallback_counters);
         details.insert("fallback_total".into(), Value::from(fallback_count as u64));
 
         artifact.cases.push(CaseArtifact {

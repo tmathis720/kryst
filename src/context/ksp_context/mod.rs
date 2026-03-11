@@ -66,10 +66,10 @@ use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use crate::preconditioner::PcDistributedSupport;
-#[cfg(feature = "backend-faer")]
-use crate::preconditioner::dist::{DistRouteFallbackReason, MpiPcOptions};
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, DistRoutePolicy, GlobalPcKind};
+#[cfg(feature = "backend-faer")]
+use crate::preconditioner::dist::{DistRouteFallbackReason, MpiPcOptions};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
@@ -1626,7 +1626,7 @@ impl KspContext {
                 if self.pending_mpi_pc.is_some() {
                     insert_value(
                         &mut diag.config,
-                        "dist_selected_route",
+                        "pc_dist_selected_route",
                         self.dist_route_diag
                             .selected_route
                             .clone()
@@ -1634,16 +1634,16 @@ impl KspContext {
                     );
                     insert_value(
                         &mut diag.config,
-                        "dist_fallback_chain",
+                        "pc_dist_fallback_chain",
                         self.dist_route_diag.fallback_chain.clone(),
                     );
                     insert_value(
                         &mut diag.config,
-                        "dist_fallback_counters",
+                        "pc_dist_fallback_counters",
                         self.dist_route_diag.fallback_counters.clone(),
                     );
                     if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
-                        insert_value(&mut diag.config, "dist_fallback_reason", reason);
+                        insert_value(&mut diag.config, "pc_dist_fallback_reason", reason);
                     }
                 }
                 Box::new(diag)
@@ -1661,7 +1661,7 @@ impl KspContext {
                         if self.pending_mpi_pc.is_some() {
                             insert_value(
                                 &mut diag.config,
-                                "dist_selected_route",
+                                "pc_dist_selected_route",
                                 self.dist_route_diag
                                     .selected_route
                                     .clone()
@@ -1669,14 +1669,17 @@ impl KspContext {
                             );
                             insert_value(
                                 &mut diag.config,
-                                "dist_fallback_chain",
+                                "pc_dist_fallback_chain",
                                 self.dist_route_diag.fallback_chain.clone(),
                             );
                             insert_value(
                                 &mut diag.config,
-                                "dist_fallback_counters",
+                                "pc_dist_fallback_counters",
                                 self.dist_route_diag.fallback_counters.clone(),
                             );
+                            if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
+                                insert_value(&mut diag.config, "pc_dist_fallback_reason", reason);
+                            }
                         }
                         diag
                     })
