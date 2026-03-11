@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -122,10 +123,28 @@ fn bench_comm() -> UniverseComm {
     }
 }
 
-fn parse_args() -> (PathBuf, PathBuf, PathBuf) {
+#[derive(Clone, Copy, Debug)]
+enum TimingDetail {
+    Off,
+    Basic,
+    High,
+}
+
+impl TimingDetail {
+    fn as_str(self) -> &'static str {
+        match self {
+            TimingDetail::Off => "off",
+            TimingDetail::Basic => "basic",
+            TimingDetail::High => "high",
+        }
+    }
+}
+
+fn parse_args() -> (PathBuf, PathBuf, PathBuf, TimingDetail) {
     let mut fixtures = PathBuf::from("benchmarks/distcsr/fixtures.json");
     let mut expectations = PathBuf::from("benchmarks/distcsr/expectations.json");
     let mut output = PathBuf::from("benchmarks/distcsr/artifacts/latest.json");
+    let mut timing_detail = TimingDetail::Basic;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -134,10 +153,33 @@ fn parse_args() -> (PathBuf, PathBuf, PathBuf) {
                 expectations = PathBuf::from(args.next().expect("missing expectations path"))
             }
             "--output" => output = PathBuf::from(args.next().expect("missing output path")),
+            "--timing-detail" => {
+                let raw = args.next().expect("missing timing detail value");
+                timing_detail = match raw.as_str() {
+                    "off" => TimingDetail::Off,
+                    "basic" => TimingDetail::Basic,
+                    "high" => TimingDetail::High,
+                    _ => panic!("unsupported timing detail: {raw}"),
+                };
+            }
             other => panic!("unsupported argument: {other}"),
         }
     }
-    (fixtures, expectations, output)
+    (fixtures, expectations, output, timing_detail)
+}
+
+#[cfg(feature = "metrics")]
+fn solve_metrics_nanos(stats: &kryst::utils::convergence::SolveStats<f64>) -> (u64, u64, u64) {
+    (
+        stats.metrics.matvec_nanos,
+        stats.metrics.pc_apply_nanos,
+        stats.metrics.reduction_wait_nanos,
+    )
+}
+
+#[cfg(not(feature = "metrics"))]
+fn solve_metrics_nanos(_stats: &kryst::utils::convergence::SolveStats<f64>) -> (u64, u64, u64) {
+    (0, 0, 0)
 }
 
 fn build_part_prefix(n_global: usize, size: usize, seed: u64) -> Vec<usize> {
@@ -309,7 +351,7 @@ fn fallback_total(view: &BTreeMap<String, Value>) -> usize {
 }
 
 fn main() {
-    let (fixtures_path, expectations_path, output_path) = parse_args();
+    let (fixtures_path, expectations_path, output_path, timing_detail) = parse_args();
     let fixtures: FixturesManifest =
         serde_json::from_str(&fs::read_to_string(fixtures_path).expect("read fixtures"))
             .expect("parse fixtures");
@@ -394,7 +436,9 @@ fn main() {
 
         let b = vec![1.0; n_local];
         let mut x = vec![0.0; n_local];
+        let solve_start = Instant::now();
         let stats = ksp.solve(&b, &mut x).expect("solve");
+        let solve_wall_nanos = solve_start.elapsed().as_nanos() as u64;
         let view = ksp.view();
 
         let route_policy = view
@@ -440,6 +484,68 @@ fn main() {
             "num_global_reductions".into(),
             Value::from(stats.counters.num_global_reductions as u64),
         );
+
+        if !matches!(timing_detail, TimingDetail::Off) {
+            let (matvec_nanos, pc_apply_nanos, reduction_nanos) = solve_metrics_nanos(&stats);
+            let halo_nanos = if matches!(timing_detail, TimingDetail::High) {
+                // Reserved for high-detail split timings; left zero unless explicit
+                // matvec-internal profiling is enabled.
+                0u64
+            } else {
+                0u64
+            };
+            let known = matvec_nanos
+                .saturating_add(halo_nanos)
+                .saturating_add(pc_apply_nanos)
+                .saturating_add(reduction_nanos);
+            let other_nanos = solve_wall_nanos.saturating_sub(known);
+            let iters = stats.iterations.max(1) as f64;
+
+            let mut totals = serde_json::Map::new();
+            totals.insert(
+                "solve_wall".into(),
+                Value::from(solve_wall_nanos as f64 * 1e-9),
+            );
+            totals.insert("matvec".into(), Value::from(matvec_nanos as f64 * 1e-9));
+            totals.insert("halo".into(), Value::from(halo_nanos as f64 * 1e-9));
+            totals.insert("pc_apply".into(), Value::from(pc_apply_nanos as f64 * 1e-9));
+            totals.insert(
+                "global_reduction".into(),
+                Value::from(reduction_nanos as f64 * 1e-9),
+            );
+            totals.insert("other".into(), Value::from(other_nanos as f64 * 1e-9));
+
+            let mut per_iter = serde_json::Map::new();
+            per_iter.insert(
+                "matvec".into(),
+                Value::from(matvec_nanos as f64 * 1e-9 / iters),
+            );
+            per_iter.insert("halo".into(), Value::from(halo_nanos as f64 * 1e-9 / iters));
+            per_iter.insert(
+                "pc_apply".into(),
+                Value::from(pc_apply_nanos as f64 * 1e-9 / iters),
+            );
+            per_iter.insert(
+                "global_reduction".into(),
+                Value::from(reduction_nanos as f64 * 1e-9 / iters),
+            );
+            per_iter.insert(
+                "other".into(),
+                Value::from(other_nanos as f64 * 1e-9 / iters),
+            );
+
+            details.insert("timing_detail".into(), Value::from(timing_detail.as_str()));
+            details.insert("timing_totals_sec".into(), Value::Object(totals));
+            details.insert("timing_per_iter_avg_sec".into(), Value::Object(per_iter));
+            #[cfg(not(feature = "metrics"))]
+            details.insert(
+                "timing_note".into(),
+                Value::from(
+                    "build without `metrics`: matvec/pc_apply/global_reduction are zero-filled to keep CI overhead bounded",
+                ),
+            );
+        }
+
         details.insert("pc_dist_route_policy".into(), Value::from(route_policy));
         details.insert("pc_dist_selected_route".into(), Value::from(selected_route));
         details.insert("pc_dist_fallback_chain".into(), fallback_chain);
