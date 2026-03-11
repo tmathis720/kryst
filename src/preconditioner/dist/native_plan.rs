@@ -57,6 +57,130 @@ impl FromStr for DistRoutePolicy {
     }
 }
 
+/// Canonical route labels emitted by distributed route selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistRouteSelection {
+    DistCsrNativeBlockJacobi,
+    ConfiguredGlobal,
+    LocalAdapter,
+    RootGather,
+}
+
+impl DistRouteSelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DistCsrNativeBlockJacobi => "distcsr_native_block_jacobi",
+            Self::ConfiguredGlobal => "configured_global",
+            Self::LocalAdapter => "local_adapter",
+            Self::RootGather => "root_gather",
+        }
+    }
+}
+
+/// Structured reasons for why a route was accepted or rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistRouteDecisionReason {
+    DistCsrMissing,
+    RoutePolicyAdapted,
+    RoutePolicyRootGather,
+    ExplicitGlobalRequested,
+    LocalPcSupportsDistributed,
+    NativeLocalApplyUnavailable,
+    NativeRouteEligible,
+}
+
+impl DistRouteDecisionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DistCsrMissing => "distcsr_missing",
+            Self::RoutePolicyAdapted => "route_policy_adapted",
+            Self::RoutePolicyRootGather => "route_policy_root_gather",
+            Self::ExplicitGlobalRequested => "explicit_global_requested",
+            Self::LocalPcSupportsDistributed => "local_pc_supports_distributed",
+            Self::NativeLocalApplyUnavailable => "native_local_apply_unavailable",
+            Self::NativeRouteEligible => "native_route_eligible",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DistRouteDecision {
+    pub selected: DistRouteSelection,
+    pub accepted: Vec<DistRouteDecisionReason>,
+    pub rejected: Vec<DistRouteDecisionReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DistRouteResolveInput {
+    pub has_distcsr: bool,
+    pub explicit_global: bool,
+    pub native_global_candidate: bool,
+    pub route_policy: DistRoutePolicy,
+    pub local_only_pc: bool,
+    pub local_apply_mode: DistLocalApplyMode,
+}
+
+pub fn resolve_dist_route(input: DistRouteResolveInput) -> DistRouteDecision {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+
+    if !input.has_distcsr {
+        rejected.push(DistRouteDecisionReason::DistCsrMissing);
+    }
+
+    if input.route_policy == DistRoutePolicy::Adapted {
+        rejected.push(DistRouteDecisionReason::RoutePolicyAdapted);
+    }
+    if input.route_policy == DistRoutePolicy::RootGather {
+        rejected.push(DistRouteDecisionReason::RoutePolicyRootGather);
+    }
+    if input.explicit_global {
+        accepted.push(DistRouteDecisionReason::ExplicitGlobalRequested);
+    }
+    if !input.local_only_pc {
+        accepted.push(DistRouteDecisionReason::LocalPcSupportsDistributed);
+    }
+    if !input.local_apply_mode.is_distributed_native() {
+        rejected.push(DistRouteDecisionReason::NativeLocalApplyUnavailable);
+    }
+
+    let native_policy = !matches!(
+        input.route_policy,
+        DistRoutePolicy::Adapted | DistRoutePolicy::RootGather
+    );
+    let native_eligible = input.has_distcsr && input.native_global_candidate && native_policy;
+    if native_eligible {
+        accepted.push(DistRouteDecisionReason::NativeRouteEligible);
+        return DistRouteDecision {
+            selected: DistRouteSelection::DistCsrNativeBlockJacobi,
+            accepted,
+            rejected,
+        };
+    }
+
+    if input.explicit_global {
+        return DistRouteDecision {
+            selected: DistRouteSelection::ConfiguredGlobal,
+            accepted,
+            rejected,
+        };
+    }
+
+    if input.route_policy == DistRoutePolicy::RootGather {
+        return DistRouteDecision {
+            selected: DistRouteSelection::RootGather,
+            accepted,
+            rejected,
+        };
+    }
+
+    DistRouteDecision {
+        selected: DistRouteSelection::LocalAdapter,
+        accepted,
+        rejected,
+    }
+}
+
 /// Controls whether distributed block-Jacobi uses a pure local wrapper
 /// or a distributed-native apply path with neighborhood coupling exchange.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +242,10 @@ impl FromStr for DistLocalApplyMode {
 
 #[cfg(test)]
 mod tests {
-    use super::{DistLocalApplyMode, DistRouteFallbackReason};
+    use super::{
+        DistLocalApplyMode, DistRouteDecisionReason, DistRouteFallbackReason, DistRoutePolicy,
+        DistRouteResolveInput, DistRouteSelection, resolve_dist_route,
+    };
     use std::str::FromStr;
 
     #[test]
@@ -142,6 +269,56 @@ mod tests {
         assert_eq!(strict, DistLocalApplyMode::NativeStrict);
         assert!(strict.is_distributed_native());
         assert!(strict.requires_native());
+    }
+
+    #[test]
+    fn resolve_dist_route_native_and_policy_routes() {
+        let native = resolve_dist_route(DistRouteResolveInput {
+            has_distcsr: true,
+            explicit_global: false,
+            native_global_candidate: true,
+            route_policy: DistRoutePolicy::Native,
+            local_only_pc: true,
+            local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
+        });
+        assert_eq!(
+            native.selected,
+            DistRouteSelection::DistCsrNativeBlockJacobi
+        );
+        assert!(
+            native
+                .accepted
+                .contains(&DistRouteDecisionReason::NativeRouteEligible)
+        );
+
+        let adapted = resolve_dist_route(DistRouteResolveInput {
+            has_distcsr: true,
+            explicit_global: false,
+            native_global_candidate: true,
+            route_policy: DistRoutePolicy::Adapted,
+            local_only_pc: true,
+            local_apply_mode: DistLocalApplyMode::WrappedLocal,
+        });
+        assert_eq!(adapted.selected, DistRouteSelection::LocalAdapter);
+        assert!(
+            adapted
+                .rejected
+                .contains(&DistRouteDecisionReason::RoutePolicyAdapted)
+        );
+
+        let root = resolve_dist_route(DistRouteResolveInput {
+            has_distcsr: false,
+            explicit_global: false,
+            native_global_candidate: false,
+            route_policy: DistRoutePolicy::RootGather,
+            local_only_pc: true,
+            local_apply_mode: DistLocalApplyMode::WrappedLocal,
+        });
+        assert_eq!(root.selected, DistRouteSelection::RootGather);
+        assert!(
+            root.rejected
+                .contains(&DistRouteDecisionReason::RoutePolicyRootGather)
+        );
     }
 
     #[test]

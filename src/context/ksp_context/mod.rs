@@ -67,7 +67,10 @@ use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use crate::preconditioner::PcDistributedSupport;
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
-use crate::preconditioner::dist::{DistPcAdapter, DistPcBuilder, DistRoutePolicy, GlobalPcKind};
+use crate::preconditioner::dist::{
+    DistPcAdapter, DistPcBuilder, DistRouteDecisionReason, DistRoutePolicy, DistRouteResolveInput,
+    DistRouteSelection, GlobalPcKind, resolve_dist_route,
+};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{DistRouteFallbackReason, MpiPcOptions};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
@@ -3006,18 +3009,35 @@ impl KspContext {
 
         let explicit_global = pending.mpi_opts.global_pc != GlobalPcKind::None;
         let dist_op = pmat.as_any().downcast_ref::<DistCsrOp>();
-        let native_eligible = dist_op.is_some()
-            && matches!(
+        let decision = resolve_dist_route(DistRouteResolveInput {
+            has_distcsr: dist_op.is_some(),
+            explicit_global,
+            native_global_candidate: matches!(
                 pending.mpi_opts.global_pc,
                 GlobalPcKind::None | GlobalPcKind::BlockJacobi
-            )
-            && !matches!(
-                pending.mpi_opts.route_policy,
-                DistRoutePolicy::Adapted | DistRoutePolicy::RootGather
-            );
+            ),
+            route_policy: pending.mpi_opts.route_policy,
+            local_only_pc,
+            local_apply_mode: pending.mpi_opts.local_apply_mode,
+        });
+        let decision_reasons = {
+            let accepted = decision
+                .accepted
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let rejected = decision
+                .rejected
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("accept={accepted};reject={rejected}")
+        };
 
-        if native_eligible {
-            let dist_op = dist_op.expect("checked");
+        if decision.selected == DistRouteSelection::DistCsrNativeBlockJacobi {
+            let dist_op = dist_op.expect("resolver selected native route without DistCsrOp");
             let mut native_pending = pending.clone();
             native_pending.mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
             if !native_pending
@@ -3029,11 +3049,13 @@ impl KspContext {
                     crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
             }
             self.set_dist_route_selected(format!(
-                "distcsr_native_block_jacobi:{}",
+                "{}:{}:{}",
+                DistRouteSelection::DistCsrNativeBlockJacobi.as_str(),
                 native_pending
                     .mpi_opts
                     .local_apply_mode
-                    .communication_strategy_name()
+                    .communication_strategy_name(),
+                decision_reasons
             ));
             if !explicit_global {
                 self.push_dist_route_fallback(DistRouteFallbackReason::AutoPromotedFromLocal);
@@ -3059,7 +3081,7 @@ impl KspContext {
             }
         }
 
-        if explicit_global {
+        if decision.selected == DistRouteSelection::ConfiguredGlobal {
             let Some(dist_op) = dist_op else {
                 self.push_dist_route_fallback(DistRouteFallbackReason::MissingDistCsrOperator);
                 return Err(KError::InvalidInput(
@@ -3067,8 +3089,10 @@ impl KspContext {
                 ));
             };
             self.set_dist_route_selected(format!(
-                "configured_global_{:?}",
-                pending.mpi_opts.global_pc
+                "{}_{:?}:{}",
+                DistRouteSelection::ConfiguredGlobal.as_str(),
+                pending.mpi_opts.global_pc,
+                decision_reasons
             ));
             self.push_dist_route_fallback(DistRouteFallbackReason::ConfiguredGlobalFallback);
             let mut new_pc = self.build_mpi_global_pc(&pending, dist_op)?;
@@ -3090,14 +3114,25 @@ impl KspContext {
             return Ok(false);
         }
 
-        if pending.mpi_opts.route_policy == DistRoutePolicy::Adapted {
-            self.set_dist_route_selected("local_adapter".to_string());
+        if decision
+            .rejected
+            .contains(&DistRouteDecisionReason::RoutePolicyAdapted)
+        {
+            self.set_dist_route_selected(format!(
+                "{}:{}",
+                DistRouteSelection::LocalAdapter.as_str(),
+                decision_reasons
+            ));
             self.push_dist_route_fallback(DistRouteFallbackReason::AdapterOnlyPolicy);
             return Ok(false);
         }
 
-        if pending.mpi_opts.route_policy == DistRoutePolicy::RootGather {
-            self.set_dist_route_selected("root_gather".to_string());
+        if decision.selected == DistRouteSelection::RootGather {
+            self.set_dist_route_selected(format!(
+                "{}:{}",
+                DistRouteSelection::RootGather.as_str(),
+                decision_reasons
+            ));
             self.push_dist_route_fallback(DistRouteFallbackReason::RootGatherPolicy);
             return Ok(false);
         }
