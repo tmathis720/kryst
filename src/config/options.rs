@@ -4350,6 +4350,20 @@ mod old_tests {
         assert!((mpi_opts.ilutp_perm_tol - 0.2).abs() < 1e-12);
     }
 
+    #[cfg(feature = "backend-faer")]
+    #[test]
+    fn test_jacobi_cli_to_mpi_options() {
+        let mut opts = PcOptions::default();
+        opts.pc_global = Some("block_jacobi".to_string());
+        opts.pc_local = Some("jacobi".to_string());
+        opts.pc_dist_local_apply = Some("strict".to_string());
+
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        assert_eq!(mpi_opts.global_pc, GlobalPcKind::BlockJacobi);
+        assert_eq!(mpi_opts.local_pc, LocalPcKind::Jacobi);
+        assert_eq!(mpi_opts.local_apply_mode, DistLocalApplyMode::NativeStrict);
+    }
+
     #[test]
     fn test_prefixed_pc_options_isolation() {
         let args = vec![

@@ -384,7 +384,7 @@ pub static SPECS: &[Spec] = &[
         key: "pc_local",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "local PC for block Jacobi: ilu | ilut | ilutp | sor | chebyshev | fsai | spai",
+        doc: "local PC for block Jacobi: ilu | ilut | ilutp | jacobi | sor | chebyshev | fsai | spai",
     },
     Spec {
         flag: "-pc_dist_local_apply",

@@ -19,6 +19,8 @@ use crate::preconditioner::ilut::RowFilterPreconditioner;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::ilutp::Ilutp;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use crate::preconditioner::jacobi::Jacobi;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::legacy::Preconditioner as LegacyPreconditioner;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::preconditioner::sor::{MatSorType, SorPc};
@@ -167,6 +169,43 @@ fn maybe_native_plan(
         1.0,
         local_apply_mode,
     )?))
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn strict_native_unavailable(local_pc_name: &str) -> KError {
+    KError::InvalidInput(format!(
+        "pc_dist_local_apply=strict requested but pc_local={local_pc_name} only supports wrapped_local mode"
+    ))
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn build_obj_block_pc<L>(
+    dist_op: &DistCsrOp,
+    mut local_pc: L,
+    local_apply_mode: DistLocalApplyMode,
+    supports_native: bool,
+    local_pc_name: &str,
+) -> Result<BlockJacobiObjPc, KError>
+where
+    L: ObjPreconditioner + 'static,
+{
+    let local = Arc::new(dist_op.local_block_csr());
+    let op = CsrOp::new(local);
+    ObjPreconditioner::setup(&mut local_pc, &op)?;
+    let native_plan = if supports_native {
+        maybe_native_plan(dist_op, local_apply_mode, true, local_pc_name)?
+    } else if local_apply_mode.requires_native() {
+        return Err(strict_native_unavailable(local_pc_name));
+    } else {
+        None
+    };
+    Ok(BlockJacobiObjPc::new(
+        dist_op.comm(),
+        Box::new(local_pc),
+        dist_op.local_row_offset(),
+        dist_op.local_nrows(),
+        native_plan,
+    ))
 }
 
 fn owner_of(gcol: usize, row_part: &[usize]) -> usize {
@@ -403,64 +442,52 @@ pub fn build_block_jacobi_pc(
                     opts.conditioning.clone(),
                     opts.local_apply_mode,
                 )?),
-                LocalPcKind::Sor => {
-                    let mut pc = SorPc::new(1.0, 1, MatSorType::SYMMETRIC_SWEEP, 0.0);
+                LocalPcKind::Sor => Box::new(build_obj_block_pc(
+                    dist_op,
+                    SorPc::new(1.0, 1, MatSorType::SYMMETRIC_SWEEP, 0.0),
+                    opts.local_apply_mode,
+                    true,
+                    "sor",
+                )?),
+                LocalPcKind::Chebyshev => Box::new(build_obj_block_pc(
+                    dist_op,
+                    ChebyshevPc::new(2, 1e-2, 1.0),
+                    opts.local_apply_mode,
+                    true,
+                    "chebyshev",
+                )?),
+                LocalPcKind::Jacobi => {
+                    let mut jacobi = Jacobi::new();
                     let local = Arc::new(dist_op.local_block_csr());
                     let op = CsrOp::new(local);
-                    ObjPreconditioner::setup(&mut pc, &op)?;
-                    Box::new(BlockJacobiObjPc::new(
+                    ObjPreconditioner::setup(&mut jacobi, &op)?;
+                    Box::new(BlockJacobiLocalPc::new(
                         dist_op.comm(),
-                        Box::new(pc),
+                        jacobi,
                         dist_op.local_row_offset(),
-                        dist_op.local_nrows(),
-                        maybe_native_plan(dist_op, opts.local_apply_mode, true, "sor")?,
+                        maybe_native_plan(dist_op, opts.local_apply_mode, true, "jacobi")?,
                     ))
                 }
-                LocalPcKind::Chebyshev => {
-                    let mut pc = ChebyshevPc::new(2, 1e-2, 1.0);
-                    let local = Arc::new(dist_op.local_block_csr());
-                    let op = CsrOp::new(local);
-                    ObjPreconditioner::setup(&mut pc, &op)?;
-                    Box::new(BlockJacobiObjPc::new(
-                        dist_op.comm(),
-                        Box::new(pc),
-                        dist_op.local_row_offset(),
-                        dist_op.local_nrows(),
-                        maybe_native_plan(dist_op, opts.local_apply_mode, true, "chebyshev")?,
-                    ))
-                }
-                LocalPcKind::Fsai => {
-                    let mut pc = FsaiCsr::new_with_params(ApproxInvParams {
+                LocalPcKind::Fsai => Box::new(build_obj_block_pc(
+                    dist_op,
+                    FsaiCsr::new_with_params(ApproxInvParams {
                         kind: ApproxInvKind::FSAI,
                         ..ApproxInvParams::default()
-                    });
-                    let local = Arc::new(dist_op.local_block_csr());
-                    let op = CsrOp::new(local);
-                    ObjPreconditioner::setup(&mut pc, &op)?;
-                    Box::new(BlockJacobiObjPc::new(
-                        dist_op.comm(),
-                        Box::new(pc),
-                        dist_op.local_row_offset(),
-                        dist_op.local_nrows(),
-                        maybe_native_plan(dist_op, opts.local_apply_mode, false, "fsai")?,
-                    ))
-                }
-                LocalPcKind::Spai => {
-                    let mut pc = SpaiCsr::new_with_params(ApproxInvParams {
+                    }),
+                    opts.local_apply_mode,
+                    false,
+                    "fsai",
+                )?),
+                LocalPcKind::Spai => Box::new(build_obj_block_pc(
+                    dist_op,
+                    SpaiCsr::new_with_params(ApproxInvParams {
                         kind: ApproxInvKind::SPAI,
                         ..ApproxInvParams::default()
-                    });
-                    let local = Arc::new(dist_op.local_block_csr());
-                    let op = CsrOp::new(local);
-                    ObjPreconditioner::setup(&mut pc, &op)?;
-                    Box::new(BlockJacobiObjPc::new(
-                        dist_op.comm(),
-                        Box::new(pc),
-                        dist_op.local_row_offset(),
-                        dist_op.local_nrows(),
-                        maybe_native_plan(dist_op, opts.local_apply_mode, false, "spai")?,
-                    ))
-                }
+                    }),
+                    opts.local_apply_mode,
+                    false,
+                    "spai",
+                )?),
             };
             Ok(Some(wrapper))
         }
