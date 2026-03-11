@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "native_route": {
+    "target_selected": "distributed_native",
+    "selection_rate_min": 1.0,
+    "per_case_required": [
+      "poisson2d_g48_p4",
+      "poisson3d_20x16x12_p4",
+      "powerlaw_n4096_deg14_p4",
+      "blocksys_96x24_ov2_p4"
+    ]
+  },
+  "fallback": {
+    "frequency_max": 0.0,
+    "per_case_max_total": {
+      "poisson2d_g48_p4": 0,
+      "poisson3d_20x16x12_p4": 0,
+      "powerlaw_n4096_deg14_p4": 0,
+      "blocksys_96x24_ov2_p4": 0
+    }
+  }
+}

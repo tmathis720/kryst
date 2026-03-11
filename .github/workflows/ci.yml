@@ -121,3 +121,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features invariants --test context_smoke -- --nocapture
+
+  distcsr-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openmpi-bin libopenmpi-dev
+
+      - name: Run DistCSR benchmark replay
+        run: |
+          mpirun -n 4 --oversubscribe \
+            cargo run --bin distcsr_bench_runner --features mpi -- \
+              --fixtures benchmarks/distcsr/fixtures.json \
+              --expectations benchmarks/distcsr/expectations.json \
+              --output benchmarks/distcsr/artifacts/ci.json
+
+      - name: Enforce DistCSR route/fallback thresholds
+        run: |
+          python3 scripts/check_distcsr_thresholds.py \
+            --artifact benchmarks/distcsr/artifacts/ci.json \
+            --thresholds ci/distcsr_thresholds.json
+
+      - name: Upload DistCSR benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distcsr-benchmark-artifact
+          path: benchmarks/distcsr/artifacts/ci.json
