@@ -1,0 +1,442 @@
+use kryst::config::options::KspOptions;
+use kryst::context::ksp_context::{KspContext, SolverType};
+use kryst::matrix::utils::poisson_3d;
+use kryst::matrix::{CsrMatrix, DistCsrOp};
+use kryst::parallel::{NoComm, UniverseComm};
+use kryst::preconditioner::PcSide;
+use kryst::Comm;
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[cfg(feature = "mpi")]
+use kryst::parallel::MpiComm;
+
+#[derive(Debug, Deserialize)]
+struct FixturesManifest {
+    schema_version: u32,
+    cases: Vec<BenchCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BenchCase {
+    id: String,
+    matrix: MatrixSpec,
+    process_count: usize,
+    partition_seed: u64,
+    solver: SolverSpec,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MatrixSpec {
+    Poisson2d {
+        n: usize,
+    },
+    Poisson3d {
+        nx: usize,
+        ny: usize,
+        nz: usize,
+    },
+    PowerLaw {
+        n: usize,
+        avg_degree: usize,
+        seed: u64,
+    },
+    BlockSystem {
+        n_blocks: usize,
+        block_size: usize,
+        overlap: usize,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverSpec {
+    ksp_type: String,
+    pc_global: String,
+    pc_local: String,
+    pc_dist_local_apply: String,
+    rtol: f64,
+    maxits: usize,
+    restart: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectationsManifest {
+    schema_version: u32,
+    expectations: Vec<CaseExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CaseExpectation {
+    id: String,
+    iterations: BandUsize,
+    final_residual: BandF64,
+    route: RouteExpectation,
+}
+
+#[derive(Debug, Deserialize)]
+struct BandUsize {
+    min: usize,
+    max: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct BandF64 {
+    min: f64,
+    max: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RouteExpectation {
+    selected: String,
+    fallback_max: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct Artifact {
+    schema_version: u32,
+    cases: Vec<CaseArtifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct CaseArtifact {
+    id: String,
+    process_count: usize,
+    status: String,
+    details: BTreeMap<String, Value>,
+}
+
+fn bench_comm() -> UniverseComm {
+    #[cfg(feature = "mpi")]
+    {
+        UniverseComm::Mpi(Arc::new(MpiComm::new()))
+    }
+    #[cfg(not(feature = "mpi"))]
+    {
+        UniverseComm::NoComm(NoComm)
+    }
+}
+
+fn parse_args() -> (PathBuf, PathBuf, PathBuf) {
+    let mut fixtures = PathBuf::from("benchmarks/distcsr/fixtures.json");
+    let mut expectations = PathBuf::from("benchmarks/distcsr/expectations.json");
+    let mut output = PathBuf::from("benchmarks/distcsr/artifacts/latest.json");
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--fixtures" => fixtures = PathBuf::from(args.next().expect("missing fixtures path")),
+            "--expectations" => {
+                expectations = PathBuf::from(args.next().expect("missing expectations path"))
+            }
+            "--output" => output = PathBuf::from(args.next().expect("missing output path")),
+            other => panic!("unsupported argument: {other}"),
+        }
+    }
+    (fixtures, expectations, output)
+}
+
+fn build_part_prefix(n_global: usize, size: usize, seed: u64) -> Vec<usize> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let base = n_global / size;
+    let rem = n_global % size;
+    let mut chunks: Vec<usize> = (0..size).map(|r| base + usize::from(r < rem)).collect();
+    for _ in 0..(size * 3).max(1) {
+        let i = rng.gen_range(0..size);
+        let j = rng.gen_range(0..size);
+        if i != j && chunks[i] > 1 {
+            chunks[i] -= 1;
+            chunks[j] += 1;
+        }
+    }
+    let mut prefix = vec![0usize];
+    for c in chunks {
+        prefix.push(prefix.last().copied().unwrap_or(0) + c);
+    }
+    if let Some(last) = prefix.last_mut() {
+        *last = n_global;
+    }
+    prefix
+}
+
+fn slice_rows(a: &CsrMatrix<f64>, row_start: usize, n_local: usize) -> CsrMatrix<f64> {
+    let row_end = row_start + n_local;
+    let mut row_ptr = vec![0usize];
+    let mut col_idx = Vec::new();
+    let mut values = Vec::new();
+    for row in row_start..row_end {
+        let (cols, vals) = a.row(row);
+        col_idx.extend_from_slice(cols);
+        values.extend_from_slice(vals);
+        row_ptr.push(col_idx.len());
+    }
+    CsrMatrix::from_csr(n_local, a.ncols(), row_ptr, col_idx, values)
+}
+
+fn poisson2d_csr(n: usize) -> CsrMatrix<f64> {
+    let nn = n * n;
+    let mut row_ptr = vec![0usize];
+    let mut col_idx = Vec::with_capacity(5 * nn);
+    let mut vals = Vec::with_capacity(5 * nn);
+    for i in 0..n {
+        for j in 0..n {
+            let row = i * n + j;
+            let mut entries: [(usize, f64); 5] = [(usize::MAX, 0.0); 5];
+            let mut len = 0usize;
+            let mut diag = 0.0;
+            if j > 0 {
+                entries[len] = (row - 1, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            if j + 1 < n {
+                entries[len] = (row + 1, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            if i > 0 {
+                entries[len] = (row - n, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            if i + 1 < n {
+                entries[len] = (row + n, -1.0);
+                len += 1;
+                diag += 1.0;
+            }
+            entries[len] = (row, diag);
+            len += 1;
+            entries[..len].sort_unstable_by_key(|(c, _)| *c);
+            for k in 0..len {
+                col_idx.push(entries[k].0);
+                vals.push(entries[k].1);
+            }
+            row_ptr.push(col_idx.len());
+        }
+    }
+    CsrMatrix::from_csr(nn, nn, row_ptr, col_idx, vals)
+}
+
+fn powerlaw_like(n: usize, avg_degree: usize, seed: u64) -> CsrMatrix<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut row_ptr = vec![0usize];
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    for i in 0..n {
+        let base = rng.gen_range((avg_degree / 2).max(1)..=(avg_degree * 3 / 2).max(2));
+        let burst = if rng.r#gen::<f64>() < 0.05 {
+            rng.gen_range(avg_degree.max(1)..=(4 * avg_degree.max(1)))
+        } else {
+            0
+        };
+        let deg = (base + burst).min(n.saturating_sub(1)).max(1);
+        let mut set: BTreeSet<usize> = BTreeSet::new();
+        set.insert(i);
+        while set.len() < deg {
+            set.insert(rng.gen_range(0..n));
+        }
+        for &j in &set {
+            col_idx.push(j);
+            let mut v = 0.5 + rng.r#gen::<f64>();
+            if j != i && rng.r#gen::<f64>() < 0.2 {
+                v = -v;
+            }
+            vals.push(v);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
+fn block_system(n_blocks: usize, block_size: usize, overlap: usize) -> CsrMatrix<f64> {
+    let n = n_blocks * block_size;
+    let mut row_ptr = vec![0usize];
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    for b in 0..n_blocks {
+        let start = b * block_size;
+        let end = start + block_size;
+        for i in start..end {
+            if i > start {
+                col_idx.push(i - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(i);
+            vals.push(2.0);
+            if i + 1 < end {
+                col_idx.push(i + 1);
+                vals.push(-1.0);
+            }
+            if overlap > 0 && b + 1 < n_blocks {
+                let next_start = (b + 1) * block_size;
+                for k in 0..overlap.min(block_size) {
+                    col_idx.push(next_start + k);
+                    vals.push(-0.15);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+    }
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
+fn matrix_from_spec(spec: &MatrixSpec) -> CsrMatrix<f64> {
+    match spec {
+        MatrixSpec::Poisson2d { n } => poisson2d_csr(*n),
+        MatrixSpec::Poisson3d { nx, ny, nz } => poisson_3d(*nx, *ny, *nz),
+        MatrixSpec::PowerLaw {
+            n,
+            avg_degree,
+            seed,
+        } => powerlaw_like(*n, *avg_degree, *seed),
+        MatrixSpec::BlockSystem {
+            n_blocks,
+            block_size,
+            overlap,
+        } => block_system(*n_blocks, *block_size, *overlap),
+    }
+}
+
+fn fallback_total(view: &BTreeMap<String, Value>) -> usize {
+    view.get("pc_dist_fallback_counters")
+        .and_then(Value::as_object)
+        .map(|o| o.values().filter_map(Value::as_u64).sum::<u64>() as usize)
+        .unwrap_or(0)
+}
+
+fn main() {
+    let (fixtures_path, expectations_path, output_path) = parse_args();
+    let fixtures: FixturesManifest =
+        serde_json::from_str(&fs::read_to_string(fixtures_path).expect("read fixtures"))
+            .expect("parse fixtures");
+    let expectations: ExpectationsManifest =
+        serde_json::from_str(&fs::read_to_string(expectations_path).expect("read expectations"))
+            .expect("parse expectations");
+    assert_eq!(fixtures.schema_version, 1);
+    assert_eq!(expectations.schema_version, 1);
+    let expected_by_id: BTreeMap<String, CaseExpectation> = expectations
+        .expectations
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
+    let comm = bench_comm();
+    let mut artifact = Artifact {
+        schema_version: 1,
+        cases: Vec::new(),
+    };
+
+    for case in fixtures.cases {
+        let mut details = BTreeMap::new();
+        details.insert(
+            "required_process_count".into(),
+            Value::from(case.process_count as u64),
+        );
+        details.insert(
+            "actual_process_count".into(),
+            Value::from(comm.size() as u64),
+        );
+
+        if case.process_count != comm.size() {
+            details.insert(
+                "skip_reason".into(),
+                Value::from("process_count_mismatch_for_replay"),
+            );
+            artifact.cases.push(CaseArtifact {
+                id: case.id,
+                process_count: comm.size(),
+                status: "skipped".into(),
+                details,
+            });
+            continue;
+        }
+
+        let expectation = expected_by_id
+            .get(&case.id)
+            .expect("missing case expectation");
+        let a_global = matrix_from_spec(&case.matrix);
+        let n_global = a_global.nrows();
+        let part_prefix = build_part_prefix(n_global, comm.size(), case.partition_seed);
+        let row_start = part_prefix[comm.rank()];
+        let n_local = part_prefix[comm.rank() + 1] - row_start;
+        let a_local = slice_rows(&a_global, row_start, n_local);
+        let dist =
+            DistCsrOp::from_local_rows(n_global, row_start, &a_local, &part_prefix, comm.clone())
+                .expect("dist csr build");
+
+        let opts = KspOptions::from_args(&[
+            "-ksp_type",
+            &case.solver.ksp_type,
+            "-pc_global",
+            &case.solver.pc_global,
+            "-pc_local",
+            &case.solver.pc_local,
+            "-pc_dist_local_apply",
+            &case.solver.pc_dist_local_apply,
+            "-ksp_rtol",
+            &case.solver.rtol.to_string(),
+            "-ksp_maxits",
+            &case.solver.maxits.to_string(),
+        ])
+        .expect("ksp options parse");
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).expect("set gmres");
+        ksp.set_pc_type_from_str("block_jacobi")
+            .expect("set block_jacobi");
+        ksp.set_pc_side(PcSide::Left);
+        ksp.set_restart(case.solver.restart);
+        ksp.set_from_options(&opts).expect("set options");
+        ksp.set_operators(Arc::new(dist), None);
+
+        let b = vec![1.0; n_local];
+        let mut x = vec![0.0; n_local];
+        let stats = ksp.solve(&b, &mut x).expect("solve");
+        let view = ksp.view();
+
+        let selected_route = view
+            .solver_config
+            .get("pc_dist_selected_route")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let fallback_count = fallback_total(&view.solver_config);
+        let residual = stats.final_residual;
+        let pass = (expectation.iterations.min..=expectation.iterations.max)
+            .contains(&stats.iterations)
+            && residual >= expectation.final_residual.min
+            && residual <= expectation.final_residual.max
+            && selected_route == expectation.route.selected
+            && fallback_count <= expectation.route.fallback_max;
+
+        details.insert("iterations".into(), Value::from(stats.iterations as u64));
+        details.insert("final_residual".into(), Value::from(residual));
+        details.insert("reason".into(), Value::from(format!("{:?}", stats.reason)));
+        details.insert(
+            "num_global_reductions".into(),
+            Value::from(stats.counters.num_global_reductions as u64),
+        );
+        details.insert("selected_route".into(), Value::from(selected_route));
+        details.insert("fallback_total".into(), Value::from(fallback_count as u64));
+
+        artifact.cases.push(CaseArtifact {
+            id: case.id,
+            process_count: comm.size(),
+            status: if pass { "pass" } else { "fail" }.into(),
+            details,
+        });
+    }
+
+    artifact.cases.sort_by(|a, b| a.id.cmp(&b.id));
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).expect("create output dir");
+    }
+    fs::write(
+        output_path,
+        serde_json::to_string_pretty(&artifact).expect("serialize artifact"),
+    )
+    .expect("write artifact");
+}

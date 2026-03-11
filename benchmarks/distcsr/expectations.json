@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "expectations": [
+    {
+      "id": "poisson2d_g48_p4",
+      "iterations": { "min": 5, "max": 180 },
+      "final_residual": { "min": 0.0, "max": 1e-6 },
+      "route": { "selected": "distributed_native", "fallback_max": 0 }
+    },
+    {
+      "id": "poisson3d_20x16x12_p4",
+      "iterations": { "min": 5, "max": 200 },
+      "final_residual": { "min": 0.0, "max": 1e-6 },
+      "route": { "selected": "distributed_native", "fallback_max": 0 }
+    },
+    {
+      "id": "powerlaw_n4096_deg14_p4",
+      "iterations": { "min": 5, "max": 240 },
+      "final_residual": { "min": 0.0, "max": 1e-5 },
+      "route": { "selected": "distributed_native", "fallback_max": 0 }
+    },
+    {
+      "id": "blocksys_96x24_ov2_p4",
+      "iterations": { "min": 5, "max": 210 },
+      "final_residual": { "min": 0.0, "max": 1e-6 },
+      "route": { "selected": "distributed_native", "fallback_max": 0 }
+    }
+  ]
+}
