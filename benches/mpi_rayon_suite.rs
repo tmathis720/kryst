@@ -7,6 +7,7 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 use kryst::parallel::{Comm, NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
+use serde_json::Value;
 use std::sync::Arc;
 
 #[cfg(feature = "mpi")]
@@ -91,17 +92,29 @@ fn build_case(
     (ksp, b, x)
 }
 
+fn dist_fallback_total(ksp: &KspContext) -> usize {
+    let view = ksp.view();
+    let Some(Value::Object(obj)) = view.solver_config.get("pc_dist_fallback_counters") else {
+        return 0;
+    };
+    obj.values().filter_map(|v| v.as_u64()).sum::<u64>() as usize
+}
+
 fn run_once(
     grid: usize,
     pc_type: &str,
     comm: &UniverseComm,
     threads: Option<usize>,
-) -> (std::time::Duration, usize) {
+) -> (std::time::Duration, usize, usize) {
     let (mut ksp, b, mut x) = build_case(grid, pc_type, comm, threads);
     x.fill(0.0);
     let start = std::time::Instant::now();
     let stats = ksp.solve(&b, &mut x).unwrap();
-    (start.elapsed(), stats.counters.num_global_reductions)
+    (
+        start.elapsed(),
+        stats.counters.num_global_reductions,
+        dist_fallback_total(&ksp),
+    )
 }
 
 fn check_reduction_budget(tag: &str, reductions: usize, n_local: usize) {
@@ -132,12 +145,13 @@ fn bench_suite(c: &mut Criterion) {
     for pc_type in ["ilu", "asm"] {
         let mut group = c.benchmark_group(format!("dist_{pc_type}"));
         for (label, grid) in sizes {
-            let (base_time, base_red) = run_once(grid, pc_type, &comm, Some(1));
-            let (cfg_time, cfg_red) = run_once(grid, pc_type, &comm, threads);
+            let (base_time, base_red, base_fb) = run_once(grid, pc_type, &comm, Some(1));
+            let (cfg_time, cfg_red, cfg_fb) = run_once(grid, pc_type, &comm, threads);
             println!(
-                "{pc_type}:{label}:g{grid} delta => reductions={} runtime_ms={:.3} (threads={:?})",
+                "{pc_type}:{label}:g{grid} delta => reductions={} runtime_ms={:.3} fallback_delta={} (threads={:?})",
                 base_red as isize - cfg_red as isize,
                 (base_time.as_secs_f64() - cfg_time.as_secs_f64()) * 1.0e3,
+                base_fb as isize - cfg_fb as isize,
                 threads
             );
 

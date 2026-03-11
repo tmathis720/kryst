@@ -12,6 +12,30 @@ pub enum DistRoutePolicy {
     RootGather,
 }
 
+/// Structured fallback reasons for distributed route selection diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DistRouteFallbackReason {
+    AutoPromotedFromLocal,
+    NativeSetupFailed,
+    ConfiguredGlobalFallback,
+    AdapterOnlyPolicy,
+    RootGatherPolicy,
+    MissingDistCsrOperator,
+}
+
+impl DistRouteFallbackReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoPromotedFromLocal => "auto_promoted_from_local",
+            Self::NativeSetupFailed => "native_setup_failed",
+            Self::ConfiguredGlobalFallback => "configured_global_fallback",
+            Self::AdapterOnlyPolicy => "adapter_only_policy",
+            Self::RootGatherPolicy => "root_gather_policy",
+            Self::MissingDistCsrOperator => "missing_distcsr_operator",
+        }
+    }
+}
+
 impl Default for DistRoutePolicy {
     fn default() -> Self {
         Self::Native
@@ -94,7 +118,7 @@ impl FromStr for DistLocalApplyMode {
 
 #[cfg(test)]
 mod tests {
-    use super::DistLocalApplyMode;
+    use super::{DistLocalApplyMode, DistRouteFallbackReason};
     use std::str::FromStr;
 
     #[test]
@@ -118,5 +142,17 @@ mod tests {
         assert_eq!(strict, DistLocalApplyMode::NativeStrict);
         assert!(strict.is_distributed_native());
         assert!(strict.requires_native());
+    }
+
+    #[test]
+    fn fallback_reason_keys_are_stable() {
+        assert_eq!(
+            DistRouteFallbackReason::AutoPromotedFromLocal.as_str(),
+            "auto_promoted_from_local"
+        );
+        assert_eq!(
+            DistRouteFallbackReason::NativeSetupFailed.as_str(),
+            "native_setup_failed"
+        );
     }
 }

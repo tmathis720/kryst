@@ -8,7 +8,7 @@ mod coarse;
 mod native_plan;
 
 pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
-pub use native_plan::{DistLocalApplyMode, DistRoutePolicy};
+pub use native_plan::{DistLocalApplyMode, DistRouteFallbackReason, DistRoutePolicy};
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
