@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "poisson2d_g48_p4",
+      "matrix": { "kind": "poisson2d", "n": 48 },
+      "process_count": 4,
+      "partition_seed": 4242,
+      "solver": {
+        "ksp_type": "gmres",
+        "pc_global": "block_jacobi",
+        "pc_local": "ilutp",
+        "pc_dist_local_apply": "distributed_native",
+        "rtol": 1e-8,
+        "maxits": 220,
+        "restart": 40
+      }
+    },
+    {
+      "id": "poisson3d_20x16x12_p4",
+      "matrix": { "kind": "poisson3d", "nx": 20, "ny": 16, "nz": 12 },
+      "process_count": 4,
+      "partition_seed": 1717,
+      "solver": {
+        "ksp_type": "gmres",
+        "pc_global": "block_jacobi",
+        "pc_local": "sor",
+        "pc_dist_local_apply": "distributed_native",
+        "rtol": 1e-8,
+        "maxits": 240,
+        "restart": 50
+      }
+    },
+    {
+      "id": "powerlaw_n4096_deg14_p4",
+      "matrix": { "kind": "power_law", "n": 4096, "avg_degree": 14, "seed": 918273 },
+      "process_count": 4,
+      "partition_seed": 31337,
+      "solver": {
+        "ksp_type": "gmres",
+        "pc_global": "block_jacobi",
+        "pc_local": "jacobi",
+        "pc_dist_local_apply": "distributed_native",
+        "rtol": 1e-8,
+        "maxits": 260,
+        "restart": 50
+      }
+    },
+    {
+      "id": "blocksys_96x24_ov2_p4",
+      "matrix": { "kind": "block_system", "n_blocks": 96, "block_size": 24, "overlap": 2 },
+      "process_count": 4,
+      "partition_seed": 9001,
+      "solver": {
+        "ksp_type": "gmres",
+        "pc_global": "block_jacobi",
+        "pc_local": "chebyshev",
+        "pc_dist_local_apply": "distributed_native",
+        "rtol": 1e-8,
+        "maxits": 240,
+        "restart": 40
+      }
+    }
+  ]
+}
