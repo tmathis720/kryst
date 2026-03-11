@@ -421,6 +421,17 @@ struct DistRouteDiagnosticsState {
     fallback_chain: Vec<String>,
     fallback_reason: Option<String>,
     fallback_counters: BTreeMap<String, usize>,
+    preflight: Option<DistRoutePreflightState>,
+}
+
+#[derive(Clone, Debug)]
+#[cfg(feature = "backend-faer")]
+struct DistRoutePreflightState {
+    probe_key: String,
+    outcome: String,
+    reason_codes: Vec<String>,
+    native_ready: bool,
+    cached_hits: usize,
 }
 
 fn insert_value<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, value: T) {
@@ -1616,6 +1627,28 @@ impl KspContext {
             if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                 insert_value(&mut solver_config, "pc_dist_fallback_reason", reason);
             }
+            if let Some(preflight) = self.dist_route_diag.preflight.as_ref() {
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_preflight_outcome",
+                    preflight.outcome.clone(),
+                );
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_preflight_reason_codes",
+                    preflight.reason_codes.clone(),
+                );
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_preflight_native_ready",
+                    preflight.native_ready,
+                );
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_preflight_cached_hits",
+                    preflight.cached_hits,
+                );
+            }
         }
 
         let pc = self
@@ -1647,6 +1680,28 @@ impl KspContext {
                     );
                     if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                         insert_value(&mut diag.config, "pc_dist_fallback_reason", reason);
+                    }
+                    if let Some(preflight) = self.dist_route_diag.preflight.as_ref() {
+                        insert_value(
+                            &mut diag.config,
+                            "pc_dist_preflight_outcome",
+                            preflight.outcome.clone(),
+                        );
+                        insert_value(
+                            &mut diag.config,
+                            "pc_dist_preflight_reason_codes",
+                            preflight.reason_codes.clone(),
+                        );
+                        insert_value(
+                            &mut diag.config,
+                            "pc_dist_preflight_native_ready",
+                            preflight.native_ready,
+                        );
+                        insert_value(
+                            &mut diag.config,
+                            "pc_dist_preflight_cached_hits",
+                            preflight.cached_hits,
+                        );
                     }
                 }
                 Box::new(diag)
@@ -1682,6 +1737,28 @@ impl KspContext {
                             );
                             if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                                 insert_value(&mut diag.config, "pc_dist_fallback_reason", reason);
+                            }
+                            if let Some(preflight) = self.dist_route_diag.preflight.as_ref() {
+                                insert_value(
+                                    &mut diag.config,
+                                    "pc_dist_preflight_outcome",
+                                    preflight.outcome.clone(),
+                                );
+                                insert_value(
+                                    &mut diag.config,
+                                    "pc_dist_preflight_reason_codes",
+                                    preflight.reason_codes.clone(),
+                                );
+                                insert_value(
+                                    &mut diag.config,
+                                    "pc_dist_preflight_native_ready",
+                                    preflight.native_ready,
+                                );
+                                insert_value(
+                                    &mut diag.config,
+                                    "pc_dist_preflight_cached_hits",
+                                    preflight.cached_hits,
+                                );
                             }
                         }
                         diag
@@ -2955,6 +3032,50 @@ impl KspContext {
     }
 
     #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+    fn dist_preflight_reasons(
+        &self,
+        pmat: &Arc<dyn LinOp<S = S>>,
+        pending: &PendingMpiPc,
+        dist_op: Option<&DistCsrOp>,
+        local_only_pc: bool,
+    ) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let comm = pmat.comm();
+        let layout_ok = pmat.dist_layout().is_some() || dist_op.is_some();
+        if !layout_ok {
+            reasons.push("layout_incomplete".to_string());
+        }
+        if comm.size() <= 1 {
+            reasons.push("communicator_not_distributed".to_string());
+        }
+        if pending.mpi_opts.local_apply_mode.is_distributed_native() && dist_op.is_none() {
+            reasons.push("halo_not_ready".to_string());
+        }
+        if local_only_pc
+            && pending.mpi_opts.global_pc == GlobalPcKind::None
+            && pending.mpi_opts.route_policy == DistRoutePolicy::Adapted
+        {
+            reasons.push("pc_global_local_incompatible".to_string());
+        }
+        reasons
+    }
+
+    #[cfg(feature = "backend-faer")]
+    fn maybe_reuse_dist_preflight(&mut self, probe_key: &str) -> Option<DistRoutePreflightState> {
+        let state = self.dist_route_diag.preflight.as_mut()?;
+        if state.probe_key != probe_key {
+            return None;
+        }
+        state.cached_hits = state.cached_hits.saturating_add(1);
+        Some(state.clone())
+    }
+
+    #[cfg(feature = "backend-faer")]
+    fn store_dist_preflight(&mut self, state: DistRoutePreflightState) {
+        self.dist_route_diag.preflight = Some(state);
+    }
+
+    #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
     fn build_mpi_global_pc(
         &self,
         pending: &PendingMpiPc,
@@ -3009,6 +3130,41 @@ impl KspContext {
 
         let explicit_global = pending.mpi_opts.global_pc != GlobalPcKind::None;
         let dist_op = pmat.as_any().downcast_ref::<DistCsrOp>();
+        let preflight_probe_key = format!(
+            "comm={}#size={}#distcsr={}#layout={}#global={:?}#local={:?}#apply={}#route={:?}#local_only={}",
+            pmat.comm().id(),
+            pmat.comm().size(),
+            dist_op.is_some(),
+            pmat.dist_layout().is_some(),
+            pending.mpi_opts.global_pc,
+            pending.mpi_opts.local_pc,
+            pending
+                .mpi_opts
+                .local_apply_mode
+                .communication_strategy_name(),
+            pending.mpi_opts.route_policy,
+            local_only_pc,
+        );
+        let mut preflight_cached = false;
+        let preflight = if let Some(cached) = self.maybe_reuse_dist_preflight(&preflight_probe_key)
+        {
+            preflight_cached = true;
+            cached
+        } else {
+            let reason_codes = self.dist_preflight_reasons(&pmat, &pending, dist_op, local_only_pc);
+            let native_ready = reason_codes.is_empty();
+            let outcome = if native_ready { "passed" } else { "rejected" }.to_string();
+            let state = DistRoutePreflightState {
+                probe_key: preflight_probe_key.clone(),
+                outcome,
+                reason_codes,
+                native_ready,
+                cached_hits: 0,
+            };
+            self.store_dist_preflight(state.clone());
+            state
+        };
+
         let decision = resolve_dist_route(DistRouteResolveInput {
             has_distcsr: dist_op.is_some(),
             explicit_global,
@@ -3037,46 +3193,64 @@ impl KspContext {
         };
 
         if decision.selected == DistRouteSelection::DistCsrNativeBlockJacobi {
-            let dist_op = dist_op.expect("resolver selected native route without DistCsrOp");
-            let mut native_pending = pending.clone();
-            native_pending.mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
-            if !native_pending
-                .mpi_opts
-                .local_apply_mode
-                .is_distributed_native()
-            {
-                native_pending.mpi_opts.local_apply_mode =
-                    crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
-            }
-            self.set_dist_route_selected(format!(
-                "{}:{}:{}",
-                DistRouteSelection::DistCsrNativeBlockJacobi.as_str(),
-                native_pending
+            if !preflight.native_ready {
+                let reasons = if preflight.reason_codes.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    preflight.reason_codes.join(",")
+                };
+                self.set_dist_route_selected(format!(
+                    "{}:preflight_rejected:{}:{}",
+                    DistRouteSelection::DistCsrNativeBlockJacobi.as_str(),
+                    reasons,
+                    decision_reasons
+                ));
+                self.push_dist_route_fallback(DistRouteFallbackReason::NativeSetupFailed);
+                self.set_dist_route_fallback_reason(format!(
+                    "native preflight rejected: {reasons}"
+                ));
+            } else {
+                let dist_op = dist_op.expect("resolver selected native route without DistCsrOp");
+                let mut native_pending = pending.clone();
+                native_pending.mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
+                if !native_pending
                     .mpi_opts
                     .local_apply_mode
-                    .communication_strategy_name(),
-                decision_reasons
-            ));
-            if !explicit_global {
-                self.push_dist_route_fallback(DistRouteFallbackReason::AutoPromotedFromLocal);
-            }
-            let mut new_pc = self.build_mpi_global_pc(&native_pending, dist_op)?;
-            let want = new_pc.required_format();
-            let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
-            let pmat_view = materialize(pmat.clone(), want, tol)?;
-            match new_pc.setup(pmat_view.as_ref()) {
-                Ok(()) => {
-                    self.pc = Some(new_pc);
-                    self.last_pc_sid = Some(sid);
-                    self.last_pc_vid = Some(vid);
-                    return Ok(true);
+                    .is_distributed_native()
+                {
+                    native_pending.mpi_opts.local_apply_mode =
+                        crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
                 }
-                Err(err) => {
-                    self.push_dist_route_fallback(DistRouteFallbackReason::NativeSetupFailed);
-                    self.set_dist_route_fallback_reason(err.to_string());
-                    log::warn!(
-                        "Native distributed preconditioner setup failed, enabling fallback chain: {err}"
-                    );
+                self.set_dist_route_selected(format!(
+                    "{}:{}:{}",
+                    DistRouteSelection::DistCsrNativeBlockJacobi.as_str(),
+                    native_pending
+                        .mpi_opts
+                        .local_apply_mode
+                        .communication_strategy_name(),
+                    decision_reasons
+                ));
+                if !explicit_global {
+                    self.push_dist_route_fallback(DistRouteFallbackReason::AutoPromotedFromLocal);
+                }
+                let mut new_pc = self.build_mpi_global_pc(&native_pending, dist_op)?;
+                let want = new_pc.required_format();
+                let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
+                let pmat_view = materialize(pmat.clone(), want, tol)?;
+                match new_pc.setup(pmat_view.as_ref()) {
+                    Ok(()) => {
+                        self.pc = Some(new_pc);
+                        self.last_pc_sid = Some(sid);
+                        self.last_pc_vid = Some(vid);
+                        return Ok(true);
+                    }
+                    Err(err) => {
+                        self.push_dist_route_fallback(DistRouteFallbackReason::NativeSetupFailed);
+                        self.set_dist_route_fallback_reason(err.to_string());
+                        log::warn!(
+                            "Native distributed preconditioner setup failed, enabling fallback chain: {err}"
+                        );
+                    }
                 }
             }
         }
@@ -3108,6 +3282,14 @@ impl KspContext {
             self.last_pc_sid = Some(sid);
             self.last_pc_vid = Some(vid);
             return Ok(true);
+        }
+
+        if preflight_cached {
+            log::debug!(
+                "Reused cached distributed preflight outcome={} reasons={:?}",
+                preflight.outcome,
+                preflight.reason_codes
+            );
         }
 
         if !local_only_pc {

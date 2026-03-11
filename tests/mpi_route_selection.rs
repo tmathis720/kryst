@@ -204,3 +204,42 @@ fn mpi_gamg_route_hint_accepts_explicit_choice() {
         "GAMG with explicit coarse route hint should converge, got {reason:?}"
     );
 }
+
+#[test]
+fn mpi_route_diagnostics_include_preflight_metadata() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    if comm.size() <= 1 {
+        return;
+    }
+    let n_per = 4;
+    let dist = Arc::new(make_dist_poisson(&comm, n_per));
+
+    let mut ksp = KspContext::new();
+    let ksp_opts = KspOptions {
+        ksp_type: Some("gmres".to_string()),
+        maxits: Some(20),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("mg".to_string()),
+        pc_global: Some("block_jacobi".to_string()),
+        pc_local: Some("ilu".to_string()),
+        ..Default::default()
+    };
+    ksp.set_type(SolverType::Gmres).expect("set gmres");
+    ksp.set_operators(dist, None);
+    ksp.set_from_all_options(&ksp_opts, &pc_opts)
+        .expect("set options");
+    ksp.setup().expect("setup");
+
+    let diag = ksp.view();
+    assert!(diag.solver_config.contains_key("pc_dist_preflight_outcome"));
+    assert!(
+        diag.solver_config
+            .contains_key("pc_dist_preflight_reason_codes")
+    );
+    assert!(
+        diag.solver_config
+            .contains_key("pc_dist_preflight_native_ready")
+    );
+}
