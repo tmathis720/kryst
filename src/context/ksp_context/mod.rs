@@ -3129,6 +3129,7 @@ impl KspContext {
         };
 
         let explicit_global = pending.mpi_opts.global_pc != GlobalPcKind::None;
+        let strict_local_apply = pending.mpi_opts.local_apply_mode.requires_native();
         let dist_op = pmat.as_any().downcast_ref::<DistCsrOp>();
         let preflight_probe_key = format!(
             "comm={}#size={}#distcsr={}#layout={}#global={:?}#local={:?}#apply={}#route={:?}#local_only={}",
@@ -3209,6 +3210,11 @@ impl KspContext {
                 self.set_dist_route_fallback_reason(format!(
                     "native preflight rejected: {reasons}"
                 ));
+                if strict_local_apply {
+                    return Err(KError::InvalidInput(format!(
+                        "pc_dist_local_apply=strict requires native DistCsr apply readiness; preflight rejected: {reasons}"
+                    )));
+                }
             } else {
                 let dist_op = dist_op.expect("resolver selected native route without DistCsrOp");
                 let mut native_pending = pending.clone();
@@ -3218,8 +3224,9 @@ impl KspContext {
                     .local_apply_mode
                     .is_distributed_native()
                 {
-                    native_pending.mpi_opts.local_apply_mode =
-                        crate::preconditioner::dist::DistLocalApplyMode::NativeLocalHalo;
+                    return Err(KError::InvalidInput(
+                        "native DistCsr route selected with non-native local apply mode".into(),
+                    ));
                 }
                 self.set_dist_route_selected(format!(
                     "{}:{}:{}",
@@ -3247,6 +3254,11 @@ impl KspContext {
                     Err(err) => {
                         self.push_dist_route_fallback(DistRouteFallbackReason::NativeSetupFailed);
                         self.set_dist_route_fallback_reason(err.to_string());
+                        if strict_local_apply {
+                            return Err(KError::InvalidInput(format!(
+                                "pc_dist_local_apply=strict requires native DistCsr apply setup, but setup failed: {err}"
+                            )));
+                        }
                         log::warn!(
                             "Native distributed preconditioner setup failed, enabling fallback chain: {err}"
                         );
@@ -3306,6 +3318,11 @@ impl KspContext {
                 decision_reasons
             ));
             self.push_dist_route_fallback(DistRouteFallbackReason::AdapterOnlyPolicy);
+            if strict_local_apply {
+                return Err(KError::InvalidInput(
+                    "pc_dist_local_apply=strict forbids local adapter fallback; use a native DistCsr route".into(),
+                ));
+            }
             return Ok(false);
         }
 
@@ -3316,6 +3333,11 @@ impl KspContext {
                 decision_reasons
             ));
             self.push_dist_route_fallback(DistRouteFallbackReason::RootGatherPolicy);
+            if strict_local_apply {
+                return Err(KError::InvalidInput(
+                    "pc_dist_local_apply=strict forbids root-gather fallback; use a native DistCsr route".into(),
+                ));
+            }
             return Ok(false);
         }
 
