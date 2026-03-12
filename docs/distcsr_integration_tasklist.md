@@ -67,12 +67,16 @@ This task list targets stronger use of fast distributed paths in Krylov solves a
 - [ ] Add a machine-readable “effective distributed config” section in solver view output.
 - [ ] Standardize terminology (`native distributed`, `adapted local wrapper`, `gather route`) across docs and logs.
 
-## 9) Rollout plan
+## 9) Rollout tracker (Phase 1–4)
 
-- [ ] Phase 1: instrumentation + route diagnostics + benchmark baselines.
-- [ ] Phase 2: halo and apply fast-path performance work.
-- [ ] Phase 3: solver reduction optimizations + robustness matrix completion.
-- [ ] Phase 4: defaults tuning (prefer native aggressively where safe) and deprecate weak adapter-only patterns.
+Use the DistCsr scoreboard as release/merge criteria for integration changes.
+
+| Phase | Deliverables | Measurable gate | Scoreboard evidence |
+|---|---|---|---|
+| 1. Instrumentation & diagnostics | Benchmark fixture set, route/fallback telemetry, timing categories exported | 100% fixture cases emit route + fallback fields and timing category keys | `details.pc_dist_selected_route`, `details.fallback_total`, timing keys in `benchmarks/distcsr/artifacts/latest.json` |
+| 2. Performance fast-path work | Halo/apply fast-path optimizations with baseline comparison payload | Median end-to-end speedup ≥ 1.20x vs recorded baseline | `performance.speedup_min` and per-case checks in `ci/distcsr_thresholds.json` |
+| 3. Robustness completion | Correctness matrix + fallback behavior coverage + failure diagnostics | Convergence non-regression bands hold and fallback diagnostics are complete whenever fallback happens | `convergence.*` and `fallback_diagnostics.*` checks in `scripts/check_distcsr_thresholds.py` |
+| 4. Default tuning readiness | Native route made default where safe, adapter path kept explicit fallback | Native-route default rate ≥ 95% and fallback frequency ≤ 5% on supported fixture set | `native_route.selection_rate_min` and `fallback.frequency_max` checks |
 
 ## 10) Success criteria (exit checks)
 
@@ -80,3 +84,19 @@ This task list targets stronger use of fast distributed paths in Krylov solves a
 - [ ] ≥20% end-to-end speedup on medium/large MPI cases versus current baseline for representative solver+PC combos.
 - [ ] No regressions in convergence quality versus baseline within defined tolerance bands.
 - [ ] Fallbacks are explicit, rare, and diagnosable from one solver-view snapshot.
+
+## 11) Scoreboard automation and merge policy
+
+Run the scoreboard gate on every DistCsr integration PR and release branch before merge:
+
+```bash
+python3 scripts/check_distcsr_thresholds.py \
+  --artifact benchmarks/distcsr/artifacts/latest.json \
+  --thresholds ci/distcsr_thresholds.json
+```
+
+Merge/release policy:
+
+- **Required pass**: all configured gates in `ci/distcsr_thresholds.json` (native-route rate, fallback rate, speedup minimum, convergence bands, fallback diagnostics).
+- **Required artifact content**: benchmark artifact must include baseline timing + baseline convergence fields used by the checker (`baseline_*` keys).
+- **No manual override for red gates** without explicit sign-off and updated thresholds reviewed in the same change.

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "native_route": {
     "target_selected": "distributed_native",
-    "selection_rate_min": 1.0,
+    "selection_rate_min": 0.95,
     "per_case_required": [
       "poisson2d_g48_p4",
       "poisson3d_20x16x12_p4",
@@ -11,12 +11,35 @@
     ]
   },
   "fallback": {
-    "frequency_max": 0.0,
+    "frequency_max": 0.05,
     "per_case_max_total": {
       "poisson2d_g48_p4": 0,
       "poisson3d_20x16x12_p4": 0,
       "powerlaw_n4096_deg14_p4": 0,
       "blocksys_96x24_ov2_p4": 0
     }
+  },
+  "performance": {
+    "speedup_min": 1.20,
+    "per_case_speedup_min": {},
+    "current_time_keys": ["solve_ms", "total_solve_ms"],
+    "baseline_time_keys": ["baseline_solve_ms", "baseline_total_solve_ms"]
+  },
+  "convergence": {
+    "iteration_growth_max": 1.10,
+    "residual_growth_max": 1.50,
+    "iteration_keys": ["iterations"],
+    "baseline_iteration_keys": ["baseline_iterations"],
+    "final_residual_keys": ["final_residual"],
+    "baseline_final_residual_keys": ["baseline_final_residual"]
+  },
+  "fallback_diagnostics": {
+    "require_when_fallback": true,
+    "required_fields": [
+      "pc_dist_fallback_chain",
+      "pc_dist_fallback_reason",
+      "pc_dist_fallback_counters",
+      "solver_view_snapshot"
+    ]
   }
 }
