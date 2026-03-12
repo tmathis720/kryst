@@ -119,4 +119,51 @@ fn pipelined_handles_complex_drift() {
     assert_eq!(cg::debug::large_imag_count(), 0);
 }
 
+#[test]
+fn pipelined_periodic_refresh_bounds_residual_drift() {
+    let n = 128;
+    let a = build_dense_poisson(n);
+    let b: Vec<S> = vec![S::from_real(1.0); n];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    let mut plain = CgSolver::new(1e-10, 300).with_variant(CgVariant::Pipelined);
+    let mut refreshed = CgSolver::new(1e-10, 300).with_variant(CgVariant::Pipelined);
+    refreshed.set_pipelined_residual_refresh_every(Some(8));
+
+    let mut x_plain = vec![S::zero(); n];
+    let mut ws_plain = Workspace::default();
+    plain.setup_workspace(&mut ws_plain);
+    let stats_plain = plain
+        .solve_with_comm(
+            &as_s_op(&a),
+            None,
+            &b,
+            &mut x_plain,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws_plain),
+        )
+        .expect("plain pipelined CG converged");
+
+    let mut x_refresh = vec![S::zero(); n];
+    let mut ws_refresh = Workspace::default();
+    refreshed.setup_workspace(&mut ws_refresh);
+    let stats_refresh = refreshed
+        .solve_with_comm(
+            &as_s_op(&a),
+            None,
+            &b,
+            &mut x_refresh,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws_refresh),
+        )
+        .expect("refreshed pipelined CG converged");
+
+    assert!(stats_refresh.final_residual <= stats_plain.final_residual * R::from(1.5));
+    assert!(stats_refresh.iterations <= 300);
+}
+
 mod fixtures;

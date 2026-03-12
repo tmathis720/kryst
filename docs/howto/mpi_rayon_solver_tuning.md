@@ -31,6 +31,26 @@ Recommended defaults:
 | Multi-node, higher latency / congested | 2–8 | pipelined PCG/GMRES/FGMRES |
 | Strong-scaling tail (tiny local subproblems) | 1–4 | pipelined (minimize syncs), or switch to block methods |
 
+## 3.5) Distributed Krylov variants with safe reduction pipelining
+
+Use reduced-sync variants only where the recurrences are mathematically valid for the operator/PC pairing:
+
+- `CgVariant::Pipelined` (CG): SPD operator, left HPD preconditioner.
+- `PcgVariant::Pipelined { replace_every }` (PCG): same SPD/left-HPD assumptions.
+- `GmresVariant::Pipelined` and `FgmresVariant::Pipelined`: general nonsymmetric systems with Arnoldi-based fused reductions.
+- `BiCgStabVariant::LowSync`: nonsymmetric systems when lower synchronization is desired over strict classical recurrence behavior.
+
+Practical drift control for long runs:
+
+- `-ksp_cg_replace_every <k>` now controls periodic residual refresh/replacement in pipelined CG-family paths (PCG replacement and CG residual recomputation).
+- Smaller `k` improves robustness and stopping consistency; larger `k` minimizes extra matvec/reduction overhead.
+
+Stopping-criteria/reproducibility notes:
+
+- Iterative checks continue to use each solver's reported norm semantics (preconditioned/unpreconditioned/natural), while end-of-solve diagnostics use true residual norms where implemented.
+- In distributed mode, prefer `-ksp_reproducible true` when regression stability is required; expect slower reductions due to deterministic ordering.
+- For throughput runs, keep reproducibility off and use periodic refresh only when residual drift appears in monitor histories.
+
 ## 4) Benchmarking
 
 Use:

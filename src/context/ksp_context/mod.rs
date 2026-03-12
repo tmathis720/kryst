@@ -1258,6 +1258,9 @@ impl KspContext {
             if let Some(min_n) = opts.cg_async_min_n {
                 s.set_async_min_n(min_n);
             }
+            if let Some(repl) = opts.cg_replace_every {
+                s.set_pipelined_residual_refresh_every(Some(repl));
+            }
         }
         let mut pcg_pending_updated = false;
         if let Some(variant) = requested_cg_variant {
