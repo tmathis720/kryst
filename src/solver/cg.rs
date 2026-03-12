@@ -280,6 +280,7 @@ pub struct CgSolver {
     async_enabled: bool,
     async_min_n: usize,
     variant: CgVariant,
+    pipelined_residual_refresh_every: Option<usize>,
 }
 
 impl CgSolver {
@@ -299,6 +300,7 @@ impl CgSolver {
             async_enabled: true,
             async_min_n: 10_000,
             variant: CgVariant::Classic,
+            pipelined_residual_refresh_every: None,
         }
     }
 
@@ -368,6 +370,15 @@ impl CgSolver {
     }
     pub fn set_async_min_n(&mut self, n: usize) {
         self.async_min_n = n;
+    }
+
+    /// For pipelined CG, optionally refresh the recursive residual every
+    /// `every` iterations by recomputing `r = b - A x` (and derived vectors).
+    ///
+    /// This bounds long-run drift at the cost of an extra matvec and global
+    /// reductions on refresh iterations.
+    pub fn set_pipelined_residual_refresh_every(&mut self, every: Option<usize>) {
+        self.pipelined_residual_refresh_every = every.filter(|v| *v > 0);
     }
     /// Set the nonzero initial guess flag after construction.
     pub fn set_nonzero_guess(&mut self, f: bool) {
@@ -961,6 +972,7 @@ impl CgSolver {
         }
 
         let mut rho_prev = rho;
+        let refresh_every = self.pipelined_residual_refresh_every;
 
         for k in 1..=self.conv.max_iters {
             let alpha_s: S = S::from_real(alpha);
@@ -1084,12 +1096,60 @@ impl CgSolver {
                 None
             };
 
-            let beta: R = rho_new / rho;
-            let beta_s: S = S::from_real(beta);
-            par_axpy(p, beta_s, u);
-            par_copy(u, p);
-            par_axpy(s, beta_s, w);
-            par_copy(w, s);
+            let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
+            let (rho_new, delta_new, rsq_new, znorm_new, refreshed) = if refresh_due {
+                a.matvec_s(x, tmp, scratch);
+                for i in 0..n {
+                    r[i] = b[i] - tmp[i];
+                }
+                if let Some(pc) = pc {
+                    pc.apply_s(PcSide::Left, r, &mut u[..], scratch)?;
+                } else {
+                    par_copy(r, u);
+                }
+                a.matvec_s(u, &mut w[..], scratch);
+
+                let mut pairs: SmallVec<[(&[S], &[S]); 4]> = SmallVec::new();
+                pairs.push((&r[..], &u[..]));
+                let rho_idx = 0usize;
+                pairs.push((&u[..], &w[..]));
+                let delta_idx = 1usize;
+                let rsq_idx = if want_unpre {
+                    pairs.push((&r[..], &r[..]));
+                    Some(pairs.len() - 1)
+                } else {
+                    None
+                };
+                let znorm_idx = if want_natural {
+                    pairs.push((&u[..], &u[..]));
+                    Some(pairs.len() - 1)
+                } else {
+                    None
+                };
+                let mut vals: SmallVec<[S; 4]> = SmallVec::new();
+                vals.resize(pairs.len(), S::zero());
+                red.dot_many_into(pairs.as_slice(), vals.as_mut_slice());
+
+                let rho_val = dot_result_to_real(vals[rho_idx]);
+                let delta_val = dot_result_to_real(vals[delta_idx]);
+                let rsq_val = rsq_idx.map(|idx| dot_result_to_real(vals[idx]));
+                let znorm_val = znorm_idx.map(|idx| dot_result_to_real(vals[idx]));
+                (rho_val, delta_val, rsq_val, znorm_val, true)
+            } else {
+                (rho_new, delta_new, rsq_new, znorm_new, false)
+            };
+
+            let beta = if refreshed { R::zero() } else { rho_new / rho };
+            if refreshed {
+                par_copy(u, p);
+                par_copy(w, s);
+            } else {
+                let beta_s: S = S::from_real(beta);
+                par_axpy(p, beta_s, u);
+                par_copy(u, p);
+                par_axpy(s, beta_s, w);
+                par_copy(w, s);
+            }
 
             debug::emit_iter(debug::IterEvent {
                 iteration: k,

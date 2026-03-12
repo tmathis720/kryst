@@ -299,7 +299,7 @@ pub static SPECS: &[Spec] = &[
         key: "ksp_cg_replace_every",
         arity: Arity::One,
         kind: ValueKind::UInt,
-        doc: "residual replacement interval for pipelined PCG",
+        doc: "residual replacement/recompute interval for pipelined PCG/CG",
     },
     Spec {
         flag: "-ksp_cg_single_reduction",

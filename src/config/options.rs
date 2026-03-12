@@ -128,6 +128,7 @@ pub struct KspOptions {
     pub guard_zero_residual: Option<f64>,
     pub cg_norm: Option<String>,
     pub cg_pipelined: Option<bool>,
+    /// Residual replacement/recompute interval for pipelined CG-family solvers.
     pub cg_replace_every: Option<usize>,
     pub cg_single_reduction: Option<bool>,
     pub trust_region: Option<f64>,
