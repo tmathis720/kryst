@@ -98,9 +98,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
+#[cfg(feature = "backend-faer")]
+mod distcsr_capability;
 mod execution;
 mod workspace;
 pub use crate::core::block::BlockVec;
+#[cfg(feature = "backend-faer")]
+use distcsr_capability::{
+    DistCsrCapabilityEntry, DistCsrCapabilityKey, resolve_distcsr_capability,
+};
 use execution::KrylovVariant;
 pub use execution::{AdaptiveExecutionDecision, ExecutionPolicy, OverlapStrategy, ThreadingPolicy};
 pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
@@ -422,6 +428,7 @@ struct PendingMpiPc {
 #[cfg(feature = "backend-faer")]
 struct DistRouteDiagnosticsState {
     selected_route: Option<String>,
+    capability_entry: Option<DistCsrCapabilityEntry>,
     fallback_chain: Vec<String>,
     fallback_reason: Option<String>,
     fallback_counters: BTreeMap<String, usize>,
@@ -1705,6 +1712,9 @@ impl KspContext {
                     .clone()
                     .unwrap_or_else(|| "unresolved".to_string()),
             );
+            if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
+                insert_value(&mut solver_config, "pc_dist_capability_entry", entry);
+            }
             insert_value(
                 &mut solver_config,
                 "pc_dist_fallback_chain",
@@ -1799,6 +1809,9 @@ impl KspContext {
                             .clone()
                             .unwrap_or_else(|| "unresolved".to_string()),
                     );
+                    if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
+                        insert_value(&mut diag.config, "pc_dist_capability_entry", entry);
+                    }
                     insert_value(
                         &mut diag.config,
                         "pc_dist_fallback_chain",
@@ -1907,6 +1920,9 @@ impl KspContext {
                                     .clone()
                                     .unwrap_or_else(|| "unresolved".to_string()),
                             );
+                            if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
+                                insert_value(&mut diag.config, "pc_dist_capability_entry", entry);
+                            }
                             insert_value(
                                 &mut diag.config,
                                 "pc_dist_fallback_chain",
@@ -3227,6 +3243,11 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
+    fn set_dist_route_capability_entry(&mut self, entry: DistCsrCapabilityEntry) {
+        self.dist_route_diag.capability_entry = Some(entry);
+    }
+
+    #[cfg(feature = "backend-faer")]
     fn push_dist_route_fallback(&mut self, reason: DistRouteFallbackReason) {
         let key = reason.as_str().to_string();
         self.dist_route_diag.fallback_chain.push(key.clone());
@@ -3451,13 +3472,18 @@ impl KspContext {
             state
         };
 
+        let capability_entry = resolve_distcsr_capability(DistCsrCapabilityKey {
+            solver_type: self.solver_type,
+            global_pc: pending.mpi_opts.global_pc,
+            local_pc: pending.mpi_opts.local_pc,
+            apply_mode: pending.mpi_opts.local_apply_mode,
+        });
+        self.set_dist_route_capability_entry(capability_entry.clone());
+
         let decision = resolve_dist_route(DistRouteResolveInput {
             has_distcsr: dist_op.is_some(),
             explicit_global,
-            native_global_candidate: matches!(
-                pending.mpi_opts.global_pc,
-                GlobalPcKind::None | GlobalPcKind::BlockJacobi
-            ),
+            native_global_candidate: capability_entry.native_global_candidate,
             route_policy: pending.mpi_opts.route_policy,
             local_only_pc,
             local_apply_mode: pending.mpi_opts.local_apply_mode,
