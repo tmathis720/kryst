@@ -26,6 +26,8 @@ use crate::preconditioner::ilu_options::{
     IluKind, IluOptions, IterativeSetupType, Overlay, PivotPolicy, ReorderingType, TriSolveType,
 };
 use crate::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm};
+#[cfg(feature = "backend-faer")]
+use log::warn;
 
 fn env_bool(key: &str) -> Option<bool> {
     std::env::var(key)
@@ -2749,6 +2751,28 @@ pub fn parse_all_options(args: &[String]) -> Result<(KspOptions, PcOptions), KEr
 }
 
 impl PcOptions {
+    #[cfg(feature = "backend-faer")]
+    fn distributed_setting_warnings(
+        route_policy: DistRoutePolicy,
+        local_apply_mode: DistLocalApplyMode,
+    ) -> Vec<&'static str> {
+        let mut warnings = Vec::new();
+
+        if matches!(
+            route_policy,
+            DistRoutePolicy::Adapted | DistRoutePolicy::RootGather
+        ) && local_apply_mode.is_distributed_native()
+        {
+            warnings.push("native_local_apply_with_non_native_route_policy");
+        }
+
+        if route_policy == DistRoutePolicy::Native && !local_apply_mode.is_distributed_native() {
+            warnings.push("native_route_policy_with_adapted_local_wrapper");
+        }
+
+        warnings
+    }
+
     pub fn conditioning_options(&self) -> Result<ConditioningOptions, KError> {
         let mut opts = ConditioningOptions::default();
         if let Some(v) = self.pc_fixdiag {
@@ -2810,6 +2834,16 @@ impl PcOptions {
             .map(DistRoutePolicy::from_str)
             .transpose()?
             .unwrap_or(opts.route_policy);
+
+        for warning_code in
+            Self::distributed_setting_warnings(opts.route_policy, opts.local_apply_mode)
+        {
+            warn!(
+                "distributed option preflight warning: {warning_code} (pc_dist_route={:?}, pc_dist_local_apply={:?})",
+                opts.route_policy, opts.local_apply_mode
+            );
+        }
+
         opts.ilu_config = build_ilu_config(self)?;
         opts.conditioning = self.conditioning_options()?;
 
@@ -4326,6 +4360,36 @@ mod old_tests {
         opts.pc_dist_route = Some("adapted".to_string());
         let mpi_opts = opts.mpi_pc_options().unwrap();
         assert_eq!(mpi_opts.route_policy, DistRoutePolicy::Adapted);
+    }
+
+    #[cfg(feature = "backend-faer")]
+    #[test]
+    fn test_mpi_option_warning_for_native_local_apply_with_adapted_route() {
+        let mut opts = PcOptions::default();
+        opts.pc_dist_route = Some("adapted".to_string());
+        opts.pc_dist_local_apply = Some("distributed_native".to_string());
+
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        let warnings = PcOptions::distributed_setting_warnings(
+            mpi_opts.route_policy,
+            mpi_opts.local_apply_mode,
+        );
+        assert!(warnings.contains(&"native_local_apply_with_non_native_route_policy"));
+    }
+
+    #[cfg(feature = "backend-faer")]
+    #[test]
+    fn test_mpi_option_warning_for_native_route_with_adapted_local_wrapper() {
+        let mut opts = PcOptions::default();
+        opts.pc_dist_route = Some("native".to_string());
+        opts.pc_dist_local_apply = Some("wrapped_local".to_string());
+
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        let warnings = PcOptions::distributed_setting_warnings(
+            mpi_opts.route_policy,
+            mpi_opts.local_apply_mode,
+        );
+        assert!(warnings.contains(&"native_route_policy_with_adapted_local_wrapper"));
     }
 
     #[cfg(feature = "backend-faer")]

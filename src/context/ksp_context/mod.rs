@@ -66,13 +66,15 @@ use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use crate::preconditioner::PcDistributedSupport;
+#[cfg(feature = "backend-faer")]
+use crate::preconditioner::dist::{
+    DistLocalApplyMode, DistRouteFallbackReason, DistRoutePolicy, MpiPcOptions,
+};
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{
-    DistPcAdapter, DistPcBuilder, DistRouteDecisionReason, DistRoutePolicy, DistRouteResolveInput,
+    DistPcAdapter, DistPcBuilder, DistRouteDecisionReason, DistRouteResolveInput,
     DistRouteSelection, GlobalPcKind, resolve_dist_route,
 };
-#[cfg(feature = "backend-faer")]
-use crate::preconditioner::dist::{DistRouteFallbackReason, MpiPcOptions};
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
 use crate::solver::{
@@ -448,6 +450,28 @@ impl Default for KspContext {
 }
 
 impl KspContext {
+    #[cfg(feature = "backend-faer")]
+    fn distributed_setting_warnings(
+        route_policy: DistRoutePolicy,
+        local_apply_mode: DistLocalApplyMode,
+    ) -> Vec<&'static str> {
+        let mut warnings = Vec::new();
+
+        if matches!(
+            route_policy,
+            DistRoutePolicy::Adapted | DistRoutePolicy::RootGather
+        ) && local_apply_mode.is_distributed_native()
+        {
+            warnings.push("native_local_apply_with_non_native_route_policy");
+        }
+
+        if route_policy == DistRoutePolicy::Native && !local_apply_mode.is_distributed_native() {
+            warnings.push("native_route_policy_with_adapted_local_wrapper");
+        }
+
+        warnings
+    }
+
     #[inline]
     fn effective_side_for_solver(side: PcSide, solver_type: SolverType) -> PcSide {
         match solver_type {
@@ -1605,10 +1629,71 @@ impl KspContext {
 
         #[cfg(feature = "backend-faer")]
         if let Some(pending) = self.pending_mpi_pc.as_ref() {
+            let warning_codes = Self::distributed_setting_warnings(
+                pending.mpi_opts.route_policy,
+                pending.mpi_opts.local_apply_mode,
+            );
+            let mut effective_dist_config = BTreeMap::new();
+            insert_value(
+                &mut effective_dist_config,
+                "global_pc",
+                format!("{:?}", pending.mpi_opts.global_pc),
+            );
+            insert_value(
+                &mut effective_dist_config,
+                "local_pc",
+                format!("{:?}", pending.mpi_opts.local_pc),
+            );
+            insert_value(
+                &mut effective_dist_config,
+                "route_policy",
+                format!("{:?}", pending.mpi_opts.route_policy),
+            );
+            insert_value(
+                &mut effective_dist_config,
+                "local_apply_mode",
+                pending
+                    .mpi_opts
+                    .local_apply_mode
+                    .communication_strategy_name(),
+            );
+            insert_value(
+                &mut effective_dist_config,
+                "local_apply_requires_native",
+                pending.mpi_opts.local_apply_mode.requires_native(),
+            );
+            insert_value(
+                &mut effective_dist_config,
+                "local_apply_is_native",
+                pending.mpi_opts.local_apply_mode.is_distributed_native(),
+            );
+            insert_value(
+                &mut effective_dist_config,
+                "warnings",
+                warning_codes.clone(),
+            );
             insert_value(
                 &mut solver_config,
                 "pc_dist_route_policy",
                 format!("{:?}", pending.mpi_opts.route_policy),
+            );
+            insert_value(
+                &mut solver_config,
+                "pc_dist_local_apply_effective",
+                pending
+                    .mpi_opts
+                    .local_apply_mode
+                    .communication_strategy_name(),
+            );
+            insert_value(
+                &mut solver_config,
+                "pc_dist_option_warnings",
+                warning_codes.clone(),
+            );
+            insert_value(
+                &mut solver_config,
+                "pc_dist_effective_config",
+                effective_dist_config.clone(),
             );
             insert_value(
                 &mut solver_config,
@@ -1670,7 +1755,40 @@ impl KspContext {
                 let mut diag =
                     PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref());
                 #[cfg(feature = "backend-faer")]
-                if self.pending_mpi_pc.is_some() {
+                if let Some(pending) = self.pending_mpi_pc.as_ref() {
+                    let warning_codes = Self::distributed_setting_warnings(
+                        pending.mpi_opts.route_policy,
+                        pending.mpi_opts.local_apply_mode,
+                    );
+                    let mut effective_dist_config = BTreeMap::new();
+                    insert_value(
+                        &mut effective_dist_config,
+                        "global_pc",
+                        format!("{:?}", pending.mpi_opts.global_pc),
+                    );
+                    insert_value(
+                        &mut effective_dist_config,
+                        "local_pc",
+                        format!("{:?}", pending.mpi_opts.local_pc),
+                    );
+                    insert_value(
+                        &mut effective_dist_config,
+                        "route_policy",
+                        format!("{:?}", pending.mpi_opts.route_policy),
+                    );
+                    insert_value(
+                        &mut effective_dist_config,
+                        "local_apply_mode",
+                        pending
+                            .mpi_opts
+                            .local_apply_mode
+                            .communication_strategy_name(),
+                    );
+                    insert_value(
+                        &mut effective_dist_config,
+                        "warnings",
+                        warning_codes.clone(),
+                    );
                     insert_value(
                         &mut diag.config,
                         "pc_dist_selected_route",
@@ -1688,6 +1806,24 @@ impl KspContext {
                         &mut diag.config,
                         "pc_dist_fallback_counters",
                         self.dist_route_diag.fallback_counters.clone(),
+                    );
+                    insert_value(
+                        &mut diag.config,
+                        "pc_dist_local_apply_effective",
+                        pending
+                            .mpi_opts
+                            .local_apply_mode
+                            .communication_strategy_name(),
+                    );
+                    insert_value(
+                        &mut diag.config,
+                        "pc_dist_option_warnings",
+                        warning_codes.clone(),
+                    );
+                    insert_value(
+                        &mut diag.config,
+                        "pc_dist_effective_config",
+                        effective_dist_config.clone(),
                     );
                     if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                         insert_value(&mut diag.config, "pc_dist_fallback_reason", reason);
@@ -1727,7 +1863,40 @@ impl KspContext {
                         let mut diag =
                             PcDiagnostics::from_options(Some(spec.pc_type), spec.options.as_ref());
                         #[cfg(feature = "backend-faer")]
-                        if self.pending_mpi_pc.is_some() {
+                        if let Some(pending) = self.pending_mpi_pc.as_ref() {
+                            let warning_codes = Self::distributed_setting_warnings(
+                                pending.mpi_opts.route_policy,
+                                pending.mpi_opts.local_apply_mode,
+                            );
+                            let mut effective_dist_config = BTreeMap::new();
+                            insert_value(
+                                &mut effective_dist_config,
+                                "global_pc",
+                                format!("{:?}", pending.mpi_opts.global_pc),
+                            );
+                            insert_value(
+                                &mut effective_dist_config,
+                                "local_pc",
+                                format!("{:?}", pending.mpi_opts.local_pc),
+                            );
+                            insert_value(
+                                &mut effective_dist_config,
+                                "route_policy",
+                                format!("{:?}", pending.mpi_opts.route_policy),
+                            );
+                            insert_value(
+                                &mut effective_dist_config,
+                                "local_apply_mode",
+                                pending
+                                    .mpi_opts
+                                    .local_apply_mode
+                                    .communication_strategy_name(),
+                            );
+                            insert_value(
+                                &mut effective_dist_config,
+                                "warnings",
+                                warning_codes.clone(),
+                            );
                             insert_value(
                                 &mut diag.config,
                                 "pc_dist_selected_route",
@@ -1745,6 +1914,24 @@ impl KspContext {
                                 &mut diag.config,
                                 "pc_dist_fallback_counters",
                                 self.dist_route_diag.fallback_counters.clone(),
+                            );
+                            insert_value(
+                                &mut diag.config,
+                                "pc_dist_local_apply_effective",
+                                pending
+                                    .mpi_opts
+                                    .local_apply_mode
+                                    .communication_strategy_name(),
+                            );
+                            insert_value(
+                                &mut diag.config,
+                                "pc_dist_option_warnings",
+                                warning_codes.clone(),
+                            );
+                            insert_value(
+                                &mut diag.config,
+                                "pc_dist_effective_config",
+                                effective_dist_config.clone(),
                             );
                             if let Some(reason) = self.dist_route_diag.fallback_reason.clone() {
                                 insert_value(&mut diag.config, "pc_dist_fallback_reason", reason);

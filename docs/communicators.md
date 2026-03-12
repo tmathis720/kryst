@@ -62,26 +62,43 @@ cargo mpirun -n 4 --example matrix_market_demo --features backend-faer,mpi -- \
 
 ## Distributed route selection policy (`pc_dist_route`)
 
+Standard terms used in diagnostics and docs:
+
+- **native distributed**: DistCsr-native route and apply kernels.
+- **adapted local wrapper**: compatibility/local-wrapper route (`wrapped_local`).
+- **gather route**: root-gather heavy coarse/global route (`root_gather`).
+
 Selection policy is native-first by default:
 
-- `pc_dist_route=native` (default) prefers DistCsr-native distributed preconditioner kernels whenever possible.
-- `pc_dist_route=adapted` forces compatibility adapter behavior and should be treated as fallback-only.
-- `pc_dist_route=root_gather` is reserved for coarse/global gather-heavy workflows.
+- `pc_dist_route=native` (default) prefers the **native distributed** route whenever possible.
+- `pc_dist_route=adapted` forces the **adapted local wrapper** route and should be treated as fallback-only.
+- `pc_dist_route=root_gather` selects the **gather route** for coarse/global workflows.
 
 When running with `DistCsrOp` and communicator size > 1, Kryst attempts native distributed Block-Jacobi/ILU routes first (including auto-promotion from local PC settings when safe), then records fallback transitions when native setup fails.
 
-For large MPI jobs, recommended defaults are:
+Kryst now emits early option-preflight warnings for contradictory distributed settings (for example, `pc_dist_route=native` combined with `pc_dist_local_apply=wrapped_local`).
 
-- `-pc_dist_route native`
-- `-pc_dist_local_apply distributed_native`
-- leave `-pc_global` unset unless you explicitly need `asm|ras|block_jacobi`
+### Playbook: force native distributed path
 
-Use `ksp_view` / `pc_view` diagnostics to confirm runtime route choices:
+- Prefer:
+  - `-pc_dist_route native`
+  - `-pc_dist_local_apply distributed_native` (or `strict` when you want setup to fail instead of fallback)
+  - leave `-pc_global` unset unless you explicitly need `asm|ras|block_jacobi`
+- Validate with `-ksp_view` or `-pc_view`:
+  - `pc_dist_selected_route` should start with `distcsr_native_block_jacobi`
+  - `pc_dist_option_warnings` should be empty
 
-- `pc_dist_route_policy`
-- `pc_dist_selected_route`
-- `pc_dist_fallback_chain`
-- `pc_dist_fallback_reason`
+### Playbook: debug fallback behavior
+
+- Turn on `-ksp_view` (or `-pc_view`) and inspect:
+  - `pc_dist_effective_config` (machine-readable effective distributed config)
+  - `pc_dist_option_warnings` (early contradictory-setting warnings)
+  - `pc_dist_fallback_chain`, `pc_dist_fallback_reason`, `pc_dist_fallback_counters`
+  - `pc_dist_preflight_*` fields for native-readiness probes
+- For benchmarking/replay artifacts (`distcsr_bench_runner`), check:
+  - `pc_dist_effective_config`
+  - `pc_dist_option_warnings`
+  - `pc_dist_selected_route` + fallback fields
 
 ## Common errors
 
