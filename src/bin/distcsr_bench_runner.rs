@@ -468,6 +468,16 @@ fn main() {
             .get("pc_dist_fallback_counters")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let option_warnings = view
+            .solver_config
+            .get("pc_dist_option_warnings")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let effective_dist_config = view
+            .solver_config
+            .get("pc_dist_effective_config")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         let fallback_count = fallback_total(&view.solver_config);
         let residual = stats.final_residual;
         let pass = (expectation.iterations.min..=expectation.iterations.max)
@@ -551,6 +561,8 @@ fn main() {
         details.insert("pc_dist_fallback_chain".into(), fallback_chain);
         details.insert("pc_dist_fallback_reason".into(), fallback_reason);
         details.insert("pc_dist_fallback_counters".into(), fallback_counters);
+        details.insert("pc_dist_option_warnings".into(), option_warnings);
+        details.insert("pc_dist_effective_config".into(), effective_dist_config);
         details.insert("fallback_total".into(), Value::from(fallback_count as u64));
 
         artifact.cases.push(CaseArtifact {
