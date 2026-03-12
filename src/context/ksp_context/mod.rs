@@ -422,6 +422,7 @@ struct DistRouteDiagnosticsState {
     fallback_reason: Option<String>,
     fallback_counters: BTreeMap<String, usize>,
     preflight: Option<DistRoutePreflightState>,
+    replay_tokens: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1652,6 +1653,13 @@ impl KspContext {
                     preflight.cached_hits,
                 );
             }
+            if !self.dist_route_diag.replay_tokens.is_empty() {
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_replay_tokens",
+                    self.dist_route_diag.replay_tokens.clone(),
+                );
+            }
         }
 
         let pc = self
@@ -2558,6 +2566,17 @@ impl KspContext {
                         if matches!(err, KError::PcFailed(_)) {
                             if let KError::PcFailed(ref msg) = err {
                                 log::warn!("KSP diverged due to preconditioner failure: {msg}");
+                                #[cfg(feature = "backend-faer")]
+                                {
+                                    let token = format!(
+                                        "phase=apply;rank={};size={};solver={:?};message={}",
+                                        comm.rank(),
+                                        comm.size(),
+                                        self.solver_type,
+                                        msg.replace(';', ",")
+                                    );
+                                    self.set_dist_replay_token("pc_apply_failure", token);
+                                }
                             }
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
@@ -3078,6 +3097,13 @@ impl KspContext {
         self.dist_route_diag.preflight = Some(state);
     }
 
+    #[cfg(feature = "backend-faer")]
+    fn set_dist_replay_token(&mut self, key: &str, token: String) {
+        self.dist_route_diag
+            .replay_tokens
+            .insert(key.to_string(), token);
+    }
+
     #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
     fn build_mpi_global_pc(
         &self,
@@ -3240,6 +3266,16 @@ impl KspContext {
                         .communication_strategy_name(),
                     decision_reasons
                 ));
+                let setup_token = format!(
+                    "phase=setup;rank={};size={};row_start={};local_rows={};global_rows={};route={}",
+                    dist_op.comm().rank(),
+                    dist_op.comm().size(),
+                    dist_op.local_row_offset(),
+                    dist_op.local_nrows(),
+                    dist_op.n_global,
+                    DistRouteSelection::DistCsrNativeBlockJacobi.as_str()
+                );
+                self.set_dist_replay_token("native_setup", setup_token);
                 if !explicit_global {
                     self.push_dist_route_fallback(DistRouteFallbackReason::AutoPromotedFromLocal);
                 }
@@ -3284,6 +3320,16 @@ impl KspContext {
                 decision_reasons
             ));
             self.push_dist_route_fallback(DistRouteFallbackReason::ConfiguredGlobalFallback);
+            let setup_token = format!(
+                "phase=setup;rank={};size={};row_start={};local_rows={};global_rows={};route={}",
+                dist_op.comm().rank(),
+                dist_op.comm().size(),
+                dist_op.local_row_offset(),
+                dist_op.local_nrows(),
+                dist_op.n_global,
+                DistRouteSelection::ConfiguredGlobal.as_str()
+            );
+            self.set_dist_replay_token("configured_setup", setup_token);
             let mut new_pc = self.build_mpi_global_pc(&pending, dist_op)?;
             let want = new_pc.required_format();
             let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
