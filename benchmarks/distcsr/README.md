@@ -4,7 +4,7 @@ Replayable distributed benchmark assets for CI comparisons.
 
 - `fixtures.json`: matrix + solver definitions with fixed process counts and partition seeds.
 - `expectations.json`: expected iteration/residual bands and route-selection expectations.
-- `../../ci/distcsr_thresholds.json`: CI guardrail targets for native route-selection and fallback frequency regressions.
+- `../../ci/distcsr_thresholds.json`: CI guardrail targets for rollout gates (native default rate, fallback rate, speedup floor, convergence bands, fallback diagnostics completeness).
 - `artifacts/latest.json`: normalized runner output for baseline comparison.
 
 Run:
@@ -24,7 +24,7 @@ Optional timing instrumentation modes:
 
 When built without `metrics`, category timings other than `other` are zero-filled and `other` captures wall-time remainder; this keeps default CI runs cheap while preserving a stable output schema.
 
-CI threshold gate:
+CI rollout scoreboard gate:
 
 ```bash
 python3 scripts/check_distcsr_thresholds.py \
@@ -32,4 +32,12 @@ python3 scripts/check_distcsr_thresholds.py \
   --thresholds ci/distcsr_thresholds.json
 ```
 
-The checker exits non-zero with explicit messages for any case that regresses route-selection or fallback totals.
+The checker exits non-zero with explicit messages for regressions in:
+
+- native-route default rate,
+- fallback frequency,
+- speedup target vs baseline timings,
+- convergence non-regression bands, and
+- fallback diagnostic snapshot completeness.
+
+To enable the speedup/convergence gates, include baseline values in each case's `details` object in the artifact (`baseline_solve_ms`, `baseline_iterations`, `baseline_final_residual`, etc.).
