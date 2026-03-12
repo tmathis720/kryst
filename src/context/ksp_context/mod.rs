@@ -66,6 +66,8 @@ use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
 #[cfg(feature = "mpi")]
 use crate::preconditioner::PcDistributedSupport;
+#[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, Weighting};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{
     DistLocalApplyMode, DistRouteFallbackReason, DistRoutePolicy, MpiPcOptions,
@@ -3305,17 +3307,84 @@ impl KspContext {
                 Ok(Box::new(DistPcAdapter::build(dist_op, builder)?))
             }
             GlobalPcKind::Asm => {
-                PcFactory::create_preconditioner(PcType::Asm, Some(&pending.pc_opts))
+                let builder = Self::build_dist_asm_builder(pending, GlobalPcKind::Asm)?;
+                Ok(Box::new(DistPcAdapter::build(dist_op, builder)?))
             }
             GlobalPcKind::Ras => {
-                let mut opts = pending.pc_opts.clone();
-                opts.asm_mode = Some("ras".to_string());
-                PcFactory::create_preconditioner(PcType::Asm, Some(&opts))
+                let builder = Self::build_dist_asm_builder(pending, GlobalPcKind::Ras)?;
+                Ok(Box::new(DistPcAdapter::build(dist_op, builder)?))
             }
             GlobalPcKind::None => Err(KError::InvalidInput(
                 "pc_global=none should not build a global PC".into(),
             )),
         }
+    }
+
+    #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+    fn build_dist_asm_builder(
+        pending: &PendingMpiPc,
+        global: GlobalPcKind,
+    ) -> Result<DistPcBuilder, KError> {
+        let overlap = pending.pc_opts.asm_overlap.unwrap_or(0);
+        let subdomain_hint = pending.pc_opts.asm_subdomain_size;
+        let block_solver = match pending.pc_opts.asm_block_solver.as_deref() {
+            Some("csr") => AsmBlockSolver::Csr,
+            Some("ludense") | None => AsmBlockSolver::LuDense,
+            Some(other) => {
+                return Err(KError::InvalidInput(format!(
+                    "unknown pc_asm_block_solver: {other}"
+                )));
+            }
+        };
+        let inner_pc = match pending.pc_opts.asm_inner_pc.as_deref() {
+            Some("jacobi") => AsmInnerPc::Jacobi,
+            Some("ilut") => AsmInnerPc::Ilut {
+                drop_tol: pending.pc_opts.ilut_drop_tol.unwrap_or(1e-4),
+                max_fill: pending.pc_opts.ilut_max_fill.unwrap_or(20),
+            },
+            Some("ilutp") => AsmInnerPc::Ilutp {
+                drop_tol: pending.pc_opts.ilutp_drop_tol.unwrap_or(1e-4),
+                max_fill: pending.pc_opts.ilutp_max_fill.unwrap_or(10),
+                perm_tol: pending.pc_opts.ilutp_perm_tol.unwrap_or(0.1),
+            },
+            Some("ilu") | Some("ilu0") | None => AsmInnerPc::Ilu0,
+            Some(other) => {
+                return Err(KError::InvalidInput(format!(
+                    "unknown pc_asm_inner_pc: {other}"
+                )));
+            }
+        };
+        let weighting = match pending.pc_opts.asm_weighting.as_deref() {
+            Some("uniform") => Weighting::Uniform,
+            Some("none") | None => Weighting::None,
+            Some(other) => {
+                return Err(KError::InvalidInput(format!(
+                    "unsupported distributed pc_asm_weighting: {other}"
+                )));
+            }
+        };
+
+        Ok(match global {
+            GlobalPcKind::Asm => DistPcBuilder::Asm {
+                overlap,
+                subdomain_hint,
+                block_solver,
+                inner_pc,
+                weighting,
+            },
+            GlobalPcKind::Ras => DistPcBuilder::Ras {
+                overlap,
+                subdomain_hint,
+                block_solver,
+                inner_pc,
+                weighting,
+            },
+            _ => {
+                return Err(KError::InvalidInput(
+                    "ASM builder requested for non-ASM global kind".into(),
+                ));
+            }
+        })
     }
 
     #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
@@ -3500,12 +3569,13 @@ impl KspContext {
                     "-pc_global requires DistCsrOp when running distributed".into(),
                 ));
             };
-            self.set_dist_route_selected(format!(
-                "{}_{:?}:{}",
-                DistRouteSelection::ConfiguredGlobal.as_str(),
-                pending.mpi_opts.global_pc,
-                decision_reasons
-            ));
+            let configured_label = match pending.mpi_opts.global_pc {
+                GlobalPcKind::BlockJacobi => "distcsr_native_block_jacobi_configured",
+                GlobalPcKind::Asm => "distcsr_native_asm",
+                GlobalPcKind::Ras => "distcsr_native_ras",
+                GlobalPcKind::None => "configured_global_none",
+            };
+            self.set_dist_route_selected(format!("{configured_label}:{decision_reasons}"));
             self.push_dist_route_fallback(DistRouteFallbackReason::ConfiguredGlobalFallback);
             let setup_token = format!(
                 "phase=setup;rank={};size={};row_start={};local_rows={};global_rows={};route={}",

@@ -41,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "mpi")]
-use super::comm_plan::{CommPlan, alltoallv_u64};
+use super::comm_plan::{CommPlan, alltoallv_scalar, alltoallv_u64};
 #[cfg(feature = "mpi")]
 use super::subdomain::{RemoteRow, build_subdomain_csr, request_remote_rows};
 
@@ -140,11 +140,6 @@ impl Preconditioner for DistributedAsm {
             );
             self.coarse_strategy = DistCoarseStrategy::None;
         }
-        if self.mode == AsmMode::ASM {
-            return Err(KError::Unsupported(
-                "Distributed ASM currently supports only RAS mode".into(),
-            ));
-        }
         let comm = op.comm();
         if comm.size() <= 1 {
             return Err(KError::Unsupported(
@@ -193,7 +188,8 @@ impl Preconditioner for DistributedAsm {
         let comm_plan = build_comm_plan(&comm, &ownership, &subdofs)?;
         let imported_rows: usize = comm_plan.imports.iter().map(|rows| rows.len()).sum();
         log::info!(
-            "distributed RAS ASM setup: rank={} overlap={} imported_rows={} local_subdomain_nnz={}",
+            "distributed {:?} ASM setup: rank={} overlap={} imported_rows={} local_subdomain_nnz={}",
+            self.mode,
             comm.rank(),
             self.overlap,
             imported_rows,
@@ -279,6 +275,39 @@ impl Preconditioner for DistributedAsm {
                     .copied()
                     .unwrap_or(1.0);
                 y[local_idx] = weight * sol[sub_idx];
+            }
+        }
+
+        if self.mode == AsmMode::ASM {
+            let mut send = vec![Vec::<S>::new(); state.comm.size()];
+            for (peer, imports) in state.comm_plan.imports.iter().enumerate() {
+                if peer == state.comm.rank() {
+                    continue;
+                }
+                let mut payload = Vec::with_capacity(imports.len());
+                for &g in imports {
+                    let sub_idx = *state
+                        .sub_map
+                        .get(&g)
+                        .expect("subdomain map missing ASM import contribution");
+                    payload.push(sol[sub_idx]);
+                }
+                send[peer] = payload;
+            }
+            let recv = alltoallv_scalar(&state.comm, &send)?;
+            for (peer, exported) in state.comm_plan.exports.iter().enumerate() {
+                for (slot, &g) in exported.iter().enumerate() {
+                    if g >= state.layout.row_start && g < state.layout.row_end {
+                        let local_idx = g - state.layout.row_start;
+                        let weight = state
+                            .weights
+                            .as_ref()
+                            .and_then(|w| w.get(local_idx))
+                            .copied()
+                            .unwrap_or(1.0);
+                        y[local_idx] += weight * recv[peer][slot];
+                    }
+                }
             }
         }
 

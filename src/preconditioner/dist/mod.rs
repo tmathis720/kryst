@@ -15,8 +15,12 @@ pub use native_plan::{
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
+use crate::preconditioner::PcSide;
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::preconditioner::Preconditioner;
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmMode, DistributedAsm, Weighting};
 use crate::preconditioner::ilu::IluConfig;
-use crate::preconditioner::{PcSide, Preconditioner};
 use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
 
@@ -203,7 +207,49 @@ impl DistVec {
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 #[derive(Clone, Debug)]
 pub enum DistPcBuilder {
-    BlockJacobi { opts: MpiPcOptions },
+    BlockJacobi {
+        opts: MpiPcOptions,
+    },
+    Asm {
+        overlap: usize,
+        subdomain_hint: Option<usize>,
+        block_solver: AsmBlockSolver,
+        inner_pc: AsmInnerPc,
+        weighting: Weighting,
+    },
+    Ras {
+        overlap: usize,
+        subdomain_hint: Option<usize>,
+        block_solver: AsmBlockSolver,
+        inner_pc: AsmInnerPc,
+        weighting: Weighting,
+    },
+}
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+#[derive(Debug)]
+struct DistAsmPc {
+    inner: DistributedAsm,
+}
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+impl DistAsmPc {
+    fn new(mut inner: DistributedAsm, dist_op: &DistCsrOp) -> Result<Self, KError> {
+        inner.setup(dist_op)?;
+        Ok(Self { inner })
+    }
+}
+
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+impl DistributedPreconditioner for DistAsmPc {
+    type Scalar = f64;
+
+    fn apply_global(&self, side: PcSide, x: &mut DistVec) -> Result<(), KError> {
+        let mut y = vec![0.0; x.local_len()];
+        self.inner.apply(side, x.local_view(), &mut y)?;
+        x.local_view_mut().copy_from_slice(&y);
+        Ok(())
+    }
 }
 
 /// Adapter bridging a `DistributedPreconditioner` to the `Preconditioner` trait.
@@ -315,6 +361,40 @@ fn build_dist_pc(
                     "block-Jacobi distributed PC requires backend-faer".into(),
                 ))
             }
+        }
+        DistPcBuilder::Asm {
+            overlap,
+            subdomain_hint,
+            block_solver,
+            inner_pc,
+            weighting,
+        } => {
+            let asm = DistributedAsm::new(
+                *overlap,
+                *subdomain_hint,
+                *block_solver,
+                *inner_pc,
+                AsmMode::ASM,
+                *weighting,
+                DistCoarseStrategy::None,
+            );
+            Ok(Box::new(DistAsmPc::new(asm, dist_op)?))
+        }
+        DistPcBuilder::Ras {
+            overlap,
+            subdomain_hint,
+            block_solver,
+            inner_pc,
+            weighting,
+        } => {
+            let asm = DistributedAsm::new_ras(
+                *overlap,
+                *subdomain_hint,
+                *block_solver,
+                *inner_pc,
+                *weighting,
+            );
+            Ok(Box::new(DistAsmPc::new(asm, dist_op)?))
         }
     }
 }
