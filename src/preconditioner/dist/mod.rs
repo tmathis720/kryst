@@ -23,6 +23,8 @@ use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmMode, Distribute
 use crate::preconditioner::ilu::IluConfig;
 use crate::utils::conditioning::ConditioningOptions;
 use std::str::FromStr;
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
+use std::sync::Mutex;
 
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 use crate::algebra::scalar::S;
@@ -138,21 +140,45 @@ pub trait DistributedPreconditioner: Send + Sync {
     type Scalar;
 
     /// Apply the distributed preconditioner to a global vector.
-    fn apply_global(&self, side: PcSide, x: &mut DistVec) -> Result<(), KError>;
+    fn apply_global(&self, side: PcSide, x: &mut DistVec<'_>) -> Result<(), KError>;
 }
 
 /// Simple distributed vector carrying only the owned local slice.
 #[derive(Debug)]
-pub struct DistVec {
+pub struct DistVec<'a> {
     comm: UniverseComm,
     row_offset: usize,
     global_len: usize,
-    local: Vec<f64>,
+    local: DistVecLocal<'a>,
+    scratch: DistVecScratch<'a>,
 }
 
-impl DistVec {
+#[derive(Debug)]
+enum DistVecLocal<'a> {
+    Owned(Vec<f64>),
+    Borrowed(&'a mut [f64]),
+}
+
+#[derive(Debug)]
+enum DistVecScratch<'a> {
+    Owned(Vec<f64>),
+    Borrowed(&'a mut Vec<f64>),
+}
+
+impl DistVec<'_> {
     /// Construct a distributed vector for the current rank.
     pub fn new(comm: UniverseComm, row_offset: usize, global_len: usize, local: Vec<f64>) -> Self {
+        Self::with_scratch(comm, row_offset, global_len, local, Vec::new())
+    }
+
+    /// Construct a distributed vector with reusable owned work buffers.
+    pub fn with_scratch(
+        comm: UniverseComm,
+        row_offset: usize,
+        global_len: usize,
+        local: Vec<f64>,
+        scratch: Vec<f64>,
+    ) -> Self {
         if row_offset > global_len {
             panic!("row_offset ({row_offset}) must be < global_len ({global_len})");
         }
@@ -168,7 +194,36 @@ impl DistVec {
             comm,
             row_offset,
             global_len,
-            local,
+            local: DistVecLocal::Owned(local),
+            scratch: DistVecScratch::Owned(scratch),
+        }
+    }
+
+    /// Construct a distributed vector that writes directly into a borrowed local slice.
+    pub fn from_local_slice<'a>(
+        comm: UniverseComm,
+        row_offset: usize,
+        global_len: usize,
+        local: &'a mut [f64],
+        scratch: &'a mut Vec<f64>,
+    ) -> DistVec<'a> {
+        if row_offset > global_len {
+            panic!("row_offset ({row_offset}) must be < global_len ({global_len})");
+        }
+        if row_offset + local.len() > global_len {
+            panic!(
+                "local slice length ({}) at offset {} exceeds global length {}",
+                local.len(),
+                row_offset,
+                global_len
+            );
+        }
+        DistVec {
+            comm,
+            row_offset,
+            global_len,
+            local: DistVecLocal::Borrowed(local),
+            scratch: DistVecScratch::Borrowed(scratch),
         }
     }
 
@@ -189,17 +244,73 @@ impl DistVec {
 
     /// Local slice owned by this rank.
     pub fn local_view(&self) -> &[f64] {
-        &self.local
+        match &self.local {
+            DistVecLocal::Owned(local) => local,
+            DistVecLocal::Borrowed(local) => local,
+        }
     }
 
     /// Mutable local slice owned by this rank.
     pub fn local_view_mut(&mut self) -> &mut [f64] {
-        &mut self.local
+        match &mut self.local {
+            DistVecLocal::Owned(local) => local,
+            DistVecLocal::Borrowed(local) => local,
+        }
     }
 
     /// Number of entries owned by this rank.
     pub fn local_len(&self) -> usize {
-        self.local.len()
+        self.local_view().len()
+    }
+
+    /// Return a mutable scratch slice sized for local operations.
+    pub fn scratch_mut(&mut self) -> &mut [f64] {
+        let local_len = self.local_len();
+        let scratch = match &mut self.scratch {
+            DistVecScratch::Owned(scratch) => scratch,
+            DistVecScratch::Borrowed(scratch) => scratch,
+        };
+        if scratch.len() != local_len {
+            scratch.resize(local_len, 0.0);
+        }
+        scratch.as_mut_slice()
+    }
+
+    /// Current scratch slice.
+    pub fn scratch_view(&self) -> &[f64] {
+        match &self.scratch {
+            DistVecScratch::Owned(scratch) => scratch,
+            DistVecScratch::Borrowed(scratch) => scratch,
+        }
+    }
+
+    /// Copy local data into the reusable scratch buffer.
+    pub fn copy_local_to_scratch(&mut self) {
+        let local_len = self.local_len();
+        let local_ptr = self.local_view().as_ptr();
+        let scratch = self.scratch_mut();
+        debug_assert_eq!(scratch.len(), local_len);
+        // SAFETY: local and scratch refer to independent buffers managed by this type.
+        unsafe {
+            std::ptr::copy_nonoverlapping(local_ptr, scratch.as_mut_ptr(), local_len);
+        }
+    }
+
+    /// Provide immutable scratch input and mutable local output slices.
+    pub fn with_scratch_input_local_output<R>(
+        &mut self,
+        f: impl FnOnce(&[f64], &mut [f64]) -> R,
+    ) -> R {
+        self.copy_local_to_scratch();
+        let len = self.local_len();
+        let in_ptr = self.scratch_mut().as_ptr();
+        let out_ptr = self.local_view_mut().as_mut_ptr();
+        // SAFETY: scratch and local are distinct storage owned by separate fields.
+        unsafe {
+            let x_local = std::slice::from_raw_parts(in_ptr, len);
+            let y_local = std::slice::from_raw_parts_mut(out_ptr, len);
+            f(x_local, y_local)
+        }
     }
 }
 
@@ -244,10 +355,10 @@ impl DistAsmPc {
 impl DistributedPreconditioner for DistAsmPc {
     type Scalar = f64;
 
-    fn apply_global(&self, side: PcSide, x: &mut DistVec) -> Result<(), KError> {
-        let mut y = vec![0.0; x.local_len()];
-        self.inner.apply(side, x.local_view(), &mut y)?;
-        x.local_view_mut().copy_from_slice(&y);
+    fn apply_global(&self, side: PcSide, x: &mut DistVec<'_>) -> Result<(), KError> {
+        x.with_scratch_input_local_output(|x_local, y_local| {
+            self.inner.apply(side, x_local, y_local)
+        })?;
         Ok(())
     }
 }
@@ -261,6 +372,7 @@ pub struct DistPcAdapter {
     local_len: usize,
     inner: Box<dyn DistributedPreconditioner<Scalar = f64>>,
     builder: DistPcBuilder,
+    workspace: Mutex<Vec<f64>>,
 }
 
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
@@ -286,6 +398,7 @@ impl DistPcAdapter {
             local_len,
             inner,
             builder,
+            workspace: Mutex::new(Vec::new()),
         }
     }
 
@@ -319,14 +432,19 @@ impl Preconditioner for DistPcAdapter {
                 "distributed PC apply length mismatch".into(),
             ));
         }
-        let mut dist_vec = DistVec::new(
+        y.copy_from_slice(x);
+        let mut workspace = self
+            .workspace
+            .lock()
+            .expect("distributed PC workspace mutex poisoned");
+        let mut dist_vec = DistVec::from_local_slice(
             self.comm.clone(),
             self.row_offset,
             self.global_len,
-            x.to_vec(),
+            y,
+            &mut workspace,
         );
         self.inner.apply_global(side, &mut dist_vec)?;
-        y.copy_from_slice(dist_vec.local_view());
         Ok(())
     }
 

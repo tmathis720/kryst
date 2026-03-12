@@ -287,7 +287,7 @@ where
 {
     type Scalar = f64;
 
-    fn apply_global(&self, side: PcSide, x: &mut DistVec) -> Result<(), KError> {
+    fn apply_global(&self, side: PcSide, x: &mut DistVec<'_>) -> Result<(), KError> {
         debug_assert_eq!(x.row_offset(), self.row_offset);
         debug_assert_eq!(x.local_len(), self.n_local);
         if self.n_local == 0 {
@@ -295,13 +295,13 @@ where
         }
 
         debug_assert!(matches!(side, PcSide::Left));
-        let x_local = x.local_view();
-        let mut y_local = vec![0.0; self.n_local];
-        self.local_pc.apply_local(x_local, &mut y_local)?;
-        if let Some(plan) = &self.native_plan {
-            plan.apply_remote_correction(x_local, &mut y_local);
-        }
-        x.local_view_mut().copy_from_slice(&y_local);
+        x.with_scratch_input_local_output(|x_local, y_local| {
+            self.local_pc.apply_local(x_local, y_local)?;
+            if let Some(plan) = &self.native_plan {
+                plan.apply_remote_correction(x_local, y_local);
+            }
+            Ok::<(), KError>(())
+        })?;
         Ok(())
     }
 }
@@ -338,19 +338,20 @@ impl BlockJacobiObjPc {
 impl DistributedPreconditioner for BlockJacobiObjPc {
     type Scalar = f64;
 
-    fn apply_global(&self, side: PcSide, x: &mut DistVec) -> Result<(), KError> {
+    fn apply_global(&self, side: PcSide, x: &mut DistVec<'_>) -> Result<(), KError> {
         let _ = &self.comm;
         debug_assert_eq!(x.row_offset(), self.row_offset);
         debug_assert_eq!(x.local_len(), self.n_local);
         if self.n_local == 0 {
             return Ok(());
         }
-        let mut y_local = vec![0.0; self.n_local];
-        self.local_pc.apply(side, x.local_view(), &mut y_local)?;
-        if let Some(plan) = &self.native_plan {
-            plan.apply_remote_correction(x.local_view(), &mut y_local);
-        }
-        x.local_view_mut().copy_from_slice(&y_local);
+        x.with_scratch_input_local_output(|x_local, y_local| {
+            self.local_pc.apply(side, x_local, y_local)?;
+            if let Some(plan) = &self.native_plan {
+                plan.apply_remote_correction(x_local, y_local);
+            }
+            Ok::<(), KError>(())
+        })?;
         Ok(())
     }
 }
