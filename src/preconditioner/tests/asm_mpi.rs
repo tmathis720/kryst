@@ -412,3 +412,49 @@ fn mpi_block_jacobi_sor_native_differs_from_wrapped_with_coupling() {
         "expected native SOR halo correction to differ from wrapper mode"
     );
 }
+
+#[test]
+fn mpi_dist_builder_constructs_native_ras_and_asm() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let ras = DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Ras {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+        },
+    )
+    .expect("native distributed ras build");
+
+    let asm = DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Asm {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+        },
+    )
+    .expect("native distributed asm build");
+
+    let rhs: Vec<f64> = (0..dist.local_nrows()).map(|i| (i + 1) as f64).collect();
+    let mut y_ras = vec![0.0; rhs.len()];
+    let mut y_asm = vec![0.0; rhs.len()];
+    ras.apply(PcSide::Left, &rhs, &mut y_ras)
+        .expect("ras apply");
+    asm.apply(PcSide::Left, &rhs, &mut y_asm)
+        .expect("asm apply");
+
+    assert!(
+        y_ras.iter().all(|v| v.is_finite()) && y_asm.iter().all(|v| v.is_finite()),
+        "distributed ASM/RAS outputs must be finite"
+    );
+}
