@@ -14,7 +14,7 @@ use std::sync::{
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
-use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan};
+use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan, HaloTuning};
 use crate::matrix::dist::spmv_dist::RowRanges;
 use crate::matrix::op::{ChangeIds, DistLayout, LinOp, StructureId, ValuesId};
 use crate::matrix::parcsr::{self, ParCsrMatrix};
@@ -79,8 +79,15 @@ pub struct DistCsrOp {
     border_col_unified: Vec<usize>,
     border_vals: Vec<S>,
     halo: HaloPlan,
+    overlap_mode: HaloOverlapMode,
     reentrancy: AtomicUsize,
     ids: ChangeIds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaloOverlapMode {
+    Disabled,
+    Interior,
 }
 
 impl DistCsrOp {
@@ -90,6 +97,24 @@ impl DistCsrOp {
         local_rows: &CsrMatrix<S>,
         part_prefix: &[usize],
         comm: UniverseComm,
+    ) -> Result<Self, KError> {
+        Self::from_local_rows_with_halo_tuning(
+            n_global,
+            row_start,
+            local_rows,
+            part_prefix,
+            comm,
+            HaloTuning::default(),
+        )
+    }
+
+    pub fn from_local_rows_with_halo_tuning(
+        n_global: usize,
+        row_start: usize,
+        local_rows: &CsrMatrix<S>,
+        part_prefix: &[usize],
+        comm: UniverseComm,
+        halo_tuning: HaloTuning,
     ) -> Result<Self, KError> {
         if part_prefix.len() != comm.size() + 1 {
             return Err(KError::InvalidInput(
@@ -117,12 +142,13 @@ impl DistCsrOp {
             }
         }
 
-        let halo = HaloPlan::new(
+        let halo = HaloPlan::new_with_tuning(
             comm.clone(),
             Arc::new(part_prefix.to_vec()),
             row_start,
             row_end,
             recv_map,
+            halo_tuning,
         )?;
 
         let local_only = RowRanges::from_mask(&row_is_local, true);
@@ -180,9 +206,14 @@ impl DistCsrOp {
             border_col_unified,
             border_vals,
             halo,
+            overlap_mode: HaloOverlapMode::Interior,
             reentrancy: AtomicUsize::new(0),
             ids,
         })
+    }
+
+    pub fn set_halo_overlap_mode(&mut self, mode: HaloOverlapMode) {
+        self.overlap_mode = mode;
     }
 
     /// Build a distributed operator from a [`ParCsrMatrix`].
@@ -418,21 +449,39 @@ impl KLinOp for DistCsrOp {
         for v in y.iter_mut() {
             *v = S::zero();
         }
-        let halo_req = if self.halo.index.n_ghost > 0 || !self.halo.index.send_local_idx.is_empty()
-        {
-            Some(self.halo.post_halo(x))
-        } else {
-            None
-        };
+        match self.overlap_mode {
+            HaloOverlapMode::Disabled => {
+                let halo_req =
+                    if self.halo.index.n_ghost > 0 || !self.halo.index.send_local_idx.is_empty() {
+                        Some(self.halo.post_halo(x))
+                    } else {
+                        None
+                    };
+                if let Some(req) = halo_req {
+                    self.halo.complete_halo(req);
+                }
+                self.spmv_local_only(x, y);
+                let ghost_guard = self.halo.ghost_slice_ref();
+                self.spmv_border(x, y, &ghost_guard[..]);
+            }
+            HaloOverlapMode::Interior => {
+                let halo_req =
+                    if self.halo.index.n_ghost > 0 || !self.halo.index.send_local_idx.is_empty() {
+                        Some(self.halo.post_halo(x))
+                    } else {
+                        None
+                    };
 
-        self.spmv_local_only(x, y);
+                self.spmv_local_only(x, y);
 
-        if let Some(req) = halo_req {
-            self.halo.complete_halo(req);
+                if let Some(req) = halo_req {
+                    self.halo.complete_halo(req);
+                }
+
+                let ghost_guard = self.halo.ghost_slice_ref();
+                self.spmv_border(x, y, &ghost_guard[..]);
+            }
         }
-
-        let ghost_guard = self.halo.ghost_slice_ref();
-        self.spmv_border(x, y, &ghost_guard[..]);
         self.reentrancy.fetch_sub(1, Ordering::SeqCst);
     }
 }

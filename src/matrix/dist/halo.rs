@@ -12,6 +12,30 @@ pub struct HaloReq<'a> {
     pub send_reqs: Vec<<UniverseComm as Comm>::Request<'a>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeighborOrder {
+    RankAscending,
+    SendVolumeDesc,
+    RecvVolumeDesc,
+}
+
+#[derive(Debug, Clone)]
+pub struct HaloTuning {
+    pub coalesce_pack_runs: bool,
+    pub min_run_len: usize,
+    pub neighbor_order: NeighborOrder,
+}
+
+impl Default for HaloTuning {
+    fn default() -> Self {
+        Self {
+            coalesce_pack_runs: true,
+            min_run_len: 4,
+            neighbor_order: NeighborOrder::RankAscending,
+        }
+    }
+}
+
 pub struct HaloIndexPlan {
     pub comm: UniverseComm,
     pub rank: usize,
@@ -189,6 +213,30 @@ pub struct HaloBuffers {
     pub ghost_flat: RwLock<Vec<S>>,
 }
 
+#[derive(Clone)]
+struct RecvSchedule {
+    nbr: usize,
+}
+
+#[derive(Clone)]
+enum PackOp {
+    Scatter {
+        src: usize,
+        dst: usize,
+    },
+    Run {
+        src_start: usize,
+        dst_start: usize,
+        len: usize,
+    },
+}
+
+#[derive(Clone)]
+struct SendSchedule {
+    nbr: usize,
+    ops: Vec<PackOp>,
+}
+
 impl HaloBuffers {
     pub fn new(plan: &HaloIndexPlan) -> Self {
         let mut send_buf = BTreeMap::new();
@@ -226,6 +274,8 @@ impl HaloBuffers {
 pub struct HaloPlan {
     pub index: Arc<HaloIndexPlan>,
     buffers: HaloBuffers,
+    recv_schedule: Vec<RecvSchedule>,
+    send_schedule: Vec<SendSchedule>,
 }
 
 // SAFETY: HaloPlan is shared immutably and all mutation occurs through the
@@ -242,11 +292,36 @@ impl HaloPlan {
         row_end: usize,
         recv_map: BTreeMap<usize, Vec<usize>>,
     ) -> Result<Self, KError> {
+        Self::new_with_tuning(
+            comm,
+            row_part,
+            row_start,
+            row_end,
+            recv_map,
+            HaloTuning::default(),
+        )
+    }
+
+    pub fn new_with_tuning(
+        comm: UniverseComm,
+        row_part: Arc<Vec<usize>>,
+        row_start: usize,
+        row_end: usize,
+        recv_map: BTreeMap<usize, Vec<usize>>,
+        tuning: HaloTuning,
+    ) -> Result<Self, KError> {
         let index = Arc::new(HaloIndexPlan::new(
             comm, row_part, row_start, row_end, recv_map,
         )?);
         let buffers = HaloBuffers::new(&index);
-        Ok(Self { index, buffers })
+        let recv_schedule = build_recv_schedule(&index, tuning.neighbor_order);
+        let send_schedule = build_send_schedule(&index, &tuning, tuning.neighbor_order);
+        Ok(Self {
+            index,
+            buffers,
+            recv_schedule,
+            send_schedule,
+        })
     }
 
     pub fn ghost_slice_ref(&self) -> std::sync::RwLockReadGuard<'_, Vec<S>> {
@@ -255,30 +330,40 @@ impl HaloPlan {
 
     pub fn post_halo<'a>(&'a self, x_local: &[S]) -> HaloReq<'a> {
         let mut recv_reqs = Vec::new();
-        for (&nbr, cols) in &self.index.recv_map {
-            if cols.is_empty() {
-                continue;
-            }
-            if let Some(buf_lock) = self.buffers.recv_buf.get(&nbr) {
+        for item in &self.recv_schedule {
+            if let Some(buf_lock) = self.buffers.recv_buf.get(&item.nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
+                if buf.is_empty() {
+                    continue;
+                }
                 let slice = halo_slice_mut(buf);
-                let req = self.index.comm.irecv_from(slice, nbr as i32);
+                let req = self.index.comm.irecv_from(slice, item.nbr as i32);
                 recv_reqs.push(req);
             }
         }
 
         let mut send_reqs = Vec::new();
-        for (&nbr, buf_lock) in &self.buffers.send_buf {
-            if let Some(idxs) = self.index.send_local_idx.get(&nbr) {
+        for item in &self.send_schedule {
+            if let Some(buf_lock) = self.buffers.send_buf.get(&item.nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
                 if buf.is_empty() {
                     continue;
                 }
-                for (dst, &idx_val) in buf.iter_mut().zip(idxs.iter()) {
-                    *dst = x_local[idx_val];
+                for op in &item.ops {
+                    match *op {
+                        PackOp::Scatter { src, dst } => buf[dst] = x_local[src],
+                        PackOp::Run {
+                            src_start,
+                            dst_start,
+                            len,
+                        } => {
+                            buf[dst_start..dst_start + len]
+                                .copy_from_slice(&x_local[src_start..src_start + len]);
+                        }
+                    }
                 }
                 let slice = halo_slice(buf);
-                let req = self.index.comm.isend_to(slice, nbr as i32);
+                let req = self.index.comm.isend_to(slice, item.nbr as i32);
                 send_reqs.push(req);
             }
         }
@@ -305,6 +390,83 @@ impl HaloPlan {
                 }
             }
         }
+    }
+}
+
+fn build_recv_schedule(index: &HaloIndexPlan, neighbor_order: NeighborOrder) -> Vec<RecvSchedule> {
+    let mut neighbors: Vec<usize> = index
+        .recv_map
+        .iter()
+        .filter_map(|(&nbr, cols)| (!cols.is_empty()).then_some(nbr))
+        .collect();
+    order_neighbors(&mut neighbors, index, neighbor_order);
+    neighbors
+        .into_iter()
+        .map(|nbr| RecvSchedule { nbr })
+        .collect()
+}
+
+fn build_send_schedule(
+    index: &HaloIndexPlan,
+    tuning: &HaloTuning,
+    neighbor_order: NeighborOrder,
+) -> Vec<SendSchedule> {
+    let mut neighbors: Vec<usize> = index
+        .send_local_idx
+        .iter()
+        .filter_map(|(&nbr, idxs)| (!idxs.is_empty()).then_some(nbr))
+        .collect();
+    order_neighbors(&mut neighbors, index, neighbor_order);
+
+    neighbors
+        .into_iter()
+        .map(|nbr| {
+            let idxs = index
+                .send_local_idx
+                .get(&nbr)
+                .expect("send schedule mismatch");
+            let mut ops = Vec::new();
+            let mut dst = 0usize;
+            while dst < idxs.len() {
+                if tuning.coalesce_pack_runs {
+                    let mut len = 1usize;
+                    while dst + len < idxs.len() && idxs[dst + len] == idxs[dst] + len {
+                        len += 1;
+                    }
+                    if len >= tuning.min_run_len {
+                        ops.push(PackOp::Run {
+                            src_start: idxs[dst],
+                            dst_start: dst,
+                            len,
+                        });
+                        dst += len;
+                        continue;
+                    }
+                }
+                ops.push(PackOp::Scatter {
+                    src: idxs[dst],
+                    dst,
+                });
+                dst += 1;
+            }
+            SendSchedule { nbr, ops }
+        })
+        .collect()
+}
+
+fn order_neighbors(neighbors: &mut [usize], index: &HaloIndexPlan, neighbor_order: NeighborOrder) {
+    match neighbor_order {
+        NeighborOrder::RankAscending => neighbors.sort_unstable(),
+        NeighborOrder::SendVolumeDesc => neighbors.sort_unstable_by(|a, b| {
+            let av = index.send_local_idx.get(a).map_or(0, Vec::len);
+            let bv = index.send_local_idx.get(b).map_or(0, Vec::len);
+            bv.cmp(&av).then_with(|| a.cmp(b))
+        }),
+        NeighborOrder::RecvVolumeDesc => neighbors.sort_unstable_by(|a, b| {
+            let av = index.recv_map.get(a).map_or(0, Vec::len);
+            let bv = index.recv_map.get(b).map_or(0, Vec::len);
+            bv.cmp(&av).then_with(|| a.cmp(b))
+        }),
     }
 }
 
@@ -337,6 +499,38 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    fn build_index_for_schedule_tests() -> HaloIndexPlan {
+        let comm = UniverseComm::NoComm(NoComm);
+        let row_part = Arc::new(vec![0usize, 16usize]);
+        let mut recv_map = BTreeMap::new();
+        recv_map.insert(1, vec![100, 101]);
+        recv_map.insert(2, vec![200, 201, 202, 203]);
+        recv_map.insert(3, vec![300]);
+        HaloIndexPlan {
+            comm,
+            rank: 0,
+            size: 4,
+            row_part,
+            row_start: 0,
+            row_end: 16,
+            n_local: 16,
+            recv_map,
+            send_map: BTreeMap::from([
+                (1usize, vec![0, 1]),
+                (2usize, vec![4, 5, 6, 7]),
+                (3usize, vec![9]),
+            ]),
+            send_local_idx: BTreeMap::from([
+                (1usize, vec![0, 1]),
+                (2usize, vec![4, 5, 6, 7]),
+                (3usize, vec![9]),
+            ]),
+            ghost_index_of: BTreeMap::new(),
+            ghost_ranges: BTreeMap::new(),
+            n_ghost: 0,
+        }
+    }
+
     #[test]
     fn halo_plan_rejects_local_neighbor() {
         let comm = UniverseComm::NoComm(NoComm);
@@ -361,5 +555,33 @@ mod tests {
         if let Err(KError::InvalidInput(msg)) = res {
             assert!(msg.contains("neighbor rank 5 out of bounds"))
         }
+    }
+
+    #[test]
+    fn halo_send_schedule_coalesces_contiguous_runs() {
+        let index = build_index_for_schedule_tests();
+        let tuning = HaloTuning {
+            coalesce_pack_runs: true,
+            min_run_len: 3,
+            neighbor_order: NeighborOrder::RankAscending,
+        };
+        let schedule = build_send_schedule(&index, &tuning, NeighborOrder::RankAscending);
+        let nbr2 = schedule.iter().find(|item| item.nbr == 2).unwrap();
+        assert!(matches!(
+            nbr2.ops.as_slice(),
+            [PackOp::Run {
+                src_start: 4,
+                dst_start: 0,
+                len: 4
+            }]
+        ));
+    }
+
+    #[test]
+    fn halo_recv_schedule_can_be_ordered_by_volume() {
+        let index = build_index_for_schedule_tests();
+        let recv = build_recv_schedule(&index, NeighborOrder::RecvVolumeDesc);
+        let order: Vec<usize> = recv.into_iter().map(|item| item.nbr).collect();
+        assert_eq!(order, vec![2, 1, 3]);
     }
 }
