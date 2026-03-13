@@ -348,6 +348,11 @@ impl DistCsrOp {
         self.halo.index.row_part.clone()
     }
 
+    /// Return the halo index plan used by the distributed operator.
+    pub fn halo_index(&self) -> Arc<HaloIndexPlan> {
+        self.halo.index.clone()
+    }
+
     /// Number of local rows stored on this rank.
     pub fn local_nrows(&self) -> usize {
         self.n_local

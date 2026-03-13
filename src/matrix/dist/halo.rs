@@ -285,6 +285,19 @@ pub struct HaloPlan {
 unsafe impl Sync for HaloPlan {}
 
 impl HaloPlan {
+    pub fn from_shared_index(index: Arc<HaloIndexPlan>) -> Self {
+        let buffers = HaloBuffers::new(&index);
+        let recv_schedule = build_recv_schedule(&index, NeighborOrder::RankAscending);
+        let send_schedule =
+            build_send_schedule(&index, &HaloTuning::default(), NeighborOrder::RankAscending);
+        Self {
+            index,
+            buffers,
+            recv_schedule,
+            send_schedule,
+        }
+    }
+
     pub fn new(
         comm: UniverseComm,
         row_part: Arc<Vec<usize>>,
