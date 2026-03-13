@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn fieldsplit_distributed_support_is_local_when_children_local() {
         let pc =
-            FieldSplitPc::new(vec![2, 2], Some("jacobi".into()), PcOptions::default()).unwrap();
+            FieldSplitPc::new(vec![2, 2], Some("none".into()), PcOptions::default()).unwrap();
         assert_eq!(pc.distributed_support(), PcDistributedSupport::LocalOnly);
     }
 

@@ -132,7 +132,7 @@ impl GamgConfig {
             amg_config.dist_coarse_strategy = DistCoarseStrategy::from_str(policy)?;
         }
 
-        let mut merged: std::collections::BTreeMap<usize, GamgLevelPolicy> =
+        let mut merged: std::collections::BTreeMap<(usize, Option<String>), GamgLevelPolicy> =
             std::collections::BTreeMap::new();
         for policy in opts
             .pc_gamg_level_policies
@@ -145,8 +145,9 @@ impl GamgConfig {
             })
             .unwrap_or_default()
         {
+            let key = (policy.level, policy.level_key.clone());
             let entry = merged
-                .entry(policy.level)
+                .entry(key)
                 .or_insert_with(|| GamgLevelPolicy {
                     level: policy.level,
                     ..Default::default()
@@ -155,7 +156,9 @@ impl GamgConfig {
         }
         for (level, scoped) in &opts.pc_gamg_level_scoped_options {
             let scoped_policy = gamg_policy_from_scoped(opts, *level, scoped)?;
-            let entry = merged.entry(*level).or_insert_with(|| GamgLevelPolicy {
+            let entry = merged
+                .entry((*level, None))
+                .or_insert_with(|| GamgLevelPolicy {
                 level: *level,
                 ..Default::default()
             });
