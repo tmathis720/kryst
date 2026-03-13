@@ -1097,7 +1097,7 @@ impl CgSolver {
             };
 
             let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
-            let (rho_new, delta_new, rsq_new, znorm_new, refreshed) = if refresh_due {
+            let (mut rho_new, mut delta_new, _rsq_new, _znorm_new, refreshed) = if refresh_due {
                 a.matvec_s(x, tmp, scratch);
                 for i in 0..nrows {
                     r[i] = b[i] - tmp[i];
@@ -1163,8 +1163,8 @@ impl CgSolver {
 
             let res_reported: R = match self.norm_type {
                 CgNormType::Preconditioned => rho_new.abs().sqrt(),
-                CgNormType::Unpreconditioned => rsq_new.unwrap().abs().sqrt(),
-                CgNormType::Natural => znorm_new.unwrap().abs().sqrt(),
+                CgNormType::Unpreconditioned => red.norm2(r),
+                CgNormType::Natural => red.norm2(u),
                 CgNormType::None => R::zero(),
             };
 
@@ -1181,6 +1181,38 @@ impl CgSolver {
             let (reason, mut s_out) = self.conv.check(res_reported, res0_reported, k);
             if !matches!(reason, ConvergedReason::Continued) {
                 s_out.final_residual = red.norm2(r);
+                let tol = self.conv.atol.max(self.conv.rtol * res0_reported);
+                if s_out.final_residual > tol && k < self.conv.max_iters {
+                    a.matvec_s(x, tmp, scratch);
+                    for i in 0..nrows {
+                        r[i] = b[i] - tmp[i];
+                    }
+                    if let Some(pc) = pc {
+                        pc.apply_s(PcSide::Left, r, &mut u[..], scratch)?;
+                    } else {
+                        par_copy(r, u);
+                    }
+                    a.matvec_s(u, &mut w[..], scratch);
+
+                    rho_new = dot_result_to_real(red.dot(r, u));
+                    delta_new = dot_result_to_real(red.dot(u, w));
+                    if rho_new < R::zero() || !rho_new.is_finite() {
+                        return Err(KError::IndefinitePreconditioner);
+                    }
+                    if delta_new <= R::zero() || !delta_new.is_finite() {
+                        return Err(KError::IndefiniteMatrix);
+                    }
+
+                    par_copy(u, p);
+                    par_copy(w, s);
+                    rho_prev = rho;
+                    rho = rho_new;
+                    delta = delta_new;
+                    alpha = rho / delta;
+                    stats.iterations = k;
+                    stats.final_residual = s_out.final_residual;
+                    continue;
+                }
                 if s_out.final_residual <= zero_floor {
                     s_out.final_residual = R::zero();
                 }
