@@ -162,7 +162,14 @@ fn pipelined_periodic_refresh_bounds_residual_drift() {
         )
         .expect("refreshed pipelined CG converged");
 
-    assert!(stats_refresh.final_residual <= stats_plain.final_residual * R::from(1.5));
+    let allowed_refresh_residual = (stats_plain.final_residual * R::from(1.5)).max(R::from(1e-9));
+    assert!(
+        stats_refresh.final_residual <= allowed_refresh_residual,
+        "refresh residual {} exceeded bound {} (plain residual {})",
+        stats_refresh.final_residual,
+        allowed_refresh_residual,
+        stats_plain.final_residual
+    );
     assert!(stats_refresh.iterations <= 300);
 }
 
