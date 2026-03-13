@@ -269,7 +269,10 @@ fn mpi_block_jacobi_strict_rejects_unsupported_local_pc() {
     };
     let msg = format!("{err}");
     assert!(
-        msg.contains("pc_dist_local_apply=strict") && msg.contains("supports wrapped_local"),
+        msg.contains("err_key=pc_dist_strict_mode_rejected")
+            && msg.contains("pc_dist_local_apply=strict")
+            && msg.contains("pc_global=BlockJacobi")
+            && msg.contains("detail_key=unsupported_local_pc"),
         "unexpected strict-mode error: {msg}"
     );
 }
@@ -429,6 +432,7 @@ fn mpi_dist_builder_constructs_native_ras_and_asm() {
             block_solver: AsmBlockSolver::Csr,
             inner_pc: AsmInnerPc::Ilu0,
             weighting: Weighting::None,
+            local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
         },
     )
     .expect("native distributed ras build");
@@ -441,6 +445,7 @@ fn mpi_dist_builder_constructs_native_ras_and_asm() {
             block_solver: AsmBlockSolver::Csr,
             inner_pc: AsmInnerPc::Ilu0,
             weighting: Weighting::None,
+            local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
         },
     )
     .expect("native distributed asm build");
@@ -456,5 +461,100 @@ fn mpi_dist_builder_constructs_native_ras_and_asm() {
     assert!(
         y_ras.iter().all(|v| v.is_finite()) && y_asm.iter().all(|v| v.is_finite()),
         "distributed ASM/RAS outputs must be finite"
+    );
+}
+
+#[test]
+fn mpi_asm_strict_rejected_with_structured_keys() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let err = match DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Asm {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+            local_apply_mode: DistLocalApplyMode::NativeStrict,
+        },
+    ) {
+        Ok(_) => panic!("strict mode should reject ASM distributed builder"),
+        Err(err) => err,
+    };
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("err_key=pc_dist_strict_mode_rejected")
+            && msg.contains("pc_dist_local_apply=strict")
+            && msg.contains("pc_global=Asm")
+            && msg.contains("detail_key=unsupported_global_pc"),
+        "unexpected strict-mode error: {msg}"
+    );
+}
+
+#[test]
+fn mpi_ras_strict_rejected_with_structured_keys() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let err = match DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Ras {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+            local_apply_mode: DistLocalApplyMode::NativeStrict,
+        },
+    ) {
+        Ok(_) => panic!("strict mode should reject RAS distributed builder"),
+        Err(err) => err,
+    };
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("err_key=pc_dist_strict_mode_rejected")
+            && msg.contains("pc_dist_local_apply=strict")
+            && msg.contains("pc_global=Ras")
+            && msg.contains("detail_key=unsupported_global_pc"),
+        "unexpected strict-mode error: {msg}"
+    );
+}
+
+#[test]
+fn mpi_block_jacobi_strict_rejects_wrapped_only_with_structured_keys() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let opts = MpiPcOptions {
+        global_pc: GlobalPcKind::BlockJacobi,
+        local_pc: LocalPcKind::Spai,
+        local_apply_mode: DistLocalApplyMode::NativeStrict,
+        ..MpiPcOptions::default()
+    };
+    let err = match DistPcAdapter::build(&dist, DistPcBuilder::BlockJacobi { opts }) {
+        Ok(_) => panic!("strict mode should reject wrapped-only block-jacobi local pc"),
+        Err(err) => err,
+    };
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("err_key=pc_dist_strict_mode_rejected")
+            && msg.contains("pc_dist_local_apply=strict")
+            && msg.contains("pc_global=BlockJacobi")
+            && msg.contains("detail_key=unsupported_local_pc"),
+        "unexpected strict-mode error: {msg}"
     );
 }

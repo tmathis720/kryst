@@ -3392,6 +3392,7 @@ impl KspContext {
                 block_solver,
                 inner_pc,
                 weighting,
+                local_apply_mode: pending.mpi_opts.local_apply_mode,
             },
             GlobalPcKind::Ras => DistPcBuilder::Ras {
                 overlap,
@@ -3399,6 +3400,7 @@ impl KspContext {
                 block_solver,
                 inner_pc,
                 weighting,
+                local_apply_mode: pending.mpi_opts.local_apply_mode,
             },
             _ => {
                 return Err(KError::InvalidInput(
