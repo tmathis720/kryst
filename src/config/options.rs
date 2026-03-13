@@ -2030,13 +2030,14 @@ impl PcOptions {
     }
 
     pub fn resolved_pc_ksp_pc_options(&self) -> PcOptions {
-        let mut pc = self
-            .pc_ksp_pc_options
-            .as_ref()
-            .map(|opts| opts.as_ref().clone())
-            .unwrap_or_default();
+        // `pc_ksp_pc_*` aliases are treated as defaults, while nested
+        // `pc_ksp_pc_options` retains highest precedence when both are provided.
+        let mut pc = PcOptions::default();
         if self.pc_ksp_pc_type.is_some() {
             pc.pc_type = self.pc_ksp_pc_type.clone();
+        }
+        if let Some(nested) = self.pc_ksp_pc_options.as_ref().map(|opts| opts.as_ref().clone()) {
+            pc.overlay_from(nested);
         }
         pc
     }
