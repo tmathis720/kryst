@@ -1,6 +1,7 @@
 #![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 
 use faer::Mat;
+use std::sync::Arc;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::KspContext;
 use kryst::parallel::{NoComm, UniverseComm};
@@ -80,7 +81,7 @@ fn bicgstab_variant_selectable_from_ksp_options() {
     let a = nonsym_tridiag(n);
     let b = vec![1.0; n];
     let mut x = vec![0.0; n];
-    ksp.set_operators(a.clone(), a).unwrap();
+    ksp.set_operators(Arc::new(a), None);
     let stats = ksp.solve(&b, &mut x).unwrap();
 
     assert_eq!(
