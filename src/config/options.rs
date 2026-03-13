@@ -1973,52 +1973,52 @@ impl KspOptions {
 impl PcOptions {
     pub fn resolved_pc_ksp_ksp_options(&self) -> KspOptions {
         let mut ksp = self.pc_ksp_ksp_options.clone().unwrap_or_default();
-        if ksp.ksp_type.is_none() {
+        if self.pc_ksp_ksp_type.is_some() {
             ksp.ksp_type = self.pc_ksp_ksp_type.clone();
         }
-        if ksp.maxits.is_none() {
+        if self.pc_ksp_maxits.is_some() {
             ksp.maxits = self.pc_ksp_maxits;
         }
-        if ksp.rtol.is_none() {
+        if self.pc_ksp_rtol.is_some() {
             ksp.rtol = self.pc_ksp_rtol;
         }
-        if ksp.atol.is_none() {
+        if self.pc_ksp_atol.is_some() {
             ksp.atol = self.pc_ksp_atol;
         }
-        if ksp.dtol.is_none() {
+        if self.pc_ksp_dtol.is_some() {
             ksp.dtol = self.pc_ksp_dtol;
         }
-        if ksp.restart.is_none() {
+        if self.pc_ksp_restart.is_some() {
             ksp.restart = self.pc_ksp_restart;
         }
-        if ksp.gmres_restart.is_none() {
+        if self.pc_ksp_gmres_restart.is_some() {
             ksp.gmres_restart = self.pc_ksp_gmres_restart;
         }
-        if ksp.fgmres_restart.is_none() {
+        if self.pc_ksp_fgmres_restart.is_some() {
             ksp.fgmres_restart = self.pc_ksp_fgmres_restart;
         }
-        if ksp.gmres_orthog.is_none() {
+        if self.pc_ksp_gmres_orthog.is_some() {
             ksp.gmres_orthog = self.pc_ksp_gmres_orthog.clone();
         }
-        if ksp.fgmres_orthog.is_none() {
+        if self.pc_ksp_fgmres_orthog.is_some() {
             ksp.fgmres_orthog = self.pc_ksp_fgmres_orthog.clone();
         }
-        if ksp.ksp_monitor_rank0.is_none() {
+        if self.pc_ksp_monitor_rank0.is_some() {
             ksp.ksp_monitor_rank0 = self.pc_ksp_monitor_rank0;
         }
-        if ksp.reduction.is_none() {
+        if self.pc_ksp_reduction.is_some() {
             ksp.reduction = self.pc_ksp_reduction.clone();
         }
-        if ksp.reproducible.is_none() {
+        if self.pc_ksp_reproducible.is_some() {
             ksp.reproducible = self.pc_ksp_reproducible;
         }
-        if ksp.threads.is_none() {
+        if self.pc_ksp_threads.is_some() {
             ksp.threads = self.pc_ksp_threads;
         }
-        if ksp.threads_mode.is_none() {
+        if self.pc_ksp_threads_mode.is_some() {
             ksp.threads_mode = self.pc_ksp_threads_mode.clone();
         }
-        if ksp.pc_side.is_none() {
+        if self.pc_ksp_pc_side.is_some() {
             ksp.pc_side = self.pc_ksp_pc_side.clone();
         }
         ksp
@@ -2030,7 +2030,7 @@ impl PcOptions {
             .as_ref()
             .map(|opts| opts.as_ref().clone())
             .unwrap_or_default();
-        if pc.pc_type.is_none() {
+        if self.pc_ksp_pc_type.is_some() {
             pc.pc_type = self.pc_ksp_pc_type.clone();
         }
         pc
