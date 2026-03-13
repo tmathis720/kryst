@@ -6,12 +6,14 @@
 
 mod coarse;
 mod native_plan;
+mod strict_mode;
 
 pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
 pub use native_plan::{
     DistLocalApplyMode, DistRouteDecision, DistRouteDecisionReason, DistRouteFallbackReason,
     DistRoutePolicy, DistRouteResolveInput, DistRouteSelection, resolve_dist_route,
 };
+pub use strict_mode::validate_dist_builder_strict_mode;
 
 use crate::error::KError;
 use crate::parallel::UniverseComm;
@@ -327,6 +329,7 @@ pub enum DistPcBuilder {
         block_solver: AsmBlockSolver,
         inner_pc: AsmInnerPc,
         weighting: Weighting,
+        local_apply_mode: DistLocalApplyMode,
     },
     Ras {
         overlap: usize,
@@ -334,6 +337,7 @@ pub enum DistPcBuilder {
         block_solver: AsmBlockSolver,
         inner_pc: AsmInnerPc,
         weighting: Weighting,
+        local_apply_mode: DistLocalApplyMode,
     },
 }
 
@@ -462,6 +466,7 @@ fn build_dist_pc(
     dist_op: &DistCsrOp,
     builder: &DistPcBuilder,
 ) -> Result<Box<dyn DistributedPreconditioner<Scalar = f64>>, KError> {
+    validate_dist_builder_strict_mode(builder)?;
     match builder {
         DistPcBuilder::BlockJacobi { opts } => {
             #[cfg(feature = "backend-faer")]
@@ -486,6 +491,7 @@ fn build_dist_pc(
             block_solver,
             inner_pc,
             weighting,
+            local_apply_mode: _,
         } => {
             let asm = DistributedAsm::new(
                 *overlap,
@@ -504,6 +510,7 @@ fn build_dist_pc(
             block_solver,
             inner_pc,
             weighting,
+            local_apply_mode: _,
         } => {
             let asm = DistributedAsm::new_ras(
                 *overlap,
