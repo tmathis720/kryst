@@ -1972,9 +1972,9 @@ impl KspOptions {
 
 impl PcOptions {
     pub fn resolved_pc_ksp_ksp_options(&self) -> KspOptions {
-        // `pc_ksp_*` aliases are treated as defaults, while nested `pc_ksp_ksp_options`
-        // retains highest precedence when both are provided.
-        let mut ksp = KspOptions::default();
+        // Begin with scoped options and allow flat `pc_ksp_*` aliases to override.
+        // This mirrors PETSc-like flag behavior where explicit flat keys win.
+        let mut ksp = self.pc_ksp_ksp_options.clone().unwrap_or_default();
         if self.pc_ksp_ksp_type.is_some() {
             ksp.ksp_type = self.pc_ksp_ksp_type.clone();
         }
@@ -2023,21 +2023,18 @@ impl PcOptions {
         if self.pc_ksp_pc_side.is_some() {
             ksp.pc_side = self.pc_ksp_pc_side.clone();
         }
-        if let Some(nested) = self.pc_ksp_ksp_options.clone() {
-            ksp.overlay_from(nested);
-        }
         ksp
     }
 
     pub fn resolved_pc_ksp_pc_options(&self) -> PcOptions {
-        // `pc_ksp_pc_*` aliases are treated as defaults, while nested
-        // `pc_ksp_pc_options` retains highest precedence when both are provided.
-        let mut pc = PcOptions::default();
+        // Begin with scoped options and allow flat `pc_ksp_pc_*` aliases to override.
+        let mut pc = self
+            .pc_ksp_pc_options
+            .as_ref()
+            .map(|opts| opts.as_ref().clone())
+            .unwrap_or_default();
         if self.pc_ksp_pc_type.is_some() {
             pc.pc_type = self.pc_ksp_pc_type.clone();
-        }
-        if let Some(nested) = self.pc_ksp_pc_options.as_ref().map(|opts| opts.as_ref().clone()) {
-            pc.overlay_from(nested);
         }
         pc
     }
@@ -3640,14 +3637,14 @@ mod old_tests {
         };
 
         let ksp = opts.resolved_pc_ksp_ksp_options();
-        assert_eq!(ksp.ksp_type.as_deref(), Some("fgmres"));
-        assert_eq!(ksp.maxits, Some(3));
+        assert_eq!(ksp.ksp_type.as_deref(), Some("gmres"));
+        assert_eq!(ksp.maxits, Some(8));
         assert_eq!(ksp.pc_side.as_deref(), Some("right"));
         assert_eq!(ksp.effective_restart_for(KspType::GMRES), Some(18));
         assert_eq!(ksp.effective_restart_for(KspType::FGMRES), Some(7));
 
         let pc = opts.resolved_pc_ksp_pc_options();
-        assert_eq!(pc.pc_type.as_deref(), Some("none"));
+        assert_eq!(pc.pc_type.as_deref(), Some("jacobi"));
     }
 
     #[test]
