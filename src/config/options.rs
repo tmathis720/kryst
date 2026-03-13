@@ -1972,7 +1972,9 @@ impl KspOptions {
 
 impl PcOptions {
     pub fn resolved_pc_ksp_ksp_options(&self) -> KspOptions {
-        let mut ksp = self.pc_ksp_ksp_options.clone().unwrap_or_default();
+        // `pc_ksp_*` aliases are treated as defaults, while nested `pc_ksp_ksp_options`
+        // retains highest precedence when both are provided.
+        let mut ksp = KspOptions::default();
         if self.pc_ksp_ksp_type.is_some() {
             ksp.ksp_type = self.pc_ksp_ksp_type.clone();
         }
@@ -2020,6 +2022,9 @@ impl PcOptions {
         }
         if self.pc_ksp_pc_side.is_some() {
             ksp.pc_side = self.pc_ksp_pc_side.clone();
+        }
+        if let Some(nested) = self.pc_ksp_ksp_options.clone() {
+            ksp.overlay_from(nested);
         }
         ksp
     }
