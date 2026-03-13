@@ -1099,7 +1099,7 @@ impl CgSolver {
             let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
             let (rho_new, delta_new, rsq_new, znorm_new, refreshed) = if refresh_due {
                 a.matvec_s(x, tmp, scratch);
-                for i in 0..n {
+                for i in 0..nrows {
                     r[i] = b[i] - tmp[i];
                 }
                 if let Some(pc) = pc {

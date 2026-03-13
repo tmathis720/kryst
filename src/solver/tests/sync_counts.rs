@@ -137,7 +137,8 @@ fn bicgstab_lowsync_reduces_reported_syncs_vs_classic() -> Result<(), KError> {
         Some(&mut ws),
     )?;
 
-    assert!(stats_lowsync.final_residual <= 1e-6 * b.norm2() + 1e-8);
+    let b_norm2 = b.iter().map(|&v| v * v).sum::<f64>().sqrt();
+    assert!(stats_lowsync.final_residual <= 1e-6 * b_norm2 + 1e-8);
     assert!(
         stats_lowsync.counters.num_global_reductions
             <= stats_classic.counters.num_global_reductions,
