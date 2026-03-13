@@ -49,6 +49,25 @@ struct NativeCouplingPlan {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Copy, Debug)]
+enum NativePlanBuildReason {
+    ReusedOperatorHalo,
+    BuiltDedicatedHalo,
+    IncompatibleHaloIndex,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl NativePlanBuildReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::ReusedOperatorHalo => "reused_operator_halo",
+            Self::BuiltDedicatedHalo => "built_dedicated_halo",
+            Self::IncompatibleHaloIndex => "incompatible_halo_index",
+        }
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 impl NativeCouplingPlan {
     fn from_dist_op(
         dist_op: &DistCsrOp,
@@ -89,16 +108,16 @@ impl NativeCouplingPlan {
             }
         }
 
-        let halo = Arc::new(HaloPlan::new(
-            dist_op.comm(),
-            part,
-            row_start,
-            row_end,
-            recv_map,
-        )?);
+        for cols in recv_map.values_mut() {
+            cols.sort_unstable();
+            cols.dedup();
+        }
+
+        let (halo, reason) = Self::build_halo_plan(dist_op, &recv_map, row_start, row_end, part)?;
+        log::debug!("native coupling halo plan reason_code={}", reason.code());
 
         Ok(Self {
-            halo,
+            halo: Arc::new(halo),
             remote_entries_by_row,
             diag_inv,
             omega,
@@ -107,6 +126,55 @@ impl NativeCouplingPlan {
             } else {
                 0.0
             },
+        })
+    }
+
+    fn build_halo_plan(
+        dist_op: &DistCsrOp,
+        recv_map: &BTreeMap<usize, Vec<usize>>,
+        row_start: usize,
+        row_end: usize,
+        part: Arc<Vec<usize>>,
+    ) -> Result<(HaloPlan, NativePlanBuildReason), KError> {
+        let op_index = dist_op.halo_index();
+        if Self::halo_index_compatible(op_index.as_ref(), recv_map) {
+            return Ok((
+                HaloPlan::from_shared_index(op_index),
+                NativePlanBuildReason::ReusedOperatorHalo,
+            ));
+        }
+
+        let reason = NativePlanBuildReason::IncompatibleHaloIndex;
+        log::debug!(
+            "native coupling halo reuse skipped reason_code={}",
+            reason.code()
+        );
+
+        Ok((
+            HaloPlan::new(dist_op.comm(), part, row_start, row_end, recv_map.clone())?,
+            NativePlanBuildReason::BuiltDedicatedHalo,
+        ))
+    }
+
+    fn halo_index_compatible(
+        op_index: &crate::matrix::dist::halo::HaloIndexPlan,
+        recv_map: &BTreeMap<usize, Vec<usize>>,
+    ) -> bool {
+        if op_index.recv_map.len() != recv_map.len() {
+            return false;
+        }
+        recv_map.iter().all(|(nbr, cols)| {
+            if let Some(op_cols) = op_index.recv_map.get(nbr) {
+                let mut lhs = cols.clone();
+                let mut rhs = op_cols.clone();
+                lhs.sort_unstable();
+                lhs.dedup();
+                rhs.sort_unstable();
+                rhs.dedup();
+                lhs == rhs
+            } else {
+                false
+            }
         })
     }
 
@@ -125,6 +193,10 @@ impl NativeCouplingPlan {
             for &(gcol, value) in entries {
                 if let Some(&gidx) = self.halo.index.ghost_index_of.get(&gcol) {
                     remote_sum += value * ghost[gidx];
+                } else {
+                    log::error!(
+                        "native coupling halo mismatch reason_code=missing_ghost_column gcol={gcol}"
+                    );
                 }
             }
             y_local[row] -= self.omega * self.diag_inv[row] * remote_sum;
