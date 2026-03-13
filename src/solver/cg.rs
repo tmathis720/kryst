@@ -1139,17 +1139,16 @@ impl CgSolver {
                 (rho_new, delta_new, rsq_new, znorm_new, false)
             };
 
-            let beta = if refreshed { R::zero() } else { rho_new / rho };
-            if refreshed {
-                par_copy(u, p);
-                par_copy(w, s);
-            } else {
-                let beta_s: S = S::from_real(beta);
-                par_axpy(p, beta_s, u);
-                par_copy(u, p);
-                par_axpy(s, beta_s, w);
-                par_copy(w, s);
-            }
+            // A residual refresh should correct recursively accumulated drift,
+            // but it should not turn pipelined CG into periodic steepest
+            // descent restarts. Keep the usual direction recurrences so we
+            // preserve conjugacy information across refresh points.
+            let beta = rho_new / rho;
+            let beta_s: S = S::from_real(beta);
+            par_axpy(p, beta_s, u);
+            par_copy(u, p);
+            par_axpy(s, beta_s, w);
+            par_copy(w, s);
 
             debug::emit_iter(debug::IterEvent {
                 iteration: k,
