@@ -11,6 +11,8 @@ pub struct CommPlan {
     pub imports: Vec<Vec<usize>>,
     pub exports: Vec<Vec<usize>>,
     pub import_locs: Vec<Vec<usize>>,
+    pub import_peers: Vec<usize>,
+    pub export_peers: Vec<usize>,
 }
 
 #[cfg(feature = "mpi")]
@@ -21,8 +23,9 @@ impl CommPlan {
         row_start: usize,
         local: &[S],
     ) -> Result<Vec<Vec<S>>, KError> {
-        let mut send = Vec::with_capacity(self.exports.len());
-        for export in &self.exports {
+        let mut send = Vec::with_capacity(self.export_peers.len());
+        for &peer in &self.export_peers {
+            let export = &self.exports[peer];
             let mut buf = Vec::with_capacity(export.len());
             for &g in export {
                 let li = g - row_start;
@@ -30,7 +33,7 @@ impl CommPlan {
             }
             send.push(buf);
         }
-        alltoallv_scalar(comm, &send)
+        alltoallv_scalar_sparse(comm, &self.export_peers, &send, &self.import_peers)
     }
 }
 
@@ -104,6 +107,67 @@ pub fn alltoallv_u64(comm: &UniverseComm, send: &[Vec<u64>]) -> Result<Vec<Vec<u
 }
 
 #[cfg(feature = "mpi")]
+pub fn alltoallv_u64_sparse(
+    comm: &UniverseComm,
+    send_peers: &[usize],
+    send: &[Vec<u64>],
+    recv_peers: &[usize],
+) -> Result<Vec<Vec<u64>>, KError> {
+    if send_peers.len() != send.len() {
+        return Err(KError::InvalidInput(
+            "alltoallv_u64_sparse: send_peers/send lengths must match".into(),
+        ));
+    }
+
+    let size = comm.size();
+    let rank = comm.rank();
+    if size == 1 {
+        return Ok(Vec::new());
+    }
+
+    let dense_send = send_peers.len() == size.saturating_sub(1)
+        && recv_peers.len() == size.saturating_sub(1)
+        && send_peers.iter().all(|&p| p != rank)
+        && recv_peers.iter().all(|&p| p != rank);
+    if dense_send {
+        let mut dense = vec![Vec::<u64>::new(); size];
+        for (&peer, payload) in send_peers.iter().zip(send.iter()) {
+            dense[peer] = payload.clone();
+        }
+        let recv = alltoallv_u64(comm, &dense)?;
+        return Ok(recv_peers.iter().map(|&peer| recv[peer].clone()).collect());
+    }
+
+    let mut recv_counts = vec![[0u64; 1]; recv_peers.len()];
+    let send_counts: Vec<[u64; 1]> = send.iter().map(|buf| [buf.len() as u64]).collect();
+
+    let mut reqs = Vec::with_capacity(recv_peers.len() + send_peers.len());
+    for (slot, &peer) in recv_counts.iter_mut().zip(recv_peers.iter()) {
+        reqs.push(comm.irecv_from_u64(slot, peer as i32));
+    }
+    for (&peer, count) in send_peers.iter().zip(send_counts.iter()) {
+        reqs.push(comm.isend_to_u64(count, peer as i32));
+    }
+    comm.wait_all(&mut reqs);
+
+    let mut recv = recv_counts
+        .iter()
+        .map(|count| vec![0u64; count[0] as usize])
+        .collect::<Vec<_>>();
+
+    let mut reqs = Vec::with_capacity(recv_peers.len() + send_peers.len());
+    for (buf, &peer) in recv.iter_mut().zip(recv_peers.iter()) {
+        reqs.push(comm.irecv_from_u64(buf, peer as i32));
+    }
+    for (&peer, payload) in send_peers.iter().zip(send.iter()) {
+        reqs.push(comm.isend_to_u64(payload, peer as i32));
+    }
+    comm.wait_all(&mut reqs);
+
+    Ok(recv)
+}
+
+#[cfg(feature = "mpi")]
 pub fn alltoallv_scalar(comm: &UniverseComm, send: &[Vec<S>]) -> Result<Vec<Vec<S>>, KError> {
     let size = comm.size();
     if send.len() != size {
@@ -111,8 +175,25 @@ pub fn alltoallv_scalar(comm: &UniverseComm, send: &[Vec<S>]) -> Result<Vec<Vec<
             "alltoallv_scalar: send buffer length must match communicator size".into(),
         ));
     }
-    let packed = pack_scalar_sends(send);
+    let packed = pack_scalar_buffers(send);
     let recv_packed = alltoallv_u64(comm, &packed)?;
+    unpack_scalar_recvs(&recv_packed)
+}
+
+#[cfg(feature = "mpi")]
+pub fn alltoallv_scalar_sparse(
+    comm: &UniverseComm,
+    send_peers: &[usize],
+    send: &[Vec<S>],
+    recv_peers: &[usize],
+) -> Result<Vec<Vec<S>>, KError> {
+    if send_peers.len() != send.len() {
+        return Err(KError::InvalidInput(
+            "alltoallv_scalar_sparse: send_peers/send lengths must match".into(),
+        ));
+    }
+    let packed = pack_scalar_buffers(send);
+    let recv_packed = alltoallv_u64_sparse(comm, send_peers, &packed, recv_peers)?;
     unpack_scalar_recvs(&recv_packed)
 }
 
@@ -129,7 +210,7 @@ fn scalar_words() -> usize {
 }
 
 #[cfg(feature = "mpi")]
-fn pack_scalar_sends(send: &[Vec<S>]) -> Vec<Vec<u64>> {
+fn pack_scalar_buffers(send: &[Vec<S>]) -> Vec<Vec<u64>> {
     let words = scalar_words();
     send.iter()
         .map(|buf| {

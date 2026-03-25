@@ -9,6 +9,8 @@ mod serial;
 mod subdomain;
 
 #[cfg(feature = "mpi")]
+pub use comm_plan::alltoallv_u64_sparse;
+#[cfg(feature = "mpi")]
 pub use distributed::DistributedAsm;
 pub use serial::*;
 
