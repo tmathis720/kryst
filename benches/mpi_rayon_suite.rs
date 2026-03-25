@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
+#[cfg(feature = "mpi")]
+use kryst::preconditioner::asm::alltoallv_u64_sparse;
 
 fn build_part_prefix(n_global: usize, size: usize) -> Vec<usize> {
     let base = n_global / size;
@@ -175,5 +177,69 @@ fn bench_suite(c: &mut Criterion) {
     }
 }
 
+#[cfg(feature = "mpi")]
+fn sparse_ring_peers(rank: usize, size: usize, degree: usize) -> Vec<usize> {
+    if size <= 1 || degree == 0 {
+        return Vec::new();
+    }
+    let span = degree.min(size.saturating_sub(1));
+    let mut peers = Vec::with_capacity(span);
+    for step in 1..=span {
+        peers.push((rank + step) % size);
+    }
+    peers
+}
+
+#[cfg(feature = "mpi")]
+fn bench_sparse_exchange(c: &mut Criterion) {
+    let comm = bench_comm();
+    let size = comm.size();
+    if size <= 1 {
+        return;
+    }
+    let rank = comm.rank();
+    let degree = std::env::var("KRYST_BENCH_SPARSE_DEGREE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4)
+        .min(size.saturating_sub(1));
+    let payload_words = std::env::var("KRYST_BENCH_SPARSE_WORDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(16);
+
+    let send_peers = sparse_ring_peers(rank, size, degree);
+    let recv_peers = (1..=send_peers.len())
+        .map(|step| (rank + size - step) % size)
+        .collect::<Vec<_>>();
+
+    let mut group = c.benchmark_group("mpi_sparse_exchange");
+    group.bench_function(format!("setup_r{size}_d{degree}_w{payload_words}"), |ben| {
+        ben.iter(|| {
+            let payloads: Vec<Vec<u64>> = send_peers
+                .iter()
+                .map(|&peer| vec![peer as u64; payload_words])
+                .collect();
+            std::hint::black_box(payloads);
+        });
+    });
+
+    let payloads: Vec<Vec<u64>> = send_peers
+        .iter()
+        .map(|&peer| vec![peer as u64; payload_words])
+        .collect();
+    group.bench_function(format!("apply_r{size}_d{degree}_w{payload_words}"), |ben| {
+        ben.iter(|| {
+            let recv = alltoallv_u64_sparse(&comm, &send_peers, &payloads, &recv_peers)
+                .expect("sparse exchange");
+            std::hint::black_box(recv);
+        });
+    });
+    group.finish();
+}
+
+#[cfg(feature = "mpi")]
+criterion_group!(benches, bench_suite, bench_sparse_exchange);
+#[cfg(not(feature = "mpi"))]
 criterion_group!(benches, bench_suite);
 criterion_main!(benches);

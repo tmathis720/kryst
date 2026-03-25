@@ -41,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "mpi")]
-use super::comm_plan::{CommPlan, alltoallv_scalar, alltoallv_u64};
+use super::comm_plan::{CommPlan, alltoallv_scalar, alltoallv_scalar_sparse, alltoallv_u64};
 #[cfg(feature = "mpi")]
 use super::subdomain::{RemoteRow, build_subdomain_csr, request_remote_rows};
 
@@ -253,13 +253,19 @@ impl Preconditioner for DistributedAsm {
                 rhs[sub_idx] = x[local_idx];
             }
         }
-        for (peer, imports) in state.comm_plan.imports.iter().enumerate() {
+        for (slot_peer, imports) in state
+            .comm_plan
+            .import_peers
+            .iter()
+            .map(|&peer| (peer, &state.comm_plan.imports[peer]))
+            .enumerate()
+        {
             for (slot, &g) in imports.iter().enumerate() {
                 let sub_idx = *state
                     .sub_map
                     .get(&g)
                     .expect("subdomain map missing import entry");
-                rhs[sub_idx] = recv[peer][slot];
+                rhs[sub_idx] = recv[slot_peer][slot];
             }
         }
 
@@ -284,11 +290,9 @@ impl Preconditioner for DistributedAsm {
         }
 
         if self.mode == AsmMode::ASM {
-            let mut send = vec![Vec::<S>::new(); state.comm.size()];
-            for (peer, imports) in state.comm_plan.imports.iter().enumerate() {
-                if peer == state.comm.rank() {
-                    continue;
-                }
+            let mut send = Vec::with_capacity(state.comm_plan.import_peers.len());
+            for &peer in &state.comm_plan.import_peers {
+                let imports = &state.comm_plan.imports[peer];
                 let mut payload = Vec::with_capacity(imports.len());
                 for &g in imports {
                     let sub_idx = *state
@@ -297,10 +301,21 @@ impl Preconditioner for DistributedAsm {
                         .expect("subdomain map missing ASM import contribution");
                     payload.push(sol[sub_idx]);
                 }
-                send[peer] = payload;
+                send.push(payload);
             }
-            let recv = alltoallv_scalar(&state.comm, &send)?;
-            for (peer, exported) in state.comm_plan.exports.iter().enumerate() {
+            let recv = alltoallv_scalar_sparse(
+                &state.comm,
+                &state.comm_plan.import_peers,
+                &send,
+                &state.comm_plan.export_peers,
+            )?;
+            for (slot_peer, exported) in state
+                .comm_plan
+                .export_peers
+                .iter()
+                .map(|&peer| &state.comm_plan.exports[peer])
+                .enumerate()
+            {
                 for (slot, &g) in exported.iter().enumerate() {
                     if g >= state.layout.row_start && g < state.layout.row_end {
                         let local_idx = g - state.layout.row_start;
@@ -310,7 +325,7 @@ impl Preconditioner for DistributedAsm {
                             .and_then(|w| w.get(local_idx))
                             .copied()
                             .unwrap_or(1.0);
-                        y[local_idx] += weight * recv[peer][slot];
+                        y[local_idx] += weight * recv[slot_peer][slot];
                     }
                 }
             }
@@ -543,11 +558,23 @@ fn build_comm_plan(
         .iter()
         .map(|list| vec![0usize; list.len()])
         .collect();
+    let import_peers = imports
+        .iter()
+        .enumerate()
+        .filter_map(|(peer, list)| (!list.is_empty() && peer != rank).then_some(peer))
+        .collect();
+    let export_peers = exports
+        .iter()
+        .enumerate()
+        .filter_map(|(peer, list)| (!list.is_empty() && peer != rank).then_some(peer))
+        .collect();
 
     Ok(CommPlan {
         imports,
         exports,
         import_locs,
+        import_peers,
+        export_peers,
     })
 }
 
