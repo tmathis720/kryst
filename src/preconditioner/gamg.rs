@@ -146,12 +146,10 @@ impl GamgConfig {
             .unwrap_or_default()
         {
             let key = (policy.level, policy.level_key.clone());
-            let entry = merged
-                .entry(key)
-                .or_insert_with(|| GamgLevelPolicy {
-                    level: policy.level,
-                    ..Default::default()
-                });
+            let entry = merged.entry(key).or_insert_with(|| GamgLevelPolicy {
+                level: policy.level,
+                ..Default::default()
+            });
             merge_gamg_policy(entry, &policy);
         }
         for (level, scoped) in &opts.pc_gamg_level_scoped_options {
@@ -159,9 +157,9 @@ impl GamgConfig {
             let entry = merged
                 .entry((*level, None))
                 .or_insert_with(|| GamgLevelPolicy {
-                level: *level,
-                ..Default::default()
-            });
+                    level: *level,
+                    ..Default::default()
+                });
             merge_gamg_policy(entry, &scoped_policy);
         }
         let level_policies = merged.into_values().collect::<Vec<_>>();
@@ -485,6 +483,85 @@ fn route_fallback_order(
 }
 
 #[cfg(feature = "backend-faer")]
+fn dist_route_is_available(route: DistCoarseSolverRoute) -> bool {
+    match route {
+        DistCoarseSolverRoute::Auto => true,
+        DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Local => true,
+        DistCoarseSolverRoute::SuperLuDist => {
+            #[cfg(feature = "superlu_dist")]
+            {
+                true
+            }
+            #[cfg(not(feature = "superlu_dist"))]
+            {
+                false
+            }
+        }
+    }
+}
+
+#[cfg(feature = "backend-faer")]
+fn resolve_route_policy(
+    requested: Option<&[DistCoarseSolverRoute]>,
+    fallback: &[DistCoarseSolverRoute],
+    context: &str,
+) -> Result<(DistCoarseSolverRoute, String), KError> {
+    let requested = requested.unwrap_or(&[]);
+    let policy_head = requested
+        .first()
+        .copied()
+        .unwrap_or(*fallback.first().unwrap_or(&DistCoarseSolverRoute::Auto));
+    let head_is_auto = policy_head == DistCoarseSolverRoute::Auto;
+
+    if !head_is_auto && !dist_route_is_available(policy_head) {
+        return Err(KError::Unsupported(format!(
+            "{context}: forced distributed coarse route {:?} is unavailable for this build",
+            policy_head
+        )));
+    }
+
+    let mut chain = Vec::new();
+    let mut push_unique = |route: DistCoarseSolverRoute| {
+        if !chain.contains(&route) {
+            chain.push(route);
+        }
+    };
+    for route in requested.iter().copied() {
+        push_unique(route);
+    }
+    for route in fallback.iter().copied() {
+        push_unique(route);
+    }
+
+    if !head_is_auto {
+        let reason = format!("forced route {:?} selected from policy head", policy_head);
+        return Ok((policy_head, reason));
+    }
+
+    for candidate in chain.iter().copied() {
+        if candidate == DistCoarseSolverRoute::Auto {
+            continue;
+        }
+        if dist_route_is_available(candidate) {
+            let reason = if requested.is_empty() {
+                format!(
+                    "default auto policy resolved via fallback to {:?}",
+                    candidate
+                )
+            } else {
+                format!("auto policy fallback selected {:?}", candidate)
+            };
+            return Ok((candidate, reason));
+        }
+    }
+
+    Err(KError::Unsupported(format!(
+        "{context}: no available distributed coarse route in fallback chain {:?}",
+        chain
+    )))
+}
+
+#[cfg(feature = "backend-faer")]
 fn parse_gamg_dist_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
     if value.eq_ignore_ascii_case("auto") {
         return Ok(DistCoarseStrategy::RootGather);
@@ -572,16 +649,47 @@ impl Preconditioner for Gamg {
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         let mut effective_cfg = self.config.amg_config.clone();
-        if let Some(coarse_policy) = resolved_gamg_policy_for_level(
+
+        let coarse_level = effective_cfg.max_levels.saturating_sub(1);
+        let coarse_policy = resolved_gamg_policy_for_level(
             &self.config.level_policies,
-            effective_cfg.max_levels.saturating_sub(1),
+            coarse_level,
             effective_cfg.max_levels,
-        ) && let Some(route) = coarse_policy
-            .coarse_routes
+        );
+        let coarse_routes = coarse_policy
             .as_ref()
-            .and_then(|routes| routes.first().copied())
-        {
-            effective_cfg.dist_coarse_solver_route = route;
+            .and_then(|policy| policy.coarse_routes.as_deref());
+        let (coarse_route, coarse_reason) = resolve_route_policy(
+            coarse_routes,
+            &self.config.dist_coarse_route_fallback,
+            "pc_gamg_level_policies(coarse)",
+        )?;
+        effective_cfg.dist_coarse_solver_route = coarse_route;
+        log::info!(
+            "GAMG distributed route decision level={coarse_level}: chosen={:?}; reason={}",
+            coarse_route,
+            coarse_reason
+        );
+
+        for level in 0..=effective_cfg.max_levels {
+            if let Some(policy) = resolved_gamg_policy_for_level(
+                &self.config.level_policies,
+                level,
+                effective_cfg.max_levels,
+            ) && let Some(routes) = policy.coarse_routes.as_deref()
+            {
+                let (chosen, reason) = resolve_route_policy(
+                    Some(routes),
+                    &self.config.dist_coarse_route_fallback,
+                    &format!("pc_gamg_level_policies(level={level})"),
+                )?;
+                log::info!(
+                    "GAMG distributed route decision level={level}: chosen={:?}; reason={}; requested={:?}",
+                    chosen,
+                    reason,
+                    routes
+                );
+            }
         }
         if let Some(fine_policy) =
             resolved_gamg_policy_for_level(&self.config.level_policies, 0, effective_cfg.max_levels)
@@ -1011,5 +1119,55 @@ mod tests {
             err.to_string()
                 .contains("pc_gamg_aggressive_mis_k must be >= 2")
         );
+    }
+
+    #[test]
+    fn gamg_route_policy_forced_unavailable_fails() {
+        let fallback = vec![
+            DistCoarseSolverRoute::Auto,
+            DistCoarseSolverRoute::Root,
+            DistCoarseSolverRoute::Local,
+        ];
+        let result = resolve_route_policy(
+            Some(&[DistCoarseSolverRoute::SuperLuDist]),
+            &fallback,
+            "test forced route",
+        );
+        #[cfg(not(feature = "superlu_dist"))]
+        {
+            let err = result.expect_err("forced unavailable route should fail");
+            assert!(err.to_string().contains("forced distributed coarse route"));
+        }
+        #[cfg(feature = "superlu_dist")]
+        {
+            let (chosen, reason) = result.expect("route should be available with superlu_dist");
+            assert_eq!(chosen, DistCoarseSolverRoute::SuperLuDist);
+            assert!(reason.contains("forced route"));
+        }
+    }
+
+    #[test]
+    fn gamg_route_policy_auto_falls_back_to_available_backend() {
+        let (chosen, reason) = resolve_route_policy(
+            Some(&[
+                DistCoarseSolverRoute::Auto,
+                DistCoarseSolverRoute::SuperLuDist,
+                DistCoarseSolverRoute::Root,
+            ]),
+            &[
+                DistCoarseSolverRoute::Auto,
+                DistCoarseSolverRoute::SuperLuDist,
+                DistCoarseSolverRoute::Local,
+            ],
+            "test auto fallback",
+        )
+        .expect("auto policy should resolve");
+        assert!(matches!(
+            chosen,
+            DistCoarseSolverRoute::Root
+                | DistCoarseSolverRoute::Local
+                | DistCoarseSolverRoute::SuperLuDist
+        ));
+        assert!(reason.contains("fallback"));
     }
 }

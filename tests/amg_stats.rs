@@ -8,6 +8,7 @@ use kryst::algebra::prelude::*;
 use kryst::assert_s_close;
 use kryst::preconditioner::amg::AMGBuilder;
 use kryst::preconditioner::dist::{DistCoarseSolverRoute, DistCoarseStrategy};
+use kryst::preconditioner::gamg::{Gamg, GamgConfig};
 use kryst::preconditioner::{PcSide, Preconditioner};
 
 #[test]
@@ -87,6 +88,22 @@ fn amg_stats_include_dist_route_and_fallback_chain() {
             "Local".to_string()
         ]
     );
+}
+
+#[test]
+fn gamg_route_policy_auto_uses_fallback_chain_during_setup() {
+    let a = csr_poisson_1d(8);
+    let opts = kryst::config::options::PcOptions {
+        amg_dist_coarse_solver_route: Some("auto,superlu_dist,root,local".into()),
+        pc_gamg_level_policies: Some(vec![
+            "level=1,coarse_routes=auto,superlu_dist,root,local".into(),
+        ]),
+        ..Default::default()
+    };
+    let cfg = GamgConfig::try_from_opts(&opts).expect("gamg opts");
+    let mut gamg = Gamg::with_config(cfg);
+    gamg.setup(&a)
+        .expect("gamg setup should resolve auto route");
 }
 
 mod fixtures;
