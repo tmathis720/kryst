@@ -31,17 +31,19 @@ fn main() {
 
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
-use kryst::matrix::op::{CsrOp, wrap_with_comm};
+use kryst::matrix::op::{wrap_with_comm, CsrOp};
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::solver::MonitorAction;
 use kryst::utils::matrix_market::{read_matrix_market, write_vector_market};
 use std::env;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
+use kryst::preconditioner::dist::{DistCoarseSolverRoute, DistCoarseStrategy};
 
 #[cfg(not(feature = "complex"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,6 +59,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments using the existing options system
     let args: Vec<String> = env::args().collect();
     let (ksp_opts, pc_opts) = parse_all_options(&args)?;
+
+    let dist_strategy = pc_opts
+        .amg_dist_apply_mode
+        .as_deref()
+        .and_then(|v| DistCoarseStrategy::from_str(v).ok())
+        .unwrap_or(DistCoarseStrategy::RootGather);
+    let selected_route = pc_opts
+        .amg_dist_coarse_solver_route
+        .as_deref()
+        .and_then(|v| v.split(',').next())
+        .and_then(|v| DistCoarseSolverRoute::from_str(v.trim()).ok())
+        .unwrap_or(DistCoarseSolverRoute::Auto);
+    let fallback_chain = match dist_strategy {
+        DistCoarseStrategy::RootGather => vec!["Root", "Local", "SuperLuDist"],
+        DistCoarseStrategy::LocalPrototype => vec!["Local", "Root", "SuperLuDist"],
+        DistCoarseStrategy::SuperLuDist => vec!["SuperLuDist", "Root", "Local"],
+        DistCoarseStrategy::None => vec!["Local", "Root"],
+    };
 
     // Create KspContext and configure from options
     let mut ksp = KspContext::new();
@@ -110,6 +130,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  GMRES restart: {}", restart);
         }
         println!("  PC side: {}", pc_side);
+        println!("  Dist coarse route (selected): {:?}", selected_route);
+        println!(
+            "  Dist coarse fallback chain: {}",
+            fallback_chain.join(" -> ")
+        );
         println!("  Matrix file: {}", matrix_file);
         println!("  RHS file: {}", rhs_file);
         println!();
