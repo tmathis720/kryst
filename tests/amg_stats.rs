@@ -7,6 +7,7 @@ use fixtures::csr_poisson_1d;
 use kryst::algebra::prelude::*;
 use kryst::assert_s_close;
 use kryst::preconditioner::amg::AMGBuilder;
+use kryst::preconditioner::dist::{DistCoarseSolverRoute, DistCoarseStrategy};
 use kryst::preconditioner::{PcSide, Preconditioner};
 
 #[test]
@@ -62,6 +63,30 @@ fn amg_cycle_timings_gated() {
     let stats = amg2.stats().unwrap();
     let cyc = stats.last_cycle.expect("cycle timings");
     assert!(cyc.total_cycle > Duration::default());
+}
+
+#[test]
+fn amg_stats_include_dist_route_and_fallback_chain() {
+    let a = csr_poisson_1d(8);
+    let mut cfg = kryst::preconditioner::amg::AMGConfig::default();
+    cfg.logging_level = 1;
+    cfg.dist_coarse_strategy = DistCoarseStrategy::RootGather;
+    cfg.dist_coarse_solver_route = DistCoarseSolverRoute::SuperLuDist;
+    let mut amg = kryst::preconditioner::amg::AMG::with_config(cfg);
+    amg.setup(&a).unwrap();
+    let stats = amg.stats().expect("stats");
+    assert_eq!(
+        stats.selected_dist_coarse_route.as_deref(),
+        Some("SuperLuDist")
+    );
+    assert_eq!(
+        stats.dist_route_fallback,
+        vec![
+            "SuperLuDist".to_string(),
+            "Root".to_string(),
+            "Local".to_string()
+        ]
+    );
 }
 
 mod fixtures;

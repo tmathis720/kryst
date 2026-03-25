@@ -50,6 +50,8 @@ use crate::preconditioner::ilu_csr::{
     IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
 };
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
+#[cfg(all(not(feature = "complex"), feature = "superlu_dist"))]
+use crate::solver::superlu_dist;
 use crate::utils::conditioning::{ConditioningOptions, apply_csr_transforms};
 use faer::Mat;
 
@@ -1150,6 +1152,47 @@ mod config_mapping_tests {
         assert_eq!(opts.pc_type.as_deref(), Some("amg"));
         let cfg = AMGConfig::try_from_opts(&opts).unwrap();
         assert_eq!(cfg.max_levels, AMGConfig::default().max_levels);
+    }
+
+    #[test]
+    fn dist_route_resolution_preserves_forced_routes() {
+        let mut cfg = AMGConfig::default();
+        cfg.dist_coarse_strategy = DistCoarseStrategy::RootGather;
+        cfg.dist_coarse_solver_route = DistCoarseSolverRoute::Local;
+        let amg = AMG::with_config(cfg);
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let (strategy, route) = amg.resolve_dist_coarse_strategy(&comm).unwrap();
+        assert_eq!(strategy, DistCoarseStrategy::LocalPrototype);
+        assert_eq!(route, DistCoarseSolverRoute::Local);
+    }
+
+    #[test]
+    #[cfg(not(feature = "superlu_dist"))]
+    fn dist_route_resolution_errors_when_forced_superlu_missing() {
+        let mut cfg = AMGConfig::default();
+        cfg.dist_coarse_solver_route = DistCoarseSolverRoute::SuperLuDist;
+        let amg = AMG::with_config(cfg);
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let err = amg
+            .resolve_dist_coarse_strategy(&comm)
+            .expect_err("missing feature");
+        assert!(err.to_string().contains("explicitly requested"));
+    }
+
+    #[test]
+    fn dist_route_fallback_order_chain_is_deterministic() {
+        let chain = dist_route_fallback_order(
+            DistCoarseSolverRoute::SuperLuDist,
+            DistCoarseStrategy::RootGather,
+        );
+        assert_eq!(
+            chain,
+            vec![
+                DistCoarseSolverRoute::SuperLuDist,
+                DistCoarseSolverRoute::Root,
+                DistCoarseSolverRoute::Local
+            ]
+        );
     }
 }
 
@@ -3484,40 +3527,79 @@ impl AMG {
     fn resolve_dist_coarse_strategy(
         &self,
         comm: &UniverseComm,
-    ) -> Result<DistCoarseStrategy, KError> {
-        let strategy = match self.cfg.dist_coarse_solver_route {
-            DistCoarseSolverRoute::Auto => self.cfg.dist_coarse_strategy,
-            DistCoarseSolverRoute::Root => DistCoarseStrategy::RootGather,
-            DistCoarseSolverRoute::Local => DistCoarseStrategy::LocalPrototype,
-            DistCoarseSolverRoute::SuperLuDist => DistCoarseStrategy::SuperLuDist,
+    ) -> Result<(DistCoarseStrategy, DistCoarseSolverRoute), KError> {
+        let is_route_available = |route: DistCoarseSolverRoute| -> bool {
+            match route {
+                DistCoarseSolverRoute::Auto => true,
+                DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Local => true,
+                DistCoarseSolverRoute::SuperLuDist => {
+                    #[cfg(feature = "superlu_dist")]
+                    {
+                        true
+                    }
+                    #[cfg(not(feature = "superlu_dist"))]
+                    {
+                        false
+                    }
+                }
+            }
         };
+
+        let route_to_strategy = |route: DistCoarseSolverRoute| -> DistCoarseStrategy {
+            match route {
+                DistCoarseSolverRoute::Auto => self.cfg.dist_coarse_strategy,
+                DistCoarseSolverRoute::Root => DistCoarseStrategy::RootGather,
+                DistCoarseSolverRoute::Local => DistCoarseStrategy::LocalPrototype,
+                DistCoarseSolverRoute::SuperLuDist => DistCoarseStrategy::SuperLuDist,
+            }
+        };
+
+        let strategy_to_route = |strategy: DistCoarseStrategy| -> DistCoarseSolverRoute {
+            match strategy {
+                DistCoarseStrategy::RootGather => DistCoarseSolverRoute::Root,
+                DistCoarseStrategy::LocalPrototype => DistCoarseSolverRoute::Local,
+                DistCoarseStrategy::SuperLuDist => DistCoarseSolverRoute::SuperLuDist,
+                DistCoarseStrategy::None => DistCoarseSolverRoute::Auto,
+            }
+        };
+
+        if self.cfg.dist_coarse_solver_route != DistCoarseSolverRoute::Auto {
+            let forced_route = self.cfg.dist_coarse_solver_route;
+            if !is_route_available(forced_route) {
+                return Err(KError::Unsupported(format!(
+                    "AMG distributed coarse route {:?} was explicitly requested but is unavailable (missing feature support)",
+                    forced_route
+                )));
+            }
+            return Ok((route_to_strategy(forced_route), forced_route));
+        }
+
+        let strategy = self.cfg.dist_coarse_strategy;
         match strategy {
             DistCoarseStrategy::None => {
                 if comm.size() > 1 {
                     log::warn!(
                         "AMG distributed coarse strategy set to none; falling back to root_gather."
                     );
-                    Ok(DistCoarseStrategy::RootGather)
+                    Ok((DistCoarseStrategy::RootGather, DistCoarseSolverRoute::Root))
                 } else {
-                    Ok(DistCoarseStrategy::None)
+                    Ok((DistCoarseStrategy::None, DistCoarseSolverRoute::Auto))
                 }
             }
             DistCoarseStrategy::SuperLuDist => {
-                #[cfg(feature = "superlu_dist")]
-                {
-                    log::warn!(
-                        "AMG distributed coarse strategy superlu_dist not wired yet; falling back to root_gather."
-                    );
-                    Ok(DistCoarseStrategy::RootGather)
-                }
-                #[cfg(not(feature = "superlu_dist"))]
-                {
-                    Err(KError::Unsupported(
-                        "superlu_dist coarse strategy requires feature superlu_dist".into(),
+                if is_route_available(DistCoarseSolverRoute::SuperLuDist) {
+                    Ok((
+                        DistCoarseStrategy::SuperLuDist,
+                        DistCoarseSolverRoute::SuperLuDist,
                     ))
+                } else {
+                    log::warn!(
+                        "AMG distributed coarse strategy superlu_dist unavailable; falling back to root_gather."
+                    );
+                    Ok((DistCoarseStrategy::RootGather, DistCoarseSolverRoute::Root))
                 }
             }
-            _ => Ok(strategy),
+            _ => Ok((strategy, strategy_to_route(strategy))),
         }
     }
 
@@ -3574,9 +3656,12 @@ impl AMG {
     #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
         let setup_t0 = tic();
-        let strategy = self.resolve_dist_coarse_strategy(&dist.comm())?;
+        let (strategy, selected_route) = self.resolve_dist_coarse_strategy(&dist.comm())?;
         if matches!(strategy, DistCoarseStrategy::LocalPrototype) {
             return self.setup_dist_local(dist);
+        }
+        if matches!(strategy, DistCoarseStrategy::SuperLuDist) {
+            return self.setup_dist_superlu(dist, selected_route);
         }
         let comm = dist.comm();
         let rank = comm.rank();
@@ -3593,7 +3678,7 @@ impl AMG {
             row_part: row_part.clone(),
             n_global: dist.n_global,
             local_hierarchy: None,
-            local_matrix: None,
+            local_matrix: Some(Arc::new(dist.local_matrix())),
             halo_plan: None,
         });
         let prev_cfg = self.cfg.clone();
@@ -3711,8 +3796,9 @@ impl AMG {
             self.csr = None;
             if let Ok(mut rt) = self.runtime.lock() {
                 let mut ds = DistApplyStats::default();
+                ds.mode = strategy;
                 ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-                ds.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+                ds.coarse_solver_route = selected_route;
                 ds.setup_total = toc(setup_t0);
                 rt.last_dist_apply = Some(ds);
             }
@@ -3742,8 +3828,9 @@ impl AMG {
         }
         if let Ok(mut rt) = self.runtime.lock() {
             let mut ds = DistApplyStats::default();
+            ds.mode = strategy;
             ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+            ds.coarse_solver_route = selected_route;
             ds.setup_total = toc(setup_t0);
             rt.last_dist_apply = Some(ds);
         }
@@ -3844,8 +3931,9 @@ impl AMG {
         self.csr = None;
         if let Ok(mut rt) = self.runtime.lock() {
             let mut ds = DistApplyStats::default();
+            ds.mode = DistCoarseStrategy::LocalPrototype;
             ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+            ds.coarse_solver_route = DistCoarseSolverRoute::Local;
             ds.setup_total = toc(setup_t0);
             rt.last_dist_apply = Some(ds);
         }
@@ -3856,6 +3944,39 @@ impl AMG {
                 rank,
                 dist.local_nrows()
             );
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn setup_dist_superlu(
+        &mut self,
+        dist: &DistCsrOp,
+        selected_route: DistCoarseSolverRoute,
+    ) -> Result<(), KError> {
+        let setup_t0 = tic();
+        let comm = dist.comm();
+        let root = 0usize;
+        let row_part = self.dist_coarse_partition(dist.row_partition(), dist.n_global);
+        self.dist = Some(DistAmgInfo {
+            comm: comm.clone(),
+            root,
+            row_part: row_part.clone(),
+            n_global: dist.n_global,
+            local_hierarchy: None,
+            local_matrix: Some(Arc::new(dist.local_matrix())),
+            halo_plan: None,
+        });
+        self.state = AmgState::Uninitialized;
+        self.stats = None;
+        self.csr = None;
+        if let Ok(mut rt) = self.runtime.lock() {
+            let mut ds = DistApplyStats::default();
+            ds.mode = DistCoarseStrategy::SuperLuDist;
+            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+            ds.coarse_solver_route = selected_route;
+            ds.setup_total = toc(setup_t0);
+            rt.last_dist_apply = Some(ds);
         }
         Ok(())
     }
@@ -3921,11 +4042,11 @@ impl AMG {
         dist: &DistAmgInfo,
     ) -> Result<(), KError> {
         let do_prof = self.cfg.dist_apply_instrumentation;
-        let strategy = self.resolve_dist_coarse_strategy(&dist.comm)?;
+        let (strategy, selected_route) = self.resolve_dist_coarse_strategy(&dist.comm)?;
         let mut stats = if do_prof {
             let mut stats = DistApplyStats::default();
             stats.mode = strategy;
-            stats.coarse_solver_route = self.cfg.dist_coarse_solver_route;
+            stats.coarse_solver_route = selected_route;
             stats.coarse_repartition = self.cfg.dist_coarse_repartition;
             Some(stats)
         } else {
@@ -3946,11 +4067,11 @@ impl AMG {
                 self.apply_dist_local(side, r, z, dist, stats.as_mut())
             }
             DistCoarseStrategy::None => Err(KError::Unsupported(
-                "AMG distributed apply requires a coarse strategy (root_gather or local_prototype)"
+                "AMG distributed apply requires a coarse strategy (root_gather, local_prototype, or superlu_dist)"
                     .into(),
             )),
             DistCoarseStrategy::SuperLuDist => {
-                self.apply_dist_root(side, r, z, dist, stats.as_mut())
+                self.apply_dist_superlu(side, r, z, dist, stats.as_mut())
             }
         };
 
@@ -4103,6 +4224,41 @@ impl AMG {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn apply_dist_superlu(
+        &self,
+        _side: PcSide,
+        r: &[f64],
+        z: &mut [f64],
+        dist: &DistAmgInfo,
+        mut stats: Option<&mut DistApplyStats>,
+    ) -> Result<(), KError> {
+        let local_matrix = dist.local_matrix.as_ref().ok_or_else(|| {
+            KError::InvalidInput("AMG superlu_dist matrix state not initialized".into())
+        })?;
+        if r.len() != z.len() || r.len() != dist.local_nrows() {
+            return Err(KError::InvalidInput(
+                "AMG superlu_dist apply length mismatch".into(),
+            ));
+        }
+        let t_local = stats.as_ref().map(|_| tic());
+        #[cfg(feature = "superlu_dist")]
+        {
+            superlu_dist::solve(local_matrix.as_ref(), r, z, &dist.comm)?;
+        }
+        #[cfg(not(feature = "superlu_dist"))]
+        {
+            let _ = (local_matrix, r, z);
+            return Err(KError::Unsupported(
+                "AMG superlu_dist route requires feature superlu_dist".into(),
+            ));
+        }
+        if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
+            stats.local_apply = toc(t0);
         }
         Ok(())
     }
