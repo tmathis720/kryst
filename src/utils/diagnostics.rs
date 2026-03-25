@@ -46,6 +46,12 @@ pub struct PcDiagnostics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub distributed_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_distributed_supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_distributed_supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub residual_reduction_per_time: Option<f64>,
     /// Nested KSP diagnostics when `pc_type = Ksp`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +162,9 @@ impl PcDiagnostics {
             complex_support,
             setup_mode: None,
             fallback_reason: None,
+            distributed_mode: None,
+            native_distributed_supported: None,
+            adapter_distributed_supported: None,
             residual_reduction_per_time: None,
             nested_ksp,
         }

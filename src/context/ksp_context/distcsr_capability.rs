@@ -17,12 +17,29 @@ pub struct DistCsrCapabilityEntry {
     pub local_pc: String,
     pub apply_mode: String,
     pub native_global_candidate: bool,
+    pub supports_native_distributed_mode: bool,
+    pub supports_adapter_distributed_mode: bool,
+    pub requested_distributed_mode: &'static str,
+    pub requested_mode_supported: bool,
     pub supports_native_apply_mode: bool,
     pub registry_rule: &'static str,
 }
 
 pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilityEntry {
-    let supports_native_apply_mode = key.apply_mode.is_distributed_native();
+    let supports_native_distributed_mode = key.local_pc.build_capabilities().native_local_apply;
+    let supports_adapter_distributed_mode = true;
+    let requested_distributed_mode = if key.apply_mode.is_distributed_native() {
+        "native_distributed"
+    } else {
+        "adapter_distributed"
+    };
+    let requested_mode_supported = if key.apply_mode.is_distributed_native() {
+        supports_native_distributed_mode
+    } else {
+        supports_adapter_distributed_mode
+    };
+    let supports_native_apply_mode =
+        key.apply_mode.is_distributed_native() && supports_native_distributed_mode;
 
     let (native_global_candidate, registry_rule) =
         match (key.global_pc, key.apply_mode, key.solver_type, key.local_pc) {
@@ -50,6 +67,10 @@ pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilit
         local_pc: format!("{:?}", key.local_pc),
         apply_mode: key.apply_mode.communication_strategy_name().to_string(),
         native_global_candidate,
+        supports_native_distributed_mode,
+        supports_adapter_distributed_mode,
+        requested_distributed_mode,
+        requested_mode_supported,
         supports_native_apply_mode,
         registry_rule,
     }
@@ -57,7 +78,7 @@ pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilit
 
 #[cfg(test)]
 mod tests {
-    use super::{DistCsrCapabilityKey, resolve_distcsr_capability};
+    use super::{resolve_distcsr_capability, DistCsrCapabilityKey};
     use crate::context::ksp_context::SolverType;
     use crate::preconditioner::dist::{DistLocalApplyMode, GlobalPcKind, LocalPcKind};
 
@@ -70,6 +91,8 @@ mod tests {
             apply_mode: DistLocalApplyMode::WrappedLocal,
         });
         assert!(!cap.native_global_candidate);
+        assert_eq!(cap.requested_distributed_mode, "adapter_distributed");
+        assert!(cap.requested_mode_supported);
         assert!(!cap.supports_native_apply_mode);
     }
 
@@ -82,6 +105,8 @@ mod tests {
             apply_mode: DistLocalApplyMode::NativeLocalHalo,
         });
         assert!(cap.native_global_candidate);
+        assert_eq!(cap.requested_distributed_mode, "native_distributed");
+        assert!(cap.supports_native_distributed_mode);
         assert!(cap.supports_native_apply_mode);
     }
 

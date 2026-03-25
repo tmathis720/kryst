@@ -10,10 +10,10 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
-use kryst::preconditioner::PcSide;
 use kryst::preconditioner::dist::{
-    DistLocalApplyMode, DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions, build_block_jacobi_pc,
+    build_block_jacobi_pc, DistLocalApplyMode, DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions,
 };
+use kryst::preconditioner::PcSide;
 use kryst::utils::convergence::ConvergedReason;
 
 fn local_rows_from_global(
@@ -243,4 +243,79 @@ fn mpi_mg_distributed_coarse_route_options_parse() {
         Some("root_gather")
     );
     assert!(opts.pc_mg_level_policies.is_some());
+}
+
+#[test]
+fn mpi_pc_diagnostics_reports_negotiated_distributed_mode() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+    if comm.size() <= 1 {
+        return;
+    }
+
+    let dist = Arc::new(make_dist_poisson(&comm, 4));
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("set gmres");
+    ksp.set_operators(dist, None);
+
+    let ksp_opts = KspOptions {
+        ksp_type: Some("gmres".to_string()),
+        maxits: Some(20),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ilu".to_string()),
+        pc_global: Some("block_jacobi".to_string()),
+        pc_local: Some("ilu".to_string()),
+        pc_dist_local_apply: Some("strict".to_string()),
+        pc_dist_route: Some("native".to_string()),
+        ..Default::default()
+    };
+    ksp.set_from_all_options(&ksp_opts, &pc_opts)
+        .expect("set distributed options");
+    ksp.setup().expect("setup with strict native distributed");
+
+    let diag = ksp.view();
+    let pc = diag.pc.expect("pc diagnostics");
+    assert_eq!(pc.distributed_mode.as_deref(), Some("native_distributed"));
+    assert_eq!(pc.native_distributed_supported, Some(true));
+    assert_eq!(pc.adapter_distributed_supported, Some(true));
+}
+
+#[test]
+fn mpi_strict_mode_rejects_adapter_masking() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+    if comm.size() <= 1 {
+        return;
+    }
+
+    let dist = Arc::new(make_dist_poisson(&comm, 4));
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("set gmres");
+    ksp.set_operators(dist, None);
+
+    let ksp_opts = KspOptions {
+        ksp_type: Some("gmres".to_string()),
+        maxits: Some(20),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ilu".to_string()),
+        pc_global: Some("block_jacobi".to_string()),
+        pc_local: Some("ilu".to_string()),
+        pc_dist_local_apply: Some("strict".to_string()),
+        pc_dist_route: Some("adapted".to_string()),
+        ..Default::default()
+    };
+    ksp.set_from_all_options(&ksp_opts, &pc_opts)
+        .expect("set distributed options");
+    let err = ksp
+        .setup()
+        .expect_err("strict mode must reject adapted fallback route");
+    assert!(
+        err.to_string()
+            .contains("pc_dist_local_apply=strict forbids local adapter fallback"),
+        "unexpected strict rejection error: {err}"
+    );
 }
