@@ -4,10 +4,12 @@ use crate::algebra::scalar::S;
 use crate::config::options::{KspOptions, PcOptions};
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::error::KError;
+use crate::matrix::DistCsrOp;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::rap_opt_generic;
-use crate::parallel::UniverseComm;
+use crate::parallel::{UniverseComm, allreduce_sum_scalar_slice_in_place};
+use crate::preconditioner::dist::coarse::DistCoarseSolverRoute;
 use crate::preconditioner::ksp_pc::KspAsPc;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use std::collections::BTreeMap;
@@ -210,6 +212,7 @@ pub struct MgLevel {
     pub operator: Arc<CsrMatrix<MgScalar>>,
     pub prolongation: Option<Arc<CsrMatrix<MgScalar>>>,
     pub restriction: Option<Arc<CsrMatrix<MgScalar>>>,
+    pub dist_transfer: Option<MgDistTransferMeta>,
 }
 
 impl MgLevel {
@@ -220,8 +223,21 @@ impl MgLevel {
             operator,
             prolongation: None,
             restriction: None,
+            dist_transfer: None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct MgDistTransferMeta {
+    pub fine_part: Arc<Vec<usize>>,
+    pub coarse_part: Arc<Vec<usize>>,
+}
+
+#[derive(Clone, Debug)]
+struct MgDistHierarchyMeta {
+    valid: bool,
+    part_per_level: Vec<Arc<Vec<usize>>>,
 }
 
 pub struct MgHierarchy {
@@ -273,6 +289,8 @@ pub struct MgPc {
     diagnostics: Vec<MgLevelDiagnostics>,
     perf: Arc<Mutex<MgPerfCounters>>,
     hierarchy_pattern_hash: Option<u64>,
+    dist_meta: Option<MgDistHierarchyMeta>,
+    coarse_route: DistCoarseSolverRoute,
     comm: UniverseComm,
 }
 
@@ -370,6 +388,8 @@ impl MgPc {
             diagnostics: Vec::new(),
             perf: Arc::new(Mutex::new(MgPerfCounters::default())),
             hierarchy_pattern_hash: None,
+            dist_meta: None,
+            coarse_route: DistCoarseSolverRoute::Auto,
             comm: UniverseComm::NoComm(crate::parallel::NoComm),
         }
     }
@@ -716,6 +736,9 @@ impl MgPc {
             let canonical = match route.trim().to_lowercase().as_str() {
                 "ksp" | "nested_ksp" => "nested_ksp",
                 "pc" | "pc_apply" | "apply" => "pc_apply",
+                "root" | "root_gather" | "gather" => "root_gather",
+                "local" | "local_prototype" | "prototype" => "local_prototype",
+                "direct" | "direct_solve" => "direct",
                 _ => continue,
             }
             .to_string();
@@ -728,6 +751,12 @@ impl MgPc {
             routes.push("pc_apply".to_string());
         }
         routes
+    }
+
+    fn root_gather_allreduce(&self, v: &mut [S]) {
+        if self.comm.size() > 1 {
+            allreduce_sum_scalar_slice_in_place(&self.comm, v);
+        }
     }
 
     fn mg_cycle(
@@ -743,6 +772,7 @@ impl MgPc {
             .ok_or_else(|| KError::InvalidInput("multigrid hierarchy not set up".into()))?;
         let level = &hierarchy.levels[level_ix];
         let t0 = Instant::now();
+        let dist_valid = self.dist_meta.as_ref().map(|m| m.valid).unwrap_or(false);
         let is_coarse = level_ix + 1 == hierarchy.levels.len();
         if is_coarse {
             if let Some(coarse) = &self.coarse_solve {
@@ -774,6 +804,9 @@ impl MgPc {
                     }
                 }
             }
+            if dist_valid && self.coarse_route == DistCoarseSolverRoute::Root {
+                self.root_gather_allreduce(x);
+            }
             if let Ok(mut perf) = self.perf.lock() {
                 if perf.apply_per_level.len() <= level_ix {
                     perf.apply_per_level.resize(level_ix + 1, Duration::ZERO);
@@ -803,6 +836,14 @@ impl MgPc {
             .ok_or_else(|| KError::InvalidInput("missing prolongation operator".into()))?;
         let mut coarse_rhs = vec![S::zero(); restriction.nrows()];
         restriction.try_spmv(&residual, &mut coarse_rhs)?;
+        if dist_valid
+            && matches!(
+                self.coarse_route,
+                DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Auto
+            )
+        {
+            self.root_gather_allreduce(&mut coarse_rhs);
+        }
         let mut coarse_sol = vec![S::zero(); coarse_rhs.len()];
 
         match cycle {
@@ -817,6 +858,14 @@ impl MgPc {
                 self.mg_cycle(level_ix + 1, &coarse_rhs, &mut coarse_sol, MgCycleType::F)?;
                 self.mg_cycle(level_ix + 1, &coarse_rhs, &mut coarse_sol, MgCycleType::V)?;
             }
+        }
+        if dist_valid
+            && matches!(
+                self.coarse_route,
+                DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Auto
+            )
+        {
+            self.root_gather_allreduce(&mut coarse_sol);
         }
 
         let mut fine_correction = vec![S::zero(); prolongation.nrows()];
@@ -855,6 +904,8 @@ impl Preconditioner for MgPc {
         self.restrict = MgRestrictType::from_option(self.restriction_type.as_deref())?;
 
         let a = csr_from_linop_scalar(_a, 0.0)?;
+        let op_comm = _a.comm();
+        let dist_op = _a.as_any().downcast_ref::<DistCsrOp>();
         let pattern_hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -868,6 +919,10 @@ impl Preconditioner for MgPc {
         let mut levels = Vec::new();
         levels.push(MgLevel::new(0, a.clone()));
         let mut current = a;
+        let mut dist_partitions: Vec<Arc<Vec<usize>>> = Vec::new();
+        if let Some(dist) = dist_op {
+            dist_partitions.push(dist.row_partition());
+        }
         for level in 0..(self.levels - 1) {
             let user_tr = self
                 .user_transfers
@@ -894,6 +949,19 @@ impl Preconditioner for MgPc {
             if let Some(entry) = levels.get_mut(level) {
                 entry.prolongation = Some(p.clone());
                 entry.restriction = Some(r.clone());
+                if let Some(fine_part) = dist_partitions.last().cloned() {
+                    let coarse_part = Arc::new(
+                        fine_part
+                            .iter()
+                            .map(|&v| (v + 1) / 2)
+                            .collect::<Vec<usize>>(),
+                    );
+                    entry.dist_transfer = Some(MgDistTransferMeta {
+                        fine_part,
+                        coarse_part: coarse_part.clone(),
+                    });
+                    dist_partitions.push(coarse_part);
+                }
             }
             levels.push(MgLevel::new(level + 1, coarse.clone()));
             current = coarse;
@@ -907,6 +975,16 @@ impl Preconditioner for MgPc {
             ));
         }
         self.levels = levels.len();
+        self.dist_meta = if !dist_partitions.is_empty() {
+            let global_levels = op_comm.all_reduce_f64(self.levels as f64);
+            let expected = (self.levels * op_comm.size()) as f64;
+            Some(MgDistHierarchyMeta {
+                valid: (global_levels - expected).abs() < 1e-12,
+                part_per_level: dist_partitions,
+            })
+        } else {
+            None
+        };
         self.smoother_sweeps = self.smoother_steps.unwrap_or(1).max(1);
 
         let smoother_name = self.smoother.as_deref().unwrap_or("jacobi");
@@ -915,7 +993,6 @@ impl Preconditioner for MgPc {
             return Err(KError::InvalidInput("pc_mg_smoother cannot be none".into()));
         }
         let mut hierarchy = MgHierarchy::new(levels);
-        let op_comm = _a.comm();
         self.comm = op_comm.clone();
         for lvl in hierarchy.levels_mut().iter_mut().take(self.levels - 1) {
             let policy = self.resolved_policy_for_level(lvl.level);
@@ -935,6 +1012,15 @@ impl Preconditioner for MgPc {
         let coarse_level = self.levels.saturating_sub(1);
         let coarse_policy = self.resolved_policy_for_level(coarse_level);
         let coarse_routes = Self::normalized_coarse_routes(&coarse_policy);
+        self.coarse_route = coarse_routes
+            .iter()
+            .find_map(|route| match route.as_str() {
+                "root_gather" => Some(DistCoarseSolverRoute::Root),
+                "local_prototype" => Some(DistCoarseSolverRoute::Local),
+                "direct" => Some(DistCoarseSolverRoute::SuperLuDist),
+                _ => None,
+            })
+            .unwrap_or(DistCoarseSolverRoute::Auto);
         let coarse_pc_type = coarse_policy
             .coarse_pc_type
             .as_deref()
@@ -1088,7 +1174,16 @@ impl Preconditioner for MgPc {
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::LocalOnly
+        if self
+            .dist_meta
+            .as_ref()
+            .map(|m| m.valid && !m.part_per_level.is_empty())
+            .unwrap_or(false)
+        {
+            PcDistributedSupport::Distributed
+        } else {
+            PcDistributedSupport::LocalOnly
+        }
     }
 }
 

@@ -224,3 +224,23 @@ fn mpi_block_jacobi_native_halo_vs_strict_match_for_new_local_pcs() {
         }
     }
 }
+
+#[test]
+fn mpi_mg_distributed_coarse_route_options_parse() {
+    let opts = PcOptions::from_args(&[
+        "-pc_type",
+        "mg",
+        "-pc_mg_coarse_solver_route",
+        "root_gather",
+        "-pc_mg_levels_policy",
+        "level=2,coarse_routes=root_gather|local_prototype|direct",
+    ])
+    .expect("parse distributed MG route options");
+
+    assert_eq!(opts.pc_type.as_deref(), Some("mg"));
+    assert_eq!(
+        opts.pc_mg_coarse_solver_route.as_deref(),
+        Some("root_gather")
+    );
+    assert!(opts.pc_mg_level_policies.is_some());
+}
