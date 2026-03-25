@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::error::KError;
@@ -10,6 +10,8 @@ use crate::parallel::{Comm, UniverseComm};
 pub struct HaloReq<'a> {
     pub recv_reqs: Vec<<UniverseComm as Comm>::Request<'a>>,
     pub send_reqs: Vec<<UniverseComm as Comm>::Request<'a>>,
+    ctx: Arc<HaloBuffers>,
+    slot: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,7 +275,9 @@ impl HaloBuffers {
 ///   while a matvec is running.
 pub struct HaloPlan {
     pub index: Arc<HaloIndexPlan>,
-    buffers: HaloBuffers,
+    primary_ctx: Arc<HaloBuffers>,
+    contexts: Mutex<Vec<Arc<HaloBuffers>>>,
+    free_slots: Mutex<Vec<usize>>,
     recv_schedule: Vec<RecvSchedule>,
     send_schedule: Vec<SendSchedule>,
 }
@@ -286,13 +290,17 @@ unsafe impl Sync for HaloPlan {}
 
 impl HaloPlan {
     pub fn from_shared_index(index: Arc<HaloIndexPlan>) -> Self {
-        let buffers = HaloBuffers::new(&index);
+        let primary_ctx = Arc::new(HaloBuffers::new(&index));
+        let contexts = Mutex::new(vec![primary_ctx.clone()]);
+        let free_slots = Mutex::new(vec![0]);
         let recv_schedule = build_recv_schedule(&index, NeighborOrder::RankAscending);
         let send_schedule =
             build_send_schedule(&index, &HaloTuning::default(), NeighborOrder::RankAscending);
         Self {
             index,
-            buffers,
+            primary_ctx,
+            contexts,
+            free_slots,
             recv_schedule,
             send_schedule,
         }
@@ -326,25 +334,42 @@ impl HaloPlan {
         let index = Arc::new(HaloIndexPlan::new(
             comm, row_part, row_start, row_end, recv_map,
         )?);
-        let buffers = HaloBuffers::new(&index);
+        let primary_ctx = Arc::new(HaloBuffers::new(&index));
+        let contexts = Mutex::new(vec![primary_ctx.clone()]);
+        let free_slots = Mutex::new(vec![0]);
         let recv_schedule = build_recv_schedule(&index, tuning.neighbor_order);
         let send_schedule = build_send_schedule(&index, &tuning, tuning.neighbor_order);
         Ok(Self {
             index,
-            buffers,
+            primary_ctx,
+            contexts,
+            free_slots,
             recv_schedule,
             send_schedule,
         })
     }
 
+    fn checkout_context(&self) -> (usize, Arc<HaloBuffers>) {
+        if let Some(slot) = self.free_slots.lock().unwrap().pop() {
+            let ctx = self.contexts.lock().unwrap()[slot].clone();
+            return (slot, ctx);
+        }
+        let mut contexts = self.contexts.lock().unwrap();
+        let slot = contexts.len();
+        let ctx = Arc::new(HaloBuffers::new(&self.index));
+        contexts.push(ctx.clone());
+        (slot, ctx)
+    }
+
     pub fn ghost_slice_ref(&self) -> std::sync::RwLockReadGuard<'_, Vec<S>> {
-        self.buffers.ghost_flat.read().unwrap()
+        self.primary_ctx.ghost_flat.read().unwrap()
     }
 
     pub fn post_halo<'a>(&'a self, x_local: &[S]) -> HaloReq<'a> {
+        let (slot, ctx) = self.checkout_context();
         let mut recv_reqs = Vec::new();
         for item in &self.recv_schedule {
-            if let Some(buf_lock) = self.buffers.recv_buf.get(&item.nbr) {
+            if let Some(buf_lock) = ctx.recv_buf.get(&item.nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
                 if buf.is_empty() {
                     continue;
@@ -357,7 +382,7 @@ impl HaloPlan {
 
         let mut send_reqs = Vec::new();
         for item in &self.send_schedule {
-            if let Some(buf_lock) = self.buffers.send_buf.get(&item.nbr) {
+            if let Some(buf_lock) = ctx.send_buf.get(&item.nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
                 if buf.is_empty() {
                     continue;
@@ -384,24 +409,32 @@ impl HaloPlan {
         HaloReq {
             recv_reqs,
             send_reqs,
+            ctx,
+            slot,
         }
     }
 
-    pub fn complete_halo(&self, mut req: HaloReq<'_>) {
+    pub fn complete_halo(&self, mut req: HaloReq<'_>) -> Vec<S> {
         self.index.comm.wait_all(&mut req.recv_reqs);
         self.index.comm.wait_all(&mut req.send_reqs);
 
         if self.index.n_ghost > 0 {
-            let mut ghost = self.buffers.ghost_flat.write().unwrap();
+            let mut ghost = req.ctx.ghost_flat.write().unwrap();
             for (&nbr, range) in &self.index.ghost_ranges {
                 if range.is_empty() {
                     continue;
                 }
-                if let Some(buf_lock) = self.buffers.recv_buf.get(&nbr) {
+                if let Some(buf_lock) = req.ctx.recv_buf.get(&nbr) {
                     let src = unsafe { &*buf_lock.get() };
                     ghost[range.clone()].copy_from_slice(src);
                 }
             }
+            let out = ghost.clone();
+            self.free_slots.lock().unwrap().push(req.slot);
+            out
+        } else {
+            self.free_slots.lock().unwrap().push(req.slot);
+            Vec::new()
         }
     }
 }

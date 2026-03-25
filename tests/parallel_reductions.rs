@@ -3,6 +3,9 @@
 
 use kryst::algebra::blas::dot_conj;
 use kryst::algebra::prelude::*;
+use kryst::matrix::dist_csr::DistCsrOp;
+use kryst::matrix::op::LinOp;
+use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{
     Comm, MpiComm, UniverseComm, allreduce_sum_scalar_mpi_sys, allreduce_sum_scalar_slice_in_place,
     allreduce_sum_scalar_slice_owned, global_dot_conj, global_dot_conj_accurate,
@@ -54,6 +57,51 @@ fn local_slice(rank: usize) -> Vec<S> {
         S::from_parts(rank as f64 + 2.0, -0.4 * rank as f64),
         S::from_parts(0.5 * rank as f64, 0.1 * (rank + 1) as f64),
     ]
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn dist_matvec_mpi_rayon_stress() {
+    use rayon::prelude::*;
+
+    let _guard = mpi_test_guard();
+    let comm = make_world();
+    let rank = comm.rank();
+    let size = comm.size();
+    let local_n = 2usize;
+    let n_global = local_n * size;
+    let row_start = rank * local_n;
+
+    let next = if rank + 1 < size { rank + 1 } else { 0 };
+    let remote_col = next * local_n;
+    let local = CsrMatrix::<S>::from_csr(
+        local_n,
+        n_global,
+        vec![0, 2, 4],
+        vec![row_start, remote_col, row_start + 1, remote_col],
+        vec![
+            S::from_real(2.0),
+            S::from_real(-0.25),
+            S::from_real(3.0),
+            S::from_real(0.5),
+        ],
+    );
+    let part: Vec<usize> = (0..=size).map(|r| r * local_n).collect();
+    let op = DistCsrOp::from_local_rows(n_global, row_start, &local, &part, comm.clone()).unwrap();
+
+    let rhs: Vec<Vec<S>> = (0..32)
+        .map(|k| {
+            vec![
+                S::from_real(rank as f64 + 1.0 + k as f64 * 0.01),
+                S::from_real(0.5 * rank as f64 - k as f64 * 0.02),
+            ]
+        })
+        .collect();
+
+    rhs.par_iter().for_each(|x| {
+        let mut y = vec![S::zero(); local_n];
+        op.try_matvec(x, &mut y).unwrap();
+    });
 }
 
 #[test]
