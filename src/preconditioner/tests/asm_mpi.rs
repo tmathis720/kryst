@@ -5,18 +5,20 @@ use super::*;
 use crate::algebra::prelude::*;
 use crate::assert_vec_close;
 use crate::matrix::DistCsrOp;
-use crate::matrix::op::CsrOp;
+use crate::matrix::op::{CsrOp, LinOp};
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, MpiComm, UniverseComm};
 use crate::preconditioner::Preconditioner;
 use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmPc, Weighting};
 use crate::preconditioner::builders::{build_block_jacobi, build_ilu0_with_conditioning};
 use crate::preconditioner::dist::{
-    DistLocalApplyMode, DistPcAdapter, DistPcBuilder, GlobalPcKind, LocalPcKind, MpiPcOptions,
+    DistCoarseStrategy, DistLocalApplyMode, DistPcAdapter, DistPcBuilder, GlobalPcKind,
+    LocalPcKind, MpiPcOptions,
 };
 use crate::utils::conditioning::ConditioningOptions;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 fn mpi_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -118,6 +120,39 @@ fn subdomain_from_global(global: &CsrMatrix<R>, subdofs: &[usize]) -> CsrMatrix<
         row_ptr.push(col_idx.len());
     }
     CsrMatrix::from_csr(subdofs.len(), subdofs.len(), row_ptr, col_idx, values)
+}
+
+fn distributed_l2_norm(comm: &UniverseComm, v: &[f64]) -> f64 {
+    let local_sq: f64 = v.iter().map(|x| x * x).sum();
+    comm.all_reduce_f64(local_sq).sqrt()
+}
+
+fn stationary_iterations(
+    dist: &DistCsrOp,
+    pc: &dyn Preconditioner,
+    rhs: &[f64],
+    iters: usize,
+) -> f64 {
+    let mut x = vec![0.0; rhs.len()];
+    let mut z = vec![0.0; rhs.len()];
+    let mut ax = vec![0.0; rhs.len()];
+    let mut r = vec![0.0; rhs.len()];
+    let comm = dist.comm();
+    for _ in 0..iters {
+        dist.matvec(&x, &mut ax);
+        for i in 0..rhs.len() {
+            r[i] = rhs[i] - ax[i];
+        }
+        pc.apply(PcSide::Left, &r, &mut z).expect("pc apply");
+        for i in 0..x.len() {
+            x[i] += z[i];
+        }
+    }
+    dist.matvec(&x, &mut ax);
+    for i in 0..rhs.len() {
+        r[i] = rhs[i] - ax[i];
+    }
+    distributed_l2_norm(&comm, &r)
 }
 
 #[test]
@@ -432,6 +467,7 @@ fn mpi_dist_builder_constructs_native_ras_and_asm() {
             block_solver: AsmBlockSolver::Csr,
             inner_pc: AsmInnerPc::Ilu0,
             weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
             local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
         },
     )
@@ -445,6 +481,7 @@ fn mpi_dist_builder_constructs_native_ras_and_asm() {
             block_solver: AsmBlockSolver::Csr,
             inner_pc: AsmInnerPc::Ilu0,
             weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
             local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
         },
     )
@@ -480,6 +517,7 @@ fn mpi_asm_strict_rejected_with_structured_keys() {
             block_solver: AsmBlockSolver::Csr,
             inner_pc: AsmInnerPc::Ilu0,
             weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
             local_apply_mode: DistLocalApplyMode::NativeStrict,
         },
     ) {
@@ -513,6 +551,7 @@ fn mpi_ras_strict_rejected_with_structured_keys() {
             block_solver: AsmBlockSolver::Csr,
             inner_pc: AsmInnerPc::Ilu0,
             weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
             local_apply_mode: DistLocalApplyMode::NativeStrict,
         },
     ) {
@@ -528,6 +567,80 @@ fn mpi_ras_strict_rejected_with_structured_keys() {
             && msg.contains("detail_key=unsupported_global_pc"),
         "unexpected strict-mode error: {msg}"
     );
+}
+
+#[test]
+fn mpi_asm_two_level_improves_stationary_convergence() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 8);
+    let rhs: Vec<f64> = vec![1.0; dist.local_nrows()];
+
+    let mut one_level = AsmPc::ras(
+        1,
+        None,
+        AsmBlockSolver::Csr,
+        AsmInnerPc::Ilu0,
+        Weighting::None,
+    )
+    .with_dist_coarse_strategy(DistCoarseStrategy::None);
+    one_level.setup(&dist).expect("one-level setup");
+    let one_level_res = stationary_iterations(&dist, &one_level, &rhs, 8);
+
+    let mut two_level = AsmPc::ras(
+        1,
+        None,
+        AsmBlockSolver::Csr,
+        AsmInnerPc::Ilu0,
+        Weighting::None,
+    )
+    .with_dist_coarse_strategy(DistCoarseStrategy::RootGather);
+    two_level.setup(&dist).expect("two-level setup");
+    let two_level_res = stationary_iterations(&dist, &two_level, &rhs, 8);
+
+    assert!(
+        two_level_res < one_level_res,
+        "expected coarse correction to reduce residual: one-level={one_level_res:e}, two-level={two_level_res:e}"
+    );
+}
+
+#[test]
+fn mpi_asm_reports_setup_and_apply_costs() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 8);
+    let rhs: Vec<f64> = vec![1.0; dist.local_nrows()];
+    let mut out = vec![0.0; rhs.len()];
+
+    let mut asm = AsmPc::ras(
+        1,
+        None,
+        AsmBlockSolver::Csr,
+        AsmInnerPc::Ilu0,
+        Weighting::None,
+    )
+    .with_dist_coarse_strategy(DistCoarseStrategy::RootGather);
+
+    let t_setup = Instant::now();
+    asm.setup(&dist).expect("setup");
+    let setup_s = t_setup.elapsed().as_secs_f64();
+
+    let t_apply = Instant::now();
+    asm.apply(PcSide::Left, &rhs, &mut out).expect("apply");
+    let apply_s = t_apply.elapsed().as_secs_f64();
+
+    let setup_max = comm.all_reduce_f64(setup_s);
+    let apply_max = comm.all_reduce_f64(apply_s);
+    eprintln!(
+        "distributed asm timing: setup_max={setup_max:.6e}s apply_max={apply_max:.6e}s ranks={}",
+        comm.size()
+    );
+    assert!(setup_max > 0.0 && apply_max > 0.0);
+    assert!(out.iter().all(|v| v.is_finite()));
 }
 
 #[test]

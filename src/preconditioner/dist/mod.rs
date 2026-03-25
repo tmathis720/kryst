@@ -329,6 +329,7 @@ pub enum DistPcBuilder {
         block_solver: AsmBlockSolver,
         inner_pc: AsmInnerPc,
         weighting: Weighting,
+        coarse_strategy: DistCoarseStrategy,
         local_apply_mode: DistLocalApplyMode,
     },
     Ras {
@@ -337,6 +338,7 @@ pub enum DistPcBuilder {
         block_solver: AsmBlockSolver,
         inner_pc: AsmInnerPc,
         weighting: Weighting,
+        coarse_strategy: DistCoarseStrategy,
         local_apply_mode: DistLocalApplyMode,
     },
 }
@@ -491,6 +493,7 @@ fn build_dist_pc(
             block_solver,
             inner_pc,
             weighting,
+            coarse_strategy,
             local_apply_mode: _,
         } => {
             let asm = DistributedAsm::new(
@@ -500,7 +503,7 @@ fn build_dist_pc(
                 *inner_pc,
                 AsmMode::ASM,
                 *weighting,
-                DistCoarseStrategy::None,
+                *coarse_strategy,
             );
             Ok(Box::new(DistAsmPc::new(asm, dist_op)?))
         }
@@ -510,14 +513,17 @@ fn build_dist_pc(
             block_solver,
             inner_pc,
             weighting,
+            coarse_strategy,
             local_apply_mode: _,
         } => {
-            let asm = DistributedAsm::new_ras(
+            let asm = DistributedAsm::new(
                 *overlap,
                 *subdomain_hint,
                 *block_solver,
                 *inner_pc,
+                AsmMode::RAS,
                 *weighting,
+                *coarse_strategy,
             );
             Ok(Box::new(DistAsmPc::new(asm, dist_op)?))
         }

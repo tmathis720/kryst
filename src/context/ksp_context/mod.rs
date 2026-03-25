@@ -68,14 +68,14 @@ use crate::parallel::Comm;
 use crate::preconditioner::PcDistributedSupport;
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, Weighting};
+#[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+use crate::preconditioner::dist::{
+    DistCoarseStrategy, DistPcAdapter, DistPcBuilder, DistRouteDecisionReason,
+    DistRouteResolveInput, DistRouteSelection, GlobalPcKind, resolve_dist_route,
+};
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{
     DistLocalApplyMode, DistRouteFallbackReason, DistRoutePolicy, MpiPcOptions,
-};
-#[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
-use crate::preconditioner::dist::{
-    DistPcAdapter, DistPcBuilder, DistRouteDecisionReason, DistRouteResolveInput,
-    DistRouteSelection, GlobalPcKind, resolve_dist_route,
 };
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
@@ -3392,6 +3392,7 @@ impl KspContext {
                 block_solver,
                 inner_pc,
                 weighting,
+                coarse_strategy: DistCoarseStrategy::None,
                 local_apply_mode: pending.mpi_opts.local_apply_mode,
             },
             GlobalPcKind::Ras => DistPcBuilder::Ras {
@@ -3400,6 +3401,7 @@ impl KspContext {
                 block_solver,
                 inner_pc,
                 weighting,
+                coarse_strategy: DistCoarseStrategy::None,
                 local_apply_mode: pending.mpi_opts.local_apply_mode,
             },
             _ => {
