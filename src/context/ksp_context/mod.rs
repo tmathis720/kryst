@@ -484,6 +484,20 @@ impl KspContext {
         warnings
     }
 
+    #[cfg(feature = "backend-faer")]
+    fn distributed_mode_family(route: Option<&str>) -> Option<&'static str> {
+        let route = route?;
+        if route.starts_with("distcsr_native_block_jacobi")
+            || route.starts_with("configured_global")
+        {
+            return Some("native_distributed");
+        }
+        if route.starts_with("local_adapter") || route.starts_with("root_gather") {
+            return Some("adapter_distributed");
+        }
+        None
+    }
+
     #[inline]
     fn effective_side_for_solver(side: PcSide, solver_type: SolverType) -> PcSide {
         match solver_type {
@@ -1735,6 +1749,26 @@ impl KspContext {
             );
             if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
                 insert_value(&mut solver_config, "pc_dist_capability_entry", entry);
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_native_distributed_supported",
+                    entry.supports_native_distributed_mode,
+                );
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_adapter_distributed_supported",
+                    entry.supports_adapter_distributed_mode,
+                );
+                insert_value(
+                    &mut solver_config,
+                    "pc_dist_requested_distributed_mode",
+                    entry.requested_distributed_mode,
+                );
+            }
+            if let Some(mode) =
+                Self::distributed_mode_family(self.dist_route_diag.selected_route.as_deref())
+            {
+                insert_value(&mut solver_config, "pc_dist_negotiated_mode", mode);
             }
             insert_value(
                 &mut solver_config,
@@ -1832,7 +1866,15 @@ impl KspContext {
                     );
                     if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
                         insert_value(&mut diag.config, "pc_dist_capability_entry", entry);
+                        diag.native_distributed_supported =
+                            Some(entry.supports_native_distributed_mode);
+                        diag.adapter_distributed_supported =
+                            Some(entry.supports_adapter_distributed_mode);
                     }
+                    diag.distributed_mode = Self::distributed_mode_family(
+                        self.dist_route_diag.selected_route.as_deref(),
+                    )
+                    .map(str::to_string);
                     insert_value(
                         &mut diag.config,
                         "pc_dist_fallback_chain",
@@ -1943,7 +1985,15 @@ impl KspContext {
                             );
                             if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
                                 insert_value(&mut diag.config, "pc_dist_capability_entry", entry);
+                                diag.native_distributed_supported =
+                                    Some(entry.supports_native_distributed_mode);
+                                diag.adapter_distributed_supported =
+                                    Some(entry.supports_adapter_distributed_mode);
                             }
+                            diag.distributed_mode = Self::distributed_mode_family(
+                                self.dist_route_diag.selected_route.as_deref(),
+                            )
+                            .map(str::to_string);
                             insert_value(
                                 &mut diag.config,
                                 "pc_dist_fallback_chain",
