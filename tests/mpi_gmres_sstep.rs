@@ -35,36 +35,42 @@ fn mpi_gmres_sstep_reduces_reduction_count() -> Result<(), KError> {
         Some(&mut ws_classic),
     )?;
 
-    let mut sstep = GmresSolver::new(restart, 1e-6, 5_000);
-    sstep.set_variant(GmresVariant::SStep {
-        s: 2,
-        reorth: ReorthPolicy::Never,
-        max_cond: 1e8,
-    });
-    let mut x_sstep = vec![0.0; a.nrows()];
-    let mut ws_sstep = Workspace::default();
-    let stats_sstep = sstep.solve_f64(
-        &a,
-        None,
-        &b,
-        &mut x_sstep,
-        PcSide::Left,
-        &comm,
-        None,
-        Some(&mut ws_sstep),
-    )?;
-
     assert!(stats_classic.final_residual.is_finite());
-    assert!(stats_sstep.final_residual.is_finite());
 
     let classic_reductions = stats_classic.counters.num_global_reductions;
-    let sstep_reductions = stats_sstep.counters.num_global_reductions;
     assert!(classic_reductions > 0);
-    assert!(sstep_reductions > 0);
-    assert!(
-        sstep_reductions <= classic_reductions,
-        "expected s-step reductions <= classical (sstep={sstep_reductions}, classic={classic_reductions})"
-    );
+    for s in [2usize, 4usize] {
+        let mut sstep = GmresSolver::new(restart, 1e-6, 5_000);
+        sstep.set_variant(GmresVariant::SStep {
+            s,
+            reorth: ReorthPolicy::IfNeeded,
+            max_cond: 1e8,
+        });
+        let mut x_sstep = vec![0.0; a.nrows()];
+        let mut ws_sstep = Workspace::default();
+        let stats_sstep = sstep.solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x_sstep,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws_sstep),
+        )?;
+
+        assert!(stats_sstep.final_residual.is_finite());
+        assert!(
+            stats_sstep.final_residual
+                <= 1e-6 * b.iter().map(|v| v * v).sum::<f64>().sqrt() + 1e-10
+        );
+        let sstep_reductions = stats_sstep.counters.num_global_reductions;
+        assert!(sstep_reductions > 0);
+        assert!(
+            sstep_reductions <= classic_reductions,
+            "expected s-step({s}) reductions <= classical (sstep={sstep_reductions}, classic={classic_reductions})"
+        );
+    }
 
     Ok(())
 }
@@ -80,7 +86,7 @@ fn mpi_gmres_sstep_deterministic_reproducible_counters() -> Result<(), KError> {
         let mut solver = GmresSolver::new(16, 1e-6, 2_000);
         solver.set_variant(GmresVariant::SStep {
             s: 2,
-            reorth: ReorthPolicy::Never,
+            reorth: ReorthPolicy::IfNeeded,
             max_cond: 1e8,
         });
         let mut ws = Workspace::default();
@@ -100,6 +106,58 @@ fn mpi_gmres_sstep_deterministic_reproducible_counters() -> Result<(), KError> {
     );
     assert!(s0.final_residual.is_finite());
     assert!(s1.final_residual.is_finite());
+
+    Ok(())
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn mpi_rayon_gmres_sstep_reductions_for_s2_s4() -> Result<(), KError> {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let a = fixtures::csr_poisson_1d(72);
+    let b: Vec<f64> = (0..a.nrows()).map(|i| 1.0 + 0.5 * i as f64).collect();
+
+    let mut classic = GmresSolver::new(20, 1e-6, 5_000);
+    classic.set_variant(GmresVariant::Classical);
+    let mut x_classic = vec![0.0; a.nrows()];
+    let mut ws_classic = Workspace::default();
+    let stats_classic = classic.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut x_classic,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws_classic),
+    )?;
+    assert!(stats_classic.final_residual.is_finite());
+
+    for s in [2usize, 4usize] {
+        let mut sstep = GmresSolver::new(20, 1e-6, 5_000);
+        sstep.set_variant(GmresVariant::SStep {
+            s,
+            reorth: ReorthPolicy::IfNeeded,
+            max_cond: 1e8,
+        });
+        let mut x_sstep = vec![0.0; a.nrows()];
+        let mut ws_sstep = Workspace::default();
+        let stats_sstep = sstep.solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x_sstep,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws_sstep),
+        )?;
+        assert!(stats_sstep.final_residual.is_finite());
+        assert!(
+            stats_sstep.counters.num_global_reductions
+                <= stats_classic.counters.num_global_reductions
+        );
+    }
 
     Ok(())
 }
