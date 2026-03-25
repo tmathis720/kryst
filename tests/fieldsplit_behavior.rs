@@ -6,6 +6,7 @@ use kryst::context::pc_context::PcFactory;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::op::DistLayout;
 use kryst::matrix::sparse::CsrMatrix;
+use kryst::preconditioner::fieldsplit::FieldSplitPc;
 use kryst::prelude::*;
 
 fn diag_csr(diag: &[f64]) -> CsrMatrix<S> {
@@ -460,4 +461,102 @@ fn fieldsplit_strategy_and_schur_approx_parse() {
     let opts = PcOptions::from_args(&args).expect("parse fieldsplit strategy/schur approx");
     assert_eq!(opts.resolved_fieldsplit_type(), "schur");
     assert_eq!(opts.resolved_fieldsplit_schur_approx(), "full");
+}
+
+#[test]
+fn fieldsplit_comm_schedule_parse() {
+    let args = [
+        "-pc_type",
+        "fieldsplit",
+        "-pc_fieldsplit_block_sizes",
+        "1,1",
+        "-pc_fieldsplit_comm_schedule",
+        "local_first",
+    ];
+    let opts = PcOptions::from_args(&args).expect("parse fieldsplit comm schedule");
+    assert_eq!(opts.resolved_fieldsplit_comm_schedule(), "local_first");
+}
+
+#[test]
+fn fieldsplit_split_diagnostics_record_exchange() -> Result<(), KError> {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(4.0),
+            S::from_real(1.0),
+            S::from_real(1.0),
+            S::from_real(3.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let opts = PcOptions {
+        pc_fieldsplit_type: Some("schur".into()),
+        pc_fieldsplit_schur_fact_type: Some("full".into()),
+        pc_fieldsplit_schur_precondition: Some("full".into()),
+        pc_fieldsplit_schur_approx: Some("distributed_full".into()),
+        ..Default::default()
+    };
+    let mut pc = FieldSplitPc::new(vec![1, 1], Some("jacobi".into()), opts)?;
+    pc.setup(&op)?;
+    let x = vec![S::from_real(1.0), S::from_real(2.0)];
+    let mut y = vec![S::zero(); 2];
+    pc.apply(PcSide::Left, &x, &mut y)?;
+    let diags = pc.split_diagnostics();
+    assert_eq!(diags.len(), 2);
+    assert!(diags.iter().map(|d| d.reduction_count).sum::<usize>() >= 1);
+    Ok(())
+}
+
+#[cfg(feature = "mpi")]
+#[test]
+fn fieldsplit_mpi_layout_schur_exchange_path() -> Result<(), KError> {
+    let csr = CsrMatrix::from_csr(
+        4,
+        4,
+        vec![0, 2, 4, 6, 8],
+        vec![0, 2, 1, 3, 0, 2, 1, 3],
+        vec![
+            S::from_real(3.0),
+            S::from_real(-1.0),
+            S::from_real(3.0),
+            S::from_real(-1.0),
+            S::from_real(-1.0),
+            S::from_real(3.0),
+            S::from_real(-1.0),
+            S::from_real(3.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr)).with_layout(DistLayout {
+        global_rows: 8,
+        global_cols: 8,
+        row_start: 2,
+        row_end: 6,
+        col_start: 2,
+        col_end: 6,
+    });
+    let opts = PcOptions {
+        pc_fieldsplit_block_sizes: Some(vec![4, 4]),
+        pc_fieldsplit_child_pc_type: Some("jacobi".into()),
+        pc_fieldsplit_type: Some("schur".into()),
+        pc_fieldsplit_schur_fact_type: Some("lower".into()),
+        pc_fieldsplit_schur_precondition: Some("full_matfree".into()),
+        pc_fieldsplit_schur_approx: Some("dist_diag".into()),
+        pc_fieldsplit_comm_schedule: Some("local_first".into()),
+        ..Default::default()
+    };
+    let mut pc = FieldSplitPc::new(vec![4, 4], Some("jacobi".into()), opts)?;
+    pc.setup(&op)?;
+    let x = vec![
+        S::from_real(1.0),
+        S::from_real(0.5),
+        S::from_real(2.0),
+        S::from_real(1.5),
+    ];
+    let mut y = vec![S::zero(); 4];
+    pc.apply(PcSide::Left, &x, &mut y)?;
+    assert!(y.iter().all(|v| v.abs().is_finite()));
+    Ok(())
 }
