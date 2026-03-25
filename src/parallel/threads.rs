@@ -34,6 +34,7 @@ use std::sync::OnceLock;
 use rayon::ThreadPoolBuilder;
 
 use crate::algebra::parallel_cfg::ParallelTune;
+use std::collections::BTreeMap;
 
 /// Default row-count cutoff for enabling parallel SpMV in `CsrOp::matvec`.
 pub const DEFAULT_PAR_CUTOFF: usize = 4096;
@@ -142,6 +143,114 @@ pub fn current_rayon_threads() -> usize {
 /// Note: The global pool cannot be destroyed; this is just an explicit init point.
 pub struct ThreadPoolGuard {
     threads: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KspExecStage {
+    OuterSetup,
+    OuterApply,
+    InnerSetup,
+    InnerApply,
+}
+
+impl KspExecStage {
+    pub fn as_key(self) -> &'static str {
+        match self {
+            KspExecStage::OuterSetup => "outer_setup",
+            KspExecStage::OuterApply => "outer_apply",
+            KspExecStage::InnerSetup => "inner_setup",
+            KspExecStage::InnerApply => "inner_apply",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScopedThreadPolicy {
+    pub setup_threads: Option<usize>,
+    pub apply_threads: Option<usize>,
+    pub inner_setup_threads: Option<usize>,
+    pub inner_apply_threads: Option<usize>,
+    /// Reserved for future per-PC thread keys (e.g. `pc_asm_threads`).
+    pub per_pc_threads: BTreeMap<String, usize>,
+}
+
+impl ScopedThreadPolicy {
+    fn clean_limit(v: Option<usize>) -> Option<usize> {
+        v.filter(|n| *n > 0)
+    }
+
+    pub fn set_outer_threads(&mut self, n: Option<usize>) {
+        let n = Self::clean_limit(n);
+        self.setup_threads = n;
+        self.apply_threads = n;
+    }
+
+    pub fn set_inner_threads(&mut self, n: Option<usize>) {
+        let n = Self::clean_limit(n);
+        self.inner_setup_threads = n;
+        self.inner_apply_threads = n;
+    }
+
+    pub fn set_stage_threads(&mut self, stage: KspExecStage, n: Option<usize>) {
+        let n = Self::clean_limit(n);
+        match stage {
+            KspExecStage::OuterSetup => self.setup_threads = n,
+            KspExecStage::OuterApply => self.apply_threads = n,
+            KspExecStage::InnerSetup => self.inner_setup_threads = n,
+            KspExecStage::InnerApply => self.inner_apply_threads = n,
+        }
+    }
+
+    pub fn effective_threads(&self, stage: KspExecStage) -> usize {
+        let fallback = current_rayon_threads();
+        match stage {
+            KspExecStage::OuterSetup => self.setup_threads.unwrap_or(fallback),
+            KspExecStage::OuterApply => self.apply_threads.unwrap_or(fallback),
+            KspExecStage::InnerSetup => self
+                .inner_setup_threads
+                .or(self.setup_threads)
+                .unwrap_or(fallback),
+            KspExecStage::InnerApply => self
+                .inner_apply_threads
+                .or(self.apply_threads)
+                .unwrap_or(fallback),
+        }
+        .max(1)
+    }
+
+    pub fn diagnostics(&self) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        for stage in [
+            KspExecStage::OuterSetup,
+            KspExecStage::OuterApply,
+            KspExecStage::InnerSetup,
+            KspExecStage::InnerApply,
+        ] {
+            out.insert(stage.as_key().to_string(), self.effective_threads(stage));
+        }
+        out
+    }
+
+    pub fn install_stage<T>(&self, stage: KspExecStage, f: impl FnOnce() -> T + Send) -> T
+    where
+        T: Send,
+    {
+        let threads = self.effective_threads(stage);
+        #[cfg(feature = "rayon")]
+        {
+            if threads <= 1 {
+                let _guard = crate::algebra::parallel_cfg::serial_guard(true);
+                return f();
+            }
+            if threads >= current_rayon_threads() {
+                return f();
+            }
+            if let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+                return pool.install(f);
+            }
+        }
+        f()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
