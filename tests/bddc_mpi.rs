@@ -117,3 +117,31 @@ fn mpi_bddc_converges_and_is_stable_vs_block_jacobi() {
         "BDDC iterations ({bddc_its}) should remain stable against block-jacobi ({bj_its})"
     );
 }
+
+#[test]
+fn mpi_mg_is_viable_distributed_baseline_for_bddc_matrix() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+
+    let n_per = 6;
+    let dist = Arc::new(make_dist_poisson(&comm, n_per));
+    let rhs: Vec<f64> = (0..n_per).map(|i| 1.0 + i as f64).collect();
+
+    let mg_opts = PcOptions {
+        pc_type: Some("mg".to_string()),
+        pc_mg_levels: Some(3),
+        pc_mg_cycle_type: Some("v".to_string()),
+        pc_mg_smoother: Some("jacobi".to_string()),
+        pc_mg_smoother_steps: Some(1),
+        ..Default::default()
+    };
+    let (_its, res, reason) = solve_with_pc(dist, &rhs, &mg_opts);
+    assert!(
+        matches!(
+            reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ),
+        "mg should converge on distributed poisson system: {reason:?}"
+    );
+    assert!(res.is_finite(), "mg residual must be finite");
+}
