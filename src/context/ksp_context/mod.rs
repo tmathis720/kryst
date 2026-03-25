@@ -4556,6 +4556,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn reproducible_ksp_disables_overlap_reduction_counters() {
+        fn run_once(ksp_type: &str, variant_key: &str, variant_value: &str) -> (Vec<f64>, usize) {
+            let a = Arc::new(poisson_2d(6, 6));
+            let op = Arc::new(CsrOp::<R>::new(a.clone()));
+
+            let mut ksp = KspContext::new();
+            ksp.set_operators(op, None);
+            let solver_type = match ksp_type {
+                "gmres" => SolverType::Gmres,
+                "fgmres" => SolverType::Fgmres,
+                "bicgstab" => SolverType::BiCgStab,
+                _ => panic!("unexpected solver type"),
+            };
+            ksp.set_type(solver_type).expect("set type");
+
+            let mut opts = KspOptions {
+                reproducible: Some(true),
+                reduction: Some("deterministic".into()),
+                maxits: Some(20),
+                rtol: Some(1e-10),
+                ..Default::default()
+            };
+            match variant_key {
+                "gmres_variant" => opts.gmres_variant = Some(variant_value.into()),
+                "fgmres_variant" => opts.fgmres_variant = Some(variant_value.into()),
+                "bicgstab_variant" => opts.bicgstab_variant = Some(variant_value.into()),
+                _ => {}
+            }
+            ksp.set_from_options(&opts).expect("set options");
+            ksp.setup().expect("setup");
+
+            let n = a.nrows();
+            let b = vec![S::from_real(1.0); n];
+            let mut x = vec![S::zero(); n];
+            let stats = ksp.solve(&b, &mut x).expect("solve");
+            let real_x: Vec<f64> = x.iter().map(|v| v.real()).collect();
+            (real_x, stats.counters.overlap_global_reductions)
+        }
+
+        for (solver, key, value) in [
+            ("gmres", "gmres_variant", "pipelined"),
+            ("fgmres", "fgmres_variant", "pipelined"),
+            ("bicgstab", "bicgstab_variant", "lowsync"),
+        ] {
+            let (x1, overlap1) = run_once(solver, key, value);
+            let (x2, overlap2) = run_once(solver, key, value);
+            assert_eq!(overlap1, 0, "{solver} overlap counter must be zero");
+            assert_eq!(overlap2, 0, "{solver} overlap counter must be zero");
+            let bits1: Vec<u64> = x1.iter().map(|v| v.to_bits()).collect();
+            let bits2: Vec<u64> = x2.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                bits1, bits2,
+                "{solver} reproducible run must be bitwise stable"
+            );
+        }
+    }
+
     #[cfg(feature = "rayon")]
     #[test]
     fn set_from_options_threads_context_does_not_touch_global_rayon() {
