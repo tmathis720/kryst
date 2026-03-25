@@ -72,6 +72,15 @@ struct DistributedAsmState {
     sub_csr: Arc<CsrMatrix<S>>,
     solver: SubdomainSolver,
     weights: Option<Vec<R>>,
+    coarse: Option<DistributedAsmCoarse>,
+}
+
+#[cfg(feature = "mpi")]
+#[derive(Debug)]
+struct DistributedAsmCoarse {
+    strategy: DistCoarseStrategy,
+    ownership: Vec<(usize, usize)>,
+    root_matrix: Option<Vec<Vec<S>>>,
 }
 
 #[cfg(feature = "mpi")]
@@ -133,13 +142,6 @@ impl Preconditioner for DistributedAsm {
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        if !matches!(self.coarse_strategy, DistCoarseStrategy::None) {
-            log::warn!(
-                "Distributed ASM coarse strategy {} not supported yet; falling back to none.",
-                self.coarse_strategy
-            );
-            self.coarse_strategy = DistCoarseStrategy::None;
-        }
         let comm = op.comm();
         if comm.size() <= 1 {
             return Err(KError::Unsupported(
@@ -201,6 +203,8 @@ impl Preconditioner for DistributedAsm {
         solver.setup(&sub_csr)?;
 
         let weights = build_ras_weights(&layout, &comm_plan, self.weighting);
+        let coarse =
+            build_coarse_space(self.coarse_strategy, &comm, &layout, &local_csr, &ownership)?;
 
         self.last_sid = Some(op.structure_id());
         self.last_vid = Some(op.values_id());
@@ -214,6 +218,7 @@ impl Preconditioner for DistributedAsm {
             sub_csr,
             solver,
             weights,
+            coarse,
         });
         Ok(())
     }
@@ -310,6 +315,9 @@ impl Preconditioner for DistributedAsm {
                 }
             }
         }
+        if let Some(coarse) = state.coarse.as_ref() {
+            coarse_additive_correction(coarse, &state.comm, x, y)?;
+        }
 
         Ok(())
     }
@@ -361,6 +369,14 @@ impl Preconditioner for DistributedAsm {
 
         state.local_csr = local_csr;
         state.sub_csr = sub_csr;
+        if let Some(coarse) = state.coarse.as_mut() {
+            coarse.root_matrix = build_root_gather_coarse_matrix(
+                coarse.strategy,
+                &state.comm,
+                &state.local_csr,
+                &coarse.ownership,
+            )?;
+        }
         self.last_vid = Some(op.values_id());
         Ok(())
     }
@@ -583,6 +599,194 @@ fn owner_of(g: usize, ownership: &[(usize, usize)]) -> usize {
         }
     }
     lo.min(ownership.len().saturating_sub(1))
+}
+
+#[cfg(feature = "mpi")]
+fn build_coarse_space(
+    requested: DistCoarseStrategy,
+    comm: &UniverseComm,
+    layout: &DistLayout,
+    local_csr: &CsrMatrix<S>,
+    ownership: &[(usize, usize)],
+) -> Result<Option<DistributedAsmCoarse>, KError> {
+    let strategy = match requested {
+        DistCoarseStrategy::None => return Ok(None),
+        DistCoarseStrategy::RootGather => DistCoarseStrategy::RootGather,
+        DistCoarseStrategy::LocalPrototype | DistCoarseStrategy::SuperLuDist => {
+            log::warn!(
+                "Distributed ASM coarse strategy {} currently routes to root_gather.",
+                requested
+            );
+            DistCoarseStrategy::RootGather
+        }
+    };
+    let _ = layout;
+    let root_matrix = build_root_gather_coarse_matrix(strategy, comm, local_csr, ownership)?;
+    Ok(Some(DistributedAsmCoarse {
+        strategy,
+        ownership: ownership.to_vec(),
+        root_matrix,
+    }))
+}
+
+#[cfg(feature = "mpi")]
+fn build_root_gather_coarse_matrix(
+    strategy: DistCoarseStrategy,
+    comm: &UniverseComm,
+    local_csr: &CsrMatrix<S>,
+    ownership: &[(usize, usize)],
+) -> Result<Option<Vec<Vec<S>>>, KError> {
+    if !matches!(strategy, DistCoarseStrategy::RootGather) {
+        return Ok(None);
+    }
+    let n_coarse = comm.size();
+    let mut local_row = vec![S::zero(); n_coarse];
+    for local_row_idx in 0..local_csr.nrows() {
+        let start = local_csr.row_ptr()[local_row_idx];
+        let end = local_csr.row_ptr()[local_row_idx + 1];
+        for slot in start..end {
+            let col = local_csr.col_idx()[slot];
+            let owner = owner_of(col, ownership);
+            local_row[owner] += local_csr.values()[slot];
+        }
+    }
+
+    let mut send = vec![Vec::<S>::new(); comm.size()];
+    send[0] = local_row;
+    let gathered = alltoallv_scalar(comm, &send)?;
+    if comm.rank() != 0 {
+        return Ok(None);
+    }
+    let mut coarse = vec![vec![S::zero(); n_coarse]; n_coarse];
+    for rank in 0..comm.size() {
+        if gathered[rank].len() != n_coarse {
+            return Err(KError::InvalidInput(
+                "coarse assembly gather produced an unexpected payload size".into(),
+            ));
+        }
+        coarse[rank].copy_from_slice(&gathered[rank]);
+    }
+    Ok(Some(coarse))
+}
+
+#[cfg(feature = "mpi")]
+fn coarse_additive_correction(
+    coarse: &DistributedAsmCoarse,
+    comm: &UniverseComm,
+    x: &[S],
+    y: &mut [S],
+) -> Result<(), KError> {
+    if !matches!(coarse.strategy, DistCoarseStrategy::RootGather) {
+        return Ok(());
+    }
+
+    let local_sum = x.iter().copied().fold(S::zero(), |acc, v| acc + v);
+    let mut send = vec![Vec::<S>::new(); comm.size()];
+    send[0] = vec![local_sum];
+    let gathered_rhs = alltoallv_scalar(comm, &send)?;
+
+    let z_local = if comm.rank() == 0 {
+        let mat = coarse.root_matrix.as_ref().ok_or_else(|| {
+            KError::InvalidInput("root-gather coarse matrix missing on rank 0".into())
+        })?;
+        let mut rhs = vec![S::zero(); comm.size()];
+        for r in 0..comm.size() {
+            if gathered_rhs[r].len() != 1 {
+                return Err(KError::InvalidInput(
+                    "coarse rhs gather produced an unexpected payload size".into(),
+                ));
+            }
+            rhs[r] = gathered_rhs[r][0];
+        }
+        let sol = dense_solve_with_diagonal_shift(mat, &rhs, 1e-12)?;
+
+        let mut scatter = vec![Vec::<S>::new(); comm.size()];
+        for r in 0..comm.size() {
+            scatter[r] = vec![sol[r]];
+        }
+        let recv = alltoallv_scalar(comm, &scatter)?;
+        if recv[0].len() != 1 {
+            return Err(KError::InvalidInput(
+                "coarse scatter to root produced an unexpected payload size".into(),
+            ));
+        }
+        recv[0][0]
+    } else {
+        let scatter = vec![Vec::<S>::new(); comm.size()];
+        let recv = alltoallv_scalar(comm, &scatter)?;
+        if recv[0].len() != 1 {
+            return Err(KError::InvalidInput(
+                "coarse scatter receive produced an unexpected payload size".into(),
+            ));
+        }
+        recv[0][0]
+    };
+
+    for yi in y.iter_mut() {
+        *yi += z_local;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mpi")]
+fn dense_solve_with_diagonal_shift(
+    a: &[Vec<S>],
+    b: &[S],
+    diag_shift: f64,
+) -> Result<Vec<S>, KError> {
+    let n = a.len();
+    if b.len() != n || a.iter().any(|row| row.len() != n) {
+        return Err(KError::InvalidInput(
+            "coarse dense solve requires a square matrix and matching rhs".into(),
+        ));
+    }
+    let mut m = a.to_vec();
+    let mut rhs = b.to_vec();
+    let shift = S::from_real(diag_shift);
+    for i in 0..n {
+        m[i][i] += shift;
+    }
+
+    for k in 0..n {
+        let mut piv = k;
+        let mut piv_abs = m[k][k].abs();
+        for row in (k + 1)..n {
+            let cand = m[row][k].abs();
+            if cand > piv_abs {
+                piv = row;
+                piv_abs = cand;
+            }
+        }
+        if piv_abs <= 1e-20 {
+            return Err(KError::InvalidInput(
+                "coarse dense solve singular pivot".into(),
+            ));
+        }
+        if piv != k {
+            m.swap(k, piv);
+            rhs.swap(k, piv);
+        }
+        for row in (k + 1)..n {
+            let factor = m[row][k] / m[k][k];
+            if factor.abs() == 0.0 {
+                continue;
+            }
+            for col in k..n {
+                m[row][col] -= factor * m[k][col];
+            }
+            rhs[row] -= factor * rhs[k];
+        }
+    }
+
+    let mut x = vec![S::zero(); n];
+    for i in (0..n).rev() {
+        let mut sum = rhs[i];
+        for j in (i + 1)..n {
+            sum -= m[i][j] * x[j];
+        }
+        x[i] = sum / m[i][i];
+    }
+    Ok(x)
 }
 
 #[cfg(feature = "mpi")]
