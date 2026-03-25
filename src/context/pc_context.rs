@@ -712,7 +712,9 @@ impl PcConfig {
             }
 
             ApproxInverse => {
-                // Interpret options for CSR-based SPAI/FSAI
+                // Route production ApproxInverse through CSR-native SPAI/FSAI.
+                // Legacy `preconditioner::approxinv::ApproxInv` remains available
+                // only as a deprecated compatibility adapter.
                 let kind = match o
                     .approxinv_kind
                     .as_deref()

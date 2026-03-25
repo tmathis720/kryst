@@ -504,6 +504,10 @@ impl Preconditioner for LegacyOpPreconditioner {
 #[cfg(feature = "backend-faer")]
 pub mod amg;
 #[cfg(feature = "backend-faer")]
+#[deprecated(
+    since = "0.1.0",
+    note = "legacy ApproxInv is deprecated; use preconditioner::approxinv_csr (FsaiCsr/SpaiCsr) or PcType::ApproxInverse"
+)]
 pub mod approxinv;
 #[cfg(feature = "backend-faer")]
 pub mod approxinv_csr;
@@ -560,6 +564,7 @@ pub use self::sor::MatSorType;
 #[cfg(feature = "backend-faer")]
 pub use amg::AMG;
 #[cfg(feature = "backend-faer")]
+#[allow(deprecated)]
 pub use approxinv::ApproxInv;
 #[cfg(feature = "backend-faer")]
 pub use approxinv_csr::{ApproxInvBuilder, ApproxInvKind, ApproxInvParams, FsaiCsr, SpaiCsr};
