@@ -1597,6 +1597,17 @@ impl Default for AMGBuilder {
 // ===== Workspace, levels & hierarchy ========================================
 
 fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<(), KError> {
+    let is_symmetric_relax = |rt: RelaxType| {
+        matches!(
+            rt,
+            RelaxType::Jacobi
+                | RelaxType::SymmetricGaussSeidel
+                | RelaxType::L1Jacobi
+                | RelaxType::Chebyshev
+                | RelaxType::Fsai
+        )
+    };
+
     if matches!(coarse_solver, CoarseSolve::DirectDense)
         && cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] != 0
     {
@@ -1689,14 +1700,7 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             ));
         }
 
-        if !matches!(
-            cfg.relax_type,
-            RelaxType::Chebyshev
-                | RelaxType::Jacobi
-                | RelaxType::L1Jacobi
-                | RelaxType::SymmetricGaussSeidel
-                | RelaxType::Fsai
-        ) {
+        if !is_symmetric_relax(cfg.relax_type) {
             return Err(KError::InvalidInput(
                 "SPD mode requires symmetric or Jacobi-type smoothers".into(),
             ));
@@ -1761,6 +1765,27 @@ fn validate_relax_policy(cfg: &AMGConfig, coarse_solver: CoarseSolve) -> Result<
             }
         }
     }
+
+    if cfg.non_galerkin.enabled && cfg.non_galerkin.symmetry == NgSymmetry::Symmetric {
+        let down = cfg.grid_relax_type[RelaxPhase::Down.ix()];
+        let up = cfg.grid_relax_type[RelaxPhase::Up.ix()];
+        if down != up {
+            return Err(KError::InvalidInput(
+                "Symmetric non-Galerkin mode requires matching Down/Up relaxers".into(),
+            ));
+        }
+        if cfg.num_grid_sweeps[RelaxPhase::Down.ix()] != cfg.num_grid_sweeps[RelaxPhase::Up.ix()] {
+            return Err(KError::InvalidInput(
+                "Symmetric non-Galerkin mode requires matching Down/Up sweep counts".into(),
+            ));
+        }
+        if !is_symmetric_relax(down) {
+            return Err(KError::InvalidInput(format!(
+                "Symmetric non-Galerkin mode requires a symmetric smoother; got {down:?}"
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -5183,7 +5208,6 @@ impl AMG {
         Ok(())
     }
 
-    #[cfg(not(feature = "complex"))]
     fn ilu0_smooth(
         omega: f64,
         level: &AMGLevel,
@@ -5219,21 +5243,6 @@ impl AMG {
         Ok(())
     }
 
-    #[cfg(feature = "complex")]
-    fn ilu0_smooth(
-        _omega: f64,
-        _level: &AMGLevel,
-        _r: &[f64],
-        _z: &mut [f64],
-        _sweeps: usize,
-        _ws: &mut AMGWorkspace,
-    ) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "AMG ILU0 smoother requires real scalars".into(),
-        ))
-    }
-
-    #[cfg(not(feature = "complex"))]
     fn ras_smooth(
         omega: f64,
         level: &AMGLevel,
@@ -5267,20 +5276,6 @@ impl AMG {
             }
         }
         Ok(())
-    }
-
-    #[cfg(feature = "complex")]
-    fn ras_smooth(
-        _omega: f64,
-        _level: &AMGLevel,
-        _r: &[f64],
-        _z: &mut [f64],
-        _sweeps: usize,
-        _ws: &mut AMGWorkspace,
-    ) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "AMG RAS smoother requires real scalars".into(),
-        ))
     }
 
     fn apply_chebyshev(
@@ -6152,7 +6147,6 @@ impl AMG {
                     work,
                 )
             }
-            #[cfg(not(feature = "complex"))]
             RelaxType::Ilu0 => {
                 let ilu = lvl
                     .ilu0
@@ -6162,11 +6156,6 @@ impl AMG {
                     .expect("ILU0 mutex poisoned")
                     .apply(PcSide::Left, r, out)
             }
-            #[cfg(feature = "complex")]
-            RelaxType::Ilu0 => Err(KError::Unsupported(
-                "AMG ILU0 smoother requires real scalars".into(),
-            )),
-            #[cfg(not(feature = "complex"))]
             RelaxType::Ras => {
                 let ras = lvl
                     .ras
@@ -6176,10 +6165,6 @@ impl AMG {
                     .expect("RAS mutex poisoned")
                     .apply(PcSide::Left, r, out)
             }
-            #[cfg(feature = "complex")]
-            RelaxType::Ras => Err(KError::Unsupported(
-                "AMG RAS smoother requires real scalars".into(),
-            )),
             RelaxType::Fsai => {
                 let data = lvl
                     .fsai
@@ -8489,7 +8474,6 @@ fn update_level_caches(
     Ok(())
 }
 
-#[cfg(not(feature = "complex"))]
 fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
     let mut cfg = IluCsrConfig::default();
     cfg.kind = IluKind::Ilu0;
@@ -8506,14 +8490,6 @@ fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
     Ok(())
 }
 
-#[cfg(feature = "complex")]
-fn build_ilu0_cache(_level: &mut AMGLevel) -> Result<(), KError> {
-    Err(KError::Unsupported(
-        "AMG ILU0 cache requires real scalars".into(),
-    ))
-}
-
-#[cfg(not(feature = "complex"))]
 fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
     let cfg = AsmConfig {
         overlap: 1,
@@ -8529,13 +8505,6 @@ fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
     Preconditioner::setup(&mut ras, &op)?;
     level.ras = Some(Mutex::new(ras));
     Ok(())
-}
-
-#[cfg(feature = "complex")]
-fn build_ras_cache(_level: &mut AMGLevel) -> Result<(), KError> {
-    Err(KError::Unsupported(
-        "AMG RAS cache requires real scalars".into(),
-    ))
 }
 
 fn cast_slice_to_f32(src: &[f64]) -> Vec<f32> {
@@ -10047,6 +10016,8 @@ mod tests {
     }
 
     mod chebyshev;
+    #[cfg(feature = "complex")]
+    mod complex_cycles;
     mod cycle_policy;
     mod fsai_smoother;
     mod mixed_precision;
