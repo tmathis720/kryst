@@ -13,7 +13,8 @@ use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
 use std::cmp::{max, min};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub struct FieldSplitPc {
     block_sizes: Vec<usize>,
@@ -28,7 +29,9 @@ pub struct FieldSplitPc {
     last_structure_id: Option<StructureId>,
     last_values_id: Option<ValuesId>,
     extraction_mode: BlockExtractionMode,
+    comm_schedule: SplitCommSchedule,
     schur_approx_workflow: String,
+    diagnostics: Mutex<Vec<SplitDiagnostics>>,
     all_children_local: bool,
 }
 
@@ -89,6 +92,21 @@ enum BlockExtractionMode {
     ZeroCopy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitCommSchedule {
+    Auto,
+    LocalFirst,
+    ExchangeFirst,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SplitDiagnostics {
+    pub apply_calls: usize,
+    pub reduction_count: usize,
+    pub local_work_time: Duration,
+    pub exchange_time: Duration,
+}
+
 impl FieldSplitPc {
     pub fn new(
         block_sizes: Vec<usize>,
@@ -126,6 +144,7 @@ impl FieldSplitPc {
                 "pc_fieldsplit_type=schur requires exactly two blocks".into(),
             ));
         }
+        let split_count = block_sizes.len();
         Ok(Self {
             block_sizes,
             block_spans: Vec::new(),
@@ -139,7 +158,9 @@ impl FieldSplitPc {
             last_structure_id: None,
             last_values_id: None,
             extraction_mode: Self::extraction_mode_from_options(&opts)?,
+            comm_schedule: Self::comm_schedule_from_options(&opts)?,
             schur_approx_workflow: opts.resolved_fieldsplit_schur_approx(),
+            diagnostics: Mutex::new(vec![SplitDiagnostics::default(); split_count]),
             all_children_local,
         })
     }
@@ -207,6 +228,54 @@ impl FieldSplitPc {
                 "unknown pc_fieldsplit_type: {other}"
             ))),
         }
+    }
+
+    fn comm_schedule_from_options(opts: &PcOptions) -> Result<SplitCommSchedule, KError> {
+        match opts.resolved_fieldsplit_comm_schedule().as_str() {
+            "auto" => Ok(SplitCommSchedule::Auto),
+            "local_first" | "local" => Ok(SplitCommSchedule::LocalFirst),
+            "exchange_first" | "exchange" => Ok(SplitCommSchedule::ExchangeFirst),
+            other => Err(KError::InvalidInput(format!(
+                "unknown pc_fieldsplit_comm_schedule: {other}"
+            ))),
+        }
+    }
+
+    fn active_comm_schedule(&self) -> SplitCommSchedule {
+        match self.comm_schedule {
+            SplitCommSchedule::Auto
+                if self.distributed_support() == PcDistributedSupport::Distributed =>
+            {
+                SplitCommSchedule::LocalFirst
+            }
+            SplitCommSchedule::Auto => SplitCommSchedule::ExchangeFirst,
+            schedule => schedule,
+        }
+    }
+
+    fn add_local_time(&self, idx: usize, elapsed: Duration) {
+        if let Ok(mut diag) = self.diagnostics.lock()
+            && let Some(d) = diag.get_mut(idx)
+        {
+            d.apply_calls += 1;
+            d.local_work_time += elapsed;
+        }
+    }
+
+    fn add_exchange_event(&self, idx: usize, elapsed: Duration) {
+        if let Ok(mut diag) = self.diagnostics.lock()
+            && let Some(d) = diag.get_mut(idx)
+        {
+            d.reduction_count += 1;
+            d.exchange_time += elapsed;
+        }
+    }
+
+    pub fn split_diagnostics(&self) -> Vec<SplitDiagnostics> {
+        self.diagnostics
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     fn block_spans_from_sizes(block_sizes: &[usize]) -> Vec<BlockSpan> {
@@ -354,6 +423,8 @@ impl FieldSplitPc {
                 // structurally complete sparse path as diag for determinism.
                 self.schur_diag_approx(a11, a22, schur)
             }
+            "distributed_diag" | "dist_diag" => self.schur_diag_approx(a11, a22, schur),
+            "distributed_full" | "dist_full" => self.schur_diag_approx(a11, a22, schur),
             other => Err(KError::InvalidInput(format!(
                 "unknown pc_fieldsplit_schur_approx: {other}"
             ))),
@@ -385,12 +456,12 @@ impl FieldSplitPc {
             };
         }
         let a12 = schur.a12.as_ref();
-        let mut scaled_vals = Vec::with_capacity(a12.values().len());
+        let mut scaled_vals = vec![S::zero(); a12.values().len()];
         for row in 0..a12.nrows() {
             let rs = a12.row_ptr()[row];
             let re = a12.row_ptr()[row + 1];
             for p in rs..re {
-                scaled_vals.push(a12.values()[p] * diag_inv[row]);
+                scaled_vals[p] = a12.values()[p] * diag_inv[row];
             }
         }
         let scaled_a12 = CsrMatrix::from_csr(
@@ -553,23 +624,19 @@ impl FieldSplitPc {
 
     fn apply_additive(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         y.fill(S::zero());
-        for (idx, (span, _)) in self
-            .block_spans
-            .iter()
-            .zip(self.children.iter())
-            .enumerate()
-        {
+        let mut order: Vec<usize> = (0..self.block_spans.len()).collect();
+        if self.active_comm_schedule() == SplitCommSchedule::LocalFirst {
+            order.sort_by_key(|idx| self.block_spans[*idx].len());
+        }
+        for idx in order {
+            let span = self.block_spans[idx];
             if span.len() == 0 {
                 continue;
             }
             let mut zout = vec![S::zero(); span.len()];
-            self.apply_child(
-                idx,
-                side,
-                self.restrict_rhs(x, *span),
-                &mut zout,
-                "additive",
-            )?;
+            let start = Instant::now();
+            self.apply_child(idx, side, self.restrict_rhs(x, span), &mut zout, "additive")?;
+            self.add_local_time(idx, start.elapsed());
             for (yi, zi) in y[span.start..span.end].iter_mut().zip(zout.iter()) {
                 *yi += *zi;
             }
@@ -692,7 +759,9 @@ impl FieldSplitPc {
             SchurFactorization::Lower => {
                 self.apply_child(0, side, x1, &mut y1, "schur_lower_a11")?;
                 let mut tmp2 = vec![S::zero(); span1.len()];
+                let exch = Instant::now();
                 schur.a21.try_spmv(&y1, &mut tmp2)?;
+                self.add_exchange_event(1, exch.elapsed());
                 for i in 0..tmp2.len() {
                     tmp2[i] = x2[i] - tmp2[i];
                 }
@@ -705,7 +774,9 @@ impl FieldSplitPc {
             SchurFactorization::Upper => {
                 self.apply_child(1, side, x2, &mut y2, "schur_upper_s")?;
                 let mut tmp1 = vec![S::zero(); span0.len()];
+                let exch = Instant::now();
                 schur.a12.try_spmv(&y2, &mut tmp1)?;
+                self.add_exchange_event(0, exch.elapsed());
                 for i in 0..tmp1.len() {
                     tmp1[i] = x1[i] - tmp1[i];
                 }
@@ -714,7 +785,9 @@ impl FieldSplitPc {
             SchurFactorization::Full => {
                 self.apply_child(0, side, x1, &mut y1, "schur_full_a11")?;
                 let mut tmp2 = vec![S::zero(); span1.len()];
+                let exch = Instant::now();
                 schur.a21.try_spmv(&y1, &mut tmp2)?;
+                self.add_exchange_event(1, exch.elapsed());
                 for i in 0..tmp2.len() {
                     tmp2[i] = x2[i] - tmp2[i];
                 }
@@ -724,7 +797,9 @@ impl FieldSplitPc {
                     self.apply_child(1, side, &tmp2, &mut y2, "schur_full_s")?;
                 }
                 let mut tmp1 = vec![S::zero(); span0.len()];
+                let exch = Instant::now();
                 schur.a12.try_spmv(&y2, &mut tmp1)?;
+                self.add_exchange_event(0, exch.elapsed());
                 let mut corr = vec![S::zero(); span0.len()];
                 self.apply_child(0, side, &tmp1, &mut corr, "schur_full_correction")?;
                 for i in 0..y1.len() {
@@ -861,6 +936,9 @@ impl Preconditioner for FieldSplitPc {
         };
         self.schur_precondition_matrix = schur_precondition_matrix;
         self.schur_apply_hook = schur_apply_hook;
+        if let Ok(mut d) = self.diagnostics.lock() {
+            *d = vec![SplitDiagnostics::default(); self.block_spans.len()];
+        }
         self.last_structure_id = Some(a.structure_id());
         self.last_values_id = Some(a.values_id());
         Ok(())
@@ -964,8 +1042,7 @@ mod tests {
 
     #[test]
     fn fieldsplit_distributed_support_is_local_when_children_local() {
-        let pc =
-            FieldSplitPc::new(vec![2, 2], Some("none".into()), PcOptions::default()).unwrap();
+        let pc = FieldSplitPc::new(vec![2, 2], Some("none".into()), PcOptions::default()).unwrap();
         assert_eq!(pc.distributed_support(), PcDistributedSupport::LocalOnly);
     }
 

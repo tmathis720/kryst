@@ -1039,6 +1039,13 @@ pub static SPECS: &[Spec] = &[
         doc: "Schur complement approximation workflow (diag/full)",
     },
     Spec {
+        flag: "-pc_fieldsplit_comm_schedule",
+        key: "pc_fieldsplit_comm_schedule",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "per-split communication schedule (auto/local_first/exchange_first)",
+    },
+    Spec {
         flag: "-pc_fieldsplit_extraction",
         key: "pc_fieldsplit_extraction",
         arity: Arity::One,

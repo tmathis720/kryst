@@ -160,3 +160,7 @@ harness = false
 [[bench]]
 name = "preconditioner_complex_quality"
 harness = false
+
+[[bench]]
+name = "fieldsplit_modes"
+harness = false

@@ -274,6 +274,8 @@ pub struct PcOptions {
     pub pc_fieldsplit_schur_precondition: Option<String>,
     /// Schur complement approximation workflow: `diag` (default) or `full`.
     pub pc_fieldsplit_schur_approx: Option<String>,
+    /// Split communication schedule: `auto` (default), `local_first`, or `exchange_first`.
+    pub pc_fieldsplit_comm_schedule: Option<String>,
     pub pc_fieldsplit_extraction: Option<String>,
     // Shell
     pub pc_shell_name: Option<String>,
@@ -1311,6 +1313,9 @@ impl Sink for PcOptions {
             "pc_fieldsplit_schur_approx" => {
                 set_opt!(&mut self.pc_fieldsplit_schur_approx, v.to_lowercase())
             }
+            "pc_fieldsplit_comm_schedule" => {
+                set_opt!(&mut self.pc_fieldsplit_comm_schedule, v.to_lowercase())
+            }
             "pc_fieldsplit_extraction" => {
                 set_opt!(&mut self.pc_fieldsplit_extraction, v.to_lowercase())
             }
@@ -2068,6 +2073,13 @@ impl PcOptions {
             .to_ascii_lowercase()
     }
 
+    pub fn resolved_fieldsplit_comm_schedule(&self) -> String {
+        self.pc_fieldsplit_comm_schedule
+            .as_deref()
+            .unwrap_or("auto")
+            .to_ascii_lowercase()
+    }
+
     pub fn resolved_pc_ksp_inner_tol_policy(&self) -> String {
         self.pc_ksp_inner_tol_policy
             .as_deref()
@@ -2543,6 +2555,7 @@ impl PcOptions {
         o!(pc_fieldsplit_schur_fact_type);
         o!(pc_fieldsplit_schur_precondition);
         o!(pc_fieldsplit_schur_approx);
+        o!(pc_fieldsplit_comm_schedule);
         o!(pc_fieldsplit_extraction);
         o!(pc_shell_name);
         o!(pc_shell_apply);
