@@ -211,7 +211,7 @@ impl FgmresSolver {
         if call_monitors(mons, 0, res, pipeline_reductions) {
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: pipeline_reductions,
-                overlap_global_reductions: 0,
+                overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
             return Ok(
@@ -269,7 +269,7 @@ impl FgmresSolver {
                 end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reductions,
-                overlap_global_reductions: 0,
+                overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
             let mut stats = stats.with_counters(counters);
@@ -484,7 +484,7 @@ impl FgmresSolver {
                 if call_monitors(mons, total_iters, res, pipeline_reductions) {
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: pipeline_reductions,
-                        overlap_global_reductions: 0,
+                        overlap_global_reductions: async_waits,
                         residual_replacements: async_waits,
                     };
                     return Ok(SolveStats::new(
@@ -658,7 +658,7 @@ impl FgmresSolver {
             end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
         let counters = crate::utils::convergence::SolverCounters {
             num_global_reductions: reductions,
-            overlap_global_reductions: 0,
+            overlap_global_reductions: async_waits,
             residual_replacements: async_waits,
         };
         let mut stats = stats.with_counters(counters);

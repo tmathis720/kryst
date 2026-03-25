@@ -322,7 +322,7 @@ impl BiCgStabSolver {
                 stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -384,7 +384,7 @@ impl BiCgStabSolver {
                 stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -409,7 +409,7 @@ impl BiCgStabSolver {
                     stats.reason = reason;
                     return Ok(stats.with_counters(SolverCounters {
                         num_global_reductions: sync_reductions + async_reduction_waits,
-                        overlap_global_reductions: 0,
+                        overlap_global_reductions: async_reduction_waits,
                         residual_replacements: async_reduction_waits,
                     }));
                 }
@@ -418,7 +418,7 @@ impl BiCgStabSolver {
                         SolveStats::new(k, s_norm, ConvergedReason::StoppedByMonitor)
                             .with_counters(SolverCounters {
                                 num_global_reductions: sync_reductions + async_reduction_waits,
-                                overlap_global_reductions: 0,
+                                overlap_global_reductions: async_reduction_waits,
                                 residual_replacements: async_reduction_waits,
                             }),
                     );
@@ -457,7 +457,7 @@ impl BiCgStabSolver {
                     };
                     return Ok(stats.with_counters(SolverCounters {
                         num_global_reductions: sync_reductions + async_reduction_waits,
-                        overlap_global_reductions: 0,
+                        overlap_global_reductions: async_reduction_waits,
                         residual_replacements: async_reduction_waits,
                     }));
                 }
@@ -502,7 +502,7 @@ impl BiCgStabSolver {
                 stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -515,7 +515,7 @@ impl BiCgStabSolver {
                 stats.reason = ReasonEmitter::breakdown_bicg();
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -612,7 +612,7 @@ impl BiCgStabSolver {
                 stats.reason = reason;
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -621,7 +621,7 @@ impl BiCgStabSolver {
                     SolveStats::new(k, r_norm, ConvergedReason::StoppedByMonitor).with_counters(
                         SolverCounters {
                             num_global_reductions: sync_reductions + async_reduction_waits,
-                            overlap_global_reductions: 0,
+                            overlap_global_reductions: async_reduction_waits,
                             residual_replacements: async_reduction_waits,
                         },
                     ),
@@ -638,7 +638,7 @@ impl BiCgStabSolver {
                 };
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -648,7 +648,7 @@ impl BiCgStabSolver {
                 stats.reason = ConvergedReason::DivergedDtol;
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 }));
             }
@@ -663,7 +663,7 @@ impl BiCgStabSolver {
             SolveStats::new(self.maxits, r_norm, ConvergedReason::DivergedMaxIts).with_counters(
                 SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: 0,
+                    overlap_global_reductions: async_reduction_waits,
                     residual_replacements: async_reduction_waits,
                 },
             ),
