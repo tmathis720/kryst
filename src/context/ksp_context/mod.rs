@@ -64,6 +64,7 @@ use crate::ops::klinop::KLinOp;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::Comm;
+use crate::parallel::threads::{KspExecStage, ScopedThreadPolicy};
 #[cfg(feature = "mpi")]
 use crate::preconditioner::PcDistributedSupport;
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
@@ -320,6 +321,7 @@ pub struct KspContext {
     reduction_opts: ReductOptions,
     reproducible: bool,
     exec: ExecutionPolicy,
+    scoped_threads: ScopedThreadPolicy,
     #[cfg(feature = "backend-faer")]
     pending_mpi_pc: Option<PendingMpiPc>,
     #[cfg(feature = "backend-faer")]
@@ -362,7 +364,8 @@ impl fmt::Debug for KspContext {
             .field("last_pc_vid", &self.last_pc_vid)
             .field("reduction_opts", &self.reduction_opts)
             .field("reproducible", &self.reproducible)
-            .field("exec", &self.exec);
+            .field("exec", &self.exec)
+            .field("scoped_threads", &self.scoped_threads);
         #[cfg(feature = "backend-faer")]
         dbg.field("pending_mpi_pc", &self.pending_mpi_pc);
         dbg.field("pending_gmres", &self.pending_gmres)
@@ -613,6 +616,7 @@ impl KspContext {
             reduction_opts: ReductOptions::default(),
             reproducible: false,
             exec: ExecutionPolicy::default(),
+            scoped_threads: ScopedThreadPolicy::default(),
             #[cfg(feature = "backend-faer")]
             pending_mpi_pc: None,
             #[cfg(feature = "backend-faer")]
@@ -846,12 +850,16 @@ impl KspContext {
     pub fn set_from_options(&mut self, opts: &KspOptions) -> Result<&mut Self, KError> {
         #[cfg(feature = "rayon")]
         {
+            self.scoped_threads.set_outer_threads(opts.threads);
+            self.scoped_threads.set_inner_threads(opts.threads);
             if let Some(mode) = opts.threads_mode.as_deref() {
                 match mode {
                     "context" => {}
                     "global" => {}
                     "serial" => {
                         self.exec.threading = ThreadingPolicy::Serial;
+                        self.scoped_threads.set_outer_threads(Some(1));
+                        self.scoped_threads.set_inner_threads(Some(1));
                     }
                     other => {
                         return Err(KError::InvalidInput(format!(
@@ -865,12 +873,15 @@ impl KspContext {
                 match opts.threads_mode.as_deref().unwrap_or("context") {
                     "context" => {
                         self.exec = self.exec.clone().with_threads(n)?;
+                        self.scoped_threads.set_outer_threads(Some(n));
                     }
                     "serial" => {
                         self.exec.threading = ThreadingPolicy::Serial;
+                        self.scoped_threads.set_outer_threads(Some(1));
                     }
                     "global" => {
                         set_rayon_threads(n);
+                        self.scoped_threads.set_outer_threads(Some(n));
                     }
                     other => {
                         return Err(KError::InvalidInput(format!(
@@ -1586,6 +1597,16 @@ impl KspContext {
             &mut solver_config,
             "execution_policy",
             format!("{:?}", self.exec),
+        );
+        insert_value(
+            &mut solver_config,
+            "execution_stage_threads",
+            self.scoped_threads.diagnostics(),
+        );
+        insert_value(
+            &mut solver_config,
+            "execution_stage_threads_effective",
+            self.scoped_threads.diagnostics(),
         );
         if let Some(adaptive) = &self.adaptive_exec {
             insert_value(
@@ -2330,7 +2351,10 @@ impl KspContext {
     /// Prepare preconditioner and workspace.
     pub fn setup(&mut self) -> Result<(), KError> {
         let exec = self.exec.clone();
-        exec.install(|| self.setup_impl())
+        let scoped = self.scoped_threads.clone();
+        scoped.install_stage(KspExecStage::OuterSetup, || {
+            exec.install(|| self.setup_impl())
+        })
     }
 
     fn setup_impl(&mut self) -> Result<(), KError> {
@@ -2614,7 +2638,10 @@ impl KspContext {
     /// Solve the linear system using stored operators.
     pub fn solve(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
         let exec = self.exec.clone();
-        exec.install(|| self.solve_impl(b, x))
+        let scoped = self.scoped_threads.clone();
+        scoped.install_stage(KspExecStage::OuterApply, || {
+            exec.install(|| self.solve_impl(b, x))
+        })
     }
 
     fn solve_impl(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
