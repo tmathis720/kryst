@@ -206,3 +206,79 @@ fn nested_ksp_pc_mpi_inner_tol_policy_allow_maxits_overrides_compat_flag() {
 
     assert!(stats.nested_pc_failure.is_none());
 }
+
+#[test]
+fn nested_ksp_pc_mpi_symmetric_outer_aligns_with_inner_fgmres_side() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let n_local = 4;
+    let a = Arc::new(make_dist_poisson(&comm, n_local));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Fgmres).expect("outer type");
+    let ksp_opts = KspOptions {
+        pc_side: Some("symmetric".into()),
+        maxits: Some(10),
+        rtol: Some(1e-8),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_options: Some(KspOptions {
+            ksp_type: Some("fgmres".into()),
+            maxits: Some(2),
+            rtol: Some(1e-2),
+            ..Default::default()
+        }),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        ..Default::default()
+    };
+
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).expect("opts");
+    ksp.set_operators(a, None);
+    let rhs = vec![1.0; n_local];
+    let mut x = vec![0.0; n_local];
+    let stats = ksp.solve(&rhs, &mut x).expect("solve");
+    assert!(stats.nested_pc_failure.is_none());
+}
+
+#[test]
+fn nested_ksp_pc_mpi_symmetric_outer_reports_inner_side_mismatch() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let n_local = 4;
+    let a = Arc::new(make_dist_poisson(&comm, n_local));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("outer type");
+    let ksp_opts = KspOptions {
+        pc_side: Some("symmetric".into()),
+        maxits: Some(8),
+        rtol: Some(1e-8),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_options: Some(KspOptions {
+            ksp_type: Some("gmres".into()),
+            pc_side: Some("right".into()),
+            maxits: Some(2),
+            rtol: Some(1e-2),
+            ..Default::default()
+        }),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        ..Default::default()
+    };
+
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).expect("opts");
+    ksp.set_operators(a, None);
+    let rhs = vec![1.0; n_local];
+    let mut x = vec![0.0; n_local];
+    let stats = ksp.solve(&rhs, &mut x).expect("solve");
+
+    assert_eq!(
+        stats.reason,
+        kryst::utils::convergence::ConvergedReason::DivergedPcFailed
+    );
+    let inner = stats.nested_pc_failure.as_ref().expect("nested failure");
+    assert!(inner.detail.contains("compatibility=mismatch"));
+    assert!(inner.detail.contains("stage=preflight"));
+}

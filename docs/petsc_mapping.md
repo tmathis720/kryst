@@ -19,7 +19,7 @@ features, options, and monitoring/convergence hooks.
 | `KSPSetType` | [`KspContext::set_type`](https://docs.rs/kryst/latest/kryst/context/struct.KspContext.html#method.set_type) + [`SolverType`](https://docs.rs/kryst/latest/kryst/context/ksp_context/enum.SolverType.html) | Supported | See KSP method matrix below. |
 | `PCSetType` | [`KspContext::set_pc_type`](https://docs.rs/kryst/latest/kryst/context/struct.KspContext.html#method.set_pc_type) + [`PcType`](https://docs.rs/kryst/latest/kryst/context/pc_context/enum.PcType.html) | Supported | See PC method matrix below. |
 | `KSP/PCSetFromOptions` | [`KspContext::set_from_options`](https://docs.rs/kryst/latest/kryst/context/struct.KspContext.html#method.set_from_options) / [`set_from_all_options`](https://docs.rs/kryst/latest/kryst/context/struct.KspContext.html#method.set_from_all_options) | Supported | Uses [`KspOptions`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html) + [`PcOptions`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html). |
-| `PCSide` | [`PcSide`](https://docs.rs/kryst/latest/kryst/preconditioner/enum.PcSide.html) | Supported | `pc_side` is normalized per solver rules. |
+| `PCSide` | [`PcSide`](https://docs.rs/kryst/latest/kryst/preconditioner/enum.PcSide.html) | Supported | `pc_side` is normalized per solver rules; nested `pc_type=ksp` preserves explicit side compatibility diagnostics. |
 
 ## KSP method matrix
 
@@ -112,6 +112,7 @@ features, options, and monitoring/convergence hooks.
 | `-pc_ksp_monitor_policy` / `-pc_ksp_monitor_rank0` | `PcOptions::pc_ksp_monitor_policy` / `pc_ksp_monitor_rank0` | Supported | Explicit policy key (`all`/`rank0`) overrides boolean compatibility flag. |
 | `-pc_ksp_allow_maxits` | [`PcOptions::pc_ksp_allow_maxits`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_allow_maxits) | Supported | Controls whether inner `KSP_DIVERGED_ITS` is treated as acceptable (`true`, default) or nested failure (`false`). |
 | `-pc_ksp_propagate_converged_reason` | [`PcOptions::pc_ksp_propagate_converged_reason`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_ksp_propagate_converged_reason) | Supported | If true (default), `SolveStats::nested_pc_failure.reason` preserves the inner reason; if false, normalizes to `DivergedPcFailed`. |
+
 | `-pc_mg_levels` | [`PcOptions::pc_mg_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_levels) | Partial | Controls number of MG levels (injection coarsening). |
 | `-pc_mg_cycle_type` | [`PcOptions::pc_mg_cycle_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_cycle_type) | Partial | `v`/`w`/`f` cycles supported. |
 | `-pc_mg_smoother` | [`PcOptions::pc_mg_smoother`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_mg_smoother) | Partial | Smoother applied per-level; direct smoothers (`lu`/`qr`) become the coarse solve. |
@@ -136,6 +137,15 @@ features, options, and monitoring/convergence hooks.
 | `-pc_gamg_interp_type` | [`PcOptions::pc_gamg_interp_type`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_interp_type) | Supported | Interpolation override (`classical`, `direct`, `multipass`, `extended`, `standard`, `he`). |
 | `-pc_gamg_aggressive_levels` | [`PcOptions::pc_gamg_aggressive_levels`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_aggressive_levels) | Supported | Aggressive coarsening level count (>=1). |
 | `-pc_gamg_aggressive_mis_k` | [`PcOptions::pc_gamg_aggressive_mis_k`](https://docs.rs/kryst/latest/kryst/config/options/struct.PcOptions.html#structfield.pc_gamg_aggressive_mis_k) | Supported | Aggressive PMIS/HMIS neighborhood depth (>=2). |
+
+### Nested `pc_type=ksp` side compatibility (GMRES / FGMRES)
+
+For nested KSP-as-PC, kryst applies side compatibility using the inner Krylov method:
+
+- **Inner GMRES**: `symmetric` is interpreted as `left`.
+- **Inner FGMRES**: `left` and `symmetric` both map to `right`.
+- **Explicit inner side (`-pc_ksp_pc_side`)**: respected for non-symmetric outer requests, and reported as `compatible_override` when it differs from the outer effective side.
+- **Symmetric outer side + conflicting explicit inner side**: rejected with a nested failure (`SolveStats.reason = DivergedPcFailed`) and `nested_pc_failure.detail` includes `compatibility=mismatch`.
 
 ## Monitor hooks
 

@@ -6,7 +6,9 @@ use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
-use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
+use crate::utils::convergence::{
+    map_kerror_to_reason, ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure,
+};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -189,15 +191,46 @@ impl KspAsPc {
         Ok(true)
     }
 
-    fn set_inner_side_for_outer(side: PcSide, inner: &mut KspContext) {
-        let mapped = match side {
-            PcSide::Left => PcSide::Left,
-            PcSide::Right => PcSide::Right,
-            // Nested KSP-as-PC does not currently model split left/right factors;
-            // keep symmetric requests communicator-safe by mapping to left.
-            PcSide::Symmetric => PcSide::Left,
+    fn effective_side_for_inner_solver(side: PcSide, inner_ksp_type: KspType) -> PcSide {
+        match inner_ksp_type {
+            KspType::FGMRES => match side {
+                PcSide::Left | PcSide::Symmetric => PcSide::Right,
+                PcSide::Right => PcSide::Right,
+            },
+            KspType::GMRES => match side {
+                PcSide::Symmetric => PcSide::Left,
+                s => s,
+            },
+            KspType::Other => side,
+        }
+    }
+
+    fn side_compatibility_detail(
+        outer_side: PcSide,
+        configured_inner_side: Option<PcSide>,
+        inner_ksp_type: KspType,
+    ) -> (PcSide, bool, String) {
+        let effective_outer = Self::effective_side_for_inner_solver(outer_side, inner_ksp_type);
+        let effective_inner = configured_inner_side
+            .map(|side| Self::effective_side_for_inner_solver(side, inner_ksp_type))
+            .unwrap_or(effective_outer);
+        let mismatch = matches!(outer_side, PcSide::Symmetric)
+            && configured_inner_side.is_some()
+            && effective_inner != effective_outer;
+        let compatibility = if mismatch {
+            "mismatch"
+        } else if configured_inner_side.is_some() && effective_inner != effective_outer {
+            "compatible_override"
+        } else {
+            "compatible"
         };
-        let _ = inner.try_set_pc_side(mapped);
+        (
+            effective_inner,
+            mismatch,
+            format!(
+                "side_semantics=outer:{outer_side:?}->effective:{effective_outer:?} configured_inner={configured_inner_side:?}->effective:{effective_inner:?} compatibility={compatibility}"
+            ),
+        )
     }
 
     fn configured_inner_side(options: &KspOptions) -> Option<PcSide> {
@@ -291,18 +324,34 @@ impl Preconditioner for KspAsPc {
         }
 
         if let Some(inner) = self.inner_ctx.lock().expect("ksp-pc nested lock").as_mut() {
-            if let Some(configured_side) = Self::configured_inner_side(&inner.ksp_options) {
-                let _ = inner.ksp.try_set_pc_side(configured_side);
-            } else {
-                Self::set_inner_side_for_outer(side, &mut inner.ksp);
+            let inner_ksp_type = Self::inner_ksp_type(&inner.ksp_options);
+            let configured_inner_side = Self::configured_inner_side(&inner.ksp_options);
+            let (applied_side, side_mismatch, side_detail) =
+                Self::side_compatibility_detail(side, configured_inner_side, inner_ksp_type);
+            if side_mismatch {
+                return Err(KError::NestedPcFailed(NestedPcFailure {
+                    component: "pc_ksp",
+                    reason: ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
+                    iterations: 0,
+                    detail: format!(
+                        "component=pc_ksp stage=preflight inner_ksp={:?} {}",
+                        inner.ksp_options.ksp_type, side_detail
+                    ),
+                    final_norm: None,
+                    residual_history_summary: None,
+                }));
             }
+            let _ = inner.ksp.try_set_pc_side(applied_side);
             Self::apply_runtime_controls_from_options(inner);
             y.fill(S::zero());
             let stats = inner.ksp.solve(x, y).map_err(|err| {
                 let history_summary = Self::summarize_history(&inner.residual_history, R::default());
+                let mapped_reason = map_kerror_to_reason(&err, FailureStage::Solve)
+                    .unwrap_or(ConvergedReason::from_failure_kind(FailureReasonKind::PcApply));
                 let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} nested_error={err} {history_summary}",
-                    Self::configured_inner_side(&inner.ksp_options),
+                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} applied_inner_side={applied_side:?} {} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} nested_error={err} {history_summary}",
+                    configured_inner_side,
+                    side_detail,
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
                     inner.monitor_rank0,
@@ -315,7 +364,7 @@ impl Preconditioner for KspAsPc {
                 );
                 KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
-                    reason: ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
+                    reason: mapped_reason,
                     iterations: 0,
                     detail,
                     final_norm: None,
@@ -330,8 +379,9 @@ impl Preconditioner for KspAsPc {
                 let history_summary =
                     Self::summarize_history(&inner.residual_history, stats.final_residual);
                 let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} true_final_norm={:.3e} nested_reason={} {}",
-                    Self::configured_inner_side(&inner.ksp_options),
+                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} applied_inner_side={applied_side:?} {} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} true_final_norm={:.3e} nested_reason={} {}",
+                    configured_inner_side,
+                    side_detail,
                     inner.ksp_options.ksp_type,
                     inner.pc_options.pc_type,
                     inner.monitor_rank0,
@@ -526,20 +576,16 @@ mod tests {
             ),
             detail: "inner_ksp=Some(\"gmres\") inner_pc=Some(\"none\")".into(),
         };
-        assert!(
-            failure
-                .final_norm
-                .as_deref()
-                .unwrap_or_default()
-                .contains("true_residual_l2")
-        );
-        assert!(
-            failure
-                .residual_history_summary
-                .as_deref()
-                .unwrap_or_default()
-                .contains("history_len=")
-        );
+        assert!(failure
+            .final_norm
+            .as_deref()
+            .unwrap_or_default()
+            .contains("true_residual_l2"));
+        assert!(failure
+            .residual_history_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("history_len="));
     }
 
     #[test]
