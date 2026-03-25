@@ -59,6 +59,7 @@ fn default_apply_mut_forwards_to_apply() {
 mod asm_amg;
 #[cfg(feature = "mpi")]
 mod asm_mpi;
+mod approxinv_migration;
 mod block_jacobi;
 mod classical;
 mod coarsen;

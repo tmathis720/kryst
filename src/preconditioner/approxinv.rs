@@ -20,6 +20,12 @@
 //!
 //! # Usage
 //! See the tests at the bottom of this file for usage examples.
+//!
+//! # Deprecation
+//! This legacy implementation is kept for migration compatibility only.
+//! Production KSP/PC integration routes `PcType::ApproxInverse` through the
+//! CSR-native implementation in [`crate::preconditioner::approxinv_csr`].
+//! Prefer [`crate::preconditioner::SpaiCsr`] / [`crate::preconditioner::FsaiCsr`].
 
 // =====================
 //   SPAI PRECONDITIONER
@@ -56,6 +62,10 @@ pub const COMPLEX_SUPPORT: &str = "native_complex";
 /// - `M`: Matrix type (must implement `MatVec<V>`)
 /// - `V`: Vector type (must be convertible from/to `Vec<T>`)
 /// - `T`: Scalar type (must implement `KrystScalar` with `Real = R`)
+#[deprecated(
+    since = "0.1.0",
+    note = "legacy ApproxInv is deprecated; migrate to approxinv_csr::SpaiCsr/FsaiCsr"
+)]
 pub struct ApproxInv<M, V, T> {
     /// Sparsity pattern for the approximate inverse (manual or automatic)
     pub pattern: SparsityPattern,
@@ -102,6 +112,10 @@ impl<M, V, T> ApproxInv<M, V, T>
 where
     T: KrystScalar<Real = R>,
 {
+    #[deprecated(
+        since = "0.1.0",
+        note = "legacy ApproxInv is deprecated; migrate to approxinv_csr::SpaiCsr/FsaiCsr"
+    )]
     #[allow(clippy::too_many_arguments)]
     /// Create a new SPAI preconditioner with the given parameters.
     ///
