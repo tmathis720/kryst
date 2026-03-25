@@ -1,6 +1,6 @@
 use crate::error::KError;
 
-use super::{DistLocalApplyMode, DistPcBuilder, GlobalPcKind, LocalPcKind};
+use super::{DistLocalApplyMode, DistPcBuilder, GlobalPcKind};
 
 fn strict_mode_error(global_pc: GlobalPcKind, detail_key: &str, detail: &str) -> KError {
     KError::InvalidInput(format!(
@@ -14,13 +14,14 @@ pub fn validate_dist_builder_strict_mode(builder: &DistPcBuilder) -> Result<(), 
             if !opts.local_apply_mode.requires_native() {
                 return Ok(());
             }
-            match opts.local_pc {
-                LocalPcKind::Fsai | LocalPcKind::Spai => Err(strict_mode_error(
+            if !opts.local_pc.build_capabilities().native_local_apply {
+                Err(strict_mode_error(
                     GlobalPcKind::BlockJacobi,
                     "unsupported_local_pc",
                     "block-jacobi strict mode requires native local kernel; local pc supports wrapped_local only",
-                )),
-                _ => Ok(()),
+                ))
+            } else {
+                Ok(())
             }
         }
         DistPcBuilder::Asm {

@@ -10,6 +10,10 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
+use kryst::preconditioner::PcSide;
+use kryst::preconditioner::dist::{
+    DistLocalApplyMode, DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions, build_block_jacobi_pc,
+};
 use kryst::utils::convergence::ConvergedReason;
 
 fn local_rows_from_global(
@@ -131,4 +135,92 @@ fn mpi_gamg_distributed_policy_options_parse() {
     assert_eq!(opts.amg_dist_coarse_repartition.as_deref(), Some("uniform"));
     assert_eq!(opts.amg_dist_coarse_solver_route.as_deref(), Some("local"));
     assert_eq!(opts.amg_dist_instrumentation, Some(true));
+}
+
+#[test]
+fn mpi_block_jacobi_native_strict_supported_local_pcs_consistent() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+
+    let n_per = 5;
+    let dist = make_dist_poisson(&comm, n_per);
+    let rhs: Vec<f64> = (0..n_per).map(|i| 1.0 + i as f64).collect();
+
+    for local_pc in [LocalPcKind::Fsai, LocalPcKind::Spai] {
+        let mut mpi_opts = MpiPcOptions::default();
+        mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
+        mpi_opts.local_pc = local_pc;
+        mpi_opts.local_apply_mode = DistLocalApplyMode::NativeStrict;
+
+        let pc = build_block_jacobi_pc(&dist, &mpi_opts)
+            .expect("build block-jacobi PC")
+            .expect("pc exists");
+
+        let mut out = DistVec::new(
+            comm.clone(),
+            dist.local_row_offset(),
+            dist.n_global,
+            rhs.clone(),
+        );
+        pc.apply_global(PcSide::Left, &mut out)
+            .expect("distributed apply");
+        let local_sum: f64 = out.local_view().iter().copied().sum();
+        let global_sum = comm.all_reduce_f64(local_sum);
+        let size = comm.size() as f64;
+        assert!(global_sum.is_finite(), "global sum must be finite");
+        assert!(
+            (global_sum / size).is_finite(),
+            "scaled global sum must remain finite for {local_pc:?}"
+        );
+    }
+}
+
+#[test]
+fn mpi_block_jacobi_native_halo_vs_strict_match_for_new_local_pcs() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+
+    let n_per = 4;
+    let dist = make_dist_poisson(&comm, n_per);
+    let rhs: Vec<f64> = (0..n_per).map(|i| 0.5 + i as f64).collect();
+
+    for local_pc in [LocalPcKind::Fsai, LocalPcKind::Spai] {
+        let mut strict_opts = MpiPcOptions::default();
+        strict_opts.global_pc = GlobalPcKind::BlockJacobi;
+        strict_opts.local_pc = local_pc;
+        strict_opts.local_apply_mode = DistLocalApplyMode::NativeStrict;
+
+        let mut halo_opts = strict_opts.clone();
+        halo_opts.local_apply_mode = DistLocalApplyMode::NativeLocalHalo;
+
+        let strict_pc = build_block_jacobi_pc(&dist, &strict_opts)
+            .expect("strict build")
+            .expect("strict pc");
+        let halo_pc = build_block_jacobi_pc(&dist, &halo_opts)
+            .expect("halo build")
+            .expect("halo pc");
+
+        let mut strict_out = DistVec::new(
+            comm.clone(),
+            dist.local_row_offset(),
+            dist.n_global,
+            rhs.clone(),
+        );
+        let mut halo_out = DistVec::new(
+            comm.clone(),
+            dist.local_row_offset(),
+            dist.n_global,
+            rhs.clone(),
+        );
+        strict_pc
+            .apply_global(PcSide::Left, &mut strict_out)
+            .expect("strict apply");
+        halo_pc
+            .apply_global(PcSide::Left, &mut halo_out)
+            .expect("halo apply");
+
+        for (a, b) in strict_out.local_view().iter().zip(halo_out.local_view()) {
+            assert!((a - b).abs() < 1e-11, "mode mismatch for {local_pc:?}");
+        }
+    }
 }
