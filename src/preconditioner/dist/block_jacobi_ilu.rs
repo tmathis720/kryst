@@ -433,6 +433,7 @@ pub fn build_block_jacobi_ilu_pc(
     dist_op: &DistCsrOp,
     config: &IluConfig,
     local_apply_mode: DistLocalApplyMode,
+    supports_native: bool,
 ) -> Result<BlockJacobiLocalPc<Ilu>, KError> {
     let mut ilu = Ilu::new_with_config(config.clone())?;
     let local = dist_op.local_block_dense();
@@ -441,7 +442,7 @@ pub fn build_block_jacobi_ilu_pc(
         dist_op.comm(),
         ilu,
         dist_op.local_row_offset(),
-        maybe_native_plan(dist_op, local_apply_mode, true, "ilu")?,
+        maybe_native_plan(dist_op, local_apply_mode, supports_native, "ilu")?,
     ))
 }
 
@@ -452,6 +453,7 @@ pub fn build_block_jacobi_ilut_pc(
     drop_tol: f64,
     conditioning: ConditioningOptions,
     local_apply_mode: DistLocalApplyMode,
+    supports_native: bool,
 ) -> Result<BlockJacobiLocalPc<RowFilterPreconditioner>, KError> {
     let mut pc = RowFilterPreconditioner::new(fill, S::from_real(drop_tol));
     pc.set_conditioning(conditioning);
@@ -461,7 +463,7 @@ pub fn build_block_jacobi_ilut_pc(
         dist_op.comm(),
         pc,
         dist_op.local_row_offset(),
-        maybe_native_plan(dist_op, local_apply_mode, true, "ilut")?,
+        maybe_native_plan(dist_op, local_apply_mode, supports_native, "ilut")?,
     ))
 }
 
@@ -473,6 +475,7 @@ pub fn build_block_jacobi_ilutp_pc(
     perm_tol: f64,
     conditioning: ConditioningOptions,
     local_apply_mode: DistLocalApplyMode,
+    supports_native: bool,
 ) -> Result<BlockJacobiLocalPc<Ilutp>, KError> {
     let mut pc = Ilutp::with_params(max_fill, drop_tol, perm_tol);
     pc.set_conditioning(conditioning);
@@ -482,7 +485,7 @@ pub fn build_block_jacobi_ilutp_pc(
         dist_op.comm(),
         pc,
         dist_op.local_row_offset(),
-        maybe_native_plan(dist_op, local_apply_mode, true, "ilutp")?,
+        maybe_native_plan(dist_op, local_apply_mode, supports_native, "ilutp")?,
     ))
 }
 
@@ -494,11 +497,13 @@ pub fn build_block_jacobi_pc(
     match opts.global_pc {
         GlobalPcKind::None => Ok(None),
         GlobalPcKind::BlockJacobi => {
+            let local_caps = opts.local_pc.build_capabilities();
             let wrapper: Box<dyn DistributedPreconditioner<Scalar = f64>> = match opts.local_pc {
                 LocalPcKind::Ilu => Box::new(build_block_jacobi_ilu_pc(
                     dist_op,
                     &opts.ilu_config,
                     opts.local_apply_mode,
+                    local_caps.native_local_apply,
                 )?),
                 LocalPcKind::Ilut => Box::new(build_block_jacobi_ilut_pc(
                     dist_op,
@@ -506,6 +511,7 @@ pub fn build_block_jacobi_pc(
                     opts.ilut_drop_tol,
                     opts.conditioning.clone(),
                     opts.local_apply_mode,
+                    local_caps.native_local_apply,
                 )?),
                 LocalPcKind::Ilutp => Box::new(build_block_jacobi_ilutp_pc(
                     dist_op,
@@ -514,19 +520,20 @@ pub fn build_block_jacobi_pc(
                     opts.ilutp_perm_tol,
                     opts.conditioning.clone(),
                     opts.local_apply_mode,
+                    local_caps.native_local_apply,
                 )?),
                 LocalPcKind::Sor => Box::new(build_obj_block_pc(
                     dist_op,
                     SorPc::new(1.0, 1, MatSorType::SYMMETRIC_SWEEP, 0.0),
                     opts.local_apply_mode,
-                    true,
+                    local_caps.native_local_apply,
                     "sor",
                 )?),
                 LocalPcKind::Chebyshev => Box::new(build_obj_block_pc(
                     dist_op,
                     ChebyshevPc::new(2, 1e-2, 1.0),
                     opts.local_apply_mode,
-                    true,
+                    local_caps.native_local_apply,
                     "chebyshev",
                 )?),
                 LocalPcKind::Jacobi => {
@@ -538,7 +545,12 @@ pub fn build_block_jacobi_pc(
                         dist_op.comm(),
                         jacobi,
                         dist_op.local_row_offset(),
-                        maybe_native_plan(dist_op, opts.local_apply_mode, true, "jacobi")?,
+                        maybe_native_plan(
+                            dist_op,
+                            opts.local_apply_mode,
+                            local_caps.native_local_apply,
+                            "jacobi",
+                        )?,
                     ))
                 }
                 LocalPcKind::Fsai => Box::new(build_obj_block_pc(
@@ -548,7 +560,7 @@ pub fn build_block_jacobi_pc(
                         ..ApproxInvParams::default()
                     }),
                     opts.local_apply_mode,
-                    false,
+                    local_caps.native_local_apply,
                     "fsai",
                 )?),
                 LocalPcKind::Spai => Box::new(build_obj_block_pc(
@@ -558,7 +570,7 @@ pub fn build_block_jacobi_pc(
                         ..ApproxInvParams::default()
                     }),
                     opts.local_apply_mode,
-                    false,
+                    local_caps.native_local_apply,
                     "spai",
                 )?),
             };

@@ -6,7 +6,7 @@ use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::preconditioner::dist::{
-    DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions, build_block_jacobi_pc,
+    DistLocalApplyMode, DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions, build_block_jacobi_pc,
 };
 use kryst::preconditioner::ilu::{Ilu, IluConfig};
 use kryst::preconditioner::legacy::Preconditioner;
@@ -49,5 +49,41 @@ fn distributed_block_jacobi_ilu_matches_serial() {
 
     for (serial, local) in serial_out.iter().zip(dist_vec.local_view().iter()) {
         assert!((serial - local).abs() < 1e-10);
+    }
+}
+
+fn build_single_rank_dist_op() -> (UniverseComm, DistCsrOp, Vec<f64>) {
+    let mut mat = Mat::zeros(3, 3);
+    mat[(0, 0)] = 4.0;
+    mat[(0, 1)] = -1.0;
+    mat[(1, 0)] = -1.0;
+    mat[(1, 1)] = 4.0;
+    mat[(1, 2)] = -1.0;
+    mat[(2, 1)] = -1.0;
+    mat[(2, 2)] = 4.0;
+    let rhs = vec![1.0, 2.0, 3.0];
+    let csr = CsrMatrix::from_dense(&mat, 0.0).unwrap();
+    let part = vec![0, 3];
+    let comm = UniverseComm::NoComm(NoComm);
+    let dist_op = DistCsrOp::from_local_rows(3, 0, &csr, &part, comm.clone()).unwrap();
+    (comm, dist_op, rhs)
+}
+
+#[test]
+fn distributed_block_jacobi_native_strict_supports_fsai_and_spai() {
+    for local_pc in [LocalPcKind::Fsai, LocalPcKind::Spai] {
+        let (comm, dist_op, rhs) = build_single_rank_dist_op();
+        let mut mpi_opts = MpiPcOptions::default();
+        mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
+        mpi_opts.local_pc = local_pc;
+        mpi_opts.local_apply_mode = DistLocalApplyMode::NativeStrict;
+
+        let pc = build_block_jacobi_pc(&dist_op, &mpi_opts)
+            .unwrap()
+            .expect("distributed block jacobi PC");
+        let mut dist_vec = DistVec::new(comm, 0, rhs.len(), rhs);
+        pc.apply_global(PcSide::Left, &mut dist_vec)
+            .expect("strict distributed apply");
+        assert!(dist_vec.local_view().iter().all(|v| v.is_finite()));
     }
 }

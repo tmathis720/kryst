@@ -77,6 +77,13 @@ pub enum LocalPcKind {
     Spai,
 }
 
+/// Capability metadata used to negotiate distributed-native compatibility for
+/// block-Jacobi local preconditioner builders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalPcBuildCapabilities {
+    pub native_local_apply: bool,
+}
+
 impl FromStr for LocalPcKind {
     type Err = KError;
 
@@ -93,6 +100,25 @@ impl FromStr for LocalPcKind {
             other => Err(KError::InvalidInput(format!(
                 "Unknown pc_local value: {other}"
             ))),
+        }
+    }
+}
+
+impl LocalPcKind {
+    /// Capabilities advertised by each local preconditioner when used inside
+    /// distributed block-Jacobi wrappers.
+    pub const fn build_capabilities(self) -> LocalPcBuildCapabilities {
+        match self {
+            Self::Ilu
+            | Self::Ilut
+            | Self::Ilutp
+            | Self::Jacobi
+            | Self::Sor
+            | Self::Chebyshev
+            | Self::Fsai
+            | Self::Spai => LocalPcBuildCapabilities {
+                native_local_apply: true,
+            },
         }
     }
 }
