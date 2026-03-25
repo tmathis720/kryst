@@ -6,10 +6,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::{KrystScalar, S};
@@ -56,12 +53,8 @@ fn self_idx(plan: &HaloIndexPlan, gcol: usize) -> usize {
 /// Canonical distributed CSR operator with an MPI-backed halo plan.
 ///
 /// # Thread-safety
-/// `DistCsrOp` is `Send + Sync` but not reentrant: concurrent `matvec` calls on
-/// the same instance are not supported because the internal halo buffers are
-/// reused per operation.
-/// - Even though Rayon may be used for local/border rows, the halo exchange
-///   (`post_halo`/`complete_halo`) runs single-threaded per matvec and must not
-///   be invoked concurrently.
+/// `DistCsrOp` supports concurrent `matvec` calls on a single instance.
+/// Halo exchange state is checked out per call from a pool managed by `HaloPlan`.
 pub struct DistCsrOp {
     pub n_global: usize,
     pub row_start: usize,
@@ -80,7 +73,6 @@ pub struct DistCsrOp {
     border_vals: Vec<S>,
     halo: HaloPlan,
     overlap_mode: HaloOverlapMode,
-    reentrancy: AtomicUsize,
     ids: ChangeIds,
 }
 
@@ -207,7 +199,6 @@ impl DistCsrOp {
             border_vals,
             halo,
             overlap_mode: HaloOverlapMode::Interior,
-            reentrancy: AtomicUsize::new(0),
             ids,
         })
     }
@@ -449,8 +440,6 @@ impl KLinOp for DistCsrOp {
     fn matvec_s(&self, x: &[S], y: &mut [S], _scratch: &mut BridgeScratch) {
         assert_eq!(x.len(), self.n_local);
         assert_eq!(y.len(), self.n_local);
-        let prev = self.reentrancy.fetch_add(1, Ordering::SeqCst);
-        debug_assert_eq!(prev, 0, "DistCsrOp::matvec_s called reentrantly");
         for v in y.iter_mut() {
             *v = S::zero();
         }
@@ -463,11 +452,13 @@ impl KLinOp for DistCsrOp {
                         None
                     };
                 if let Some(req) = halo_req {
-                    self.halo.complete_halo(req);
+                    let ghost = self.halo.complete_halo(req);
+                    self.spmv_local_only(x, y);
+                    self.spmv_border(x, y, &ghost[..]);
+                } else {
+                    self.spmv_local_only(x, y);
+                    self.spmv_border(x, y, &[]);
                 }
-                self.spmv_local_only(x, y);
-                let ghost_guard = self.halo.ghost_slice_ref();
-                self.spmv_border(x, y, &ghost_guard[..]);
             }
             HaloOverlapMode::Interior => {
                 let halo_req =
@@ -480,14 +471,13 @@ impl KLinOp for DistCsrOp {
                 self.spmv_local_only(x, y);
 
                 if let Some(req) = halo_req {
-                    self.halo.complete_halo(req);
+                    let ghost = self.halo.complete_halo(req);
+                    self.spmv_border(x, y, &ghost[..]);
+                } else {
+                    self.spmv_border(x, y, &[]);
                 }
-
-                let ghost_guard = self.halo.ghost_slice_ref();
-                self.spmv_border(x, y, &ghost_guard[..]);
             }
         }
-        self.reentrancy.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
