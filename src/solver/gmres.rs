@@ -1073,14 +1073,6 @@ impl GmresSolver {
             } => (s.max(1), reorth, max_cond),
             _ => unreachable!("solve_sstep called for non s-step variant"),
         };
-        if block_s > 1 {
-            // Multi-step blocks are not yet numerically robust; fall back to classical GMRES.
-            let prev_variant = self.variant;
-            self.variant = GmresVariant::Classical;
-            let result = self.solve(a, pc, b, x, pc_side, comm, monitors, work);
-            self.variant = prev_variant;
-            return result;
-        }
         let reorth_tol = R::from(self.reorth_tol).max(R::zero());
 
         let pc_apply_side = pc_side;
@@ -1294,199 +1286,151 @@ impl GmresSolver {
             let mut k_steps = 0usize;
             let mut k = 0usize;
             while k < self.restart {
-                let block = block_s.min(self.restart - k);
+                let mut block = block_s.min(self.restart - k);
                 if block == 0 {
                     break;
                 }
-                // Resize W (n x block), column-major.
-                w_block.resize(n * block, S::zero());
+                let mut used_guarded_fallback = false;
+                'panel_attempt: loop {
+                    // Resize W (n x block), column-major.
+                    w_block.resize(n * block, S::zero());
 
-                // Build W columns: w_j = (M^{-1} A)^{j+1} v_k   (Left)
-                //              or  w_j = A (M^{-1} w_{j-1})     (Right)
-                for j in 0..block {
-                    // src is either v_k (j==0) or previous W column (j>0).
-                    let (prev_cols, cur_and_rest) = w_block.split_at_mut(j * n);
-                    let src: &[S] = if j == 0 {
-                        &ws.v_mem[k * n..(k + 1) * n]
-                    } else {
-                        &prev_cols[(j - 1) * n..j * n]
-                    };
-                    let wj: &mut [S] = &mut cur_and_rest[0..n];
+                    // Build W columns: w_j = (M^{-1} A)^{j+1} v_k   (Left)
+                    //              or  w_j = A (M^{-1} w_{j-1})     (Right)
+                    for j in 0..block {
+                        // src is either v_k (j==0) or previous W column (j>0).
+                        let (prev_cols, cur_and_rest) = w_block.split_at_mut(j * n);
+                        let src: &[S] = if j == 0 {
+                            &ws.v_mem[k * n..(k + 1) * n]
+                        } else {
+                            &prev_cols[(j - 1) * n..j * n]
+                        };
+                        let wj: &mut [S] = &mut cur_and_rest[0..n];
 
-                    match pc_side {
-                        PcSide::Left | PcSide::Symmetric => {
-                            #[cfg(feature = "metrics")]
-                            let matvec_start = std::time::Instant::now();
-                            a.matvec_s(src, &mut ws.tmp1, &mut ws.bridge);
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
-                            }
-
-                            if let Some(pc) = pc {
-                                let tmp2 = &mut ws.tmp2[..n];
+                        match pc_side {
+                            PcSide::Left | PcSide::Symmetric => {
                                 #[cfg(feature = "metrics")]
-                                let pc_start = std::time::Instant::now();
-                                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                                let matvec_start = std::time::Instant::now();
+                                a.matvec_s(src, &mut ws.tmp1, &mut ws.bridge);
                                 #[cfg(feature = "metrics")]
                                 {
-                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                                    metrics.matvec_nanos +=
+                                        matvec_start.elapsed().as_nanos() as u64;
                                 }
-                                wj.copy_from_slice(tmp2);
-                            } else {
+
+                                if let Some(pc) = pc {
+                                    let tmp2 = &mut ws.tmp2[..n];
+                                    #[cfg(feature = "metrics")]
+                                    let pc_start = std::time::Instant::now();
+                                    pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        metrics.pc_apply_nanos +=
+                                            pc_start.elapsed().as_nanos() as u64;
+                                    }
+                                    wj.copy_from_slice(tmp2);
+                                } else {
+                                    wj.copy_from_slice(&ws.tmp1[..n]);
+                                }
+                            }
+                            PcSide::Right => {
+                                if let Some(pc) = pc {
+                                    let tmp2 = &mut ws.tmp2[..n];
+                                    #[cfg(feature = "metrics")]
+                                    let pc_start = std::time::Instant::now();
+                                    pc.apply_s(pc_apply_side, src, tmp2, &mut ws.bridge)?;
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        metrics.pc_apply_nanos +=
+                                            pc_start.elapsed().as_nanos() as u64;
+                                    }
+                                } else {
+                                    ws.tmp2[..n].copy_from_slice(src);
+                                }
+
+                                #[cfg(feature = "metrics")]
+                                let matvec_start = std::time::Instant::now();
+                                a.matvec_s(&ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.matvec_nanos +=
+                                        matvec_start.elapsed().as_nanos() as u64;
+                                }
+
                                 wj.copy_from_slice(&ws.tmp1[..n]);
                             }
                         }
-                        PcSide::Right => {
-                            if let Some(pc) = pc {
-                                let tmp2 = &mut ws.tmp2[..n];
-                                #[cfg(feature = "metrics")]
-                                let pc_start = std::time::Instant::now();
-                                pc.apply_s(pc_apply_side, src, tmp2, &mut ws.bridge)?;
-                                #[cfg(feature = "metrics")]
-                                {
-                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-                                }
-                            } else {
-                                ws.tmp2[..n].copy_from_slice(src);
-                            }
-
-                            #[cfg(feature = "metrics")]
-                            let matvec_start = std::time::Instant::now();
-                            a.matvec_s(&ws.tmp2[..n], &mut ws.tmp1, &mut ws.bridge);
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
-                            }
-
-                            wj.copy_from_slice(&ws.tmp1[..n]);
-                        }
                     }
-                }
 
-                let mut pre_norms = Vec::new();
-                if matches!(reorth_policy, ReorthPolicy::IfNeeded) {
-                    pre_norms.resize(block, R::zero());
-                    let mut cols: Vec<&[S]> = Vec::with_capacity(block);
-                    for j in 0..block {
-                        cols.push(&w_block[j * n..(j + 1) * n]);
-                    }
-                    red.norm2_many_into(&cols, &mut pre_norms);
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics.bytes_reduced += block * std::mem::size_of::<R>();
-                    }
-                }
-
-                let mut cvals: Vec<S> = vec![S::zero(); (k + 1) * block];
-                {
-                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
-                        SmallVec::with_capacity((k + 1) * block);
-                    for i in 0..=k {
-                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                    let mut pre_norms = Vec::new();
+                    if matches!(reorth_policy, ReorthPolicy::IfNeeded) {
+                        pre_norms.resize(block, R::zero());
+                        let mut cols: Vec<&[S]> = Vec::with_capacity(block);
                         for j in 0..block {
-                            let wj = &w_block[j * n..(j + 1) * n];
-                            pairs.push((vi, wj));
+                            cols.push(&w_block[j * n..(j + 1) * n]);
                         }
-                    }
-                    red.dot_many_into(pairs.as_slice(), cvals.as_mut_slice());
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
-                    }
-                } // pairs dropped here; we can safely mutate w_block next.
-                // W <- W - V C
-                for i in 0..=k {
-                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                    for j in 0..block {
-                        let coeff = cvals[i * block + j];
-                        let wj = &mut w_block[j * n..(j + 1) * n];
-                        for (w, &vi_j) in wj.iter_mut().zip(vi) {
-                            *w -= coeff * vi_j;
-                        }
-                    }
-                }
-
-                macro_rules! compute_gram {
-                    ($w_block:expr) => {{
-                        let mut gram: Vec<S> = vec![S::zero(); block * block];
-                        let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
-                            SmallVec::with_capacity(block * block);
-                        for i in 0..block {
-                            let wi = &$w_block[i * n..(i + 1) * n];
-                            for j in 0..block {
-                                let wj = &$w_block[j * n..(j + 1) * n];
-                                pairs.push((wi, wj));
-                            }
-                        }
-                        red.dot_many_into(pairs.as_slice(), gram.as_mut_slice());
+                        red.norm2_many_into(&cols, &mut pre_norms);
                         reduction_count += 1;
                         #[cfg(feature = "metrics")]
                         {
-                            metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
+                            metrics.bytes_reduced += block * std::mem::size_of::<R>();
                         }
-                        gram
-                    }};
-                }
+                    }
 
-                let mut gram = match reorth_policy {
-                    ReorthPolicy::Always => {
-                        let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
-                        {
-                            let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
-                                SmallVec::with_capacity((k + 1) * block);
-                            for i in 0..=k {
-                                let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                for j in 0..block {
-                                    let wj = &w_block[j * n..(j + 1) * n];
-                                    pairs.push((vi, wj));
-                                }
-                            }
-                            red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
-                            reduction_count += 1;
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
-                            }
-                        }
+                    let mut cvals: Vec<S> = vec![S::zero(); (k + 1) * block];
+                    {
+                        let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                            SmallVec::with_capacity((k + 1) * block);
                         for i in 0..=k {
                             let vi = &ws.v_mem[i * n..(i + 1) * n];
                             for j in 0..block {
-                                let coeff = c2[i * block + j];
-                                cvals[i * block + j] += coeff;
-                                let wj = &mut w_block[j * n..(j + 1) * n];
-                                for (w, &vi_j) in wj.iter_mut().zip(vi) {
-                                    *w -= coeff * vi_j;
-                                }
+                                let wj = &w_block[j * n..(j + 1) * n];
+                                pairs.push((vi, wj));
                             }
                         }
-                        compute_gram!(&w_block)
+                        red.dot_many_into(pairs.as_slice(), cvals.as_mut_slice());
+                        reduction_count += 1;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
+                        }
+                    } // pairs dropped here; we can safely mutate w_block next.
+                    // W <- W - V C
+                    for i in 0..=k {
+                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                        for j in 0..block {
+                            let coeff = cvals[i * block + j];
+                            let wj = &mut w_block[j * n..(j + 1) * n];
+                            for (w, &vi_j) in wj.iter_mut().zip(vi) {
+                                *w -= coeff * vi_j;
+                            }
+                        }
                     }
-                    ReorthPolicy::Never => compute_gram!(&w_block),
-                    ReorthPolicy::IfNeeded => {
-                        let mut gram = compute_gram!(&w_block);
-                        let mut trigger_reorth = false;
-                        if reorth_tol > R::zero() {
-                            for j in 0..block {
-                                let pre = pre_norms[j];
-                                if pre > R::zero() {
-                                    let post_sq = gram[j * block + j].real();
-                                    let post_sq = if post_sq > R::zero() {
-                                        post_sq
-                                    } else {
-                                        R::zero()
-                                    };
-                                    let thresh = reorth_tol * pre;
-                                    if post_sq <= thresh * thresh {
-                                        trigger_reorth = true;
-                                        break;
-                                    }
+
+                    macro_rules! compute_gram {
+                        ($w_block:expr) => {{
+                            let mut gram: Vec<S> = vec![S::zero(); block * block];
+                            let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                                SmallVec::with_capacity(block * block);
+                            for i in 0..block {
+                                let wi = &$w_block[i * n..(i + 1) * n];
+                                for j in 0..block {
+                                    let wj = &$w_block[j * n..(j + 1) * n];
+                                    pairs.push((wi, wj));
                                 }
                             }
-                        }
-                        if trigger_reorth {
+                            red.dot_many_into(pairs.as_slice(), gram.as_mut_slice());
+                            reduction_count += 1;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.bytes_reduced += block * block * std::mem::size_of::<R>();
+                            }
+                            gram
+                        }};
+                    }
+
+                    let mut gram = match reorth_policy {
+                        ReorthPolicy::Always => {
                             let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
                             {
                                 let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
@@ -1517,69 +1461,154 @@ impl GmresSolver {
                                     }
                                 }
                             }
-                            gram = compute_gram!(&w_block);
+                            compute_gram!(&w_block)
                         }
-                        gram
-                    }
-                };
-
-                let mut r_block = vec![R::default(); block * block];
-                for (dst, src) in r_block.iter_mut().zip(gram.iter()) {
-                    *dst = src.real();
-                }
-                Self::chol_upper(&mut r_block, block)?;
-                let cond = Self::estimate_triangular_condition(&r_block, block);
-                if cond > max_cond {
-                    return Err(KError::FactorError(
-                        "s-step GMRES: block conditioning exceeds max_cond".into(),
-                    ));
-                }
-                // W <- W * R^{-1}   (solve X R = W in-place for X)
-                #[cfg(not(feature = "complex"))]
-                {
-                    let w_data = w_block.as_mut_slice();
-                    let w_real: &mut [R] = unsafe {
-                        std::slice::from_raw_parts_mut(w_data.as_mut_ptr() as *mut R, w_data.len())
-                    };
-                    Self::triangular_solve_right_upper(&r_block, block, w_real, n);
-                }
-
-                // Store new basis vectors V_{k+1..k+block} from the orthonormalized block W.
-                for j in 0..block {
-                    let dst = &mut ws.v_mem[(k + 1 + j) * n..(k + 2 + j) * n];
-                    let src = &w_block[j * n..(j + 1) * n];
-                    dst.copy_from_slice(src);
-                }
-
-                // For Right preconditioning, also build Z columns for these new V columns.
-                if matches!(pc_side, PcSide::Right) {
-                    for j in 0..block {
-                        let vj: &[S] = &ws.v_mem[(k + 1 + j) * n..(k + 2 + j) * n];
-                        let zj: &mut [S] = &mut ws.z_mem[(k + 1 + j) * n..(k + 2 + j) * n];
-                        if let Some(pc) = pc {
-                            #[cfg(feature = "metrics")]
-                            let pc_start = std::time::Instant::now();
-                            pc.apply_s(pc_apply_side, vj, zj, &mut ws.bridge)?;
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                        ReorthPolicy::Never => compute_gram!(&w_block),
+                        ReorthPolicy::IfNeeded => {
+                            let mut gram = compute_gram!(&w_block);
+                            let mut trigger_reorth = false;
+                            if reorth_tol > R::zero() {
+                                for j in 0..block {
+                                    let pre = pre_norms[j];
+                                    if pre > R::zero() {
+                                        let post_sq = gram[j * block + j].real();
+                                        let post_sq = if post_sq > R::zero() {
+                                            post_sq
+                                        } else {
+                                            R::zero()
+                                        };
+                                        let thresh = reorth_tol * pre;
+                                        if post_sq <= thresh * thresh {
+                                            trigger_reorth = true;
+                                            break;
+                                        }
+                                    }
+                                }
                             }
-                        } else {
-                            zj.copy_from_slice(vj);
+                            if trigger_reorth {
+                                let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
+                                {
+                                    let mut pairs: SmallVec<[(&[S], &[S]); 64]> =
+                                        SmallVec::with_capacity((k + 1) * block);
+                                    for i in 0..=k {
+                                        let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                        for j in 0..block {
+                                            let wj = &w_block[j * n..(j + 1) * n];
+                                            pairs.push((vi, wj));
+                                        }
+                                    }
+                                    red.dot_many_into(pairs.as_slice(), c2.as_mut_slice());
+                                    reduction_count += 1;
+                                    #[cfg(feature = "metrics")]
+                                    {
+                                        metrics.bytes_reduced +=
+                                            (k + 1) * block * std::mem::size_of::<R>();
+                                    }
+                                }
+                                for i in 0..=k {
+                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                                    for j in 0..block {
+                                        let coeff = c2[i * block + j];
+                                        cvals[i * block + j] += coeff;
+                                        let wj = &mut w_block[j * n..(j + 1) * n];
+                                        for (w, &vi_j) in wj.iter_mut().zip(vi) {
+                                            *w -= coeff * vi_j;
+                                        }
+                                    }
+                                }
+                                gram = compute_gram!(&w_block);
+                            }
+                            gram
+                        }
+                    };
+
+                    let mut r_block = vec![R::default(); block * block];
+                    for (dst, src) in r_block.iter_mut().zip(gram.iter()) {
+                        *dst = src.real();
+                    }
+                    let mut breakdown = Self::chol_upper(&mut r_block, block).is_err();
+                    let mut cond = Self::estimate_triangular_condition(&r_block, block);
+                    if !breakdown {
+                        breakdown |= !cond.is_finite() || cond > max_cond;
+                    }
+
+                    if !breakdown && block > 1 {
+                        // Cholesky-QR2 stabilization: normalize once, recompute panel Gram in batch,
+                        // then renormalize to mitigate loss of orthogonality in wide s-step panels.
+                        Self::triangular_solve_right_upper_s(&r_block, block, &mut w_block, n);
+                        let gram2 = compute_gram!(&w_block);
+                        let mut r2 = vec![R::default(); block * block];
+                        for (dst, src) in r2.iter_mut().zip(gram2.iter()) {
+                            *dst = src.real();
+                        }
+                        breakdown = Self::chol_upper(&mut r2, block).is_err();
+                        let cond2 = Self::estimate_triangular_condition(&r2, block);
+                        if !breakdown {
+                            breakdown |= !cond2.is_finite() || cond2 > max_cond;
+                        }
+                        if !breakdown {
+                            Self::triangular_solve_right_upper_s(&r2, block, &mut w_block, n);
+                            r_block = Self::upper_mul(&r2, &r_block, block);
+                            cond = Self::estimate_triangular_condition(&r_block, block);
+                            breakdown |= !cond.is_finite() || cond > max_cond;
+                        }
+                    } else if !breakdown {
+                        Self::triangular_solve_right_upper_s(&r_block, block, &mut w_block, n);
+                    }
+
+                    if breakdown {
+                        if block > 1 {
+                            block = 1;
+                            used_guarded_fallback = true;
+                            continue 'panel_attempt;
+                        }
+                        return Err(KError::FactorError(
+                            "s-step GMRES: numerical breakdown during panel orthogonalization"
+                                .into(),
+                        ));
+                    }
+
+                    // Store new basis vectors V_{k+1..k+block} from the orthonormalized block W.
+                    for j in 0..block {
+                        let dst = &mut ws.v_mem[(k + 1 + j) * n..(k + 2 + j) * n];
+                        let src = &w_block[j * n..(j + 1) * n];
+                        dst.copy_from_slice(src);
+                    }
+
+                    // For Right preconditioning, also build Z columns for these new V columns.
+                    if matches!(pc_side, PcSide::Right) {
+                        for j in 0..block {
+                            let vj: &[S] = &ws.v_mem[(k + 1 + j) * n..(k + 2 + j) * n];
+                            let zj: &mut [S] = &mut ws.z_mem[(k + 1 + j) * n..(k + 2 + j) * n];
+                            if let Some(pc) = pc {
+                                #[cfg(feature = "metrics")]
+                                let pc_start = std::time::Instant::now();
+                                pc.apply_s(pc_apply_side, vj, zj, &mut ws.bridge)?;
+                                #[cfg(feature = "metrics")]
+                                {
+                                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                                }
+                            } else {
+                                zj.copy_from_slice(vj);
+                            }
                         }
                     }
-                }
 
-                // Fill the Hessenberg block: upper part is C, lower part is R from Cholesky.
-                for i in 0..=k {
-                    for j in 0..block {
-                        *ws.h_at_mut(i, k + j) = cvals[i * block + j];
+                    // Fill the Hessenberg block: upper part is C, lower part is R from Cholesky.
+                    for i in 0..=k {
+                        for j in 0..block {
+                            *ws.h_at_mut(i, k + j) = cvals[i * block + j];
+                        }
                     }
-                }
-                for i in 0..block {
-                    for j in i..block {
-                        *ws.h_at_mut(k + 1 + i, k + j) = S::from_real(r_block[i * block + j]);
+                    for i in 0..block {
+                        for j in i..block {
+                            *ws.h_at_mut(k + 1 + i, k + j) = S::from_real(r_block[i * block + j]);
+                        }
                     }
+                    break 'panel_attempt;
+                } // end panel_attempt
+                if used_guarded_fallback {
+                    // Guarded local downgrade for this panel only; continue s-step afterwards.
                 }
 
                 for j in 0..block {
@@ -1903,11 +1932,11 @@ impl GmresSolver {
     }
 
     #[allow(dead_code)]
-    fn triangular_solve_right_upper(r: &[R], block: usize, data: &mut [R], nrows: usize) {
+    fn triangular_solve_right_upper_s(r: &[R], block: usize, data: &mut [S], nrows: usize) {
         // Solve X R = data in-place for X, where data holds W' (nrows x block)
         // stored column-major. After the solve, data contains Q.
         for col in 0..block {
-            let mut col_slice = vec![R::default(); nrows];
+            let mut col_slice = vec![S::zero(); nrows];
             // copy target column (W' column)
             for row in 0..nrows {
                 col_slice[row] = data[col * nrows + row];
@@ -1915,22 +1944,38 @@ impl GmresSolver {
             for k in 0..col {
                 let r_kj = r[Self::mat_idx(block, k, col)];
                 if r_kj.abs() > R::default() {
+                    let r_kj_s = S::from_real(r_kj);
                     for row in 0..nrows {
-                        col_slice[row] -= r_kj * data[k * nrows + row];
+                        col_slice[row] -= r_kj_s * data[k * nrows + row];
                     }
                 }
             }
             let diag = r[Self::mat_idx(block, col, col)];
             if diag.abs() > R::default() {
+                let inv_diag = S::from_real(1.0 / diag);
                 for row in 0..nrows {
-                    data[col * nrows + row] = col_slice[row] / diag;
+                    data[col * nrows + row] = col_slice[row] * inv_diag;
                 }
             } else {
                 for row in 0..nrows {
-                    data[col * nrows + row] = R::default();
+                    data[col * nrows + row] = S::zero();
                 }
             }
         }
+    }
+
+    fn upper_mul(a: &[R], b: &[R], block: usize) -> Vec<R> {
+        let mut out = vec![R::zero(); block * block];
+        for i in 0..block {
+            for j in i..block {
+                let mut sum = R::zero();
+                for k in i..=j {
+                    sum += a[Self::mat_idx(block, i, k)] * b[Self::mat_idx(block, k, j)];
+                }
+                out[Self::mat_idx(block, i, j)] = sum;
+            }
+        }
+        out
     }
 
     #[allow(dead_code)]
