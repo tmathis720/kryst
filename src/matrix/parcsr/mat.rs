@@ -1,10 +1,11 @@
 use super::halo::HaloPlan;
 use crate::algebra::prelude::*;
 use crate::error::KError;
+use crate::matrix::dist_csr::DistCsrOp;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::parallel::{Comm, UniverseComm};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Distributed CSR matrix split into on- and off-process blocks.
 #[derive(Clone)]
@@ -19,6 +20,7 @@ pub struct ParCsrMatrix {
     pub colmap_owned: Vec<usize>,
     pub colmap_ghost: Vec<usize>,
     pub halo: HaloPlan,
+    canonical: OnceLock<Arc<DistCsrOp>>,
 }
 
 /// LinOp adapter that exposes a [`ParCsrMatrix`] through the common interface.
@@ -40,7 +42,7 @@ impl LinOp for ParCsrOp {
     type S = S;
 
     fn dims(&self) -> (usize, usize) {
-        (self.mat.local_n(), self.mat.global_m)
+        (self.mat.local_n(), self.mat.local_n())
     }
 
     fn matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
@@ -61,15 +63,63 @@ impl LinOp for ParCsrOp {
         self.mat.comm.clone()
     }
 
+    fn dist_layout(&self) -> Option<&crate::matrix::op::DistLayout> {
+        self.mat
+            .canonical_dist_op()
+            .ok()
+            .and_then(|op| op.dist_layout())
+    }
+
     fn format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
     }
 }
 
 impl ParCsrMatrix {
+    pub fn from_legacy_parts(
+        comm: UniverseComm,
+        row_start: usize,
+        row_end: usize,
+        global_n: usize,
+        global_m: usize,
+        a_diag: CsrMatrix<S>,
+        a_off: CsrMatrix<S>,
+        colmap_owned: Vec<usize>,
+        colmap_ghost: Vec<usize>,
+        halo: HaloPlan,
+    ) -> Self {
+        Self {
+            comm,
+            row_start,
+            row_end,
+            global_n,
+            global_m,
+            a_diag,
+            a_off,
+            colmap_owned,
+            colmap_ghost,
+            halo,
+            canonical: OnceLock::new(),
+        }
+    }
+
     /// Number of locally owned rows.
     pub fn local_n(&self) -> usize {
         self.row_end - self.row_start
+    }
+
+    /// Canonical distributed operator backing this legacy wrapper.
+    pub fn canonical_dist_op(&self) -> Result<&DistCsrOp, KError> {
+        self.canonical
+            .get_or_try_init(|| DistCsrOp::from_parcsr(self).map(Arc::new))
+            .map(Arc::as_ref)
+    }
+
+    #[deprecated(
+        note = "ParCsr halo internals are legacy compatibility only; prefer canonical_dist_op()"
+    )]
+    pub fn legacy_halo_plan(&self) -> &HaloPlan {
+        &self.halo
     }
 
     /// y = alpha*A*x + beta*y with two-phase halo exchange.
@@ -85,20 +135,11 @@ impl ParCsrMatrix {
                 "dimension mismatch in ParCsrMatrix::spmv".into(),
             ));
         }
-
-        let mut x_ghost: Vec<S> = vec![S::zero(); self.colmap_ghost.len()];
-        let mut recv_buf: Vec<S> = vec![S::zero(); self.halo.recv_idx.len()];
-        let mut send_buf: Vec<S> = vec![S::zero(); self.halo.send_idx.len()];
-        let mut reqs = self
-            .halo
-            .begin_exchange(&self.comm, x_owned, &mut send_buf, &mut recv_buf);
-
-        self.a_diag.spmv_scaled(alpha, x_owned, beta, y_owned)?;
-
-        self.comm.wait_all(&mut reqs);
-        self.halo.unpack(&recv_buf, &mut x_ghost);
-
-        self.a_off.spmv_scaled(alpha, &x_ghost, S::one(), y_owned)?;
+        let mut tmp = vec![S::zero(); self.local_n()];
+        self.canonical_dist_op()?.try_matvec(x_owned, &mut tmp)?;
+        for (yi, ai) in y_owned.iter_mut().zip(tmp.iter()) {
+            *yi = alpha * *ai + beta * *yi;
+        }
         Ok(())
     }
 
@@ -139,6 +180,7 @@ mod tests {
             colmap_owned: vec![0, 1],
             colmap_ghost: Vec::new(),
             halo,
+            canonical: OnceLock::new(),
         };
         let x = vec![S::from_real(1.0), S::from_real(2.0)];
         let mut y = vec![S::zero(); 2];
@@ -170,6 +212,7 @@ mod tests {
             colmap_owned: vec![0, 1],
             colmap_ghost: Vec::new(),
             halo,
+            canonical: OnceLock::new(),
         };
         let x = vec![S::from_parts(1.0, 2.0), S::from_parts(-1.0, 0.5)];
         let mut y = vec![S::zero(); 2];
@@ -222,6 +265,7 @@ mod tests {
             colmap_owned,
             colmap_ghost,
             halo,
+            canonical: OnceLock::new(),
         };
 
         let x0 = S::from_parts(1.0, 2.0);
