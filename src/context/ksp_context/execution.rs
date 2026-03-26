@@ -1,5 +1,7 @@
 use crate::algebra::parallel_cfg::serial_guard;
-use crate::algebra::parallel_cfg::{ParallelTune, parallel_tune};
+use crate::algebra::parallel_cfg::{
+    AdaptiveTuneDecision, ParallelTune, adapt_parallel_tune, parallel_tune,
+};
 use crate::config::options::KspOptions;
 use crate::error::KError;
 use crate::reduction::ReproMode;
@@ -109,6 +111,7 @@ pub struct AdaptiveExecutionDecision {
     pub local_work: usize,
     pub reduction_latency_us: f64,
     pub tune: ParallelTune,
+    pub tune_decision: AdaptiveTuneDecision,
     pub threading: &'static str,
     pub recommended_threads: usize,
     pub threading_reason: &'static str,
@@ -133,7 +136,9 @@ impl AdaptiveExecutionDecision {
         monitor_overhead_sensitive: bool,
         reduction: &ReductOptions,
     ) -> Self {
-        let tune = parallel_tune();
+        let baseline_tune = parallel_tune();
+        let tune_decision = adapt_parallel_tune(baseline_tune, reduction_latency_us, reproducible);
+        let tune = tune_decision.selected;
 
         #[cfg(feature = "rayon")]
         let threading = {
@@ -206,6 +211,7 @@ impl AdaptiveExecutionDecision {
             local_work,
             reduction_latency_us,
             tune,
+            tune_decision,
             threading: threading.0,
             recommended_threads: threading.1,
             threading_reason: threading.2,
@@ -379,6 +385,7 @@ impl ExecutionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algebra::parallel_cfg::{ParallelTunerMode, set_parallel_tuner_mode};
     use crate::config::options::KspOptions;
     use crate::reduction::ReproMode;
     use crate::utils::reduction::{ReductExec, ReductOptions};
@@ -457,5 +464,25 @@ mod tests {
             AdaptiveExecutionDecision::decide(32768, 16, 50, 32768 * 50, 80.0, false, false, &opt);
         assert!(matches!(d.variant, KrylovVariant::SStep));
         assert!(d.sstep_block.is_some());
+    }
+
+    #[test]
+    fn adaptive_tuner_respects_manual_mode() {
+        set_parallel_tuner_mode(ParallelTunerMode::Manual);
+        let opt = ReductOptions::default();
+        let d = AdaptiveExecutionDecision::decide(4096, 2, 30, 4096 * 30, 10.0, false, false, &opt);
+        assert!(matches!(d.tune_decision.mode, ParallelTunerMode::Manual));
+        assert_eq!(d.tune.min_len_vec, d.tune_decision.baseline.min_len_vec);
+    }
+
+    #[test]
+    fn adaptive_tuner_forces_deterministic_when_reproducible() {
+        set_parallel_tuner_mode(ParallelTunerMode::Adaptive);
+        let opt = ReductOptions::default();
+        let d = AdaptiveExecutionDecision::decide(4096, 2, 30, 4096 * 30, 70.0, true, false, &opt);
+        assert!(matches!(
+            d.tune_decision.mode,
+            ParallelTunerMode::Deterministic
+        ));
     }
 }

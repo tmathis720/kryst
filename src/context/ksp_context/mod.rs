@@ -1684,6 +1684,48 @@ impl KspContext {
                 "adaptive_reduction_latency_us",
                 adaptive.reduction_latency_us,
             );
+            insert_value(
+                &mut solver_config,
+                "adaptive_tuner_mode",
+                format!("{:?}", adaptive.tune_decision.mode),
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_tuner_rationale",
+                adaptive.tune_decision.rationale,
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_thresholds_baseline",
+                serde_json::json!({
+                    "min_len_vec": adaptive.tune_decision.baseline.min_len_vec,
+                    "min_rows_spmv": adaptive.tune_decision.baseline.min_rows_spmv,
+                    "min_rows_ilu_factorization": adaptive.tune_decision.baseline.min_rows_ilu_factorization,
+                    "min_rows_ilu_triangular": adaptive.tune_decision.baseline.min_rows_ilu_triangular,
+                    "min_rows_asm_apply": adaptive.tune_decision.baseline.min_rows_asm_apply,
+                }),
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_thresholds_selected",
+                serde_json::json!({
+                    "min_len_vec": adaptive.tune_decision.selected.min_len_vec,
+                    "min_rows_spmv": adaptive.tune_decision.selected.min_rows_spmv,
+                    "min_rows_ilu_factorization": adaptive.tune_decision.selected.min_rows_ilu_factorization,
+                    "min_rows_ilu_triangular": adaptive.tune_decision.selected.min_rows_ilu_triangular,
+                    "min_rows_asm_apply": adaptive.tune_decision.selected.min_rows_asm_apply,
+                }),
+            );
+            insert_value(
+                &mut solver_config,
+                "adaptive_kernel_timing_ns_per_elem",
+                serde_json::json!({
+                    "serial": adaptive.tune_decision.kernel_timing.serial_ns_per_elem,
+                    "parallel": adaptive.tune_decision.kernel_timing.parallel_ns_per_elem,
+                    "serial_samples": adaptive.tune_decision.kernel_timing.serial_samples,
+                    "parallel_samples": adaptive.tune_decision.kernel_timing.parallel_samples,
+                }),
+            );
             if let Some(s) = adaptive.sstep_block {
                 insert_value(&mut solver_config, "adaptive_sstep_block", s);
             }

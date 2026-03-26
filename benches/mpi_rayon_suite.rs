@@ -2,6 +2,9 @@
 mod datasets;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use kryst::algebra::parallel_cfg::{
+    ParallelTune, ParallelTunerMode, set_parallel_tune, set_parallel_tuner_mode,
+};
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};
@@ -177,6 +180,58 @@ fn bench_suite(c: &mut Criterion) {
     }
 }
 
+fn bench_adaptive_tuner_configs(c: &mut Criterion) {
+    let comm = bench_comm();
+    let comm_size = comm.size();
+    let cfgs = [
+        ("mpi_only", Some(1usize), comm_size > 1),
+        ("rayon_only", Some(4usize), comm_size <= 1),
+        ("hybrid", Some(4usize), comm_size > 1),
+    ];
+    let grid = 64usize;
+    let pc_type = "ilu";
+    let baseline = ParallelTune::default();
+
+    let mut group = c.benchmark_group("adaptive_tuner_modes");
+    for (label, threads, enabled) in cfgs {
+        if !enabled {
+            continue;
+        }
+
+        set_parallel_tune(baseline);
+        set_parallel_tuner_mode(ParallelTunerMode::Manual);
+        let (manual_time, _, _) = run_once(grid, pc_type, &comm, threads);
+
+        set_parallel_tune(baseline);
+        set_parallel_tuner_mode(ParallelTunerMode::Adaptive);
+        let (adaptive_time, _, _) = run_once(grid, pc_type, &comm, threads);
+
+        let ratio = manual_time.as_secs_f64() / adaptive_time.as_secs_f64().max(1e-12);
+        println!(
+            "adaptive:{label}: threads={threads:?} comm_size={comm_size} speedup={ratio:.3} manual_ms={:.3} adaptive_ms={:.3}",
+            manual_time.as_secs_f64() * 1e3,
+            adaptive_time.as_secs_f64() * 1e3
+        );
+        assert!(
+            ratio >= 0.9,
+            "adaptive tuner regressed {label} scenario: speedup={ratio:.3}"
+        );
+
+        let bench_id = format!("{label}_g{grid}");
+        group.bench_function(bench_id, |ben| {
+            let (mut ksp, b, mut x) = build_case(grid, pc_type, &comm, threads);
+            ben.iter(|| {
+                set_parallel_tuner_mode(ParallelTunerMode::Adaptive);
+                x.fill(0.0);
+                let _ = ksp.solve(&b, &mut x).unwrap();
+            });
+        });
+    }
+    group.finish();
+    set_parallel_tuner_mode(ParallelTunerMode::Manual);
+    set_parallel_tune(baseline);
+}
+
 #[cfg(feature = "mpi")]
 fn sparse_ring_peers(rank: usize, size: usize, degree: usize) -> Vec<usize> {
     if size <= 1 || degree == 0 {
@@ -239,7 +294,12 @@ fn bench_sparse_exchange(c: &mut Criterion) {
 }
 
 #[cfg(feature = "mpi")]
-criterion_group!(benches, bench_suite, bench_sparse_exchange);
+criterion_group!(
+    benches,
+    bench_suite,
+    bench_adaptive_tuner_configs,
+    bench_sparse_exchange
+);
 #[cfg(not(feature = "mpi"))]
-criterion_group!(benches, bench_suite);
+criterion_group!(benches, bench_suite, bench_adaptive_tuner_configs);
 criterion_main!(benches);
