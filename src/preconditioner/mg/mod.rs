@@ -9,6 +9,7 @@ use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::utils::rap_opt_generic;
 use crate::parallel::{Comm, UniverseComm, allreduce_sum_scalar_slice_in_place};
+#[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::DistCoarseSolverRoute;
 use crate::preconditioner::ksp_pc::KspAsPc;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -19,6 +20,15 @@ use std::time::{Duration, Instant};
 
 /// Scalar carried through MG hierarchy operators and transfers.
 type MgScalar = S;
+
+#[cfg(not(feature = "backend-faer"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DistCoarseSolverRoute {
+    Auto,
+    Root,
+    Local,
+    SuperLuDist,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct MgLevelPolicy {

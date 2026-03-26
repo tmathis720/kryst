@@ -3,6 +3,7 @@ use crate::config::options::PcOptions;
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::core::traits::SubmatrixExtract;
 use crate::error::KError;
+#[cfg(feature = "backend-faer")]
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::DistLayout;
 use crate::matrix::op::LinOp;
@@ -140,6 +141,57 @@ pub struct SplitDiagnostics {
 }
 
 impl FieldSplitPc {
+    fn materialize_csr(a: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<S>>, KError> {
+        #[cfg(feature = "backend-faer")]
+        {
+            return csr_from_linop(a, 0.0);
+        }
+
+        #[cfg(not(feature = "backend-faer"))]
+        {
+            if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
+                return Ok(Arc::new(csr.clone()));
+            }
+
+            let (rows, cols) = a.dims();
+            if rows != cols {
+                return Err(KError::InvalidInput(
+                    "FieldSplit setup requires a square operator".into(),
+                ));
+            }
+
+            let mut row_ptr = Vec::with_capacity(rows + 1);
+            let mut col_idx = Vec::new();
+            let mut values = Vec::new();
+            let mut ej = vec![S::zero(); cols];
+            let mut col = vec![S::zero(); rows];
+            row_ptr.push(0);
+            let threshold = S::from_real(0.0).abs();
+            let mut entries: Vec<Vec<(usize, S)>> = vec![Vec::new(); rows];
+            for j in 0..cols {
+                ej.fill(S::zero());
+                ej[j] = S::one();
+                a.try_matvec(&ej, &mut col)?;
+                for i in 0..rows {
+                    if col[i].abs() > threshold {
+                        entries[i].push((j, col[i]));
+                    }
+                }
+            }
+            for row in entries {
+                for (j, v) in row {
+                    col_idx.push(j);
+                    values.push(v);
+                }
+                row_ptr.push(col_idx.len());
+            }
+
+            Ok(Arc::new(CsrMatrix::from_csr(
+                rows, cols, row_ptr, col_idx, values,
+            )))
+        }
+    }
+
     pub fn new(
         block_sizes: Vec<usize>,
         child_pc_type: Option<String>,
@@ -984,7 +1036,7 @@ impl Preconditioner for FieldSplitPc {
                 "fieldsplit local block spans do not cover local rows; check global block sizes against ownership layout".into(),
             ));
         }
-        let csr = csr_from_linop(a, 0.0)?;
+        let csr = Self::materialize_csr(a)?;
         let block_mats = self.extract_block_matrices(csr.as_ref(), &spans);
         let mut schur_precondition_matrix = None;
         let mut schur_apply_hook: Option<SchurApplyHook> = None;
