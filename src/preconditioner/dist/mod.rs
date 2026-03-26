@@ -115,9 +115,11 @@ impl LocalPcKind {
             | Self::Jacobi
             | Self::Sor
             | Self::Chebyshev
-            | Self::Fsai
-            | Self::Spai => LocalPcBuildCapabilities {
+            | Self::Fsai => LocalPcBuildCapabilities {
                 native_local_apply: true,
+            },
+            Self::Spai => LocalPcBuildCapabilities {
+                native_local_apply: false,
             },
         }
     }
