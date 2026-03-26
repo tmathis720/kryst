@@ -4,6 +4,7 @@ use std::sync::Arc;
 use kryst::algebra::prelude::*;
 use kryst::algebra::scalar::S;
 use kryst::matrix::LinOp;
+use kryst::matrix::parcsr::ParCsrMatrix;
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -81,6 +82,44 @@ fn dist_csr_numeric_update_changes_values_id() {
     op.update_numeric(&[S::from_real(2.0)]).unwrap();
     assert_eq!(op.structure_id(), sid);
     assert_ne!(op.values_id(), vid);
+}
+
+#[test]
+fn parcsr_spmv_matches_canonical_distcsr() {
+    let comm = UniverseComm::NoComm(NoComm);
+    let a_diag = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 2, 4, 5],
+        vec![0, 1, 0, 2, 2],
+        vec![
+            S::from_real(4.0),
+            S::from_real(-1.0),
+            S::from_real(-2.0),
+            S::from_real(5.0),
+            S::from_real(3.0),
+        ],
+    );
+    let a_off = CsrMatrix::from_csr(3, 0, vec![0, 0, 0, 0], Vec::new(), Vec::new());
+    let par = ParCsrMatrix::from_legacy_parts(
+        comm.clone(),
+        0,
+        3,
+        3,
+        3,
+        a_diag,
+        a_off,
+        vec![0, 1, 2],
+        Vec::new(),
+        kryst::matrix::parcsr::HaloPlan::default(),
+    );
+    let x = vec![S::from_real(1.0), S::from_real(-1.0), S::from_real(2.0)];
+    let mut y_par = vec![S::zero(); 3];
+    par.spmv(&x, &mut y_par).unwrap();
+
+    let mut y_dist = vec![S::zero(); 3];
+    par.canonical_dist_op().unwrap().matvec(&x, &mut y_dist);
+    assert_eq!(y_par, y_dist);
 }
 
 #[cfg(feature = "complex")]
