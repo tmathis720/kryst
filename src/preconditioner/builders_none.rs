@@ -89,6 +89,8 @@ pub fn try_build(cfg: &PcConfig) -> Result<Option<Box<dyn Preconditioner>>, KErr
             crate::preconditioner::bddc::BddcConfig {
                 coarse_ksp_type: coarse_ksp_type.clone(),
                 coarse_pc_type: coarse_pc_type.clone(),
+                local_ksp_type: None,
+                local_pc_type: None,
                 use_vertices: *use_vertices,
                 constraint_selection: Some(*constraint_selection),
                 scaling: Some(*scaling),

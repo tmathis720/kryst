@@ -2,6 +2,9 @@
 
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::error::KError;
+#[cfg(not(feature = "complex"))]
+use crate::matrix::convert::csr_from_linop;
+use crate::matrix::csr::CsrMatrix;
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -33,9 +36,22 @@ pub enum BddcScaling {
 pub struct BddcConfig {
     pub coarse_ksp_type: Option<String>,
     pub coarse_pc_type: Option<String>,
+    pub local_ksp_type: Option<String>,
+    pub local_pc_type: Option<String>,
     pub use_vertices: bool,
     pub constraint_selection: Option<BddcConstraintSelection>,
     pub scaling: Option<BddcScaling>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BddcDiagnostics {
+    pub local_nnz: usize,
+    pub coarse_nnz: usize,
+    pub local_solve_route: String,
+    pub local_solve_estimated_flops: usize,
+    pub coarse_solve_route: String,
+    pub comm_interface_dofs: usize,
+    pub comm_coarse_dofs: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -52,8 +68,9 @@ struct BddcSymbolic {
 
 #[derive(Debug, Clone)]
 struct BddcNumeric {
-    operator: Vec<Vec<S>>,
-    coarse_operator: Vec<Vec<S>>,
+    operator: CsrMatrix<S>,
+    coarse_operator: CsrMatrix<S>,
+    diagnostics: BddcDiagnostics,
     values_id: ValuesId,
 }
 
@@ -75,6 +92,10 @@ impl BddcPc {
             symbolic: None,
             numeric: None,
         }
+    }
+
+    pub fn diagnostics(&self) -> Option<&BddcDiagnostics> {
+        self.numeric.as_ref().map(|n| &n.diagnostics)
     }
 
     fn build_subdomains(n: usize) -> Vec<(usize, usize)> {
@@ -190,56 +211,133 @@ impl BddcPc {
         Ok(a)
     }
 
-    fn solve_dense(mut a: Vec<Vec<S>>, mut b: Vec<S>) -> Result<Vec<S>, KError> {
-        let n = b.len();
-        if a.len() != n || a.iter().any(|row| row.len() != n) {
-            return Err(KError::InvalidInput(
-                "BDDC dense solve received non-square matrix".into(),
-            ));
+    fn csr_submatrix(a: &CsrMatrix<S>, dofs: &[usize]) -> CsrMatrix<S> {
+        let n = dofs.len();
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+        row_ptr.push(0);
+        let mut inv = vec![usize::MAX; a.ncols];
+        for (i, &dof) in dofs.iter().enumerate() {
+            if dof < inv.len() {
+                inv[dof] = i;
+            }
         }
-        for k in 0..n {
-            let mut piv = k;
-            let mut best = a[k][k].abs();
-            for (i, row) in a.iter().enumerate().skip(k + 1) {
-                let cand = row[k].abs();
-                if cand > best {
-                    best = cand;
-                    piv = i;
+        for &global_i in dofs {
+            for p in a.rowptr[global_i]..a.rowptr[global_i + 1] {
+                let j = a.colind[p];
+                if j < inv.len() {
+                    let local_j = inv[j];
+                    if local_j != usize::MAX {
+                        col_idx.push(local_j);
+                        values.push(a.values[p]);
+                    }
                 }
             }
-            if best <= 1e-14 {
+            row_ptr.push(col_idx.len());
+        }
+        CsrMatrix::new(n, n, row_ptr, col_idx, values)
+    }
+
+    fn csr_matvec(a: &CsrMatrix<S>, x: &[S], y: &mut [S]) {
+        for (i, yi) in y.iter_mut().enumerate().take(a.nrows) {
+            let mut acc = S::zero();
+            for p in a.rowptr[i]..a.rowptr[i + 1] {
+                acc = acc + a.values[p] * x[a.colind[p]];
+            }
+            *yi = acc;
+        }
+    }
+
+    fn solve_csr_jacobi(a: &CsrMatrix<S>, rhs: &[S]) -> Result<Vec<S>, KError> {
+        let mut x = vec![S::zero(); rhs.len()];
+        for i in 0..rhs.len() {
+            let mut diag = None;
+            for p in a.rowptr[i]..a.rowptr[i + 1] {
+                if a.colind[p] == i {
+                    diag = Some(a.values[p]);
+                    break;
+                }
+            }
+            let d = diag.ok_or_else(|| {
+                KError::FactorError("BDDC Jacobi solve encountered missing diagonal".into())
+            })?;
+            if d.abs() <= 1e-14 {
                 return Err(KError::FactorError(
-                    "BDDC local/coarse solve encountered singular pivot".into(),
+                    "BDDC Jacobi solve encountered near-zero diagonal".into(),
                 ));
             }
-            if piv != k {
-                a.swap(piv, k);
-                b.swap(piv, k);
-            }
-            let pivot = a[k][k];
-            let pivot_row = a[k].clone();
-            let b_k = b[k];
-            for (i, row) in a.iter_mut().enumerate().skip(k + 1) {
-                let factor = row[k] / pivot;
-                row[k] = S::zero();
-                for j in (k + 1)..n {
-                    row[j] = row[j] - factor * pivot_row[j];
-                }
-                b[i] = b[i] - factor * b_k;
-            }
-        }
-        let mut x = vec![S::zero(); n];
-        for i in (0..n).rev() {
-            let mut rhs = b[i];
-            for (j, xj) in x.iter().enumerate().skip(i + 1) {
-                rhs = rhs - a[i][j] * *xj;
-            }
-            x[i] = rhs / a[i][i];
+            x[i] = rhs[i] / d;
         }
         Ok(x)
     }
 
-    fn coarse_solve(&self, coarse_op: &[Vec<S>], rhs: Vec<S>) -> Result<Vec<S>, KError> {
+    fn solve_csr_cg(a: &CsrMatrix<S>, rhs: &[S], maxits: usize, tol: R) -> Result<Vec<S>, KError> {
+        let n = rhs.len();
+        let mut x = vec![S::zero(); n];
+        let mut r = rhs.to_vec();
+        let mut p = r.clone();
+        let mut ap = vec![S::zero(); n];
+        let mut rr = r
+            .iter()
+            .map(|v| v.conj() * *v)
+            .fold(S::zero(), |acc, v| acc + v);
+        let rr0 = rr.abs().max(1e-30);
+        for _ in 0..maxits {
+            Self::csr_matvec(a, &p, &mut ap);
+            let denom = p
+                .iter()
+                .zip(ap.iter())
+                .map(|(pi, api)| pi.conj() * *api)
+                .fold(S::zero(), |acc, v| acc + v);
+            if denom.abs() <= 1e-20 {
+                break;
+            }
+            let alpha = rr / denom;
+            for i in 0..n {
+                x[i] = x[i] + alpha * p[i];
+                r[i] = r[i] - alpha * ap[i];
+            }
+            let rr_new = r
+                .iter()
+                .map(|v| v.conj() * *v)
+                .fold(S::zero(), |acc, v| acc + v);
+            if (rr_new.abs() / rr0).sqrt() < tol {
+                return Ok(x);
+            }
+            let beta = rr_new / rr;
+            for i in 0..n {
+                p[i] = r[i] + beta * p[i];
+            }
+            rr = rr_new;
+        }
+        Ok(x)
+    }
+
+    fn solve_csr_local(&self, a: &CsrMatrix<S>, rhs: Vec<S>) -> Result<Vec<S>, KError> {
+        let ksp = self
+            .config
+            .local_ksp_type
+            .as_deref()
+            .unwrap_or("preonly")
+            .to_lowercase();
+        let pc = self
+            .config
+            .local_pc_type
+            .as_deref()
+            .unwrap_or("jacobi")
+            .to_lowercase();
+        match (ksp.as_str(), pc.as_str()) {
+            ("preonly", "jacobi") => Self::solve_csr_jacobi(a, &rhs),
+            ("cg", "jacobi") => Self::solve_csr_cg(a, &rhs, 60, 1e-8),
+            ("gmres", "jacobi") => Self::solve_csr_cg(a, &rhs, 90, 1e-8),
+            _ => Err(KError::InvalidInput(format!(
+                "unsupported BDDC local backend combination: ksp={ksp}, pc={pc}"
+            ))),
+        }
+    }
+
+    fn coarse_solve(&self, coarse_op: &CsrMatrix<S>, rhs: Vec<S>) -> Result<Vec<S>, KError> {
         let ksp = self
             .config
             .coarse_ksp_type
@@ -263,34 +361,13 @@ impl BddcPc {
         }
 
         match pc.as_str() {
-            "lu" | "cholesky" | "none" => Self::solve_dense(coarse_op.to_vec(), rhs),
-            "jacobi" => {
-                let mut x = vec![S::zero(); rhs.len()];
-                for (i, row) in coarse_op.iter().enumerate() {
-                    let d = row[i];
-                    if d.abs() <= 1e-14 {
-                        return Err(KError::FactorError(
-                            "BDDC coarse Jacobi backend encountered zero diagonal".into(),
-                        ));
-                    }
-                    x[i] = rhs[i] / d;
-                }
-                Ok(x)
-            }
+            "jacobi" => Self::solve_csr_jacobi(coarse_op, &rhs),
+            "none" => Ok(rhs),
+            "lu" | "cholesky" => Self::solve_csr_cg(coarse_op, &rhs, 120, 1e-10),
             other => Err(KError::InvalidInput(format!(
                 "unsupported BDDC coarse PC backend: {other}"
             ))),
         }
-    }
-
-    fn submatrix(a: &[Vec<S>], dofs: &[usize]) -> Vec<Vec<S>> {
-        let mut out = vec![vec![S::zero(); dofs.len()]; dofs.len()];
-        for (ii, &i) in dofs.iter().enumerate() {
-            for (jj, &j) in dofs.iter().enumerate() {
-                out[ii][jj] = a[i][j];
-            }
-        }
-        out
     }
 
     fn apply_scaling(&self, value: S, diag: S, multiplicity: R) -> S {
@@ -377,11 +454,54 @@ impl Preconditioner for BddcPc {
                 .symbolic
                 .as_ref()
                 .ok_or_else(|| KError::PcFailed("BDDC symbolic phase missing".into()))?;
-            let operator = Self::extract_dense_operator(op, sym.local_n)?;
-            let coarse_operator = Self::submatrix(&operator, &sym.coarse_dofs);
+            #[cfg(not(feature = "complex"))]
+            let operator = {
+                let csr = csr_from_linop(op, 0.0)?;
+                CsrMatrix::from_real_csr(csr.as_ref())
+            };
+            #[cfg(feature = "complex")]
+            let operator = {
+                let dense = Self::extract_dense_operator(op, sym.local_n)?;
+                let mut row_ptr = Vec::with_capacity(sym.local_n + 1);
+                let mut col_idx = Vec::new();
+                let mut vals = Vec::new();
+                row_ptr.push(0);
+                for (i, row) in dense.iter().enumerate() {
+                    for (j, &v) in row.iter().enumerate() {
+                        if v.abs() > 0.0 {
+                            col_idx.push(j);
+                            vals.push(v);
+                        }
+                    }
+                    row_ptr.push(col_idx.len());
+                    let _ = i;
+                }
+                CsrMatrix::new(sym.local_n, sym.local_n, row_ptr, col_idx, vals)
+            };
+            let coarse_operator = Self::csr_submatrix(&operator, &sym.coarse_dofs);
+            let local_route = format!(
+                "{}+{}",
+                self.config.local_ksp_type.as_deref().unwrap_or("preonly"),
+                self.config.local_pc_type.as_deref().unwrap_or("jacobi")
+            );
+            let coarse_route = format!(
+                "{}+{}",
+                self.config.coarse_ksp_type.as_deref().unwrap_or("preonly"),
+                self.config.coarse_pc_type.as_deref().unwrap_or("lu")
+            );
+            let diagnostics = BddcDiagnostics {
+                local_nnz: operator.nnz(),
+                coarse_nnz: coarse_operator.nnz(),
+                local_solve_route: local_route,
+                local_solve_estimated_flops: operator.nnz().saturating_mul(2),
+                coarse_solve_route: coarse_route,
+                comm_interface_dofs: sym.interface_dofs.len(),
+                comm_coarse_dofs: sym.coarse_dofs.len(),
+            };
             self.numeric = Some(BddcNumeric {
                 operator,
                 coarse_operator,
+                diagnostics,
                 values_id,
             });
         }
@@ -413,8 +533,8 @@ impl Preconditioner for BddcPc {
         for &(start, end) in &sym.subdomains {
             let dofs: Vec<usize> = (start..end).collect();
             let rhs: Vec<S> = dofs.iter().map(|&i| x[i]).collect();
-            let a_sub = Self::submatrix(&num.operator, &dofs);
-            let local_sol = Self::solve_dense(a_sub, rhs)?;
+            let a_sub = Self::csr_submatrix(&num.operator, &dofs);
+            let local_sol = self.solve_csr_local(&a_sub, rhs)?;
             for (&dof, &val) in dofs.iter().zip(local_sol.iter()) {
                 y[dof] = y[dof] + val;
                 multiplicity[dof] += 1;
@@ -428,13 +548,7 @@ impl Preconditioner for BddcPc {
 
         // Phase 2: primal coarse correction.
         let mut az = vec![S::zero(); sym.local_n];
-        for (i, row) in num.operator.iter().enumerate() {
-            let mut sum = S::zero();
-            for (aij, zj) in row.iter().zip(y.iter()) {
-                sum = sum + (*aij * *zj);
-            }
-            az[i] = sum;
-        }
+        Self::csr_matvec(&num.operator, y, &mut az);
         let residual: Vec<S> = x
             .iter()
             .zip(az.iter())
@@ -454,7 +568,13 @@ impl Preconditioner for BddcPc {
             if dof >= sym.local_n {
                 continue;
             }
-            let diag = num.operator[dof][dof];
+            let mut diag = S::one();
+            for p in num.operator.rowptr[dof]..num.operator.rowptr[dof + 1] {
+                if num.operator.colind[p] == dof {
+                    diag = num.operator.values[p];
+                    break;
+                }
+            }
             let multiplicity = sym.interface_multiplicity.get(k).copied().unwrap_or(1.0);
             y[dof] = self.apply_scaling(y[dof], diag, multiplicity);
         }

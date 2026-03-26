@@ -145,3 +145,43 @@ fn mpi_mg_is_viable_distributed_baseline_for_bddc_matrix() {
     );
     assert!(res.is_finite(), "mg residual must be finite");
 }
+
+#[test]
+fn mpi_bddc_constraint_and_scaling_variants_converge() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+    let n_per = 5;
+    let dist = Arc::new(make_dist_poisson(&comm, n_per));
+    let rhs: Vec<f64> = (0..n_per).map(|i| 0.5 + i as f64).collect();
+
+    let opts_vertices = PcOptions {
+        pc_type: Some("bddc".to_string()),
+        pc_bddc_constraint_selection: Some("vertices".to_string()),
+        pc_bddc_scaling: Some("uniform".to_string()),
+        ..Default::default()
+    };
+    let (_its_v, res_v, reason_v) = solve_with_pc(dist.clone(), &rhs, &opts_vertices);
+    assert!(
+        matches!(
+            reason_v,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ),
+        "vertices mode should converge: {reason_v:?}"
+    );
+
+    let opts_iface_deluxe = PcOptions {
+        pc_type: Some("bddc".to_string()),
+        pc_bddc_constraint_selection: Some("interface".to_string()),
+        pc_bddc_scaling: Some("deluxe_like".to_string()),
+        ..Default::default()
+    };
+    let (_its_i, res_i, reason_i) = solve_with_pc(dist, &rhs, &opts_iface_deluxe);
+    assert!(
+        matches!(
+            reason_i,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ),
+        "interface+deluxe mode should converge: {reason_i:?}"
+    );
+    assert!(res_v.is_finite() && res_i.is_finite());
+}
