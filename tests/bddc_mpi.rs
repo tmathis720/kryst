@@ -185,3 +185,35 @@ fn mpi_bddc_constraint_and_scaling_variants_converge() {
     );
     assert!(res_v.is_finite() && res_i.is_finite());
 }
+
+#[test]
+fn mpi_bddc_coarse_backend_combinations_converge() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+    let n_per = 6;
+    let dist = Arc::new(make_dist_poisson(&comm, n_per));
+    let rhs: Vec<f64> = (0..n_per).map(|i| 1.0 + 0.25 * i as f64).collect();
+    let combos = [("preonly", "lu"), ("cg", "jacobi"), ("gmres", "ilu")];
+
+    for (ksp, pc) in combos {
+        let opts = PcOptions {
+            pc_type: Some("bddc".to_string()),
+            pc_bddc_coarse_ksp_type: Some(ksp.to_string()),
+            pc_bddc_coarse_pc_type: Some(pc.to_string()),
+            pc_bddc_constraint_selection: Some("interface".to_string()),
+            ..Default::default()
+        };
+        let (_its, res, reason) = solve_with_pc(dist.clone(), &rhs, &opts);
+        assert!(
+            matches!(
+                reason,
+                ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+            ),
+            "coarse combo {ksp}+{pc} should converge, got {reason:?}"
+        );
+        assert!(
+            res.is_finite(),
+            "coarse combo {ksp}+{pc} residual must be finite"
+        );
+    }
+}

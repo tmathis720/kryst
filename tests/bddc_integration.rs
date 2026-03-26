@@ -190,3 +190,30 @@ fn bddc_reports_sparse_diagnostics_and_constraint_modes() {
         "different constraint/scaling modes should alter response"
     );
 }
+
+#[test]
+fn bddc_supports_coarse_backend_combinations_and_reports_runtime_diagnostics() {
+    let (a, _) = decomposed_spd(32);
+    let combos = [("preonly", "lu"), ("cg", "jacobi"), ("gmres", "ilu")];
+
+    for (ksp, pc) in combos {
+        let mut bddc = BddcPc::new(BddcConfig {
+            coarse_ksp_type: Some(ksp.into()),
+            coarse_pc_type: Some(pc.into()),
+            local_ksp_type: Some("cg".into()),
+            local_pc_type: Some("jacobi".into()),
+            use_vertices: true,
+            constraint_selection: None,
+            scaling: None,
+        });
+        bddc.setup(&a).expect("setup");
+        let x = vec![1.0; 32];
+        let mut y = vec![0.0; 32];
+        bddc.apply(PcSide::Left, &x, &mut y).expect("apply");
+        let d = bddc.diagnostics().expect("diagnostics");
+        assert!(!d.coarse_solve_route.is_empty());
+        assert!(d.coarse_solve_route.contains(ksp) || d.coarse_solve_route.contains("preonly"));
+        assert!(d.coarse_final_residual.is_finite());
+        assert!(d.coarse_iterations < 2000);
+    }
+}
