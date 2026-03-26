@@ -496,7 +496,7 @@ fn build_dist_pc(
     dist_op: &DistCsrOp,
     builder: &DistPcBuilder,
 ) -> Result<Box<dyn DistributedPreconditioner<Scalar = f64>>, KError> {
-    validate_dist_builder_strict_mode(builder)?;
+    validate_dist_builder_strict_mode(dist_op, builder)?;
     match builder {
         DistPcBuilder::BlockJacobi { opts } => {
             #[cfg(feature = "backend-faer")]
