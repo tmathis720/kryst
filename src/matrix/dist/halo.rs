@@ -215,6 +215,11 @@ pub struct HaloBuffers {
     pub ghost_flat: RwLock<Vec<S>>,
 }
 
+// SAFETY: HaloBuffers are only mutated through HaloPlan's sequential
+// post/complete calls and never concurrently accessed from multiple threads.
+unsafe impl Send for HaloBuffers {}
+unsafe impl Sync for HaloBuffers {}
+
 #[derive(Clone)]
 struct RecvSchedule {
     nbr: usize,
@@ -436,6 +441,14 @@ impl HaloPlan {
             self.free_slots.lock().unwrap().push(req.slot);
             Vec::new()
         }
+    }
+
+    pub fn recv_volume(&self) -> usize {
+        self.index.recv_map.values().map(Vec::len).sum()
+    }
+
+    pub fn send_volume(&self) -> usize {
+        self.index.send_local_idx.values().map(Vec::len).sum()
     }
 }
 
