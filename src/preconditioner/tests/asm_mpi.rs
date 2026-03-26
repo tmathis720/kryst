@@ -502,12 +502,118 @@ fn mpi_dist_builder_constructs_native_ras_and_asm() {
 }
 
 #[test]
-fn mpi_asm_strict_rejected_with_structured_keys() {
+fn mpi_asm_and_ras_strict_accept_supported_native_prerequisites() {
     let _guard = mpi_test_guard();
     let Some(comm) = mpi_world() else {
         return;
     };
     let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Asm {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
+            local_apply_mode: DistLocalApplyMode::NativeStrict,
+        },
+    )
+    .expect("strict mode should accept ASM distributed builder when prerequisites are met");
+
+    DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Ras {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
+            local_apply_mode: DistLocalApplyMode::NativeStrict,
+        },
+    )
+    .expect("strict mode should accept RAS distributed builder when prerequisites are met");
+}
+
+#[test]
+fn mpi_asm_strict_rejected_on_overlap_mode_with_structured_keys() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let err = match DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Asm {
+            overlap: 0,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::Csr,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
+            local_apply_mode: DistLocalApplyMode::NativeStrict,
+        },
+    ) {
+        Ok(_) => panic!("strict mode should reject overlap=0 ASM distributed builder"),
+        Err(err) => err,
+    };
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("err_key=pc_dist_strict_mode_rejected")
+            && msg.contains("pc_dist_local_apply=strict")
+            && msg.contains("pc_global=Asm")
+            && msg.contains("detail_key=overlap_mode"),
+        "unexpected strict-mode error: {msg}"
+    );
+}
+
+#[test]
+fn mpi_ras_strict_rejected_on_local_solver_support_with_structured_keys() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
+
+    let err = match DistPcAdapter::build(
+        &dist,
+        DistPcBuilder::Ras {
+            overlap: 1,
+            subdomain_hint: None,
+            block_solver: AsmBlockSolver::LuDense,
+            inner_pc: AsmInnerPc::Ilu0,
+            weighting: Weighting::None,
+            coarse_strategy: DistCoarseStrategy::None,
+            local_apply_mode: DistLocalApplyMode::NativeStrict,
+        },
+    ) {
+        Ok(_) => panic!("strict mode should reject unsupported RAS solver combination"),
+        Err(err) => err,
+    };
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("err_key=pc_dist_strict_mode_rejected")
+            && msg.contains("pc_dist_local_apply=strict")
+            && msg.contains("pc_global=Ras")
+            && msg.contains("detail_key=local_solver_support"),
+        "unexpected strict-mode error: {msg}"
+    );
+}
+
+#[test]
+fn mpi_asm_strict_rejected_on_comm_plan_constraints_with_structured_keys() {
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
+    let solo = comm.split(comm.rank() as i32, 0);
+    let (dist, _, _, _) = make_dist_poisson(&solo, 2);
 
     let err = match DistPcAdapter::build(
         &dist,
@@ -521,7 +627,7 @@ fn mpi_asm_strict_rejected_with_structured_keys() {
             local_apply_mode: DistLocalApplyMode::NativeStrict,
         },
     ) {
-        Ok(_) => panic!("strict mode should reject ASM distributed builder"),
+        Ok(_) => panic!("strict mode should reject communicator size=1"),
         Err(err) => err,
     };
 
@@ -530,41 +636,7 @@ fn mpi_asm_strict_rejected_with_structured_keys() {
         msg.contains("err_key=pc_dist_strict_mode_rejected")
             && msg.contains("pc_dist_local_apply=strict")
             && msg.contains("pc_global=Asm")
-            && msg.contains("detail_key=unsupported_global_pc"),
-        "unexpected strict-mode error: {msg}"
-    );
-}
-
-#[test]
-fn mpi_ras_strict_rejected_with_structured_keys() {
-    let _guard = mpi_test_guard();
-    let Some(comm) = mpi_world() else {
-        return;
-    };
-    let (dist, _, _, _) = make_dist_poisson(&comm, 2);
-
-    let err = match DistPcAdapter::build(
-        &dist,
-        DistPcBuilder::Ras {
-            overlap: 1,
-            subdomain_hint: None,
-            block_solver: AsmBlockSolver::Csr,
-            inner_pc: AsmInnerPc::Ilu0,
-            weighting: Weighting::None,
-            coarse_strategy: DistCoarseStrategy::None,
-            local_apply_mode: DistLocalApplyMode::NativeStrict,
-        },
-    ) {
-        Ok(_) => panic!("strict mode should reject RAS distributed builder"),
-        Err(err) => err,
-    };
-
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("err_key=pc_dist_strict_mode_rejected")
-            && msg.contains("pc_dist_local_apply=strict")
-            && msg.contains("pc_global=Ras")
-            && msg.contains("detail_key=unsupported_global_pc"),
+            && msg.contains("detail_key=communication_plan_constraints"),
         "unexpected strict-mode error: {msg}"
     );
 }

@@ -1,4 +1,7 @@
 use crate::error::KError;
+use crate::matrix::DistCsrOp;
+use crate::parallel::Comm;
+use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc};
 
 use super::{DistLocalApplyMode, DistPcBuilder, GlobalPcKind};
 
@@ -8,7 +11,58 @@ fn strict_mode_error(global_pc: GlobalPcKind, detail_key: &str, detail: &str) ->
     ))
 }
 
-pub fn validate_dist_builder_strict_mode(builder: &DistPcBuilder) -> Result<(), KError> {
+fn asm_local_solver_supports_native(block_solver: AsmBlockSolver, inner_pc: AsmInnerPc) -> bool {
+    match (block_solver, inner_pc) {
+        (AsmBlockSolver::Csr, AsmInnerPc::Jacobi)
+        | (AsmBlockSolver::LuDense, AsmInnerPc::Jacobi)
+        | (AsmBlockSolver::Csr, AsmInnerPc::Ilu0)
+        | (AsmBlockSolver::Csr, AsmInnerPc::Ilut { .. })
+        | (AsmBlockSolver::LuDense, AsmInnerPc::Ilutp { .. }) => true,
+        (AsmBlockSolver::LuDense, AsmInnerPc::Ilu0)
+        | (AsmBlockSolver::LuDense, AsmInnerPc::Ilut { .. })
+        | (AsmBlockSolver::Csr, AsmInnerPc::Ilutp { .. }) => false,
+    }
+}
+
+fn validate_asm_like_strict_mode(
+    dist_op: &DistCsrOp,
+    global_pc: GlobalPcKind,
+    overlap: usize,
+    block_solver: AsmBlockSolver,
+    inner_pc: AsmInnerPc,
+    local_apply_mode: DistLocalApplyMode,
+) -> Result<(), KError> {
+    if !local_apply_mode.requires_native() {
+        return Ok(());
+    }
+    if overlap == 0 {
+        return Err(strict_mode_error(
+            global_pc,
+            "overlap_mode",
+            "strict distributed local-apply requires overlap>0 for ASM/RAS native kernels",
+        ));
+    }
+    if !asm_local_solver_supports_native(block_solver, inner_pc) {
+        return Err(strict_mode_error(
+            global_pc,
+            "local_solver_support",
+            "strict distributed local-apply requires a supported ASM/RAS block_solver + inner_pc pair",
+        ));
+    }
+    if dist_op.comm().size() <= 1 {
+        return Err(strict_mode_error(
+            global_pc,
+            "communication_plan_constraints",
+            "strict distributed local-apply requires MPI communicator size>1 for ASM/RAS communication plans",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_dist_builder_strict_mode(
+    dist_op: &DistCsrOp,
+    builder: &DistPcBuilder,
+) -> Result<(), KError> {
     match builder {
         DistPcBuilder::BlockJacobi { opts } => {
             if !opts.local_apply_mode.requires_native() {
@@ -25,24 +79,32 @@ pub fn validate_dist_builder_strict_mode(builder: &DistPcBuilder) -> Result<(), 
             }
         }
         DistPcBuilder::Asm {
-            local_apply_mode, ..
-        }
-        | DistPcBuilder::Ras {
-            local_apply_mode, ..
-        } => {
-            if matches!(local_apply_mode, DistLocalApplyMode::NativeStrict) {
-                let global = match builder {
-                    DistPcBuilder::Asm { .. } => GlobalPcKind::Asm,
-                    DistPcBuilder::Ras { .. } => GlobalPcKind::Ras,
-                    DistPcBuilder::BlockJacobi { .. } => unreachable!(),
-                };
-                return Err(strict_mode_error(
-                    global,
-                    "unsupported_global_pc",
-                    "strict distributed local-apply mode is currently unsupported for ASM/RAS builders",
-                ));
-            }
-            Ok(())
-        }
+            overlap,
+            block_solver,
+            inner_pc,
+            local_apply_mode,
+            ..
+        } => validate_asm_like_strict_mode(
+            dist_op,
+            GlobalPcKind::Asm,
+            *overlap,
+            *block_solver,
+            *inner_pc,
+            *local_apply_mode,
+        ),
+        DistPcBuilder::Ras {
+            overlap,
+            block_solver,
+            inner_pc,
+            local_apply_mode,
+            ..
+        } => validate_asm_like_strict_mode(
+            dist_op,
+            GlobalPcKind::Ras,
+            *overlap,
+            *block_solver,
+            *inner_pc,
+            *local_apply_mode,
+        ),
     }
 }
