@@ -8,6 +8,7 @@ use crate::error::KError;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::csr::CsrMatrix;
+use crate::matrix::MatShell;
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -364,7 +365,11 @@ impl BddcPc {
             ..Default::default()
         };
         ksp.set_pc_type(pc_type, Some(&pc_opts))?;
-        ksp.set_operators(Arc::new(coarse_op.clone()), None);
+        let coarse_op_owned = Arc::new(coarse_op.clone());
+        let shell = MatShell::new(rhs.len(), rhs.len(), move |x: &[S], y: &mut [S]| {
+            coarse_op_owned.spmv(x, y);
+        });
+        ksp.set_operators(Arc::new(shell), None);
         ksp.setup()?;
         let mut x = vec![S::zero(); rhs.len()];
         let stats = ksp.solve(rhs, &mut x)?;

@@ -3591,10 +3591,10 @@ impl AMG {
         if self.cfg.dist_coarse_solver_route != DistCoarseSolverRoute::Auto {
             let forced_route = self.cfg.dist_coarse_solver_route;
             if !is_route_available(forced_route) {
-                return Err(KError::Unsupported(format!(
-                    "AMG distributed coarse route {:?} was explicitly requested but is unavailable (missing feature support)",
-                    forced_route
-                )));
+                let _ = forced_route;
+                return Err(KError::Unsupported(
+                    "AMG distributed coarse route was explicitly requested but is unavailable (missing feature support)",
+                ));
             }
             return Ok((route_to_strategy(forced_route), forced_route));
         }

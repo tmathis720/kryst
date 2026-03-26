@@ -488,7 +488,7 @@ fn estimate_hermitian_magnitude_lmax(a: &CsrMatrix<f64>) -> Result<f64, KError> 
     // like a Hermitian-magnitude bound for real-projected operators and remains
     // valid when the runtime scalar is complex.
     let mut d_sqrt_inv = vec![1.0; n];
-    let diag = a.diag();
+    let diag = a.diagonal();
     for i in 0..n {
         let di = diag[i].abs();
         d_sqrt_inv[i] = if di > 1e-30 { 1.0 / di.sqrt() } else { 1.0 };
