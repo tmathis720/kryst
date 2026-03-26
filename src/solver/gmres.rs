@@ -1215,57 +1215,61 @@ impl GmresSolver {
                 SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
             );
         }
-        let true_res =
-            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
-        reduction_count += 1;
-        #[cfg(feature = "metrics")]
-        {
-            metrics.bytes_reduced += std::mem::size_of::<R>();
-        }
-        let precond_res = if let Some(pc) = pc {
-            let tmp2 = &mut ws.tmp2[..n];
-            #[cfg(feature = "metrics")]
-            let pc_start = std::time::Instant::now();
-            pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-            #[cfg(feature = "metrics")]
-            {
-                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-            }
-            let norm = red.norm2(&ws.tmp2[..n]);
-            reduction_count += 1;
-            #[cfg(feature = "metrics")]
-            {
-                metrics.bytes_reduced += std::mem::size_of::<R>();
-            }
-            norm
-        } else {
-            let norm = red.norm2(&ws.tmp1[..n]);
-            reduction_count += 1;
-            #[cfg(feature = "metrics")]
-            {
-                metrics.bytes_reduced += std::mem::size_of::<R>();
-            }
-            norm
-        };
         #[cfg(feature = "logging")]
-        log_residuals(
-            0,
-            "GMRES(s-step)",
-            ResidualSnapshot {
-                true_residual: true_res,
-                preconditioned_residual: precond_res,
-                recurrence_residual: Some(res),
-            },
-        );
+        {
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            let precond_res = if let Some(pc) = pc {
+                let tmp2 = &mut ws.tmp2[..n];
+                #[cfg(feature = "metrics")]
+                let pc_start = std::time::Instant::now();
+                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                }
+                let norm = red.norm2(&ws.tmp2[..n]);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                norm
+            } else {
+                let norm = red.norm2(&ws.tmp1[..n]);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                norm
+            };
+            log_residuals(
+                0,
+                "GMRES(s-step)",
+                ResidualSnapshot {
+                    true_residual: true_res,
+                    preconditioned_residual: precond_res,
+                    recurrence_residual: Some(res),
+                },
+            );
+        }
         if res <= thr {
-            stats.reason = if res <= self.conv.atol {
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
+            stats.reason = if true_reason.is_converged() {
+                true_reason
+            } else if res <= self.conv.atol {
                 ConvergedReason::ConvergedAtol
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            stats.final_residual = res;
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -1639,60 +1643,55 @@ impl GmresSolver {
                         )
                         .with_counters(counters));
                     }
-                    let true_res = Self::true_residual_norm(
-                        a,
-                        b,
-                        x,
-                        red.engine(),
-                        &mut ws.tmp1,
-                        &mut ws.bridge,
-                    );
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics.bytes_reduced += std::mem::size_of::<R>();
-                    }
-                    let precond_res = if let Some(pc) = pc {
-                        let tmp2 = &mut ws.tmp2[..n];
-                        #[cfg(feature = "metrics")]
-                        let pc_start = std::time::Instant::now();
-                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-                        }
-                        let norm = red.norm2(&ws.tmp2[..n]);
-                        reduction_count += 1;
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics.bytes_reduced += std::mem::size_of::<R>();
-                        }
-                        norm
-                    } else {
-                        let norm = red.norm2(&ws.tmp1[..n]);
-                        reduction_count += 1;
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics.bytes_reduced += std::mem::size_of::<R>();
-                        }
-                        norm
-                    };
                     #[cfg(feature = "logging")]
-                    log_residuals(
-                        total_iters,
-                        "GMRES(s-step)",
-                        ResidualSnapshot {
-                            true_residual: true_res,
-                            preconditioned_residual: precond_res,
-                            recurrence_residual: Some(res),
-                        },
-                    );
-                    let refreshed_res = match pc_side {
-                        PcSide::Left | PcSide::Symmetric => precond_res,
-                        PcSide::Right => true_res,
-                    };
-                    if refreshed_res.is_finite() {
-                        res = refreshed_res;
+                    {
+                        let true_res = Self::true_residual_norm(
+                            a,
+                            b,
+                            x,
+                            red.engine(),
+                            &mut ws.tmp1,
+                            &mut ws.bridge,
+                        );
+                        reduction_count += 1;
+                        #[cfg(feature = "metrics")]
+                        {
+                            metrics.bytes_reduced += std::mem::size_of::<R>();
+                        }
+                        let precond_res = if let Some(pc) = pc {
+                            let tmp2 = &mut ws.tmp2[..n];
+                            #[cfg(feature = "metrics")]
+                            let pc_start = std::time::Instant::now();
+                            pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                            }
+                            let norm = red.norm2(&ws.tmp2[..n]);
+                            reduction_count += 1;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.bytes_reduced += std::mem::size_of::<R>();
+                            }
+                            norm
+                        } else {
+                            let norm = red.norm2(&ws.tmp1[..n]);
+                            reduction_count += 1;
+                            #[cfg(feature = "metrics")]
+                            {
+                                metrics.bytes_reduced += std::mem::size_of::<R>();
+                            }
+                            norm
+                        };
+                        log_residuals(
+                            total_iters,
+                            "GMRES(s-step)",
+                            ResidualSnapshot {
+                                true_residual: true_res,
+                                preconditioned_residual: precond_res,
+                                recurrence_residual: Some(res),
+                            },
+                        );
                     }
 
                     if res <= thr || total_iters >= self.conv.max_iters {
@@ -1836,62 +1835,61 @@ impl GmresSolver {
                         .with_counters(counters),
                 );
             }
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
-            reduction_count += 1;
-            #[cfg(feature = "metrics")]
-            {
-                metrics.bytes_reduced += std::mem::size_of::<R>();
-            }
-            let precond_res = if let Some(pc) = pc {
-                let tmp2 = &mut ws.tmp2[..n];
-                #[cfg(feature = "metrics")]
-                let pc_start = std::time::Instant::now();
-                pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                #[cfg(feature = "metrics")]
-                {
-                    metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-                }
-                let norm = red.norm2(&ws.tmp2[..n]);
-                reduction_count += 1;
-                #[cfg(feature = "metrics")]
-                {
-                    metrics.bytes_reduced += std::mem::size_of::<R>();
-                }
-                norm
-            } else {
-                let norm = red.norm2(&ws.tmp1[..n]);
-                reduction_count += 1;
-                #[cfg(feature = "metrics")]
-                {
-                    metrics.bytes_reduced += std::mem::size_of::<R>();
-                }
-                norm
-            };
             #[cfg(feature = "logging")]
-            log_residuals(
-                total_iters,
-                "GMRES(s-step)",
-                ResidualSnapshot {
-                    true_residual: true_res,
-                    preconditioned_residual: precond_res,
-                    recurrence_residual: Some(res),
-                },
-            );
-            let refreshed_res = match pc_side {
-                PcSide::Left | PcSide::Symmetric => precond_res,
-                PcSide::Right => true_res,
-            };
-            if refreshed_res.is_finite() {
-                res = refreshed_res;
+            {
+                let true_res =
+                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                reduction_count += 1;
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.bytes_reduced += std::mem::size_of::<R>();
+                }
+                let precond_res = if let Some(pc) = pc {
+                    let tmp2 = &mut ws.tmp2[..n];
+                    #[cfg(feature = "metrics")]
+                    let pc_start = std::time::Instant::now();
+                    pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+                    }
+                    let norm = red.norm2(&ws.tmp2[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    norm
+                } else {
+                    let norm = red.norm2(&ws.tmp1[..n]);
+                    reduction_count += 1;
+                    #[cfg(feature = "metrics")]
+                    {
+                        metrics.bytes_reduced += std::mem::size_of::<R>();
+                    }
+                    norm
+                };
+                log_residuals(
+                    total_iters,
+                    "GMRES(s-step)",
+                    ResidualSnapshot {
+                        true_residual: true_res,
+                        preconditioned_residual: precond_res,
+                        recurrence_residual: Some(res),
+                    },
+                );
             }
         }
 
-        let (reason, _) = self.conv.check(res, bnorm, total_iters);
-        stats.reason = reason;
-
         let true_res =
             Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        let (reason, _) = self.conv.check(res, bnorm, total_iters);
+        let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
+        stats.reason = if true_reason.is_converged() {
+            true_reason
+        } else {
+            reason
+        };
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
