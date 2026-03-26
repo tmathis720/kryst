@@ -1,7 +1,6 @@
-use crate::algebra::parallel;
+use crate::algebra::parallel_cfg::parallel_tune;
 use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
-use std::sync::atomic::{AtomicPtr, Ordering};
 
 use super::{IluCsr, Real};
 
@@ -64,49 +63,181 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[Real], y: &mut [Real]) -> Res
     let uv = pc.u_val();
     let di = pc.u_diag_ix();
 
-    // Forward: L y = x (unit diagonal). Per-level parallel, disjoint writes.
+    let tune = parallel_tune();
+    let min_parallel_rows = tune.min_rows_ilu_triangular_level_parallel.max(1);
+    let min_bucket_coalesce = tune.min_rows_ilu_triangular_bucket_coalesce.max(1);
+
+    // Forward: L y = x (unit diagonal). Level-group parallel with serial commit.
     y.fill(Real::zero());
-    for bucket in pc.buckets_fwd() {
-        let y_ptr = AtomicPtr::new(y.as_mut_ptr());
-        parallel::par_for_each_index(bucket.len(), move |k| unsafe {
-            let i = *bucket.get_unchecked(k);
-            let mut s = *x.get_unchecked(i);
-            let rs = *lr.get_unchecked(i);
-            let re = *lr.get_unchecked(i + 1);
-            let lc_p = lc.as_ptr();
-            let lv_p = lv.as_ptr();
-            let y_ptr = y_ptr.load(Ordering::Relaxed);
-            for p in rs..re {
-                let j = *lc_p.add(p);
-                s -= *lv_p.add(p) * *y_ptr.add(j);
-            }
-            *y_ptr.add(i) = s;
-        });
+    for group in coalesce_buckets(pc.buckets_fwd(), min_bucket_coalesce) {
+        if group_row_count(group) < min_parallel_rows {
+            solve_forward_group_serial(group, x, y, lr, lc, lv);
+        } else {
+            solve_forward_group_parallel(group, x, y, lr, lc, lv);
+        }
     }
 
-    // Backward: U z = y → write z into y. Per-level parallel, disjoint writes.
-    for bucket in pc.buckets_bwd() {
-        let y_ptr = AtomicPtr::new(y.as_mut_ptr());
-        parallel::par_for_each_index(bucket.len(), move |k| unsafe {
-            let i = *bucket.get_unchecked(k);
-            let y_ptr = y_ptr.load(Ordering::Relaxed);
-            let mut s = *y_ptr.add(i);
-            let rs = *ur.get_unchecked(i);
-            let re = *ur.get_unchecked(i + 1);
-            let uc_p = uc.as_ptr();
-            let uv_p = uv.as_ptr();
-            for p in rs..re {
-                let j = *uc_p.add(p);
-                if j > i {
-                    s -= *uv_p.add(p) * *y_ptr.add(j);
-                }
-            }
-            let d = *uv_p.add(*di.get_unchecked(i));
-            *y_ptr.add(i) = s / d;
-        });
+    // Backward: U z = y → write z into y. Level-group parallel with serial commit.
+    for group in coalesce_buckets(pc.buckets_bwd(), min_bucket_coalesce) {
+        if group_row_count(group) < min_parallel_rows {
+            solve_backward_group_serial(group, y, ur, uc, uv, di);
+        } else {
+            solve_backward_group_parallel(group, y, ur, uc, uv, di);
+        }
     }
 
     Ok(())
+}
+
+fn coalesce_buckets<'a>(
+    buckets: &'a [Vec<usize>],
+    min_bucket_coalesce: usize,
+) -> Vec<&'a [Vec<usize>]> {
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    while start < buckets.len() {
+        let mut end = start + 1;
+        let mut rows = buckets[start].len();
+        while end < buckets.len() && rows < min_bucket_coalesce {
+            rows += buckets[end].len();
+            end += 1;
+        }
+        groups.push(&buckets[start..end]);
+        start = end;
+    }
+    groups
+}
+
+#[inline]
+fn group_row_count(group: &[Vec<usize>]) -> usize {
+    group.iter().map(|bucket| bucket.len()).sum()
+}
+
+fn solve_forward_group_serial(
+    group: &[Vec<usize>],
+    x: &[Real],
+    y: &mut [Real],
+    lr: &[usize],
+    lc: &[usize],
+    lv: &[Real],
+) {
+    for bucket in group {
+        for &i in bucket {
+            let mut s = x[i];
+            for p in lr[i]..lr[i + 1] {
+                s -= lv[p] * y[lc[p]];
+            }
+            y[i] = s;
+        }
+    }
+}
+
+fn solve_forward_group_parallel(
+    group: &[Vec<usize>],
+    x: &[Real],
+    y: &mut [Real],
+    lr: &[usize],
+    lc: &[usize],
+    lv: &[Real],
+) {
+    for bucket in group {
+        #[cfg(feature = "rayon")]
+        let solved: Vec<(usize, Real)> = {
+            use rayon::prelude::*;
+            bucket
+                .par_iter()
+                .map(|&i| {
+                    let mut s = x[i];
+                    for p in lr[i]..lr[i + 1] {
+                        s -= lv[p] * y[lc[p]];
+                    }
+                    (i, s)
+                })
+                .collect()
+        };
+        #[cfg(not(feature = "rayon"))]
+        let solved: Vec<(usize, Real)> = bucket
+            .iter()
+            .map(|&i| {
+                let mut s = x[i];
+                for p in lr[i]..lr[i + 1] {
+                    s -= lv[p] * y[lc[p]];
+                }
+                (i, s)
+            })
+            .collect();
+        for (i, v) in solved {
+            y[i] = v;
+        }
+    }
+}
+
+fn solve_backward_group_serial(
+    group: &[Vec<usize>],
+    y: &mut [Real],
+    ur: &[usize],
+    uc: &[usize],
+    uv: &[Real],
+    di: &[usize],
+) {
+    for bucket in group {
+        for &i in bucket {
+            let mut s = y[i];
+            for p in ur[i]..ur[i + 1] {
+                let j = uc[p];
+                if j > i {
+                    s -= uv[p] * y[j];
+                }
+            }
+            y[i] = s / uv[di[i]];
+        }
+    }
+}
+
+fn solve_backward_group_parallel(
+    group: &[Vec<usize>],
+    y: &mut [Real],
+    ur: &[usize],
+    uc: &[usize],
+    uv: &[Real],
+    di: &[usize],
+) {
+    for bucket in group {
+        #[cfg(feature = "rayon")]
+        let solved: Vec<(usize, Real)> = {
+            use rayon::prelude::*;
+            bucket
+                .par_iter()
+                .map(|&i| {
+                    let mut s = y[i];
+                    for p in ur[i]..ur[i + 1] {
+                        let j = uc[p];
+                        if j > i {
+                            s -= uv[p] * y[j];
+                        }
+                    }
+                    (i, s / uv[di[i]])
+                })
+                .collect()
+        };
+        #[cfg(not(feature = "rayon"))]
+        let solved: Vec<(usize, Real)> = bucket
+            .iter()
+            .map(|&i| {
+                let mut s = y[i];
+                for p in ur[i]..ur[i + 1] {
+                    let j = uc[p];
+                    if j > i {
+                        s -= uv[p] * y[j];
+                    }
+                }
+                (i, s / uv[di[i]])
+            })
+            .collect();
+        for (i, v) in solved {
+            y[i] = v;
+        }
+    }
 }
 
 pub fn tri_solve_transpose_serial(

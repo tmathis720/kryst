@@ -21,6 +21,10 @@ pub struct ParallelTune {
     pub min_rows_ilu_factorization: usize,
     /// Minimum rows to enable Rayon in ILU triangular solves.
     pub min_rows_ilu_triangular: usize,
+    /// Minimum total rows in a level-group to activate parallel level solve work.
+    pub min_rows_ilu_triangular_level_parallel: usize,
+    /// Minimum rows in a bucket-group; smaller consecutive buckets are coalesced.
+    pub min_rows_ilu_triangular_bucket_coalesce: usize,
     /// Minimum rows to enable Rayon in ASM block application.
     pub min_rows_asm_apply: usize,
 }
@@ -36,6 +40,8 @@ impl Default for ParallelTune {
             chunk_cols_spmm_dense: 4,
             min_rows_ilu_factorization: 512,
             min_rows_ilu_triangular: 512,
+            min_rows_ilu_triangular_level_parallel: 128,
+            min_rows_ilu_triangular_bucket_coalesce: 64,
             min_rows_asm_apply: 512,
         }
     }
@@ -183,6 +189,10 @@ pub fn adapt_parallel_tune(
         selected.min_rows_spmv = (selected.min_len_vec / 4).clamp(256, 65_536);
         selected.min_rows_ilu_factorization = (selected.min_rows_spmv / 4).clamp(128, 8_192);
         selected.min_rows_ilu_triangular = selected.min_rows_ilu_factorization;
+        selected.min_rows_ilu_triangular_level_parallel =
+            (selected.min_rows_ilu_triangular / 4).clamp(32, 2_048);
+        selected.min_rows_ilu_triangular_bucket_coalesce =
+            (selected.min_rows_ilu_triangular_level_parallel / 2).max(8);
         selected.min_rows_asm_apply = (selected.min_rows_spmv / 3).clamp(128, 16_384);
 
         if reduction_latency_us > 50.0 {

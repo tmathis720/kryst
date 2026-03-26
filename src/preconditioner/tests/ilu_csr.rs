@@ -288,6 +288,136 @@ fn ilu0_with_rcm_setup() {
     assert!(y.iter().all(|v| v.is_finite()));
 }
 
+#[cfg(feature = "rayon")]
+#[test]
+fn ilu0_level_scheduled_stress_matches_serial_across_thread_counts() {
+    use crate::algebra::parallel_cfg::{ParallelTune, parallel_tune, set_parallel_tune};
+    use crate::preconditioner::PcSide;
+    use oorandom::Rand64;
+    use rayon::ThreadPoolBuilder;
+
+    let a = poisson_2d(12, 12);
+    let cfg_serial = IluCsrConfig {
+        kind: IluKind::Ilu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
+        level_sched: false,
+        numeric_update_fixed: true,
+        logging: 0,
+        reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
+    };
+    let mut cfg_parallel = cfg_serial.clone();
+    cfg_parallel.level_sched = true;
+
+    let mut pc_serial = IluCsr::new_with_config(cfg_serial);
+    pc_serial.setup(&a).unwrap();
+    let mut pc_parallel = IluCsr::new_with_config(cfg_parallel);
+    pc_parallel.setup(&a).unwrap();
+
+    let orig_tune = parallel_tune();
+    let mut tuned: ParallelTune = orig_tune;
+    tuned.min_rows_ilu_triangular = 1;
+    tuned.min_rows_ilu_triangular_level_parallel = 1;
+    tuned.min_rows_ilu_triangular_bucket_coalesce = 1;
+    set_parallel_tune(tuned);
+
+    let mut rng = Rand64::new(7);
+    let rhs: Vec<Vec<R>> = (0..32)
+        .map(|_| {
+            (0..a.nrows())
+                .map(|_| R::from(rng.rand_float()) - R::from(0.5))
+                .collect()
+        })
+        .collect();
+
+    for &threads in &[1usize, 2, 4] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for b in &rhs {
+                let mut y_serial = vec![R::default(); b.len()];
+                let mut y_parallel = vec![R::default(); b.len()];
+                pc_serial.apply(PcSide::Left, b, &mut y_serial).unwrap();
+                pc_parallel.apply(PcSide::Left, b, &mut y_parallel).unwrap();
+                let num = y_serial
+                    .iter()
+                    .zip(&y_parallel)
+                    .map(|(a, b)| (*a - *b) * (*a - *b))
+                    .sum::<R>()
+                    .sqrt();
+                let den = y_serial
+                    .iter()
+                    .map(|a| *a * *a)
+                    .sum::<R>()
+                    .sqrt()
+                    .max(R::from(1e-30));
+                assert!(
+                    num / den < R::from(5e-13),
+                    "thread_count={threads}, relative diff={}",
+                    num / den
+                );
+            }
+        });
+    }
+    set_parallel_tune(orig_tune);
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn ilu0_level_scheduled_deterministic_mode_is_thread_count_invariant() {
+    use crate::algebra::parallel_cfg::{parallel_tune, serial_guard, set_parallel_tune};
+    use crate::preconditioner::PcSide;
+    use rayon::ThreadPoolBuilder;
+
+    let a = poisson_2d(10, 10);
+    let cfg = IluCsrConfig {
+        kind: IluKind::Ilu0,
+        pivot: PivotStrategy::DiagonalPerturbation,
+        pivot_threshold: R::from(1e-12),
+        diag_perturb_factor: R::from(1e-10),
+        level_sched: true,
+        numeric_update_fixed: true,
+        logging: 0,
+        reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
+    };
+    let mut pc = IluCsr::new_with_config(cfg);
+    pc.setup(&a).unwrap();
+
+    let mut tuned = parallel_tune();
+    tuned.min_rows_ilu_triangular = 1;
+    tuned.min_rows_ilu_triangular_level_parallel = 1;
+    tuned.min_rows_ilu_triangular_bucket_coalesce = 1;
+    let orig_tune = parallel_tune();
+    set_parallel_tune(tuned);
+
+    let b: Vec<R> = (0..a.nrows())
+        .map(|i| R::from(i as f64 / a.nrows() as f64) - R::from(0.5))
+        .collect();
+
+    let run = |threads: usize| -> Vec<R> {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let _guard = serial_guard(true);
+            let mut y = vec![R::default(); b.len()];
+            pc.apply(PcSide::Left, &b, &mut y).unwrap();
+            y
+        })
+    };
+
+    let y1 = run(1);
+    let y4 = run(4);
+    assert_eq!(y1, y4);
+    set_parallel_tune(orig_tune);
+}
+
 #[cfg(feature = "complex")]
 #[test]
 fn ilu_csr_apply_s_matches_real_path() {
