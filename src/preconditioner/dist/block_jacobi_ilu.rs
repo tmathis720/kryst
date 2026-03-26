@@ -36,7 +36,7 @@ use crate::matrix::op::CsrOp;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use super::{DistLocalApplyMode, GlobalPcKind, LocalPcKind, MpiPcOptions};
-use super::{DistVec, DistributedPreconditioner};
+use super::{DistVecS, DistributedPreconditioner};
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[derive(Clone)]
@@ -359,7 +359,7 @@ where
 {
     type Scalar = f64;
 
-    fn apply_global(&self, side: PcSide, x: &mut DistVec<'_>) -> Result<(), KError> {
+    fn apply_global(&self, side: PcSide, x: &mut DistVecS<'_, f64>) -> Result<(), KError> {
         debug_assert_eq!(x.row_offset(), self.row_offset);
         debug_assert_eq!(x.local_len(), self.n_local);
         if self.n_local == 0 {
@@ -410,7 +410,7 @@ impl BlockJacobiObjPc {
 impl DistributedPreconditioner for BlockJacobiObjPc {
     type Scalar = f64;
 
-    fn apply_global(&self, side: PcSide, x: &mut DistVec<'_>) -> Result<(), KError> {
+    fn apply_global(&self, side: PcSide, x: &mut DistVecS<'_, f64>) -> Result<(), KError> {
         let _ = &self.comm;
         debug_assert_eq!(x.row_offset(), self.row_offset);
         debug_assert_eq!(x.local_len(), self.n_local);
