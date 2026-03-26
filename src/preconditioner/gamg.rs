@@ -17,6 +17,8 @@ use crate::preconditioner::dist::{
 };
 #[cfg(feature = "backend-faer")]
 use std::str::FromStr;
+#[cfg(feature = "backend-faer")]
+use std::sync::Mutex;
 
 #[cfg(feature = "backend-faer")]
 #[derive(Clone, Debug, Default)]
@@ -514,7 +516,7 @@ fn resolve_route_policy(
     let head_is_auto = policy_head == DistCoarseSolverRoute::Auto;
 
     if !head_is_auto && !dist_route_is_available(policy_head) {
-        return Err(KError::Unsupported(format!(
+        return Err(KError::InvalidInput(format!(
             "{context}: forced distributed coarse route {:?} is unavailable for this build",
             policy_head
         )));
@@ -555,7 +557,7 @@ fn resolve_route_policy(
         }
     }
 
-    Err(KError::Unsupported(format!(
+    Err(KError::InvalidInput(format!(
         "{context}: no available distributed coarse route in fallback chain {:?}",
         chain
     )))
@@ -617,14 +619,14 @@ fn apply_petsc_gamg_defaults(cfg: &mut AMGConfig, gamg_type: GamgType) {
 
 #[cfg(feature = "backend-faer")]
 pub struct Gamg {
-    amg: AMG,
+    amg: Mutex<AMG>,
     config: GamgConfig,
 }
 
 #[cfg(feature = "backend-faer")]
 impl Gamg {
     pub fn with_config(config: GamgConfig) -> Self {
-        let amg = AMG::with_config(config.amg_config.clone());
+        let amg = Mutex::new(AMG::with_config(config.amg_config.clone()));
         Self { amg, config }
     }
 
@@ -633,18 +635,24 @@ impl Gamg {
     }
 
     pub fn set_level_transfer_operators(&mut self, level: usize, operators: AmgTransferOperators) {
-        self.amg.set_level_transfer_operators(level, operators);
+        self.amg
+            .get_mut()
+            .expect("gamg amg mutex poisoned")
+            .set_level_transfer_operators(level, operators);
     }
 
     pub fn set_level_coarse_solver(&mut self, level: usize, solve: CoarseSolve) {
-        self.amg.set_level_coarse_solver(level, solve);
+        self.amg
+            .get_mut()
+            .expect("gamg amg mutex poisoned")
+            .set_level_coarse_solver(level, solve);
     }
 }
 
 #[cfg(feature = "backend-faer")]
 impl Preconditioner for Gamg {
     fn dims(&self) -> (usize, usize) {
-        self.amg.dims()
+        self.amg.lock().expect("gamg amg mutex poisoned").dims()
     }
 
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
@@ -728,7 +736,8 @@ impl Preconditioner for Gamg {
                 effective_cfg.num_grid_sweeps[RelaxPhase::Up.ix()] = post;
             }
         }
-        self.amg = AMG::with_config(effective_cfg.clone());
+        let amg = self.amg.get_mut().expect("gamg amg mutex poisoned");
+        *amg = AMG::with_config(effective_cfg.clone());
         for level in 0..=effective_cfg.max_levels {
             if let Some(p) = resolved_gamg_policy_for_level(
                 &self.config.level_policies,
@@ -745,73 +754,109 @@ impl Preconditioner for Gamg {
                         _ => None,
                     };
                     if let Some(relax) = relax {
-                        self.amg.set_level_relax_type(level, relax);
+                        amg.set_level_relax_type(level, relax);
                     }
                 }
                 if p.sweeps.is_some() || p.pre_sweeps.is_some() || p.post_sweeps.is_some() {
                     let sweeps = p.sweeps.unwrap_or(1);
                     let pre = p.pre_sweeps.unwrap_or(sweeps);
                     let post = p.post_sweeps.unwrap_or(sweeps);
-                    self.amg.set_level_sweeps(level, pre, post);
+                    amg.set_level_sweeps(level, pre, post);
                 }
                 if let Some(solve) = p
                     .coarse_solver
                     .or_else(|| p.pc_type.as_deref().and_then(coarse_solve_from_pc_name))
                     .or_else(|| p.ksp_type.as_ref().map(|_| CoarseSolve::CG))
                 {
-                    self.amg.set_level_coarse_solver(level, solve);
+                    amg.set_level_coarse_solver(level, solve);
                 }
             }
         }
-        self.amg.setup(a)
+        amg.setup(a)
     }
 
     fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        self.amg.apply(side, x, y)
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .apply(side, x, y)
     }
 
     fn apply_op(&self, op: Op, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        self.amg.apply_op(op, x, y)
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .apply_op(op, x, y)
     }
 
     fn apply_op_inplace(&self, op: Op, y: &mut [S]) -> Result<(), KError> {
-        self.amg.apply_op_inplace(op, y)
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .apply_op_inplace(op, y)
     }
 
     fn capabilities(&self) -> PcCaps {
-        self.amg.capabilities()
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .capabilities()
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
-        self.amg.distributed_support()
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .distributed_support()
     }
 
     fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        self.amg.apply_mut(side, x, y)
+        self.amg
+            .get_mut()
+            .expect("gamg amg mutex poisoned")
+            .apply_mut(side, x, y)
     }
 
     fn on_restart(&mut self, outer_iter: usize, residual_norm: R) -> Result<(), KError> {
-        self.amg.on_restart(outer_iter, residual_norm)
+        self.amg
+            .get_mut()
+            .expect("gamg amg mutex poisoned")
+            .on_restart(outer_iter, residual_norm)
     }
 
     fn supports_numeric_update(&self) -> bool {
-        self.amg.supports_numeric_update()
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .supports_numeric_update()
     }
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        self.amg.update_numeric(op)
+        self.amg
+            .get_mut()
+            .expect("gamg amg mutex poisoned")
+            .update_numeric(op)
     }
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        self.amg.update_symbolic(op)
+        self.amg
+            .get_mut()
+            .expect("gamg amg mutex poisoned")
+            .update_symbolic(op)
     }
 
     fn required_format(&self) -> OpFormat {
-        self.amg.required_format()
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .required_format()
     }
 
     fn preferred_drop_tol_for_format(&self) -> Option<R> {
-        self.amg.preferred_drop_tol_for_format()
+        self.amg
+            .lock()
+            .expect("gamg amg mutex poisoned")
+            .preferred_drop_tol_for_format()
     }
 }
 
