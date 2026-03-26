@@ -14,7 +14,7 @@ High-performance Krylov subspace and preconditioned iterative solvers for dense 
 ## PETSc KSP/PC parity snapshot and roadmap focus
 
 - **Current parity estimate (KSP+PC surface):** ~68% practical parity with PETSc for full workflow depth, and ~87% weighted parity on the currently documented compatibility matrix (`Supported=1.0`, `Partial=0.5`).
-- **What this means:** core KSP lifecycle, major Krylov methods, option plumbing, monitoring hooks, and many PC types are already in place; the remaining work is concentrated in advanced composition and distributed/complex depth.
+- **What this means:** core KSP lifecycle, major Krylov methods, option plumbing, monitoring hooks, and many PC types are already in place; the remaining work is concentrated in advanced composition and MPI-backed distributed/complex depth.
 - **Primary project focus:** maintain high customizability and computational efficiency first (MPI/Rayon scaling, reduction-aware Krylov variants, reusable setup paths), rather than adding low-impact parity flags.
 
 Top roadmap priorities are:
