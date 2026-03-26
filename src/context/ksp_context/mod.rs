@@ -920,6 +920,9 @@ impl KspContext {
         if opts.min_len_vec.is_some()
             || opts.min_rows_spmv.is_some()
             || opts.chunk_rows_spmv.is_some()
+            || opts.min_work_spmm_dense.is_some()
+            || opts.chunk_rows_spmm_dense.is_some()
+            || opts.chunk_cols_spmm_dense.is_some()
         {
             let mut tune = parallel_tune();
             if let Some(v) = opts.min_len_vec {
@@ -930,6 +933,15 @@ impl KspContext {
             }
             if let Some(v) = opts.chunk_rows_spmv {
                 tune.chunk_rows_spmv = v;
+            }
+            if let Some(v) = opts.min_work_spmm_dense {
+                tune.min_work_spmm_dense = v;
+            }
+            if let Some(v) = opts.chunk_rows_spmm_dense {
+                tune.chunk_rows_spmm_dense = v;
+            }
+            if let Some(v) = opts.chunk_cols_spmm_dense {
+                tune.chunk_cols_spmm_dense = v;
             }
             set_parallel_tune(tune);
         }

@@ -9,8 +9,8 @@ use crate::matrix::{
     csr::CsrMatrix as GenericCsrMatrix,
     sparse::CsrMatrix,
     spmv::{
-        TBackend, spmm_csr_block, spmv_csr_parallel, spmv_scaled_csr, spmv_t_scaled_csr,
-        t_spmv_csr_parallel,
+        TBackend, spmm_csr_block, spmm_csr_dense, spmv_csr_parallel, spmv_scaled_csr,
+        spmv_t_scaled_csr, t_spmv_csr_parallel,
     },
 };
 
@@ -304,6 +304,83 @@ fn spmm_block_s_two_rhs() {
     a.spmv(&x1, &mut r1);
     assert_eq!(y0, r0);
     assert_eq!(y1, r1);
+}
+
+fn make_block_spmm_fixture(n: usize) -> CsrMatrix {
+    let mut rp = Vec::with_capacity(n + 1);
+    let mut ci = Vec::new();
+    let mut vv = Vec::new();
+    rp.push(0);
+    for i in 0..n {
+        ci.push(i);
+        vv.push(2.0);
+        if i + 1 < n {
+            ci.push(i + 1);
+            vv.push(-0.25);
+        }
+        if i > 0 {
+            ci.push(i - 1);
+            vv.push(0.5);
+        }
+        rp.push(ci.len());
+    }
+    CsrMatrix::from_csr(n, n, rp, ci, vv)
+}
+
+fn fill_block_input(n: usize, p: usize) -> crate::context::ksp_context::BlockVec {
+    let mut x = crate::context::ksp_context::BlockVec::new(n, p);
+    for col in 0..p {
+        let xcol = x.col_mut(col);
+        for (i, xi) in xcol.iter_mut().enumerate() {
+            *xi = ((i + 1 + col) as f64) / ((col + 2) as f64);
+        }
+    }
+    x
+}
+
+#[test]
+fn spmm_csr_dense_matches_columnwise_spmv_for_block_gmres_sizes() {
+    let n = 96;
+    let a = make_block_spmm_fixture(n);
+    for &p in &[1usize, 2, 4, 8] {
+        let x = fill_block_input(n, p);
+        let mut y = crate::context::ksp_context::BlockVec::new(n, p);
+        spmm_csr_dense(&a, &x, &mut y).expect("spmm_csr_dense should succeed");
+
+        for col in 0..p {
+            let mut y_ref = vec![0.0; n];
+            a.spmv(x.col(col), &mut y_ref);
+            assert_eq!(y.col(col), &y_ref);
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn spmm_csr_dense_parallel_tuning_paths_match_serial_for_arnoldi_block_sizes() {
+    use crate::algebra::parallel_cfg::{parallel_tune, serial_guard, set_parallel_tune};
+
+    let n = 160;
+    let a = make_block_spmm_fixture(n);
+    for &p in &[2usize, 4, 8] {
+        let x = fill_block_input(n, p);
+        let mut y_parallel = crate::context::ksp_context::BlockVec::new(n, p);
+        let mut y_serial = crate::context::ksp_context::BlockVec::new(n, p);
+
+        let orig = parallel_tune();
+        let mut tuned = orig;
+        tuned.min_work_spmm_dense = 1;
+        tuned.chunk_rows_spmm_dense = 16;
+        tuned.chunk_cols_spmm_dense = 2;
+        set_parallel_tune(tuned);
+
+        spmm_csr_dense(&a, &x, &mut y_parallel).expect("parallel spmm should succeed");
+        let _guard = serial_guard(true);
+        spmm_csr_dense(&a, &x, &mut y_serial).expect("serial spmm should succeed");
+        set_parallel_tune(orig);
+
+        assert_eq!(y_parallel.as_slice(), y_serial.as_slice());
+    }
 }
 
 #[cfg(all(feature = "simd", not(feature = "complex")))]

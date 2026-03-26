@@ -10,6 +10,12 @@ pub struct ParallelTune {
     pub min_rows_spmv: usize,
     /// Target chunk size in rows for CSR SpMV (approx).
     pub chunk_rows_spmv: usize,
+    /// Minimum work size (`rows * cols`) to enable Rayon in CSR SpMM dense.
+    pub min_work_spmm_dense: usize,
+    /// Target row block size for threaded CSR SpMM dense.
+    pub chunk_rows_spmm_dense: usize,
+    /// Target RHS-column block size for threaded CSR SpMM dense.
+    pub chunk_cols_spmm_dense: usize,
     /// Minimum rows to enable Rayon in ILU factorization kernels.
     pub min_rows_ilu_factorization: usize,
     /// Minimum rows to enable Rayon in ILU triangular solves.
@@ -24,6 +30,9 @@ impl Default for ParallelTune {
             min_len_vec: 8192,
             min_rows_spmv: 2048,
             chunk_rows_spmv: 512,
+            min_work_spmm_dense: 16_384,
+            chunk_rows_spmm_dense: 128,
+            chunk_cols_spmm_dense: 4,
             min_rows_ilu_factorization: 512,
             min_rows_ilu_triangular: 512,
             min_rows_asm_apply: 512,

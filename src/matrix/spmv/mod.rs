@@ -166,17 +166,12 @@ where
     Ok(())
 }
 
-pub fn spmm_csr_dense<A>(a: &A, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError>
+#[inline]
+fn spmm_csr_dense_serial_impl<A>(a: &A, x: &BlockVec, y: &mut BlockVec)
 where
     A: CsrAccess<S>,
 {
-    let (m, n) = (a.nrows(), a.ncols());
-    if x.nrows() != n || y.nrows() != m || x.ncols() != y.ncols() {
-        return Err(KError::InvalidInput(
-            "spmm_csr_dense: dimension mismatch".into(),
-        ));
-    }
-
+    let m = a.nrows();
     let rp = a.row_ptr();
     let cj = a.col_idx();
     let vv = a.values();
@@ -193,14 +188,95 @@ where
         for pos in row_start..row_end {
             let j = cj[pos];
             let aij = vv[pos];
-            let x_base = j;
             for col in 0..p {
                 let y_idx = col * yn + i;
-                let x_idx = col * xn + x_base;
+                let x_idx = col * xn + j;
                 y_data[y_idx] += aij * x_data[x_idx];
             }
         }
     }
+}
+
+#[cfg(feature = "rayon")]
+fn spmm_csr_dense_parallel_impl<A>(a: &A, x: &BlockVec, y: &mut BlockVec)
+where
+    A: CsrAccess<S>,
+{
+    use rayon::prelude::*;
+
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    let m = a.nrows();
+    let n = a.ncols();
+    let p = x.ncols();
+
+    let tune = crate::algebra::parallel_cfg::parallel_tune();
+    let work = m.saturating_mul(p);
+    if crate::algebra::parallel_cfg::force_serial()
+        || work < tune.min_work_spmm_dense
+        || m < tune.chunk_rows_spmm_dense
+        || p <= 1
+    {
+        return spmm_csr_dense_serial_impl(a, x, y);
+    }
+
+    let x_data = x.as_slice();
+    let y_data = y.as_mut_slice();
+    y_data.fill(S::zero());
+
+    let row_block = tune.chunk_rows_spmm_dense.max(1);
+    let col_block = tune.chunk_cols_spmm_dense.max(1);
+    let col_stride = m;
+    let x_stride = n;
+
+    y_data
+        .par_chunks_mut(col_block * col_stride)
+        .enumerate()
+        .for_each(|(col_blk_idx, y_cols_block)| {
+            let col_start = col_blk_idx * col_block;
+            let cols_here = (p - col_start).min(col_block);
+            for row_start in (0..m).step_by(row_block) {
+                let row_end = (row_start + row_block).min(m);
+                for i in row_start..row_end {
+                    let row_nnz_start = rp[i];
+                    let row_nnz_end = rp[i + 1];
+                    for pos in row_nnz_start..row_nnz_end {
+                        let j = cj[pos];
+                        let aij = vv[pos];
+                        for local_col in 0..cols_here {
+                            let col = col_start + local_col;
+                            let y_idx = local_col * col_stride + i;
+                            let x_idx = col * x_stride + j;
+                            y_cols_block[y_idx] += aij * x_data[x_idx];
+                        }
+                    }
+                }
+            }
+        });
+}
+
+#[cfg(not(feature = "rayon"))]
+#[inline]
+fn spmm_csr_dense_parallel_impl<A>(a: &A, x: &BlockVec, y: &mut BlockVec)
+where
+    A: CsrAccess<S>,
+{
+    spmm_csr_dense_serial_impl(a, x, y);
+}
+
+pub fn spmm_csr_dense<A>(a: &A, x: &BlockVec, y: &mut BlockVec) -> Result<(), KError>
+where
+    A: CsrAccess<S>,
+{
+    let (m, n) = (a.nrows(), a.ncols());
+    if x.nrows() != n || y.nrows() != m || x.ncols() != y.ncols() {
+        return Err(KError::InvalidInput(
+            "spmm_csr_dense: dimension mismatch".into(),
+        ));
+    }
+
+    spmm_csr_dense_parallel_impl(a, x, y);
 
     Ok(())
 }

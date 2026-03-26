@@ -145,6 +145,9 @@ pub struct KspOptions {
     pub min_len_vec: Option<usize>,
     pub min_rows_spmv: Option<usize>,
     pub chunk_rows_spmv: Option<usize>,
+    pub min_work_spmm_dense: Option<usize>,
+    pub chunk_rows_spmm_dense: Option<usize>,
+    pub chunk_cols_spmm_dense: Option<usize>,
     /// Damping/step parameter for Richardson KSP.
     pub richardson_omega: Option<f64>,
     /// Damping/step parameter for Chebyshev-as-KSP mode.
@@ -1059,6 +1062,18 @@ impl Sink for KspOptions {
                 &mut self.chunk_rows_spmv,
                 ensure_ge_1("ksp_chunk_rows_spmv", parse_as::<usize>(v, spec)?)?
             ),
+            "ksp_min_work_spmm_dense" => set_opt!(
+                &mut self.min_work_spmm_dense,
+                ensure_ge_1("ksp_min_work_spmm_dense", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_chunk_rows_spmm_dense" => set_opt!(
+                &mut self.chunk_rows_spmm_dense,
+                ensure_ge_1("ksp_chunk_rows_spmm_dense", parse_as::<usize>(v, spec)?)?
+            ),
+            "ksp_chunk_cols_spmm_dense" => set_opt!(
+                &mut self.chunk_cols_spmm_dense,
+                ensure_ge_1("ksp_chunk_cols_spmm_dense", parse_as::<usize>(v, spec)?)?
+            ),
             "ksp_richardson_omega" => {
                 set_opt!(&mut self.richardson_omega, parse_as::<f64>(v, spec)?)
             }
@@ -1870,6 +1885,24 @@ impl KspOptions {
             })?;
             me.chunk_rows_spmv = Some(ensure_ge_1("KRYST_KSP_CHUNK_ROWS_SPMV", n)?);
         }
+        if let Ok(v) = std::env::var("KRYST_KSP_MIN_WORK_SPMM_DENSE") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_MIN_WORK_SPMM_DENSE: {v}"))
+            })?;
+            me.min_work_spmm_dense = Some(ensure_ge_1("KRYST_KSP_MIN_WORK_SPMM_DENSE", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CHUNK_ROWS_SPMM_DENSE") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_CHUNK_ROWS_SPMM_DENSE: {v}"))
+            })?;
+            me.chunk_rows_spmm_dense = Some(ensure_ge_1("KRYST_KSP_CHUNK_ROWS_SPMM_DENSE", n)?);
+        }
+        if let Ok(v) = std::env::var("KRYST_KSP_CHUNK_COLS_SPMM_DENSE") {
+            let n: usize = v.parse().map_err(|_| {
+                KError::SolveError(format!("Invalid KRYST_KSP_CHUNK_COLS_SPMM_DENSE: {v}"))
+            })?;
+            me.chunk_cols_spmm_dense = Some(ensure_ge_1("KRYST_KSP_CHUNK_COLS_SPMM_DENSE", n)?);
+        }
         Ok(me)
     }
 
@@ -1936,6 +1969,9 @@ impl KspOptions {
         o!(min_len_vec);
         o!(min_rows_spmv);
         o!(chunk_rows_spmv);
+        o!(min_work_spmm_dense);
+        o!(chunk_rows_spmm_dense);
+        o!(chunk_cols_spmm_dense);
         o!(richardson_omega);
         o!(chebyshev_omega);
         o!(gcr_restart);
