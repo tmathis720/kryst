@@ -1687,6 +1687,13 @@ impl GmresSolver {
                             recurrence_residual: Some(res),
                         },
                     );
+                    let refreshed_res = match pc_side {
+                        PcSide::Left | PcSide::Symmetric => precond_res,
+                        PcSide::Right => true_res,
+                    };
+                    if refreshed_res.is_finite() {
+                        res = refreshed_res;
+                    }
 
                     if res <= thr || total_iters >= self.conv.max_iters {
                         break;
@@ -1871,6 +1878,13 @@ impl GmresSolver {
                     recurrence_residual: Some(res),
                 },
             );
+            let refreshed_res = match pc_side {
+                PcSide::Left | PcSide::Symmetric => precond_res,
+                PcSide::Right => true_res,
+            };
+            if refreshed_res.is_finite() {
+                res = refreshed_res;
+            }
         }
 
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
