@@ -134,9 +134,16 @@ impl ParCsrMatrix {
 
     /// Canonical distributed operator backing this legacy wrapper.
     pub fn canonical_dist_op(&self) -> Result<&DistCsrOp, KError> {
-        self.canonical
-            .get_or_try_init(|| DistCsrOp::from_parcsr(self).map(Arc::new))
-            .map(Arc::as_ref)
+        if let Some(op) = self.canonical.get() {
+            return Ok(op.as_ref());
+        }
+        let op = Arc::new(DistCsrOp::from_parcsr(self)?);
+        let _ = self.canonical.set(op);
+        Ok(self
+            .canonical
+            .get()
+            .expect("ParCsrMatrix canonical operator was set")
+            .as_ref())
     }
 
     #[deprecated(

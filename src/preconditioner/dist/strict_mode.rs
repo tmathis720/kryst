@@ -1,5 +1,6 @@
 use crate::error::KError;
 use crate::matrix::DistCsrOp;
+use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc};
 

@@ -6,6 +6,7 @@
 
 mod coarse;
 mod native_plan;
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
 mod strict_mode;
 
 pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
@@ -14,6 +15,7 @@ pub use native_plan::{
     DistRouteFallbackReason, DistRoutePolicy, DistRoutePolicyBudget, DistRouteResolveInput,
     DistRouteSelection, resolve_dist_route, validate_dist_route_policy_budget,
 };
+#[cfg(all(not(feature = "complex"), feature = "mpi"))]
 pub use strict_mode::validate_dist_builder_strict_mode;
 
 use crate::algebra::scalar::S as ScalarAlias;
