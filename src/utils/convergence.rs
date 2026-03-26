@@ -343,6 +343,19 @@ pub struct SolverCounters {
     pub residual_replacements: usize,
 }
 
+/// GCR-specific accounting captured by GCR/PipeGCR variants.
+#[derive(Clone, Debug, Default)]
+pub struct GcrCounters {
+    /// Number of `(p_i, Ap_i)` basis pairs accepted into the Krylov basis.
+    pub basis_updates: usize,
+    /// Solver-observed synchronization/reduction count.
+    pub sync_count: usize,
+    /// Number of restart boundaries crossed during the solve.
+    pub restart_count: usize,
+    /// Whether the solve executed at least one restart.
+    pub restarted: bool,
+}
+
 /// Structured failure details propagated from a nested preconditioner solve.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NestedPcFailure {
@@ -410,6 +423,8 @@ pub struct SolveStats<R> {
     pub reason: ConvergedReason,
     /// Additional counters collected during the solve.
     pub counters: SolverCounters,
+    /// Optional GCR-specific counters.
+    pub gcr_counters: Option<GcrCounters>,
     /// Reduction accounting model for the selected solver variant.
     pub reduction_model: Option<ReductionModel>,
     /// Total number of complex drift events observed during reductions.
@@ -437,6 +452,7 @@ impl<R: Default> SolveStats<R> {
             final_residual,
             reason,
             counters: SolverCounters::default(),
+            gcr_counters: None,
             reduction_model: None,
             complex_drift_events: 0,
             complex_drift_counts: [0; 6],
@@ -455,6 +471,12 @@ impl<R: Default> SolveStats<R> {
 
     pub fn with_reduction_model(mut self, model: ReductionModel) -> Self {
         self.reduction_model = Some(model);
+        self
+    }
+
+    /// Attach GCR-specific counters.
+    pub fn with_gcr_counters(mut self, counters: GcrCounters) -> Self {
+        self.gcr_counters = Some(counters);
         self
     }
 
