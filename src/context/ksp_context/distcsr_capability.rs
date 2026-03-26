@@ -1,5 +1,8 @@
 use crate::context::ksp_context::SolverType;
-use crate::preconditioner::dist::{DistLocalApplyMode, GlobalPcKind, LocalPcKind};
+use crate::preconditioner::dist::{
+    DistLocalApplyMode, DistRouteDecisionReport, DistRouteSelection, GlobalPcKind, LocalPcKind,
+    MpiPcOptions,
+};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug)]
@@ -105,11 +108,37 @@ pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilit
     }
 }
 
+pub fn build_dist_route_decision_report(
+    mpi_opts: &MpiPcOptions,
+    selected: DistRouteSelection,
+    fallback_reason: Option<String>,
+    fallback_chain_len: usize,
+) -> DistRouteDecisionReport {
+    let requested_mode = if mpi_opts.local_apply_mode.is_distributed_native() {
+        "native_distributed"
+    } else {
+        "adapter_distributed"
+    };
+    DistRouteDecisionReport {
+        requested_mode,
+        selected_mode: selected.as_str(),
+        fallback_reason,
+        strict_local_apply: mpi_opts.local_apply_mode.requires_native(),
+        native_required: mpi_opts.route_policy_budget.native_required,
+        fallback_chain_len,
+        max_allowed_fallbacks: mpi_opts.route_policy_budget.max_allowed_fallbacks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{resolve_distcsr_capability, DistCsrCapabilityKey};
+    use super::{
+        DistCsrCapabilityKey, build_dist_route_decision_report, resolve_distcsr_capability,
+    };
     use crate::context::ksp_context::SolverType;
-    use crate::preconditioner::dist::{DistLocalApplyMode, GlobalPcKind, LocalPcKind};
+    use crate::preconditioner::dist::{
+        DistLocalApplyMode, DistRouteSelection, GlobalPcKind, LocalPcKind, MpiPcOptions,
+    };
 
     #[test]
     fn wrapped_local_disables_native_global_candidate() {
@@ -198,5 +227,27 @@ mod tests {
             Some("incompatible_solver_mode")
         );
         assert_eq!(cap.registry_rule, "ksp_solver_mode_incompatible");
+    }
+
+    #[test]
+    fn route_report_tracks_requested_selected_and_budget_state() {
+        let mut opts = MpiPcOptions::default();
+        opts.local_apply_mode = DistLocalApplyMode::NativeStrict;
+        opts.route_policy_budget.native_required = true;
+        opts.route_policy_budget.max_allowed_fallbacks = Some(0);
+        let report = build_dist_route_decision_report(
+            &opts,
+            DistRouteSelection::DistCsrNativeBlockJacobi,
+            None,
+            0,
+        );
+        assert_eq!(report.requested_mode, "native_distributed");
+        assert_eq!(
+            report.selected_mode,
+            DistRouteSelection::DistCsrNativeBlockJacobi.as_str()
+        );
+        assert!(report.strict_local_apply);
+        assert!(report.native_required);
+        assert_eq!(report.max_allowed_fallbacks, Some(0));
     }
 }

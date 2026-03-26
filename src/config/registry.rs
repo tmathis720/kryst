@@ -401,6 +401,20 @@ pub static SPECS: &[Spec] = &[
         doc: "distributed route preference: native | adapted | root_gather",
     },
     Spec {
+        flag: "-pc_dist_max_fallbacks",
+        key: "pc_dist_max_fallbacks",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "maximum fallback events allowed in distributed route selection",
+    },
+    Spec {
+        flag: "-pc_dist_native_required",
+        key: "pc_dist_native_required",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "require native distributed route; fail early on adapted/configured fallback routes",
+    },
+    Spec {
         flag: "-pc_jacobi_block_size",
         key: "pc_jacobi_block_size",
         arity: Arity::One,
