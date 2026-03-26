@@ -858,6 +858,44 @@ pub struct FactorizationStats {
     pub condition_estimate: Option<f64>,
     /// Memory usage in bytes
     pub memory_usage: usize,
+    /// Chosen distributed factorization route
+    pub route: FactorizationRoute,
+    /// Route-selection diagnostics for 2D/3D decision
+    pub route_diagnostics: RouteSelectionDiagnostics,
+    /// Synthetic strong-scaling benchmark scenarios for this setup
+    pub strong_scaling_scenarios: Vec<StrongScalingBenchmarkScenario>,
+}
+
+/// Numerical route used by distributed LU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorizationRoute {
+    TwoD,
+    #[cfg(feature = "superlu3d")]
+    ThreeD,
+}
+
+/// Diagnostics that explain why a 2D or 3D route was selected.
+#[derive(Debug, Clone)]
+pub struct RouteSelectionDiagnostics {
+    pub requested_3d: bool,
+    pub can_use_3d: bool,
+    pub selected_route: FactorizationRoute,
+    pub reason: String,
+    pub estimated_2d_comm_volume: f64,
+    pub estimated_3d_comm_volume: f64,
+    pub communication_reduction_ratio: f64,
+}
+
+/// Strong-scaling scenario metadata to compare route behavior.
+#[derive(Debug, Clone)]
+pub struct StrongScalingBenchmarkScenario {
+    pub name: String,
+    pub problem_size: usize,
+    pub nnz: usize,
+    pub process_count: usize,
+    pub route: FactorizationRoute,
+    pub predicted_comm_volume: f64,
+    pub predicted_panel_steps: usize,
 }
 
 /// Communication pattern for distributed triangular solve
@@ -4125,6 +4163,144 @@ impl SuperLuDistSolver {
         Ok(())
     }
 
+    fn estimate_comm_volume_2d(n: usize, panel_size: usize, procs: usize) -> f64 {
+        if procs <= 1 || n == 0 {
+            return 0.0;
+        }
+        let npanels = n.div_ceil(panel_size.max(1));
+        (npanels as f64) * (n as f64) * ((procs - 1) as f64)
+    }
+
+    fn estimate_comm_volume_3d(
+        n: usize,
+        panel_size: usize,
+        procs: usize,
+        depth: usize,
+        memory_tradeoff: f64,
+    ) -> f64 {
+        if procs <= 1 || n == 0 || depth <= 1 {
+            return Self::estimate_comm_volume_2d(n, panel_size, procs);
+        }
+        let base = Self::estimate_comm_volume_2d(n, panel_size, procs);
+        let tradeoff = memory_tradeoff.max(0.1);
+        base / ((depth as f64).sqrt() * tradeoff)
+    }
+
+    fn select_factorization_route(
+        &self,
+        n: usize,
+        panel_size: usize,
+        comm: &UniverseComm,
+    ) -> RouteSelectionDiagnostics {
+        let requested_3d = self.options.enable_3d_factorization;
+        let depth = self.options.process_grid_3d_depth.unwrap_or(1);
+        let estimated_2d = Self::estimate_comm_volume_2d(n, panel_size, comm.size());
+        let estimated_3d = Self::estimate_comm_volume_3d(
+            n,
+            panel_size,
+            comm.size(),
+            depth,
+            self.options.memory_tradeoff_factor,
+        );
+
+        #[cfg(feature = "superlu3d")]
+        let can_use_3d = requested_3d && depth > 1 && comm.size().is_multiple_of(depth);
+        #[cfg(not(feature = "superlu3d"))]
+        let can_use_3d = false;
+
+        #[cfg(feature = "superlu3d")]
+        let (selected_route, reason) = if can_use_3d {
+            (
+                FactorizationRoute::ThreeD,
+                format!(
+                    "3D enabled with depth={depth}; estimated comm {:.2e} vs 2D {:.2e}",
+                    estimated_3d, estimated_2d
+                ),
+            )
+        } else if requested_3d {
+            (
+                FactorizationRoute::TwoD,
+                format!(
+                    "3D requested but unavailable (depth={depth}, procs={}); using 2D",
+                    comm.size()
+                ),
+            )
+        } else {
+            (
+                FactorizationRoute::TwoD,
+                "3D not requested; using production 2D route".to_string(),
+            )
+        };
+
+        #[cfg(not(feature = "superlu3d"))]
+        let (selected_route, reason) = if requested_3d {
+            (
+                FactorizationRoute::TwoD,
+                "3D requested but crate built without `superlu3d`; using 2D".to_string(),
+            )
+        } else {
+            (
+                FactorizationRoute::TwoD,
+                "3D not requested; using production 2D route".to_string(),
+            )
+        };
+
+        RouteSelectionDiagnostics {
+            requested_3d,
+            can_use_3d,
+            selected_route,
+            reason,
+            estimated_2d_comm_volume: estimated_2d,
+            estimated_3d_comm_volume: estimated_3d,
+            communication_reduction_ratio: if estimated_2d > 0.0 {
+                estimated_3d / estimated_2d
+            } else {
+                1.0
+            },
+        }
+    }
+
+    fn strong_scaling_scenarios(
+        &self,
+        n: usize,
+        nnz: usize,
+        route: FactorizationRoute,
+        panel_size: usize,
+        base_procs: usize,
+    ) -> Vec<StrongScalingBenchmarkScenario> {
+        [1usize, 2, 4]
+            .iter()
+            .map(|mult| {
+                let procs = (base_procs * mult).max(1);
+                let predicted_comm = match route {
+                    FactorizationRoute::TwoD => Self::estimate_comm_volume_2d(n, panel_size, procs),
+                    #[cfg(feature = "superlu3d")]
+                    FactorizationRoute::ThreeD => Self::estimate_comm_volume_3d(
+                        n,
+                        panel_size,
+                        procs,
+                        self.options.process_grid_3d_depth.unwrap_or(1),
+                        self.options.memory_tradeoff_factor,
+                    ),
+                };
+                let pipeline_width = if self.options.async_panel_updates {
+                    self.options.max_concurrent_panels.max(1)
+                } else {
+                    1
+                };
+                StrongScalingBenchmarkScenario {
+                    name: format!("n{n}_p{procs}_{route:?}"),
+                    problem_size: n,
+                    nnz,
+                    process_count: procs,
+                    route,
+                    predicted_comm_volume: predicted_comm,
+                    predicted_panel_steps: n.div_ceil(panel_size.max(1) * pipeline_width),
+                }
+            })
+            .collect()
+    }
+
     fn large_diag_row_permutation(
         &self,
         matrix: &CsrMatrix<f64>,
@@ -4285,6 +4461,43 @@ impl SuperLuDistSolver {
         Ok(local_matrix)
     }
 
+    fn compute_column_permutation(
+        &self,
+        matrix: &CsrMatrix<f64>,
+        n: usize,
+        comm: &UniverseComm,
+        distribution: &BlockCyclicDistribution,
+    ) -> Result<Vec<usize>, KError> {
+        match self.options.column_permutation {
+            ColumnPermutation::Natural => Ok(OrderingAlgorithms::natural_ordering(n)),
+            ColumnPermutation::MmdAta => {
+                if comm.size() > 1 {
+                    OrderingAlgorithms::mmd_ata_ordering_distributed(matrix, comm, distribution)
+                } else {
+                    Ok(OrderingAlgorithms::mmd_ata_ordering(matrix))
+                }
+            }
+            ColumnPermutation::Metis => OrderingAlgorithms::metis_ordering(matrix),
+            ColumnPermutation::ParMetis => {
+                #[cfg(feature = "parmetis")]
+                {
+                    OrderingAlgorithms::parmetis_ordering(matrix, comm, distribution)
+                }
+                #[cfg(not(feature = "parmetis"))]
+                {
+                    #[cfg(feature = "logging")]
+                    if comm.rank() == 0 {
+                        log::warn!(
+                            "ColumnPermutation::ParMetis requested without `parmetis` feature; falling back to distributed MMD"
+                        );
+                    }
+                    OrderingAlgorithms::mmd_ata_ordering_distributed(matrix, comm, distribution)
+                }
+            }
+            ColumnPermutation::User => Ok(OrderingAlgorithms::natural_ordering(n)),
+        }
+    }
+
     /// Enhanced symbolic factorization using ordering algorithms
     fn symbolic_factorization(
         &self,
@@ -4311,29 +4524,7 @@ impl SuperLuDistSolver {
         );
 
         // Compute column permutation based on strategy
-        let col_perm = match self.options.column_permutation {
-            ColumnPermutation::Natural => OrderingAlgorithms::natural_ordering(n),
-            ColumnPermutation::MmdAta => {
-                if comm.size() > 1 {
-                    OrderingAlgorithms::mmd_ata_ordering_distributed(
-                        matrix,
-                        comm,
-                        &data.distribution,
-                    )?
-                } else {
-                    OrderingAlgorithms::mmd_ata_ordering(matrix)
-                }
-            }
-            ColumnPermutation::Metis => OrderingAlgorithms::metis_ordering(matrix)?,
-            ColumnPermutation::ParMetis => {
-                OrderingAlgorithms::parmetis_ordering(matrix, comm, &data.distribution)?
-            }
-            ColumnPermutation::User => {
-                // User-provided permutation would be stored in options
-                // For now, use natural ordering
-                OrderingAlgorithms::natural_ordering(n)
-            }
-        };
+        let col_perm = self.compute_column_permutation(matrix, n, comm, &data.distribution)?;
 
         // Compute row permutation based on strategy
         let row_perm = match self.options.row_permutation {
@@ -4417,6 +4608,27 @@ impl SuperLuDistSolver {
             "Starting numerical factorization with panel size {panel_size}, pivot strategy {pivot_strategy:?}"
         );
 
+        let route_diagnostics = self.select_factorization_route(n, panel_size, comm);
+        #[cfg(feature = "logging")]
+        if self.options.enabled(1, 1) && comm.rank() == 0 {
+            log::info!(
+                "Route selection: {:?} (requested_3d={}, can_use_3d={}, reason={})",
+                route_diagnostics.selected_route,
+                route_diagnostics.requested_3d,
+                route_diagnostics.can_use_3d,
+                route_diagnostics.reason
+            );
+        }
+        #[cfg(feature = "superlu3d")]
+        if matches!(route_diagnostics.selected_route, FactorizationRoute::ThreeD) {
+            let depth = self.options.process_grid_3d_depth.unwrap_or(1);
+            let _grid3d = ProcessGrid3D::from_2d_with_depth(&data.process_grid, depth)?;
+            #[cfg(feature = "logging")]
+            if self.options.enabled(1, 1) && comm.rank() == 0 {
+                log::info!("Using production 3D factorization route with depth={depth}");
+            }
+        }
+
         let mut panels = Vec::new();
         let mut panel_factors = Vec::new();
         let mut total_row_swaps = 0;
@@ -4424,61 +4636,86 @@ impl SuperLuDistSolver {
         let mut panels_with_replacements = 0usize;
         let mut max_pivot_growth = 1.0;
 
-        // Process matrix in panels
-        for panel_start in (0..n).step_by(panel_size) {
-            let panel_end = std::cmp::min(panel_start + panel_size, n);
+        // Process matrix in panels with optional look-ahead pipeline window.
+        let panel_starts: Vec<usize> = (0..n).step_by(panel_size).collect();
+        let mut pipeline_width = if self.options.async_panel_updates {
+            self.options.max_concurrent_panels.max(1)
+        } else {
+            1
+        };
+        #[cfg(feature = "superlu3d")]
+        if matches!(route_diagnostics.selected_route, FactorizationRoute::ThreeD) {
+            let depth = self.options.process_grid_3d_depth.unwrap_or(1).max(1);
+            pipeline_width = (pipeline_width * depth).max(1);
+        }
+        for window in panel_starts.chunks(pipeline_width) {
+            // Look-ahead stage: prepare scheduling metadata for upcoming panels.
+            let mut scheduled = Vec::with_capacity(window.len());
+            for &panel_start in window {
+                let panel_end = std::cmp::min(panel_start + panel_size, n);
+                scheduled.push((panel_start, panel_end));
+            }
 
-            // Extract rows that have nonzeros in this panel's columns
-            let mut panel_rows = Vec::new();
-            let rp = matrix.row_ptr();
-            let cj = matrix.col_idx();
-            for i in 0..matrix.nrows() {
-                let row_start = rp[i];
-                let row_end = rp[i + 1];
-
-                for idx in row_start..row_end {
-                    let col = cj[idx];
-                    if col >= panel_start && col < panel_end {
-                        panel_rows.push(i);
-                        break;
-                    }
+            // Factorization stage for currently scheduled panels.
+            for (panel_start, panel_end) in scheduled {
+                #[cfg(feature = "logging")]
+                if self.options.enabled(2, 2) {
+                    log::debug!("Factoring panel [{panel_start}, {panel_end})");
                 }
-            }
 
-            if panel_rows.is_empty() {
-                continue; // No nonzeros in this panel
-            }
+                // Extract rows that have nonzeros in this panel's columns
+                let mut panel_rows = Vec::new();
+                let rp = matrix.row_ptr();
+                let cj = matrix.col_idx();
+                for i in 0..matrix.nrows() {
+                    let row_start = rp[i];
+                    let row_end = rp[i + 1];
 
-            // Create panel from sparse matrix
-            let mut panel = Panel::from_sparse_columns(matrix, panel_start, panel_end, panel_rows);
-
-            // Factorize the panel
-            match panel.factorize_lu(self.options.diagonal_pivot_threshold, pivot_strategy) {
-                Ok(factor) => {
-                    total_row_swaps += factor.num_row_swaps;
-                    tiny_pivots_replaced_total += factor.tiny_pivots_replaced;
-                    if factor.tiny_pivots_replaced > 0 {
-                        panels_with_replacements += 1;
-                    }
-
-                    // Estimate pivot growth (simplified)
-                    for i in 0..panel.width.min(panel.height) {
-                        let diag_val = panel.data[i * panel.height + i].abs();
-                        if diag_val > max_pivot_growth {
-                            max_pivot_growth = diag_val;
+                    for idx in row_start..row_end {
+                        let col = cj[idx];
+                        if col >= panel_start && col < panel_end {
+                            panel_rows.push(i);
+                            break;
                         }
                     }
+                }
 
-                    panel_factors.push(factor);
+                if panel_rows.is_empty() {
+                    continue; // No nonzeros in this panel
                 }
-                Err(e) => {
-                    #[cfg(feature = "logging")]
-                    log::error!("Panel factorization failed: {e}");
-                    return Err(e);
+
+                // Create panel from sparse matrix
+                let mut panel =
+                    Panel::from_sparse_columns(matrix, panel_start, panel_end, panel_rows);
+
+                // Factorize the panel
+                match panel.factorize_lu(self.options.diagonal_pivot_threshold, pivot_strategy) {
+                    Ok(factor) => {
+                        total_row_swaps += factor.num_row_swaps;
+                        tiny_pivots_replaced_total += factor.tiny_pivots_replaced;
+                        if factor.tiny_pivots_replaced > 0 {
+                            panels_with_replacements += 1;
+                        }
+
+                        // Estimate pivot growth (simplified)
+                        for i in 0..panel.width.min(panel.height) {
+                            let diag_val = panel.data[i * panel.height + i].abs();
+                            if diag_val > max_pivot_growth {
+                                max_pivot_growth = diag_val;
+                            }
+                        }
+
+                        panel_factors.push(factor);
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "logging")]
+                        log::error!("Panel factorization failed: {e}");
+                        return Err(e);
+                    }
                 }
+
+                panels.push(panel);
             }
-
-            panels.push(panel);
         }
 
         // Create global permutations (simplified - in real SuperLU_DIST this would be distributed)
@@ -4495,6 +4732,14 @@ impl SuperLuDistSolver {
             .sum::<usize>()
             + (global_row_perm.len() + global_col_perm.len()) * std::mem::size_of::<usize>();
 
+        let strong_scaling_scenarios = self.strong_scaling_scenarios(
+            n,
+            matrix.nnz(),
+            route_diagnostics.selected_route,
+            panel_size,
+            comm.size().max(1),
+        );
+
         let factor_stats = FactorizationStats {
             num_panels: panels.len(),
             total_row_swaps,
@@ -4502,6 +4747,9 @@ impl SuperLuDistSolver {
             max_pivot_growth,
             condition_estimate: None, // Would require more sophisticated analysis
             memory_usage,
+            route: route_diagnostics.selected_route,
+            route_diagnostics: route_diagnostics.clone(),
+            strong_scaling_scenarios,
         };
 
         #[cfg(feature = "logging")]
@@ -5408,6 +5656,17 @@ mod tests {
                 max_pivot_growth: 1.0,
                 condition_estimate: None,
                 memory_usage: 0,
+                route: FactorizationRoute::TwoD,
+                route_diagnostics: RouteSelectionDiagnostics {
+                    requested_3d: false,
+                    can_use_3d: false,
+                    selected_route: FactorizationRoute::TwoD,
+                    reason: "unit test default".to_string(),
+                    estimated_2d_comm_volume: 0.0,
+                    estimated_3d_comm_volume: 0.0,
+                    communication_reduction_ratio: 1.0,
+                },
+                strong_scaling_scenarios: Vec::new(),
             },
             l_block_graph: vec![vec![], vec![]],
             u_block_graph: vec![vec![], vec![]],
@@ -5472,6 +5731,17 @@ mod tests {
                 max_pivot_growth: 1.0,
                 condition_estimate: None,
                 memory_usage: 0,
+                route: FactorizationRoute::TwoD,
+                route_diagnostics: RouteSelectionDiagnostics {
+                    requested_3d: false,
+                    can_use_3d: false,
+                    selected_route: FactorizationRoute::TwoD,
+                    reason: "unit test default".to_string(),
+                    estimated_2d_comm_volume: 0.0,
+                    estimated_3d_comm_volume: 0.0,
+                    communication_reduction_ratio: 1.0,
+                },
+                strong_scaling_scenarios: Vec::new(),
             },
             l_block_graph: vec![vec![], vec![], vec![]],
             u_block_graph: vec![vec![], vec![], vec![]],
@@ -6763,6 +7033,29 @@ mod tests {
         tags.sort_unstable();
         let expected = vec![(block_id << 8) + 1, (block_id << 8) + 2];
         assert_eq!(tags, expected);
+    }
+
+    #[test]
+    fn test_route_selection_diagnostics_2d_default() {
+        let comm = UniverseComm::NoComm(NoComm);
+        let solver = SuperLuDistSolver::new();
+        let diag = solver.select_factorization_route(512, 64, &comm);
+        assert_eq!(diag.selected_route, FactorizationRoute::TwoD);
+        assert!(!diag.requested_3d);
+        assert!(diag.estimated_2d_comm_volume >= 0.0);
+    }
+
+    #[test]
+    fn test_strong_scaling_scenarios_generated() {
+        let solver = SuperLuDistBuilder::new()
+            .async_panel_updates(true)
+            .max_concurrent_panels(2)
+            .build();
+        let scenarios =
+            solver.strong_scaling_scenarios(1024, 8192, FactorizationRoute::TwoD, 64, 2);
+        assert_eq!(scenarios.len(), 3);
+        assert!(scenarios[1].process_count > scenarios[0].process_count);
+        assert!(scenarios.iter().all(|s| s.predicted_panel_steps > 0));
     }
 }
 
