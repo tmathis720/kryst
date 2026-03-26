@@ -446,6 +446,10 @@ pub struct PcOptions {
     pub pc_dist_local_apply: Option<String>,
     /// Route selection policy for distributed PCs: native|adapted|root_gather.
     pub pc_dist_route: Option<String>,
+    /// Maximum number of distributed route fallbacks allowed before setup fails.
+    pub pc_dist_max_fallbacks: Option<usize>,
+    /// Require native distributed route selection at policy level.
+    pub pc_dist_native_required: Option<bool>,
     /// ILU variant ("iluk", "ilut", ...).
     pub ilu_variant: Option<String>,
     /// Reordering strategy for ILU.
@@ -1116,6 +1120,7 @@ impl Sink for PcOptions {
             }
             // Approximate inverse (CSR) options
             "pc_approxinv_parallel" => set_opt!(&mut self.approxinv_parallel, v),
+            "pc_dist_native_required" => set_opt!(&mut self.pc_dist_native_required, v),
             "pc_fixdiag" => set_opt!(&mut self.pc_fixdiag, v),
             "pc_bddc_use_vertices" => set_opt!(&mut self.pc_bddc_use_vertices, v),
             "pc_view" => set_opt!(&mut self.pc_view, v),
@@ -1130,6 +1135,9 @@ impl Sink for PcOptions {
             "pc_local" => set_opt!(&mut self.pc_local, v.to_lowercase()),
             "pc_dist_local_apply" => set_opt!(&mut self.pc_dist_local_apply, v.to_lowercase()),
             "pc_dist_route" => set_opt!(&mut self.pc_dist_route, v.to_lowercase()),
+            "pc_dist_max_fallbacks" => {
+                set_opt!(&mut self.pc_dist_max_fallbacks, parse_as::<usize>(v, spec)?)
+            }
             "pc_ilu_levels" => set_opt!(&mut self.ilu_level, parse_as::<usize>(v, spec)?),
             "pc_chebyshev_degree" => {
                 set_opt!(&mut self.chebyshev_degree, parse_as::<usize>(v, spec)?)
@@ -2701,6 +2709,8 @@ impl PcOptions {
         o!(pc_local);
         o!(pc_dist_local_apply);
         o!(pc_dist_route);
+        o!(pc_dist_max_fallbacks);
+        o!(pc_dist_native_required);
         o!(ilu_variant);
         o!(ilu_reordering);
 
@@ -2850,6 +2860,8 @@ impl PcOptions {
             .map(DistRoutePolicy::from_str)
             .transpose()?
             .unwrap_or(opts.route_policy);
+        opts.route_policy_budget.max_allowed_fallbacks = self.pc_dist_max_fallbacks;
+        opts.route_policy_budget.native_required = self.pc_dist_native_required.unwrap_or(false);
 
         for warning_code in
             Self::distributed_setting_warnings(opts.route_policy, opts.local_apply_mode)
@@ -4376,6 +4388,17 @@ mod old_tests {
         opts.pc_dist_route = Some("adapted".to_string());
         let mpi_opts = opts.mpi_pc_options().unwrap();
         assert_eq!(mpi_opts.route_policy, DistRoutePolicy::Adapted);
+    }
+
+    #[cfg(feature = "backend-faer")]
+    #[test]
+    fn test_dist_route_policy_budget_cli_to_mpi_options() {
+        let mut opts = PcOptions::default();
+        opts.pc_dist_max_fallbacks = Some(1);
+        opts.pc_dist_native_required = Some(true);
+        let mpi_opts = opts.mpi_pc_options().unwrap();
+        assert_eq!(mpi_opts.route_policy_budget.max_allowed_fallbacks, Some(1));
+        assert!(mpi_opts.route_policy_budget.native_required);
     }
 
     #[cfg(feature = "backend-faer")]

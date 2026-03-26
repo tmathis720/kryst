@@ -10,8 +10,9 @@ mod strict_mode;
 
 pub use coarse::{DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy};
 pub use native_plan::{
-    DistLocalApplyMode, DistRouteDecision, DistRouteDecisionReason, DistRouteFallbackReason,
-    DistRoutePolicy, DistRouteResolveInput, DistRouteSelection, resolve_dist_route,
+    DistLocalApplyMode, DistRouteDecision, DistRouteDecisionReason, DistRouteDecisionReport,
+    DistRouteFallbackReason, DistRoutePolicy, DistRoutePolicyBudget, DistRouteResolveInput,
+    DistRouteSelection, resolve_dist_route, validate_dist_route_policy_budget,
 };
 pub use strict_mode::validate_dist_builder_strict_mode;
 
@@ -145,6 +146,7 @@ pub struct MpiPcOptions {
     pub ilutp_perm_tol: f64,
     pub local_apply_mode: DistLocalApplyMode,
     pub route_policy: DistRoutePolicy,
+    pub route_policy_budget: DistRoutePolicyBudget,
 }
 
 impl Default for MpiPcOptions {
@@ -162,6 +164,7 @@ impl Default for MpiPcOptions {
             ilutp_perm_tol: 0.1,
             local_apply_mode: DistLocalApplyMode::NativeLocalHalo,
             route_policy: DistRoutePolicy::Native,
+            route_policy_budget: DistRoutePolicyBudget::default(),
         }
     }
 }

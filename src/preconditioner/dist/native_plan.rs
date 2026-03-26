@@ -1,4 +1,5 @@
 use crate::error::KError;
+use serde::Serialize;
 use std::str::FromStr;
 
 /// High-level route selection policy for distributed preconditioners.
@@ -21,6 +22,68 @@ pub enum DistRouteFallbackReason {
     AdapterOnlyPolicy,
     RootGatherPolicy,
     MissingDistCsrOperator,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct DistRoutePolicyBudget {
+    pub max_allowed_fallbacks: Option<usize>,
+    pub native_required: bool,
+}
+
+impl Default for DistRoutePolicyBudget {
+    fn default() -> Self {
+        Self {
+            max_allowed_fallbacks: None,
+            native_required: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DistRouteDecisionReport {
+    pub requested_mode: &'static str,
+    pub selected_mode: &'static str,
+    pub fallback_reason: Option<String>,
+    pub strict_local_apply: bool,
+    pub native_required: bool,
+    pub fallback_chain_len: usize,
+    pub max_allowed_fallbacks: Option<usize>,
+}
+
+impl DistRouteDecisionReport {
+    pub fn fallback_budget_exceeded(&self) -> bool {
+        self.max_allowed_fallbacks
+            .is_some_and(|max| self.fallback_chain_len > max)
+    }
+}
+
+pub fn validate_dist_route_policy_budget(
+    report: &DistRouteDecisionReport,
+    fallback_chain: &[String],
+) -> Result<(), KError> {
+    if report.native_required
+        && report.selected_mode != DistRouteSelection::DistCsrNativeBlockJacobi.as_str()
+    {
+        return Err(KError::InvalidInput(format!(
+            "distributed route policy requires native mode, but selected={} requested={} fallback_reason={}",
+            report.selected_mode,
+            report.requested_mode,
+            report
+                .fallback_reason
+                .clone()
+                .unwrap_or_else(|| "none".to_string())
+        )));
+    }
+
+    if report.fallback_budget_exceeded() {
+        return Err(KError::InvalidInput(format!(
+            "distributed route fallback budget exceeded: used={} max={} chain={:?}",
+            report.fallback_chain_len,
+            report.max_allowed_fallbacks.unwrap_or(0),
+            fallback_chain
+        )));
+    }
+    Ok(())
 }
 
 impl DistRouteFallbackReason {
@@ -243,8 +306,9 @@ impl FromStr for DistLocalApplyMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        DistLocalApplyMode, DistRouteDecisionReason, DistRouteFallbackReason, DistRoutePolicy,
-        DistRouteResolveInput, DistRouteSelection, resolve_dist_route,
+        DistLocalApplyMode, DistRouteDecisionReason, DistRouteDecisionReport,
+        DistRouteFallbackReason, DistRoutePolicy, DistRouteResolveInput, DistRouteSelection,
+        resolve_dist_route, validate_dist_route_policy_budget,
     };
     use std::str::FromStr;
 
@@ -331,5 +395,57 @@ mod tests {
             DistRouteFallbackReason::NativeSetupFailed.as_str(),
             "native_setup_failed"
         );
+    }
+
+    #[test]
+    fn budget_check_enforces_native_only_policy() {
+        let report = DistRouteDecisionReport {
+            requested_mode: "native_distributed",
+            selected_mode: DistRouteSelection::LocalAdapter.as_str(),
+            fallback_reason: Some("adapter_only_policy".to_string()),
+            strict_local_apply: false,
+            native_required: true,
+            fallback_chain_len: 1,
+            max_allowed_fallbacks: Some(3),
+        };
+        let err = validate_dist_route_policy_budget(&report, &["adapter_only_policy".to_string()])
+            .expect_err("native-required policy should fail for adapted route");
+        assert!(err.to_string().contains("requires native mode"));
+    }
+
+    #[test]
+    fn budget_check_enforces_max_fallbacks() {
+        let report = DistRouteDecisionReport {
+            requested_mode: "native_distributed",
+            selected_mode: DistRouteSelection::DistCsrNativeBlockJacobi.as_str(),
+            fallback_reason: None,
+            strict_local_apply: false,
+            native_required: false,
+            fallback_chain_len: 2,
+            max_allowed_fallbacks: Some(1),
+        };
+        let chain = vec![
+            "auto_promoted_from_local".to_string(),
+            "native_setup_failed".to_string(),
+        ];
+        let err = validate_dist_route_policy_budget(&report, &chain)
+            .expect_err("fallback budget should be enforced");
+        assert!(err.to_string().contains("fallback budget exceeded"));
+    }
+
+    #[test]
+    fn budget_check_accepts_auto_fallback_within_budget() {
+        let report = DistRouteDecisionReport {
+            requested_mode: "native_distributed",
+            selected_mode: DistRouteSelection::DistCsrNativeBlockJacobi.as_str(),
+            fallback_reason: None,
+            strict_local_apply: false,
+            native_required: false,
+            fallback_chain_len: 1,
+            max_allowed_fallbacks: Some(2),
+        };
+        let chain = vec!["auto_promoted_from_local".to_string()];
+        validate_dist_route_policy_budget(&report, &chain)
+            .expect("auto fallback should succeed within budget");
     }
 }

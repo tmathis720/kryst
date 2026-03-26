@@ -72,11 +72,12 @@ use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, Weighting};
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::preconditioner::dist::{
     DistCoarseStrategy, DistPcAdapter, DistPcBuilder, DistRouteDecisionReason,
-    DistRouteResolveInput, DistRouteSelection, GlobalPcKind, resolve_dist_route,
+    DistRouteResolveInput, GlobalPcKind, resolve_dist_route,
 };
 #[cfg(feature = "backend-faer")]
 use crate::preconditioner::dist::{
-    DistLocalApplyMode, DistRouteFallbackReason, DistRoutePolicy, MpiPcOptions,
+    DistLocalApplyMode, DistRouteDecisionReport, DistRouteFallbackReason, DistRoutePolicy,
+    DistRouteSelection, MpiPcOptions, validate_dist_route_policy_budget,
 };
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
@@ -106,7 +107,8 @@ mod workspace;
 pub use crate::core::block::BlockVec;
 #[cfg(feature = "backend-faer")]
 use distcsr_capability::{
-    DistCsrCapabilityEntry, DistCsrCapabilityKey, resolve_distcsr_capability,
+    DistCsrCapabilityEntry, DistCsrCapabilityKey, build_dist_route_decision_report,
+    resolve_distcsr_capability,
 };
 use execution::KrylovVariant;
 pub use execution::{
@@ -435,6 +437,7 @@ struct PendingMpiPc {
 struct DistRouteDiagnosticsState {
     selected_route: Option<String>,
     capability_entry: Option<DistCsrCapabilityEntry>,
+    decision_report: Option<DistRouteDecisionReport>,
     fallback_chain: Vec<String>,
     fallback_reason: Option<String>,
     fallback_counters: BTreeMap<String, usize>,
@@ -1750,6 +1753,9 @@ impl KspContext {
                     .clone()
                     .unwrap_or_else(|| "unresolved".to_string()),
             );
+            if let Some(report) = self.dist_route_diag.decision_report.as_ref() {
+                insert_value(&mut solver_config, "pc_dist_route_decision_report", report);
+            }
             if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
                 insert_value(&mut solver_config, "pc_dist_capability_entry", entry);
                 insert_value(
@@ -1867,6 +1873,9 @@ impl KspContext {
                             .clone()
                             .unwrap_or_else(|| "unresolved".to_string()),
                     );
+                    if let Some(report) = self.dist_route_diag.decision_report.as_ref() {
+                        insert_value(&mut diag.config, "pc_dist_route_decision_report", report);
+                    }
                     if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
                         insert_value(&mut diag.config, "pc_dist_capability_entry", entry);
                         diag.native_distributed_supported =
@@ -1986,6 +1995,13 @@ impl KspContext {
                                     .clone()
                                     .unwrap_or_else(|| "unresolved".to_string()),
                             );
+                            if let Some(report) = self.dist_route_diag.decision_report.as_ref() {
+                                insert_value(
+                                    &mut diag.config,
+                                    "pc_dist_route_decision_report",
+                                    report,
+                                );
+                            }
                             if let Some(entry) = self.dist_route_diag.capability_entry.as_ref() {
                                 insert_value(&mut diag.config, "pc_dist_capability_entry", entry);
                                 diag.native_distributed_supported =
@@ -3328,6 +3344,11 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
+    fn set_dist_route_decision_report(&mut self, report: DistRouteDecisionReport) {
+        self.dist_route_diag.decision_report = Some(report);
+    }
+
+    #[cfg(feature = "backend-faer")]
     fn push_dist_route_fallback(&mut self, reason: DistRouteFallbackReason) {
         let key = reason.as_str().to_string();
         self.dist_route_diag.fallback_chain.push(key.clone());
@@ -3341,6 +3362,23 @@ impl KspContext {
     #[cfg(feature = "backend-faer")]
     fn set_dist_route_fallback_reason(&mut self, reason: impl Into<String>) {
         self.dist_route_diag.fallback_reason = Some(reason.into());
+    }
+
+    #[cfg(feature = "backend-faer")]
+    fn refresh_and_validate_dist_route_report(
+        &mut self,
+        pending: &PendingMpiPc,
+        selected: DistRouteSelection,
+    ) -> Result<(), KError> {
+        let report = build_dist_route_decision_report(
+            &pending.mpi_opts,
+            selected,
+            self.dist_route_diag.fallback_reason.clone(),
+            self.dist_route_diag.fallback_chain.len(),
+        );
+        validate_dist_route_policy_budget(&report, &self.dist_route_diag.fallback_chain)?;
+        self.set_dist_route_decision_report(report);
+        Ok(())
     }
 
     #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
@@ -3605,6 +3643,10 @@ impl KspContext {
                 self.set_dist_route_fallback_reason(format!(
                     "native preflight rejected: {reasons}"
                 ));
+                self.refresh_and_validate_dist_route_report(
+                    &pending,
+                    DistRouteSelection::DistCsrNativeBlockJacobi,
+                )?;
                 if strict_local_apply {
                     return Err(KError::InvalidInput(format!(
                         "pc_dist_local_apply=strict requires native DistCsr apply readiness; preflight rejected: {reasons}"
@@ -3645,6 +3687,10 @@ impl KspContext {
                 if !explicit_global {
                     self.push_dist_route_fallback(DistRouteFallbackReason::AutoPromotedFromLocal);
                 }
+                self.refresh_and_validate_dist_route_report(
+                    &pending,
+                    DistRouteSelection::DistCsrNativeBlockJacobi,
+                )?;
                 let mut new_pc = self.build_mpi_global_pc(&native_pending, dist_op)?;
                 let want = new_pc.required_format();
                 let tol = new_pc.preferred_drop_tol_for_format().unwrap_or_default();
@@ -3659,6 +3705,10 @@ impl KspContext {
                     Err(err) => {
                         self.push_dist_route_fallback(DistRouteFallbackReason::NativeSetupFailed);
                         self.set_dist_route_fallback_reason(err.to_string());
+                        self.refresh_and_validate_dist_route_report(
+                            &pending,
+                            DistRouteSelection::DistCsrNativeBlockJacobi,
+                        )?;
                         if strict_local_apply {
                             return Err(KError::InvalidInput(format!(
                                 "pc_dist_local_apply=strict requires native DistCsr apply setup, but setup failed: {err}"
@@ -3675,6 +3725,10 @@ impl KspContext {
         if decision.selected == DistRouteSelection::ConfiguredGlobal {
             let Some(dist_op) = dist_op else {
                 self.push_dist_route_fallback(DistRouteFallbackReason::MissingDistCsrOperator);
+                self.refresh_and_validate_dist_route_report(
+                    &pending,
+                    DistRouteSelection::ConfiguredGlobal,
+                )?;
                 return Err(KError::InvalidInput(
                     "-pc_global requires DistCsrOp when running distributed".into(),
                 ));
@@ -3687,6 +3741,10 @@ impl KspContext {
             };
             self.set_dist_route_selected(format!("{configured_label}:{decision_reasons}"));
             self.push_dist_route_fallback(DistRouteFallbackReason::ConfiguredGlobalFallback);
+            self.refresh_and_validate_dist_route_report(
+                &pending,
+                DistRouteSelection::ConfiguredGlobal,
+            )?;
             let setup_token = format!(
                 "phase=setup;rank={};size={};row_start={};local_rows={};global_rows={};route={}",
                 dist_op.comm().rank(),
@@ -3703,6 +3761,10 @@ impl KspContext {
             let pmat_view = materialize(pmat.clone(), want, tol)?;
             if let Err(err) = new_pc.setup(pmat_view.as_ref()) {
                 self.set_dist_route_fallback_reason(err.to_string());
+                self.refresh_and_validate_dist_route_report(
+                    &pending,
+                    DistRouteSelection::ConfiguredGlobal,
+                )?;
                 self.handle_pc_setup_failure(err, pmat, sid, vid)?;
                 return Ok(false);
             }
@@ -3734,6 +3796,10 @@ impl KspContext {
                 decision_reasons
             ));
             self.push_dist_route_fallback(DistRouteFallbackReason::AdapterOnlyPolicy);
+            self.refresh_and_validate_dist_route_report(
+                &pending,
+                DistRouteSelection::LocalAdapter,
+            )?;
             if strict_local_apply {
                 return Err(KError::InvalidInput(
                     "pc_dist_local_apply=strict forbids local adapter fallback; use a native DistCsr route".into(),
@@ -3749,6 +3815,7 @@ impl KspContext {
                 decision_reasons
             ));
             self.push_dist_route_fallback(DistRouteFallbackReason::RootGatherPolicy);
+            self.refresh_and_validate_dist_route_report(&pending, DistRouteSelection::RootGather)?;
             if strict_local_apply {
                 return Err(KError::InvalidInput(
                     "pc_dist_local_apply=strict forbids root-gather fallback; use a native DistCsr route".into(),
