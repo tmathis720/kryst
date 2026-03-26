@@ -444,9 +444,15 @@ fn chebyshev_t(m: usize, x: R) -> R {
 
 #[derive(Default)]
 struct ChebScratch {
-    v0: Vec<R>,
-    v1: Vec<R>,
-    v2: Vec<R>,
+    v0: Vec<S>,
+    v1: Vec<S>,
+    v2: Vec<S>,
+    spmv_in_re: Vec<f64>,
+    spmv_out_re: Vec<f64>,
+    #[cfg(feature = "complex")]
+    spmv_in_im: Vec<f64>,
+    #[cfg(feature = "complex")]
+    spmv_out_im: Vec<f64>,
 }
 
 /// Object-safe Chebyshev preconditioner
@@ -472,27 +478,121 @@ impl ChebyshevPc {
     }
 }
 
-#[cfg(not(feature = "complex"))]
+fn estimate_hermitian_magnitude_lmax(a: &CsrMatrix<f64>) -> Result<f64, KError> {
+    let n = a.nrows();
+    if n == 0 {
+        return Ok(1.0);
+    }
+    // Complex-safe strategy:
+    // estimate on D^{-1/2} A D^{-1/2} with D taken from |diag(A)|. This behaves
+    // like a Hermitian-magnitude bound for real-projected operators and remains
+    // valid when the runtime scalar is complex.
+    let mut d_sqrt_inv = vec![1.0; n];
+    let diag = a.diag();
+    for i in 0..n {
+        let di = diag[i].abs();
+        d_sqrt_inv[i] = if di > 1e-30 { 1.0 / di.sqrt() } else { 1.0 };
+    }
+    let est = estimate_lmax_sym(a, &d_sqrt_inv, 4)?;
+    Ok(est.max(1e-8))
+}
+
+fn normalize_bounds(
+    a: &CsrMatrix<f64>,
+    lambda_min: f64,
+    lambda_max: f64,
+) -> Result<ChebBounds, KError> {
+    let provided_lo = lambda_min.abs();
+    let provided_hi = lambda_max.abs();
+    let mut lam_max = if provided_hi.is_finite() && provided_hi > 0.0 {
+        provided_hi
+    } else {
+        estimate_hermitian_magnitude_lmax(a)?
+    };
+    let mut lam_min = if provided_lo.is_finite() && provided_lo > 0.0 {
+        provided_lo
+    } else {
+        0.1 * lam_max
+    };
+    if lam_min >= lam_max {
+        lam_max = lam_max.max(lam_min * 1.25);
+        lam_min = (0.1 * lam_max).max(1e-12);
+    }
+    Ok(ChebBounds { lam_max, lam_min })
+}
+
+fn csr_real_matvec_scalar(
+    a: &CsrMatrix<f64>,
+    x: &[S],
+    y: &mut [S],
+    s: &mut ChebScratch,
+) -> Result<(), KError> {
+    let n = a.nrows();
+    if x.len() != n || y.len() != n {
+        return Err(KError::InvalidInput(
+            "dimension mismatch in csr_real_matvec_scalar".into(),
+        ));
+    }
+    for i in 0..n {
+        s.spmv_in_re[i] = x[i].real();
+    }
+    a.spmv_scaled(1.0, &s.spmv_in_re, 0.0, &mut s.spmv_out_re)?;
+    #[cfg(not(feature = "complex"))]
+    {
+        for i in 0..n {
+            y[i] = S::from_real(s.spmv_out_re[i]);
+        }
+    }
+    #[cfg(feature = "complex")]
+    {
+        for i in 0..n {
+            s.spmv_in_im[i] = x[i].imag();
+        }
+        a.spmv_scaled(1.0, &s.spmv_in_im, 0.0, &mut s.spmv_out_im)?;
+        for i in 0..n {
+            y[i] = S::from_parts(s.spmv_out_re[i], s.spmv_out_im[i]);
+        }
+    }
+    Ok(())
+}
+
 impl ObjPreconditioner for ChebyshevPc {
     fn dims(&self) -> (usize, usize) {
         (self.n, self.n)
     }
 
-    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), crate::error::KError> {
+    fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), crate::error::KError> {
         let csr = csr_from_linop(op, 0.0)?;
         let n = csr.nrows();
+        let b = normalize_bounds(&csr, self.lambda_min, self.lambda_max)?;
+        self.lambda_min = b.lam_min;
+        self.lambda_max = b.lam_max;
         self.a_csr = Some(csr);
         self.n = n;
         // ensure scratch
         let mut s = self.scratch.lock().unwrap();
         if s.v0.len() != n {
-            s.v0.resize(n, R::default());
+            s.v0.resize(n, S::default());
         }
         if s.v1.len() != n {
-            s.v1.resize(n, R::default());
+            s.v1.resize(n, S::default());
         }
         if s.v2.len() != n {
-            s.v2.resize(n, R::default());
+            s.v2.resize(n, S::default());
+        }
+        if s.spmv_in_re.len() != n {
+            s.spmv_in_re.resize(n, 0.0);
+        }
+        if s.spmv_out_re.len() != n {
+            s.spmv_out_re.resize(n, 0.0);
+        }
+        #[cfg(feature = "complex")]
+        if s.spmv_in_im.len() != n {
+            s.spmv_in_im.resize(n, 0.0);
+        }
+        #[cfg(feature = "complex")]
+        if s.spmv_out_im.len() != n {
+            s.spmv_out_im.resize(n, 0.0);
         }
         Ok(())
     }
@@ -501,9 +601,12 @@ impl ObjPreconditioner for ChebyshevPc {
         true
     }
 
-    fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), crate::error::KError> {
+    fn update_numeric(&mut self, op: &dyn LinOp<S = S>) -> Result<(), crate::error::KError> {
         // For now, refresh CSR view and keep degree/spectrum
         let csr = csr_from_linop(op, 0.0)?;
+        let b = normalize_bounds(&csr, self.lambda_min, self.lambda_max)?;
+        self.lambda_min = b.lam_min;
+        self.lambda_max = b.lam_max;
         self.a_csr = Some(csr);
         Ok(())
     }
@@ -511,8 +614,8 @@ impl ObjPreconditioner for ChebyshevPc {
     fn apply(
         &self,
         _side: crate::preconditioner::PcSide,
-        r: &[f64],
-        z: &mut [f64],
+        r: &[S],
+        z: &mut [S],
     ) -> Result<(), crate::error::KError> {
         use crate::error::KError;
         let a = self
@@ -543,7 +646,7 @@ impl ObjPreconditioner for ChebyshevPc {
                 z.copy_from_slice(r);
                 return Ok(());
             }
-            let tau = 1.0 / chebyshev_t(self.degree, (0.0 - c) / d);
+            let tau = S::from_real(1.0 / chebyshev_t(self.degree, (0.0 - c) / d));
 
             if self.degree == 0 {
                 z.copy_from_slice(r);
@@ -551,9 +654,9 @@ impl ObjPreconditioner for ChebyshevPc {
             }
 
             // v1 = (A r - c r) / d
-            a.spmv_scaled(1.0, r, 0.0, &mut v1[..n])?;
+            csr_real_matvec_scalar(a, r, &mut v1[..n], &mut s)?;
             for i in 0..n {
-                v1[i] = (v1[i] - c * r[i]) / d;
+                v1[i] = (v1[i] - S::from_real(c) * r[i]) / S::from_real(d);
             }
             if self.degree == 1 {
                 for i in 0..n {
@@ -568,9 +671,11 @@ impl ObjPreconditioner for ChebyshevPc {
             // Recurrence for k = 2..=m
             for _k in 2..=self.degree {
                 // v2 = 2 * ((A v1 - c v1)/d) - v0
-                a.spmv_scaled(1.0, &v1[..n], 0.0, &mut v2[..n])?;
+                csr_real_matvec_scalar(a, &v1[..n], &mut v2[..n], &mut s)?;
                 for i in 0..n {
-                    v2[i] = 2.0 * ((v2[i] - c * v1[i]) / d) - v0[i];
+                    v2[i] = S::from_real(2.0)
+                        * ((v2[i] - S::from_real(c) * v1[i]) / S::from_real(d))
+                        - v0[i];
                 }
                 // rotate: v0 <- v1, v1 <- v2, v2 becomes scratch (old v0)
                 std::mem::swap(&mut v0, &mut v1);
@@ -602,30 +707,6 @@ impl ObjPreconditioner for ChebyshevPc {
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
-    }
-
-    fn distributed_support(&self) -> PcDistributedSupport {
-        PcDistributedSupport::Distributed
-    }
-}
-
-#[cfg(feature = "complex")]
-impl ObjPreconditioner for ChebyshevPc {
-    fn setup(&mut self, _op: &dyn LinOp<S = S>) -> Result<(), crate::error::KError> {
-        Err(KError::Unsupported(
-            "Chebyshev does not support complex scalars yet".into(),
-        ))
-    }
-
-    fn apply(
-        &self,
-        _side: crate::preconditioner::PcSide,
-        _x: &[S],
-        _y: &mut [S],
-    ) -> Result<(), crate::error::KError> {
-        Err(KError::Unsupported(
-            "Chebyshev does not support complex scalars yet".into(),
-        ))
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
@@ -771,19 +852,61 @@ mod tests {
 mod complex_tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::error::KError;
+    use crate::config::kinds::{PcType, SolverType};
+    use crate::context::KspContext;
+    use crate::matrix::op::CsrOp;
+    use crate::matrix::op::LinOp;
+    use crate::matrix::sparse::CsrMatrix;
     use crate::ops::kpc::KPreconditioner;
     use crate::preconditioner::PcSide;
+    use std::sync::Arc;
 
     #[test]
-    fn apply_s_reports_unsupported() {
-        let pc = ChebyshevPc::new(2, 0.5, 3.0);
-        let rhs = vec![S::one(); 2];
+    fn apply_s_complex_setup_and_apply() {
+        let row_ptr = vec![0, 2, 4];
+        let col_idx = vec![0, 1, 0, 1];
+        let values = vec![1.5, 0.0, 0.0, 1.5];
+        let op = CsrOp::new(Arc::new(CsrMatrix::from_csr(
+            2, 2, row_ptr, col_idx, values,
+        )));
+
+        let mut pc = ChebyshevPc::new(3, -0.2, 0.0);
+        pc.setup(&op as &dyn LinOp<S = S>).expect("setup");
+        let rhs = vec![S::from_parts(1.0, 0.25), S::from_parts(-2.0, 0.5)];
         let mut out = vec![S::zero(); rhs.len()];
         let mut scratch = BridgeScratch::default();
-        let err = pc
-            .apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
-            .unwrap_err();
-        assert!(matches!(err, KError::Unsupported(_)));
+        pc.apply_s(PcSide::Left, &rhs, &mut out, &mut scratch)
+            .expect("apply_s");
+        assert!(out.iter().all(|v| v.is_finite()));
+        assert!(
+            out.iter()
+                .zip(rhs.iter())
+                .any(|(o, r)| (*o - *r).abs() > 1e-8)
+        );
+    }
+
+    #[test]
+    fn chebyshev_pc_integrates_with_ksp_context_complex() {
+        let row_ptr = vec![0, 1, 2, 3];
+        let col_idx = vec![0, 1, 2];
+        let values = vec![1.0, 1.0, 1.0];
+        let a = Arc::new(CsrOp::new(Arc::new(CsrMatrix::from_csr(
+            3, 3, row_ptr, col_idx, values,
+        ))));
+
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Richardson).expect("set solver");
+        ksp.set_pc_type(PcType::Chebyshev, None).expect("set pc");
+        ksp.set_operators(a.clone(), None);
+        ksp.setup().expect("ksp setup");
+
+        let b = vec![
+            S::from_parts(1.0, 1.0),
+            S::from_parts(-2.0, 0.0),
+            S::from_parts(0.5, -0.5),
+        ];
+        let mut x = vec![S::zero(); b.len()];
+        ksp.solve(&b, &mut x).expect("ksp solve");
+        assert!(x.iter().all(|xi| xi.is_finite()));
     }
 }
