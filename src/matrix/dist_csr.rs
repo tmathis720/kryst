@@ -11,11 +11,13 @@ use std::sync::Arc;
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
+use crate::matrix::csr::CsrMatrix as PlanCsrMatrix;
 use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan, HaloTuning};
 use crate::matrix::dist::spmv_dist::RowRanges;
 use crate::matrix::op::{ChangeIds, DistLayout, LinOp, StructureId, ValuesId};
 use crate::matrix::parcsr::ParCsrMatrix;
 use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::spmv::plan::{self as spmv_plan, SpmvKernel, SpmvPlan, SpmvTuning};
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -68,9 +70,11 @@ pub struct DistCsrOp {
     #[cfg_attr(feature = "rayon", allow(dead_code))]
     local_only: RowRanges,
     border: RowRanges,
-    border_row_ranges: Vec<Option<std::ops::Range<usize>>>,
-    border_col_unified: Vec<usize>,
-    border_vals: Vec<S>,
+    border_ghost_row_ranges: Vec<Option<std::ops::Range<usize>>>,
+    border_ghost_col_unified: Vec<usize>,
+    border_ghost_vals: Vec<S>,
+    local_diag_plan: SpmvPlan<S>,
+    plan_diagnostics: DistributedPlanDiagnostics,
     halo: HaloPlan,
     overlap_mode: HaloOverlapMode,
     ids: ChangeIds,
@@ -80,6 +84,83 @@ pub struct DistCsrOp {
 pub enum HaloOverlapMode {
     Disabled,
     Interior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistLocalKernelStrategy {
+    RowSplitScalar,
+    LocalDiagSpmvPlan,
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributedPlanMetrics {
+    pub n_local_rows: usize,
+    pub local_nnz: usize,
+    pub local_diag_nnz: usize,
+    pub ghost_nnz: usize,
+    pub local_only_rows: usize,
+    pub border_rows: usize,
+    pub halo_recv_volume: usize,
+    pub halo_send_volume: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributedPlanDiagnostics {
+    pub overlap_mode: HaloOverlapMode,
+    pub kernel_strategy: DistLocalKernelStrategy,
+    pub local_spmv_kernel: Option<SpmvKernel>,
+    pub row_locality_ratio: f64,
+    pub border_ratio: f64,
+    pub halo_recv_volume: usize,
+    pub halo_send_volume: usize,
+    pub expected_communication_fraction: f64,
+    pub expected_computation_fraction: f64,
+}
+
+pub fn choose_distributed_plan(
+    metrics: &DistributedPlanMetrics,
+    local_spmv_kernel: Option<SpmvKernel>,
+) -> DistributedPlanDiagnostics {
+    let n_rows = metrics.n_local_rows.max(1) as f64;
+    let row_locality_ratio = (metrics.local_only_rows as f64 / n_rows).clamp(0.0, 1.0);
+    let border_ratio = (metrics.border_rows as f64 / n_rows).clamp(0.0, 1.0);
+    let halo_volume = metrics.halo_recv_volume + metrics.halo_send_volume;
+    let halo_per_row = halo_volume as f64 / n_rows;
+    let ghost_pressure = metrics.ghost_nnz as f64 / metrics.local_nnz.max(1) as f64;
+    let communication_pressure =
+        (0.5 * border_ratio + 0.3 * ghost_pressure + 0.2 * (halo_per_row / 8.0)).clamp(0.0, 1.0);
+
+    let overlap_mode = if communication_pressure >= 0.28 {
+        HaloOverlapMode::Interior
+    } else {
+        HaloOverlapMode::Disabled
+    };
+
+    let kernel_strategy = match local_spmv_kernel {
+        Some(_) if row_locality_ratio >= 0.55 || communication_pressure < 0.25 => {
+            DistLocalKernelStrategy::LocalDiagSpmvPlan
+        }
+        _ => DistLocalKernelStrategy::RowSplitScalar,
+    };
+
+    let mut expected_communication_fraction =
+        (0.55 * border_ratio + 0.45 * ghost_pressure + (halo_per_row / 32.0)).clamp(0.0, 0.95);
+    if overlap_mode == HaloOverlapMode::Interior {
+        expected_communication_fraction *= 0.82;
+    }
+    let expected_computation_fraction = (1.0 - expected_communication_fraction).clamp(0.05, 1.0);
+
+    DistributedPlanDiagnostics {
+        overlap_mode,
+        kernel_strategy,
+        local_spmv_kernel,
+        row_locality_ratio,
+        border_ratio,
+        halo_recv_volume: metrics.halo_recv_volume,
+        halo_send_volume: metrics.halo_send_volume,
+        expected_communication_fraction,
+        expected_computation_fraction,
+    }
 }
 
 impl DistCsrOp {
@@ -165,28 +246,58 @@ impl DistCsrOp {
         let local_only = RowRanges::from_mask(&row_is_local, true);
         let border = RowRanges::from_mask(&row_is_local, false);
 
-        let mut border_row_ranges = vec![None; n_local];
-        let mut border_col_unified = Vec::new();
-        let mut border_vals = Vec::new();
+        let mut border_ghost_row_ranges = vec![None; n_local];
+        let mut border_ghost_col_unified = Vec::new();
+        let mut border_ghost_vals = Vec::new();
+        let mut local_diag_row_ptr = Vec::with_capacity(n_local + 1);
+        let mut local_diag_col_idx = Vec::new();
+        let mut local_diag_vals = Vec::new();
+        local_diag_row_ptr.push(0);
+        let mut local_diag_nnz = 0usize;
+        let mut ghost_nnz = 0usize;
+        let mut local_only_rows = 0usize;
         for i in 0..n_local {
-            if row_is_local[i] {
-                continue;
-            }
-            let start = border_col_unified.len();
+            let start = border_ghost_col_unified.len();
             for idx in row_ptr[i]..row_ptr[i + 1] {
                 let gcol = col_idx[idx];
                 let owner = owner_of(gcol, halo.index.row_part.as_ref());
-                let unified = if owner == rank {
-                    gcol - row_start
+                if owner == rank {
+                    local_diag_col_idx.push(gcol - row_start);
+                    local_diag_vals.push(vals[idx]);
+                    local_diag_nnz += 1;
                 } else {
-                    self_idx(&halo.index, gcol)
-                };
-                border_col_unified.push(unified);
-                border_vals.push(vals[idx]);
+                    border_ghost_col_unified.push(self_idx(&halo.index, gcol));
+                    border_ghost_vals.push(vals[idx]);
+                    ghost_nnz += 1;
+                }
             }
-            let end = border_col_unified.len();
-            border_row_ranges[i] = Some(start..end);
+            local_diag_row_ptr.push(local_diag_col_idx.len());
+            let end = border_ghost_col_unified.len();
+            if end > start {
+                border_ghost_row_ranges[i] = Some(start..end);
+            } else {
+                local_only_rows += 1;
+            }
         }
+        let local_diag = PlanCsrMatrix::new(
+            n_local,
+            n_local,
+            local_diag_row_ptr,
+            local_diag_col_idx,
+            local_diag_vals,
+        );
+        let local_diag_plan = spmv_plan::build(&local_diag, &SpmvTuning::default());
+        let metrics = DistributedPlanMetrics {
+            n_local_rows: n_local,
+            local_nnz: vals.len(),
+            local_diag_nnz,
+            ghost_nnz,
+            local_only_rows,
+            border_rows: n_local.saturating_sub(local_only_rows),
+            halo_recv_volume: halo.recv_volume(),
+            halo_send_volume: halo.send_volume(),
+        };
+        let plan_diagnostics = choose_distributed_plan(&metrics, Some(local_diag_plan.kernel));
 
         let ids = ChangeIds::default();
         ids.bump_structure();
@@ -213,17 +324,24 @@ impl DistCsrOp {
             row_is_local,
             local_only,
             border,
-            border_row_ranges,
-            border_col_unified,
-            border_vals,
+            border_ghost_row_ranges,
+            border_ghost_col_unified,
+            border_ghost_vals,
+            local_diag_plan,
+            plan_diagnostics: plan_diagnostics.clone(),
             halo,
-            overlap_mode: HaloOverlapMode::Interior,
+            overlap_mode: plan_diagnostics.overlap_mode,
             ids,
         })
     }
 
     pub fn set_halo_overlap_mode(&mut self, mode: HaloOverlapMode) {
         self.overlap_mode = mode;
+        self.plan_diagnostics.overlap_mode = mode;
+    }
+
+    pub fn plan_diagnostics(&self) -> &DistributedPlanDiagnostics {
+        &self.plan_diagnostics
     }
 
     /// Build a distributed operator from a [`ParCsrMatrix`].
@@ -286,12 +404,24 @@ impl DistCsrOp {
             ));
         }
         self.vals.copy_from_slice(new_vals);
+        let local = self.local_block_csr();
+        let local_diag = PlanCsrMatrix::new(
+            local.nrows(),
+            local.ncols(),
+            local.row_ptr().to_vec(),
+            local.col_idx().to_vec(),
+            local.values().to_vec(),
+        );
+        self.local_diag_plan = spmv_plan::build(&local_diag, &SpmvTuning::default());
         for row in 0..self.n_local {
-            if let Some(range) = &self.border_row_ranges[row] {
-                let mut idx = self.row_ptr[row];
-                for slot in range.clone() {
-                    self.border_vals[slot] = self.vals[idx];
-                    idx += 1;
+            if let Some(range) = &self.border_ghost_row_ranges[row] {
+                let mut slot = range.start;
+                for idx in self.row_ptr[row]..self.row_ptr[row + 1] {
+                    let owner = owner_of(self.col_idx[idx], self.halo.index.row_part.as_ref());
+                    if owner != self.halo.index.rank {
+                        self.border_ghost_vals[slot] = self.vals[idx];
+                        slot += 1;
+                    }
                 }
             }
         }
@@ -366,6 +496,10 @@ impl DistCsrOp {
     }
 
     fn spmv_local_only(&self, x: &[S], y: &mut [S]) {
+        if self.plan_diagnostics.kernel_strategy == DistLocalKernelStrategy::LocalDiagSpmvPlan {
+            self.local_diag_plan.apply_scaled(S::one(), x, S::zero(), y);
+            return;
+        }
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
@@ -396,11 +530,10 @@ impl DistCsrOp {
         }
     }
 
-    fn spmv_border(&self, x: &[S], y: &mut [S], ghost: &[S]) {
+    fn spmv_border(&self, y: &mut [S], ghost: &[S]) {
         if self.border.is_empty() {
             return;
         }
-        let n_local = self.n_local;
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
@@ -408,18 +541,14 @@ impl DistCsrOp {
                 .enumerate()
                 .filter(|(row, _)| !self.row_is_local[*row])
                 .for_each(|(row, slot)| {
-                    if let Some(range) = &self.border_row_ranges[row] {
+                    if let Some(range) = &self.border_ghost_row_ranges[row] {
                         let mut acc = S::zero();
                         for k in range.clone() {
-                            let col = self.border_col_unified[k];
-                            let val = self.border_vals[k];
-                            if col < n_local {
-                                acc = acc + val * x[col];
-                            } else {
-                                acc = acc + val * ghost[col - n_local];
-                            }
+                            let col = self.border_ghost_col_unified[k] - self.n_local;
+                            let val = self.border_ghost_vals[k];
+                            acc = acc + val * ghost[col];
                         }
-                        *slot = acc;
+                        *slot = *slot + acc;
                     }
                 });
         }
@@ -427,18 +556,14 @@ impl DistCsrOp {
         {
             for span in &self.border.spans {
                 for row in span.clone() {
-                    if let Some(range) = &self.border_row_ranges[row] {
+                    if let Some(range) = &self.border_ghost_row_ranges[row] {
                         let mut acc = S::zero();
                         for k in range.clone() {
-                            let col = self.border_col_unified[k];
-                            let val = self.border_vals[k];
-                            if col < n_local {
-                                acc = acc + val * x[col];
-                            } else {
-                                acc = acc + val * ghost[col - n_local];
-                            }
+                            let col = self.border_ghost_col_unified[k] - self.n_local;
+                            let val = self.border_ghost_vals[k];
+                            acc = acc + val * ghost[col];
                         }
-                        y[row] = acc;
+                        y[row] = y[row] + acc;
                     }
                 }
             }
@@ -470,10 +595,10 @@ impl KLinOp for DistCsrOp {
                 if let Some(req) = halo_req {
                     let ghost = self.halo.complete_halo(req);
                     self.spmv_local_only(x, y);
-                    self.spmv_border(x, y, &ghost[..]);
+                    self.spmv_border(y, &ghost[..]);
                 } else {
                     self.spmv_local_only(x, y);
-                    self.spmv_border(x, y, &[]);
+                    self.spmv_border(y, &[]);
                 }
             }
             HaloOverlapMode::Interior => {
@@ -488,9 +613,9 @@ impl KLinOp for DistCsrOp {
 
                 if let Some(req) = halo_req {
                     let ghost = self.halo.complete_halo(req);
-                    self.spmv_border(x, y, &ghost[..]);
+                    self.spmv_border(y, &ghost[..]);
                 } else {
-                    self.spmv_border(x, y, &[]);
+                    self.spmv_border(y, &[]);
                 }
             }
         }
@@ -539,5 +664,52 @@ impl LinOp for DistCsrOp {
 
     fn format(&self) -> crate::matrix::format::OpFormat {
         crate::matrix::format::OpFormat::Csr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planner_prefers_overlap_for_comm_heavy_metrics() {
+        let metrics = DistributedPlanMetrics {
+            n_local_rows: 4096,
+            local_nnz: 80_000,
+            local_diag_nnz: 30_000,
+            ghost_nnz: 50_000,
+            local_only_rows: 700,
+            border_rows: 3396,
+            halo_recv_volume: 12_000,
+            halo_send_volume: 10_000,
+        };
+        let diag = choose_distributed_plan(&metrics, Some(SpmvKernel::Scalar));
+        assert_eq!(diag.overlap_mode, HaloOverlapMode::Interior);
+        assert_eq!(
+            diag.kernel_strategy,
+            DistLocalKernelStrategy::RowSplitScalar
+        );
+        assert!(diag.expected_communication_fraction > diag.expected_computation_fraction);
+    }
+
+    #[test]
+    fn planner_prefers_local_diag_kernel_for_compute_heavy_metrics() {
+        let metrics = DistributedPlanMetrics {
+            n_local_rows: 4096,
+            local_nnz: 80_000,
+            local_diag_nnz: 76_000,
+            ghost_nnz: 4_000,
+            local_only_rows: 3600,
+            border_rows: 496,
+            halo_recv_volume: 500,
+            halo_send_volume: 600,
+        };
+        let diag = choose_distributed_plan(&metrics, Some(SpmvKernel::Scalar));
+        assert_eq!(diag.overlap_mode, HaloOverlapMode::Disabled);
+        assert_eq!(
+            diag.kernel_strategy,
+            DistLocalKernelStrategy::LocalDiagSpmvPlan
+        );
+        assert!(diag.expected_computation_fraction > diag.expected_communication_fraction);
     }
 }

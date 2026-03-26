@@ -15,7 +15,8 @@ pub mod sellc;
 pub mod simd_csr;
 
 pub use self::plan::{
-    SpmvKernel, SpmvPlan, SpmvTuning, build as build_plan, build_owned as build_plan_owned,
+    SpmvKernel, SpmvPlan, SpmvPlanDiagnostics, SpmvTuning, build as build_plan,
+    build_owned as build_plan_owned,
 };
 pub use self::scalar::{spmv_csr_scalar, spmv_scaled_csr, spmv_t_scaled_csr};
 

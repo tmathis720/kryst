@@ -31,6 +31,7 @@ pub enum SpmvKernel {
 #[derive(Clone, Debug)]
 pub struct SpmvPlan<S: KrystScalar> {
     pub kernel: SpmvKernel,
+    pub diagnostics: SpmvPlanDiagnostics,
     pub nrows: usize,
     pub ncols: usize,
     pub row_ptr: Vec<usize>,
@@ -40,6 +41,14 @@ pub struct SpmvPlan<S: KrystScalar> {
     pub sell: Option<sellc::SellCStorage>,
     #[cfg(all(feature = "simd", not(feature = "complex")))]
     lanes: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SpmvPlanDiagnostics {
+    pub selected_kernel: SpmvKernel,
+    pub simd_lanes: usize,
+    pub gather_bench_seconds: Option<f64>,
+    pub sellc_bench_seconds: Option<f64>,
 }
 
 impl<S: KrystScalar> SpmvPlan<S> {
@@ -120,6 +129,12 @@ impl<S: KrystScalar> SpmvPlan<S> {
     pub fn build_scalar(matrix: &CsrMatrix<S>) -> Self {
         Self {
             kernel: SpmvKernel::Scalar,
+            diagnostics: SpmvPlanDiagnostics {
+                selected_kernel: SpmvKernel::Scalar,
+                simd_lanes: 1,
+                gather_bench_seconds: None,
+                sellc_bench_seconds: None,
+            },
             nrows: matrix.nrows,
             ncols: matrix.ncols,
             row_ptr: matrix.rowptr.clone(),
@@ -175,6 +190,12 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
     #[allow(unused_mut)]
     let mut plan = SpmvPlan {
         kernel: SpmvKernel::Scalar,
+        diagnostics: SpmvPlanDiagnostics {
+            selected_kernel: SpmvKernel::Scalar,
+            simd_lanes: 1,
+            gather_bench_seconds: None,
+            sellc_bench_seconds: None,
+        },
         nrows,
         ncols,
         row_ptr: rowptr,
@@ -238,6 +259,7 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
                             &mut y_buf,
                         );
                     });
+                    plan.diagnostics.gather_bench_seconds = Some(gather_time);
 
                     let prefer_sell = tuning.prefer_sellc || !is_uniformish;
                     if prefer_sell {
@@ -255,6 +277,7 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
                         let sell_time = microbench(bench_runs, || {
                             dispatch_sellc(lanes, &sell, 1.0, &x_buf, 0.0, &mut y_buf);
                         });
+                        plan.diagnostics.sellc_bench_seconds = Some(sell_time);
                         if sell_time < gather_time {
                             best_kernel = SpmvKernel::SellC;
                             best_sell = Some(sell);
@@ -264,6 +287,8 @@ pub fn build_owned<S: KrystScalar>(matrix: CsrMatrix<S>, tuning: &SpmvTuning) ->
                     plan.kernel = best_kernel;
                     plan.lanes = lanes;
                     plan.sell = best_sell;
+                    plan.diagnostics.selected_kernel = best_kernel;
+                    plan.diagnostics.simd_lanes = lanes;
                 }
             }
         }
