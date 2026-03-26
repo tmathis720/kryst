@@ -1,6 +1,9 @@
 //! Balancing Domain Decomposition by Constraints (BDDC) preconditioner.
 
 use crate::algebra::scalar::{KrystScalar, R, S};
+use crate::config::options::PcOptions;
+use crate::context::ksp_context::{KspContext, SolverType};
+use crate::context::pc_context::PcType;
 use crate::error::KError;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::convert::csr_from_linop;
@@ -8,6 +11,9 @@ use crate::matrix::csr::CsrMatrix;
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
+use crate::utils::convergence::ConvergedReason;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BddcConstraintSelection {
@@ -50,6 +56,10 @@ pub struct BddcDiagnostics {
     pub local_solve_route: String,
     pub local_solve_estimated_flops: usize,
     pub coarse_solve_route: String,
+    pub coarse_iterations: usize,
+    pub coarse_final_residual: R,
+    pub coarse_fallback_route: Option<String>,
+    pub coarse_failure_reason: Option<String>,
     pub comm_interface_dofs: usize,
     pub comm_coarse_dofs: usize,
 }
@@ -70,7 +80,6 @@ struct BddcSymbolic {
 struct BddcNumeric {
     operator: CsrMatrix<S>,
     coarse_operator: CsrMatrix<S>,
-    diagnostics: BddcDiagnostics,
     values_id: ValuesId,
 }
 
@@ -81,6 +90,7 @@ pub struct BddcPc {
     comm: UniverseComm,
     symbolic: Option<BddcSymbolic>,
     numeric: Option<BddcNumeric>,
+    diagnostics: Mutex<Option<BddcDiagnostics>>,
 }
 
 impl BddcPc {
@@ -91,11 +101,12 @@ impl BddcPc {
             comm: UniverseComm::NoComm(crate::parallel::NoComm),
             symbolic: None,
             numeric: None,
+            diagnostics: Mutex::new(None),
         }
     }
 
-    pub fn diagnostics(&self) -> Option<&BddcDiagnostics> {
-        self.numeric.as_ref().map(|n| &n.diagnostics)
+    pub fn diagnostics(&self) -> Option<BddcDiagnostics> {
+        self.diagnostics.lock().ok().and_then(|d| d.clone())
     }
 
     fn build_subdomains(n: usize) -> Vec<(usize, usize)> {
@@ -337,7 +348,34 @@ impl BddcPc {
         }
     }
 
-    fn coarse_solve(&self, coarse_op: &CsrMatrix<S>, rhs: Vec<S>) -> Result<Vec<S>, KError> {
+    fn coarse_solve_with_ksp(
+        &self,
+        coarse_op: &CsrMatrix<S>,
+        rhs: &[S],
+        ksp_name: &str,
+        pc_name: &str,
+    ) -> Result<(Vec<S>, usize, R, ConvergedReason), KError> {
+        let solver_type = SolverType::from_str(ksp_name)?;
+        let pc_type = PcType::from_str(pc_name)?;
+        let mut ksp = KspContext::new();
+        ksp.set_type(solver_type)?;
+        let pc_opts = PcOptions {
+            pc_type: Some(pc_name.to_string()),
+            ..Default::default()
+        };
+        ksp.set_pc_type(pc_type, Some(&pc_opts))?;
+        ksp.set_operators(Arc::new(coarse_op.clone()), None);
+        ksp.setup()?;
+        let mut x = vec![S::zero(); rhs.len()];
+        let stats = ksp.solve(rhs, &mut x)?;
+        Ok((x, stats.iterations, stats.final_residual, stats.reason))
+    }
+
+    fn coarse_solve(
+        &self,
+        coarse_op: &CsrMatrix<S>,
+        rhs: Vec<S>,
+    ) -> Result<(Vec<S>, usize, R, String, Option<String>, Option<String>), KError> {
         let ksp = self
             .config
             .coarse_ksp_type
@@ -350,24 +388,47 @@ impl BddcPc {
             .as_deref()
             .unwrap_or("lu")
             .to_lowercase();
-
-        match ksp.as_str() {
-            "preonly" | "cg" | "gmres" => {}
-            other => {
-                return Err(KError::InvalidInput(format!(
-                    "unsupported BDDC coarse KSP backend: {other}"
-                )));
+        let primary = (ksp.clone(), pc.clone());
+        let mut routes = vec![primary.clone()];
+        if ksp == "preonly" {
+            routes.push(("gmres".to_string(), "ilu".to_string()));
+            routes.push(("cg".to_string(), "jacobi".to_string()));
+        } else {
+            routes.push(("preonly".to_string(), "lu".to_string()));
+            routes.push(("gmres".to_string(), "ilu".to_string()));
+            routes.push(("cg".to_string(), "jacobi".to_string()));
+        }
+        routes.dedup();
+        let mut first_failure: Option<String> = None;
+        for (idx, (rksp, rpc)) in routes.iter().enumerate() {
+            let route = format!("{rksp}+{rpc}");
+            match self.coarse_solve_with_ksp(coarse_op, &rhs, rksp, rpc) {
+                Ok((x, its, res, reason)) => {
+                    if matches!(
+                        reason,
+                        ConvergedReason::ConvergedAtol
+                            | ConvergedReason::ConvergedRtol
+                            | ConvergedReason::ConvergedHappyBreakdown
+                            | ConvergedReason::ConvergedTrustRegion
+                    ) {
+                        let fallback = (idx > 0).then(|| format!("{}+{}", primary.0, primary.1));
+                        return Ok((x, its, res, route, fallback, first_failure));
+                    }
+                    let msg = format!("{route} stopped with {:?}", reason);
+                    if first_failure.is_none() {
+                        first_failure = Some(msg);
+                    }
+                }
+                Err(err) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(format!("{route} failed: {err}"));
+                    }
+                }
             }
         }
-
-        match pc.as_str() {
-            "jacobi" => Self::solve_csr_jacobi(coarse_op, &rhs),
-            "none" => Ok(rhs),
-            "lu" | "cholesky" => Self::solve_csr_cg(coarse_op, &rhs, 120, 1e-10),
-            other => Err(KError::InvalidInput(format!(
-                "unsupported BDDC coarse PC backend: {other}"
-            ))),
-        }
+        Err(KError::PcFailed(first_failure.unwrap_or_else(|| {
+            "BDDC coarse solve failed for all configured/fallback routes".to_string()
+        })))
     }
 
     fn apply_scaling(&self, value: S, diag: S, multiplicity: R) -> S {
@@ -495,13 +556,19 @@ impl Preconditioner for BddcPc {
                 local_solve_route: local_route,
                 local_solve_estimated_flops: operator.nnz().saturating_mul(2),
                 coarse_solve_route: coarse_route,
+                coarse_iterations: 0,
+                coarse_final_residual: 0.0,
+                coarse_fallback_route: None,
+                coarse_failure_reason: None,
                 comm_interface_dofs: sym.interface_dofs.len(),
                 comm_coarse_dofs: sym.coarse_dofs.len(),
             };
+            if let Ok(mut d) = self.diagnostics.lock() {
+                *d = Some(diagnostics);
+            }
             self.numeric = Some(BddcNumeric {
                 operator,
                 coarse_operator,
-                diagnostics,
                 values_id,
             });
         }
@@ -557,7 +624,17 @@ impl Preconditioner for BddcPc {
 
         if !sym.coarse_dofs.is_empty() {
             let rc: Vec<S> = sym.coarse_dofs.iter().map(|&dof| residual[dof]).collect();
-            let ec = self.coarse_solve(&num.coarse_operator, rc)?;
+            let (ec, coarse_its, coarse_res, route, fallback, failure) =
+                self.coarse_solve(&num.coarse_operator, rc)?;
+            if let Ok(mut diag_guard) = self.diagnostics.lock() {
+                if let Some(diag) = diag_guard.as_mut() {
+                    diag.coarse_iterations = coarse_its;
+                    diag.coarse_final_residual = coarse_res;
+                    diag.coarse_solve_route = route;
+                    diag.coarse_fallback_route = fallback;
+                    diag.coarse_failure_reason = failure;
+                }
+            }
             for (k, &dof) in sym.coarse_dofs.iter().enumerate() {
                 y[dof] = y[dof] + ec[k];
             }
