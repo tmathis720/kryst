@@ -369,6 +369,40 @@ impl PipeGcrSolver {
                 }),
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_f64(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        let (m, n) = a.dims();
+        if m != n {
+            return Err(KError::InvalidInput(
+                "PipeGCR requires a square operator".to_string(),
+            ));
+        }
+        if b.len() != n || x.len() != n {
+            return Err(KError::InvalidInput(
+                "PipeGCR: vector size mismatch".to_string(),
+            ));
+        }
+
+        let a_s = as_s_op(a);
+        match pc {
+            Some(pc_ref) => {
+                let mut pc_s = as_s_pc_mut(pc_ref);
+                self.solve_k(&a_s, Some(&mut pc_s), b, x, pc_side, comm, monitors, work)
+            }
+            None => self.solve_k(&a_s, None, b, x, pc_side, comm, monitors, work),
+        }
+    }
 }
 
 impl LinearSolver for PipeGcrSolver {
@@ -391,13 +425,6 @@ impl LinearSolver for PipeGcrSolver {
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        let a_s = as_s_op(a);
-        match pc {
-            Some(pc_ref) => {
-                let mut pc_s = as_s_pc_mut(pc_ref);
-                self.solve_k(&a_s, Some(&mut pc_s), b, x, pc_side, comm, monitors, work)
-            }
-            None => self.solve_k(&a_s, None, b, x, pc_side, comm, monitors, work),
-        }
+        self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
     }
 }

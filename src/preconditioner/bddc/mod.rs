@@ -5,10 +5,10 @@ use crate::config::options::PcOptions;
 use crate::context::ksp_context::{KspContext, SolverType};
 use crate::context::pc_context::PcType;
 use crate::error::KError;
-#[cfg(not(feature = "complex"))]
+use crate::matrix::MatShell;
+#[cfg(all(not(feature = "complex"), feature = "backend-faer"))]
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::csr::CsrMatrix;
-use crate::matrix::MatShell;
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -520,12 +520,12 @@ impl Preconditioner for BddcPc {
                 .symbolic
                 .as_ref()
                 .ok_or_else(|| KError::PcFailed("BDDC symbolic phase missing".into()))?;
-            #[cfg(not(feature = "complex"))]
+            #[cfg(all(not(feature = "complex"), feature = "backend-faer"))]
             let operator = {
                 let csr = csr_from_linop(op, 0.0)?;
                 CsrMatrix::from_real_csr(csr.as_ref())
             };
-            #[cfg(feature = "complex")]
+            #[cfg(any(feature = "complex", not(feature = "backend-faer")))]
             let operator = {
                 let dense = Self::extract_dense_operator(op, sym.local_n)?;
                 let mut row_ptr = Vec::with_capacity(sym.local_n + 1);
