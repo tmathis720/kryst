@@ -49,6 +49,8 @@ fn bddc_reduces_iterations_vs_none_on_domain_decomposed_spd() {
     let mut bddc = BddcPc::new(BddcConfig {
         coarse_ksp_type: Some("preonly".into()),
         coarse_pc_type: Some("lu".into()),
+        local_ksp_type: Some("cg".into()),
+        local_pc_type: Some("jacobi".into()),
         use_vertices: true,
         constraint_selection: None,
         scaling: None,
@@ -97,6 +99,8 @@ fn bddc_rejects_non_square_operator() {
     let mut bddc = BddcPc::new(BddcConfig {
         coarse_ksp_type: None,
         coarse_pc_type: None,
+        local_ksp_type: None,
+        local_pc_type: None,
         use_vertices: true,
         constraint_selection: None,
         scaling: None,
@@ -135,10 +139,54 @@ fn bddc_validates_distributed_layout_consistency() {
     let mut bddc = BddcPc::new(BddcConfig {
         coarse_ksp_type: None,
         coarse_pc_type: None,
+        local_ksp_type: None,
+        local_pc_type: None,
         use_vertices: false,
         constraint_selection: None,
         scaling: None,
     });
     let err = bddc.setup(&LayoutMismatch).unwrap_err();
     assert!(matches!(err, KError::InvalidInput(_)));
+}
+
+#[test]
+fn bddc_reports_sparse_diagnostics_and_constraint_modes() {
+    let (a, _) = decomposed_spd(24);
+    let mut bddc_vertices = BddcPc::new(BddcConfig {
+        coarse_ksp_type: Some("preonly".into()),
+        coarse_pc_type: Some("jacobi".into()),
+        local_ksp_type: Some("cg".into()),
+        local_pc_type: Some("jacobi".into()),
+        use_vertices: true,
+        constraint_selection: Some(kryst::preconditioner::bddc::BddcConstraintSelection::Vertices),
+        scaling: Some(kryst::preconditioner::bddc::BddcScaling::Uniform),
+    });
+    bddc_vertices.setup(&a).unwrap();
+    let d = bddc_vertices.diagnostics().expect("diagnostics");
+    assert!(d.local_nnz > 0);
+    assert!(d.coarse_nnz > 0);
+    assert!(d.local_solve_route.contains("cg"));
+    assert!(d.coarse_solve_route.contains("jacobi"));
+    assert!(d.comm_interface_dofs > 0);
+
+    let mut bddc_interface = BddcPc::new(BddcConfig {
+        coarse_ksp_type: Some("preonly".into()),
+        coarse_pc_type: Some("jacobi".into()),
+        local_ksp_type: Some("preonly".into()),
+        local_pc_type: Some("jacobi".into()),
+        use_vertices: false,
+        constraint_selection: Some(kryst::preconditioner::bddc::BddcConstraintSelection::Interface),
+        scaling: Some(kryst::preconditioner::bddc::BddcScaling::DeluxeLike),
+    });
+    bddc_interface.setup(&a).unwrap();
+    let x = vec![1.0; 24];
+    let mut y_v = vec![0.0; 24];
+    let mut y_i = vec![0.0; 24];
+    bddc_vertices.apply(PcSide::Left, &x, &mut y_v).unwrap();
+    bddc_interface.apply(PcSide::Left, &x, &mut y_i).unwrap();
+    let diff: f64 = y_v.iter().zip(y_i.iter()).map(|(a, b)| (a - b).abs()).sum();
+    assert!(
+        diff > 1e-9,
+        "different constraint/scaling modes should alter response"
+    );
 }
