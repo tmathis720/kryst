@@ -392,14 +392,16 @@ impl GmresSolver {
             );
         }
         if res <= thr {
-            stats.reason = if res <= self.conv.atol {
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
+            stats.reason = if true_reason.is_converged() {
+                true_reason
+            } else if res <= self.conv.atol {
                 ConvergedReason::ConvergedAtol
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            stats.final_residual = res;
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -974,11 +976,15 @@ impl GmresSolver {
             }
         }
 
-        let (reason, _) = self.conv.check(res, bnorm, total_iters);
-        stats.reason = reason;
-
         let true_res =
             Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        let (reason, _) = self.conv.check(res, bnorm, total_iters);
+        let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
+        stats.reason = if true_reason.is_converged() {
+            true_reason
+        } else {
+            reason
+        };
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
@@ -1681,6 +1687,13 @@ impl GmresSolver {
                             recurrence_residual: Some(res),
                         },
                     );
+                    let refreshed_res = match pc_side {
+                        PcSide::Left | PcSide::Symmetric => precond_res,
+                        PcSide::Right => true_res,
+                    };
+                    if refreshed_res.is_finite() {
+                        res = refreshed_res;
+                    }
 
                     if res <= thr || total_iters >= self.conv.max_iters {
                         break;
@@ -1865,6 +1878,13 @@ impl GmresSolver {
                     recurrence_residual: Some(res),
                 },
             );
+            let refreshed_res = match pc_side {
+                PcSide::Left | PcSide::Symmetric => precond_res,
+                PcSide::Right => true_res,
+            };
+            if refreshed_res.is_finite() {
+                res = refreshed_res;
+            }
         }
 
         let (reason, _) = self.conv.check(res, bnorm, total_iters);

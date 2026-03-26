@@ -85,6 +85,38 @@ fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
     Ok(())
 }
 
+#[cfg(not(feature = "complex"))]
+#[test]
+fn gmres_sstep_s1_tracks_classical_on_spd() -> Result<(), KError> {
+    let a = util::spd_poisson2d(6);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 9);
+    let restart = 12;
+    let bnorm: R = util::vec_norm(&b).max(R::from(1e-32));
+
+    let (_x_classic, stats_classic, res_classic) =
+        solve_with_variant(&a, &b, GmresVariant::Classical, restart)?;
+    let (_x_sstep, stats_sstep, res_sstep) = solve_with_variant(
+        &a,
+        &b,
+        GmresVariant::SStep {
+            s: 1,
+            reorth: crate::context::ksp_context::ReorthPolicy::IfNeeded,
+            max_cond: 1e8,
+        },
+        restart,
+    )?;
+
+    let target = (R::from(1e-8) * bnorm + R::from(1e-10)).max(res_classic * R::from(10.0));
+    assert!(stats_classic.reason.is_converged());
+    assert!(stats_sstep.reason.is_converged());
+    assert!(res_sstep <= target);
+    assert!(
+        (stats_classic.iterations as isize - stats_sstep.iterations as isize).abs() as usize
+            <= restart
+    );
+    Ok(())
+}
+
 #[cfg(feature = "complex")]
 #[test]
 fn gmres_sstep_complex_matches_classical_reason() -> Result<(), KError> {
