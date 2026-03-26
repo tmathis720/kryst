@@ -15,10 +15,30 @@ pub struct ParCsrMatrix {
     pub row_end: usize,
     pub global_n: usize,
     pub global_m: usize,
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy diag/off storage is compatibility-only; use canonical_dist_op()/DistCsrOp accessors. Planned removal after 2026-12-31"
+    )]
     pub a_diag: CsrMatrix<S>,
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy diag/off storage is compatibility-only; use canonical_dist_op()/DistCsrOp accessors. Planned removal after 2026-12-31"
+    )]
     pub a_off: CsrMatrix<S>,
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy column maps are compatibility-only; use canonical_dist_op()/DistCsrOp row_partition/layout metadata. Planned removal after 2026-12-31"
+    )]
     pub colmap_owned: Vec<usize>,
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy column maps are compatibility-only; use canonical_dist_op()/DistCsrOp row_partition/layout metadata. Planned removal after 2026-12-31"
+    )]
     pub colmap_ghost: Vec<usize>,
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy halo internals are compatibility-only; use canonical_dist_op()/DistCsrOp exchange paths. Planned removal after 2026-12-31"
+    )]
     pub halo: HaloPlan,
     canonical: OnceLock<Arc<DistCsrOp>>,
 }
@@ -76,6 +96,10 @@ impl LinOp for ParCsrOp {
 }
 
 impl ParCsrMatrix {
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy diag/off constructor is compatibility-only; use DistCsrOp::from_local_rows and canonical distributed APIs. Planned removal after 2026-12-31"
+    )]
     pub fn from_legacy_parts(
         comm: UniverseComm,
         row_start: usize,
@@ -116,10 +140,27 @@ impl ParCsrMatrix {
     }
 
     #[deprecated(
-        note = "ParCsr halo internals are legacy compatibility only; prefer canonical_dist_op()"
+        since = "1.1.0",
+        note = "ParCsr halo internals are legacy compatibility only; prefer canonical_dist_op(). Planned removal after 2026-12-31"
     )]
     pub fn legacy_halo_plan(&self) -> &HaloPlan {
         &self.halo
+    }
+
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy diag block access is compatibility-only; prefer canonical_dist_op().local_block_csr(). Planned removal after 2026-12-31"
+    )]
+    pub fn legacy_diag_block(&self) -> &CsrMatrix<S> {
+        &self.a_diag
+    }
+
+    #[deprecated(
+        since = "1.1.0",
+        note = "Legacy off block access is compatibility-only; prefer canonical_dist_op().local_matrix()/layout metadata. Planned removal after 2026-12-31"
+    )]
+    pub fn legacy_off_block(&self) -> &CsrMatrix<S> {
+        &self.a_off
     }
 
     /// y = alpha*A*x + beta*y with two-phase halo exchange.

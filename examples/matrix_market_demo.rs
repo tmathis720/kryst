@@ -58,8 +58,6 @@ mod real_demo {
     #[cfg(feature = "mpi")]
     use kryst::matrix::DistCsrOp;
     use kryst::matrix::op::{CsrOp, LinOp};
-    #[cfg(feature = "mpi")]
-    use kryst::matrix::parcsr::builder::partition_rows;
     use kryst::matrix::sparse::CsrMatrix;
     #[cfg(not(feature = "mpi"))]
     use kryst::parallel::NoComm;
@@ -1226,8 +1224,7 @@ mod real_demo {
                     let rhs = broadcast_vec(rhs_root.as_ref().map(|v| v.as_slice()), &mpi_comm)?;
                     let analysis = analyze_matrix(&matrix);
 
-                    let part = partition_rows(matrix.nrows() as u64, comm);
-                    let part_usize: Vec<usize> = part.iter().map(|&x| x as usize).collect();
+                    let part_usize = DistCsrOp::partition_rows_balanced(matrix.nrows(), comm);
                     let row_start = part_usize[rank];
                     let row_end = part_usize[rank + 1];
 

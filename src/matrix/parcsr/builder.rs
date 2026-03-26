@@ -1,24 +1,37 @@
 use super::Global;
+use crate::matrix::dist_csr::DistCsrOp;
 use crate::parallel::{Comm, UniverseComm};
 
 /// Partition `n_global` rows among all ranks in `comm`.
 ///
 /// Returns a vector `row_starts` of length `p + 1` where `p = comm.size()`.
 /// Row `k` on rank `r` spans `row_starts[r] .. row_starts[r+1]`.
+#[deprecated(
+    since = "1.1.0",
+    note = "Use DistCsrOp::partition_rows_balanced; legacy parcsr partition helpers are compatibility-only and planned for removal after 2026-12-31"
+)]
 pub fn partition_rows(n_global: Global, comm: &UniverseComm) -> Vec<Global> {
-    partition_rows_size(n_global, comm.size())
+    DistCsrOp::partition_rows_balanced(n_global as usize, comm)
+        .into_iter()
+        .map(|v| v as Global)
+        .collect()
 }
 
 /// Core implementation taking the number of partitions `p` directly.
+#[deprecated(
+    since = "1.1.0",
+    note = "Use DistCsrOp::partition_rows_balanced; legacy parcsr partition helpers are compatibility-only and planned for removal after 2026-12-31"
+)]
 pub fn partition_rows_size(n_global: Global, p: usize) -> Vec<Global> {
     assert!(p > 0, "number of partitions must be positive");
-    let base = n_global / p as Global;
-    let rem = n_global % p as Global;
-    let mut starts = Vec::with_capacity(p + 1);
-    let mut s: Global = 0;
-    for k in 0..p {
-        starts.push(s);
-        s += base + if (k as Global) < rem { 1 } else { 0 };
+    let comm_size = p;
+    let base = n_global as usize / comm_size;
+    let rem = n_global as usize % comm_size;
+    let mut starts = Vec::with_capacity(comm_size + 1);
+    let mut s: usize = 0;
+    for k in 0..comm_size {
+        starts.push(s as Global);
+        s += base + usize::from(k < rem);
     }
     starts.push(n_global);
     starts
