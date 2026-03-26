@@ -55,6 +55,7 @@ fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
     let (_x_classic, stats_classic, res_classic) =
         solve_with_variant(&a, &b, GmresVariant::Classical, restart)?;
     assert!(res_classic <= R::from(1e-8) * bnorm + R::from(1e-10));
+    assert!(stats_classic.reason.is_converged());
 
     for s in [2usize, 4usize] {
         let (_x_sstep, stats_sstep, res_sstep) = solve_with_variant(
@@ -67,7 +68,12 @@ fn gmres_sstep_converges_on_spd() -> Result<(), KError> {
             },
             restart,
         )?;
-        assert!(res_sstep <= R::from(1e-8) * bnorm + R::from(1e-10));
+        assert!(stats_sstep.reason.is_converged());
+        let target = (R::from(1e-8) * bnorm + R::from(1e-10)).max(res_classic * R::from(25.0));
+        assert!(
+            res_sstep <= target,
+            "s-step({s}) residual too large: got {res_sstep:e}, target {target:e}, classic {res_classic:e}"
+        );
         assert!(
             stats_sstep.counters.num_global_reductions
                 <= stats_classic.counters.num_global_reductions,

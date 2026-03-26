@@ -385,10 +385,33 @@ impl ExecutionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::parallel_cfg::{ParallelTunerMode, set_parallel_tuner_mode};
+    use crate::algebra::parallel_cfg::{
+        ParallelTunerMode, parallel_tuner_mode, set_parallel_tuner_mode,
+    };
     use crate::config::options::KspOptions;
     use crate::reduction::ReproMode;
     use crate::utils::reduction::{ReductExec, ReductOptions};
+    use std::sync::{LazyLock, Mutex};
+
+    static TUNER_MODE_TEST_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct TunerModeRestore {
+        prev: ParallelTunerMode,
+    }
+
+    impl TunerModeRestore {
+        fn set(mode: ParallelTunerMode) -> Self {
+            let prev = parallel_tuner_mode();
+            set_parallel_tuner_mode(mode);
+            Self { prev }
+        }
+    }
+
+    impl Drop for TunerModeRestore {
+        fn drop(&mut self) {
+            set_parallel_tuner_mode(self.prev);
+        }
+    }
 
     #[test]
     fn nested_policy_rejects_global_with_mpi() {
@@ -468,7 +491,10 @@ mod tests {
 
     #[test]
     fn adaptive_tuner_respects_manual_mode() {
-        set_parallel_tuner_mode(ParallelTunerMode::Manual);
+        let _guard = TUNER_MODE_TEST_GUARD
+            .lock()
+            .expect("tuner mode test mutex poisoned");
+        let _restore = TunerModeRestore::set(ParallelTunerMode::Manual);
         let opt = ReductOptions::default();
         let d = AdaptiveExecutionDecision::decide(4096, 2, 30, 4096 * 30, 10.0, false, false, &opt);
         assert!(matches!(d.tune_decision.mode, ParallelTunerMode::Manual));
@@ -477,7 +503,10 @@ mod tests {
 
     #[test]
     fn adaptive_tuner_forces_deterministic_when_reproducible() {
-        set_parallel_tuner_mode(ParallelTunerMode::Adaptive);
+        let _guard = TUNER_MODE_TEST_GUARD
+            .lock()
+            .expect("tuner mode test mutex poisoned");
+        let _restore = TunerModeRestore::set(ParallelTunerMode::Adaptive);
         let opt = ReductOptions::default();
         let d = AdaptiveExecutionDecision::decide(4096, 2, 30, 4096 * 30, 70.0, true, false, &opt);
         assert!(matches!(
