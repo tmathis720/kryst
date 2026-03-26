@@ -81,6 +81,27 @@ fn universe() -> &'static mpi::environment::Universe {
 }
 
 impl MpiComm {
+    #[inline]
+    fn allreduce_sum_interleaved(&self, send: &[R], recv: &mut [R]) {
+        debug_assert_eq!(send.len(), recv.len());
+        if send.is_empty() {
+            return;
+        }
+        self.world
+            .all_reduce_into(send, recv, SystemOperation::sum());
+    }
+
+    #[cfg(feature = "complex")]
+    #[inline]
+    fn pack_complex_slice(buf: &[S]) -> Vec<R> {
+        let mut packed = Vec::with_capacity(buf.len() * 2);
+        for &z in buf.iter() {
+            packed.push(z.real());
+            packed.push(z.imag());
+        }
+        packed
+    }
+
     /// Initializes MPI once and constructs a new [`MpiComm`].
     pub fn new() -> Self {
         let world = universe().world().duplicate();
@@ -145,9 +166,10 @@ impl MpiComm {
     pub fn allreduce_sum_scalar(&self, v: S) -> S {
         #[cfg(feature = "complex")]
         {
-            let re = self.allreduce_sum_real(v.real());
-            let im = self.allreduce_sum_real(v.imag());
-            S::from_parts(re, im)
+            let send = [v.real(), v.imag()];
+            let mut recv = [0.0; 2];
+            self.allreduce_sum_interleaved(&send, &mut recv);
+            S::from_parts(recv[0], recv[1])
         }
         #[cfg(not(feature = "complex"))]
         {
@@ -160,25 +182,13 @@ impl MpiComm {
             return;
         }
 
-        use mpi::collective::SystemOperation;
-
         #[cfg(feature = "complex")]
         {
-            let n = buf.len();
-            let mut re = vec![0.0f64; n];
-            let mut im = vec![0.0f64; n];
-            for (i, &z) in buf.iter().enumerate() {
-                re[i] = z.real();
-                im[i] = z.imag();
-            }
-            let mut re_sum = vec![0.0f64; n];
-            let mut im_sum = vec![0.0f64; n];
-            self.world
-                .all_reduce_into(&re[..], &mut re_sum[..], SystemOperation::sum());
-            self.world
-                .all_reduce_into(&im[..], &mut im_sum[..], SystemOperation::sum());
-            for (slot, (&r, &i)) in buf.iter_mut().zip(re_sum.iter().zip(im_sum.iter())) {
-                *slot = S::from_parts(r, i);
+            let send = Self::pack_complex_slice(buf);
+            let mut recv = vec![0.0f64; send.len()];
+            self.allreduce_sum_interleaved(send.as_slice(), recv.as_mut_slice());
+            for (slot, chunk) in buf.iter_mut().zip(recv.chunks_exact(2)) {
+                *slot = S::from_parts(chunk[0], chunk[1]);
             }
         }
 
@@ -189,8 +199,7 @@ impl MpiComm {
                 *dst = z.real();
             }
             let mut sum = vec![0.0f64; tmp.len()];
-            self.world
-                .all_reduce_into(&tmp[..], &mut sum[..], SystemOperation::sum());
+            self.allreduce_sum_interleaved(&tmp[..], &mut sum[..]);
             for (slot, &value) in buf.iter_mut().zip(sum.iter()) {
                 *slot = S::from_real(value);
             }
