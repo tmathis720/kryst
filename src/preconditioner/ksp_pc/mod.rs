@@ -1,13 +1,15 @@
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::config::options::{KspOptions, KspType, PcOptions};
-use crate::context::ksp_context::{ExecutionPolicy, KspContext, MonitorPolicy};
+use crate::context::ksp_context::{
+    ExecutionPolicy, KspContext, MonitorPolicy, NestedPolicyContext,
+};
 use crate::error::KError;
 use crate::matrix::backend::materialize_ref;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{
-    map_kerror_to_reason, ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure,
+    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, map_kerror_to_reason,
 };
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -22,6 +24,8 @@ struct InnerKspContext {
     inner_tol_policy: InnerTolPolicy,
     propagate_converged_reason: bool,
     comm_size: usize,
+    outer_threads: Option<usize>,
+    outer_threads_mode: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +153,8 @@ impl KspAsPc {
             existing.inner_tol_policy = inner_tol_policy;
             existing.propagate_converged_reason = propagate_converged_reason;
             existing.comm_size = a.comm().size();
+            existing.outer_threads = self.ksp_options.threads;
+            existing.outer_threads_mode = self.ksp_options.threads_mode.clone();
             existing
                 .ksp
                 .try_set_operators_with_comm(amat, None, a.comm())?;
@@ -157,7 +163,14 @@ impl KspAsPc {
             return Ok(true);
         }
 
-        let nested_exec = ExecutionPolicy::nested_from_options(&ksp_opts, a.comm().size())?;
+        let nested_exec = ExecutionPolicy::nested_from_options_with_context(
+            &ksp_opts,
+            a.comm().size(),
+            NestedPolicyContext {
+                outer_threads: self.ksp_options.threads,
+                outer_threads_mode: self.ksp_options.threads_mode.as_deref(),
+            },
+        )?;
         let mut ksp = KspContext::new();
         ksp.set_execution_policy(nested_exec);
         ksp.set_from_all_options(&ksp_opts, &pc_opts)?;
@@ -187,6 +200,8 @@ impl KspAsPc {
             inner_tol_policy,
             propagate_converged_reason,
             comm_size: a.comm().size(),
+            outer_threads: self.ksp_options.threads,
+            outer_threads_mode: self.ksp_options.threads_mode.clone(),
         });
         Ok(true)
     }
@@ -251,8 +266,14 @@ impl KspAsPc {
     }
 
     fn apply_runtime_controls_from_options(inner: &mut InnerKspContext) {
-        if let Ok(exec) = ExecutionPolicy::nested_from_options(&inner.ksp_options, inner.comm_size)
-        {
+        if let Ok(exec) = ExecutionPolicy::nested_from_options_with_context(
+            &inner.ksp_options,
+            inner.comm_size,
+            NestedPolicyContext {
+                outer_threads: inner.outer_threads,
+                outer_threads_mode: inner.outer_threads_mode.as_deref(),
+            },
+        ) {
             inner.ksp.set_execution_policy(exec);
         }
         if inner.ksp_options.rtol.is_some()
@@ -576,16 +597,20 @@ mod tests {
             ),
             detail: "inner_ksp=Some(\"gmres\") inner_pc=Some(\"none\")".into(),
         };
-        assert!(failure
-            .final_norm
-            .as_deref()
-            .unwrap_or_default()
-            .contains("true_residual_l2"));
-        assert!(failure
-            .residual_history_summary
-            .as_deref()
-            .unwrap_or_default()
-            .contains("history_len="));
+        assert!(
+            failure
+                .final_norm
+                .as_deref()
+                .unwrap_or_default()
+                .contains("true_residual_l2")
+        );
+        assert!(
+            failure
+                .residual_history_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("history_len=")
+        );
     }
 
     #[test]

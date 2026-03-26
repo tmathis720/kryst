@@ -109,7 +109,10 @@ use distcsr_capability::{
     DistCsrCapabilityEntry, DistCsrCapabilityKey, resolve_distcsr_capability,
 };
 use execution::KrylovVariant;
-pub use execution::{AdaptiveExecutionDecision, ExecutionPolicy, OverlapStrategy, ThreadingPolicy};
+pub use execution::{
+    AdaptiveExecutionDecision, ExecutionPolicy, NestedPolicyContext, OverlapStrategy,
+    ThreadingPolicy,
+};
 pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
 
 #[cfg(feature = "complex")]

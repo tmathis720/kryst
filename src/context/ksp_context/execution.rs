@@ -31,8 +31,16 @@ pub enum NestedExecutionPolicy {
     Serial,
     /// Reuse context-managed worker pools (or global executor when not configured).
     ContextPool,
+    /// Run nested work with a bounded thread cap (MPI-safe compromise between serial and full parallel).
+    Hybrid,
     /// Use the global Rayon pool unchanged.
     Global,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NestedPolicyContext<'a> {
+    pub outer_threads: Option<usize>,
+    pub outer_threads_mode: Option<&'a str>,
 }
 
 #[derive(Clone, Debug)]
@@ -243,10 +251,23 @@ impl ExecutionPolicy {
     /// - `threads_mode=global` is allowed only for strictly local (non-MPI) solves
     /// - when `comm_size > 1` and `threads > 1`, force `serial` or return an error
     pub fn nested_from_options(opts: &KspOptions, comm_size: usize) -> Result<Self, KError> {
-        let mode = opts.threads_mode.as_deref().unwrap_or("context");
+        Self::nested_from_options_with_context(opts, comm_size, NestedPolicyContext::default())
+    }
+
+    pub fn nested_from_options_with_context(
+        opts: &KspOptions,
+        comm_size: usize,
+        context: NestedPolicyContext<'_>,
+    ) -> Result<Self, KError> {
+        let mode = opts
+            .threads_mode
+            .as_deref()
+            .or(context.outer_threads_mode)
+            .unwrap_or("context");
         let policy = match mode {
             "serial" => NestedExecutionPolicy::Serial,
             "context" => NestedExecutionPolicy::ContextPool,
+            "hybrid" => NestedExecutionPolicy::Hybrid,
             "global" => {
                 if comm_size > 1 {
                     return Err(KError::InvalidInput(
@@ -265,9 +286,13 @@ impl ExecutionPolicy {
 
         if comm_size > 1 && opts.threads.unwrap_or(1) > 1 && policy != NestedExecutionPolicy::Serial
         {
-            return Err(KError::InvalidInput(
-                "nested pc_type=ksp with MPI and threads>1 requires ksp_threads_mode=serial".into(),
+            if policy == NestedExecutionPolicy::Hybrid {
+                // handled below via thread capping
+            } else {
+                return Err(KError::InvalidInput(
+                "nested pc_type=ksp with MPI and threads>1 requires ksp_threads_mode=serial or hybrid".into(),
             ));
+            }
         }
 
         let mut exec = ExecutionPolicy::default();
@@ -280,6 +305,28 @@ impl ExecutionPolicy {
                 #[cfg(feature = "rayon")]
                 if let Some(n) = opts.threads {
                     exec = exec.with_threads(n)?;
+                }
+            }
+            NestedExecutionPolicy::Hybrid => {
+                #[cfg(feature = "rayon")]
+                {
+                    let rank_threads = crate::parallel::threads::current_rayon_threads().max(1);
+                    let outer_cap = context.outer_threads.unwrap_or(rank_threads).max(1);
+                    let mut budget = rank_threads.min(outer_cap);
+                    if comm_size > 1 {
+                        budget = budget.min((rank_threads / 2).max(1));
+                    }
+                    let requested = opts.threads.unwrap_or(budget).max(1);
+                    let chosen = requested.min(budget).max(1);
+                    if chosen <= 1 {
+                        exec.threading = ThreadingPolicy::Serial;
+                    } else {
+                        exec = exec.with_threads(chosen)?;
+                    }
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    exec.threading = ThreadingPolicy::Serial;
                 }
             }
             NestedExecutionPolicy::Global => {
@@ -354,7 +401,7 @@ mod tests {
             ..Default::default()
         };
         let err = ExecutionPolicy::nested_from_options(&opts, 4).unwrap_err();
-        assert!(format!("{err}").contains("requires ksp_threads_mode=serial"));
+        assert!(format!("{err}").contains("requires ksp_threads_mode=serial or hybrid"));
     }
 
     #[test]
@@ -366,6 +413,22 @@ mod tests {
         };
         let pol = ExecutionPolicy::nested_from_options(&opts, 8).unwrap();
         assert!(matches!(pol.threading, ThreadingPolicy::Serial));
+    }
+
+    #[test]
+    fn nested_policy_inherits_outer_hybrid_mode() {
+        let opts = KspOptions::default();
+        let pol = ExecutionPolicy::nested_from_options_with_context(
+            &opts,
+            4,
+            NestedPolicyContext {
+                outer_threads_mode: Some("hybrid"),
+                outer_threads: Some(4),
+            },
+        )
+        .unwrap();
+        #[cfg(feature = "rayon")]
+        assert!(!matches!(pol.threading, ThreadingPolicy::GlobalUnmodified));
     }
 
     #[test]
