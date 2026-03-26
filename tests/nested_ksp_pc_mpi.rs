@@ -10,6 +10,38 @@ use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 
+fn solve_with_nested_policy(mode: &str, threads: usize) -> kryst::utils::convergence::SolveStats {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let n_local = 4;
+    let a = Arc::new(make_dist_poisson(&comm, n_local));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("outer type");
+    let ksp_opts = KspOptions {
+        maxits: Some(40),
+        rtol: Some(1e-10),
+        threads_mode: Some("context".into()),
+        threads: Some(threads),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("gmres".into()),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        pc_ksp_threads_mode: Some(mode.into()),
+        pc_ksp_threads: Some(threads),
+        pc_ksp_maxits: Some(2),
+        pc_ksp_rtol: Some(1e-2),
+        ..Default::default()
+    };
+
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).expect("opts");
+    ksp.set_operators(a, None);
+    let rhs = vec![1.0; n_local];
+    let mut x = vec![0.0; n_local];
+    ksp.solve(&rhs, &mut x).expect("solve")
+}
+
 fn local_rows_from_global(
     global: &CsrMatrix<f64>,
     row_start: usize,
@@ -281,4 +313,47 @@ fn nested_ksp_pc_mpi_symmetric_outer_reports_inner_side_mismatch() {
     let inner = stats.nested_pc_failure.as_ref().expect("nested failure");
     assert!(inner.detail.contains("compatibility=mismatch"));
     assert!(inner.detail.contains("stage=preflight"));
+}
+
+#[test]
+fn nested_ksp_pc_mpi_threads_mode_hybrid_matches_serial_convergence() {
+    let serial_stats = solve_with_nested_policy("serial", 4);
+    let hybrid_stats = solve_with_nested_policy("hybrid", 4);
+
+    assert!(serial_stats.reason.is_converged() || serial_stats.reason.is_diverged());
+    assert!(hybrid_stats.reason.is_converged() || hybrid_stats.reason.is_diverged());
+    let s = serial_stats.final_residual;
+    let h = hybrid_stats.final_residual;
+    let scale = s.abs().max(h.abs()).max(1.0);
+    assert!((s - h).abs() <= 1e-6 * scale);
+}
+
+#[test]
+fn nested_ksp_pc_mpi_context_mode_rejects_multithread_inner() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let n_local = 4;
+    let a = Arc::new(make_dist_poisson(&comm, n_local));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("outer type");
+    let ksp_opts = KspOptions {
+        maxits: Some(10),
+        rtol: Some(1e-8),
+        ..Default::default()
+    };
+    let pc_opts = PcOptions {
+        pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("richardson".into()),
+        pc_ksp_pc_type: Some("jacobi".into()),
+        pc_ksp_threads_mode: Some("context".into()),
+        pc_ksp_threads: Some(2),
+        ..Default::default()
+    };
+
+    ksp.set_from_all_options(&ksp_opts, &pc_opts).expect("opts");
+    ksp.set_operators(a, None);
+    let rhs = vec![1.0; n_local];
+    let mut x = vec![0.0; n_local];
+    let err = ksp.solve(&rhs, &mut x).unwrap_err();
+    assert!(format!("{err}").contains("requires ksp_threads_mode=serial or hybrid"));
 }
