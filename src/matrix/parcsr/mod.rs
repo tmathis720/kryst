@@ -14,7 +14,8 @@
 //!    `LinOp::comm()` metadata; `ParCsrOp` forwards these from the canonical
 //!    operator.
 //! 4. Legacy diag/off data structures remain only as compatibility adapters and
-//!    are marked for deprecation in favor of canonical conversion helpers.
+//!    are marked deprecated (since 1.1.0) with planned removal after
+//!    2026-12-31 in favor of canonical conversion helpers.
 //! 5. Test parity gates validate that legacy `ParCsrMatrix` SpMV behavior
 //!    matches canonical distributed SpMV before removing legacy routes.
 

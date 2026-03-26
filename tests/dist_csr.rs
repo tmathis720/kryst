@@ -122,6 +122,104 @@ fn parcsr_spmv_matches_canonical_distcsr() {
     assert_eq!(y_par, y_dist);
 }
 
+#[cfg(feature = "mpi")]
+#[test]
+fn parcsr_parity_gate_matches_canonical_output_and_runtime() {
+    let Some(mpi) = MpiComm::try_new() else {
+        eprintln!("skipping MPI test: MPI init failed");
+        return;
+    };
+    let comm = UniverseComm::Mpi(Arc::new(mpi));
+    if comm.size() != 2 {
+        eprintln!("skipping MPI parity gate: requires exactly 2 ranks");
+        return;
+    }
+
+    let rank = comm.rank();
+    let (row_start, row_end, diag_val, off_val, colmap_owned, colmap_ghost) = if rank == 0 {
+        (
+            0,
+            1,
+            S::from_real(3.0),
+            S::from_real(-1.0),
+            vec![0],
+            vec![1],
+        )
+    } else {
+        (1, 2, S::from_real(4.0), S::from_real(2.0), vec![1], vec![0])
+    };
+
+    let a_diag = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![diag_val]);
+    let a_off = CsrMatrix::from_csr(1, 1, vec![0, 1], vec![0], vec![off_val]);
+    #[allow(deprecated)]
+    let par = ParCsrMatrix::from_legacy_parts(
+        comm.clone(),
+        row_start,
+        row_end,
+        2,
+        2,
+        a_diag,
+        a_off,
+        colmap_owned,
+        colmap_ghost,
+        kryst::matrix::parcsr::HaloPlan {
+            neighbors: vec![if rank == 0 { 1 } else { 0 }],
+            send_ptr: vec![0, 1],
+            send_idx: vec![0],
+            recv_ptr: vec![0, 1],
+            recv_idx: vec![0],
+        },
+    );
+
+    let x_local = if rank == 0 {
+        vec![S::from_real(1.5)]
+    } else {
+        vec![S::from_real(-0.5)]
+    };
+    let mut y_par = vec![S::zero(); 1];
+    let mut y_dist = vec![S::zero(); 1];
+    par.spmv(&x_local, &mut y_par).unwrap();
+    par.canonical_dist_op()
+        .unwrap()
+        .matvec(&x_local, &mut y_dist);
+    assert_eq!(y_par, y_dist);
+
+    comm.barrier();
+    let warmup = 10usize;
+    let iters = 200usize;
+    for _ in 0..warmup {
+        par.spmv(&x_local, &mut y_par).unwrap();
+        par.canonical_dist_op()
+            .unwrap()
+            .matvec(&x_local, &mut y_dist);
+    }
+    comm.barrier();
+
+    let t_par0 = std::time::Instant::now();
+    for _ in 0..iters {
+        par.spmv(&x_local, &mut y_par).unwrap();
+    }
+    let t_par = t_par0.elapsed().as_secs_f64();
+    comm.barrier();
+
+    let t_dist0 = std::time::Instant::now();
+    for _ in 0..iters {
+        par.canonical_dist_op()
+            .unwrap()
+            .matvec(&x_local, &mut y_dist);
+    }
+    let t_dist = t_dist0.elapsed().as_secs_f64();
+
+    // Guardrail, not a strict microbenchmark: legacy delegation should stay in
+    // the same order-of-magnitude as direct canonical application.
+    let ratio = t_par / t_dist.max(1e-12);
+    assert!(
+        ratio < 2.5,
+        "legacy/canonical runtime ratio too high on rank {}: {ratio:.3}",
+        rank
+    );
+}
+
 #[cfg(feature = "complex")]
 #[test]
 fn dist_csr_spmv_complex_values() {

@@ -4,8 +4,6 @@ use kryst::matrix::dist_csr::DistCsrOp;
 #[cfg(feature = "mpi")]
 use kryst::matrix::op::LinOp;
 #[cfg(feature = "mpi")]
-use kryst::matrix::parcsr::builder::partition_rows;
-#[cfg(feature = "mpi")]
 use kryst::matrix::sparse::CsrMatrix;
 #[cfg(feature = "mpi")]
 use kryst::parallel::{Comm, MpiComm, NoComm, UniverseComm};
@@ -83,8 +81,7 @@ fn dist_csr_halo_exchange_matches_tridiagonal() {
     }
 
     let n_global = comm.size() * 4;
-    let part_prefix_u64 = partition_rows(n_global as u64, &comm);
-    let part_prefix: Vec<usize> = part_prefix_u64.iter().map(|&v| v as usize).collect();
+    let part_prefix = DistCsrOp::partition_rows_balanced(n_global, &comm);
     let row_start = part_prefix[comm.rank()];
     let row_end = part_prefix[comm.rank() + 1];
     let n_local = row_end - row_start;

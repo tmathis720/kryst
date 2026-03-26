@@ -14,7 +14,7 @@ use crate::error::KError;
 use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan, HaloTuning};
 use crate::matrix::dist::spmv_dist::RowRanges;
 use crate::matrix::op::{ChangeIds, DistLayout, LinOp, StructureId, ValuesId};
-use crate::matrix::parcsr::{self, ParCsrMatrix};
+use crate::matrix::parcsr::ParCsrMatrix;
 use crate::matrix::sparse::CsrMatrix;
 use crate::ops::klinop::KLinOp;
 use crate::parallel::{Comm, UniverseComm};
@@ -83,6 +83,25 @@ pub enum HaloOverlapMode {
 }
 
 impl DistCsrOp {
+    /// Canonical balanced row partition helper for distributed operators.
+    ///
+    /// Returns a prefix array of length `comm.size() + 1` where each rank `r`
+    /// owns rows `part[r]..part[r + 1]`.
+    pub fn partition_rows_balanced(n_global: usize, comm: &UniverseComm) -> Vec<usize> {
+        let p = comm.size();
+        assert!(p > 0, "number of partitions must be positive");
+        let base = n_global / p;
+        let rem = n_global % p;
+        let mut starts = Vec::with_capacity(p + 1);
+        let mut s = 0usize;
+        for k in 0..p {
+            starts.push(s);
+            s += base + usize::from(k < rem);
+        }
+        starts.push(n_global);
+        starts
+    }
+
     pub fn from_local_rows(
         n_global: usize,
         row_start: usize,
@@ -249,10 +268,7 @@ impl DistCsrOp {
         }
 
         let local_rows = CsrMatrix::from_csr(n_local, n_global, row_ptr, col_idx, vals);
-        let part_prefix: Vec<usize> = parcsr::builder::partition_rows(n_global as u64, &par.comm)
-            .into_iter()
-            .map(|g| g as usize)
-            .collect();
+        let part_prefix = Self::partition_rows_balanced(n_global, &par.comm);
 
         Self::from_local_rows(
             n_global,
