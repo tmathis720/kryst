@@ -12,6 +12,7 @@ use crate::matrix::utils::spgemm_with_drop_tol_generic;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{ConvergedReason, FailureReasonKind, NestedPcFailure};
 use std::cmp::{max, min};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ pub struct FieldSplitPc {
     comm_schedule: SplitCommSchedule,
     schur_approx_workflow: String,
     diagnostics: Mutex<Vec<SplitDiagnostics>>,
+    apply_workspaces: Mutex<HashMap<ApplyWorkspaceKey, Vec<ApplyWorkspace>>>,
     all_children_local: bool,
 }
 
@@ -60,7 +62,7 @@ enum FieldSplitType {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SchurFactorization {
     Diag,
     Lower,
@@ -99,12 +101,42 @@ enum SplitCommSchedule {
     ExchangeFirst,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SplitTypeKey {
+    Additive,
+    Multiplicative,
+    Symmetric,
+    Schur(SchurFactorization),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ApplyWorkspaceKey {
+    split_type: SplitTypeKey,
+    block_lens: Vec<usize>,
+    n: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ApplyWorkspace {
+    y_accum: Vec<S>,
+    residual: Vec<S>,
+    ay: Vec<S>,
+    block_outputs: Vec<Vec<S>>,
+    schur_tmp0: Vec<S>,
+    schur_tmp1: Vec<S>,
+    schur_corr: Vec<S>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SplitDiagnostics {
     pub apply_calls: usize,
     pub reduction_count: usize,
     pub local_work_time: Duration,
     pub exchange_time: Duration,
+    pub allocation_free_applies: usize,
+    pub local_first_apply_time: Duration,
+    pub exchange_first_apply_time: Duration,
+    pub comm_schedule_time_delta: Duration,
 }
 
 impl FieldSplitPc {
@@ -161,6 +193,7 @@ impl FieldSplitPc {
             comm_schedule: Self::comm_schedule_from_options(&opts)?,
             schur_approx_workflow: opts.resolved_fieldsplit_schur_approx(),
             diagnostics: Mutex::new(vec![SplitDiagnostics::default(); split_count]),
+            apply_workspaces: Mutex::new(HashMap::new()),
             all_children_local,
         })
     }
@@ -253,6 +286,59 @@ impl FieldSplitPc {
         }
     }
 
+    fn split_type_key(&self) -> SplitTypeKey {
+        match self.split_type {
+            FieldSplitType::Additive => SplitTypeKey::Additive,
+            FieldSplitType::Multiplicative => SplitTypeKey::Multiplicative,
+            FieldSplitType::Symmetric => SplitTypeKey::Symmetric,
+            FieldSplitType::Schur { factorization, .. } => SplitTypeKey::Schur(factorization),
+        }
+    }
+
+    fn apply_workspace_key(&self, n: usize) -> ApplyWorkspaceKey {
+        ApplyWorkspaceKey {
+            split_type: self.split_type_key(),
+            block_lens: self.block_spans.iter().map(BlockSpan::len).collect(),
+            n,
+        }
+    }
+
+    fn build_workspace(&self, key: &ApplyWorkspaceKey) -> ApplyWorkspace {
+        let mut block_outputs = Vec::with_capacity(key.block_lens.len());
+        for len in &key.block_lens {
+            block_outputs.push(vec![S::zero(); *len]);
+        }
+        let schur_len0 = key.block_lens.first().copied().unwrap_or(0);
+        let schur_len1 = key.block_lens.get(1).copied().unwrap_or(0);
+        ApplyWorkspace {
+            y_accum: vec![S::zero(); key.n],
+            residual: vec![S::zero(); key.n],
+            ay: vec![S::zero(); key.n],
+            block_outputs,
+            schur_tmp0: vec![S::zero(); schur_len0],
+            schur_tmp1: vec![S::zero(); schur_len1],
+            schur_corr: vec![S::zero(); schur_len0],
+        }
+    }
+
+    fn checkout_workspace(&self, n: usize) -> (ApplyWorkspaceKey, ApplyWorkspace, bool) {
+        let key = self.apply_workspace_key(n);
+        if let Ok(mut pools) = self.apply_workspaces.lock()
+            && let Some(pool) = pools.get_mut(&key)
+            && let Some(workspace) = pool.pop()
+        {
+            return (key, workspace, true);
+        }
+        let workspace = self.build_workspace(&key);
+        (key, workspace, false)
+    }
+
+    fn checkin_workspace(&self, key: ApplyWorkspaceKey, workspace: ApplyWorkspace) {
+        if let Ok(mut pools) = self.apply_workspaces.lock() {
+            pools.entry(key).or_default().push(workspace);
+        }
+    }
+
     fn add_local_time(&self, idx: usize, elapsed: Duration) {
         if let Ok(mut diag) = self.diagnostics.lock()
             && let Some(d) = diag.get_mut(idx)
@@ -268,6 +354,34 @@ impl FieldSplitPc {
         {
             d.reduction_count += 1;
             d.exchange_time += elapsed;
+        }
+    }
+
+    fn add_apply_schedule_stats(
+        &self,
+        schedule: SplitCommSchedule,
+        elapsed: Duration,
+        allocation_free: bool,
+    ) {
+        if let Ok(mut diag) = self.diagnostics.lock() {
+            for (idx, span) in self.block_spans.iter().enumerate() {
+                if span.len() == 0 {
+                    continue;
+                }
+                if let Some(d) = diag.get_mut(idx) {
+                    if allocation_free {
+                        d.allocation_free_applies += 1;
+                    }
+                    match schedule {
+                        SplitCommSchedule::LocalFirst => d.local_first_apply_time += elapsed,
+                        SplitCommSchedule::ExchangeFirst => d.exchange_first_apply_time += elapsed,
+                        SplitCommSchedule::Auto => {}
+                    }
+                    d.comm_schedule_time_delta = d
+                        .local_first_apply_time
+                        .abs_diff(d.exchange_first_apply_time);
+                }
+            }
         }
     }
 
@@ -570,12 +684,11 @@ impl FieldSplitPc {
         ))
     }
 
-    fn update_residual(&self, x: &[S], y: &[S], r: &mut [S]) -> Result<(), KError> {
+    fn update_residual(&self, x: &[S], y: &[S], r: &mut [S], ay: &mut [S]) -> Result<(), KError> {
         let a = self.full_matrix.as_ref().ok_or_else(|| {
             KError::InvalidInput("fieldsplit multiplicative requires CSR matrix".into())
         })?;
-        let mut ay = vec![S::zero(); y.len()];
-        a.try_spmv(y, &mut ay)?;
+        a.try_spmv(y, ay)?;
         for i in 0..r.len() {
             r[i] = x[i] - ay[i];
         }
@@ -622,7 +735,13 @@ impl FieldSplitPc {
             .map_err(|err| self.nested_apply_failure(idx, side, stage, &err))
     }
 
-    fn apply_additive(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_additive(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        workspace: &mut ApplyWorkspace,
+    ) -> Result<(), KError> {
         y.fill(S::zero());
         let mut order: Vec<usize> = (0..self.block_spans.len()).collect();
         if self.active_comm_schedule() == SplitCommSchedule::LocalFirst {
@@ -633,9 +752,10 @@ impl FieldSplitPc {
             if span.len() == 0 {
                 continue;
             }
-            let mut zout = vec![S::zero(); span.len()];
+            let zout = &mut workspace.block_outputs[idx];
+            zout.fill(S::zero());
             let start = Instant::now();
-            self.apply_child(idx, side, self.restrict_rhs(x, span), &mut zout, "additive")?;
+            self.apply_child(idx, side, self.restrict_rhs(x, span), zout, "additive")?;
             self.add_local_time(idx, start.elapsed());
             for (yi, zi) in y[span.start..span.end].iter_mut().zip(zout.iter()) {
                 *yi += *zi;
@@ -644,10 +764,17 @@ impl FieldSplitPc {
         Ok(())
     }
 
-    fn apply_multiplicative(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        let n = x.len();
-        let mut y_accum = vec![S::zero(); n];
-        let mut residual = x.to_vec();
+    fn apply_multiplicative(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        workspace: &mut ApplyWorkspace,
+    ) -> Result<(), KError> {
+        let y_accum = &mut workspace.y_accum;
+        y_accum.fill(S::zero());
+        let residual = &mut workspace.residual;
+        residual.copy_from_slice(x);
         for (idx, (span, _)) in self
             .block_spans
             .iter()
@@ -657,27 +784,35 @@ impl FieldSplitPc {
             if span.len() == 0 {
                 continue;
             }
-            let mut zout = vec![S::zero(); span.len()];
+            let zout = &mut workspace.block_outputs[idx];
+            zout.fill(S::zero());
             self.apply_child(
                 idx,
                 side,
-                self.restrict_rhs(&residual, *span),
-                &mut zout,
+                self.restrict_rhs(residual, *span),
+                zout,
                 "multiplicative",
             )?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
-            self.update_residual(x, &y_accum, &mut residual)?;
+            self.update_residual(x, y_accum, residual, &mut workspace.ay)?;
         }
-        y.copy_from_slice(&y_accum);
+        y.copy_from_slice(y_accum);
         Ok(())
     }
 
-    fn apply_symmetric(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
-        let n = x.len();
-        let mut y_accum = vec![S::zero(); n];
-        let mut residual = x.to_vec();
+    fn apply_symmetric(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        workspace: &mut ApplyWorkspace,
+    ) -> Result<(), KError> {
+        let y_accum = &mut workspace.y_accum;
+        y_accum.fill(S::zero());
+        let residual = &mut workspace.residual;
+        residual.copy_from_slice(x);
         for (idx, (span, _)) in self
             .block_spans
             .iter()
@@ -687,18 +822,19 @@ impl FieldSplitPc {
             if span.len() == 0 {
                 continue;
             }
-            let mut zout = vec![S::zero(); span.len()];
+            let zout = &mut workspace.block_outputs[idx];
+            zout.fill(S::zero());
             self.apply_child(
                 idx,
                 side,
-                self.restrict_rhs(&residual, *span),
-                &mut zout,
+                self.restrict_rhs(residual, *span),
+                zout,
                 "symmetric_forward",
             )?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
-            self.update_residual(x, &y_accum, &mut residual)?;
+            self.update_residual(x, y_accum, residual, &mut workspace.ay)?;
         }
         for (idx, (span, _)) in self
             .block_spans
@@ -710,24 +846,31 @@ impl FieldSplitPc {
             if span.len() == 0 {
                 continue;
             }
-            let mut zout = vec![S::zero(); span.len()];
+            let zout = &mut workspace.block_outputs[idx];
+            zout.fill(S::zero());
             self.apply_child(
                 idx,
                 side,
-                self.restrict_rhs(&residual, *span),
-                &mut zout,
+                self.restrict_rhs(residual, *span),
+                zout,
                 "symmetric_backward",
             )?;
             for (i, val) in zout.iter().enumerate() {
                 y_accum[span.start + i] += *val;
             }
-            self.update_residual(x, &y_accum, &mut residual)?;
+            self.update_residual(x, y_accum, residual, &mut workspace.ay)?;
         }
-        y.copy_from_slice(&y_accum);
+        y.copy_from_slice(y_accum);
         Ok(())
     }
 
-    fn apply_schur(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+    fn apply_schur(
+        &self,
+        side: PcSide,
+        x: &[S],
+        y: &mut [S],
+        workspace: &mut ApplyWorkspace,
+    ) -> Result<(), KError> {
         let FieldSplitType::Schur { factorization, .. } = self.split_type else {
             return Err(KError::InvalidInput(
                 "apply_schur called for non-schur fieldsplit".into(),
@@ -748,68 +891,76 @@ impl FieldSplitPc {
         let x1 = &x[span0.start..span0.end];
         let x2 = &x[span1.start..span1.end];
 
-        let mut y1 = vec![S::zero(); span0.len()];
-        let mut y2 = vec![S::zero(); span1.len()];
+        let (left, right) = workspace.block_outputs.split_at_mut(1);
+        let y1 = &mut left[0];
+        y1.fill(S::zero());
+        let y2 = &mut right[0];
+        y2.fill(S::zero());
 
         match factorization {
             SchurFactorization::Diag => {
-                self.apply_child(0, side, x1, &mut y1, "schur_diag_a11")?;
-                self.apply_child(1, side, x2, &mut y2, "schur_diag_s")?;
+                self.apply_child(0, side, x1, y1, "schur_diag_a11")?;
+                self.apply_child(1, side, x2, y2, "schur_diag_s")?;
             }
             SchurFactorization::Lower => {
-                self.apply_child(0, side, x1, &mut y1, "schur_lower_a11")?;
-                let mut tmp2 = vec![S::zero(); span1.len()];
+                self.apply_child(0, side, x1, y1, "schur_lower_a11")?;
+                let tmp2 = &mut workspace.schur_tmp1;
+                tmp2.fill(S::zero());
                 let exch = Instant::now();
-                schur.a21.try_spmv(&y1, &mut tmp2)?;
+                schur.a21.try_spmv(y1, tmp2)?;
                 self.add_exchange_event(1, exch.elapsed());
                 for i in 0..tmp2.len() {
                     tmp2[i] = x2[i] - tmp2[i];
                 }
                 if let Some(hook) = &self.schur_apply_hook {
-                    hook(&tmp2, &mut y2)?;
+                    hook(tmp2, y2)?;
                 } else {
-                    self.apply_child(1, side, &tmp2, &mut y2, "schur_lower_s")?;
+                    self.apply_child(1, side, tmp2, y2, "schur_lower_s")?;
                 }
             }
             SchurFactorization::Upper => {
-                self.apply_child(1, side, x2, &mut y2, "schur_upper_s")?;
-                let mut tmp1 = vec![S::zero(); span0.len()];
+                self.apply_child(1, side, x2, y2, "schur_upper_s")?;
+                let tmp1 = &mut workspace.schur_tmp0;
+                tmp1.fill(S::zero());
                 let exch = Instant::now();
-                schur.a12.try_spmv(&y2, &mut tmp1)?;
+                schur.a12.try_spmv(y2, tmp1)?;
                 self.add_exchange_event(0, exch.elapsed());
                 for i in 0..tmp1.len() {
                     tmp1[i] = x1[i] - tmp1[i];
                 }
-                self.apply_child(0, side, &tmp1, &mut y1, "schur_upper_a11")?;
+                self.apply_child(0, side, tmp1, y1, "schur_upper_a11")?;
             }
             SchurFactorization::Full => {
-                self.apply_child(0, side, x1, &mut y1, "schur_full_a11")?;
-                let mut tmp2 = vec![S::zero(); span1.len()];
+                self.apply_child(0, side, x1, y1, "schur_full_a11")?;
+                let tmp2 = &mut workspace.schur_tmp1;
+                tmp2.fill(S::zero());
                 let exch = Instant::now();
-                schur.a21.try_spmv(&y1, &mut tmp2)?;
+                schur.a21.try_spmv(y1, tmp2)?;
                 self.add_exchange_event(1, exch.elapsed());
                 for i in 0..tmp2.len() {
                     tmp2[i] = x2[i] - tmp2[i];
                 }
                 if let Some(hook) = &self.schur_apply_hook {
-                    hook(&tmp2, &mut y2)?;
+                    hook(tmp2, y2)?;
                 } else {
-                    self.apply_child(1, side, &tmp2, &mut y2, "schur_full_s")?;
+                    self.apply_child(1, side, tmp2, y2, "schur_full_s")?;
                 }
-                let mut tmp1 = vec![S::zero(); span0.len()];
+                let tmp1 = &mut workspace.schur_tmp0;
+                tmp1.fill(S::zero());
                 let exch = Instant::now();
-                schur.a12.try_spmv(&y2, &mut tmp1)?;
+                schur.a12.try_spmv(y2, tmp1)?;
                 self.add_exchange_event(0, exch.elapsed());
-                let mut corr = vec![S::zero(); span0.len()];
-                self.apply_child(0, side, &tmp1, &mut corr, "schur_full_correction")?;
+                let corr = &mut workspace.schur_corr;
+                corr.fill(S::zero());
+                self.apply_child(0, side, tmp1, corr, "schur_full_correction")?;
                 for i in 0..y1.len() {
                     y1[i] -= corr[i];
                 }
             }
         }
 
-        y[span0.start..span0.end].copy_from_slice(&y1);
-        y[span1.start..span1.end].copy_from_slice(&y2);
+        y[span0.start..span0.end].copy_from_slice(y1.as_slice());
+        y[span1.start..span1.end].copy_from_slice(y2.as_slice());
         Ok(())
     }
 }
@@ -939,6 +1090,9 @@ impl Preconditioner for FieldSplitPc {
         if let Ok(mut d) = self.diagnostics.lock() {
             *d = vec![SplitDiagnostics::default(); self.block_spans.len()];
         }
+        if let Ok(mut pools) = self.apply_workspaces.lock() {
+            pools.clear();
+        }
         self.last_structure_id = Some(a.structure_id());
         self.last_values_id = Some(a.values_id());
         Ok(())
@@ -950,12 +1104,19 @@ impl Preconditioner for FieldSplitPc {
                 "fieldsplit input/output length mismatch".into(),
             ));
         }
-        match self.split_type {
-            FieldSplitType::Additive => self.apply_additive(side, x, y),
-            FieldSplitType::Multiplicative => self.apply_multiplicative(side, x, y),
-            FieldSplitType::Symmetric => self.apply_symmetric(side, x, y),
-            FieldSplitType::Schur { .. } => self.apply_schur(side, x, y),
-        }
+        let schedule = self.active_comm_schedule();
+        let (workspace_key, mut workspace, allocation_free) = self.checkout_workspace(x.len());
+        let start = Instant::now();
+        let result = match self.split_type {
+            FieldSplitType::Additive => self.apply_additive(side, x, y, &mut workspace),
+            FieldSplitType::Multiplicative => self.apply_multiplicative(side, x, y, &mut workspace),
+            FieldSplitType::Symmetric => self.apply_symmetric(side, x, y, &mut workspace),
+            FieldSplitType::Schur { .. } => self.apply_schur(side, x, y, &mut workspace),
+        };
+        let elapsed = start.elapsed();
+        self.checkin_workspace(workspace_key, workspace);
+        self.add_apply_schedule_stats(schedule, elapsed, allocation_free);
+        result
     }
 
     fn distributed_support(&self) -> PcDistributedSupport {
@@ -975,6 +1136,7 @@ mod tests {
     use crate::matrix::op::DenseOp;
     use faer::Mat;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn tri_diag_2x2_blocks(n: usize) -> Arc<DenseOp<f64>> {
         let m = Mat::<f64>::from_fn(n, n, |i, j| {
@@ -1073,5 +1235,92 @@ mod tests {
         };
         let pc = FieldSplitPc::new(vec![2, 2], Some("jacobi".into()), opts).unwrap();
         assert_eq!(pc.distributed_support(), PcDistributedSupport::Distributed);
+    }
+
+    #[test]
+    fn fieldsplit_workspace_reuse_preserves_outputs() {
+        let a = tri_diag_2x2_blocks(8);
+        let mut pc = FieldSplitPc::new(
+            vec![4, 4],
+            Some("jacobi".into()),
+            PcOptions {
+                pc_fieldsplit_type: Some("symmetric".into()),
+                pc_fieldsplit_comm_schedule: Some("local_first".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        pc.setup(a.as_ref()).unwrap();
+
+        let rhs = vec![1.0; 8];
+        let mut y_first = vec![0.0; 8];
+        let mut y_second = vec![0.0; 8];
+        pc.apply(PcSide::Left, &rhs, &mut y_first).unwrap();
+        pc.apply(PcSide::Left, &rhs, &mut y_second).unwrap();
+        assert_eq!(y_first, y_second);
+
+        let diag = pc.split_diagnostics();
+        assert!(diag.iter().all(|d| d.allocation_free_applies >= 1));
+    }
+
+    #[test]
+    fn fieldsplit_diagnostics_report_schedule_delta() {
+        let a = tri_diag_2x2_blocks(8);
+        let rhs = vec![1.0; 8];
+
+        let mut local_pc = FieldSplitPc::new(
+            vec![4, 4],
+            Some("jacobi".into()),
+            PcOptions {
+                pc_fieldsplit_type: Some("additive".into()),
+                pc_fieldsplit_comm_schedule: Some("local_first".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        local_pc.setup(a.as_ref()).unwrap();
+        let mut y_local = vec![0.0; 8];
+        local_pc.apply(PcSide::Left, &rhs, &mut y_local).unwrap();
+
+        let mut exchange_pc = FieldSplitPc::new(
+            vec![4, 4],
+            Some("jacobi".into()),
+            PcOptions {
+                pc_fieldsplit_type: Some("additive".into()),
+                pc_fieldsplit_comm_schedule: Some("exchange_first".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        exchange_pc.setup(a.as_ref()).unwrap();
+        let mut y_exchange = vec![0.0; 8];
+        exchange_pc
+            .apply(PcSide::Left, &rhs, &mut y_exchange)
+            .unwrap();
+        assert_eq!(y_local, y_exchange);
+
+        let local_diag = local_pc.split_diagnostics();
+        assert!(
+            local_diag
+                .iter()
+                .all(|d| d.local_first_apply_time > Duration::ZERO)
+        );
+        assert!(
+            local_diag
+                .iter()
+                .all(|d| d.comm_schedule_time_delta > Duration::ZERO)
+        );
+
+        let exchange_diag = exchange_pc.split_diagnostics();
+        assert!(
+            exchange_diag
+                .iter()
+                .all(|d| d.exchange_first_apply_time > Duration::ZERO)
+        );
+        assert!(
+            exchange_diag
+                .iter()
+                .all(|d| d.comm_schedule_time_delta > Duration::ZERO)
+        );
     }
 }
