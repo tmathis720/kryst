@@ -5,15 +5,29 @@
 //! - Per-field prefixes with sub-KSP/sub-PC options
 //! - Setup reuse and repeated-apply timings
 
+#[cfg(not(feature = "backend-faer"))]
+fn main() {
+    eprintln!("fieldsplit_block_system_benchmark requires the backend-faer feature.");
+}
+
+#[cfg(feature = "backend-faer")]
 use kryst::KError;
+#[cfg(feature = "backend-faer")]
 use kryst::config::options::PcOptions;
+#[cfg(feature = "backend-faer")]
 use kryst::context::pc_context::PcFactory;
+#[cfg(feature = "backend-faer")]
 use kryst::matrix::op::CsrOp;
+#[cfg(feature = "backend-faer")]
 use kryst::matrix::sparse::CsrMatrix;
+#[cfg(feature = "backend-faer")]
 use kryst::prelude::*;
+#[cfg(feature = "backend-faer")]
 use std::sync::Arc;
+#[cfg(feature = "backend-faer")]
 use std::time::Instant;
 
+#[cfg(feature = "backend-faer")]
 fn coupled_block_system(nu: usize, np: usize) -> CsrMatrix<S> {
     let n = nu + np;
     let mut row_ptr = Vec::with_capacity(n + 1);
@@ -50,6 +64,7 @@ fn coupled_block_system(nu: usize, np: usize) -> CsrMatrix<S> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
 }
 
+#[cfg(feature = "backend-faer")]
 fn run_case(
     name: &str,
     opts: &PcOptions,
@@ -81,6 +96,7 @@ fn run_case(
     Ok(())
 }
 
+#[cfg(feature = "backend-faer")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (nu, np) = (160, 80);
     let a = coupled_block_system(nu, np);
