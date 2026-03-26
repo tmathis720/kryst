@@ -357,6 +357,27 @@ pub static SPECS: &[Spec] = &[
         kind: ValueKind::UInt,
         doc: "target rows per chunk for threaded CSR SpMV",
     },
+    Spec {
+        flag: "-ksp_min_work_spmm_dense",
+        key: "ksp_min_work_spmm_dense",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "work cutoff (rows*rhs) for threaded CSR SpMM dense",
+    },
+    Spec {
+        flag: "-ksp_chunk_rows_spmm_dense",
+        key: "ksp_chunk_rows_spmm_dense",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "row block for threaded CSR SpMM dense",
+    },
+    Spec {
+        flag: "-ksp_chunk_cols_spmm_dense",
+        key: "ksp_chunk_cols_spmm_dense",
+        arity: Arity::One,
+        kind: ValueKind::UInt,
+        doc: "rhs-column block for threaded CSR SpMM dense",
+    },
     // --------- PC (subset shown; we include all below)
     Spec {
         flag: "-pc_type",
