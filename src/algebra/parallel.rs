@@ -12,6 +12,7 @@
 use crate::algebra::prelude::*;
 use crate::reduction::{Accum, Kahan, ReproMode};
 use crate::utils::reduction::repro_mode_is_strict;
+use std::time::Instant;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -141,50 +142,89 @@ fn s_sum_abs2_local(x: &[S]) -> R {
 #[inline]
 pub fn par_copy(src: &[S], dst: &mut [S]) {
     debug_assert_eq!(src.len(), dst.len());
+    let t0 = Instant::now();
+    let mut used_parallel = false;
     #[cfg(feature = "rayon")]
     {
         let n = src.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
             src.par_chunks(chunk)
                 .zip(dst.par_chunks_mut(chunk))
                 .for_each(|(s, d)| d.copy_from_slice(s));
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                src.len(),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
             return;
         }
     }
     s_copy(src, dst);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        src.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
 }
 
 #[inline]
 pub fn par_fill_zero(dst: &mut [S]) {
+    let t0 = Instant::now();
+    let mut used_parallel = false;
     #[cfg(feature = "rayon")]
     {
         let n = dst.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
             dst.par_chunks_mut(chunk)
                 .for_each(|chunk| s_fill_zero(chunk));
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                dst.len(),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
             return;
         }
     }
     s_fill_zero(dst);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        dst.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
 }
 
 #[inline]
 pub fn par_scale(alpha: S, y: &mut [S]) {
+    let t0 = Instant::now();
+    let mut used_parallel = false;
     #[cfg(feature = "rayon")]
     {
         let n = y.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         let chunk = VEC_CHUNK;
         if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
             if alpha == S::from_real(1.0) {
+                crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                    y.len(),
+                    used_parallel,
+                    t0.elapsed().as_nanos() as u64,
+                );
                 return;
             }
             if alpha == S::zero() {
                 par_fill_zero(y);
+                crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                    y.len(),
+                    used_parallel,
+                    t0.elapsed().as_nanos() as u64,
+                );
                 return;
             }
             y.par_chunks_mut(chunk).for_each(|yc| {
@@ -192,21 +232,39 @@ pub fn par_scale(alpha: S, y: &mut [S]) {
                     *yi = alpha * *yi;
                 }
             });
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                y.len(),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
             return;
         }
     }
     s_scale(alpha, y);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        y.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
 }
 
 #[inline]
 pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
     debug_assert_eq!(x.len(), y.len());
+    let t0 = Instant::now();
+    let mut used_parallel = false;
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
             if alpha == S::zero() {
+                crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                    x.len(),
+                    used_parallel,
+                    t0.elapsed().as_nanos() as u64,
+                );
                 return;
             }
             y.par_iter_mut()
@@ -214,20 +272,33 @@ pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
                 .for_each(|(yi, xi)| {
                     *yi = *yi + alpha * xi;
                 });
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                x.len(),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
             return;
         }
     }
     s_axpy(x, alpha, y);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        x.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
 }
 
 #[inline]
 pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
     debug_assert_eq!(x.len(), y.len());
+    let t0 = Instant::now();
+    let mut used_parallel = false;
     #[cfg(feature = "rayon")]
     {
         let n = x.len();
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
             if beta == S::zero() {
                 y.par_iter_mut()
                     .zip(x.par_iter().copied())
@@ -243,10 +314,20 @@ pub fn par_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
                         *yi = alpha * xi + beta * *yi;
                     });
             }
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                x.len(),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
             return;
         }
     }
     s_axpby(x, alpha, y, beta);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        x.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
 }
 
 /// Compute `y = x + alpha * y`.
