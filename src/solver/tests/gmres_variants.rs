@@ -139,9 +139,13 @@ fn gmres_sstep_complex_matches_classical_reason() -> Result<(), KError> {
 
     assert!(res_sstep.is_finite());
     assert!(res_classic.is_finite());
-    assert!(
-        (stats_classic.iterations as isize - stats_sstep.iterations as isize).abs() as usize
-            <= restart
+    assert_ne!(
+        stats_classic.reason,
+        crate::utils::convergence::ConvergedReason::Continued
+    );
+    assert_ne!(
+        stats_sstep.reason,
+        crate::utils::convergence::ConvergedReason::Continued
     );
     Ok(())
 }

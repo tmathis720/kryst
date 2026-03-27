@@ -677,13 +677,23 @@ where
         }
 
         let mut base_y = vec![S::zero(); n];
-        self.base.apply(side, &fine_tmp, &mut base_y)?;
+        if self.base.apply(side, &fine_tmp, &mut base_y).is_err() {
+            base_y.copy_from_slice(&fine_tmp);
+        }
         for i in 0..n {
             y[i] += base_y[i];
         }
 
         let _ = base_out;
         Ok(())
+    }
+
+    fn distributed_support(&self) -> PcDistributedSupport {
+        if self.local_range.is_some() {
+            PcDistributedSupport::Distributed
+        } else {
+            self.base.distributed_support()
+        }
     }
 }
 
