@@ -10,7 +10,10 @@ use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 
-fn solve_with_nested_policy(mode: &str, threads: usize) -> kryst::utils::convergence::SolveStats {
+fn solve_with_nested_policy(
+    mode: &str,
+    threads: usize,
+) -> kryst::utils::convergence::SolveStats<f64> {
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
