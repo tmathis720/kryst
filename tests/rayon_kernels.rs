@@ -39,6 +39,7 @@ mod rayon_tests {
                 min_rows_ilu_factorization: 1,
                 min_rows_ilu_triangular: 1,
                 min_rows_asm_apply: 1,
+                ..ParallelTune::default()
             });
 
             let a = CsrMatrix::from_csr(
@@ -89,6 +90,7 @@ mod rayon_tests {
                 min_rows_ilu_factorization: 1,
                 min_rows_ilu_triangular: 1,
                 min_rows_asm_apply: 1,
+                ..ParallelTune::default()
             });
 
             let n = 12;
