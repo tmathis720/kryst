@@ -223,10 +223,11 @@ impl KspDiagnostics {
 }
 
 fn insert_opt<T: Serialize>(map: &mut BTreeMap<String, Value>, key: &str, val: Option<T>) {
-    if let Some(value) = val
-        && let Ok(value) = serde_json::to_value(value) {
+    if let Some(value) = val {
+        if let Ok(value) = serde_json::to_value(value) {
             map.insert(key.to_string(), value);
         }
+    }
 }
 
 fn build_nested_ksp_diagnostics(opts: &PcOptions) -> Option<KspDiagnostics> {

@@ -41,15 +41,18 @@ fn env_lower(key: &str) -> Option<String> {
 
 /// Supported CG algorithm variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
 pub enum CgVariant {
     /// Classic Hestenes-Stiefel CG.
-    #[default]
     Classic,
     /// Pipelined CG that trades local work for fewer global reductions.
     Pipelined,
 }
 
+impl Default for CgVariant {
+    fn default() -> Self {
+        CgVariant::Classic
+    }
+}
 
 impl FromStr for CgVariant {
     type Err = &'static str;
@@ -857,8 +860,8 @@ impl PcOptions {
             let tok = args[i];
             if let Some(suffix) = tok.strip_prefix(prefix) {
                 let canonical = format!("-{suffix}");
-                if let Some(spec) = reg.spec_for_flag(&canonical)
-                    && keep(&canonical) {
+                if let Some(spec) = reg.spec_for_flag(&canonical) {
+                    if keep(&canonical) {
                         out.push(tok);
                         match spec.arity {
                             Arity::Zero | Arity::OptionalBool => {
@@ -886,6 +889,7 @@ impl PcOptions {
                             }
                         }
                     }
+                }
             }
             i += 1;
         }
@@ -2867,14 +2871,15 @@ impl PcOptions {
             .transpose()?
             .unwrap_or(LocalPcKind::Ilu);
 
-        if let GlobalPcKind::Ras = global
-            && let Some(mode) = self.asm_mode.as_deref()
+        if let GlobalPcKind::Ras = global {
+            if let Some(mode) = self.asm_mode.as_deref()
                 && mode != "ras"
             {
                 return Err(KError::InvalidInput(format!(
                     "pc_global=ras requires pc_asm_mode=ras (got {mode})"
                 )));
             }
+        }
 
         let mut opts = MpiPcOptions::default();
         opts.global_pc = global;

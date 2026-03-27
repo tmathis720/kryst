@@ -740,7 +740,7 @@ impl Ilu {
                 return true;
             }
             let tune = crate::algebra::parallel_cfg::parallel_tune();
-            n >= tune.min_rows_ilu_factorization
+            return n >= tune.min_rows_ilu_factorization;
         }
         #[cfg(not(feature = "rayon"))]
         {
@@ -761,7 +761,7 @@ impl Ilu {
                 return false;
             }
             let tune = crate::algebra::parallel_cfg::parallel_tune();
-            n >= tune.min_rows_ilu_triangular
+            return n >= tune.min_rows_ilu_triangular;
         }
         #[cfg(not(feature = "rayon"))]
         {
@@ -1244,7 +1244,7 @@ impl Ilu {
         let mut original_row_sums = vec![0.0; n];
         for i in 0..n {
             for j in 0..n {
-                original_row_sums[i] += matrix[(i, j)];
+                original_row_sums[i] = original_row_sums[i] + matrix[(i, j)];
             }
         }
 
@@ -1282,7 +1282,7 @@ impl Ilu {
                                 let u_ij = Self::sparse_get(&u, i, j);
                                 Self::sparse_set(&mut u, i, j, u_ij - update);
                             } else {
-                                dropped_sum += update;
+                                dropped_sum = dropped_sum + update;
                             }
                         }
                     }
@@ -1336,7 +1336,7 @@ impl Ilu {
 
             for i in (k + 1)..n {
                 if level[i][k] <= self.config.level_of_fill {
-                    l[(i, k)] /= pivot;
+                    l[(i, k)] = l[(i, k)] / pivot;
 
                     for j in (k + 1)..n {
                         if level[k][j] <= self.config.level_of_fill {
@@ -1345,7 +1345,7 @@ impl Ilu {
 
                             if new_level <= self.config.level_of_fill {
                                 let update = l[(i, k)] * u[(k, j)];
-                                u[(i, j)] -= update;
+                                u[(i, j)] = u[(i, j)] - update;
                                 level[i][j] = level[i][j].min(new_level);
                             }
                         }
@@ -1402,7 +1402,7 @@ impl Ilu {
 
             for i in (k + 1)..n {
                 if l[(i, k)].abs() >= drop_tol {
-                    l[(i, k)] /= pivot;
+                    l[(i, k)] = l[(i, k)] / pivot;
 
                     for j in (k + 1)..n {
                         if u[(k, j)].abs() >= drop_tol {
@@ -1798,10 +1798,11 @@ impl Ilu {
                 time_s: iter_time,
             });
 
-            if let Some(m) = &self.monitor
-                && let Some(sample) = history.as_slice().last() {
+            if let Some(m) = &self.monitor {
+                if let Some(sample) = history.as_slice().last() {
                     m.on_event(Event::IluSetupIter { sample });
                 }
+            }
 
             if iter + 1 >= min_iters && res < tol {
                 break;
@@ -2013,7 +2014,7 @@ impl Ilu {
                     let (cols, vals) = self.l.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j < i {
-                            sum += val * x[j];
+                            sum = sum + val * x[j];
                         }
                     }
                     x[i] = b[i] - sum; // L has unit diagonal
@@ -2025,7 +2026,7 @@ impl Ilu {
                     let (cols, vals) = self.u.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j > i {
-                            sum += val * x[j];
+                            sum = sum + val * x[j];
                         }
                     }
                     x[i] = (b[i] - sum) * self.inv_diag_u[i];
@@ -2054,7 +2055,7 @@ impl Ilu {
                     let (cols, vals) = self.l.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j < i {
-                            sum += val * x[j];
+                            sum = sum + val * x[j];
                         }
                     }
                     x[i] = b[i] - sum; // L has unit diagonal
@@ -2066,7 +2067,7 @@ impl Ilu {
                     let (cols, vals) = self.u.row(i);
                     for (&j, &val) in cols.iter().zip(vals.iter()) {
                         if j > i {
-                            sum += val * x[j];
+                            sum = sum + val * x[j];
                         }
                     }
                     x[i] = (b[i] - sum) * self.inv_diag_u[i];
@@ -2227,7 +2228,7 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
             for j in 0..n {
                 let val_abs = matrix[(i, j)].abs();
                 if j != i {
-                    row_gersh += val_abs;
+                    row_gersh = row_gersh + val_abs;
                 }
                 if val_abs > row_inf {
                     row_inf = val_abs;

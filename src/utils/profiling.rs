@@ -77,7 +77,7 @@ impl StageGuard {
             #[cfg(feature = "logging")]
             log::trace!("---- enter stage: {name}");
             #[cfg(not(feature = "logging"))]
-            eprintln!("---- enter stage: {name}");
+            eprintln!("---- enter stage: {}", name);
             Some(Instant::now())
         } else {
             None

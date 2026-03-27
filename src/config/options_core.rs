@@ -77,7 +77,8 @@ impl Registry {
             let spec = if let Some(spec) = self.by_flag.get(tok) {
                 *spec
             } else if let Some(pref) = prefix_filter {
-                if let Some(suffix) = tok.strip_prefix(pref) {
+                if tok.starts_with(pref) {
+                    let suffix = &tok[pref.len()..];
                     let canonical = format!("-{suffix}");
                     if let Some(spec) = self.by_flag.get(canonical.as_str()) {
                         *spec
@@ -88,7 +89,7 @@ impl Registry {
                         let guess = nearest(canonical.as_str(), &self.flags);
                         let mut msg = format!("Unrecognized option: {tok}");
                         if let Some(g) = guess {
-                            msg.push_str(&format!(" (did you mean {g} with prefix?)"));
+                            msg.push_str(&format!(" (did you mean {} with prefix?)", g));
                         }
                         return Err(KError::SolveError(msg));
                     }

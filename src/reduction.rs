@@ -140,7 +140,7 @@ pub fn dot_local_deterministic_parallel(
     #[cfg(feature = "rayon")]
     {
         let chunk_len = _chunk_len.max(1);
-        let n_chunks = u.len().div_ceil(chunk_len);
+        let n_chunks = (u.len() + chunk_len - 1) / chunk_len;
         let partials: Vec<f64> = (0..n_chunks)
             .into_par_iter()
             .map(|chunk_idx| {

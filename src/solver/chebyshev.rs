@@ -65,7 +65,7 @@ impl LinearSolver for ChebyshevSolver {
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.inner.solve_f64(
             a,
-            pc.map(|p| &*p),
+            pc.as_deref_mut().map(|p| &*p),
             b,
             x,
             pc_side,

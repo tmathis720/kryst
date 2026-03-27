@@ -202,9 +202,11 @@ pub(crate) fn get_or_insert_csr<T: 'static + Send + Sync>(
         .unwrap()
         .get(&key)
         .and_then(|w| w.upgrade())
-        && let Ok(typed) = existing.downcast::<T>() {
+    {
+        if let Ok(typed) = existing.downcast::<T>() {
             return typed;
         }
+    }
 
     let arc: Arc<T> = build();
     let erased: Arc<dyn Any + Send + Sync> = arc.clone();
@@ -223,9 +225,11 @@ pub(crate) fn get_or_insert_csc<T: 'static + Send + Sync>(
         .unwrap()
         .get(&key)
         .and_then(|w| w.upgrade())
-        && let Ok(typed) = existing.downcast::<T>() {
+    {
+        if let Ok(typed) = existing.downcast::<T>() {
             return typed;
         }
+    }
 
     let arc: Arc<T> = build();
     let erased: Arc<dyn Any + Send + Sync> = arc.clone();

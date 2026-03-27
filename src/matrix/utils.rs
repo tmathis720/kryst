@@ -676,7 +676,7 @@ pub fn parallel_mat_vec_sparse(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) -> 
     #[cfg(feature = "rayon")]
     {
         use crate::matrix::spmv::csr_matvec_par;
-        csr_matvec_par(a, x, y)
+        return csr_matvec_par(a, x, y);
     }
     #[cfg(not(feature = "rayon"))]
     {

@@ -581,8 +581,8 @@ impl BiCgStabSolver {
                 }
             }
 
-            if let Some(every) = replace_every
-                && k % every == 0 {
+            if let Some(every) = replace_every {
+                if k % every == 0 {
                     a.matvec_s(x, &mut v[..], &mut *scratch);
                     for i in 0..n {
                         r[i] = b[i] - v[i];
@@ -600,6 +600,7 @@ impl BiCgStabSolver {
                         }
                     }
                 }
+            }
 
             let r_norm = if need_left {
                 red.norm2(s)

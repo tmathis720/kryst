@@ -57,7 +57,7 @@ impl RowWork {
             self.val[j] = delta;
             self.idx.push(j);
         } else {
-            self.val[j] += delta;
+            self.val[j] = self.val[j] + delta;
         }
     }
 

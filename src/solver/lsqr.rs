@@ -109,7 +109,7 @@ impl LsqrSolver {
         }
         if pc.is_some() {
             return Err(KError::Unsupported(
-                "LSQR preconditioning is not yet supported",
+                "LSQR preconditioning is not yet supported".into(),
             ));
         }
         if pc_side != PcSide::Left {
@@ -229,7 +229,7 @@ impl LsqrSolver {
             let theta = s * alpha;
             rho_bar = -c * alpha;
             let phi = c * phi_bar;
-            phi_bar *= s;
+            phi_bar = s * phi_bar;
 
             let phi_over_rho = phi / rho;
             let theta_over_rho = theta / rho;
@@ -374,7 +374,7 @@ impl LinearSolver for LsqrSolver {
         if w.q_s.len() < 2 {
             w.q_s.resize(2, Vec::new());
         }
-        if w.z_s.is_empty() {
+        if w.z_s.len() < 1 {
             w.z_s.resize(1, Vec::new());
         }
     }

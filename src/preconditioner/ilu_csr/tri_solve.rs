@@ -89,10 +89,10 @@ pub fn tri_solve_level_scheduled(pc: &IluCsr, x: &[Real], y: &mut [Real]) -> Res
     Ok(())
 }
 
-fn coalesce_buckets(
-    buckets: &[Vec<usize>],
+fn coalesce_buckets<'a>(
+    buckets: &'a [Vec<usize>],
     min_bucket_coalesce: usize,
-) -> Vec<&[Vec<usize>]> {
+) -> Vec<&'a [Vec<usize>]> {
     let mut groups = Vec::new();
     let mut start = 0usize;
     while start < buckets.len() {

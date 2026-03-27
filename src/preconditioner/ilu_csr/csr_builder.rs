@@ -4,12 +4,19 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 #[derive(Clone, Debug)]
-#[derive(Default)]
 pub struct CsrRowBuilder {
     pub cols: Vec<usize>,
     pub vals: Vec<Real>,
 }
 
+impl Default for CsrRowBuilder {
+    fn default() -> Self {
+        Self {
+            cols: Vec::new(),
+            vals: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CsrBuilder {
@@ -55,7 +62,7 @@ impl CsrBuilder {
             for (c, v) in pairs {
                 if let Some(lc) = last_col {
                     if lc == c {
-                        last_val += v;
+                        last_val = last_val + v;
                         continue;
                     } else {
                         col_idx.push(lc);

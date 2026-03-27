@@ -823,7 +823,8 @@ impl<S: KrystScalar> LinOp for Mat<S> {
             }
             (lx, ly) => {
                 return Err(KError::InvalidInput(format!(
-                    "Mat::matvec dimension mismatch: A is {m}x{n}, x.len() = {lx}, y.len() = {ly}"
+                    "Mat::matvec dimension mismatch: A is {}x{}, x.len() = {}, y.len() = {}",
+                    m, n, lx, ly
                 )));
             }
         }

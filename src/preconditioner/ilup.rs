@@ -58,12 +58,6 @@ pub struct IlupWorkspace {
     size: usize,
 }
 
-impl Default for IlupWorkspace {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl IlupWorkspace {
     pub fn new() -> Self {
         Self {
@@ -139,7 +133,7 @@ impl Ilup {
         for i in 0..n {
             let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
-                sum -= self.l[i].vals[j_idx] * y[j];
+                sum = sum - self.l[i].vals[j_idx] * y[j];
             }
             y[i] = sum;
         }
@@ -148,7 +142,7 @@ impl Ilup {
             let mut sum = y[i];
             for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
                 if j > i {
-                    sum -= self.u[i].vals[j_idx] * z[j];
+                    sum = sum - self.u[i].vals[j_idx] * z[j];
                 }
             }
             if let Some(idx) = self.u[i].cols.iter().position(|&col| col == i) {
@@ -212,7 +206,7 @@ where
                                 level[i][j].saturating_add(level[j][k]).saturating_add(1);
                             if new_level <= self.fill {
                                 let update = lij * a_work[j][k];
-                                a_work[i][k] -= update;
+                                a_work[i][k] = a_work[i][k] - update;
                                 level[i][k] = level[i][k].min(new_level);
                             }
                         }
