@@ -53,6 +53,9 @@ use crate::algebra::parallel::set_rayon_threads;
 use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
 use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
+use crate::context::ksp_context::distcsr_capability::DistCsrCapabilityKey;
+#[cfg(feature= "backend-faer")]
+use crate::context::ksp_context::distcsr_capability::resolve_distcsr_capability;
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
