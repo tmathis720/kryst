@@ -270,7 +270,7 @@ pub fn spmm_csr_dense<A>(a: &A, x: &BlockVec, y: &mut BlockVec) -> Result<(), KE
 where
     A: CsrAccess<S>,
 {
-    let (m, n) = (a.nrows(), a.ncols());
+    let (m, n): (usize, usize) = (a.nrows(), a.ncols());
     if x.nrows() != n || y.nrows() != m || x.ncols() != y.ncols() {
         return Err(KError::InvalidInput(
             "spmm_csr_dense: dimension mismatch".into(),

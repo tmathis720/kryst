@@ -356,7 +356,10 @@ where
     /// # Errors
     /// Returns `KError::Unsupported` when called with complex scalars.
     #[cfg(feature = "backend-faer")]
-    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Result<Self, crate::error::KError> {
+    pub fn from_dense(
+        dense: &faer::Mat<f64>,
+        drop_tol: f64,
+    ) -> Result<Self, crate::error::KError> {
         if crate::algebra::scalar::is_complex_scalar::<T>() {
             return Err(crate::error::KError::Unsupported(
                 "CSR from_dense is real-only; complex scalars are unsupported",
@@ -385,8 +388,8 @@ where
     /// Convert from an owned dense `faer::Mat<R>` to sparse CSR format with drop tolerance.
     #[cfg(feature = "backend-faer")]
     pub fn from_dense_owned(
-        dense: faer::Mat<R>,
-        drop_tol: R,
+        dense: faer::Mat<f64>,
+        drop_tol: f64,
     ) -> Result<Self, crate::error::KError> {
         Self::from_dense(&dense, drop_tol)
     }

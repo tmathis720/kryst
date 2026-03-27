@@ -54,14 +54,14 @@ impl<T> CscMatrix<T> {
 
 impl<T> CscMatrix<T>
 where
-    T: KrystScalar<Real = R>,
+    T: KrystScalar<Real = f64>,
 {
     /// Convert to dense `faer::Mat` with real entries. Works for real scalars only.
     ///
     /// # Errors
     /// Returns `KError::Unsupported` when called with complex scalars to avoid
     /// silently discarding imaginary components.
-    pub fn to_dense(&self) -> Result<faer::Mat<R>, crate::error::KError> {
+    pub fn to_dense(&self) -> Result<faer::Mat<f64>, crate::error::KError> {
         if crate::algebra::scalar::is_complex_scalar::<T>() {
             return Err(crate::error::KError::Unsupported(
                 "CSC to_dense is real-only; complex scalars are unsupported",
@@ -69,7 +69,7 @@ where
         }
         let m = self.nrows();
         let n = self.ncols();
-        let mut dense = faer::Mat::from_fn(m, n, |_, _| R::default());
+        let mut dense = faer::Mat::from_fn(m, n, |_, _| f64::default());
         let cp = self.col_ptr();
         let ri = self.row_idx();
         let vv = self.values();
@@ -86,7 +86,10 @@ where
     ///
     /// # Errors
     /// Returns `KError::Unsupported` when called with complex scalars.
-    pub fn from_dense(dense: &faer::Mat<R>, drop_tol: R) -> Result<Self, crate::error::KError> {
+    pub fn from_dense(
+        dense: &faer::Mat<f64>,
+        drop_tol: f64,
+    ) -> Result<Self, crate::error::KError> {
         if crate::algebra::scalar::is_complex_scalar::<T>() {
             return Err(crate::error::KError::Unsupported(
                 "CSC from_dense is real-only; complex scalars are unsupported",
@@ -126,7 +129,7 @@ where
         y.fill(T::zero());
         let cp = self.col_ptr();
         let ri = self.row_idx();
-        let vv = self.values();
+        let vv: &[T] = self.values();
         for j in 0..self.ncols() {
             let xj = x[j];
             for p in cp[j]..cp[j + 1] {
@@ -147,7 +150,7 @@ where
         assert_eq!(y.len(), self.ncols());
         let cp = self.col_ptr();
         let ri = self.row_idx();
-        let vv = self.values();
+        let vv: &[T] = self.values();
 
         for (j, yj) in y.iter_mut().enumerate() {
             let mut acc = T::zero();
@@ -177,7 +180,7 @@ where
         let m = self.nrows();
         let cp = self.col_ptr();
         let ri = self.row_idx();
-        let vv = self.values();
+        let vv: &[T] = self.values();
 
         let result = (0..self.ncols())
             .into_par_iter()

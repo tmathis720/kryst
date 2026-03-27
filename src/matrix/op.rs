@@ -948,7 +948,7 @@ impl<S: KrystScalar> LinOp for CscMatrix<S> {
     type S = S;
 
     fn dims(&self) -> (usize, usize) {
-        (self.nrows(), self.ncols())
+        (CscMatrix::nrows(self), CscMatrix::ncols(self))
     }
 
     fn matvec(&self, x: &[S], y: &mut [S]) {
@@ -971,8 +971,8 @@ impl<S: KrystScalar> LinOp for CscMatrix<S> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        self.col_ptr().hash(&mut h);
-        self.row_idx().hash(&mut h);
+        CscMatrix::col_ptr(self).hash(&mut h);
+        CscMatrix::row_idx(self).hash(&mut h);
         StructureId(h.finish())
     }
 

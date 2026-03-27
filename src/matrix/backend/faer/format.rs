@@ -204,11 +204,11 @@ pub(crate) fn csr_to_csc(a: &CsrMatrix<f64>) -> CscMatrix<f64> {
 }
 
 pub(crate) fn csc_to_csr(a: &CscMatrix<f64>) -> CsrMatrix<f64> {
-    let m = a.nrows();
-    let n = a.ncols();
-    let cp = a.col_ptr();
-    let ri = a.row_idx();
-    let vv = a.values();
+    let m = CscMatrix::nrows(a);
+    let n = CscMatrix::ncols(a);
+    let cp = CscMatrix::col_ptr(a);
+    let ri = CscMatrix::row_idx(a);
+    let vv = CscMatrix::values(a);
     let nnz = vv.len();
 
     let mut row_ptr = vec![0usize; m + 1];

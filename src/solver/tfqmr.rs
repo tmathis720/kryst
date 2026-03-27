@@ -528,6 +528,7 @@ mod tests {
     use crate::ops::klinop::KLinOp;
     use crate::ops::kpc::KPreconditioner;
     use crate::testkit::s;
+    use crate::solver::MonitorAction;
     use std::any::Any;
     use std::sync::{Arc, Mutex};
 

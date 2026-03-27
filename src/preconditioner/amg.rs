@@ -2535,12 +2535,12 @@ fn symmetric_eigenvalues(mut m: Mat<f64>) -> Vec<f64> {
             continue;
         }
         let tau = (aqq - app) / (2.0 * apq);
-        let t = if tau >= 0.0 {
-            1.0 / (tau + (1.0 + tau * tau).sqrt())
+        let t = if tau >= 0.0_f64 {
+            1.0_f64 / (tau + (1.0_f64 + tau * tau).sqrt())
         } else {
-            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+            -1.0_f64 / (-tau + (1.0_f64 + tau * tau).sqrt())
         };
-        let c = 1.0 / (1.0 + t * t).sqrt();
+        let c = 1.0_f64 / (1.0_f64 + t * t).sqrt();
         let s = t * c;
         for k in 0..n {
             if k != p && k != q {
