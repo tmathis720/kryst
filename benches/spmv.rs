@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kryst::matrix::{sparse::CsrMatrix, spmv::spmv_csr_parallel};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 fn build_random_csr(m: usize, n: usize, nnz_per_row: usize) -> CsrMatrix<f64> {
     let mut rp = Vec::with_capacity(m + 1);
@@ -10,7 +10,7 @@ fn build_random_csr(m: usize, n: usize, nnz_per_row: usize) -> CsrMatrix<f64> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(123);
     for _ in 0..m {
         let mut cols: Vec<usize> = (0..n)
-            .map(|_| rng.gen_range(0..n))
+            .map(|_| rng.random_range(0..n))
             .take(nnz_per_row)
             .collect();
         cols.sort_unstable();
@@ -18,7 +18,7 @@ fn build_random_csr(m: usize, n: usize, nnz_per_row: usize) -> CsrMatrix<f64> {
         let k0 = cj.len();
         cj.extend(cols.iter().copied());
         let added = cj.len() - k0;
-        vv.extend((0..added).map(|_| rng.r#gen::<f64>()));
+        vv.extend((0..added).map(|_| rng.random::<f64>()));
         rp.push(cj.len());
     }
     CsrMatrix::from_csr(m, n, rp, cj, vv)

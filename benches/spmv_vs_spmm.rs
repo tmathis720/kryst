@@ -37,7 +37,7 @@ fn bench_spmv_vs_spmm(c: &mut Criterion) {
                 let mut x = BlockVec::new(n, 4);
                 for col in 0..4 {
                     for row in 0..n {
-                        x[(row, col)] = 1.0;
+                        x.col_mut(col)[row] = 1.0;
                     }
                 }
                 let y = BlockVec::new(n, 4);

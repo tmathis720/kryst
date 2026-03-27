@@ -1,7 +1,7 @@
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::matrix::utils::{rap_btree, rap_opt};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 #[path = "infra/datasets.rs"]
 mod datasets;
@@ -67,8 +67,8 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
     p_rp.push(0);
     let mut rng = rand::rngs::StdRng::seed_from_u64(123);
     for _i in 0..n {
-        let c0 = rng.gen_range(0..nc);
-        let offset = 1 + rng.gen_range(0..3);
+        let c0 = rng.random_range(0..nc);
+        let offset = 1 + rng.random_range(0..3);
         let c1 = if c0 + offset < nc {
             c0 + offset
         } else {
@@ -117,8 +117,8 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
             pr.push(0);
             let mut rng = rand::rngs::StdRng::seed_from_u64(99);
             for _ in 0..1_000 {
-                let c0 = rng.gen_range(0..nc_small);
-                let offset = 1 + rng.gen_range(0..3);
+                let c0 = rng.random_range(0..nc_small);
+                let offset = 1 + rng.random_range(0..3);
                 let c1 = if c0 + offset < nc_small {
                     c0 + offset
                 } else {
