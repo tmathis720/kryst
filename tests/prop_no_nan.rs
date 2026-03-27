@@ -6,8 +6,8 @@ use proptest::prelude::*;
 
 // Build a random strictly diagonally dominant symmetric CSR
 fn random_strictly_diag_dominant_csr(n: usize, bandwidth: usize) -> CsrMatrix<R> {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx: Vec<usize> = Vec::new();
     let mut vals: Vec<R> = Vec::new();
@@ -34,7 +34,7 @@ fn random_strictly_diag_dominant_csr(n: usize, bandwidth: usize) -> CsrMatrix<R>
             if j == i {
                 continue; // defer diagonal until after off-diagonal sum
             }
-            let v = R::from(rng.gen_range(-0.5..0.5));
+            let v = R::from(rng.random_range(-0.5..0.5));
             entries.push((j, v));
             sum_abs += v.abs();
         }
