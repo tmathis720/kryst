@@ -192,7 +192,6 @@ pub fn build_ilut_with_conditioning(
 ) -> Result<Box<dyn Preconditioner>, KError> {
     use crate::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, IlutParams, PivotPolicy, PivotStrategy, Pivoting,
-        ReorderingOptions,
     };
     let params = IlutParams {
         droptol_abs: drop_tol,
@@ -320,7 +319,7 @@ pub fn build_asm(
     inner_pc: AsmInnerPc,
 ) -> Result<Box<dyn Preconditioner>, KError> {
     // Map the optional block solver string to the enum used by AdditiveSchwarz.
-    use crate::preconditioner::asm::{AsmBlockSolver, AsmInnerPc, AsmMode, AsmPc, Weighting};
+    use crate::preconditioner::asm::{AsmBlockSolver, AsmMode, AsmPc, Weighting};
 
     if block_solver
         .as_deref()

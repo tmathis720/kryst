@@ -411,7 +411,7 @@ impl GmresSolver {
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
-            let mut stats = stats.with_counters(counters);
+            let stats = stats.with_counters(counters);
             #[cfg(feature = "metrics")]
             {
                 metrics.reductions = reductions;
@@ -995,7 +995,7 @@ impl GmresSolver {
             overlap_global_reductions: async_waits,
             residual_replacements: async_waits,
         };
-        let mut stats = stats.with_counters(counters);
+        let stats = stats.with_counters(counters);
         #[cfg(feature = "metrics")]
         {
             metrics.reductions = reductions;
@@ -1202,7 +1202,7 @@ impl GmresSolver {
         let mut total_iters = 0usize;
         res = beta;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
-        let mut async_waits = 0usize;
+        let async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         if call_monitors(mons, 0, res, reduction_count) {
@@ -1279,7 +1279,7 @@ impl GmresSolver {
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
-            let mut stats = stats.with_counters(counters);
+            let stats = stats.with_counters(counters);
             #[cfg(feature = "metrics")]
             {
                 metrics.reductions = reductions;
@@ -1439,7 +1439,7 @@ impl GmresSolver {
                         }};
                     }
 
-                    let mut gram = match reorth_policy {
+                    let gram = match reorth_policy {
                         ReorthPolicy::Always => {
                             let mut c2: Vec<S> = vec![S::zero(); (k + 1) * block];
                             {
@@ -1900,7 +1900,7 @@ impl GmresSolver {
             overlap_global_reductions: async_waits,
             residual_replacements: async_waits,
         };
-        let mut stats = stats.with_counters(counters);
+        let stats = stats.with_counters(counters);
         #[cfg(feature = "metrics")]
         {
             metrics.reductions = reductions;

@@ -1,6 +1,6 @@
 use super::Global;
 use crate::matrix::dist_csr::DistCsrOp;
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::UniverseComm;
 
 /// Partition `n_global` rows among all ranks in `comm`.
 ///

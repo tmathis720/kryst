@@ -3709,7 +3709,7 @@ impl AMG {
         let prev_cfg = self.cfg.clone();
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
-        let mut record_error = |local_stage: &mut Option<&'static str>,
+        let record_error = |local_stage: &mut Option<&'static str>,
                                 local_detail: &mut Option<String>,
                                 stage: &'static str,
                                 err: KError| {
@@ -3872,7 +3872,7 @@ impl AMG {
 
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
-        let mut record_error = |local_stage: &mut Option<&'static str>,
+        let record_error = |local_stage: &mut Option<&'static str>,
                                 local_detail: &mut Option<String>,
                                 stage: &'static str,
                                 err: KError| {
@@ -4260,7 +4260,7 @@ impl AMG {
         r: &[f64],
         z: &mut [f64],
         dist: &DistAmgInfo,
-        mut stats: Option<&mut DistApplyStats>,
+        stats: Option<&mut DistApplyStats>,
     ) -> Result<(), KError> {
         let local_matrix = dist.local_matrix.as_ref().ok_or_else(|| {
             KError::InvalidInput("AMG superlu_dist matrix state not initialized".into())

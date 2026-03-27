@@ -180,7 +180,7 @@ impl BddcPc {
             }
         }
 
-        let mut global_counts = if let Some(l) = layout {
+        let global_counts = if let Some(l) = layout {
             let mut owned = vec![S::zero(); l.global_rows];
             for (local_i, val) in local_counts.iter().copied().enumerate() {
                 let gi = l.row_start + local_i;

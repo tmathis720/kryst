@@ -18,7 +18,7 @@ use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as Preconditi
 use crate::solver::LinearSolver;
 use crate::solver::common::call_monitors;
 use crate::solver::common::{ReductCtx, dot_result_to_real, take_or_resize};
-use crate::solver::{MonitorAction, MonitorCallback};
+use crate::solver::MonitorCallback;
 use crate::utils::convergence::{
     ConvergedReason, Convergence, ReasonEmitter, SolveStats, SolverCounters,
 };
