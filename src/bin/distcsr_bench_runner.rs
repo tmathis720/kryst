@@ -5,7 +5,7 @@ use kryst::matrix::utils::poisson_3d;
 use kryst::matrix::{CsrMatrix, DistCsrOp};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -188,8 +188,8 @@ fn build_part_prefix(n_global: usize, size: usize, seed: u64) -> Vec<usize> {
     let rem = n_global % size;
     let mut chunks: Vec<usize> = (0..size).map(|r| base + usize::from(r < rem)).collect();
     for _ in 0..(size * 3).max(1) {
-        let i = rng.gen_range(0..size);
-        let j = rng.gen_range(0..size);
+        let i = rng.random_range(0..size);
+        let j = rng.random_range(0..size);
         if i != j && chunks[i] > 1 {
             chunks[i] -= 1;
             chunks[j] += 1;
@@ -269,9 +269,9 @@ fn powerlaw_like(n: usize, avg_degree: usize, seed: u64) -> CsrMatrix<f64> {
     let mut col_idx = Vec::new();
     let mut vals = Vec::new();
     for i in 0..n {
-        let base = rng.gen_range((avg_degree / 2).max(1)..=(avg_degree * 3 / 2).max(2));
-        let burst = if rng.r#gen::<f64>() < 0.05 {
-            rng.gen_range(avg_degree.max(1)..=(4 * avg_degree.max(1)))
+        let base = rng.random_range((avg_degree / 2).max(1)..=(avg_degree * 3 / 2).max(2));
+        let burst = if rng.random::<f64>() < 0.05 {
+            rng.random_range(avg_degree.max(1)..=(4 * avg_degree.max(1)))
         } else {
             0
         };
@@ -279,12 +279,12 @@ fn powerlaw_like(n: usize, avg_degree: usize, seed: u64) -> CsrMatrix<f64> {
         let mut set: BTreeSet<usize> = BTreeSet::new();
         set.insert(i);
         while set.len() < deg {
-            set.insert(rng.gen_range(0..n));
+            set.insert(rng.random_range(0..n));
         }
         for &j in &set {
             col_idx.push(j);
-            let mut v = 0.5 + rng.r#gen::<f64>();
-            if j != i && rng.r#gen::<f64>() < 0.2 {
+            let mut v = 0.5 + rng.random::<f64>();
+            if j != i && rng.random::<f64>() < 0.2 {
                 v = -v;
             }
             vals.push(v);

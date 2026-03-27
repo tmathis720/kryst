@@ -432,9 +432,9 @@ pub fn convection_diffusion_2d(n: usize, peclet: f64) -> CsrMatrix<f64> {
 /// Generate a reproducible random right-hand side vector of length `n` using a
 /// deterministic seed. Values lie in `[-0.5, 0.5)`.
 pub fn random_rhs(n: usize, seed: u64) -> Vec<f64> {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     let mut rng = StdRng::seed_from_u64(seed);
-    (0..n).map(|_| rng.r#gen::<f64>() - 0.5).collect()
+    (0..n).map(|_| rng.random::<f64>() - 0.5).collect()
 }
 
 #[cfg(feature = "simd")]
