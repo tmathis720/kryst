@@ -107,7 +107,8 @@ mod workspace;
 pub use crate::core::block::BlockVec;
 #[cfg(feature = "backend-faer")]
 use distcsr_capability::{
-    DistCsrCapabilityEntry, build_dist_route_decision_report,
+    DistCsrCapabilityEntry, DistCsrCapabilityKey, build_dist_route_decision_report,
+    resolve_distcsr_capability,
 };
 use execution::KrylovVariant;
 pub use execution::{

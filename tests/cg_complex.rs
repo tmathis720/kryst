@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use faer::Mat;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
@@ -109,16 +109,16 @@ fn rng() -> StdRng {
 }
 
 #[inline]
-fn rand_s<RNG: Rng>(rng: &mut RNG) -> S {
+fn rand_s<RNG: RngExt>(rng: &mut RNG) -> S {
     #[cfg(feature = "complex")]
     {
-        let re = rng.gen_range(-0.5..0.5);
-        let im = rng.gen_range(-0.5..0.5);
+        let re = rng.random_range(-0.5..0.5);
+        let im = rng.random_range(-0.5..0.5);
         S::from_parts(re, im)
     }
     #[cfg(not(feature = "complex"))]
     {
-        S::from_real(rng.gen_range(-0.5..0.5))
+        S::from_real(rng.random_range(-0.5..0.5))
     }
 }
 

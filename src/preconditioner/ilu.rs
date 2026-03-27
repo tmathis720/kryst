@@ -2528,7 +2528,7 @@ mod tests {
     use crate::preconditioner::PcSide;
     use crate::preconditioner::legacy::Preconditioner;
     #[cfg(not(feature = "complex"))]
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
 
     #[cfg(feature = "rayon")]
     use rayon::prelude::*;
@@ -2578,7 +2578,7 @@ mod tests {
         let mut a = faer::Mat::zeros(n, n);
         for i in 0..n {
             for j in 0..=i {
-                let v = rng.gen_range(-1.0..1.0);
+                let v = rng.random_range(-1.0..1.0);
                 a[(i, j)] = S::from_real(v);
                 a[(j, i)] = S::from_real(v);
             }
