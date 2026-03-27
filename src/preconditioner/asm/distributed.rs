@@ -253,13 +253,8 @@ impl Preconditioner for DistributedAsm {
                 rhs[sub_idx] = x[local_idx];
             }
         }
-        for (slot_peer, imports) in state
-            .comm_plan
-            .import_peers
-            .iter()
-            .map(|&peer| (peer, &state.comm_plan.imports[peer]))
-            .enumerate()
-        {
+        for (slot_peer, &peer) in state.comm_plan.import_peers.iter().enumerate() {
+            let imports = &state.comm_plan.imports[peer];
             for (slot, &g) in imports.iter().enumerate() {
                 let sub_idx = *state
                     .sub_map

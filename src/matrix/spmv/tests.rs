@@ -306,7 +306,7 @@ fn spmm_block_s_two_rhs() {
     assert_eq!(y1, r1);
 }
 
-fn make_block_spmm_fixture(n: usize) -> CsrMatrix {
+fn make_block_spmm_fixture(n: usize) -> CsrMatrix<f64> {
     let mut rp = Vec::with_capacity(n + 1);
     let mut ci = Vec::new();
     let mut vv = Vec::new();
