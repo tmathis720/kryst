@@ -504,6 +504,17 @@ fn normalize_bounds(
 ) -> Result<ChebBounds, KError> {
     let provided_lo = lambda_min.abs();
     let provided_hi = lambda_max.abs();
+    let user_provided_degenerate = provided_lo.is_finite()
+        && provided_hi.is_finite()
+        && provided_lo > 0.0
+        && provided_hi > 0.0
+        && (provided_lo - provided_hi).abs() <= f64::EPSILON * provided_hi.max(1.0);
+    if user_provided_degenerate {
+        return Ok(ChebBounds {
+            lam_max: provided_hi,
+            lam_min: provided_lo,
+        });
+    }
     let mut lam_max = if provided_hi.is_finite() && provided_hi > 0.0 {
         provided_hi
     } else {
