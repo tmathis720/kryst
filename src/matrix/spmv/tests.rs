@@ -312,15 +312,15 @@ fn make_block_spmm_fixture(n: usize) -> CsrMatrix<f64> {
     let mut vv = Vec::new();
     rp.push(0);
     for i in 0..n {
+        if i > 0 {
+            ci.push(i - 1);
+            vv.push(0.5);
+        }
         ci.push(i);
         vv.push(2.0);
         if i + 1 < n {
             ci.push(i + 1);
             vv.push(-0.25);
-        }
-        if i > 0 {
-            ci.push(i - 1);
-            vv.push(0.5);
         }
         rp.push(ci.len());
     }
