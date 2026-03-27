@@ -32,6 +32,8 @@ use crate::algebra::prelude::*;
 use crate::core::traits::MatVec;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
+#[cfg(feature = "complex")]
+use crate::matrix::op::CsrOp;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
@@ -567,12 +569,45 @@ fn csr_real_matvec_scalar(
     Ok(())
 }
 
+#[cfg(feature = "complex")]
+fn csr_real_from_complex_linop(op: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<f64>>, KError> {
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
+        return Ok(Arc::new(csr.clone()));
+    }
+    if let Some(csr_op) = op.as_any().downcast_ref::<CsrOp<f64>>() {
+        return Ok(Arc::new(csr_op.inner().clone()));
+    }
+    if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
+        return Ok(Arc::new(CsrMatrix::from_csr(
+            csr.nrows(),
+            csr.ncols(),
+            csr.row_ptr().to_vec(),
+            csr.col_idx().to_vec(),
+            csr.values().iter().map(|v| v.real()).collect(),
+        )));
+    }
+    if let Some(csr_op) = op.as_any().downcast_ref::<CsrOp<S>>() {
+        let csr = csr_op.inner();
+        return Ok(Arc::new(CsrMatrix::from_csr(
+            csr.nrows(),
+            csr.ncols(),
+            csr.row_ptr().to_vec(),
+            csr.col_idx().to_vec(),
+            csr.values().iter().map(|v| v.real()).collect(),
+        )));
+    }
+    csr_from_linop(op, 0.0)
+}
+
 impl ObjPreconditioner for ChebyshevPc {
     fn dims(&self) -> (usize, usize) {
         (self.n, self.n)
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), crate::error::KError> {
+        #[cfg(feature = "complex")]
+        let csr = csr_real_from_complex_linop(op)?;
+        #[cfg(not(feature = "complex"))]
         let csr = csr_from_linop(op, 0.0)?;
         let n = csr.nrows();
         let b = normalize_bounds(&csr, self.lambda_min, self.lambda_max)?;
@@ -614,6 +649,9 @@ impl ObjPreconditioner for ChebyshevPc {
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = S>) -> Result<(), crate::error::KError> {
         // For now, refresh CSR view and keep degree/spectrum
+        #[cfg(feature = "complex")]
+        let csr = csr_real_from_complex_linop(op)?;
+        #[cfg(not(feature = "complex"))]
         let csr = csr_from_linop(op, 0.0)?;
         let b = normalize_bounds(&csr, self.lambda_min, self.lambda_max)?;
         self.lambda_min = b.lam_min;

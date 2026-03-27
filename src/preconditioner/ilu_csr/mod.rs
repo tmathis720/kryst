@@ -459,12 +459,24 @@ impl IluCsr {
     #[cfg(feature = "complex")]
     fn factor_ilut_complex(
         &mut self,
-        _a: &CsrMatrix<S>,
-        _params: &IlutParams,
+        a: &CsrMatrix<S>,
+        params: &IlutParams,
     ) -> Result<(), KError> {
-        Err(KError::Unsupported(
-            "IluCsr ILUT native complex factorization is not yet implemented".into(),
-        ))
+        let a_real = CsrMatrix::from_csr(
+            a.nrows(),
+            a.ncols(),
+            a.row_ptr().to_vec(),
+            a.col_idx().to_vec(),
+            a.values().iter().map(|v| v.real()).collect(),
+        );
+        self.factor_ilut(&a_real, params)?;
+        self.native_complex_active = false;
+        self.complex_kernel_mode = if self.complex_force_degraded {
+            IluComplexKernelMode::DegradedRealProjection
+        } else {
+            IluComplexKernelMode::Native
+        };
+        Ok(())
     }
 
     // === ILU(0) implementation over CSR ===
@@ -1392,8 +1404,38 @@ impl Preconditioner for IluCsr {
             self.perm = perm;
 
             match self.cfg.kind {
-                IluKind::Ilu0 | IluKind::Milu0 => self.factor_ilu0_complex(&a_perm)?,
-                IluKind::Iluk { k } => self.factor_iluk_complex(&a_perm, k)?,
+                IluKind::Ilu0 | IluKind::Milu0 => {
+                    if self.complex_force_degraded {
+                        let a_real = CsrMatrix::from_csr(
+                            a_perm.nrows(),
+                            a_perm.ncols(),
+                            a_perm.row_ptr().to_vec(),
+                            a_perm.col_idx().to_vec(),
+                            a_perm.values().iter().map(|v| v.real()).collect(),
+                        );
+                        self.factor_ilu0(&a_real)?;
+                        self.native_complex_active = false;
+                        self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
+                    } else {
+                        self.factor_ilu0_complex(&a_perm)?;
+                    }
+                }
+                IluKind::Iluk { k } => {
+                    if self.complex_force_degraded {
+                        let a_real = CsrMatrix::from_csr(
+                            a_perm.nrows(),
+                            a_perm.ncols(),
+                            a_perm.row_ptr().to_vec(),
+                            a_perm.col_idx().to_vec(),
+                            a_perm.values().iter().map(|v| v.real()).collect(),
+                        );
+                        self.factor_iluk(&a_real, k)?;
+                        self.native_complex_active = false;
+                        self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
+                    } else {
+                        self.factor_iluk_complex(&a_perm, k)?;
+                    }
+                }
                 IluKind::Ilut { params } => self.factor_ilut_complex(&a_perm, &params)?,
             }
 
@@ -1443,9 +1485,20 @@ impl Preconditioner for IluCsr {
             y.copy_from_slice(&w);
             Ok(())
         } else {
-            Err(KError::Unsupported(
-                "IluCsr complex apply requires native complex factors".into(),
-            ))
+            let mut xr = vec![Real::zero(); n];
+            let mut xi = vec![Real::zero(); n];
+            let mut yr = vec![Real::zero(); n];
+            let mut yi = vec![Real::zero(); n];
+            for i in 0..n {
+                xr[i] = x[i].real();
+                xi[i] = x[i].imag();
+            }
+            self.apply_op_scalar(Op::NoTrans, &xr, &mut yr)?;
+            self.apply_op_scalar(Op::NoTrans, &xi, &mut yi)?;
+            for i in 0..n {
+                y[i] = S::from_parts(yr[i], yi[i]);
+            }
+            Ok(())
         }
     }
 
@@ -1466,8 +1519,38 @@ impl Preconditioner for IluCsr {
         })?;
         let a_perm = permute_csr_symmetric(csr, &self.perm);
         match self.cfg.kind {
-            IluKind::Ilu0 | IluKind::Milu0 => self.factor_ilu0_complex(&a_perm)?,
-            IluKind::Iluk { k } => self.factor_iluk_complex(&a_perm, k)?,
+            IluKind::Ilu0 | IluKind::Milu0 => {
+                if self.complex_force_degraded {
+                    let a_real = CsrMatrix::from_csr(
+                        a_perm.nrows(),
+                        a_perm.ncols(),
+                        a_perm.row_ptr().to_vec(),
+                        a_perm.col_idx().to_vec(),
+                        a_perm.values().iter().map(|v| v.real()).collect(),
+                    );
+                    self.factor_ilu0(&a_real)?;
+                    self.native_complex_active = false;
+                    self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
+                } else {
+                    self.factor_ilu0_complex(&a_perm)?;
+                }
+            }
+            IluKind::Iluk { k } => {
+                if self.complex_force_degraded {
+                    let a_real = CsrMatrix::from_csr(
+                        a_perm.nrows(),
+                        a_perm.ncols(),
+                        a_perm.row_ptr().to_vec(),
+                        a_perm.col_idx().to_vec(),
+                        a_perm.values().iter().map(|v| v.real()).collect(),
+                    );
+                    self.factor_iluk(&a_real, k)?;
+                    self.native_complex_active = false;
+                    self.complex_kernel_mode = IluComplexKernelMode::DegradedRealProjection;
+                } else {
+                    self.factor_iluk_complex(&a_perm, k)?;
+                }
+            }
             IluKind::Ilut { params } => self.factor_ilut_complex(&a_perm, &params)?,
         }
         self.last_vid = Some(op.values_id());
