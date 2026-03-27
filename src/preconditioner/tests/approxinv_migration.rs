@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 
 use crate::algebra::prelude::S;
+use crate::algebra::scalar::KrystScalar;
 use crate::config::options::PcOptions;
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::matrix::op::CsrOp;
