@@ -28,7 +28,7 @@ use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
 use crate::utils::convergence::{
     ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
 };
-use crate::utils::reduction::{AllreduceOps, ReductOptions};
+use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
@@ -489,9 +489,11 @@ impl BiCgStabSolver {
             };
             let (omega_req, _omega_local) =
                 dot2_async_s(comm, &t[..], &t[..], &t[..], &s[..], &async_opt)?;
-
+            let overlap_reduction = !matches!(omega_req, AllreduceHandle::Ready(_));
             let omega_reds = <UniverseComm as AllreduceOps>::wait_pair(omega_req);
-            async_reduction_waits += 1;
+            if overlap_reduction {
+                async_reduction_waits += 1;
+            }
 
             let omega_den = S::from_real(omega_reds.0);
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
