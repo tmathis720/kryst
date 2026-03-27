@@ -5,33 +5,33 @@ use crate::matrix::sparse_api::{CscMatMut, CscMatRef};
 impl<S: KrystScalar> CscMatRef<S> for CscMatrix<S> {
     #[inline]
     fn nrows(&self) -> usize {
-        self.nrows()
+        CscMatrix::nrows(self)
     }
 
     #[inline]
     fn ncols(&self) -> usize {
-        self.ncols()
+        CscMatrix::ncols(self)
     }
 
     #[inline]
     fn col_ptr(&self) -> &[usize] {
-        self.col_ptr()
+        CscMatrix::col_ptr(self)
     }
 
     #[inline]
     fn row_idx(&self) -> &[usize] {
-        self.row_idx()
+        CscMatrix::row_idx(self)
     }
 
     #[inline]
     fn values(&self) -> &[S] {
-        self.values()
+        CscMatrix::values(self)
     }
 }
 
 impl<S: KrystScalar> CscMatMut<S> for CscMatrix<S> {
     #[inline]
     fn values_mut(&mut self) -> &mut [S] {
-        self.values_mut()
+        CscMatrix::values_mut(self)
     }
 }
