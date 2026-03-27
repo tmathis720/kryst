@@ -13,7 +13,6 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::matrix::spmv::csr_spmm_dense;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
-#[cfg(not(feature = "complex"))]
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::amg::AMG;
 #[cfg(feature = "complex")]

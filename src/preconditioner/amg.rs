@@ -5217,6 +5217,15 @@ impl AMG {
         sweeps: usize,
         ws: &mut AMGWorkspace,
     ) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        {
+            let _ = (omega, level, r, z, sweeps, ws);
+            return Err(KError::Unsupported(
+                "RelaxType::Ilu0 is not supported in complex AMG mode".into(),
+            ));
+        }
+        #[cfg(not(feature = "complex"))]
+        {
         if sweeps == 0 {
             return Ok(());
         }
@@ -5242,6 +5251,7 @@ impl AMG {
             }
         }
         Ok(())
+        }
     }
 
     fn ras_smooth(
@@ -5252,6 +5262,15 @@ impl AMG {
         sweeps: usize,
         ws: &mut AMGWorkspace,
     ) -> Result<(), KError> {
+        #[cfg(feature = "complex")]
+        {
+            let _ = (omega, level, r, z, sweeps, ws);
+            return Err(KError::Unsupported(
+                "RelaxType::Ras is not supported in complex AMG mode".into(),
+            ));
+        }
+        #[cfg(not(feature = "complex"))]
+        {
         if sweeps == 0 {
             return Ok(());
         }
@@ -5277,6 +5296,7 @@ impl AMG {
             }
         }
         Ok(())
+        }
     }
 
     fn apply_chebyshev(
@@ -6148,6 +6168,7 @@ impl AMG {
                     work,
                 )
             }
+            #[cfg(not(feature = "complex"))]
             RelaxType::Ilu0 => {
                 let ilu = lvl
                     .ilu0
@@ -6157,6 +6178,11 @@ impl AMG {
                     .expect("ILU0 mutex poisoned")
                     .apply(PcSide::Left, r, out)
             }
+            #[cfg(feature = "complex")]
+            RelaxType::Ilu0 => Err(KError::Unsupported(
+                "RelaxType::Ilu0 is not supported in complex AMG mode".into(),
+            )),
+            #[cfg(not(feature = "complex"))]
             RelaxType::Ras => {
                 let ras = lvl
                     .ras
@@ -6166,6 +6192,10 @@ impl AMG {
                     .expect("RAS mutex poisoned")
                     .apply(PcSide::Left, r, out)
             }
+            #[cfg(feature = "complex")]
+            RelaxType::Ras => Err(KError::Unsupported(
+                "RelaxType::Ras is not supported in complex AMG mode".into(),
+            )),
             RelaxType::Fsai => {
                 let data = lvl
                     .fsai
@@ -8476,6 +8506,15 @@ fn update_level_caches(
 }
 
 fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
+    #[cfg(feature = "complex")]
+    {
+        let _ = level;
+        return Err(KError::Unsupported(
+            "ILU0 cache is not supported in complex AMG mode".into(),
+        ));
+    }
+    #[cfg(not(feature = "complex"))]
+    {
     let mut cfg = IluCsrConfig::default();
     cfg.kind = IluKind::Ilu0;
     cfg.pivot = PivotStrategy::DiagonalPerturbation;
@@ -8489,9 +8528,19 @@ fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
     ilu.setup(&op)?;
     level.ilu0 = Some(Mutex::new(ilu));
     Ok(())
+    }
 }
 
 fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
+    #[cfg(feature = "complex")]
+    {
+        let _ = level;
+        return Err(KError::Unsupported(
+            "RAS cache is not supported in complex AMG mode".into(),
+        ));
+    }
+    #[cfg(not(feature = "complex"))]
+    {
     let cfg = AsmConfig {
         overlap: 1,
         combine: AsmCombine::Restricted,
@@ -8506,6 +8555,7 @@ fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
     Preconditioner::setup(&mut ras, &op)?;
     level.ras = Some(Mutex::new(ras));
     Ok(())
+    }
 }
 
 fn cast_slice_to_f32(src: &[f64]) -> Vec<f32> {

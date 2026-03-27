@@ -923,7 +923,7 @@ mod complex_tests {
             S::from_parts(0.5, -0.5),
         ];
         let mut x = vec![S::zero(); b.len()];
-        ksp.solve(&b, &mut x).expect("ksp solve");
+        let _ = ksp.solve(&b, &mut x).expect("ksp solve");
         assert!(x.iter().all(|xi| xi.is_finite()));
     }
 }

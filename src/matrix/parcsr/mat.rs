@@ -4,7 +4,7 @@ use crate::error::KError;
 use crate::matrix::dist_csr::DistCsrOp;
 use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 use std::sync::{Arc, OnceLock};
 
 /// Distributed CSR matrix split into on- and off-process blocks.

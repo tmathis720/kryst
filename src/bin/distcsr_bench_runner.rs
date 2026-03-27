@@ -1,3 +1,5 @@
+use kryst::algebra::prelude::S;
+use kryst::algebra::scalar::KrystScalar;
 use kryst::Comm;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
@@ -343,6 +345,16 @@ fn matrix_from_spec(spec: &MatrixSpec) -> CsrMatrix<f64> {
     }
 }
 
+fn lift_real_csr_to_scalar(a: &CsrMatrix<f64>) -> CsrMatrix<S> {
+    CsrMatrix::from_csr(
+        a.nrows(),
+        a.ncols(),
+        a.row_ptr().to_vec(),
+        a.col_idx().to_vec(),
+        a.values().iter().map(|&v| S::from_real(v)).collect(),
+    )
+}
+
 fn fallback_total(view: &BTreeMap<String, Value>) -> usize {
     view.get("pc_dist_fallback_counters")
         .and_then(Value::as_object)
@@ -405,9 +417,15 @@ fn main() {
         let row_start = part_prefix[comm.rank()];
         let n_local = part_prefix[comm.rank() + 1] - row_start;
         let a_local = slice_rows(&a_global, row_start, n_local);
-        let dist =
-            DistCsrOp::from_local_rows(n_global, row_start, &a_local, &part_prefix, comm.clone())
-                .expect("dist csr build");
+        let a_local_s = lift_real_csr_to_scalar(&a_local);
+        let dist = DistCsrOp::from_local_rows(
+            n_global,
+            row_start,
+            &a_local_s,
+            &part_prefix,
+            comm.clone(),
+        )
+        .expect("dist csr build");
 
         let opts = KspOptions::from_args(&[
             "-ksp_type",
@@ -434,8 +452,8 @@ fn main() {
         ksp.set_from_options(&opts).expect("set options");
         ksp.set_operators(Arc::new(dist), None);
 
-        let b = vec![1.0; n_local];
-        let mut x = vec![0.0; n_local];
+        let b = vec![S::from_real(1.0); n_local];
+        let mut x = vec![S::zero(); n_local];
         let solve_start = Instant::now();
         let stats = ksp.solve(&b, &mut x).expect("solve");
         let solve_wall_nanos = solve_start.elapsed().as_nanos() as u64;
