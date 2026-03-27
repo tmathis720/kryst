@@ -3,7 +3,7 @@ use crate::config::options::PcOptions;
 use crate::context::pc_context::{PcFactory, PcType};
 use crate::core::traits::SubmatrixExtract;
 use crate::error::KError;
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use crate::matrix::convert::csr_from_linop;
 use crate::matrix::op::DistLayout;
 use crate::matrix::op::LinOp;
@@ -142,12 +142,12 @@ pub struct SplitDiagnostics {
 
 impl FieldSplitPc {
     fn materialize_csr(a: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<S>>, KError> {
-        #[cfg(feature = "backend-faer")]
+        #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
         {
             return csr_from_linop(a, 0.0);
         }
 
-        #[cfg(not(feature = "backend-faer"))]
+        #[cfg(any(not(feature = "backend-faer"), feature = "complex"))]
         {
             if let Some(csr) = a.as_any().downcast_ref::<CsrMatrix<S>>() {
                 return Ok(Arc::new(csr.clone()));

@@ -370,6 +370,7 @@ impl PipeGcrSolver {
         )
     }
 
+    #[cfg(not(feature = "complex"))]
     #[allow(clippy::too_many_arguments)]
     pub fn solve_f64(
         &mut self,
@@ -425,6 +426,17 @@ impl LinearSolver for PipeGcrSolver {
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
+        #[cfg(not(feature = "complex"))]
+        {
+            self.solve_f64(a, pc, b, x, pc_side, comm, monitors, work)
+        }
+        #[cfg(feature = "complex")]
+        {
+            let _ = (a, pc, b, x, pc_side, comm, monitors, work);
+            Err(KError::Unsupported(
+                "PipeGCR real-valued LinearSolver bridge is unavailable when complex is enabled"
+                    .into(),
+            ))
+        }
     }
 }

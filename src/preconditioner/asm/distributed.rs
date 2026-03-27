@@ -789,14 +789,19 @@ fn dense_solve_with_diagonal_shift(
             rhs.swap(k, piv);
         }
         for row in (k + 1)..n {
-            let factor = m[row][k] / m[k][k];
+            let pivot_diag = m[k][k];
+            let pivot_rhs = rhs[k];
+            let factor = m[row][k] / pivot_diag;
             if factor.abs() == 0.0 {
                 continue;
             }
+            let (head, tail) = m.split_at_mut(row);
+            let pivot_row = &head[k];
+            let row_mut = &mut tail[0];
             for col in k..n {
-                m[row][col] -= factor * m[k][col];
+                row_mut[col] -= factor * pivot_row[col];
             }
-            rhs[row] -= factor * rhs[k];
+            rhs[row] -= factor * pivot_rhs;
         }
     }
 
