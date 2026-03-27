@@ -144,11 +144,10 @@ impl MatrixMarketData {
         if idx_len != col_indices.len() || idx_len != values.len() {
             panic!("MatrixMarketData triplets must have matching lengths");
         }
-        if let Some(ref imag) = imag_values {
-            if imag.len() != values.len() {
+        if let Some(ref imag) = imag_values
+            && imag.len() != values.len() {
                 panic!("MatrixMarketData imaginary component must match value length");
             }
-        }
         Self {
             rows,
             cols,

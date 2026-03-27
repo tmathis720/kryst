@@ -580,15 +580,13 @@ impl KspContext {
         } else {
             side
         };
-        if let Some(st) = self.solver_type {
-            if let Some(required) = st.required_pc_side() {
-                if normalized != required {
+        if let Some(st) = self.solver_type
+            && let Some(required) = st.required_pc_side()
+                && normalized != required {
                     return Err(KError::InvalidInput(format!(
                         "{st:?} requires left preconditioning; got {side:?}"
                     )));
                 }
-            }
-        }
         Ok(())
     }
 
@@ -976,20 +974,18 @@ impl KspContext {
                 "-ksp_gcr_restart requires -ksp_type gcr or -ksp_type pipegcr".into(),
             ));
         }
-        if let Some(omega) = opts.richardson_omega {
-            if omega <= 0.0 {
+        if let Some(omega) = opts.richardson_omega
+            && omega <= 0.0 {
                 return Err(KError::InvalidInput(
                     "-ksp_richardson_omega must be > 0".into(),
                 ));
             }
-        }
-        if let Some(omega) = opts.chebyshev_omega {
-            if omega <= 0.0 {
+        if let Some(omega) = opts.chebyshev_omega
+            && omega <= 0.0 {
                 return Err(KError::InvalidInput(
                     "-ksp_chebyshev_omega must be > 0".into(),
                 ));
             }
-        }
         let mut scalar_solver_config_changed = false;
         if let Some(rtol) = opts.rtol {
             self.rtol = rtol;
@@ -1067,27 +1063,24 @@ impl KspContext {
             }
         }
 
-        if let Some(omega) = opts.richardson_omega {
-            if let Some(s) = self
+        if let Some(omega) = opts.richardson_omega
+            && let Some(s) = self
                 .solver
                 .as_mut()
                 .and_then(|b| b.as_any_mut().downcast_mut::<RichardsonSolver>())
             {
                 s.set_omega(omega);
             }
-        }
 
-        if let Some(omega) = opts.chebyshev_omega {
-            if matches!(self.solver_type, Some(SolverType::Chebyshev)) {
-                if let Some(s) = self
+        if let Some(omega) = opts.chebyshev_omega
+            && matches!(self.solver_type, Some(SolverType::Chebyshev))
+                && let Some(s) = self
                     .solver
                     .as_mut()
                     .and_then(|b| b.as_any_mut().downcast_mut::<RichardsonSolver>())
                 {
                     s.set_omega(omega);
                 }
-            }
-        }
 
         // --- GMRES options ---
         if let Some(s) = self
@@ -2187,8 +2180,7 @@ impl KspContext {
         let p_dims = pmat.dims();
         if a_dims != p_dims {
             return Err(KError::InvalidInput(format!(
-                "Amat/Pmat dimension mismatch: A={:?}, P={:?}",
-                a_dims, p_dims
+                "Amat/Pmat dimension mismatch: A={a_dims:?}, P={p_dims:?}"
             )));
         }
         if let (Some(a_layout), Some(p_layout)) = (amat.dist_layout(), pmat.dist_layout()) {
@@ -2499,8 +2491,7 @@ impl KspContext {
         );
         if !allow_rect && m != n {
             return Err(KError::InvalidInput(format!(
-                "Amat must be square: got {}x{}",
-                m, n
+                "Amat must be square: got {m}x{n}"
             )));
         }
         if m != pm || n != pn {
@@ -2530,7 +2521,7 @@ impl KspContext {
             );
         }
 
-        if self.pc.is_none() {
+        if self.pc.is_none()
             #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
             {
                 if self.pending_pc.is_none() && self.pc_chain_plan.is_none() {
@@ -2550,13 +2541,11 @@ impl KspContext {
                     }
                 }
             }
-            if self.pc_chain_plan.is_none() {
-                if let Some(spec) = self.pending_pc.take() {
+            && self.pc_chain_plan.is_none()
+                && let Some(spec) = self.pending_pc.take() {
                     let pc = PcFactory::construct_deferred_preconditioner(spec, pmat.as_ref())?;
                     self.pc = Some(pc);
                 }
-            }
-        }
 
         let sid = {
             let id = pmat.structure_id();
@@ -2574,11 +2563,10 @@ impl KspContext {
             self.last_pc_vid = None;
         }
 
-        if self.pc.is_none() {
-            if self.pc_chain_plan.is_some() {
+        if self.pc.is_none()
+            && self.pc_chain_plan.is_some() {
                 self.try_setup_chain_plan(pmat.clone(), sid, vid)?;
             }
-        }
 
         if let Some(pc) = self.pc.as_mut() {
             // Pre-convert once to the PC's requested format, preserving communicator.
@@ -2767,8 +2755,8 @@ impl KspContext {
     }
 
     fn solve_impl(&mut self, b: &[S], x: &mut [S]) -> Result<SolveStats<R>, KError> {
-        if !self.setup_called {
-            if let Err(err) = self.setup_impl() {
+        if !self.setup_called
+            && let Err(err) = self.setup_impl() {
                 if let Some(reason) = ReasonEmitter::from_error(&err, FailureStage::Setup) {
                     let amat = self.amat.clone();
                     let res = if let Some(amat) = amat.as_ref() {
@@ -2793,7 +2781,6 @@ impl KspContext {
                 }
                 return Err(err);
             }
-        }
         let amat = self
             .amat
             .clone()
@@ -2811,8 +2798,7 @@ impl KspContext {
         );
         if !allow_rect && m != n {
             return Err(KError::InvalidInput(format!(
-                "Amat must be square: got {}x{}",
-                m, n
+                "Amat must be square: got {m}x{n}"
             )));
         }
         if m != pm || n != pn {
@@ -2917,8 +2903,8 @@ impl KspContext {
                 Ok(stats) => stats,
                 Err(err) => {
                     if let Some(reason) = ReasonEmitter::from_error(&err, FailureStage::Solve) {
-                        if matches!(err, KError::PcFailed(_)) {
-                            if let KError::PcFailed(ref msg) = err {
+                        if matches!(err, KError::PcFailed(_))
+                            && let KError::PcFailed(ref msg) = err {
                                 log::warn!("KSP diverged due to preconditioner failure: {msg}");
                                 #[cfg(feature = "backend-faer")]
                                 {
@@ -2932,7 +2918,6 @@ impl KspContext {
                                     self.set_dist_replay_token("pc_apply_failure", token);
                                 }
                             }
-                        }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
                         if let Some(failure) =
@@ -3903,7 +3888,7 @@ impl KspContext {
         F: Fn(usize, R, usize) -> MonitorAction + Send + Sync + 'static,
     {
         self.monitors
-            .push(Box::new(move |it, r, reds| f(it, r, reds)));
+            .push(Box::new(f));
         self.monitor_policy = MonitorPolicy::Rank0Only;
     }
 
@@ -3958,8 +3943,8 @@ impl KspContext {
             .map(|st| Self::effective_side_for_solver(self.pc_side, st))
             .unwrap_or(self.pc_side);
 
-        if let Some(SolverType::PcaGmres) = self.solver_type {
-            if let Some(s) = self
+        if let Some(SolverType::PcaGmres) = self.solver_type
+            && let Some(s) = self
                 .solver
                 .as_mut()
                 .and_then(|s| s.as_any_mut().downcast_mut::<PcaGmresSolver>())
@@ -3969,17 +3954,14 @@ impl KspContext {
                     PcSide::Right => PcaPcMode::Right,
                 };
             }
-        }
 
-        if let Some(st) = self.solver_type {
-            if let Some(required) = st.required_pc_side() {
-                if side != required {
+        if let Some(st) = self.solver_type
+            && let Some(required) = st.required_pc_side()
+                && side != required {
                     return Err(KError::InvalidInput(format!(
                         "{st:?} requires left preconditioning; got {side:?}"
                     )));
                 }
-            }
-        }
         Ok(())
     }
 

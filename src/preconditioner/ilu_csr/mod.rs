@@ -1433,14 +1433,14 @@ impl Preconditioner for IluCsr {
             // compute permutation
             let perm = match self.cfg.reordering.kind {
                 ReorderingKind::None => Permutation::identity(a.nrows()),
-                ReorderingKind::Rcm => rcm_csr(&a),
-                ReorderingKind::Amd => amd_csr(&a),
+                ReorderingKind::Rcm => rcm_csr(a),
+                ReorderingKind::Amd => amd_csr(a),
             };
             let a_perm = if self.cfg.reordering.symmetric {
-                permute_csr_symmetric(&a, &perm)
+                permute_csr_symmetric(a, &perm)
             } else {
                 // nonsymmetric not yet supported
-                permute_csr_symmetric(&a, &perm)
+                permute_csr_symmetric(a, &perm)
             };
             self.perm = perm;
             self.factor_symbolic_and_numeric(&a_perm)?;
@@ -1450,7 +1450,7 @@ impl Preconditioner for IluCsr {
             self.tmp.resize(a_perm.nrows(), Real::zero());
             Ok(())
         } else if values_changed {
-            let a_perm = permute_csr_symmetric(&a, &self.perm);
+            let a_perm = permute_csr_symmetric(a, &self.perm);
             self.factor_numeric_only(&a_perm)?;
             self.last_vid = Some(vid);
             Ok(())

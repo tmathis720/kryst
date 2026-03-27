@@ -71,7 +71,7 @@ fn s_scale(alpha: S, y: &mut [S]) {
         return;
     }
     for yi in y {
-        *yi = alpha * *yi;
+        *yi *= alpha;
     }
 }
 
@@ -82,7 +82,7 @@ fn s_axpy(x: &[S], alpha: S, y: &mut [S]) {
         return;
     }
     for (yi, &xi) in y.iter_mut().zip(x) {
-        *yi = *yi + alpha * xi;
+        *yi += alpha * xi;
     }
 }
 
@@ -112,9 +112,9 @@ fn s_dot_conj_local(x: &[S], y: &[S]) -> S {
         let end = (i + BLK).min(x.len());
         let mut blk = S::zero();
         for j in i..end {
-            blk = blk + x[j].conj() * y[j];
+            blk += x[j].conj() * y[j];
         }
-        acc = acc + blk;
+        acc += blk;
         i = end;
     }
     acc
@@ -129,9 +129,9 @@ fn s_sum_abs2_local(x: &[S]) -> R {
         let end = (i + BLK).min(x.len());
         let mut blk = R::default();
         for j in i..end {
-            blk = blk + x[j].abs2();
+            blk += x[j].abs2();
         }
-        acc = acc + blk;
+        acc += blk;
         i = end;
     }
     acc
@@ -182,7 +182,7 @@ pub fn par_fill_zero(dst: &mut [S]) {
         if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
             used_parallel = true;
             dst.par_chunks_mut(chunk)
-                .for_each(|chunk| s_fill_zero(chunk));
+                .for_each(s_fill_zero);
             crate::algebra::parallel_cfg::observe_vector_kernel_timing(
                 dst.len(),
                 used_parallel,
@@ -229,7 +229,7 @@ pub fn par_scale(alpha: S, y: &mut [S]) {
             }
             y.par_chunks_mut(chunk).for_each(|yc| {
                 for yi in yc {
-                    *yi = alpha * *yi;
+                    *yi *= alpha;
                 }
             });
             crate::algebra::parallel_cfg::observe_vector_kernel_timing(
@@ -270,7 +270,7 @@ pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
             y.par_iter_mut()
                 .zip(x.par_iter().copied())
                 .for_each(|(yi, xi)| {
-                    *yi = *yi + alpha * xi;
+                    *yi += alpha * xi;
                 });
             crate::algebra::parallel_cfg::observe_vector_kernel_timing(
                 x.len(),
@@ -347,7 +347,7 @@ where
     {
         let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
         if len >= min_len && !crate::algebra::parallel_cfg::force_serial() {
-            (0..len).into_par_iter().for_each(|i| f(i));
+            (0..len).into_par_iter().for_each(&f);
             return;
         }
     }
@@ -372,7 +372,7 @@ fn dot_conj_local_fast(x: &[S], y: &[S]) -> S {
                 .map(|(xc, yc)| {
                     let mut acc = S::zero();
                     for (&xi, &yi) in xc.iter().zip(yc) {
-                        acc = acc + xi.conj() * yi;
+                        acc += xi.conj() * yi;
                     }
                     acc
                 })
@@ -396,7 +396,7 @@ fn sum_abs2_local_fast(x: &[S]) -> R {
                     let mut ssq = R::default();
                     for &value in xc {
                         let a = value.abs();
-                        ssq = ssq + a * a;
+                        ssq += a * a;
                     }
                     ssq
                 })
@@ -447,7 +447,7 @@ pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
         return S::zero();
     }
 
-    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let nchunks = x.len().div_ceil(REPRO_CHUNK);
     let mut parts = vec![S::zero(); nchunks];
 
     #[cfg(feature = "rayon")]
@@ -459,7 +459,7 @@ pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
                 let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
                 let mut acc = S::zero();
                 for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
-                    acc = acc + xi.conj() * yi;
+                    acc += xi.conj() * yi;
                 }
                 *slot = acc;
             });
@@ -469,7 +469,7 @@ pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
                 let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
                 let mut acc = S::zero();
                 for (&xi, &yi) in x[start..end].iter().zip(&y[start..end]) {
-                    acc = acc + xi.conj() * yi;
+                    acc += xi.conj() * yi;
                 }
                 parts[cid] = acc;
             }
@@ -491,7 +491,7 @@ pub fn dot_conj_local_repro(x: &[S], y: &[S]) -> S {
 
     let mut total = S::zero();
     for part in parts {
-        total = total + part;
+        total += part;
     }
     total
 }
@@ -503,7 +503,7 @@ pub fn dot_conj_local_repro_accurate(x: &[S], y: &[S]) -> S {
         return S::zero();
     }
 
-    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let nchunks = x.len().div_ceil(REPRO_CHUNK);
     let mut parts = vec![S::zero(); nchunks];
 
     #[cfg(feature = "rayon")]
@@ -589,7 +589,7 @@ pub fn dot_conj_local_repro_accurate(x: &[S], y: &[S]) -> S {
 
     let mut total = S::zero();
     for part in parts {
-        total = total + part;
+        total += part;
     }
     total
 }
@@ -600,7 +600,7 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
         return R::zero();
     }
 
-    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let nchunks = x.len().div_ceil(REPRO_CHUNK);
     let mut parts = vec![R::zero(); nchunks];
 
     #[cfg(feature = "rayon")]
@@ -612,7 +612,7 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
                 let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
                 let mut acc = R::zero();
                 for &value in &x[start..end] {
-                    acc = acc + value.abs2();
+                    acc += value.abs2();
                 }
                 *slot = acc;
             });
@@ -622,7 +622,7 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
                 let end = ((cid + 1) * REPRO_CHUNK).min(x.len());
                 let mut acc = R::zero();
                 for &value in &x[start..end] {
-                    acc = acc + value.abs2();
+                    acc += value.abs2();
                 }
                 parts[cid] = acc;
             }
@@ -644,7 +644,7 @@ pub fn sum_abs2_local_repro(x: &[S]) -> R {
 
     let mut total = R::zero();
     for part in parts {
-        total = total + part;
+        total += part;
     }
     total
 }
@@ -655,7 +655,7 @@ pub fn sum_abs2_local_repro_accurate(x: &[S]) -> R {
         return R::zero();
     }
 
-    let nchunks = (x.len() + REPRO_CHUNK - 1) / REPRO_CHUNK;
+    let nchunks = x.len().div_ceil(REPRO_CHUNK);
     let mut parts = vec![R::zero(); nchunks];
 
     #[cfg(feature = "rayon")]
@@ -699,7 +699,7 @@ pub fn sum_abs2_local_repro_accurate(x: &[S]) -> R {
 
     let mut total = R::zero();
     for part in parts {
-        total = total + part;
+        total += part;
     }
     total
 }

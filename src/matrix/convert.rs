@@ -325,18 +325,18 @@ pub fn dense_from_linop(op: &dyn LinOp<S = S>) -> Result<Mat<f64>, KError> {
     }
     if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<f64>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
-        return Ok(csr.to_dense()?);
+        return csr.to_dense();
     }
     if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<f64>>() {
-        return Ok(csr.to_dense()?);
+        return csr.to_dense();
     }
     if let Some(csc) = op.as_any().downcast_ref::<CscMatrix<f64>>() {
-        return Ok(csc.to_dense()?);
+        return csc.to_dense();
     }
     #[cfg(not(feature = "complex"))]
     if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
         let csr = dist.local_block_csr();
-        return Ok(csr.to_dense()?);
+        return csr.to_dense();
     }
     Err(unsupported_linop_err(op, "dense_from_linop", "dense"))
 }

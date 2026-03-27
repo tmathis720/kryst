@@ -162,7 +162,7 @@ impl FromStr for PcType {
                 #[cfg(not(feature = "superlu_dist"))]
                 {
                     Err(KError::Unsupported(
-                        "build without feature=\"superlu_dist\"".into(),
+                        "build without feature=\"superlu_dist\"",
                     ))
                 }
             }
@@ -1027,8 +1027,7 @@ impl PcFactory {
         }
 
         Err(KError::InvalidInput(format!(
-            "Preconditioner {:?} requires a backend that is not enabled/supported for this build",
-            pc_type
+            "Preconditioner {pc_type:?} requires a backend that is not enabled/supported for this build"
         )))
     }
 

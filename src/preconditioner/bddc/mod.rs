@@ -124,11 +124,10 @@ impl BddcPc {
         }
         let mut interface = Vec::new();
         for window in subdomains.windows(2) {
-            if let Some((_, end)) = window.first() {
-                if *end > 0 {
+            if let Some((_, end)) = window.first()
+                && *end > 0 {
                     interface.push(end - 1);
                 }
-            }
             if let Some((start, _)) = window.get(1) {
                 interface.push(*start);
             }
@@ -176,7 +175,7 @@ impl BddcPc {
         let mut local_counts = vec![S::zero(); local_n];
         for &(start, end) in subdomains {
             for i in start..end {
-                local_counts[i] = local_counts[i] + S::one();
+                local_counts[i] += S::one();
             }
         }
 
@@ -255,7 +254,7 @@ impl BddcPc {
         for (i, yi) in y.iter_mut().enumerate().take(a.nrows) {
             let mut acc = S::zero();
             for p in a.rowptr[i]..a.rowptr[i + 1] {
-                acc = acc + a.values[p] * x[a.colind[p]];
+                acc += a.values[p] * x[a.colind[p]];
             }
             *yi = acc;
         }
@@ -307,8 +306,8 @@ impl BddcPc {
             }
             let alpha = rr / denom;
             for i in 0..n {
-                x[i] = x[i] + alpha * p[i];
-                r[i] = r[i] - alpha * ap[i];
+                x[i] += alpha * p[i];
+                r[i] -= alpha * ap[i];
             }
             let rr_new = r
                 .iter()
@@ -363,10 +362,10 @@ impl BddcPc {
             let pivot = dense[k][k];
             let pivot_row_vals = dense[k].clone();
             for row in dense.iter_mut().take(n).skip(k + 1) {
-                row[k] = row[k] / pivot;
+                row[k] /= pivot;
                 let factor = row[k];
                 for j in (k + 1)..n {
-                    row[j] = row[j] - factor * pivot_row_vals[j];
+                    row[j] -= factor * pivot_row_vals[j];
                 }
             }
         }
@@ -379,7 +378,7 @@ impl BddcPc {
         for i in 0..n {
             let mut acc = pb[i];
             for (j, &yj) in y.iter().enumerate().take(i) {
-                acc = acc - dense[i][j] * yj;
+                acc -= dense[i][j] * yj;
             }
             y[i] = acc;
         }
@@ -387,7 +386,7 @@ impl BddcPc {
         for i in (0..n).rev() {
             let mut acc = y[i];
             for (j, &xj) in x.iter().enumerate().take(n).skip(i + 1) {
-                acc = acc - dense[i][j] * xj;
+                acc -= dense[i][j] * xj;
             }
             let diag = dense[i][i];
             if diag.abs() <= 1e-14 {
@@ -702,13 +701,13 @@ impl Preconditioner for BddcPc {
             let a_sub = Self::csr_submatrix(&num.operator, &dofs);
             let local_sol = self.solve_csr_local(&a_sub, rhs)?;
             for (&dof, &val) in dofs.iter().zip(local_sol.iter()) {
-                y[dof] = y[dof] + val;
+                y[dof] += val;
                 multiplicity[dof] += 1;
             }
         }
         for (i, yi) in y.iter_mut().enumerate() {
             if multiplicity[i] > 0 {
-                *yi = *yi * S::from_real(1.0 / multiplicity[i] as R);
+                *yi *= S::from_real(1.0 / multiplicity[i] as R);
             }
         }
 
@@ -725,17 +724,16 @@ impl Preconditioner for BddcPc {
             let rc: Vec<S> = sym.coarse_dofs.iter().map(|&dof| residual[dof]).collect();
             let (ec, coarse_its, coarse_res, route, fallback, failure) =
                 self.coarse_solve(&num.coarse_operator, rc)?;
-            if let Ok(mut diag_guard) = self.diagnostics.lock() {
-                if let Some(diag) = diag_guard.as_mut() {
+            if let Ok(mut diag_guard) = self.diagnostics.lock()
+                && let Some(diag) = diag_guard.as_mut() {
                     diag.coarse_iterations = coarse_its;
                     diag.coarse_final_residual = coarse_res;
                     diag.coarse_solve_route = route;
                     diag.coarse_fallback_route = fallback;
                     diag.coarse_failure_reason = failure;
                 }
-            }
             for (k, &dof) in sym.coarse_dofs.iter().enumerate() {
-                y[dof] = y[dof] + ec[k];
+                y[dof] += ec[k];
             }
         }
 

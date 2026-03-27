@@ -25,19 +25,12 @@ pub enum DistRouteFallbackReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Default)]
 pub struct DistRoutePolicyBudget {
     pub max_allowed_fallbacks: Option<usize>,
     pub native_required: bool,
 }
 
-impl Default for DistRoutePolicyBudget {
-    fn default() -> Self {
-        Self {
-            max_allowed_fallbacks: None,
-            native_required: false,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DistRouteDecisionReport {

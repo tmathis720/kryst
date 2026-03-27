@@ -775,12 +775,11 @@ impl AMGConfig {
                 "SPD mode requires pc_amg_keep_transpose true".into(),
             ));
         }
-        if let Some(flag) = opts.amg_print_setup {
-            if flag {
+        if let Some(flag) = opts.amg_print_setup
+            && flag {
                 cfg.print_level = cfg.print_level.max(1);
                 cfg.logging_level = cfg.logging_level.max(2);
             }
-        }
         if let Some(ref mode) = opts.amg_dist_apply_mode {
             cfg.dist_coarse_strategy = parse_dist_apply_mode(mode)?;
         }
@@ -2863,7 +2862,7 @@ fn pack_message_u64(message: &str) -> (u64, Vec<u64>) {
     if len == 0 {
         return (0, Vec::new());
     }
-    let words = (len + 7) / 8;
+    let words = len.div_ceil(8);
     let mut data = vec![0u64; words];
     for (idx, &b) in bytes.iter().enumerate() {
         let word = idx / 8;
@@ -2932,7 +2931,7 @@ fn broadcast_message<C: Comm>(comm: &C, root: usize, message: Option<String>) ->
         if len == 0 {
             return String::new();
         }
-        let words = (len + 7) / 8;
+        let words = len.div_ceil(8);
         let mut data = vec![0u64; words];
         {
             let mut data_reqs = vec![comm.irecv_from_u64(&mut data, root as i32)];
@@ -2984,7 +2983,7 @@ fn collect_error_message<C: Comm>(comm: &C, root: usize, local_message: Option<S
             if msg_len == 0 {
                 continue;
             }
-            let words = (msg_len + 7) / 8;
+            let words = msg_len.div_ceil(8);
             let buf = unsafe { &mut *data_bufs.as_mut_ptr().add(r) };
             *buf = vec![0u64; words];
             data_reqs.push(comm.irecv_from_u64(buf.as_mut_slice(), r as i32));
@@ -3312,27 +3311,19 @@ fn debug_check_csr(a: &CsrMatrix<f64>, name: &str) {
             let col = col_idx[idx];
             debug_assert!(
                 col < ncols,
-                "{name}: column index {} (row {}) out of bounds (ncols={ncols})",
-                col,
-                row
+                "{name}: column index {col} (row {row}) out of bounds (ncols={ncols})"
             );
             if let Some(prev) = last_col {
                 debug_assert!(
                     col >= prev,
-                    "{name}: column index decreased at row {}: {} < {}",
-                    row,
-                    col,
-                    prev
+                    "{name}: column index decreased at row {row}: {col} < {prev}"
                 );
             }
             last_col = Some(col);
             let val = vals[idx];
             debug_assert!(
                 val.is_finite(),
-                "{name}: non-finite value at row {} (idx {}): {}",
-                row,
-                idx,
-                val
+                "{name}: non-finite value at row {row} (idx {idx}): {val}"
             );
         }
     }
@@ -3737,12 +3728,11 @@ impl AMG {
             match global {
                 Some(mut fine) => {
                     let cfg = self.cfg.clone();
-                    if cfg.conditioning.is_active() {
-                        if let Err(err) = apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
+                    if cfg.conditioning.is_active()
+                        && let Err(err) = apply_csr_transforms("AMG", &mut fine, &cfg.conditioning)
                         {
                             record_error(&mut local_stage, &mut local_detail, "conditioning", err);
                         }
-                    }
                     if local_stage.is_none() {
                         let sid = dist.structure_id();
                         let vid = dist.values_id();
@@ -4092,8 +4082,7 @@ impl AMG {
                 self.apply_dist_local(side, r, z, dist, stats.as_mut())
             }
             DistCoarseStrategy::None => Err(KError::Unsupported(
-                "AMG distributed apply requires a coarse strategy (root_gather, local_prototype, or superlu_dist)"
-                    .into(),
+                "AMG distributed apply requires a coarse strategy (root_gather, local_prototype, or superlu_dist)",
             )),
             DistCoarseStrategy::SuperLuDist => {
                 self.apply_dist_superlu(side, r, z, dist, stats.as_mut())
@@ -4279,7 +4268,7 @@ impl AMG {
         {
             let _ = (local_matrix, r, z);
             return Err(KError::Unsupported(
-                "AMG superlu_dist route requires feature superlu_dist".into(),
+                "AMG superlu_dist route requires feature superlu_dist",
             ));
         }
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
@@ -4899,7 +4888,7 @@ impl AMG {
                 self.cfg.dist_coarse_strategy,
             )
             .into_iter()
-            .map(|r| format!("{:?}", r))
+            .map(|r| format!("{r:?}"))
             .collect();
             st.diagnostics = diag_stats;
             self.stats = Some(st);
@@ -6778,11 +6767,10 @@ impl Preconditioner for AMG {
 
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
-        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-            if op.comm().size() > 1 {
+        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>()
+            && op.comm().size() > 1 {
                 return self.setup_dist(dist);
             }
-        }
         self.dist = None;
         let sid = op.structure_id();
         let vid = op.values_id();
@@ -6791,11 +6779,10 @@ impl Preconditioner for AMG {
     }
 
     fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
-        if let Some(dist) = &self.dist {
-            if dist.comm.size() > 1 {
+        if let Some(dist) = &self.dist
+            && dist.comm.size() > 1 {
                 return self.apply_dist(side, r, z, dist);
             }
-        }
         self.apply_local(side, r, z)
     }
 
@@ -6814,11 +6801,10 @@ impl Preconditioner for AMG {
 
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
-        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-            if op.comm().size() > 1 {
+        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>()
+            && op.comm().size() > 1 {
                 return self.setup_dist(dist);
             }
-        }
         self.dist = None;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let sid = op.structure_id();
@@ -6838,11 +6824,10 @@ impl Preconditioner for AMG {
 
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
-        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-            if op.comm().size() > 1 {
+        if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>()
+            && op.comm().size() > 1 {
                 return self.setup_dist(dist);
             }
-        }
         self.dist = None;
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
         let sid = op.structure_id();
@@ -6870,11 +6855,10 @@ impl Preconditioner for AMG {
     }
 
     fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
-        if let Some(dist) = &self.dist {
-            if dist.comm.size() > 1 {
+        if let Some(dist) = &self.dist
+            && dist.comm.size() > 1 {
                 return crate::preconditioner::PcDistributedSupport::Distributed;
             }
-        }
         crate::preconditioner::PcDistributedSupport::LocalOnly
     }
 }
@@ -7921,7 +7905,7 @@ fn build_hierarchy(
         stats.dist_route_fallback =
             dist_route_fallback_order(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
                 .into_iter()
-                .map(|r| format!("{:?}", r))
+                .map(|r| format!("{r:?}"))
                 .collect();
         stats.diagnostics = diag_stats;
         let mut setup = SetupTimings::default();
@@ -8075,7 +8059,7 @@ fn build_smoother_only_hierarchy(
         stats.dist_route_fallback =
             dist_route_fallback_order(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
                 .into_iter()
-                .map(|r| format!("{:?}", r))
+                .map(|r| format!("{r:?}"))
                 .collect();
         stats.diagnostics = vec![AmgLevelStats {
             p_min_col_norm: 0.0,
@@ -9797,8 +9781,8 @@ fn collect_level_stats(
             post_sweeps,
             pre_work_estimate: pre_sweeps as f64 * lvl.a.nnz() as f64,
             post_work_estimate: post_sweeps as f64 * lvl.a.nnz() as f64,
-            selected_relax_pre: format!("{:?}", relax_pre),
-            selected_relax_post: format!("{:?}", relax_post),
+            selected_relax_pre: format!("{relax_pre:?}"),
+            selected_relax_post: format!("{relax_post:?}"),
             coarse_solver: if i == h.coarsest_ix() {
                 Some(format!("{:?}", cfg.coarse_solve))
             } else {

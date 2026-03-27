@@ -166,7 +166,7 @@ impl LinearSolver for RichardsonSolver {
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(
             a,
-            pc.as_deref_mut().map(|p| &*p),
+            pc.map(|p| &*p),
             b,
             x,
             pc_side,

@@ -550,7 +550,7 @@ impl MgPc {
             MgCoarsenType::Aggregation => 3,
             MgCoarsenType::Injection | MgCoarsenType::Linear => 2,
         };
-        let n_coarse = (n_fine + coarse_div - 1) / coarse_div;
+        let n_coarse = n_fine.div_ceil(coarse_div);
 
         let mut p_row_ptr = Vec::with_capacity(n_fine + 1);
         let mut p_col_idx = Vec::with_capacity(n_fine * 2);
@@ -963,7 +963,7 @@ impl Preconditioner for MgPc {
                     let coarse_part = Arc::new(
                         fine_part
                             .iter()
-                            .map(|&v| (v + 1) / 2)
+                            .map(|&v| v.div_ceil(2))
                             .collect::<Vec<usize>>(),
                     );
                     entry.dist_transfer = Some(MgDistTransferMeta {

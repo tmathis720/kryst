@@ -226,11 +226,11 @@ where
         for i in 0..n {
             let mut sigma = S::zero();
             for j in 0..i {
-                sigma = sigma + a[(i, j)] * y[j];
+                sigma += a[(i, j)] * y[j];
             }
             if !self.sym.contains(MatSorType::EISENSTAT) {
                 for j in (i + 1)..n {
-                    sigma = sigma + a[(i, j)] * x[j];
+                    sigma += a[(i, j)] * x[j];
                 }
             }
             let xi = x[i];
@@ -244,11 +244,11 @@ where
         for ii in (0..n).rev() {
             let mut sigma = S::zero();
             for j in (ii + 1)..n {
-                sigma = sigma + a[(ii, j)] * y[j];
+                sigma += a[(ii, j)] * y[j];
             }
             if !self.sym.contains(MatSorType::EISENSTAT) {
                 for j in 0..ii {
-                    sigma = sigma + a[(ii, j)] * y[j];
+                    sigma += a[(ii, j)] * y[j];
                 }
             }
             let xi = x[ii];
