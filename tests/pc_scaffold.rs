@@ -93,7 +93,7 @@ fn pc_options_parse_scaffold_prefixes() {
 
 #[test]
 fn pc_scaffold_apply_smoke() -> Result<(), KError> {
-    let mat = Mat::<R>::identity(4, 4);
+    let mat = Mat::<S>::identity(4, 4);
     let op = DenseOp::<S>::new(Arc::new(mat));
     let x = vec![
         S::from_real(1.0),
