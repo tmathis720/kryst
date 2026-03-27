@@ -9,7 +9,7 @@ use kryst::preconditioner::ilu::{IluBuilder, IluType};
 use kryst::preconditioner::legacy::Preconditioner;
 use proptest::prelude::*;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 fn random_diagonally_dominant(n: usize, seed: u64) -> Mat<S> {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -19,7 +19,7 @@ fn random_diagonally_dominant(n: usize, seed: u64) -> Mat<S> {
             let diag = R::from(1.0 + 0.1 * n as f64);
             S::from_real(diag)
         } else {
-            S::from_real(rng.gen_range(-0.05..0.05))
+            S::from_real(rng.random_range(-0.05..0.05))
         }
     })
 }

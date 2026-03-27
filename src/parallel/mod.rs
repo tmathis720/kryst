@@ -388,7 +388,7 @@ impl UniverseComm {
         match self {
             UniverseComm::NoComm(_) => 0,
             #[cfg(feature = "mpi")]
-            UniverseComm::Mpi(comm) => comm.world.as_raw() as u64,
+            UniverseComm::Mpi(comm) => Arc::as_ptr(comm) as usize as u64,
             #[cfg(feature = "rayon")]
             UniverseComm::Rayon(_) => 0,
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]

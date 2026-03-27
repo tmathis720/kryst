@@ -8,7 +8,7 @@ use approx::assert_abs_diff_eq;
 use faer::Mat;
 use kryst::algebra::prelude::*;
 use kryst::core::traits::{InnerProduct, MatVec};
-use rand::Rng;
+use rand::{RngExt, rng};
 
 /// Test matrix-vector multiplication for a small random dense matrix.
 ///
@@ -17,11 +17,11 @@ use rand::Rng;
 #[test]
 fn matvec_random_small() {
     let n = 5;
-    let mut rng = rand::thread_rng();
-    let vals: Vec<R> = (0..n * n).map(|_| rng.r#gen()).collect();
+    let mut rng = rng();
+    let vals: Vec<R> = (0..n * n).map(|_| rng.random()).collect();
     // Use from_fn to build a column-major matrix
     let a = Mat::<R>::from_fn(n, n, |i, j| vals[j * n + i]);
-    let x: Vec<R> = (0..n).map(|_| rng.r#gen()).collect();
+    let x: Vec<R> = (0..n).map(|_| rng.random()).collect();
     let mut y = vec![R::default(); n];
     a.matvec(&x, &mut y);
 

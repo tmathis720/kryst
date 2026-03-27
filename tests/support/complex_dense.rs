@@ -6,7 +6,7 @@ use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
 use kryst::ops::klinop::KLinOp;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Dense operator used by complex solver regression tests.
 #[derive(Clone, Debug)]
@@ -66,8 +66,8 @@ impl KLinOp for DenseOp {
 fn random_solution(rng: &mut StdRng, n: usize) -> Vec<S> {
     (0..n)
         .map(|_| {
-            let re = rng.gen_range(-0.5..0.5);
-            let im = rng.gen_range(-0.5..0.5);
+            let re = rng.random_range(-0.5..0.5);
+            let im = rng.random_range(-0.5..0.5);
             S::from_parts(re, im)
         })
         .collect()
@@ -88,14 +88,14 @@ pub fn diagonally_dominant_system(
             if i == j {
                 continue;
             }
-            let re = rng.gen_range(-row_scale..row_scale);
-            let im = rng.gen_range(-row_scale..row_scale);
+            let re = rng.random_range(-row_scale..row_scale);
+            let im = rng.random_range(-row_scale..row_scale);
             let val = S::from_parts(re, im);
             data[i * n + j] = val;
             row_sum += val.abs();
         }
-        let diag_re = diag_shift + row_sum + rng.r#gen::<f64>().abs();
-        let diag_im = rng.gen_range(-row_scale..row_scale);
+        let diag_re = diag_shift + row_sum + rng.random::<f64>().abs();
+        let diag_im = rng.random_range(-row_scale..row_scale);
         data[i * n + i] = S::from_parts(diag_re, diag_im);
     }
 
@@ -111,8 +111,8 @@ pub fn hermitian_pos_def_system(n: usize, seed: u64, shift: f64) -> (DenseOp, Ve
     let mut rng = StdRng::seed_from_u64(seed + n as u64);
     let mut base = vec![S::zero(); n * n];
     for val in base.iter_mut() {
-        let re = rng.gen_range(-0.4..0.4);
-        let im = rng.gen_range(-0.4..0.4);
+        let re = rng.random_range(-0.4..0.4);
+        let im = rng.random_range(-0.4..0.4);
         *val = S::from_parts(re, im);
     }
 
