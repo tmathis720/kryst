@@ -3,9 +3,9 @@
 use kryst::algebra::prelude::*;
 use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcType;
+use kryst::core::traits::MatVec;
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::PcSide;
-use kryst::preconditioner::legacy::Preconditioner;
+use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::preconditioner::sor::{MatSorType, SorPc};
 use kryst::preconditioner::{ApproxInvKind, ApproxInvParams, SpaiCsr};
 use kryst::utils::diagnostics::PcDiagnostics;
@@ -79,22 +79,22 @@ fn ilu_csr_native_complex_beats_split_baseline_on_coupled_system() {
         .expect("native apply");
 
     // degraded baseline: split solve on real and imaginary parts with same real factors
-    let mut real_part = vec![0.0; 2];
-    let mut imag_part = vec![0.0; 2];
-    let xr = vec![rhs[0].real(), rhs[1].real()];
-    let xi = vec![rhs[0].imag(), rhs[1].imag()];
+    let mut real_part = vec![S::zero(); 2];
+    let mut imag_part = vec![S::zero(); 2];
+    let xr = vec![S::from_real(rhs[0].real()), S::from_real(rhs[1].real())];
+    let xi = vec![S::from_real(rhs[0].imag()), S::from_real(rhs[1].imag())];
     pc.apply_op(kryst::preconditioner::Op::NoTrans, &xr, &mut real_part)
         .expect("split real");
     pc.apply_op(kryst::preconditioner::Op::NoTrans, &xi, &mut imag_part)
         .expect("split imag");
     let split = vec![
-        S::from_parts(real_part[0], imag_part[0]),
-        S::from_parts(real_part[1], imag_part[1]),
+        S::from_parts(real_part[0].real(), imag_part[0].real()),
+        S::from_parts(real_part[1].real(), imag_part[1].real()),
     ];
 
-    let residual_norm = |z: &[S]| {
+    let residual_norm = |z: &Vec<S>| {
         let mut az = vec![S::zero(); 2];
-        kryst::core::traits::MatVec::matvec(&a, z, &mut az);
+        MatVec::matvec(&a, z, &mut az);
         az.iter()
             .zip(rhs.iter())
             .map(|(l, r)| (*l - *r).abs())
@@ -149,7 +149,7 @@ fn approxinv_spai_complex_setup_apply_residual_acceptance() {
         .expect("spai complex apply");
 
     let mut az = vec![S::zero(); rhs.len()];
-    kryst::core::traits::MatVec::matvec(&a, &out, &mut az);
+    MatVec::matvec(&a, &out, &mut az);
     let rn = az
         .iter()
         .zip(rhs.iter())
