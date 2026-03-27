@@ -96,18 +96,16 @@ impl ConditioningOptions {
     }
 
     pub fn validate(&self) -> Result<(), KError> {
-        if let Some(v) = self.shift_diag {
-            if !v.is_finite() {
+        if let Some(v) = self.shift_diag
+            && !v.is_finite() {
                 return Err(KError::InvalidInput("pc_shift_diag must be finite".into()));
             }
-        }
-        if let Some(v) = self.diag_inject_tau {
-            if !v.is_finite() {
+        if let Some(v) = self.diag_inject_tau
+            && !v.is_finite() {
                 return Err(KError::InvalidInput(
                     "pc_diag_inject_tau must be finite".into(),
                 ));
             }
-        }
         Ok(())
     }
 }
@@ -717,12 +715,11 @@ pub fn apply_csr_transforms(
     }
     if opts.fix_diag {
         for i in 0..a.nrows().min(a.ncols()) {
-            if let Some(diag) = a.diag_mut(i) {
-                if diag.abs() <= opts.tiny_threshold {
+            if let Some(diag) = a.diag_mut(i)
+                && diag.abs() <= opts.tiny_threshold {
                     let replacement = if *diag == 0.0 { 1.0 } else { diag.signum() };
                     *diag = replacement * opts.tiny_threshold;
                 }
-            }
         }
     }
     if let Some(shift) = opts.shift_diag {

@@ -90,11 +90,10 @@ pub mod debug {
 
     #[inline]
     pub(crate) fn emit_iter(event: IterEvent) {
-        if ITER_HOOK_SET.load(Ordering::Relaxed) {
-            if let Some(hook) = ITER_HOOK.lock().unwrap().as_ref() {
+        if ITER_HOOK_SET.load(Ordering::Relaxed)
+            && let Some(hook) = ITER_HOOK.lock().unwrap().as_ref() {
                 hook(event);
             }
-        }
     }
 
     pub fn set_iter_hook(hook: Option<Box<IterHook>>) {

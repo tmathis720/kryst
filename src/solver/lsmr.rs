@@ -131,7 +131,7 @@ impl LsmrSolver {
         }
         if pc.is_some() {
             return Err(KError::Unsupported(
-                "LSMR preconditioning is not yet supported".into(),
+                "LSMR preconditioning is not yet supported",
             ));
         }
         if pc_side != PcSide::Left {
@@ -276,7 +276,7 @@ impl LsmrSolver {
             sbar = new_sbar;
             rhobar = new_rhobar;
             zeta = cbar * zetabar;
-            zetabar = -sbar * zetabar;
+            zetabar *= -sbar;
 
             let h_scale = -(thetabar * rho) / (rhoold * rhobarold);
             let h_scale_s = S::from_real(h_scale);
@@ -307,7 +307,7 @@ impl LsmrSolver {
 
             tautildeold = (zetaold - thetatildeold * tautildeold) / rhotildeold;
             let taud = (zeta - thetatilde * tautildeold) / rhodold;
-            d = d + betacheck * betacheck;
+            d += betacheck * betacheck;
             normr = (d + (betad - taud) * (betad - taud) + betadd * betadd).sqrt();
 
             for m in monitors {
@@ -443,7 +443,7 @@ impl LinearSolver for LsmrSolver {
         if w.q_s.len() < 3 {
             w.q_s.resize(3, Vec::new());
         }
-        if w.z_s.len() < 1 {
+        if w.z_s.is_empty() {
             w.z_s.resize(1, Vec::new());
         }
     }

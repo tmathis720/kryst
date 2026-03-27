@@ -4,10 +4,12 @@ use std::str::FromStr;
 
 /// Unified coarse-level strategy for distributed preconditioners.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum DistCoarseStrategy {
     /// No coarse correction (rank-local only).
     None,
     /// Gather to rank 0 and solve on the root.
+    #[default]
     RootGather,
     /// Per-rank local prototype (optionally with halo correction).
     LocalPrototype,
@@ -131,11 +133,6 @@ impl DistCoarseStrategy {
     }
 }
 
-impl Default for DistCoarseStrategy {
-    fn default() -> Self {
-        DistCoarseStrategy::RootGather
-    }
-}
 
 impl fmt::Display for DistCoarseStrategy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

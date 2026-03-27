@@ -517,8 +517,7 @@ fn resolve_route_policy(
 
     if !head_is_auto && !dist_route_is_available(policy_head) {
         return Err(KError::InvalidInput(format!(
-            "{context}: forced distributed coarse route {:?} is unavailable for this build",
-            policy_head
+            "{context}: forced distributed coarse route {policy_head:?} is unavailable for this build"
         )));
     }
 
@@ -536,7 +535,7 @@ fn resolve_route_policy(
     }
 
     if !head_is_auto {
-        let reason = format!("forced route {:?} selected from policy head", policy_head);
+        let reason = format!("forced route {policy_head:?} selected from policy head");
         return Ok((policy_head, reason));
     }
 
@@ -547,19 +546,17 @@ fn resolve_route_policy(
         if dist_route_is_available(candidate) {
             let reason = if requested.is_empty() {
                 format!(
-                    "default auto policy resolved via fallback to {:?}",
-                    candidate
+                    "default auto policy resolved via fallback to {candidate:?}"
                 )
             } else {
-                format!("auto policy fallback selected {:?}", candidate)
+                format!("auto policy fallback selected {candidate:?}")
             };
             return Ok((candidate, reason));
         }
     }
 
     Err(KError::InvalidInput(format!(
-        "{context}: no available distributed coarse route in fallback chain {:?}",
-        chain
+        "{context}: no available distributed coarse route in fallback chain {chain:?}"
     )))
 }
 
@@ -674,9 +671,7 @@ impl Preconditioner for Gamg {
         )?;
         effective_cfg.dist_coarse_solver_route = coarse_route;
         log::info!(
-            "GAMG distributed route decision level={coarse_level}: chosen={:?}; reason={}",
-            coarse_route,
-            coarse_reason
+            "GAMG distributed route decision level={coarse_level}: chosen={coarse_route:?}; reason={coarse_reason}"
         );
 
         for level in 0..=effective_cfg.max_levels {
@@ -692,10 +687,7 @@ impl Preconditioner for Gamg {
                     &format!("pc_gamg_level_policies(level={level})"),
                 )?;
                 log::info!(
-                    "GAMG distributed route decision level={level}: chosen={:?}; reason={}; requested={:?}",
-                    chosen,
-                    reason,
-                    routes
+                    "GAMG distributed route decision level={level}: chosen={chosen:?}; reason={reason}; requested={routes:?}"
                 );
             }
         }
