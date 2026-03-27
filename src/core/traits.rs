@@ -233,7 +233,7 @@ impl MatVecOp<S> for crate::matrix::sparse::CsrMatrix<S> {
                 }
             } else if beta != S::one() {
                 for v in y.iter_mut() {
-                    *v *= beta;
+                    *v = beta * *v;
                 }
             }
             return Ok(());
@@ -260,7 +260,7 @@ impl MatVecOp<S> for crate::matrix::sparse::CsrMatrix<S> {
                     let j = cj[p];
                     acc = vv[p].mul_add(x[j], acc);
                 }
-                y[i] += alpha * acc;
+                y[i] = y[i] + alpha * acc;
             }
         } else {
             for i in 0..m {
@@ -302,7 +302,7 @@ impl MatVecOp<S> for crate::matrix::sparse::CsrMatrix<S> {
                 }
             } else {
                 for v in y.iter_mut() {
-                    *v *= beta;
+                    *v = beta * *v;
                 }
             }
             return Ok(());
@@ -314,7 +314,7 @@ impl MatVecOp<S> for crate::matrix::sparse::CsrMatrix<S> {
             }
         } else if beta != S::one() {
             for v in y.iter_mut() {
-                *v *= beta;
+                *v = beta * *v;
             }
         }
 
@@ -328,7 +328,7 @@ impl MatVecOp<S> for crate::matrix::sparse::CsrMatrix<S> {
             let end = rp[i + 1];
             for k in start..end {
                 let j = cj[k];
-                y[j] += alpha * vv[k] * xi;
+                y[j] = y[j] + alpha * vv[k] * xi;
             }
         }
 

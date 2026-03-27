@@ -160,7 +160,7 @@ impl LinearSolver for BlockGmresSolver {
             let mut basis: Vec<BlockVec> = Vec::with_capacity(restart + 1);
             let total_rows = (restart + 1) * p;
             let total_cols = restart * p;
-            let mut h_full: Vec<S> = vec![0.0; total_rows * total_cols];
+            let mut h_full: Vec<S> = vec![0.0.into(); total_rows * total_cols];
 
             while iterations < self.options.max_iters {
                 let mut v0 = r_block.clone();
@@ -169,7 +169,7 @@ impl LinearSolver for BlockGmresSolver {
                 basis.clear();
                 basis.push(v0);
                 for val in &mut h_full {
-                    *val = 0.0;
+                    *val = 0.0.into();
                 }
 
                 let mut x_cycle = x_block.clone();
@@ -408,9 +408,9 @@ fn block_qr(
 ) -> Result<(Vec<S>, usize), KError> {
     let p = block.ncols();
     let n = block.nrows();
-    let mut r: Vec<S> = vec![0.0; p * p];
+    let mut r: Vec<S> = vec![0.0.into(); p * p];
     let mut reductions = 0usize;
-    work.blk_scratch.resize(n, 0.0);
+    work.blk_scratch.resize(n, 0.0.into());
     let col_buf = &mut work.blk_scratch[..n];
     for j in 0..p {
         col_buf.copy_from_slice(block.col(j));
@@ -430,7 +430,7 @@ fn block_qr(
                 "block GMRES: dependent block encountered".into(),
             ));
         }
-        r[j * p + j] = norm;
+        r[j * p + j] = norm.into();
         let inv = 1.0 / norm;
         let col_mut = block.col_mut(j);
         for (dst, &src) in col_mut.iter_mut().zip(col_buf.iter()) {
@@ -442,7 +442,7 @@ fn block_qr(
 
 #[cfg(feature = "backend-faer")]
 fn extract_h(h_full: &[S], ld: usize, rows: usize, cols: usize) -> Vec<S> {
-    let mut h: Vec<S> = vec![0.0; rows * cols];
+    let mut h: Vec<S> = vec![0.0.into(); rows * cols];
     for col in 0..cols {
         for row in 0..rows {
             h[row + col * rows] = h_full[row + col * ld];
@@ -453,7 +453,7 @@ fn extract_h(h_full: &[S], ld: usize, rows: usize, cols: usize) -> Vec<S> {
 
 #[cfg(feature = "backend-faer")]
 fn build_g(rows: usize, p: usize, beta: &[S]) -> Vec<S> {
-    let mut g: Vec<S> = vec![0.0; rows * p];
+    let mut g: Vec<S> = vec![0.0.into(); rows * p];
     for row in 0..p {
         for col in 0..p {
             g[row + col * rows] = beta[row * p + col];
@@ -464,11 +464,11 @@ fn build_g(rows: usize, p: usize, beta: &[S]) -> Vec<S> {
 
 #[cfg(feature = "backend-faer")]
 fn solve_normal_eq(h: &[S], rows: usize, cols: usize, g: &[S], p: usize) -> Result<Vec<S>, KError> {
-    let mut ht_h = vec![0.0; cols * cols];
-    let mut ht_g = vec![0.0; cols * p];
+    let mut ht_h = vec![0.0.into(); cols * cols];
+    let mut ht_g = vec![0.0.into(); cols * p];
     for col_i in 0..cols {
         for col_j in 0..cols {
-            let mut sum: S = 0.0;
+            let mut sum: S = 0.0.into();
             for row in 0..rows {
                 let h_i = h[row + col_i * rows];
                 let h_j = h[row + col_j * rows];
@@ -477,7 +477,7 @@ fn solve_normal_eq(h: &[S], rows: usize, cols: usize, g: &[S], p: usize) -> Resu
             ht_h[col_i + col_j * cols] = sum;
         }
         for rhs in 0..p {
-            let mut sum: S = 0.0;
+            let mut sum: S = 0.0.into();
             for row in 0..rows {
                 let h_i = h[row + col_i * rows];
                 let g_val = g[row + rhs * rows];

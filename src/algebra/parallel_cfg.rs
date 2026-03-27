@@ -213,7 +213,7 @@ pub fn adapt_parallel_tune(
 }
 
 thread_local! {
-    static FORCE_SERIAL: Cell<bool> = const { Cell::new(false) };
+    static FORCE_SERIAL: Cell<bool> = Cell::new(false);
 }
 
 pub struct SerialGuard {

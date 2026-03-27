@@ -69,7 +69,7 @@ fn unsupported_format_err(want: OpFormat) -> KError {
 fn backend_format_support() -> BackendFormatSupport {
     #[cfg(feature = "backend-faer")]
     {
-        <crate::matrix::backend::faer::FaerBackend as SparseBackend<S>>::FORMAT_SUPPORT
+        return <crate::matrix::backend::faer::FaerBackend as SparseBackend<S>>::FORMAT_SUPPORT;
     }
     #[cfg(not(feature = "backend-faer"))]
     {

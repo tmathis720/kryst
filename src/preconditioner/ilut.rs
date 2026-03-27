@@ -61,12 +61,6 @@ pub struct RowFilterWorkspace {
     size: usize,
 }
 
-impl Default for RowFilterWorkspace {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl RowFilterWorkspace {
     pub fn new() -> Self {
         Self {
@@ -159,7 +153,7 @@ impl RowFilterPreconditioner {
         for i in 0..n {
             let mut sum = r[i];
             for (j_idx, &j) in self.l[i].cols.iter().enumerate() {
-                sum -= self.l[i].vals[j_idx] * y[j];
+                sum = sum - self.l[i].vals[j_idx] * y[j];
             }
             y[i] = sum;
         }
@@ -168,7 +162,7 @@ impl RowFilterPreconditioner {
             let mut sum = y[i];
             for (j_idx, &j) in self.u[i].cols.iter().enumerate() {
                 if j > i {
-                    sum -= self.u[i].vals[j_idx] * z[j];
+                    sum = sum - self.u[i].vals[j_idx] * z[j];
                 }
             }
             if let Some(idx) = self.u[i].cols.iter().position(|&col| col == i) {

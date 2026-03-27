@@ -457,7 +457,7 @@ impl<R: Default> SolveStats<R> {
             complex_drift_events: 0,
             complex_drift_counts: [0; 6],
             complex_drift_max_rel: R::default(),
-            metrics: SolveMetrics,
+            metrics: SolveMetrics::default(),
             nested_pc_failure: None,
             reason_counters: ReasonDiagnosticsCounters::default(),
         }

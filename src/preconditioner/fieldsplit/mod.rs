@@ -144,7 +144,7 @@ impl FieldSplitPc {
     fn materialize_csr(a: &dyn LinOp<S = S>) -> Result<Arc<CsrMatrix<S>>, KError> {
         #[cfg(feature = "backend-faer")]
         {
-            csr_from_linop(a, 0.0)
+            return csr_from_linop(a, 0.0);
         }
 
         #[cfg(not(feature = "backend-faer"))]
@@ -933,7 +933,8 @@ impl FieldSplitPc {
             .schur_blocks
             .as_ref()
             .ok_or_else(|| KError::InvalidInput("missing Schur blocks for fieldsplit".into()))?;
-        let span0 = spans.first()
+        let span0 = spans
+            .get(0)
             .ok_or_else(|| KError::InvalidInput("missing first Schur block".into()))?;
         let span1 = spans
             .get(1)
@@ -1059,7 +1060,8 @@ impl Preconditioner for FieldSplitPc {
                 let schur = self
                     .extract_schur_blocks(csr.as_ref(), &spans)
                     .ok_or_else(|| KError::InvalidInput("missing Schur blocks".into()))?;
-                let a11 = block_mats.first()
+                let a11 = block_mats
+                    .get(0)
                     .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?;
                 let a22 = block_mats
                     .get(1)
@@ -1100,7 +1102,8 @@ impl Preconditioner for FieldSplitPc {
                 FieldSplitType::Schur {
                     precondition: SchurPrecondition::A11,
                     ..
-                } if idx == 1 => block_mats.first()
+                } if idx == 1 => block_mats
+                    .get(0)
                     .ok_or_else(|| KError::InvalidInput("missing A11 block".into()))?,
                 FieldSplitType::Schur {
                     precondition: SchurPrecondition::Diag,

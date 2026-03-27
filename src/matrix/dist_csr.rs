@@ -510,7 +510,7 @@ impl DistCsrOp {
                     let mut acc = S::zero();
                     for idx in self.row_ptr[row]..self.row_ptr[row + 1] {
                         let col = self.col_idx[idx] - self.row_start;
-                        acc += self.vals[idx] * x[col];
+                        acc = acc + self.vals[idx] * x[col];
                     }
                     *slot = acc;
                 });
@@ -546,9 +546,9 @@ impl DistCsrOp {
                         for k in range.clone() {
                             let col = self.border_ghost_col_unified[k] - self.n_local;
                             let val = self.border_ghost_vals[k];
-                            acc += val * ghost[col];
+                            acc = acc + val * ghost[col];
                         }
-                        *slot += acc;
+                        *slot = *slot + acc;
                     }
                 });
         }

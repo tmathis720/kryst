@@ -259,7 +259,7 @@ pub fn build_ilutp_with_conditioning(
     {
         let _ = (max_fill, drop_tol, perm_tol, reordering, conditioning);
         Err(KError::Unsupported(
-            "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\"",
+            "ILUTP requires features \"backend-faer\" and \"legacy-pc-bridge\"".into(),
         ))
     }
 }
