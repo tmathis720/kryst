@@ -489,29 +489,31 @@ impl Preconditioner for FsaiCsr {
             "FsaiCsr complex setup requires a CSR complex operator".into(),
         ));
 
-        // Always require CSR view
         #[cfg(not(feature = "complex"))]
-        let csr = csr_from_linop(a, R::default())?; // no drop on A
-        let sid = a.structure_id();
-        let vid = a.values_id();
-
-        // Recompute numeric with fixed pattern if possible, else rebuild.
-        if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
-            && ls == sid
-            && lv != vid
         {
-            // values changed only: refresh numeric with fixed pattern
-            self.update_numeric(a)?;
-            self.last_vid = Some(vid);
-            return Ok(());
-        }
+            // Always require CSR view
+            let csr = csr_from_linop(a, R::default())?; // no drop on A
+            let sid = a.structure_id();
+            let vid = a.values_id();
 
-        // Full rebuild using current params against CSR
-        let rebuilt = FsaiCsr::build_from_csr((*csr).clone(), self.params)?;
-        *self = rebuilt;
-        self.last_sid = Some(sid);
-        self.last_vid = Some(vid);
-        Ok(())
+            // Recompute numeric with fixed pattern if possible, else rebuild.
+            if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
+                && ls == sid
+                && lv != vid
+            {
+                // values changed only: refresh numeric with fixed pattern
+                self.update_numeric(a)?;
+                self.last_vid = Some(vid);
+                return Ok(());
+            }
+
+            // Full rebuild using current params against CSR
+            let rebuilt = FsaiCsr::build_from_csr((*csr).clone(), self.params)?;
+            *self = rebuilt;
+            self.last_sid = Some(sid);
+            self.last_vid = Some(vid);
+            Ok(())
+        }
     }
 
     fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -606,58 +608,60 @@ impl Preconditioner for FsaiCsr {
             "FsaiCsr complex numeric update requires a CSR complex operator".into(),
         ));
 
-        // Re-solve per-column with fixed pattern and write values back into existing G
         #[cfg(not(feature = "complex"))]
-        let csr = csr_from_linop(a, R::default())?;
-        let n = self.g.nrows().min(self.g.ncols());
-        let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default());
-        let mut b = vec![R::default(); 1];
+        {
+            // Re-solve per-column with fixed pattern and write values back into existing G
+            let csr = csr_from_linop(a, R::default())?;
+            let n = self.g.nrows().min(self.g.ncols());
+            let mut a_ss = Mat::<R>::from_fn(1, 1, |_, _| R::default());
+            let mut b = vec![R::default(); 1];
 
-        // We'll rebuild triplets but write into a fresh CSR to keep code simple and pattern stable
-        let mut trips: Vec<(usize, usize, R)> = Vec::new();
-        for i in 0..n {
-            let s = &self.pat[i];
-            let m = s.len();
-            if m == 0 {
-                continue;
-            }
-            if a_ss.nrows() != m || a_ss.ncols() != m {
-                a_ss = Mat::<R>::from_fn(m, m, |_, _| R::default());
-                b.resize(m, R::default());
-            }
-            for p in 0..m {
-                for q in 0..=p {
-                    let v = csr_find(&csr, s[p], s[q]);
-                    a_ss[(p, q)] = v;
-                    a_ss[(q, p)] = v;
+            // We'll rebuild triplets but write into a fresh CSR to keep code simple and pattern stable
+            let mut trips: Vec<(usize, usize, R)> = Vec::new();
+            for i in 0..n {
+                let s = &self.pat[i];
+                let m = s.len();
+                if m == 0 {
+                    continue;
+                }
+                if a_ss.nrows() != m || a_ss.ncols() != m {
+                    a_ss = Mat::<R>::from_fn(m, m, |_, _| R::default());
+                    b.resize(m, R::default());
+                }
+                for p in 0..m {
+                    for q in 0..=p {
+                        let v = csr_find(&csr, s[p], s[q]);
+                        a_ss[(p, q)] = v;
+                        a_ss[(q, p)] = v;
+                    }
+                }
+                for d in 0..m {
+                    a_ss[(d, d)] += self.params.reg;
+                }
+                for item in b.iter_mut().take(m) {
+                    *item = R::default();
+                }
+                if let Ok(pos) = s.binary_search(&i) {
+                    b[pos] = S::one().real();
+                } else {
+                    continue;
+                }
+                let rhs = Mat::<R>::from_fn(m, 1, |r, _| b[r]);
+                let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
+                // No pruning during update to preserve structure
+                for (k, &row) in s.iter().enumerate() {
+                    let val = sol[(k, 0)];
+                    trips.push((row, i, val));
                 }
             }
-            for d in 0..m {
-                a_ss[(d, d)] += self.params.reg;
+            self.g = assemble_csr(n, n, &mut trips);
+            #[cfg(feature = "complex")]
+            {
+                self.native_complex_active = false;
+                self.c_g = None;
             }
-            for k in 0..m {
-                b[k] = R::default();
-            }
-            if let Ok(pos) = s.binary_search(&i) {
-                b[pos] = S::one().real();
-            } else {
-                continue;
-            }
-            let rhs = Mat::<R>::from_fn(m, 1, |r, _| b[r]);
-            let sol = faer::linalg::solvers::Qr::new(a_ss.as_ref()).solve_lstsq(rhs);
-            // No pruning during update to preserve structure
-            for (k, &row) in s.iter().enumerate() {
-                let val = sol[(k, 0)];
-                trips.push((row, i, val));
-            }
+            Ok(())
         }
-        self.g = assemble_csr(n, n, &mut trips);
-        #[cfg(feature = "complex")]
-        {
-            self.native_complex_active = false;
-            self.c_g = None;
-        }
-        Ok(())
     }
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {
@@ -987,24 +991,26 @@ impl Preconditioner for SpaiCsr {
         }
 
         #[cfg(not(feature = "complex"))]
-        let csr = csr_from_linop(a, R::default())?;
-        let sid = a.structure_id();
-        let vid = a.values_id();
-
-        if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
-            && ls == sid
-            && lv != vid
         {
-            self.update_numeric(a)?;
-            self.last_vid = Some(vid);
-            return Ok(());
-        }
+            let csr = csr_from_linop(a, R::default())?;
+            let sid = a.structure_id();
+            let vid = a.values_id();
 
-        let rebuilt = SpaiCsr::build_from_csr((*csr).clone(), self.params)?;
-        *self = rebuilt;
-        self.last_sid = Some(sid);
-        self.last_vid = Some(vid);
-        Ok(())
+            if let (Some(ls), Some(lv)) = (self.last_sid, self.last_vid)
+                && ls == sid
+                && lv != vid
+            {
+                self.update_numeric(a)?;
+                self.last_vid = Some(vid);
+                return Ok(());
+            }
+
+            let rebuilt = SpaiCsr::build_from_csr((*csr).clone(), self.params)?;
+            *self = rebuilt;
+            self.last_sid = Some(sid);
+            self.last_vid = Some(vid);
+            Ok(())
+        }
     }
 
     fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
@@ -1113,77 +1119,80 @@ impl Preconditioner for SpaiCsr {
         ));
 
         #[cfg(not(feature = "complex"))]
-        let csr = csr_from_linop(a, R::default())?;
-        let n = self.m.nrows().min(self.m.ncols());
-        let rp = csr.row_ptr();
-        let ci = csr.col_idx();
-        let vv = csr.values();
-        let mut idx_in_s: Vec<i32> = vec![-1; n];
-        let mut trips: Vec<(usize, usize, R)> = Vec::new();
+        {
+            let csr = csr_from_linop(a, R::default())?;
+            let n = self.m.nrows().min(self.m.ncols());
+            let rp = csr.row_ptr();
+            let ci = csr.col_idx();
+            let vv = csr.values();
+            let mut idx_in_s: Vec<i32> = vec![-1; n];
+            let mut trips: Vec<(usize, usize, R)> = Vec::new();
 
-        for j in 0..n {
-            let s = &self.pat[j];
-            let m = s.len();
-            if m == 0 {
-                continue;
-            }
-            for (pos, &g) in s.iter().enumerate() {
-                idx_in_s[g] = pos as i32;
-            }
-            let mut nmat = Mat::<R>::from_fn(m, m, |_, _| R::default());
-            let mut cvec = Mat::<R>::from_fn(m, 1, |_, _| R::default());
-            // cvec
-            let (rj, rj2) = (rp[j], rp[j + 1]);
-            for pidx in rj..rj2 {
-                let col = ci[pidx];
-                let val = vv[pidx];
-                let pos = idx_in_s[col];
-                if pos >= 0 {
-                    cvec[(pos as usize, 0)] = val;
+            for j in 0..n {
+                let s = &self.pat[j];
+                let m = s.len();
+                if m == 0 {
+                    continue;
                 }
-            }
-            // N
-            for i in 0..n {
-                let (rs, re) = (rp[i], rp[i + 1]);
-                let mut pos_tmp: smallvec::SmallVec<[(usize, f64); 32]> = smallvec::SmallVec::new();
-                for p in rs..re {
-                    let col = ci[p];
+                for (pos, &g) in s.iter().enumerate() {
+                    idx_in_s[g] = pos as i32;
+                }
+                let mut nmat = Mat::<R>::from_fn(m, m, |_, _| R::default());
+                let mut cvec = Mat::<R>::from_fn(m, 1, |_, _| R::default());
+                // cvec
+                let (rj, rj2) = (rp[j], rp[j + 1]);
+                for pidx in rj..rj2 {
+                    let col = ci[pidx];
+                    let val = vv[pidx];
                     let pos = idx_in_s[col];
                     if pos >= 0 {
-                        pos_tmp.push((pos as usize, vv[p]));
+                        cvec[(pos as usize, 0)] = val;
                     }
                 }
-                for ix in 0..pos_tmp.len() {
-                    let (px, vx) = pos_tmp[ix];
-                    for iy in 0..=ix {
-                        let (py, vy) = pos_tmp[iy];
-                        let v = vx * vy;
-                        nmat[(px, py)] += v;
-                        if px != py {
-                            nmat[(py, px)] += v;
+                // N
+                for i in 0..n {
+                    let (rs, re) = (rp[i], rp[i + 1]);
+                    let mut pos_tmp: smallvec::SmallVec<[(usize, f64); 32]> =
+                        smallvec::SmallVec::new();
+                    for p in rs..re {
+                        let col = ci[p];
+                        let pos = idx_in_s[col];
+                        if pos >= 0 {
+                            pos_tmp.push((pos as usize, vv[p]));
+                        }
+                    }
+                    for ix in 0..pos_tmp.len() {
+                        let (px, vx) = pos_tmp[ix];
+                        for iy in 0..=ix {
+                            let (py, vy) = pos_tmp[iy];
+                            let v = vx * vy;
+                            nmat[(px, py)] += v;
+                            if px != py {
+                                nmat[(py, px)] += v;
+                            }
                         }
                     }
                 }
+                for d in 0..m {
+                    nmat[(d, d)] += self.params.reg;
+                }
+                let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
+                // no pruning during update to preserve structure
+                for (k, &row) in s.iter().enumerate() {
+                    trips.push((row, j, sol[(k, 0)]));
+                }
+                for &g in s.iter() {
+                    idx_in_s[g] = -1;
+                }
             }
-            for d in 0..m {
-                nmat[(d, d)] += self.params.reg;
+            self.m = assemble_csr(n, n, &mut trips);
+            #[cfg(feature = "complex")]
+            {
+                self.native_complex_active = false;
+                self.c_m = None;
             }
-            let sol = faer::linalg::solvers::Qr::new(nmat.as_ref()).solve_lstsq(cvec);
-            // no pruning during update to preserve structure
-            for (k, &row) in s.iter().enumerate() {
-                trips.push((row, j, sol[(k, 0)]));
-            }
-            for &g in s.iter() {
-                idx_in_s[g] = -1;
-            }
+            Ok(())
         }
-        self.m = assemble_csr(n, n, &mut trips);
-        #[cfg(feature = "complex")]
-        {
-            self.native_complex_active = false;
-            self.c_m = None;
-        }
-        Ok(())
     }
 
     fn required_format(&self) -> crate::matrix::format::OpFormat {

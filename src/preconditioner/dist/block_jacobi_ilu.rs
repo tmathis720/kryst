@@ -313,6 +313,7 @@ where
     local_pc: LPC,
     row_offset: usize,
     n_local: usize,
+    #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
     native_plan: Option<NativeCouplingPlan>,
 }
 
@@ -325,6 +326,7 @@ where
         comm: UniverseComm,
         local_pc: LPC,
         row_offset: usize,
+        #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
         native_plan: Option<NativeCouplingPlan>,
     ) -> Self {
         let (n_local, _) = local_pc.dims();
@@ -333,6 +335,7 @@ where
             local_pc,
             row_offset,
             n_local,
+            #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
             native_plan,
         }
     }
@@ -369,6 +372,7 @@ where
         debug_assert!(matches!(side, PcSide::Left));
         x.with_scratch_input_local_output(|x_local, y_local| {
             self.local_pc.apply_local(x_local, y_local)?;
+            #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
             if let Some(plan) = &self.native_plan {
                 plan.apply_remote_correction(x_local, y_local);
             }
