@@ -48,7 +48,7 @@ oorandom = "11"
 wide = { version = "0.7", optional = true }
 rand_distr = "0.4"
 num-complex = { version = "0.4", optional = true }
-faer = { version = "0.22.6", optional = true, default-features = false, features = ["std"] }
+faer = { version = "0.24.0", optional = true, default-features = false, features = ["std"] }
 nalgebra = { version = "0.33", optional = true }
 sprs = { version = "0.11", optional = true }
 
