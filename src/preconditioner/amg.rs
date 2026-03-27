@@ -3710,9 +3710,9 @@ impl AMG {
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
         let record_error = |local_stage: &mut Option<&'static str>,
-                                local_detail: &mut Option<String>,
-                                stage: &'static str,
-                                err: KError| {
+                            local_detail: &mut Option<String>,
+                            stage: &'static str,
+                            err: KError| {
             if local_stage.is_none() {
                 *local_stage = Some(stage);
                 *local_detail = Some(err.to_string());
@@ -3873,9 +3873,9 @@ impl AMG {
         let mut local_stage: Option<&'static str> = None;
         let mut local_detail: Option<String> = None;
         let record_error = |local_stage: &mut Option<&'static str>,
-                                local_detail: &mut Option<String>,
-                                stage: &'static str,
-                                err: KError| {
+                            local_detail: &mut Option<String>,
+                            stage: &'static str,
+                            err: KError| {
             if local_stage.is_none() {
                 *local_stage = Some(stage);
                 *local_detail = Some(err.to_string());

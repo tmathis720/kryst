@@ -16,9 +16,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::common::call_monitors;
 use crate::solver::common::{ReductCtx, dot_result_to_real, take_or_resize};
-use crate::solver::MonitorCallback;
 use crate::utils::convergence::{
     ConvergedReason, Convergence, ReasonEmitter, SolveStats, SolverCounters,
 };
@@ -527,8 +527,8 @@ mod tests {
     use crate::assert_vec_close;
     use crate::ops::klinop::KLinOp;
     use crate::ops::kpc::KPreconditioner;
-    use crate::testkit::s;
     use crate::solver::MonitorAction;
+    use crate::testkit::s;
     use std::any::Any;
     use std::sync::{Arc, Mutex};
 

@@ -38,7 +38,10 @@ fn main() {
             (poisson::poisson_5pt_2d(220), poisson_3d(40, 40, 20))
         } else {
             let g = 120 * rank_factor;
-            (poisson::poisson_5pt_2d(g), poisson_3d(24, 24, 12 * rank_factor))
+            (
+                poisson::poisson_5pt_2d(g),
+                poisson_3d(24, 24, 12 * rank_factor),
+            )
         };
 
         println!("-- {mode} scale, virtual_ranks={rank_factor} --");

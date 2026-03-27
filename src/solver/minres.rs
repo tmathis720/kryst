@@ -15,9 +15,9 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{self, PcSide, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
+use crate::solver::MonitorCallback;
 use crate::solver::common::call_monitors;
 use crate::solver::common::{ReductCtx, dot_result_to_real, recompute_true_residual_norm_s};
-use crate::solver::MonitorCallback;
 use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
 use std::any::Any;
 

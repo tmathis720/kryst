@@ -86,10 +86,7 @@ where
     ///
     /// # Errors
     /// Returns `KError::Unsupported` when called with complex scalars.
-    pub fn from_dense(
-        dense: &faer::Mat<f64>,
-        drop_tol: f64,
-    ) -> Result<Self, crate::error::KError> {
+    pub fn from_dense(dense: &faer::Mat<f64>, drop_tol: f64) -> Result<Self, crate::error::KError> {
         if crate::algebra::scalar::is_complex_scalar::<T>() {
             return Err(crate::error::KError::Unsupported(
                 "CSC from_dense is real-only; complex scalars are unsupported",
