@@ -1,5 +1,5 @@
 use kryst::matrix::sparse::CsrMatrix;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::collections::BTreeSet;
 
 /// 5-point Poisson on an n x n grid with Dirichlet BCs.
@@ -117,9 +117,9 @@ pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f6
     row_ptr.push(0);
 
     for i in 0..n {
-        let base = rng.gen_range((avg_deg / 2).max(1)..=(avg_deg * 3 / 2).max(2));
-        let burst = if rng.r#gen::<f64>() < 0.05 {
-            rng.gen_range(avg_deg..=4 * avg_deg)
+        let base = rng.random_range((avg_deg / 2).max(1)..=(avg_deg * 3 / 2).max(2));
+        let burst = if rng.random::<f64>() < 0.05 {
+            rng.random_range(avg_deg..=4 * avg_deg)
         } else {
             0
         };
@@ -129,14 +129,14 @@ pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f6
         // Ensure diagonal present to avoid singular row
         set.insert(i);
         while set.len() < deg {
-            let j = rng.gen_range(0..n);
+            let j = rng.random_range(0..n);
             set.insert(j);
         }
         for &j in set.iter() {
             col_idx.push(j);
             // Values in [0.5, 1.5], negative off-diagonals with small probability
-            let mut v = 0.5 + rng.r#gen::<f64>();
-            if j != i && rng.r#gen::<f64>() < 0.2 {
+            let mut v = 0.5 + rng.random::<f64>();
+            if j != i && rng.random::<f64>() < 0.2 {
                 v = -v;
             }
             vals.push(v);

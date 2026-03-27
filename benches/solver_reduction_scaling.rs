@@ -1,5 +1,5 @@
 use kryst::context::ksp_context::Workspace;
-use kryst::matrix::utils::{poisson_3d, poisson2d_5pt_csr};
+use kryst::matrix::utils::{poisson, poisson_3d};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::LinearSolver;
@@ -35,10 +35,10 @@ fn main() {
     println!("== solver variant scaling microbench ==");
     for (mode, rank_factor) in strong_weak_cases() {
         let (n2, a3) = if mode == "strong" {
-            (poisson2d_5pt_csr(220), poisson_3d(40, 40, 20))
+            (poisson::poisson_5pt_2d(220), poisson_3d(40, 40, 20))
         } else {
             let g = 120 * rank_factor;
-            (poisson2d_5pt_csr(g), poisson_3d(24, 24, 12 * rank_factor))
+            (poisson::poisson_5pt_2d(g), poisson_3d(24, 24, 12 * rank_factor))
         };
 
         println!("-- {mode} scale, virtual_ranks={rank_factor} --");
@@ -51,7 +51,7 @@ fn main() {
         let mut ws = Workspace::default();
         let t0 = Instant::now();
         let s = pcg_classic
-            .solve_f64(
+            .solve(
                 &n2,
                 None,
                 &b2,
@@ -78,7 +78,7 @@ fn main() {
         let mut ws = Workspace::default();
         let t0 = Instant::now();
         let s = pcg_pipe
-            .solve_f64(
+            .solve(
                 &n2,
                 None,
                 &b2,
