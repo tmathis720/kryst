@@ -39,8 +39,10 @@ fn legacy_approxinv_matches_csr_spai_apply() {
 
     let mut csr_spai = SpaiCsr::new_with_params(ApproxInvParams {
         kind: ApproxInvKind::SPAI,
-        levels: 1,
-        max_per_col: 20,
+        // Legacy ApproxInv::Auto currently falls back to dense columns for CsrOp,
+        // so mirror that behavior for parity in this migration test.
+        levels: csr.nrows(),
+        max_per_col: csr.nrows(),
         drop_tol: 0.0,
         reg: 1e-12,
         max_cond: 1e12,
