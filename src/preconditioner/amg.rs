@@ -1154,6 +1154,7 @@ mod config_mapping_tests {
         assert_eq!(cfg.max_levels, AMGConfig::default().max_levels);
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn dist_route_resolution_preserves_forced_routes() {
         let mut cfg = AMGConfig::default();
@@ -1166,8 +1167,8 @@ mod config_mapping_tests {
         assert_eq!(route, DistCoarseSolverRoute::Local);
     }
 
+    #[cfg(all(not(feature = "complex"), not(feature = "superlu_dist")))]
     #[test]
-    #[cfg(not(feature = "superlu_dist"))]
     fn dist_route_resolution_errors_when_forced_superlu_missing() {
         let mut cfg = AMGConfig::default();
         cfg.dist_coarse_solver_route = DistCoarseSolverRoute::SuperLuDist;
@@ -6862,7 +6863,7 @@ impl Preconditioner for AMG {
         {
             print_setup_tables(s);
         }
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(feature = "complex")))]
         if self.cfg.require_spd {
             self.spd_probe()?;
         }
@@ -6917,7 +6918,7 @@ impl AMG {
         {
             print_setup_tables(s);
         }
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(feature = "complex")))]
         if self.cfg.require_spd {
             self.spd_probe()?;
         }

@@ -18,6 +18,7 @@ fn poisson_1d_matrix() -> CsrMatrix<f64> {
     CsrMatrix::from_csr(4, 4, row_ptr, col_idx, values)
 }
 
+#[cfg(not(feature = "complex"))]
 #[test]
 fn legacy_approxinv_matches_csr_spai_apply() {
     let csr = Arc::new(poisson_1d_matrix());

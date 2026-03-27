@@ -306,6 +306,7 @@ fn spmm_block_s_two_rhs() {
     assert_eq!(y1, r1);
 }
 
+#[cfg(not(feature = "complex"))]
 fn make_block_spmm_fixture(n: usize) -> CsrMatrix<f64> {
     let mut rp = Vec::with_capacity(n + 1);
     let mut ci = Vec::new();
@@ -327,6 +328,7 @@ fn make_block_spmm_fixture(n: usize) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(n, n, rp, ci, vv)
 }
 
+#[cfg(not(feature = "complex"))]
 fn fill_block_input(n: usize, p: usize) -> crate::context::ksp_context::BlockVec {
     let mut x = crate::context::ksp_context::BlockVec::new(n, p);
     for col in 0..p {
@@ -338,6 +340,7 @@ fn fill_block_input(n: usize, p: usize) -> crate::context::ksp_context::BlockVec
     x
 }
 
+#[cfg(not(feature = "complex"))]
 #[test]
 fn spmm_csr_dense_matches_columnwise_spmv_for_block_gmres_sizes() {
     let n = 96;
@@ -355,7 +358,7 @@ fn spmm_csr_dense_matches_columnwise_spmv_for_block_gmres_sizes() {
     }
 }
 
-#[cfg(feature = "rayon")]
+#[cfg(all(feature = "rayon", not(feature = "complex")))]
 #[test]
 fn spmm_csr_dense_parallel_tuning_paths_match_serial_for_arnoldi_block_sizes() {
     use crate::algebra::parallel_cfg::{parallel_tune, serial_guard, set_parallel_tune};

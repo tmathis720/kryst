@@ -864,7 +864,7 @@ impl Drop for ShellPc {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "complex")))]
 mod tests {
     use super::*;
     use crate::config::options::{KspOptions, PcOptions};
@@ -1213,7 +1213,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "complex")))]
 mod hook_failure_tests {
     use super::*;
     use crate::matrix::op::LinOp;

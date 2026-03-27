@@ -863,8 +863,9 @@ mod tests {
 mod complex_tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
-    use crate::config::kinds::{PcType, SolverType};
     use crate::context::KspContext;
+    use crate::context::ksp_context::SolverType;
+    use crate::context::pc_context::PcType;
     use crate::matrix::op::CsrOp;
     use crate::matrix::op::LinOp;
     use crate::matrix::sparse::CsrMatrix;
@@ -876,7 +877,12 @@ mod complex_tests {
     fn apply_s_complex_setup_and_apply() {
         let row_ptr = vec![0, 2, 4];
         let col_idx = vec![0, 1, 0, 1];
-        let values = vec![1.5, 0.0, 0.0, 1.5];
+        let values = vec![
+            S::from_real(1.5),
+            S::from_real(0.0),
+            S::from_real(0.0),
+            S::from_real(1.5),
+        ];
         let op = CsrOp::new(Arc::new(CsrMatrix::from_csr(
             2, 2, row_ptr, col_idx, values,
         )));
@@ -900,7 +906,7 @@ mod complex_tests {
     fn chebyshev_pc_integrates_with_ksp_context_complex() {
         let row_ptr = vec![0, 1, 2, 3];
         let col_idx = vec![0, 1, 2];
-        let values = vec![1.0, 1.0, 1.0];
+        let values = vec![S::from_real(1.0), S::from_real(1.0), S::from_real(1.0)];
         let a = Arc::new(CsrOp::new(Arc::new(CsrMatrix::from_csr(
             3, 3, row_ptr, col_idx, values,
         ))));

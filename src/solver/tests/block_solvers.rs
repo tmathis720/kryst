@@ -84,6 +84,7 @@ fn block_bicgstab_converges_on_block_rhs() {
     ));
 }
 
+#[cfg(not(feature = "complex"))]
 #[test]
 fn block_bicgstab_supports_left_preconditioned_runs() {
     let mut opts = BlockKrylovOptions::default();
@@ -122,7 +123,7 @@ fn block_bicgstab_supports_left_preconditioned_runs() {
     ));
 }
 
-#[cfg(feature = "backend-faer")]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[test]
 fn block_gmres_supports_left_preconditioned_runs() {
     let mut opts = BlockKrylovOptions::default();
