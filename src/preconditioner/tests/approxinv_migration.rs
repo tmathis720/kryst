@@ -64,7 +64,7 @@ fn legacy_approxinv_matches_csr_spai_apply() {
 
     for (l, c) in y_legacy.iter().zip(y_csr.iter()) {
         assert!(
-            (*l - *c).norm() < 1e-9,
+            (*l - *c).abs() < 1e-9,
             "legacy ({l:?}) and csr ({c:?}) diverged"
         );
     }
