@@ -1,12 +1,12 @@
 #![cfg(all(feature = "backend-faer", not(feature = "complex")))]
 
 use faer::Mat;
-use std::sync::Arc;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::KspContext;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::solver::LinearSolver;
 use kryst::solver::{BiCgStabSolver, BiCgStabVariant};
+use std::sync::Arc;
 
 fn nonsym_tridiag(n: usize) -> Mat<f64> {
     let mut a = Mat::<f64>::zeros(n, n);

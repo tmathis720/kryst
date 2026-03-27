@@ -31,7 +31,7 @@ fn main() {
 
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
-use kryst::matrix::op::{wrap_with_comm, CsrOp};
+use kryst::matrix::op::{CsrOp, wrap_with_comm};
 use kryst::matrix::sparse::SparseMatrix;
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::solver::MonitorAction;

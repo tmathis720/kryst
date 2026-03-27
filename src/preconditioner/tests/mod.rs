@@ -56,10 +56,10 @@ fn default_apply_mut_forwards_to_apply() {
     assert_eq!(pc.calls.load(Ordering::Relaxed), 1);
 }
 
+mod approxinv_migration;
 mod asm_amg;
 #[cfg(feature = "mpi")]
 mod asm_mpi;
-mod approxinv_migration;
 mod block_jacobi;
 mod classical;
 mod coarsen;

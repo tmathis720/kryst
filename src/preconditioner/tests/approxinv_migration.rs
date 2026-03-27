@@ -73,7 +73,12 @@ fn legacy_approxinv_matches_csr_spai_apply() {
 
 #[test]
 fn pctype_approxinverse_uses_distributed_capability_for_all_modes() {
-    for (kind, parallel) in [("fsai", false), ("fsai", true), ("spai", false), ("spai", true)] {
+    for (kind, parallel) in [
+        ("fsai", false),
+        ("fsai", true),
+        ("spai", false),
+        ("spai", true),
+    ] {
         let opts = PcOptions {
             pc_type: Some("approxinv".to_string()),
             approxinv_kind: Some(kind.to_string()),

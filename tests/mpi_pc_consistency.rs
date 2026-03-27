@@ -10,10 +10,10 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
-use kryst::preconditioner::dist::{
-    build_block_jacobi_pc, DistLocalApplyMode, DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions,
-};
 use kryst::preconditioner::PcSide;
+use kryst::preconditioner::dist::{
+    DistLocalApplyMode, DistVec, GlobalPcKind, LocalPcKind, MpiPcOptions, build_block_jacobi_pc,
+};
 use kryst::utils::convergence::ConvergedReason;
 
 fn local_rows_from_global(
