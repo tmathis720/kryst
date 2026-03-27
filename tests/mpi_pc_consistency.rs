@@ -239,7 +239,7 @@ fn mpi_mg_distributed_coarse_route_options_parse() {
 
     assert_eq!(opts.pc_type.as_deref(), Some("mg"));
     assert_eq!(
-        opts.pc_mg_coarse_solver_route.as_deref(),
+        opts.amg_dist_coarse_solver_route.as_deref(),
         Some("root_gather")
     );
     assert!(opts.pc_mg_level_policies.is_some());
