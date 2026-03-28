@@ -950,7 +950,7 @@ mod complex_tests {
         ))));
 
         let mut ksp = KspContext::new();
-        ksp.set_type(SolverType::Richardson).expect("set solver");
+        ksp.set_type(SolverType::Gmres).expect("set solver");
         ksp.set_pc_type(PcType::Chebyshev, None).expect("set pc");
         ksp.set_operators(a.clone(), None);
         ksp.setup().expect("ksp setup");
