@@ -137,7 +137,7 @@ fn pc_scaffold_apply_smoke() -> Result<(), KError> {
     let mut y = vec![S::zero(); 4];
     ksp_pc.apply(PcSide::Left, &x, &mut y)?;
     for (yi, xi) in y.iter().zip(x.iter()) {
-        assert!((*yi - *xi).norm() < 1e-12);
+        assert!((*yi - *xi).abs() < 1e-12);
     }
 
     kryst::preconditioner::shell::register_shell_callback(
