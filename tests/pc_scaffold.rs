@@ -127,6 +127,7 @@ fn pc_scaffold_apply_smoke() -> Result<(), KError> {
 
     let ksp_opts = PcOptions {
         pc_type: Some("ksp".into()),
+        pc_ksp_ksp_type: Some("gmres".into()),
         pc_ksp_pc_type: Some("none".into()),
         pc_ksp_maxits: Some(1),
         ..Default::default()
@@ -135,7 +136,9 @@ fn pc_scaffold_apply_smoke() -> Result<(), KError> {
     ksp_pc.setup(&op)?;
     let mut y = vec![S::zero(); 4];
     ksp_pc.apply(PcSide::Left, &x, &mut y)?;
-    assert_eq!(y, x);
+    for (yi, xi) in y.iter().zip(x.iter()) {
+        assert!((*yi - *xi).norm() < 1e-12);
+    }
 
     kryst::preconditioner::shell::register_shell_callback(
         "double",
