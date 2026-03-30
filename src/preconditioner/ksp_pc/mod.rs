@@ -21,7 +21,7 @@ struct InnerKspContext {
     pc_options: PcOptions,
     residual_history: Arc<Mutex<Vec<R>>>,
     monitor_rank0: bool,
-    allow_maxits: bool,
+    allow_maxits_compat: bool,
     inner_tol_policy: InnerTolPolicy,
     propagate_converged_reason: bool,
     comm_size: usize,
@@ -132,7 +132,8 @@ impl KspAsPc {
         ksp_opts.overlay_from(self.ksp_options.clone());
         let pc_opts = self.pc_options.resolved_pc_ksp_pc_options();
         let monitor_rank0 = ksp_opts.ksp_monitor_rank0.unwrap_or(false);
-        let allow_maxits = self.pc_options.pc_ksp_allow_maxits.unwrap_or(true);
+        let allow_maxits_compat = self.pc_options.pc_ksp_inner_tol_policy.is_none()
+            && self.pc_options.pc_ksp_allow_maxits.unwrap_or(true);
         let inner_tol_policy = InnerTolPolicy::from_pc_options(&self.pc_options)?;
         let propagate_converged_reason = self
             .pc_options
@@ -148,7 +149,7 @@ impl KspAsPc {
             existing.ksp_options = ksp_opts;
             existing.pc_options = pc_opts;
             existing.monitor_rank0 = existing.ksp_options.ksp_monitor_rank0.unwrap_or(false);
-            existing.allow_maxits = allow_maxits;
+            existing.allow_maxits_compat = allow_maxits_compat;
             existing.inner_tol_policy = inner_tol_policy;
             existing.propagate_converged_reason = propagate_converged_reason;
             existing.comm_size = a.comm().size();
@@ -198,7 +199,7 @@ impl KspAsPc {
             pc_options: pc_opts,
             residual_history,
             monitor_rank0,
-            allow_maxits,
+            allow_maxits_compat,
             inner_tol_policy,
             propagate_converged_reason,
             comm_size: a.comm().size(),
@@ -405,7 +406,7 @@ impl Preconditioner for KspAsPc {
             if !Self::is_acceptable_inner_reason(
                 stats.reason,
                 inner.inner_tol_policy,
-                inner.allow_maxits,
+                inner.allow_maxits_compat,
             ) {
                 let history_summary =
                     Self::summarize_history(&inner.residual_history, stats.final_residual);
