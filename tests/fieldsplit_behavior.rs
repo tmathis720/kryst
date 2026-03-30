@@ -72,23 +72,20 @@ fn fieldsplit_schur_factorization_variants_apply() -> Result<(), KError> {
         ],
     );
     let op = CsrOp::new(Arc::new(csr));
+    let schur_preconditions: &[&str] = if cfg!(feature = "complex") {
+        &["self", "selfp", "a11", "full", "full_matfree", "user"]
+    } else {
+        &["self", "selfp", "diag", "a11", "full", "full_matfree", "user"]
+    };
     for fact in ["diag", "lower", "upper", "full"] {
-        for pre in [
-            "self",
-            "selfp",
-            "diag",
-            "a11",
-            "full",
-            "full_matfree",
-            "user",
-        ] {
+        for pre in schur_preconditions {
             let opts = PcOptions {
                 pc_type: Some("fieldsplit".into()),
                 pc_fieldsplit_block_sizes: Some(vec![1, 1]),
                 pc_fieldsplit_child_pc_type: Some("jacobi".into()),
                 pc_fieldsplit_type: Some("schur".into()),
-                pc_fieldsplit_schur_fact_type: Some(fact.into()),
-                pc_fieldsplit_schur_precondition: Some(pre.into()),
+                pc_fieldsplit_schur_fact_type: Some((*fact).into()),
+                pc_fieldsplit_schur_precondition: Some((*pre).into()),
                 ..Default::default()
             };
             let mut pc = PcFactory::create_from_options(&opts)?;
