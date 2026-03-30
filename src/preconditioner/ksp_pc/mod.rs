@@ -5,6 +5,7 @@ use crate::context::ksp_context::{
 };
 use crate::error::KError;
 use crate::matrix::backend::materialize_ref;
+use crate::matrix::format::OpFormat;
 use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
@@ -120,14 +121,12 @@ impl KspAsPc {
     }
 
     fn configure_nested_ksp(&self, a: &dyn LinOp<S = S>) -> Result<bool, KError> {
-        let want = a.format();
+        let mut want = a.format();
         if want.is_any() {
-            return Ok(false);
+            want = OpFormat::Dense;
         }
         let drop_tol = self.pc_options.drop_tol.unwrap_or_default();
-        let Ok(amat) = materialize_ref(a, want, drop_tol) else {
-            return Ok(false);
-        };
+        let amat = materialize_ref(a, want, drop_tol).ok();
 
         let mut ksp_opts = self.pc_options.resolved_pc_ksp_ksp_options();
         ksp_opts.overlay_from(self.ksp_options.clone());
@@ -155,13 +154,16 @@ impl KspAsPc {
             existing.comm_size = a.comm().size();
             existing.outer_threads = self.ksp_options.threads;
             existing.outer_threads_mode = self.ksp_options.threads_mode.clone();
-            existing
-                .ksp
-                .try_set_operators_with_comm(amat, None, a.comm())?;
+            if let Some(amat) = amat.clone() {
+                existing.ksp.try_set_operators_with_comm(amat, None, a.comm())?;
+            }
             existing.ksp.setup()?;
             Self::apply_runtime_controls_from_options(existing);
             return Ok(true);
         }
+        let Some(amat) = amat else {
+            return Ok(false);
+        };
 
         let nested_exec = ExecutionPolicy::nested_from_options_with_context(
             &ksp_opts,
@@ -327,6 +329,14 @@ impl KspAsPc {
 }
 
 impl Preconditioner for KspAsPc {
+    fn required_format(&self) -> OpFormat {
+        OpFormat::Dense
+    }
+
+    fn preferred_drop_tol_for_format(&self) -> Option<R> {
+        self.pc_options.drop_tol
+    }
+
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         let configured = self.configure_nested_ksp(a)?;
         if !configured {

@@ -528,6 +528,24 @@ pub fn materialize_linop_with_hint(
         });
     }
 
+    if let Some(dense_op) = op.as_any().downcast_ref::<DenseOp<S>>() {
+        let m = dense_op.inner();
+        return Ok(match hint {
+            FormatHint::Csr => {
+                let csr = dense_to_csr_complex(m, drop_tol);
+                wrap_with_comm(Arc::new(csr), comm)
+            }
+            FormatHint::Csc => {
+                let csc = dense_to_csc_complex(m, drop_tol);
+                wrap_with_comm(Arc::new(csc), comm)
+            }
+            FormatHint::Dense => {
+                let owned = m.clone();
+                wrap_with_comm(Arc::new(owned), comm)
+            }
+        });
+    }
+
     if let Some(generic) = op.as_any().downcast_ref::<GenericCsrOp<S>>() {
         let csr = scalar_csr_to_sparse(generic.matrix());
         return Ok(match hint {
