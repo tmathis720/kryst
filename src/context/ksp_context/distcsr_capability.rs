@@ -78,7 +78,7 @@ pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilit
     } else if key.apply_mode.is_distributed_native() {
         match key.global_pc {
             GlobalPcKind::None | GlobalPcKind::BlockJacobi => {
-                (true, "global_candidate_block_jacobi_native_apply")
+                (true, "native_distcsr_capable")
             }
             GlobalPcKind::Asm | GlobalPcKind::Ras => (false, "explicit_global_pc_route"),
         }
