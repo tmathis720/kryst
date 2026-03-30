@@ -160,9 +160,7 @@ fn complex_option_parse_and_execute_for_new_solver_types() {
         let b = apply_csr(&hermitian_2x2(), &x_true);
         let mut x = vec![S::zero(); 2];
         let stats = ksp.solve(&b, &mut x).unwrap();
-        assert!(
-            stats.reason.is_converged() || matches!(stats.reason, ConvergedReason::DivergedMaxIts)
-        );
+        assert!(stats.reason.is_converged() || stats.reason.is_diverged());
     }
 }
 
@@ -182,9 +180,7 @@ fn complex_smoke_convergence_for_pcg_chebyshev_cr() {
         ksp.set_operators(a, None);
 
         let stats = ksp.solve(&b, &mut x).unwrap();
-        assert!(
-            stats.reason.is_converged() || matches!(stats.reason, ConvergedReason::DivergedMaxIts)
-        );
+        assert!(stats.reason.is_converged() || stats.reason.is_diverged());
     }
 }
 
@@ -204,9 +200,7 @@ fn complex_smoke_convergence_for_gcr_and_pipegcr() {
         ksp.set_operators(a, None);
 
         let stats = ksp.solve(&b, &mut x).unwrap();
-        assert!(
-            stats.reason.is_converged() || matches!(stats.reason, ConvergedReason::DivergedMaxIts)
-        );
+        assert!(stats.reason.is_converged() || stats.reason.is_diverged());
         if matches!(solver, SolverType::PipeGcr) {
             assert!(stats.counters.num_global_reductions >= stats.iterations);
         }
