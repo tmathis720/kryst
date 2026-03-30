@@ -123,7 +123,7 @@ impl LocalPcKind {
                 native_local_apply: true,
             },
             Self::Spai => LocalPcBuildCapabilities {
-                native_local_apply: false,
+                native_local_apply: true,
             },
         }
     }

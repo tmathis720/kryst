@@ -182,19 +182,18 @@ mod tests {
     }
 
     #[test]
-    fn strict_native_rejected_for_unsupported_local_pc() {
+    fn strict_native_supported_for_spai() {
         let cap = resolve_distcsr_capability(DistCsrCapabilityKey {
             solver_type: Some(SolverType::Gmres),
             global_pc: GlobalPcKind::BlockJacobi,
             local_pc: LocalPcKind::Spai,
             apply_mode: DistLocalApplyMode::NativeStrict,
         });
-        assert!(!cap.requested_mode_supported);
-        assert_eq!(
-            cap.requested_mode_failure_reason,
-            Some("unsupported_local_pc")
-        );
-        assert_eq!(cap.registry_rule, "strict_mode_unsupported_local_pc");
+        assert!(cap.native_global_candidate);
+        assert_eq!(cap.requested_distributed_mode, "native_distributed");
+        assert!(cap.requested_mode_supported);
+        assert_eq!(cap.requested_mode_failure_reason, None);
+        assert_eq!(cap.registry_rule, "native_distcsr_capable");
     }
 
     #[test]
