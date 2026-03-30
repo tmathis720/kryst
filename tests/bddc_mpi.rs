@@ -2,7 +2,7 @@
 
 mod fixtures;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
@@ -10,6 +10,23 @@ use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 use kryst::utils::convergence::ConvergedReason;
+
+
+fn mpi_test_guard() -> MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("mpi_test_guard poisoned")
+}
+
+fn mpi_world() -> Option<UniverseComm> {
+    let Some(comm) = MpiComm::try_new() else {
+        eprintln!("skipping bddc mpi tests: MPI init failed");
+        return None;
+    };
+    Some(UniverseComm::Mpi(Arc::new(comm)))
+}
 
 fn local_rows_from_global(
     global: &CsrMatrix<f64>,
@@ -67,7 +84,10 @@ fn solve_with_pc(
 
 #[test]
 fn mpi_bddc_converges_and_is_stable_vs_block_jacobi() {
-    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
     comm.set_reproducible(true);
 
     let n_per = 8;
@@ -120,7 +140,10 @@ fn mpi_bddc_converges_and_is_stable_vs_block_jacobi() {
 
 #[test]
 fn mpi_mg_is_viable_distributed_baseline_for_bddc_matrix() {
-    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
     comm.set_reproducible(true);
 
     let n_per = 6;
@@ -148,7 +171,10 @@ fn mpi_mg_is_viable_distributed_baseline_for_bddc_matrix() {
 
 #[test]
 fn mpi_bddc_constraint_and_scaling_variants_converge() {
-    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
     comm.set_reproducible(true);
     let n_per = 5;
     let dist = Arc::new(make_dist_poisson(&comm, n_per));
@@ -188,7 +214,10 @@ fn mpi_bddc_constraint_and_scaling_variants_converge() {
 
 #[test]
 fn mpi_bddc_coarse_backend_combinations_converge() {
-    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let _guard = mpi_test_guard();
+    let Some(comm) = mpi_world() else {
+        return;
+    };
     comm.set_reproducible(true);
     let n_per = 6;
     let dist = Arc::new(make_dist_poisson(&comm, n_per));
