@@ -218,6 +218,7 @@ fn nested_ksp_pc_complex_reports_non_breakdown_reason_codes() {
             || matches!(
                 stats.reason,
                 kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+                    | kryst::utils::convergence::ConvergedReason::DivergedPcFailed
             )
     );
     assert!(!matches!(
