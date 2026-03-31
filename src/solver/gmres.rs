@@ -847,7 +847,7 @@ impl GmresSolver {
             for i in 0..n {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
-            let preconditioned_residual = match pc_side {
+            let monitor_residual = match pc_side {
                 PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
@@ -885,10 +885,21 @@ impl GmresSolver {
             {
                 metrics.bytes_reduced += std::mem::size_of::<R>();
             }
-            res = preconditioned_residual;
+            res = monitor_residual;
 
             let breakdown_scale = cycle_res_est.max(R::from(1e-32));
-            if (true_residual - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
+            let breakdown_residual = match pc_side {
+                PcSide::Left | PcSide::Symmetric => monitor_residual,
+                PcSide::Right => true_residual,
+            };
+            if pc.is_none() {
+                let rel_gap = (true_residual - cycle_res_est).abs() / breakdown_scale;
+                debug_assert!(
+                    rel_gap < R::from(1e-8),
+                    "GMRES no-PC residual mismatch: rel_gap={rel_gap:e}, cycle_res_est={cycle_res_est:e}, true_residual={true_residual:e}"
+                );
+            }
+            if (breakdown_residual - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
                 let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
                 let async_reductions =
                     end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -908,7 +919,7 @@ impl GmresSolver {
             }
 
             stats.iterations = total_iters;
-            stats.final_residual = res;
+            stats.final_residual = true_residual;
 
             if res <= thr || total_iters >= self.conv.max_iters {
                 break 'outer;
