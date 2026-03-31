@@ -113,6 +113,13 @@ pub static SPECS: &[Spec] = &[
         doc: "GMRES reorth: never|ifneeded|always",
     },
     Spec {
+        flag: "-ksp_gmres_cgs_refinement_type",
+        key: "ksp_gmres_cgs_refinement_type",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "GMRES CGS refinement alias: never|ifneeded|always",
+    },
+    Spec {
         flag: "-ksp_gmres_reorth_tol",
         key: "ksp_gmres_reorth_tol",
         arity: Arity::One,
