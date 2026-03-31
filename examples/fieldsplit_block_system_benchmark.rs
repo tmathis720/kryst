@@ -37,14 +37,14 @@ fn coupled_block_system(nu: usize, np: usize) -> CsrMatrix<S> {
 
     for i in 0..n {
         if i < nu {
+            if i > 0 {
+                col_idx.push(i - 1);
+                values.push(S::from_real(-1.0));
+            }
             col_idx.push(i);
             values.push(S::from_real(4.0));
             if i + 1 < nu {
                 col_idx.push(i + 1);
-                values.push(S::from_real(-1.0));
-            }
-            if i > 0 {
-                col_idx.push(i - 1);
                 values.push(S::from_real(-1.0));
             }
             if np > 0 {
@@ -53,10 +53,10 @@ fn coupled_block_system(nu: usize, np: usize) -> CsrMatrix<S> {
             }
         } else {
             let p = i - nu;
-            col_idx.push(i);
-            values.push(S::from_real(2.0));
             col_idx.push(p % nu);
             values.push(S::from_real(0.15));
+            col_idx.push(i);
+            values.push(S::from_real(2.0));
         }
         row_ptr.push(col_idx.len());
     }
