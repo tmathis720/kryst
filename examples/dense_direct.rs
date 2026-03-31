@@ -15,8 +15,6 @@ use kryst::preconditioner::PcSide;
 use kryst::solver::legacy::LinearSolver;
 #[cfg(feature = "dense-direct")]
 use kryst::solver::{LuSolver, QrSolver};
-#[cfg(feature = "dense-direct")]
-use rand::rng;
 
 #[cfg(feature = "dense-direct")]
 #[cfg(not(feature = "complex"))]
@@ -27,7 +25,7 @@ fn main() {
     let n = 10;
     // Build a random SPD matrix: A = MᵀM + I
     // let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-    let data: Vec<f64> = utils::random_rhs(n, 0);
+    let data: Vec<f64> = utils::random_rhs(n * n, 0);
     let m = Mat::from_fn(n, n, |i, j| data[j * n + i]);
     let m_t = m.transpose();
     // a = m^T * m
