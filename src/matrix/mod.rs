@@ -37,6 +37,7 @@ pub mod op_bridge;
 pub mod op_nalgebra;
 pub mod op_shell;
 pub mod parcsr;
+pub mod preprocess;
 pub mod sparse;
 pub mod spmv;
 pub mod utils;

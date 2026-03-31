@@ -33,6 +33,11 @@ fn main() {
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
 use kryst::matrix::op::{CsrOp, LinOp, wrap_with_comm};
+use kryst::matrix::preprocess::{
+    SystemTransform, build_inverse, col_1_norm_scaling, matrix_diagnostics,
+    nonsymmetric_max_transversal_permutation, permute_rows_cols, row_1_norm_scaling, scale_cols,
+    scale_rows,
+};
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::solver::MonitorAction;
 use kryst::solver::gmres::StagnationPolicy;
@@ -68,6 +73,23 @@ enum ReferenceMode {
 enum DiagnosticProfile {
     Off,
     RightKrylovResidualAudit,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreprocessConfig {
+    row_scale: bool,
+    col_scale: bool,
+    matching_perm: bool,
+}
+
+impl Default for PreprocessConfig {
+    fn default() -> Self {
+        Self {
+            row_scale: false,
+            col_scale: false,
+            matching_perm: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +332,25 @@ fn parse_diagnostic_profile_arg(
     Ok(DiagnosticProfile::Off)
 }
 
+fn parse_preprocess_config(args: &[String]) -> PreprocessConfig {
+    let mut cfg = PreprocessConfig::default();
+    for arg in args {
+        match arg.as_str() {
+            "--pre-row-scale" => cfg.row_scale = true,
+            "--pre-col-scale" => cfg.col_scale = true,
+            "--pre-match-permute" => cfg.matching_perm = true,
+            _ => {}
+        }
+    }
+    cfg
+}
+
+fn parse_experiment_preset(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == "--experiment-preset")
+        .map(|w| w[1].clone())
+}
+
 fn monitor_semantics_tag(solver: &str, pc_side: &str) -> &'static str {
     if solver.eq_ignore_ascii_case("fgmres") || pc_side.eq_ignore_ascii_case("right") {
         "true"
@@ -458,6 +499,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let cli_reference_mode = parse_reference_mode_arg(&args)?;
     let diagnostic_profile = parse_diagnostic_profile_arg(&args)?;
+    let preprocess_cfg = parse_preprocess_config(&args);
+    let experiment_preset = parse_experiment_preset(&args);
 
     let mut parse_args = Vec::with_capacity(args.len());
     let mut idx = 0usize;
@@ -468,6 +511,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if args[idx] == "--diagnostic-profile" {
             idx += 2;
+            continue;
+        }
+        if args[idx] == "--experiment-preset" {
+            idx += 2;
+            continue;
+        }
+        if args[idx] == "--pre-row-scale"
+            || args[idx] == "--pre-col-scale"
+            || args[idx] == "--pre-match-permute"
+        {
+            idx += 1;
             continue;
         }
         parse_args.push(args[idx].clone());
@@ -525,6 +579,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  RHS file: {}", rhs_file);
         println!("  Reference mode (CLI): {:?}", cli_reference_mode);
         println!("  Diagnostic profile: {:?}", diagnostic_profile);
+        println!(
+            "  Preprocess stages: matching_perm={}, row_1_norm_scale={}, col_1_norm_scale={}",
+            preprocess_cfg.matching_perm, preprocess_cfg.row_scale, preprocess_cfg.col_scale
+        );
+        if let Some(preset) = &experiment_preset {
+            println!("  Experiment preset: {}", preset);
+        }
         println!();
     }
 
@@ -550,9 +611,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let matrix = matrix_data.to_csr_matrix()?;
-    let rhs = rhs_data.to_vector()?;
-    let csr_arc = Arc::new(matrix);
+    let rhs_orig = rhs_data.to_vector()?;
+    let original_csr_op = Arc::new(CsrOp::new(Arc::new(matrix.clone())));
+
+    let before_diag = matrix_diagnostics(&matrix);
+    let mut transform = SystemTransform::identity(matrix.nrows(), matrix.ncols());
+    let mut transformed_matrix = matrix.clone();
+    if preprocess_cfg.matching_perm {
+        let (row_perm, col_perm) = nonsymmetric_max_transversal_permutation(&transformed_matrix);
+        transformed_matrix = permute_rows_cols(&transformed_matrix, &row_perm, &col_perm);
+        transform.row_perm = row_perm;
+        transform.row_pinv = build_inverse(&transform.row_perm);
+        transform.col_perm = col_perm;
+        transform.col_pinv = build_inverse(&transform.col_perm);
+    }
+    if preprocess_cfg.row_scale {
+        let row_scale = row_1_norm_scaling(&transformed_matrix, 1e-15);
+        transformed_matrix = scale_rows(&transformed_matrix, &row_scale);
+        transform.row_scale = Some(row_scale);
+    }
+    if preprocess_cfg.col_scale {
+        let col_scale = col_1_norm_scaling(&transformed_matrix, 1e-15);
+        transformed_matrix = scale_cols(&transformed_matrix, &col_scale);
+        transform.col_scale = Some(col_scale);
+    }
+    let rhs_t = transform.apply_rhs(&rhs_orig);
+    let after_diag = matrix_diagnostics(&transformed_matrix);
+
+    let csr_arc = Arc::new(transformed_matrix);
     let csr_op = Arc::new(CsrOp::new(csr_arc.clone()));
+    let rhs = rhs_t;
 
     let io_time = start_io.elapsed();
     let inspection = inspect_matrix(&matrix_data);
@@ -565,15 +653,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_pc = pc_opts.pc_type.is_some();
     let user_pc_side = ksp_opts.pc_side.is_some();
 
-    let iterative_solver = ksp_opts.ksp_type.as_deref().unwrap_or("gmres").to_string();
-    let iterative_pc = pc_opts.pc_type.as_deref().unwrap_or("none").to_string();
-    let iterative_pc_side = if user_pc_side {
+    let mut iterative_solver = ksp_opts.ksp_type.as_deref().unwrap_or("gmres").to_string();
+    let mut iterative_pc = pc_opts.pc_type.as_deref().unwrap_or("none").to_string();
+    let mut iterative_pc_side = if user_pc_side {
         ksp_opts.pc_side.as_deref().unwrap_or("left").to_string()
-    } else if iterative_solver == "fgmres" {
+    } else if iterative_solver.eq_ignore_ascii_case("fgmres") {
         "right".to_string()
     } else {
         "left".to_string()
     };
+
+    if let Some(preset) = experiment_preset.as_deref() {
+        match preset {
+            "gmres+ilut" => {
+                iterative_solver = "gmres".to_string();
+                iterative_pc = "ilut".to_string();
+                iterative_pc_side = "left".to_string();
+            }
+            "fgmres(right)+ilutp" => {
+                iterative_solver = "fgmres".to_string();
+                iterative_pc = "ilutp".to_string();
+                iterative_pc_side = "right".to_string();
+            }
+            _ => {
+                return Err(format!(
+                    "Unknown --experiment-preset '{}'; expected gmres+ilut or fgmres(right)+ilutp",
+                    preset
+                )
+                .into());
+            }
+        }
+    }
 
     if iterative_solver == "fgmres" && iterative_pc_side != "right" {
         return Err("Invalid options: fgmres requires -ksp_pc_side right".into());
@@ -592,6 +702,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  Symmetry estimate: {:.2}% (likely symmetric: {})",
             100.0 * inspection.symmetry_ratio,
             inspection.is_likely_symmetric
+        );
+        println!(
+            "  Diagnostics before preprocessing: diag_nz={}, diag_zero={}, row1(min/med/max)=({:.3e}, {:.3e}, {:.3e})",
+            before_diag.diagonal_nonzeros,
+            before_diag.diagonal_zeros,
+            before_diag.row_norm_1.min,
+            before_diag.row_norm_1.median,
+            before_diag.row_norm_1.max
+        );
+        println!(
+            "  Diagnostics after preprocessing:  diag_nz={}, diag_zero={}, row1(min/med/max)=({:.3e}, {:.3e}, {:.3e})",
+            after_diag.diagonal_nonzeros,
+            after_diag.diagonal_zeros,
+            after_diag.row_norm_1.min,
+            after_diag.row_norm_1.median,
+            after_diag.row_norm_1.max
+        );
+        println!(
+            "  Applied transforms: matching_perm={}, row_scale={}, col_scale={}",
+            preprocess_cfg.matching_perm, preprocess_cfg.row_scale, preprocess_cfg.col_scale
         );
         println!("  Effective max iterations: {}", max_iters);
         println!("  Effective GMRES restart: {}", restart);
@@ -634,6 +764,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         fixed => fixed,
+    };
+    let reference_mode = if (preprocess_cfg.matching_perm
+        || preprocess_cfg.row_scale
+        || preprocess_cfg.col_scale)
+        && reference_mode == ReferenceMode::LocalDirectReplicated
+    {
+        if rank == 0 {
+            println!(
+                "Preprocessing is enabled; disabling local replicated dense reference mode for consistency."
+            );
+        }
+        ReferenceMode::Skip
+    } else {
+        reference_mode
     };
     let mut reference_rel_residual = None;
     let mut reference_solution: Option<Vec<f64>> = None;
@@ -864,7 +1008,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compute_relative_residual(csr_op.as_ref(), &solution, &rhs, &comm);
     let iterative_monitor_residual = convergence_history.last().map(|(_, r)| *r);
     let use_reference_output = !sanity_pass && reference_solution.is_some();
-    let output_solution: &[f64] = if use_reference_output {
+    let output_solution_transformed: &[f64] = if use_reference_output {
         reference_solution
             .as_deref()
             .expect("reference solution available when fallback is enabled")
@@ -872,7 +1016,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &solution
     };
     let output_relative_residual =
-        compute_relative_residual(csr_op.as_ref(), output_solution, &rhs, &comm);
+        compute_relative_residual(csr_op.as_ref(), output_solution_transformed, &rhs, &comm);
+    let output_solution_original = transform.recover_solution(output_solution_transformed);
+    let output_relative_residual_original = compute_relative_residual(
+        original_csr_op.as_ref(),
+        &output_solution_original,
+        &rhs_orig,
+        &comm,
+    );
 
     if rank == 0 {
         println!();
@@ -898,6 +1049,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output_relative_residual
             );
         }
+        println!(
+            "True relative residual on original system (after inverse transform): {:.2e}",
+            output_relative_residual_original
+        );
 
         if let Some(rr_ref) = reference_rel_residual {
             println!(
@@ -1015,26 +1170,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "  Using direct reference solution for output because iterative sanity checks failed."
             );
         }
-        write_vector_market("mpi_ksp_solution.mtx", output_solution)?;
+        write_vector_market("mpi_ksp_solution.mtx", &output_solution_original)?;
     }
 
     if rank == 0 {
         println!("Verification (true residual):");
-        println!("  Relative residual: {:.6e}", output_relative_residual);
-        if stats.reason.is_converged() && output_relative_residual < 1e-6 {
+        println!(
+            "  Relative residual: {:.6e}",
+            output_relative_residual_original
+        );
+        if stats.reason.is_converged() && output_relative_residual_original < 1e-6 {
             println!("✓ Iterative solution verified successfully.");
-        } else if output_relative_residual < 1e-3 {
+        } else if output_relative_residual_original < 1e-3 {
             println!("⚠ Iterative solve is only marginally acceptable on this configuration.");
         } else {
             println!("❌ Iterative solution verification failed.");
         }
     }
 
-    let iterative_success = stats.reason.is_converged() && iterative_relative_residual < 1e-6;
+    let iterative_success = stats.reason.is_converged() && output_relative_residual_original < 1e-6;
     if !iterative_success && !allow_divergence {
         return Err(format!(
-            "Iterative phase failed (reason={:?}, relative_residual={:.6e}); rerun with --allow-divergence to keep this as an experiment.",
-            stats.reason, iterative_relative_residual
+            "Iterative phase failed (reason={:?}, original_relative_residual={:.6e}); rerun with --allow-divergence to keep this as an experiment.",
+            stats.reason, output_relative_residual_original
         )
         .into());
     }
