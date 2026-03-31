@@ -25,7 +25,7 @@ mod real_demo {
     //! that are relevant for driven-cavity style matrices.
     //!
     //! to run:
-    //! cargo mpirun -n 2 --features=mpi,rayon,simd,dense-direct,backend-faer --example matrix_market_demo
+    //! cargo mpirun -n 2 --features=mpi,rayon,simd,dense-direct,backend-faer,legacy-pc-bridge --example matrix_market_demo -- -pc_global ras -pc_asm_overlap 1 -pc_local ilutp -pc_ilutp_max_fill 20 -pc_ilutp_drop_tol 1e-4
     //! or for serial:
     //! cargo run --example matrix_market_demo
     //! (ensure the example is built with the "mpi" feature for MPI runs)
