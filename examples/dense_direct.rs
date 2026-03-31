@@ -16,16 +16,18 @@ use kryst::solver::legacy::LinearSolver;
 #[cfg(feature = "dense-direct")]
 use kryst::solver::{LuSolver, QrSolver};
 #[cfg(feature = "dense-direct")]
-use rand::Rng;
+use rand::rng;
 
 #[cfg(feature = "dense-direct")]
 #[cfg(not(feature = "complex"))]
 fn main() {
+    use kryst::matrix::utils;
+
     let comm = kryst::parallel::UniverseComm::NoComm(kryst::parallel::NoComm);
     let n = 10;
     // Build a random SPD matrix: A = MᵀM + I
-    let mut rng = rand::thread_rng();
-    let data: Vec<f64> = (0..n * n).map(|_| rng.r#gen()).collect();
+    // let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+    let data: Vec<f64> = utils::random_rhs(n, 0);
     let m = Mat::from_fn(n, n, |i, j| data[j * n + i]);
     let m_t = m.transpose();
     // a = m^T * m
@@ -36,7 +38,7 @@ fn main() {
     }
 
     // Right-hand side
-    let b: Vec<f64> = (0..n).map(|_| rng.r#gen()).collect();
+    let b: Vec<f64> = utils::random_rhs(n, 0);
     let mut x = vec![0.0; n];
 
     // LU solve
