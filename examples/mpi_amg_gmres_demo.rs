@@ -44,12 +44,13 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
 use kryst::preconditioner::dist::{DistCoarseSolverRoute, DistCoarseStrategy};
+#[cfg(feature = "dense-direct")]
+use kryst::solver::dense_lu;
 use kryst::utils::convergence::SolveStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PhaseMode {
     Distributed,
-    Local,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,10 +203,6 @@ fn run_phase(
             let op_arc = wrap_with_comm(base_op.clone(), comm.clone());
             ksp.set_operators_with_comm(op_arc, None, comm.clone());
         }
-        PhaseMode::Local => {
-            let op_arc: Arc<dyn LinOp<S = f64>> = base_op.clone();
-            ksp.set_operators(op_arc, None);
-        }
     }
     ksp.setup()?;
     let setup_time = start_setup.elapsed();
@@ -257,6 +254,49 @@ fn parse_reference_mode_arg(args: &[String]) -> Result<ReferenceMode, Box<dyn st
     Ok(ReferenceMode::Auto)
 }
 
+#[derive(Debug)]
+enum ReferenceResult {
+    Solved {
+        x: Vec<f64>,
+        setup_time: Duration,
+        solve_time: Duration,
+        solver_label: &'static str,
+    },
+    Skipped(&'static str),
+}
+
+fn run_local_dense_reference(
+    matrix_data: &MatrixMarketData,
+    rhs: &[f64],
+) -> Result<ReferenceResult, Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "dense-direct"))]
+    {
+        let _ = (matrix_data, rhs);
+        return Ok(ReferenceResult::Skipped(
+            "dense-direct feature is required for local replicated reference solve.",
+        ));
+    }
+
+    #[cfg(feature = "dense-direct")]
+    {
+        let start_setup = Instant::now();
+        let dense = matrix_data.to_dense_matrix_scalar()?;
+        let setup_time = start_setup.elapsed();
+
+        let mut x = vec![0.0; rhs.len()];
+        let start_solve = Instant::now();
+        dense_lu::solve(&dense, rhs, &mut x)?;
+        let solve_time = start_solve.elapsed();
+
+        Ok(ReferenceResult::Solved {
+            x,
+            setup_time,
+            solve_time,
+            solver_label: "dense direct reference solve",
+        })
+    }
+}
+
 fn collective_phase_result<T>(
     phase_name: &str,
     result: Result<T, Box<dyn std::error::Error>>,
@@ -277,6 +317,67 @@ fn collective_phase_result<T>(
         return Err(format!("Collective failure in {phase_name}").into());
     }
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_reference_phase(
+    reference_mode: ReferenceMode,
+    matrix_data: &MatrixMarketData,
+    rhs: &[f64],
+    csr_op: Arc<CsrOp<f64>>,
+    comm: &UniverseComm,
+    rank: usize,
+    rtol: f64,
+    atol: f64,
+    dtol: f64,
+    max_iters: usize,
+    restart: usize,
+) -> Result<ReferenceResult, Box<dyn std::error::Error>> {
+    match reference_mode {
+        ReferenceMode::DistributedDirect => {
+            if rank == 0 {
+                println!("Reference phase (distributed): preonly + lu");
+            }
+            let distributed_ref = collective_phase_result(
+                "reference (distributed)",
+                run_phase(
+                    "reference",
+                    "preonly",
+                    "lu",
+                    "left",
+                    rtol,
+                    atol,
+                    dtol,
+                    max_iters,
+                    restart,
+                    rhs,
+                    csr_op,
+                    comm.clone(),
+                    PhaseMode::Distributed,
+                    rank,
+                ),
+                comm,
+                rank,
+            )?;
+            let (_, x_ref, _, setup_ref, solve_ref) = distributed_ref;
+            Ok(ReferenceResult::Solved {
+                x: x_ref,
+                setup_time: setup_ref,
+                solve_time: solve_ref,
+                solver_label: "preonly + lu",
+            })
+        }
+        ReferenceMode::LocalDirectReplicated => collective_phase_result(
+            "reference (local replicated)",
+            run_local_dense_reference(matrix_data, rhs),
+            comm,
+            rank,
+        ),
+        ReferenceMode::Skip => Ok(ReferenceResult::Skipped(
+            "no compatible direct backend selected/available.",
+        )),
+        ReferenceMode::Auto => unreachable!("reference_mode is resolved before this match"),
+    }
 }
 
 #[cfg(not(feature = "complex"))]
@@ -457,110 +558,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Resolved reference mode: {:?}", reference_mode);
     }
 
-    match reference_mode {
-        ReferenceMode::DistributedDirect => {
-            if rank == 0 {
-                println!("Reference phase (distributed): preonly + lu");
+    match run_reference_phase(
+        reference_mode,
+        &matrix_data,
+        &rhs,
+        csr_op.clone(),
+        &comm,
+        rank,
+        rtol,
+        atol,
+        dtol,
+        max_iters,
+        restart,
+    )? {
+        ReferenceResult::Solved {
+            x,
+            setup_time,
+            solve_time,
+            solver_label,
+        } => {
+            if rank == 0 && reference_mode == ReferenceMode::LocalDirectReplicated {
+                println!("Reference phase (local replicated): {solver_label}");
             }
-            let distributed_ref = collective_phase_result(
-                "reference (distributed)",
-                run_phase(
-                    "reference",
-                    "preonly",
-                    "lu",
-                    "left",
-                    rtol,
-                    atol,
-                    dtol,
-                    max_iters,
-                    restart,
-                    &rhs,
-                    csr_op.clone(),
-                    comm.clone(),
-                    PhaseMode::Distributed,
-                    rank,
-                ),
-                &comm,
-                rank,
-            )?;
-            let (stats_ref, x_ref, _, setup_ref, solve_ref) = distributed_ref;
-            let ref_rr = compute_relative_residual(csr_op.as_ref(), &x_ref, &rhs, &comm);
+            let ref_rr = compute_relative_residual(csr_op.as_ref(), &x, &rhs, &comm);
             reference_rel_residual = Some(ref_rr);
-            reference_setup = setup_ref;
-            reference_solve = solve_ref;
+            reference_setup = setup_time;
+            reference_solve = solve_time;
 
             if rank == 0 {
-                println!(
-                    "  reason: {:?} (converged: {}), iterations: {}",
-                    stats_ref.reason,
-                    stats_ref.reason.is_converged(),
-                    stats_ref.iterations
-                );
                 println!("  true relative residual: {:.6e}", ref_rr);
                 println!();
             }
 
-            if !stats_ref.reason.is_converged() || ref_rr > 1e-8 {
+            if ref_rr > 1e-8 {
                 return Err(format!(
-                    "Reference phase failed: reason={:?}, true relative residual={:.6e}",
-                    stats_ref.reason, ref_rr
+                    "Reference phase failed: true relative residual={:.6e}",
+                    ref_rr
                 )
                 .into());
             }
         }
-        ReferenceMode::LocalDirectReplicated => {
+        ReferenceResult::Skipped(reason) => {
             if rank == 0 {
-                println!("Reference phase (local replicated): preonly + lu");
-            }
-            let (stats_ref, x_ref, _, setup_ref, solve_ref) = run_phase(
-                "reference-local",
-                "preonly",
-                "lu",
-                "left",
-                rtol,
-                atol,
-                dtol,
-                max_iters,
-                restart,
-                &rhs,
-                csr_op.clone(),
-                comm.clone(),
-                PhaseMode::Local,
-                rank,
-            )?;
-            let ref_rr = compute_relative_residual(csr_op.as_ref(), &x_ref, &rhs, &comm);
-            reference_rel_residual = Some(ref_rr);
-            reference_setup = setup_ref;
-            reference_solve = solve_ref;
-
-            if rank == 0 {
-                println!(
-                    "  reason: {:?} (converged: {}), iterations: {}",
-                    stats_ref.reason,
-                    stats_ref.reason.is_converged(),
-                    stats_ref.iterations
-                );
-                println!("  true relative residual: {:.6e}", ref_rr);
-                println!();
-            }
-
-            if !stats_ref.reason.is_converged() || ref_rr > 1e-8 {
-                return Err(format!(
-                    "Reference phase failed: reason={:?}, true relative residual={:.6e}",
-                    stats_ref.reason, ref_rr
-                )
-                .into());
-            }
-        }
-        ReferenceMode::Skip => {
-            if rank == 0 {
-                println!(
-                    "Reference phase skipped: no compatible direct backend selected/available."
-                );
+                println!("Reference phase skipped: {reason}");
                 println!();
             }
         }
-        ReferenceMode::Auto => unreachable!("reference_mode is resolved before this match"),
     }
 
     if rank == 0 {
