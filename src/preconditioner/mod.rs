@@ -372,11 +372,14 @@ impl LegacyOpPreconditioner {
 impl Preconditioner for LegacyOpPreconditioner {
     fn setup(&mut self, a: &dyn LinOp<S = S>) -> Result<(), KError> {
         use crate::error::KError;
-        let m = a
-            .as_any()
-            .downcast_ref::<Mat<f64>>()
-            .ok_or_else(|| KError::InvalidInput("expected faer::Mat<f64>".into()))?;
-        self.inner.setup(m)
+        if let Some(m) = a.as_any().downcast_ref::<Mat<f64>>() {
+            return self.inner.setup(m);
+        }
+        #[cfg(feature = "backend-faer")]
+        if let Some(dense_op) = a.as_any().downcast_ref::<crate::matrix::op::DenseOp<f64>>() {
+            return self.inner.setup(dense_op.inner());
+        }
+        Err(KError::InvalidInput("expected faer::Mat<f64>".into()))
     }
 
     fn apply(&self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
