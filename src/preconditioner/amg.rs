@@ -4261,7 +4261,7 @@ impl AMG {
         r: &[f64],
         z: &mut [f64],
         dist: &DistAmgInfo,
-        stats: Option<&mut DistApplyStats>,
+        mut stats: Option<&mut DistApplyStats>,
     ) -> Result<(), KError> {
         let local_matrix = dist.local_matrix.as_ref().ok_or_else(|| {
             KError::InvalidInput("AMG superlu_dist matrix state not initialized".into())
