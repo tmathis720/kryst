@@ -81,6 +81,7 @@ use crate::preconditioner::dist::{
 };
 use crate::preconditioner::{PcReusePolicy, PcSide, Preconditioner};
 use crate::reduction::ReproMode;
+use crate::solver::gmres::StagnationPolicy;
 use crate::solver::{
     BiCgStabSolver, BiCgStabVariant, CgSolver, CgnrSolver, CgsSolver, ChebyshevSolver, CrSolver,
     FgmresSolver, GcrSolver, GmresSolver, LinearSolver, MinresSolver, MonitorAction,
@@ -398,6 +399,7 @@ struct PendingGmres {
     reorth: Option<ReorthPolicy>,
     reorth_tol: Option<R>,
     happy_breakdown: Option<bool>,
+    stagnation_policy: Option<StagnationPolicy>,
     variant: Option<PendingGmresVariant>,
     sstep: Option<usize>,
     sstep_max_cond: Option<R>,
@@ -1425,6 +1427,9 @@ impl KspContext {
         }
         if let Some(f) = pending.happy_breakdown {
             s.set_happy_breakdown(f);
+        }
+        if let Some(policy) = pending.stagnation_policy {
+            s.set_stagnation_policy(policy);
         }
         let mut variant_kind = pending.variant;
         if variant_kind.is_none()
@@ -3949,6 +3954,12 @@ impl KspContext {
         self.atol = atol;
         self.dtol = dtol;
         self.maxits = maxits;
+        if let Some(st) = self.solver_type {
+            if let Err(err) = self.set_type(st) {
+                log::warn!("failed to rebuild solver after set_tolerances: {err}");
+                self.invalidate_solver_setup();
+            }
+        }
         self.invalidate_solver_setup();
         self
     }
@@ -4020,6 +4031,18 @@ impl KspContext {
         }
         self.invalidate_solver_setup();
     }
+
+    pub fn set_gmres_stagnation_policy(&mut self, policy: StagnationPolicy) {
+        self.pending_gmres.stagnation_policy = Some(policy);
+        if let Some(s) = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<GmresSolver>())
+        {
+            s.set_stagnation_policy(policy);
+        }
+        self.invalidate_solver_setup();
+    }
 }
 
 impl KspContext {
@@ -4032,6 +4055,28 @@ impl KspContext {
     pub fn set_pc_box_for_tests(&mut self, pc: Box<dyn Preconditioner>) {
         self.pc = Some(pc);
         self.invalidate_pc_setup();
+    }
+
+    pub fn debug_gmres_runtime(
+        &mut self,
+    ) -> Option<(
+        usize,
+        usize,
+        crate::solver::gmres::GmresVariant,
+        ReorthPolicy,
+        StagnationPolicy,
+    )> {
+        let s = self
+            .solver
+            .as_mut()
+            .and_then(|b| b.as_any_mut().downcast_mut::<GmresSolver>())?;
+        Some((
+            s.restart,
+            s.conv.max_iters,
+            s.variant,
+            s.reorth,
+            s.stagnation_policy(),
+        ))
     }
 }
 
