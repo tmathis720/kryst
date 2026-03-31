@@ -28,16 +28,16 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
-use crate::solver::common::call_monitors;
-use crate::solver::common::ReductCtx;
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
+use crate::solver::common::ReductCtx;
+use crate::solver::common::call_monitors;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, ReductionModel, SolveStats};
-use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
 #[cfg(feature = "logging")]
-use crate::utils::monitor::{log_residuals, ResidualSnapshot};
+use crate::utils::monitor::{ResidualSnapshot, log_residuals};
+use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -65,6 +65,12 @@ pub enum GmresVariant {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagnationPolicy {
+    LogOnly,
+    HeuristicRestart,
+}
+
 pub struct GmresSolver {
     pub restart: usize,
     pub conv: Convergence,
@@ -78,6 +84,7 @@ pub struct GmresSolver {
     pub reorth_tol: f64,
     /// Whether to treat near-zero residual as a happy breakdown
     pub happy_breakdown: bool,
+    pub stagnation_policy: StagnationPolicy,
     pub variant: GmresVariant,
     pub augmentation: AugmentationPolicy,
 }
@@ -120,6 +127,7 @@ impl GmresSolver {
             reorth: ReorthPolicy::IfNeeded,
             reorth_tol: 0.7,
             happy_breakdown: true,
+            stagnation_policy: StagnationPolicy::LogOnly,
             variant: GmresVariant::Classical,
             augmentation: AugmentationPolicy::None,
         }
@@ -789,21 +797,34 @@ impl GmresSolver {
                     stagnation_residuals.remove(0);
                 }
                 if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
-                    let action = match self.variant {
-                        GmresVariant::Pipelined => {
-                            self.variant = GmresVariant::Classical;
-                            "switching to classical restart"
+                    let (action, restart_cycle) = match self.stagnation_policy {
+                        StagnationPolicy::LogOnly => {
+                            ("logging stagnation (no forced restart)", false)
                         }
-                        _ => "restarting GMRES",
+                        StagnationPolicy::HeuristicRestart => match self.variant {
+                            GmresVariant::Pipelined => {
+                                self.variant = GmresVariant::Classical;
+                                ("switching to classical restart", true)
+                            }
+                            _ => ("restarting GMRES", true),
+                        },
                     };
                     log_krylov_stagnation("GMRES", total_iters, res, action);
                     stagnation_residuals.clear();
-                    break;
+                    if restart_cycle {
+                        break;
+                    }
                 }
 
                 if res <= thr || total_iters >= self.conv.max_iters {
                     break;
                 }
+                debug_assert!(
+                    total_iters <= self.conv.max_iters,
+                    "GMRES iteration counter exceeded max_iters: {} > {}",
+                    total_iters,
+                    self.conv.max_iters
+                );
             }
 
             if k_steps == 0 {
@@ -826,7 +847,7 @@ impl GmresSolver {
             for i in 0..n {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
-            let true_res = match pc_side {
+            let preconditioned_residual = match pc_side {
                 PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
@@ -858,10 +879,16 @@ impl GmresSolver {
                     res
                 }
             };
-            res = true_res;
+            let true_residual = red.norm2(&ws.tmp1[..n]);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            res = preconditioned_residual;
 
             let breakdown_scale = cycle_res_est.max(R::from(1e-32));
-            if (true_res - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
+            if (true_residual - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
                 let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
                 let async_reductions =
                     end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -873,7 +900,7 @@ impl GmresSolver {
                 };
                 return Ok(SolveStats::new(
                     total_iters,
-                    true_res,
+                    true_residual,
                     ConvergedReason::DivergedBreakdown,
                 )
                 .with_counters(counters)
@@ -1395,7 +1422,7 @@ impl GmresSolver {
                             metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                         }
                     } // pairs dropped here; we can safely mutate w_block next.
-                      // W <- W - V C
+                    // W <- W - V C
                     for i in 0..=k {
                         let vi = &ws.v_mem[i * n..(i + 1) * n];
                         for j in 0..block {
@@ -1911,6 +1938,7 @@ impl GmresSolver {
                 reorth: self.reorth,
                 reorth_tol: self.reorth_tol,
                 happy_breakdown: self.happy_breakdown,
+                stagnation_policy: self.stagnation_policy,
                 variant: GmresVariant::Classical,
                 augmentation: self.augmentation.clone(),
             };
@@ -2094,6 +2122,12 @@ impl GmresSolver {
     }
     pub fn set_happy_breakdown(&mut self, flag: bool) {
         self.happy_breakdown = flag;
+    }
+    pub fn set_stagnation_policy(&mut self, policy: StagnationPolicy) {
+        self.stagnation_policy = policy;
+    }
+    pub fn stagnation_policy(&self) -> StagnationPolicy {
+        self.stagnation_policy
     }
     pub fn set_variant(&mut self, variant: GmresVariant) {
         self.variant = variant;
