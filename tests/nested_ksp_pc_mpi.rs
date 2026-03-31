@@ -3,12 +3,20 @@
 mod fixtures;
 
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
+
+fn mpi_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("nested_ksp_pc_mpi test lock poisoned")
+}
 
 fn solve_with_nested_policy(
     mode: &str,
@@ -77,6 +85,7 @@ fn make_dist_poisson(comm: &UniverseComm, n_per: usize) -> DistCsrOp {
 
 #[test]
 fn nested_ksp_pc_mpi_uses_scoped_inner_options_and_side() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -116,6 +125,7 @@ fn nested_ksp_pc_mpi_uses_scoped_inner_options_and_side() {
 
 #[test]
 fn nested_ksp_pc_mpi_fgmres_inner_gmres_variant_path() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 3;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -159,6 +169,7 @@ fn nested_ksp_pc_mpi_fgmres_inner_gmres_variant_path() {
 
 #[test]
 fn nested_ksp_pc_mpi_inner_maxits_failure_maps_consistently() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -205,6 +216,7 @@ fn nested_ksp_pc_mpi_inner_maxits_failure_maps_consistently() {
 
 #[test]
 fn nested_ksp_pc_mpi_inner_tol_policy_allow_maxits_overrides_compat_flag() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -239,6 +251,7 @@ fn nested_ksp_pc_mpi_inner_tol_policy_allow_maxits_overrides_compat_flag() {
 
 #[test]
 fn nested_ksp_pc_mpi_symmetric_outer_aligns_with_inner_fgmres_side() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -273,6 +286,7 @@ fn nested_ksp_pc_mpi_symmetric_outer_aligns_with_inner_fgmres_side() {
 
 #[test]
 fn nested_ksp_pc_mpi_symmetric_outer_reports_inner_side_mismatch() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -317,6 +331,7 @@ fn nested_ksp_pc_mpi_symmetric_outer_reports_inner_side_mismatch() {
 
 #[test]
 fn nested_ksp_pc_mpi_threads_mode_hybrid_matches_serial_convergence() {
+    let _guard = mpi_test_guard();
     let serial_stats = solve_with_nested_policy("serial", 4);
     let hybrid_stats = solve_with_nested_policy("hybrid", 4);
 
@@ -330,6 +345,7 @@ fn nested_ksp_pc_mpi_threads_mode_hybrid_matches_serial_convergence() {
 
 #[test]
 fn nested_ksp_pc_mpi_context_mode_rejects_multithread_inner() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
@@ -367,6 +383,7 @@ fn nested_ksp_pc_mpi_context_mode_rejects_multithread_inner() {
 
 #[test]
 fn nested_ksp_pc_mpi_fgmres_right_with_block_jacobi_ilut_subdomains_converges() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     let n_local = 4;
     let a = Arc::new(make_dist_poisson(&comm, n_local));
