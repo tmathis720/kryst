@@ -1,6 +1,6 @@
 [package]
 name = "kryst"
-version = "4.0.2"
+version = "4.0.3"
 edition = "2024"
 authors = ["Thomas James Mathis <tmathis720@gmail.com>"]
 description = "Krylov subspace and preconditioned iterative solvers for dense and sparse linear systems, with shared and distributed memory parallelism."
