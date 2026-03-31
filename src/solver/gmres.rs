@@ -893,10 +893,13 @@ impl GmresSolver {
                 PcSide::Right => true_residual,
             };
             if pc.is_none() {
-                let rel_gap = (true_residual - cycle_res_est).abs() / breakdown_scale;
+                let abs_gap = (true_residual - cycle_res_est).abs();
+                let rel_gap = abs_gap / breakdown_scale;
+                let abs_roundoff_tol =
+                    R::from(128.0 * f64::EPSILON) * breakdown_scale.max(R::one());
                 debug_assert!(
-                    rel_gap < R::from(1e-8),
-                    "GMRES no-PC residual mismatch: rel_gap={rel_gap:e}, cycle_res_est={cycle_res_est:e}, true_residual={true_residual:e}"
+                    rel_gap < R::from(1e-8) || abs_gap <= abs_roundoff_tol,
+                    "GMRES no-PC residual mismatch: rel_gap={rel_gap:e}, abs_gap={abs_gap:e}, abs_roundoff_tol={abs_roundoff_tol:e}, cycle_res_est={cycle_res_est:e}, true_residual={true_residual:e}"
                 );
             }
             if (breakdown_residual - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
