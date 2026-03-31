@@ -7,9 +7,11 @@ mod tests_gmres_lr {
     use crate::error::KError;
     use crate::matrix::op::LinOp;
     use crate::preconditioner::PcSide;
+    use crate::solver::MonitorAction;
     use crate::testkit::{ATOL, is_zero};
     use faer::Mat;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     fn true_residual_norm(a: &dyn LinOp<S = f64>, x: &[R], b: &[R]) -> R {
         let n = b.len();
@@ -42,6 +44,8 @@ mod tests_gmres_lr {
         let b = [R::from(1.0), R::from(2.0), R::from(3.0)];
 
         let amat: Arc<dyn LinOp<S = f64>> = Arc::new(a.clone());
+        let left_monitor_history = Arc::new(Mutex::new(Vec::<f64>::new()));
+        let right_monitor_history = Arc::new(Mutex::new(Vec::<f64>::new()));
 
         // --- LEFT preconditioning
         let mut ksp_left = KspContext::new();
@@ -50,6 +54,16 @@ mod tests_gmres_lr {
         ksp_left.set_operators(amat.clone(), None);
         ksp_left.pc_side = PcSide::Left;
         ksp_left.rtol = 1e-10;
+        {
+            let left_monitor_history = left_monitor_history.clone();
+            ksp_left.add_monitor(move |_iter, residual, _reductions| {
+                left_monitor_history
+                    .lock()
+                    .expect("left monitor lock")
+                    .push(residual);
+                MonitorAction::Continue
+            });
+        }
         let mut x_left = [R::default(); 3];
         let stats_left = ksp_left.solve(&b, &mut x_left)?;
         assert!(stats_left.iterations > 0);
@@ -65,6 +79,16 @@ mod tests_gmres_lr {
         ksp_right.set_operators(amat.clone(), None);
         ksp_right.pc_side = PcSide::Right;
         ksp_right.rtol = 1e-10;
+        {
+            let right_monitor_history = right_monitor_history.clone();
+            ksp_right.add_monitor(move |_iter, residual, _reductions| {
+                right_monitor_history
+                    .lock()
+                    .expect("right monitor lock")
+                    .push(residual);
+                MonitorAction::Continue
+            });
+        }
         let mut x_right = [R::default(); 3];
         let stats_right = ksp_right.solve(&b, &mut x_right)?;
         assert!(stats_right.iterations > 0);
@@ -87,6 +111,32 @@ mod tests_gmres_lr {
         assert!(
             (res_l - res_r).abs() < R::from(1e-4),
             "true residuals differ: {res_l:e} vs {res_r:e}"
+        );
+        assert!(
+            (stats_left.final_residual - res_l).abs() < R::from(1e-10),
+            "left stats.final_residual must be true residual: stats={:.3e}, true={:.3e}",
+            stats_left.final_residual,
+            res_l
+        );
+        assert!(
+            (stats_right.final_residual - res_r).abs() < R::from(1e-10),
+            "right stats.final_residual must be true residual: stats={:.3e}, true={:.3e}",
+            stats_right.final_residual,
+            res_r
+        );
+        let left_hist = left_monitor_history.lock().expect("left monitor lock");
+        let right_hist = right_monitor_history.lock().expect("right monitor lock");
+        let left_mon = *left_hist.last().expect("left monitor value");
+        let right_mon = *right_hist.last().expect("right monitor value");
+        let left_first = *left_hist.first().expect("left monitor first");
+        let right_first = *right_hist.first().expect("right monitor first");
+        assert!(
+            (right_mon - res_r).abs() < R::from(1e-8),
+            "right monitor should track true residual: monitor={right_mon:e}, true={res_r:e}"
+        );
+        assert!(
+            (left_first - right_first).abs() > R::from(1e-8),
+            "left monitor should report preconditioned residual and differ from right-monitor true residual at iteration 0"
         );
 
         // Solutions match to tolerance
