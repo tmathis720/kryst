@@ -539,7 +539,7 @@ mod real_demo {
 
         specs.push(RunSpec {
             name: if is_parallel {
-                "GMRES(50) + ILUT (L)"
+                "GMRES(50) + Block-Jacobi + ILUT (L)"
             } else {
                 "FGMRES(50) + ILUT (R)"
             },
@@ -553,9 +553,16 @@ mod real_demo {
             } else {
                 PcSide::Right
             },
-            pc: PcConfigSpec::Type {
-                pc_type: PcType::Ilut,
-                options: Some(ilut_options(analysis)),
+            pc: if is_parallel {
+                PcConfigSpec::Type {
+                    pc_type: PcType::BlockJacobi,
+                    options: Some(block_jacobi_ilut_options(analysis)),
+                }
+            } else {
+                PcConfigSpec::Type {
+                    pc_type: PcType::Ilut,
+                    options: Some(ilut_options(analysis)),
+                }
             },
             setup: if is_parallel {
                 Some(gmres_hook())
@@ -564,41 +571,19 @@ mod real_demo {
             },
         });
 
-        if !analysis.has_diag_zeros {
+        if !analysis.has_diag_zeros && !is_parallel {
             specs.push(RunSpec {
-                name: if is_parallel {
-                    "GMRES(50) + AMG (L)"
-                } else {
-                    "FGMRES(50) + AMG (R)"
-                },
-                solver: if is_parallel {
-                    SolverType::Gmres
-                } else {
-                    SolverType::Fgmres
-                },
-                pc_side: if is_parallel {
-                    PcSide::Left
-                } else {
-                    PcSide::Right
-                },
-                pc: if is_parallel {
-                    PcConfigSpec::Type {
-                        pc_type: PcType::Amg,
-                        options: if relax_amg {
-                            Some(amg_relaxed_options())
-                        } else {
-                            None
-                        },
-                    }
-                } else {
-                    PcConfigSpec::Builder(amg_builder(false, relax_amg))
-                },
-                setup: if is_parallel {
-                    Some(gmres_hook())
-                } else {
-                    Some(fgmres_hook())
-                },
+                name: "FGMRES(50) + AMG (R)",
+                solver: SolverType::Fgmres,
+                pc_side: PcSide::Right,
+                pc: PcConfigSpec::Builder(amg_builder(false, relax_amg)),
+                setup: Some(fgmres_hook()),
             });
+        } else if is_parallel {
+            notes.push(
+                "Skipping standalone AMG entry in MPI menu: local AMG needs a global wrapper and is handled via ASM/Block-Jacobi choices."
+                    .to_string(),
+            );
         } else {
             notes.push("AMG disabled due to near-zero or missing diagonal entries.".to_string());
         }
@@ -667,12 +652,23 @@ mod real_demo {
             }
             push_pcg(
                 RunSpec {
-                    name: "PCG + Jacobi (L)",
+                    name: if is_parallel {
+                        "PCG + Block-Jacobi + Jacobi (L)"
+                    } else {
+                        "PCG + Jacobi (L)"
+                    },
                     solver: SolverType::Pcg,
                     pc_side: PcSide::Left,
-                    pc: PcConfigSpec::Type {
-                        pc_type: PcType::Jacobi,
-                        options: None,
+                    pc: if is_parallel {
+                        PcConfigSpec::Type {
+                            pc_type: PcType::BlockJacobi,
+                            options: Some(block_jacobi_jacobi_options()),
+                        }
+                    } else {
+                        PcConfigSpec::Type {
+                            pc_type: PcType::Jacobi,
+                            options: None,
+                        }
                     },
                     setup: None,
                 },
@@ -733,23 +729,45 @@ mod real_demo {
                     .to_string(),
             );
             specs.push(RunSpec {
-                name: "TFQMR + ILUT (L)",
+                name: if is_parallel {
+                    "TFQMR + Block-Jacobi + ILUT (L)"
+                } else {
+                    "TFQMR + ILUT (L)"
+                },
                 solver: SolverType::Tfqmr,
                 pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Ilut,
-                    options: Some(ilut_options(analysis)),
+                pc: if is_parallel {
+                    PcConfigSpec::Type {
+                        pc_type: PcType::BlockJacobi,
+                        options: Some(block_jacobi_ilut_options(analysis)),
+                    }
+                } else {
+                    PcConfigSpec::Type {
+                        pc_type: PcType::Ilut,
+                        options: Some(ilut_options(analysis)),
+                    }
                 },
                 setup: None,
             });
 
             specs.push(RunSpec {
-                name: "BiCGStab + ILUT (L)",
+                name: if is_parallel {
+                    "BiCGStab + Block-Jacobi + ILUT (L)"
+                } else {
+                    "BiCGStab + ILUT (L)"
+                },
                 solver: SolverType::BiCgStab,
                 pc_side: PcSide::Left,
-                pc: PcConfigSpec::Type {
-                    pc_type: PcType::Ilut,
-                    options: Some(ilut_options(analysis)),
+                pc: if is_parallel {
+                    PcConfigSpec::Type {
+                        pc_type: PcType::BlockJacobi,
+                        options: Some(block_jacobi_ilut_options(analysis)),
+                    }
+                } else {
+                    PcConfigSpec::Type {
+                        pc_type: PcType::Ilut,
+                        options: Some(ilut_options(analysis)),
+                    }
                 },
                 setup: None,
             });
@@ -970,6 +988,22 @@ mod real_demo {
         let mut opts = PcOptions::default();
         opts.pc_local = Some("ilu0".into());
         opts.ilu_reordering = Some(ilu0_reordering(analysis).into());
+        opts
+    }
+
+    fn block_jacobi_ilut_options(analysis: &Analysis) -> PcOptions {
+        let (max_fill, drop_tol) = ilut_defaults(analysis);
+        let mut opts = PcOptions::default();
+        opts.pc_local = Some("ilut".into());
+        opts.ilut_drop_tol = Some(drop_tol);
+        opts.ilut_max_fill = Some(max_fill);
+        opts.ilu_reordering = Some("amd".into());
+        opts
+    }
+
+    fn block_jacobi_jacobi_options() -> PcOptions {
+        let mut opts = PcOptions::default();
+        opts.pc_local = Some("jacobi".into());
         opts
     }
 
