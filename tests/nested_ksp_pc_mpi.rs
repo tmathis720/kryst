@@ -289,8 +289,10 @@ fn nested_ksp_pc_mpi_symmetric_outer_reports_inner_side_mismatch() {
     ksp.set_type(SolverType::Gmres).expect("outer type");
     let ksp_opts = KspOptions {
         pc_side: Some("symmetric".into()),
-        maxits: Some(8),
-        rtol: Some(1e-8),
+        // Keep this test bounded to a single outer iteration so it cannot linger
+        // if the mismatch guard regresses and falls through to solve-time behavior.
+        maxits: Some(1),
+        rtol: Some(0.0),
         ..Default::default()
     };
     let pc_opts = PcOptions {
