@@ -10,7 +10,7 @@ use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{
-    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, map_kerror_to_reason,
+    map_kerror_to_reason, ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure,
 };
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -97,9 +97,44 @@ pub struct KspAsPc {
 }
 
 impl KspAsPc {
+    fn prefers_variable_local_pc_runtime(pc_options: &PcOptions) -> bool {
+        let global_is_decomposed = matches!(
+            pc_options.pc_global.as_deref(),
+            Some("block_jacobi")
+                | Some("blockjacobi")
+                | Some("block-jacobi")
+                | Some("asm")
+                | Some("ras")
+        );
+        let local_is_variable = matches!(
+            pc_options.pc_local.as_deref(),
+            Some("ilut") | Some("ilutp") | Some("ksp")
+        ) || matches!(
+            pc_options.asm_inner_pc.as_deref(),
+            Some("ilut") | Some("ilutp")
+        );
+        global_is_decomposed && local_is_variable
+    }
+
+    fn stage_nested_solver_for_variable_local_pc(
+        ksp_options: &mut KspOptions,
+        pc_options: &PcOptions,
+    ) {
+        if !Self::prefers_variable_local_pc_runtime(pc_options) {
+            return;
+        }
+        if ksp_options.ksp_type.is_none() || ksp_options.ksp_type.as_deref() == Some("gmres") {
+            ksp_options.ksp_type = Some("fgmres".to_string());
+        }
+        if ksp_options.pc_side.is_none() {
+            ksp_options.pc_side = Some("right".to_string());
+        }
+    }
+
     pub fn new(mut ksp_options: KspOptions, mut pc_options: PcOptions) -> Result<Self, KError> {
         let mut resolved_ksp = pc_options.resolved_pc_ksp_ksp_options();
         resolved_ksp.overlay_from(ksp_options.clone());
+        Self::stage_nested_solver_for_variable_local_pc(&mut resolved_ksp, &pc_options);
         ksp_options = resolved_ksp;
         if ksp_options.ksp_type.is_none() {
             ksp_options.ksp_type = Some("richardson".to_string());
@@ -130,6 +165,7 @@ impl KspAsPc {
 
         let mut ksp_opts = self.pc_options.resolved_pc_ksp_ksp_options();
         ksp_opts.overlay_from(self.ksp_options.clone());
+        Self::stage_nested_solver_for_variable_local_pc(&mut ksp_opts, &self.pc_options);
         let pc_opts = self.pc_options.resolved_pc_ksp_pc_options();
         let monitor_rank0 = ksp_opts.ksp_monitor_rank0.unwrap_or(false);
         let allow_maxits_compat = self.pc_options.pc_ksp_inner_tol_policy.is_none()
@@ -156,7 +192,9 @@ impl KspAsPc {
             existing.outer_threads = self.ksp_options.threads;
             existing.outer_threads_mode = self.ksp_options.threads_mode.clone();
             if let Some(amat) = amat.clone() {
-                existing.ksp.try_set_operators_with_comm(amat, None, a.comm())?;
+                existing
+                    .ksp
+                    .try_set_operators_with_comm(amat, None, a.comm())?;
             }
             existing.ksp.setup()?;
             Self::apply_runtime_controls_from_options(existing);
@@ -608,20 +646,16 @@ mod tests {
             ),
             detail: "inner_ksp=Some(\"gmres\") inner_pc=Some(\"none\")".into(),
         };
-        assert!(
-            failure
-                .final_norm
-                .as_deref()
-                .unwrap_or_default()
-                .contains("true_residual_l2")
-        );
-        assert!(
-            failure
-                .residual_history_summary
-                .as_deref()
-                .unwrap_or_default()
-                .contains("history_len=")
-        );
+        assert!(failure
+            .final_norm
+            .as_deref()
+            .unwrap_or_default()
+            .contains("true_residual_l2"));
+        assert!(failure
+            .residual_history_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("history_len="));
     }
 
     #[test]

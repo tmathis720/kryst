@@ -30,41 +30,42 @@ pub struct DistCsrCapabilityEntry {
 }
 
 pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilityEntry {
-    let supports_native_distributed_mode =
-        matches!(
-            key.global_pc,
-            GlobalPcKind::None | GlobalPcKind::BlockJacobi
-        ) && key.local_pc.build_capabilities().native_local_apply;
-    let supports_adapter_distributed_mode = matches!(
+    let global_supports_native = matches!(
         key.global_pc,
-        GlobalPcKind::None | GlobalPcKind::BlockJacobi
-    ) && !key.apply_mode.requires_native();
+        GlobalPcKind::None | GlobalPcKind::BlockJacobi | GlobalPcKind::Asm | GlobalPcKind::Ras
+    );
+    let supports_native_distributed_mode =
+        global_supports_native && key.local_pc.build_capabilities().native_local_apply;
+    let supports_adapter_distributed_mode =
+        global_supports_native && !key.apply_mode.requires_native();
     let requested_distributed_mode = if key.apply_mode.is_distributed_native() {
         "native_distributed"
     } else {
         "adapter_distributed"
     };
-    let (requested_mode_supported, requested_mode_failure_reason) =
-        if key.apply_mode.is_distributed_native() {
-            if !key.local_pc.build_capabilities().native_local_apply {
-                (false, Some("unsupported_local_pc"))
-            } else if !matches!(
-                key.global_pc,
-                GlobalPcKind::None | GlobalPcKind::BlockJacobi
-            ) {
-                (false, Some("unsupported_global_pc"))
-            } else {
-                (true, None)
-            }
-        } else if !supports_adapter_distributed_mode {
+    let (requested_mode_supported, requested_mode_failure_reason) = if key
+        .apply_mode
+        .is_distributed_native()
+    {
+        if !key.local_pc.build_capabilities().native_local_apply {
+            (false, Some("unsupported_local_pc"))
+        } else if !matches!(
+            key.global_pc,
+            GlobalPcKind::None | GlobalPcKind::BlockJacobi | GlobalPcKind::Asm | GlobalPcKind::Ras
+        ) {
             (false, Some("unsupported_global_pc"))
-        } else if matches!(key.solver_type, Some(SolverType::Preonly))
-            && key.apply_mode == DistLocalApplyMode::WrappedLocal
-        {
-            (false, Some("incompatible_solver_mode"))
         } else {
             (true, None)
-        };
+        }
+    } else if !supports_adapter_distributed_mode {
+        (false, Some("unsupported_global_pc"))
+    } else if matches!(key.solver_type, Some(SolverType::Preonly))
+        && key.apply_mode == DistLocalApplyMode::WrappedLocal
+    {
+        (false, Some("incompatible_solver_mode"))
+    } else {
+        (true, None)
+    };
     let supports_native_apply_mode =
         key.apply_mode.is_distributed_native() && requested_mode_supported;
 
@@ -77,10 +78,8 @@ pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilit
         }
     } else if key.apply_mode.is_distributed_native() {
         match key.global_pc {
-            GlobalPcKind::None | GlobalPcKind::BlockJacobi => {
-                (true, "native_distcsr_capable")
-            }
-            GlobalPcKind::Asm | GlobalPcKind::Ras => (false, "explicit_global_pc_route"),
+            GlobalPcKind::None | GlobalPcKind::BlockJacobi => (true, "native_distcsr_capable"),
+            GlobalPcKind::Asm | GlobalPcKind::Ras => (true, "native_distcsr_capable_asm_like"),
         }
     } else {
         (
@@ -133,7 +132,7 @@ pub fn build_dist_route_decision_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        DistCsrCapabilityKey, build_dist_route_decision_report, resolve_distcsr_capability,
+        build_dist_route_decision_report, resolve_distcsr_capability, DistCsrCapabilityKey,
     };
     use crate::context::ksp_context::SolverType;
     use crate::preconditioner::dist::{
@@ -171,14 +170,15 @@ mod tests {
     }
 
     #[test]
-    fn explicit_global_pc_is_not_native_block_jacobi_candidate() {
+    fn explicit_global_pc_asm_like_is_native_candidate() {
         let cap = resolve_distcsr_capability(DistCsrCapabilityKey {
             solver_type: Some(SolverType::Gmres),
             global_pc: GlobalPcKind::Asm,
             local_pc: LocalPcKind::Ilu,
             apply_mode: DistLocalApplyMode::NativeHybrid,
         });
-        assert!(!cap.native_global_candidate);
+        assert!(cap.native_global_candidate);
+        assert_eq!(cap.registry_rule, "native_distcsr_capable_asm_like");
     }
 
     #[test]
@@ -204,12 +204,8 @@ mod tests {
             local_pc: LocalPcKind::Ilu,
             apply_mode: DistLocalApplyMode::WrappedLocal,
         });
-        assert!(!cap.requested_mode_supported);
-        assert_eq!(
-            cap.requested_mode_failure_reason,
-            Some("unsupported_global_pc")
-        );
-        assert_eq!(cap.registry_rule, "strict_mode_unsupported_global_pc");
+        assert!(cap.requested_mode_supported);
+        assert_eq!(cap.requested_mode_failure_reason, None);
     }
 
     #[test]

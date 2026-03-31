@@ -23,6 +23,7 @@
 //!   -rhs <path>                RHS vector file path [default: examples/e05r0300/e05r0300_rhs1.mtx]
 //!   --reference-mode <mode>    auto|local|distributed|skip [default: auto]
 //!   --diagnostic-profile <p>   off|right-krylov [default: off]
+//!   --mpi-pc-stage <mode>      auto|local-direct-ref|bj-lu|bj-ilut|asm-lu|asm-ilut|fgmres-right-subksp
 //!   --allow-divergence         Return success even if iterative phase fails verification
 
 #[cfg(feature = "complex")]
@@ -73,6 +74,17 @@ enum ReferenceMode {
 enum DiagnosticProfile {
     Off,
     RightKrylovResidualAudit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MpiPcStageMode {
+    Auto,
+    LocalDirectRef,
+    BlockJacobiLocalLu,
+    BlockJacobiLocalIlut,
+    AsmLocalLu,
+    AsmLocalIlut,
+    FgmresRightSubdomainKsp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -351,6 +363,33 @@ fn parse_experiment_preset(args: &[String]) -> Option<String> {
         .map(|w| w[1].clone())
 }
 
+fn parse_mpi_pc_stage_arg(args: &[String]) -> Result<MpiPcStageMode, Box<dyn std::error::Error>> {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        if args[idx] == "--mpi-pc-stage" {
+            let value = args.get(idx + 1).ok_or(
+                "--mpi-pc-stage requires one of: auto, local-direct-ref, bj-lu, bj-ilut, asm-lu, asm-ilut, fgmres-right-subksp",
+            )?;
+            return match value.as_str() {
+                "auto" => Ok(MpiPcStageMode::Auto),
+                "local-direct-ref" => Ok(MpiPcStageMode::LocalDirectRef),
+                "bj-lu" => Ok(MpiPcStageMode::BlockJacobiLocalLu),
+                "bj-ilut" => Ok(MpiPcStageMode::BlockJacobiLocalIlut),
+                "asm-lu" => Ok(MpiPcStageMode::AsmLocalLu),
+                "asm-ilut" => Ok(MpiPcStageMode::AsmLocalIlut),
+                "fgmres-right-subksp" => Ok(MpiPcStageMode::FgmresRightSubdomainKsp),
+                _ => Err(format!(
+                    "Invalid --mpi-pc-stage '{}'; expected auto, local-direct-ref, bj-lu, bj-ilut, asm-lu, asm-ilut, fgmres-right-subksp",
+                    value
+                )
+                .into()),
+            };
+        }
+        idx += 1;
+    }
+    Ok(MpiPcStageMode::Auto)
+}
+
 fn monitor_semantics_tag(solver: &str, pc_side: &str) -> &'static str {
     if solver.eq_ignore_ascii_case("fgmres") || pc_side.eq_ignore_ascii_case("right") {
         "true"
@@ -499,6 +538,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let cli_reference_mode = parse_reference_mode_arg(&args)?;
     let diagnostic_profile = parse_diagnostic_profile_arg(&args)?;
+    let mpi_pc_stage = parse_mpi_pc_stage_arg(&args)?;
     let preprocess_cfg = parse_preprocess_config(&args);
     let experiment_preset = parse_experiment_preset(&args);
 
@@ -517,6 +557,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             idx += 2;
             continue;
         }
+        if args[idx] == "--mpi-pc-stage" {
+            idx += 2;
+            continue;
+        }
         if args[idx] == "--pre-row-scale"
             || args[idx] == "--pre-col-scale"
             || args[idx] == "--pre-match-permute"
@@ -528,8 +572,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         idx += 1;
     }
 
-    let (ksp_opts, pc_opts) = parse_all_options(&parse_args)?;
+    let (mut ksp_opts, mut pc_opts) = parse_all_options(&parse_args)?;
     let allow_divergence = args.iter().any(|a| a == "--allow-divergence");
+
+    match mpi_pc_stage {
+        MpiPcStageMode::Auto | MpiPcStageMode::LocalDirectRef => {}
+        MpiPcStageMode::BlockJacobiLocalLu => {
+            pc_opts.pc_global = Some("block_jacobi".into());
+            pc_opts.pc_local = Some("ilu".into());
+            pc_opts.ilu_level = Some(0);
+        }
+        MpiPcStageMode::BlockJacobiLocalIlut => {
+            pc_opts.pc_global = Some("block_jacobi".into());
+            pc_opts.pc_local = Some("ilut".into());
+            pc_opts.ilut_drop_tol = Some(pc_opts.ilut_drop_tol.unwrap_or(1e-4));
+            pc_opts.ilut_max_fill = Some(pc_opts.ilut_max_fill.unwrap_or(20));
+        }
+        MpiPcStageMode::AsmLocalLu => {
+            pc_opts.pc_global = Some("asm".into());
+            pc_opts.asm_block_solver = Some("ludense".into());
+            pc_opts.asm_inner_pc = Some("jacobi".into());
+        }
+        MpiPcStageMode::AsmLocalIlut => {
+            pc_opts.pc_global = Some("asm".into());
+            pc_opts.asm_block_solver = Some("csr".into());
+            pc_opts.asm_inner_pc = Some("ilut".into());
+            pc_opts.ilut_drop_tol = Some(pc_opts.ilut_drop_tol.unwrap_or(1e-4));
+            pc_opts.ilut_max_fill = Some(pc_opts.ilut_max_fill.unwrap_or(20));
+        }
+        MpiPcStageMode::FgmresRightSubdomainKsp => {
+            ksp_opts.ksp_type = Some("fgmres".into());
+            ksp_opts.pc_side = Some("right".into());
+            pc_opts.pc_type = Some("ksp".into());
+            pc_opts.pc_global = Some("asm".into());
+            pc_opts.asm_block_solver = Some("csr".into());
+            pc_opts.asm_inner_pc = Some("ilut".into());
+            pc_opts.pc_ksp_ksp_type = Some("fgmres".into());
+            pc_opts.pc_ksp_pc_side = Some("right".into());
+            pc_opts.pc_ksp_pc_type = Some("asm".into());
+            pc_opts.pc_ksp_maxits = Some(pc_opts.pc_ksp_maxits.unwrap_or(2));
+            pc_opts.pc_ksp_rtol = Some(pc_opts.pc_ksp_rtol.unwrap_or(1e-2));
+        }
+    }
 
     let dist_strategy = pc_opts
         .amg_dist_apply_mode

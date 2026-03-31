@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use kryst::context::ksp_context::{ReorthPolicy, Workspace};
 use kryst::error::KError;
+use kryst::matrix::op::LinOp;
 use kryst::parallel::{MpiComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::reduction::ReproMode;
@@ -113,6 +114,42 @@ fn mpi_gmres_sstep_deterministic_reproducible_counters() -> Result<(), KError> {
     assert!(s0.final_residual.is_finite());
     assert!(s1.final_residual.is_finite());
 
+    Ok(())
+}
+
+#[test]
+fn mpi_gmres_sstep_reports_true_residual_semantics() -> Result<(), KError> {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    let a = fixtures::csr_poisson_1d(48);
+    let b: Vec<f64> = (0..a.nrows()).map(|i| 1.0 + 0.25 * i as f64).collect();
+
+    let mut solver = GmresSolver::new(16, 1e-7, 1_000);
+    solver.set_variant(GmresVariant::SStep {
+        s: 2,
+        reorth: ReorthPolicy::IfNeeded,
+        max_cond: 1e8,
+    });
+    let mut x = vec![0.0; a.nrows()];
+    let stats = solver.solve_f64(&a, None, &b, &mut x, PcSide::Left, &comm, None, None)?;
+
+    let mut ax = vec![0.0; b.len()];
+    a.matvec(&x, &mut ax);
+    let true_res = b
+        .iter()
+        .zip(ax.iter())
+        .map(|(bi, ai)| {
+            let r = bi - ai;
+            r * r
+        })
+        .sum::<f64>()
+        .sqrt();
+    let rhs_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt().max(1.0);
+    assert!(
+        (stats.final_residual - true_res).abs() <= 1e-6 * rhs_norm,
+        "expected reported final residual ({:.6e}) to match true residual ({:.6e})",
+        stats.final_residual,
+        true_res
+    );
     Ok(())
 }
 
