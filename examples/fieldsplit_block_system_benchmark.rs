@@ -1,5 +1,6 @@
 //! FieldSplit block-system benchmark/demo.
-//!
+//! to run:
+//! cargo run --features=backend-faer,mpi --example fieldsplit_block_system_benchmark
 //! Demonstrates:
 //! - Schur and composite split modes
 //! - Per-field prefixes with sub-KSP/sub-PC options
