@@ -1103,11 +1103,11 @@ impl KspContext {
             }
             if let Some(ref orth) = opts.gmres_orthog {
                 let o = match orth.as_str() {
-                    "mgs" => crate::solver::gmres::GmresOrthog::Mgs,
-                    "cgs" => crate::solver::gmres::GmresOrthog::Cgs,
+                    "mgs" | "modified" => crate::solver::gmres::GmresOrthog::Mgs,
+                    "cgs" | "classical" => crate::solver::gmres::GmresOrthog::Cgs,
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_gmres_orthog: {other} (expected 'mgs'|'cgs')"
+                            "Unrecognized ksp_gmres_orthog: {other} (expected 'mgs'|'modified'|'cgs'|'classical')"
                         )));
                     }
                 };
@@ -1154,11 +1154,11 @@ impl KspContext {
             }
             if let Some(ref orth) = opts.gmres_orthog {
                 self.pending_gmres.orthog = Some(match orth.as_str() {
-                    "mgs" => crate::solver::gmres::GmresOrthog::Mgs,
-                    "cgs" => crate::solver::gmres::GmresOrthog::Cgs,
+                    "mgs" | "modified" => crate::solver::gmres::GmresOrthog::Mgs,
+                    "cgs" | "classical" => crate::solver::gmres::GmresOrthog::Cgs,
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_gmres_orthog: {other} (expected 'mgs'|'cgs')"
+                            "Unrecognized ksp_gmres_orthog: {other} (expected 'mgs'|'modified'|'cgs'|'classical')"
                         )));
                     }
                 });
@@ -1216,11 +1216,11 @@ impl KspContext {
             // Map "mgs"/"cgs" to Modified/Classical
             if let Some(ref orth) = opts.fgmres_orthog {
                 let o = match orth.as_str() {
-                    "mgs" => crate::solver::fgmres::Orthog::Modified,
-                    "cgs" => crate::solver::fgmres::Orthog::Classical,
+                    "mgs" | "modified" => crate::solver::fgmres::Orthog::Modified,
+                    "cgs" | "classical" => crate::solver::fgmres::Orthog::Classical,
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'cgs')"
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'modified'|'cgs'|'classical')"
                         )));
                     }
                 };
@@ -1267,11 +1267,11 @@ impl KspContext {
             }
             if let Some(ref orth) = opts.fgmres_orthog {
                 self.pending_fgmres.orthog = Some(match orth.as_str() {
-                    "mgs" => crate::solver::fgmres::Orthog::Modified,
-                    "cgs" => crate::solver::fgmres::Orthog::Classical,
+                    "mgs" | "modified" => crate::solver::fgmres::Orthog::Modified,
+                    "cgs" | "classical" => crate::solver::fgmres::Orthog::Classical,
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'cgs')"
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'modified'|'cgs'|'classical')"
                         )));
                     }
                 });

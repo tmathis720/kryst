@@ -998,6 +998,9 @@ impl Sink for KspOptions {
             // Additional GMRES/FGMRES keys
             "ksp_gmres_orthog" => set_opt!(&mut self.gmres_orthog, v.to_string()),
             "ksp_gmres_reorth" => set_opt!(&mut self.gmres_reorth, v.to_string()),
+            "ksp_gmres_cgs_refinement_type" => {
+                set_opt!(&mut self.gmres_reorth, v.to_string())
+            }
             "ksp_gmres_reorth_tol" => {
                 set_opt!(&mut self.gmres_reorth_tol, parse_as::<f64>(v, spec)?)
             }

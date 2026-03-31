@@ -50,6 +50,7 @@ use kryst::utils::convergence::SolveStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PhaseMode {
+    Local,
     Distributed,
 }
 
@@ -199,6 +200,9 @@ fn run_phase(
 
     let start_setup = Instant::now();
     match mode {
+        PhaseMode::Local => {
+            ksp.set_operators(base_op.clone(), None);
+        }
         PhaseMode::Distributed => {
             let op_arc = wrap_with_comm(base_op.clone(), comm.clone());
             ksp.set_operators_with_comm(op_arc, None, comm.clone());
@@ -428,8 +432,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rtol = ksp_opts.rtol.unwrap_or(1e-8);
     let atol = ksp_opts.atol.unwrap_or(1e-12);
     let dtol = ksp_opts.dtol.unwrap_or(1e5);
-    let max_iters = ksp_opts.maxits.unwrap_or(2000);
-    let restart = ksp_opts.restart.unwrap_or(200);
 
     let matrix_file = ksp_opts
         .matrix_file
@@ -448,8 +450,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Relative tolerance: {:.1e}", rtol);
         println!("  Absolute tolerance: {:.1e}", atol);
         println!("  Divergence tolerance: {:.1e}", dtol);
-        println!("  Max iterations: {}", max_iters);
-        println!("  GMRES restart: {}", restart);
         println!("  Dist coarse route (selected): {:?}", selected_route);
         println!(
             "  Dist coarse fallback chain: {}",
@@ -490,6 +490,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let io_time = start_io.elapsed();
     let inspection = inspect_matrix(&matrix_data);
 
+    let full_gmres_restart = inspection.nrows.min(256);
+    let restart = ksp_opts.restart.unwrap_or(full_gmres_restart);
+    let max_iters = ksp_opts.maxits.unwrap_or(restart);
+
     let user_solver = ksp_opts.ksp_type.is_some();
     let user_pc = pc_opts.pc_type.is_some();
     let user_pc_side = ksp_opts.pc_side.is_some();
@@ -522,11 +526,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             100.0 * inspection.symmetry_ratio,
             inspection.is_likely_symmetric
         );
+        println!("  Effective max iterations: {}", max_iters);
+        println!("  Effective GMRES restart: {}", restart);
         if inspection.zero_diagonal_rows > 0 && !user_pc {
             println!("  Default iterative PC policy: using 'none' (zero diagonal rows detected).");
         }
         if !inspection.is_likely_symmetric && !user_solver {
             println!("  Default iterative solver policy: using 'gmres' (nonsymmetric estimate).");
+        }
+        if ksp_opts.restart.is_none() {
+            println!(
+                "  Default restart policy: using restart=min(nrows,256)={} for small-matrix sanity.",
+                restart
+            );
+        }
+        if ksp_opts.maxits.is_none() {
+            println!(
+                "  Default max-it policy: using max_it=restart={} for full-GMRES-style sanity.",
+                max_iters
+            );
         }
         println!();
     }
@@ -611,6 +629,108 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Iterative phase: {} + {} (pc_side={})",
             iterative_solver, iterative_pc, iterative_pc_side
         );
+        println!("Iterative sanity checks:");
+        println!(
+            "  1) local operator GMRES(no PC), restart={}, max_it={}",
+            full_gmres_restart, full_gmres_restart
+        );
+        println!(
+            "  2) distributed wrapper GMRES(no PC), restart={}, max_it={}",
+            full_gmres_restart, full_gmres_restart
+        );
+    }
+
+    let (_, local_sanity_x, local_sanity_hist, _, _) = collective_phase_result(
+        "iterative-sanity-local",
+        run_phase(
+            "iterative-sanity-local",
+            "gmres",
+            "none",
+            "left",
+            rtol,
+            atol,
+            dtol,
+            full_gmres_restart,
+            full_gmres_restart,
+            &rhs,
+            csr_op.clone(),
+            comm.clone(),
+            PhaseMode::Local,
+            rank,
+        ),
+        &comm,
+        rank,
+    )?;
+    let local_sanity_true_rr =
+        compute_relative_residual(csr_op.as_ref(), &local_sanity_x, &rhs, &comm);
+
+    let (_, wrapped_sanity_x, wrapped_sanity_hist, _, _) = collective_phase_result(
+        "iterative-sanity-distributed",
+        run_phase(
+            "iterative-sanity-distributed",
+            "gmres",
+            "none",
+            "left",
+            rtol,
+            atol,
+            dtol,
+            full_gmres_restart,
+            full_gmres_restart,
+            &rhs,
+            csr_op.clone(),
+            comm.clone(),
+            PhaseMode::Distributed,
+            rank,
+        ),
+        &comm,
+        rank,
+    )?;
+    let wrapped_sanity_true_rr =
+        compute_relative_residual(csr_op.as_ref(), &wrapped_sanity_x, &rhs, &comm);
+
+    if rank == 0 {
+        let local_restart_rr = local_sanity_hist
+            .iter()
+            .find(|(it, _)| *it == full_gmres_restart)
+            .map(|(_, rr)| *rr)
+            .unwrap_or(
+                local_sanity_hist
+                    .last()
+                    .map(|(_, rr)| *rr)
+                    .unwrap_or(f64::NAN),
+            );
+        let wrapped_restart_rr = wrapped_sanity_hist
+            .iter()
+            .find(|(it, _)| *it == full_gmres_restart)
+            .map(|(_, rr)| *rr)
+            .unwrap_or(
+                wrapped_sanity_hist
+                    .last()
+                    .map(|(_, rr)| *rr)
+                    .unwrap_or(f64::NAN),
+            );
+        println!("  Local sanity true residual: {:.6e}", local_sanity_true_rr);
+        println!(
+            "  Local sanity restart-boundary internal residual: {:.6e}",
+            local_restart_rr
+        );
+        println!(
+            "  Local sanity |true-internal| mismatch: {:.6e}",
+            (local_sanity_true_rr - local_restart_rr).abs()
+        );
+        println!(
+            "  Wrapped sanity true residual: {:.6e}",
+            wrapped_sanity_true_rr
+        );
+        println!(
+            "  Wrapped sanity restart-boundary internal residual: {:.6e}",
+            wrapped_restart_rr
+        );
+        println!(
+            "  Wrapped sanity |true-internal| mismatch: {:.6e}",
+            (wrapped_sanity_true_rr - wrapped_restart_rr).abs()
+        );
+        println!();
     }
 
     let (stats, solution, convergence_history, setup_time, solve_time) = collective_phase_result(
