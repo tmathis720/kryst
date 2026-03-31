@@ -1,9 +1,9 @@
 use crate::algebra::prelude::*;
-use crate::context::ksp_context::Workspace;
+use crate::context::ksp_context::{ReorthPolicy, Workspace};
 use crate::error::KError;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
-use crate::solver::gmres::{GmresSolver, GmresVariant};
+use crate::solver::gmres::{GmresOrthog, GmresSolver, GmresVariant};
 use crate::solver::{MonitorAction, MonitorCallback};
 use std::sync::{Arc, Mutex};
 
@@ -255,6 +255,105 @@ fn gmres_full_restart_matches_dense_reference_on_small_nonsymmetric() -> Result<
         "relative solution error={}",
         diff / norm_ref
     );
+    Ok(())
+}
+
+#[test]
+fn gmres_classical_mgs_vs_cgs_use_distinct_reduction_paths() -> Result<(), KError> {
+    let a = util::nonsym_convdiff_2d(8, 2.0);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 13);
+    let comm = UniverseComm::NoComm(NoComm);
+
+    let mut solver_mgs = GmresSolver::new(12, 1e-9, 120);
+    solver_mgs.set_variant(GmresVariant::Classical);
+    solver_mgs.set_orthog(GmresOrthog::Mgs);
+    solver_mgs.set_reorth_policy(ReorthPolicy::Never);
+    let mut x_mgs = vec![0.0; b.len()];
+    let mut ws_mgs = Workspace::default();
+    let stats_mgs = solver_mgs.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut x_mgs,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws_mgs),
+    )?;
+
+    let mut solver_cgs = GmresSolver::new(12, 1e-9, 120);
+    solver_cgs.set_variant(GmresVariant::Classical);
+    solver_cgs.set_orthog(GmresOrthog::Cgs);
+    solver_cgs.set_reorth_policy(ReorthPolicy::Never);
+    let mut x_cgs = vec![0.0; b.len()];
+    let mut ws_cgs = Workspace::default();
+    let stats_cgs = solver_cgs.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut x_cgs,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws_cgs),
+    )?;
+
+    assert!(stats_mgs.reason.is_converged());
+    assert!(stats_cgs.reason.is_converged());
+    assert!(
+        stats_mgs.counters.num_global_reductions > stats_cgs.counters.num_global_reductions,
+        "expected MGS to use more reductions than CGS, got mgs={} cgs={}",
+        stats_mgs.counters.num_global_reductions,
+        stats_cgs.counters.num_global_reductions
+    );
+    Ok(())
+}
+
+#[test]
+fn gmres_classical_orthog_modes_no_pc_preserve_true_residual_sanity() -> Result<(), KError> {
+    let n = 10usize;
+    let mut dense = vec![vec![0.0; n]; n];
+    for (i, row) in dense.iter_mut().enumerate().take(n) {
+        for (j, val) in row.iter_mut().enumerate().take(n) {
+            *val = if i == j {
+                6.0 + ((i + j) as f64) * 0.1
+            } else {
+                (((i * 7 + j * 11 + 3) % 19) as f64 - 9.0) * 0.01
+            };
+        }
+    }
+    let a = dense_to_csr(&dense);
+    let b: Vec<R> = (0..n).map(|i| (1.0 + i as f64 * 0.25).sin()).collect();
+    let bnorm = util::vec_norm(&b).max(1e-32);
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for orthog in [GmresOrthog::Mgs, GmresOrthog::Cgs] {
+        let mut solver = GmresSolver::new(8, 1e-10, 200);
+        solver.set_variant(GmresVariant::Classical);
+        solver.set_orthog(orthog);
+        solver.set_reorth_policy(ReorthPolicy::IfNeeded);
+        let mut x = vec![0.0; n];
+        let mut ws = Workspace::default();
+        let stats = solver.solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )?;
+        let rtrue = util::true_residual_norm(&a, &x, &b);
+        assert!(stats.reason.is_converged());
+        assert!(rtrue <= 1e-8 * bnorm + 1e-10);
+        assert!(
+            (stats.final_residual - rtrue).abs() <= 1e-8 * rtrue.max(1e-14),
+            "orthog={orthog:?} final residual mismatch stats={} true={}",
+            stats.final_residual,
+            rtrue
+        );
+    }
     Ok(())
 }
 

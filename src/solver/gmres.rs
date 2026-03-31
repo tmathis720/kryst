@@ -76,7 +76,7 @@ pub struct GmresSolver {
     pub conv: Convergence,
     /// Happy breakdown tolerance
     pub haptol: f64,
-    /// Orthogonalization flavor (currently not altering algorithmic path)
+    /// Orthogonalization flavor for classical GMRES Arnoldi (`Mgs` or `Cgs`)
     pub orthog: GmresOrthog,
     /// Strategy for the second orthogonalization pass
     pub reorth: ReorthPolicy,
@@ -230,6 +230,219 @@ impl GmresSolver {
             tmp[i] = b[i] - tmp[i];
         }
         red.norm2_s(tmp)
+    }
+
+    fn classical_mgs_orthogonalize(
+        &self,
+        ws: &mut Workspace,
+        red: &ReductCtx,
+        k: usize,
+        n: usize,
+        use_tmp1: bool,
+    ) -> (R, usize) {
+        let mut reductions = 0usize;
+        let wnorm0 = if matches!(self.reorth, ReorthPolicy::IfNeeded) {
+            let w = if use_tmp1 {
+                &ws.tmp1[..n]
+            } else {
+                &ws.tmp2[..n]
+            };
+            reductions += 1;
+            red.norm2(w)
+        } else {
+            R::zero()
+        };
+
+        for i in 0..=k {
+            let off = i * n;
+            let hij = {
+                let vi = &ws.v_mem[off..off + n];
+                let w = if use_tmp1 {
+                    &ws.tmp1[..n]
+                } else {
+                    &ws.tmp2[..n]
+                };
+                red.dot(vi, w)
+            };
+            reductions += 1;
+            *ws.h_at_mut(i, k) = hij;
+            let w = if use_tmp1 {
+                &mut ws.tmp1[..n]
+            } else {
+                &mut ws.tmp2[..n]
+            };
+            for j in 0..n {
+                w[j] -= hij * ws.v_mem[off + j];
+            }
+        }
+
+        let mut hnext = {
+            let w = if use_tmp1 {
+                &ws.tmp1[..n]
+            } else {
+                &ws.tmp2[..n]
+            };
+            reductions += 1;
+            red.norm2(w)
+        };
+
+        let need_reorth = match self.reorth {
+            ReorthPolicy::Never => false,
+            ReorthPolicy::Always => true,
+            ReorthPolicy::IfNeeded => wnorm0 > R::zero() && hnext < self.reorth_tol * wnorm0,
+        };
+
+        if need_reorth {
+            for i in 0..=k {
+                let off = i * n;
+                let delta = {
+                    let vi = &ws.v_mem[off..off + n];
+                    let w = if use_tmp1 {
+                        &ws.tmp1[..n]
+                    } else {
+                        &ws.tmp2[..n]
+                    };
+                    red.dot(vi, w)
+                };
+                reductions += 1;
+                *ws.h_at_mut(i, k) += delta;
+                let w = if use_tmp1 {
+                    &mut ws.tmp1[..n]
+                } else {
+                    &mut ws.tmp2[..n]
+                };
+                for j in 0..n {
+                    w[j] -= delta * ws.v_mem[off + j];
+                }
+            }
+            hnext = {
+                let w = if use_tmp1 {
+                    &ws.tmp1[..n]
+                } else {
+                    &ws.tmp2[..n]
+                };
+                reductions += 1;
+                red.norm2(w)
+            };
+        }
+
+        (hnext, reductions)
+    }
+
+    fn classical_cgs_orthogonalize(
+        &self,
+        ws: &mut Workspace,
+        red: &ReductCtx,
+        k: usize,
+        n: usize,
+        use_tmp1: bool,
+    ) -> (R, usize) {
+        let mut reductions = 0usize;
+        let wnorm0 = if matches!(self.reorth, ReorthPolicy::IfNeeded) {
+            let w = if use_tmp1 {
+                &ws.tmp1[..n]
+            } else {
+                &ws.tmp2[..n]
+            };
+            reductions += 1;
+            red.norm2(w)
+        } else {
+            R::zero()
+        };
+
+        let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(k + 1);
+        hvals.resize(k + 1, S::zero());
+        {
+            let w: &[S] = if use_tmp1 {
+                &ws.tmp1[..n]
+            } else {
+                &ws.tmp2[..n]
+            };
+            let mut pairs: SmallVec<[(&[S], &[S]); 32]> = SmallVec::with_capacity(k + 1);
+            for i in 0..=k {
+                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                pairs.push((vi, w));
+            }
+            red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
+            reductions += 1;
+        }
+        {
+            let w = if use_tmp1 {
+                &mut ws.tmp1[..n]
+            } else {
+                &mut ws.tmp2[..n]
+            };
+            for (i, hij) in hvals.iter().copied().enumerate() {
+                let off = i * n;
+                for j in 0..n {
+                    w[j] -= hij * ws.v_mem[off + j];
+                }
+            }
+        }
+        for i in 0..=k {
+            *ws.h_at_mut(i, k) = hvals[i];
+        }
+
+        let mut hnext = {
+            let w = if use_tmp1 {
+                &ws.tmp1[..n]
+            } else {
+                &ws.tmp2[..n]
+            };
+            reductions += 1;
+            red.norm2(w)
+        };
+
+        let need_reorth = match self.reorth {
+            ReorthPolicy::Never => false,
+            ReorthPolicy::Always => true,
+            ReorthPolicy::IfNeeded => wnorm0 > R::zero() && hnext < self.reorth_tol * wnorm0,
+        };
+        if need_reorth {
+            let mut corr: SmallVec<[S; 32]> = SmallVec::with_capacity(k + 1);
+            corr.resize(k + 1, S::zero());
+            {
+                let w: &[S] = if use_tmp1 {
+                    &ws.tmp1[..n]
+                } else {
+                    &ws.tmp2[..n]
+                };
+                let mut pairs: SmallVec<[(&[S], &[S]); 32]> = SmallVec::with_capacity(k + 1);
+                for i in 0..=k {
+                    let vi = &ws.v_mem[i * n..(i + 1) * n];
+                    pairs.push((vi, w));
+                }
+                red.dot_many_into(pairs.as_slice(), corr.as_mut_slice());
+                reductions += 1;
+            }
+            {
+                let w = if use_tmp1 {
+                    &mut ws.tmp1[..n]
+                } else {
+                    &mut ws.tmp2[..n]
+                };
+                for (i, delta) in corr.iter().copied().enumerate() {
+                    let off = i * n;
+                    for j in 0..n {
+                        w[j] -= delta * ws.v_mem[off + j];
+                    }
+                }
+            }
+            for i in 0..=k {
+                *ws.h_at_mut(i, k) += corr[i];
+            }
+            hnext = {
+                let w = if use_tmp1 {
+                    &ws.tmp1[..n]
+                } else {
+                    &ws.tmp2[..n]
+                };
+                reductions += 1;
+                red.norm2(w)
+            };
+        }
+
+        (hnext, reductions)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -480,40 +693,18 @@ impl GmresSolver {
                             } else {
                                 ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
                             }
-                            let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(k + 1);
-                            hvals.resize(k + 1, S::zero());
-                            {
-                                let tmp2_slice: &[S] = &ws.tmp2[..n];
-                                let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
-                                    SmallVec::with_capacity(k + 1);
-                                for i in 0..=k {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    pairs.push((vi, tmp2_slice));
+                            let (hnext, reductions) = match self.orthog {
+                                GmresOrthog::Mgs => {
+                                    self.classical_mgs_orthogonalize(ws, &red, k, n, false)
                                 }
-                                red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
-                                reduction_count += 1;
-                                #[cfg(feature = "metrics")]
-                                {
-                                    metrics.bytes_reduced += (k + 1) * std::mem::size_of::<R>();
+                                GmresOrthog::Cgs => {
+                                    self.classical_cgs_orthogonalize(ws, &red, k, n, false)
                                 }
-                            }
-                            {
-                                let tmp2 = &mut ws.tmp2[..n];
-                                for (i, hij) in hvals.iter().copied().enumerate() {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    for (w, &vi_j) in tmp2.iter_mut().zip(vi) {
-                                        *w -= hij * vi_j;
-                                    }
-                                }
-                            }
-                            for i in 0..=k {
-                                *ws.h_at_mut(i, k) = hvals[i];
-                            }
-                            let hnext = red.norm2(&ws.tmp2[..n]);
-                            reduction_count += 1;
+                            };
+                            reduction_count += reductions;
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.bytes_reduced += std::mem::size_of::<R>();
+                                metrics.bytes_reduced += reductions * std::mem::size_of::<R>();
                             }
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
                             if hnext > R::default() {
@@ -551,40 +742,18 @@ impl GmresSolver {
                             {
                                 metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                             }
-                            let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(k + 1);
-                            hvals.resize(k + 1, S::zero());
-                            {
-                                let tmp1_slice: &[S] = &ws.tmp1[..n];
-                                let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
-                                    SmallVec::with_capacity(k + 1);
-                                for i in 0..=k {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    pairs.push((vi, tmp1_slice));
+                            let (hnext, reductions) = match self.orthog {
+                                GmresOrthog::Mgs => {
+                                    self.classical_mgs_orthogonalize(ws, &red, k, n, true)
                                 }
-                                red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
-                                reduction_count += 1;
-                                #[cfg(feature = "metrics")]
-                                {
-                                    metrics.bytes_reduced += (k + 1) * std::mem::size_of::<R>();
+                                GmresOrthog::Cgs => {
+                                    self.classical_cgs_orthogonalize(ws, &red, k, n, true)
                                 }
-                            }
-                            {
-                                let tmp1 = &mut ws.tmp1[..n];
-                                for (i, hij) in hvals.iter().copied().enumerate() {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    for (w, &vi_j) in tmp1.iter_mut().zip(vi) {
-                                        *w -= hij * vi_j;
-                                    }
-                                }
-                            }
-                            for i in 0..=k {
-                                *ws.h_at_mut(i, k) = hvals[i];
-                            }
-                            let hnext = red.norm2(&ws.tmp1[..n]);
-                            reduction_count += 1;
+                            };
+                            reduction_count += reductions;
                             #[cfg(feature = "metrics")]
                             {
-                                metrics.bytes_reduced += std::mem::size_of::<R>();
+                                metrics.bytes_reduced += reductions * std::mem::size_of::<R>();
                             }
                             *ws.h_at_mut(k + 1, k) = S::from_real(hnext);
                             if hnext > R::default() {
