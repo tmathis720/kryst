@@ -17,7 +17,7 @@ fn mpi_test_guard() -> MutexGuard<'static, ()> {
     GUARD
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("mpi_test_guard poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn mpi_world() -> Option<UniverseComm> {
@@ -25,6 +25,13 @@ fn mpi_world() -> Option<UniverseComm> {
         eprintln!("skipping bddc mpi tests: MPI init failed");
         return None;
     };
+    if comm.size() < 2 {
+        eprintln!(
+            "skipping bddc mpi tests: requires >=2 MPI ranks, found {}",
+            comm.size()
+        );
+        return None;
+    }
     Some(UniverseComm::Mpi(Arc::new(comm)))
 }
 
