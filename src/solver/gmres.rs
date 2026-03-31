@@ -28,16 +28,16 @@ use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
+use crate::solver::common::call_monitors;
+use crate::solver::common::ReductCtx;
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::ReductCtx;
-use crate::solver::common::call_monitors;
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, ReductionModel, SolveStats};
-#[cfg(feature = "logging")]
-use crate::utils::monitor::{ResidualSnapshot, log_residuals};
 use crate::utils::monitor::{log_krylov_stagnation, stagnation_detected};
+#[cfg(feature = "logging")]
+use crate::utils::monitor::{log_residuals, ResidualSnapshot};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -423,9 +423,14 @@ impl GmresSolver {
         let mut stagnation_residuals: Vec<R> = Vec::with_capacity(6);
         let stagnation_threshold = S::from_real(0.95).real();
 
-        'outer: loop {
+        let breakdown_tol = R::from(10.0);
+        'outer: while total_iters < self.conv.max_iters {
             let mut k_steps = 0usize;
-            for k in 0..self.restart {
+            let cycle_max = self
+                .restart
+                .min(self.conv.max_iters.saturating_sub(total_iters));
+            let mut cycle_res_est = res;
+            for k in 0..cycle_max {
                 match self.variant {
                     GmresVariant::Classical => match pc_side {
                         PcSide::Left | PcSide::Symmetric => {
@@ -711,6 +716,7 @@ impl GmresSolver {
                 ws.apply_final_givens_and_update_g(k);
 
                 res = ws.g[k + 1].abs();
+                cycle_res_est = res;
                 total_iters += 1;
                 k_steps = k + 1;
 
@@ -820,7 +826,7 @@ impl GmresSolver {
             for i in 0..n {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
-            res = match pc_side {
+            let true_res = match pc_side {
                 PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
@@ -852,6 +858,27 @@ impl GmresSolver {
                     res
                 }
             };
+            res = true_res;
+
+            let breakdown_scale = cycle_res_est.max(R::from(1e-32));
+            if (true_res - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
+                let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+                let async_reductions =
+                    end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
+                let reductions = reduction_count + async_reductions;
+                let counters = crate::utils::convergence::SolverCounters {
+                    num_global_reductions: reductions,
+                    overlap_global_reductions: async_waits,
+                    residual_replacements: async_waits,
+                };
+                return Ok(SolveStats::new(
+                    total_iters,
+                    true_res,
+                    ConvergedReason::DivergedBreakdown,
+                )
+                .with_counters(counters)
+                .with_reduction_model(self.reduction_model()));
+            }
 
             stats.iterations = total_iters;
             stats.final_residual = res;
@@ -864,27 +891,9 @@ impl GmresSolver {
             ws.cs.fill(R::default());
             ws.sn.fill(S::zero());
             ws.g.fill(S::zero());
-
-            let beta = match pc_side {
+            let beta = res;
+            match pc_side {
                 PcSide::Left | PcSide::Symmetric => {
-                    if let Some(pc) = pc {
-                        let tmp2 = &mut ws.tmp2[..n];
-                        #[cfg(feature = "metrics")]
-                        let pc_start = std::time::Instant::now();
-                        pc.apply_s(pc_apply_side, &ws.tmp1[..n], tmp2, &mut ws.bridge)?;
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-                        }
-                    } else {
-                        ws.tmp2[..n].copy_from_slice(&ws.tmp1[..n]);
-                    }
-                    let beta = red.norm2(&ws.tmp2[..n]);
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics.bytes_reduced += std::mem::size_of::<R>();
-                    }
                     if beta > R::default() {
                         let inv = S::from_real(1.0 / beta);
                         for val in &mut ws.tmp2[..n] {
@@ -894,15 +903,8 @@ impl GmresSolver {
                     } else {
                         ws.v_col(0).fill(S::zero());
                     }
-                    beta
                 }
                 PcSide::Right => {
-                    let beta = red.norm2(&ws.tmp1[..n]);
-                    reduction_count += 1;
-                    #[cfg(feature = "metrics")]
-                    {
-                        metrics.bytes_reduced += std::mem::size_of::<R>();
-                    }
                     if beta > R::default() {
                         let inv = S::from_real(1.0 / beta);
                         for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
@@ -912,24 +914,11 @@ impl GmresSolver {
                     } else {
                         ws.v_col(0).fill(S::zero());
                     }
-                    beta
                 }
-            };
+            }
 
             ws.g[0] = S::from_real(beta);
             res = beta;
-
-            if call_monitors(mons, total_iters, res, reduction_count) {
-                let counters = crate::utils::convergence::SolverCounters {
-                    num_global_reductions: reduction_count,
-                    overlap_global_reductions: async_waits,
-                    residual_replacements: async_waits,
-                };
-                return Ok(
-                    SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
-                        .with_counters(counters),
-                );
-            }
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {
                 let true_res =
@@ -1406,7 +1395,7 @@ impl GmresSolver {
                             metrics.bytes_reduced += (k + 1) * block * std::mem::size_of::<R>();
                         }
                     } // pairs dropped here; we can safely mutate w_block next.
-                    // W <- W - V C
+                      // W <- W - V C
                     for i in 0..=k {
                         let vi = &ws.v_mem[i * n..(i + 1) * n];
                         for j in 0..block {
