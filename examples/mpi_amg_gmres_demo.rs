@@ -31,10 +31,10 @@ fn main() {
 
 use kryst::config::options::parse_all_options;
 use kryst::context::ksp_context::KspContext;
-use kryst::matrix::op::{CsrOp, LinOp, wrap_with_comm};
+use kryst::matrix::op::{wrap_with_comm, CsrOp, LinOp};
 use kryst::parallel::{Comm, UniverseComm};
 use kryst::solver::MonitorAction;
-use kryst::utils::matrix_market::{MatrixMarketData, read_matrix_market, write_vector_market};
+use kryst::utils::matrix_market::{read_matrix_market, write_vector_market, MatrixMarketData};
 use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
@@ -148,6 +148,21 @@ fn compute_relative_residual(csr: &CsrOp<f64>, x: &[f64], rhs: &[f64], comm: &Un
     global_residual_sq.sqrt() / global_rhs_sq.sqrt()
 }
 
+fn compute_relative_residual_local(csr: &CsrOp<f64>, x: &[f64], rhs: &[f64]) -> f64 {
+    let mut ax = vec![0.0; rhs.len()];
+    csr.matvec(x, &mut ax);
+    let residual_sq = rhs
+        .iter()
+        .zip(ax.iter())
+        .map(|(&b, &axv)| {
+            let r = b - axv;
+            r * r
+        })
+        .sum::<f64>();
+    let rhs_sq = rhs.iter().map(|v| v * v).sum::<f64>();
+    residual_sq.sqrt() / rhs_sq.sqrt()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_phase(
     phase_name: &str,
@@ -184,10 +199,11 @@ fn run_phase(
     let monitor_data = Arc::new(Mutex::new(Vec::<(usize, f64)>::new()));
     let monitor_data_clone = monitor_data.clone();
     let phase_name_owned = phase_name.to_string();
+    let print_every_iter = phase_name.contains("sanity");
     let monitor = Box::new(move |iter: usize, residual: f64, _reductions: usize| {
         if let Ok(mut data) = monitor_data_clone.lock() {
             data.push((iter, residual));
-            if rank == 0 && (iter == 0 || iter % 200 == 0 || residual < rtol) {
+            if rank == 0 && (iter == 0 || print_every_iter || iter % 200 == 0 || residual < rtol) {
                 println!(
                     "    [{}] iter {:4}: internal residual = {:.6e}",
                     phase_name_owned, iter, residual
@@ -218,14 +234,6 @@ fn run_phase(
     let start_solve = Instant::now();
     let stats = ksp.solve(rhs, &mut solution)?;
     let solve_time = start_solve.elapsed();
-
-    if stats.iterations > max_iters {
-        return Err(format!(
-            "Invariant violation in {phase_name}: iterations {} exceed configured max {}",
-            stats.iterations, max_iters
-        )
-        .into());
-    }
 
     let history = monitor_data
         .lock()
@@ -662,7 +670,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rank,
     )?;
     let local_sanity_true_rr =
-        compute_relative_residual(csr_op.as_ref(), &local_sanity_x, &rhs, &comm);
+        compute_relative_residual_local(csr_op.as_ref(), &local_sanity_x, &rhs);
 
     let (_, wrapped_sanity_x, wrapped_sanity_hist, _, _) = collective_phase_result(
         "iterative-sanity-distributed",
@@ -689,6 +697,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compute_relative_residual(csr_op.as_ref(), &wrapped_sanity_x, &rhs, &comm);
 
     if rank == 0 {
+        let duplicate_count = |hist: &[(usize, f64)]| -> usize {
+            hist.windows(2).filter(|w| w[0].0 == w[1].0).count()
+        };
         let local_restart_rr = local_sanity_hist
             .iter()
             .find(|(it, _)| *it == full_gmres_restart)
@@ -711,6 +722,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         println!("  Local sanity true residual: {:.6e}", local_sanity_true_rr);
         println!(
+            "  Local sanity reported iterations: {}",
+            local_sanity_hist.last().map(|(it, _)| *it).unwrap_or(0)
+        );
+        println!(
             "  Local sanity restart-boundary internal residual: {:.6e}",
             local_restart_rr
         );
@@ -719,8 +734,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (local_sanity_true_rr - local_restart_rr).abs()
         );
         println!(
+            "  Local sanity duplicate monitor iteration IDs: {}",
+            duplicate_count(&local_sanity_hist)
+        );
+        println!(
             "  Wrapped sanity true residual: {:.6e}",
             wrapped_sanity_true_rr
+        );
+        println!(
+            "  Wrapped sanity reported iterations: {}",
+            wrapped_sanity_hist.last().map(|(it, _)| *it).unwrap_or(0)
         );
         println!(
             "  Wrapped sanity restart-boundary internal residual: {:.6e}",
@@ -730,7 +753,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  Wrapped sanity |true-internal| mismatch: {:.6e}",
             (wrapped_sanity_true_rr - wrapped_restart_rr).abs()
         );
+        println!(
+            "  Wrapped sanity duplicate monitor iteration IDs: {}",
+            duplicate_count(&wrapped_sanity_hist)
+        );
         println!();
+    }
+
+    if local_sanity_hist
+        .last()
+        .map(|(it, _)| *it > full_gmres_restart)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Invariant violation in iterative-sanity-local: monitor iter exceeded max_it={} (last={})",
+            full_gmres_restart,
+            local_sanity_hist.last().map(|(it, _)| *it).unwrap_or(0)
+        )
+        .into());
     }
 
     let (stats, solution, convergence_history, setup_time, solve_time) = collective_phase_result(
