@@ -199,3 +199,67 @@ fn gmres_restart_boundary_update_reduces_residual() {
         "restart-boundary update failed to reduce residual: initial={initial:e}, final={final_monitor:e}"
     );
 }
+
+#[test]
+fn gmres_one_cycle_full_restart_residuals_agree() {
+    let n = 7usize;
+    let mut a = vec![S::zero(); n * n];
+    for i in 0..n {
+        a[i * n + i] = S::from_real(4.0 + 0.1 * i as f64);
+        if i + 1 < n {
+            a[i * n + (i + 1)] = S::from_real(-0.7);
+            a[(i + 1) * n + i] = S::from_real(0.25);
+        }
+    }
+    a[0 * n + 4] = S::from_real(0.2);
+    a[5 * n + 1] = S::from_real(-0.3);
+    let op = Arc::new(DenseOp::new(n, a));
+
+    let x_true: Vec<S> = (0..n)
+        .map(|i| S::from_real((0.23 * i as f64).cos()))
+        .collect();
+    let mut b = vec![S::zero(); n];
+    op.matvec(&x_true, &mut b);
+
+    let history = Arc::new(Mutex::new(Vec::<f64>::new()));
+    let history_clone = history.clone();
+
+    let mut x = vec![S::zero(); n];
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Gmres).expect("set gmres");
+    ksp.set_pc_type(PcType::None, None).expect("set pc none");
+    ksp.set_tolerances(1e-12, 1e-14, 1e6, n);
+    ksp.set_restart(n);
+    ksp.set_operators(op.clone(), None);
+    ksp.add_monitor(Box::new(move |_it, residual, _reductions| {
+        history_clone.lock().expect("lock history").push(residual);
+        MonitorAction::Continue
+    }));
+
+    let stats = ksp.solve(&b, &mut x).expect("gmres solve");
+    let monitor_residual = *history
+        .lock()
+        .expect("lock history")
+        .last()
+        .expect("last monitor residual");
+
+    let mut ax = vec![S::zero(); n];
+    op.matvec(&x, &mut ax);
+    let mut rr = 0.0f64;
+    for i in 0..n {
+        let ri = (b[i] - ax[i]).real();
+        rr += ri * ri;
+    }
+    let true_residual = rr.sqrt();
+
+    let scale = true_residual.max(1e-14);
+    let stats_gap = (stats.final_residual - true_residual).abs() / scale;
+    assert!(
+        stats_gap < 1e-9,
+        "final stats residual must match true residual in full-cycle GMRES, rel gap={stats_gap:e}"
+    );
+    assert!(
+        monitor_residual.is_finite(),
+        "monitor residual must be finite"
+    );
+}

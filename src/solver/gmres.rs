@@ -178,6 +178,24 @@ impl GmresSolver {
         y
     }
 
+    fn ls_residual_norm_from_rotated_hessenberg(
+        h: &[S],
+        g: &[S],
+        y: &[S],
+        k: usize,
+        ld: usize,
+    ) -> R {
+        let mut ls_residual = vec![S::zero(); k + 1];
+        for i in 0..=k {
+            let mut ri = g.get(i).copied().unwrap_or_else(S::zero);
+            for j in 0..k {
+                ri -= h[j * ld + i] * y[j];
+            }
+            ls_residual[i] = ri;
+        }
+        nrm2(&ls_residual)
+    }
+
     fn axpy_update_vcols(x: &mut [S], ws: &Workspace, k: usize, y: &[S]) {
         let n = ws.n();
         for j in 0..k {
@@ -832,6 +850,16 @@ impl GmresSolver {
             }
 
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
+            let ls_residual = Self::ls_residual_norm_from_rotated_hessenberg(
+                &ws.h_mem,
+                &ws.g,
+                &y,
+                k_steps,
+                ws.ld_h(),
+            );
+            let ls_scale = cycle_res_est.max(R::from(1e-32));
+            let ls_abs_gap = (ls_residual - cycle_res_est).abs();
+            let ls_rel_gap = ls_abs_gap / ls_scale;
             match pc_side {
                 PcSide::Left | PcSide::Symmetric => Self::axpy_update_vcols(x, ws, k_steps, &y),
                 PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
@@ -902,6 +930,14 @@ impl GmresSolver {
                     "GMRES no-PC residual mismatch: rel_gap={rel_gap:e}, abs_gap={abs_gap:e}, abs_roundoff_tol={abs_roundoff_tol:e}, cycle_res_est={cycle_res_est:e}, true_residual={true_residual:e}"
                 );
             }
+            #[cfg(debug_assertions)]
+            if pc.is_none() {
+                let ls_abs_roundoff_tol = R::from(128.0 * f64::EPSILON) * ls_scale.max(R::one());
+                assert!(
+                    ls_rel_gap < R::from(1e-10) || ls_abs_gap <= ls_abs_roundoff_tol,
+                    "GMRES no-PC LS mismatch: ls_rel_gap={ls_rel_gap:e}, ls_abs_gap={ls_abs_gap:e}, ls_abs_roundoff_tol={ls_abs_roundoff_tol:e}, cycle_res_est={cycle_res_est:e}, ls_residual={ls_residual:e}"
+                );
+            }
             if (breakdown_residual - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
                 let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
                 let async_reductions =
@@ -919,6 +955,18 @@ impl GmresSolver {
                 )
                 .with_counters(counters)
                 .with_reduction_model(self.reduction_model()));
+            }
+            #[cfg(feature = "logging")]
+            if log::log_enabled!(log::Level::Info) {
+                log_residuals(
+                    total_iters,
+                    "GMRES(cycle-end)",
+                    ResidualSnapshot {
+                        true_residual,
+                        preconditioned_residual: monitor_residual,
+                        recurrence_residual: Some(cycle_res_est),
+                    },
+                );
             }
 
             stats.iterations = total_iters;
@@ -1326,6 +1374,7 @@ impl GmresSolver {
         'outer: loop {
             let mut k_steps = 0usize;
             let mut k = 0usize;
+            let mut cycle_res_est = res;
             while k < self.restart {
                 let mut block = block_s.min(self.restart - k);
                 if block == 0 {
@@ -1660,6 +1709,7 @@ impl GmresSolver {
                     res = ws.g[col + 1].abs();
                     total_iters += 1;
                     k_steps = col + 1;
+                    cycle_res_est = res;
 
                     if call_monitors(mons, total_iters, res, reduction_count) {
                         let counters = crate::utils::convergence::SolverCounters {
@@ -1741,6 +1791,16 @@ impl GmresSolver {
             }
 
             let y = Self::backsolve(&ws.h_mem, &ws.g, k_steps, ws.ld_h());
+            let ls_residual = Self::ls_residual_norm_from_rotated_hessenberg(
+                &ws.h_mem,
+                &ws.g,
+                &y,
+                k_steps,
+                ws.ld_h(),
+            );
+            let ls_scale = cycle_res_est.max(R::from(1e-32));
+            let ls_abs_gap = (ls_residual - cycle_res_est).abs();
+            let ls_rel_gap = ls_abs_gap / ls_scale;
             match pc_side {
                 PcSide::Left | PcSide::Symmetric => Self::axpy_update_vcols(x, ws, k_steps, &y),
                 PcSide::Right => Self::axpy_update_zcols(x, ws, k_steps, &y),
@@ -1756,7 +1816,7 @@ impl GmresSolver {
             for i in 0..n {
                 ws.tmp1[i] = b[i] - ws.tmp1[i];
             }
-            res = match pc_side {
+            let monitor_residual = match pc_side {
                 PcSide::Left | PcSide::Symmetric => {
                     if let Some(pc) = pc {
                         let tmp2 = &mut ws.tmp2[..n];
@@ -1788,9 +1848,44 @@ impl GmresSolver {
                     res
                 }
             };
+            let true_residual = red.norm2(&ws.tmp1[..n]);
+            reduction_count += 1;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.bytes_reduced += std::mem::size_of::<R>();
+            }
+            res = monitor_residual;
+            #[cfg(debug_assertions)]
+            if pc.is_none() {
+                let scale = cycle_res_est.max(R::from(1e-32));
+                let abs_gap = (true_residual - cycle_res_est).abs();
+                let rel_gap = abs_gap / scale;
+                let abs_roundoff_tol = R::from(128.0 * f64::EPSILON) * scale.max(R::one());
+                assert!(
+                    rel_gap < R::from(1e-8) || abs_gap <= abs_roundoff_tol,
+                    "GMRES(s-step) no-PC residual mismatch: rel_gap={rel_gap:e}, abs_gap={abs_gap:e}, abs_roundoff_tol={abs_roundoff_tol:e}, cycle_res_est={cycle_res_est:e}, true_residual={true_residual:e}"
+                );
+                let ls_abs_roundoff_tol = R::from(128.0 * f64::EPSILON) * ls_scale.max(R::one());
+                assert!(
+                    ls_rel_gap < R::from(1e-10) || ls_abs_gap <= ls_abs_roundoff_tol,
+                    "GMRES(s-step) no-PC LS mismatch: ls_rel_gap={ls_rel_gap:e}, ls_abs_gap={ls_abs_gap:e}, ls_abs_roundoff_tol={ls_abs_roundoff_tol:e}, cycle_res_est={cycle_res_est:e}, ls_residual={ls_residual:e}"
+                );
+            }
+            #[cfg(feature = "logging")]
+            if log::log_enabled!(log::Level::Info) {
+                log_residuals(
+                    total_iters,
+                    "GMRES(s-step cycle-end)",
+                    ResidualSnapshot {
+                        true_residual,
+                        preconditioned_residual: monitor_residual,
+                        recurrence_residual: Some(cycle_res_est),
+                    },
+                );
+            }
 
             stats.iterations = total_iters;
-            stats.final_residual = res;
+            stats.final_residual = true_residual;
 
             if res <= thr || total_iters >= self.conv.max_iters {
                 break 'outer;
