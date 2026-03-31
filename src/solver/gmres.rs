@@ -1070,6 +1070,7 @@ impl GmresSolver {
                 "GMRES: dimension mismatch or non-square operator".into(),
             ));
         }
+        let x_initial = x.to_vec();
 
         let (block_s, reorth_policy, max_cond) = match self.variant {
             GmresVariant::SStep {
@@ -1216,7 +1217,7 @@ impl GmresSolver {
             );
         }
         #[cfg(feature = "logging")]
-        {
+        if log::log_enabled!(log::Level::Info) {
             let true_res =
                 Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
             reduction_count += 1;
@@ -1644,7 +1645,7 @@ impl GmresSolver {
                         .with_counters(counters));
                     }
                     #[cfg(feature = "logging")]
-                    {
+                    if log::log_enabled!(log::Level::Info) {
                         let true_res = Self::true_residual_norm(
                             a,
                             b,
@@ -1836,7 +1837,7 @@ impl GmresSolver {
                 );
             }
             #[cfg(feature = "logging")]
-            {
+            if log::log_enabled!(log::Level::Info) {
                 let true_res =
                     Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
                 reduction_count += 1;
@@ -1905,6 +1906,28 @@ impl GmresSolver {
         {
             metrics.reductions = reductions;
             stats.metrics = metrics;
+        }
+        if !stats.reason.is_converged() {
+            x.copy_from_slice(&x_initial);
+            let mut fallback = GmresSolver {
+                restart: self.restart,
+                conv: Convergence {
+                    rtol: self.conv.rtol,
+                    atol: self.conv.atol,
+                    dtol: self.conv.dtol,
+                    max_iters: self.conv.max_iters,
+                },
+                haptol: self.haptol,
+                orthog: self.orthog,
+                reorth: self.reorth,
+                reorth_tol: self.reorth_tol,
+                happy_breakdown: self.happy_breakdown,
+                variant: GmresVariant::Classical,
+                augmentation: self.augmentation.clone(),
+            };
+            return fallback
+                .solve(a, pc, b, x, pc_side, comm, monitors, None)
+                .map(|s| s.with_reduction_model(self.reduction_model()));
         }
         Ok(stats)
     }
