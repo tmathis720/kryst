@@ -90,6 +90,15 @@ pub struct GmresSolver {
 }
 
 impl GmresSolver {
+    #[cfg(feature = "logging")]
+    #[inline]
+    fn monitor_residual_semantics_tag(pc_side: PcSide) -> &'static str {
+        match pc_side {
+            PcSide::Left | PcSide::Symmetric => "monitor_residual=preconditioned_norm",
+            PcSide::Right => "monitor_residual=true_norm",
+        }
+    }
+
     fn reduction_model(&self) -> ReductionModel {
         match self.variant {
             GmresVariant::Classical => ReductionModel {
@@ -575,15 +584,25 @@ impl GmresSolver {
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let mut async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
+        #[cfg(feature = "logging")]
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                "GMRES monitor semantics: {}",
+                Self::monitor_residual_semantics_tag(pc_side)
+            );
+        }
 
         if call_monitors(mons, 0, res, reduction_count) {
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
             return Ok(
-                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
+                SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
             );
         }
         #[cfg(feature = "logging")]
@@ -916,6 +935,14 @@ impl GmresSolver {
                 k_steps = k + 1;
 
                 if call_monitors(mons, total_iters, res, reduction_count) {
+                    let true_res = Self::true_residual_norm(
+                        a,
+                        b,
+                        x,
+                        red.engine(),
+                        &mut ws.tmp1,
+                        &mut ws.bridge,
+                    );
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: reduction_count,
                         overlap_global_reductions: async_waits,
@@ -923,7 +950,7 @@ impl GmresSolver {
                     };
                     return Ok(SolveStats::new(
                         total_iters,
-                        res,
+                        true_res,
                         ConvergedReason::StoppedByMonitor,
                     )
                     .with_counters(counters));
@@ -1452,15 +1479,25 @@ impl GmresSolver {
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
         let async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
+        #[cfg(feature = "logging")]
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                "GMRES(s-step) monitor semantics: {}",
+                Self::monitor_residual_semantics_tag(pc_side)
+            );
+        }
 
         if call_monitors(mons, 0, res, reduction_count) {
+            let true_res =
+                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
             return Ok(
-                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
+                SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
             );
         }
         #[cfg(feature = "logging")]
@@ -1881,6 +1918,14 @@ impl GmresSolver {
                     cycle_res_est = res;
 
                     if call_monitors(mons, total_iters, res, reduction_count) {
+                        let true_res = Self::true_residual_norm(
+                            a,
+                            b,
+                            x,
+                            red.engine(),
+                            &mut ws.tmp1,
+                            &mut ws.bridge,
+                        );
                         let counters = crate::utils::convergence::SolverCounters {
                             num_global_reductions: reduction_count,
                             overlap_global_reductions: async_waits,
@@ -1888,7 +1933,7 @@ impl GmresSolver {
                         };
                         return Ok(SolveStats::new(
                             total_iters,
-                            res,
+                            true_res,
                             ConvergedReason::StoppedByMonitor,
                         )
                         .with_counters(counters));
@@ -2120,15 +2165,19 @@ impl GmresSolver {
             res = beta;
 
             if call_monitors(mons, total_iters, res, reduction_count) {
+                let true_res =
+                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
                 let counters = crate::utils::convergence::SolverCounters {
                     num_global_reductions: reduction_count,
                     overlap_global_reductions: async_waits,
                     residual_replacements: async_waits,
                 };
-                return Ok(
-                    SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
-                        .with_counters(counters),
-                );
+                return Ok(SolveStats::new(
+                    total_iters,
+                    true_res,
+                    ConvergedReason::StoppedByMonitor,
+                )
+                .with_counters(counters));
             }
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {

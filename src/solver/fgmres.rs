@@ -61,6 +61,12 @@ pub struct FgmresSolver {
 }
 
 impl FgmresSolver {
+    #[cfg(feature = "logging")]
+    #[inline]
+    fn monitor_residual_semantics_tag() -> &'static str {
+        "monitor_residual=true_norm"
+    }
+
     pub fn new(rtol: f64, maxits: usize, restart: usize) -> Self {
         Self {
             rtol,
@@ -208,14 +214,32 @@ impl FgmresSolver {
         let mut async_waits = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
+        #[cfg(feature = "logging")]
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                "FGMRES monitor semantics: {}",
+                Self::monitor_residual_semantics_tag()
+            );
+        }
+
         if call_monitors(mons, 0, res, pipeline_reductions) {
+            let true_res = recompute_true_residual_norm_s(
+                a,
+                b,
+                x,
+                comm,
+                red.engine(),
+                &mut ws.tmp1[..n],
+                &mut ws.bridge,
+            );
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: pipeline_reductions,
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
             return Ok(
-                SolveStats::new(0, res, ConvergedReason::StoppedByMonitor).with_counters(counters)
+                SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
+                    .with_counters(counters),
             );
         }
         let true_res = recompute_true_residual_norm_s(
@@ -248,7 +272,6 @@ impl FgmresSolver {
             },
         );
         if res <= thr {
-            stats.final_residual = res;
             stats.reason = if res <= self.atol {
                 ConvergedReason::ConvergedAtol
             } else {
@@ -482,6 +505,15 @@ impl FgmresSolver {
                 arnoldi_steps = j + 1;
 
                 if call_monitors(mons, total_iters, res, pipeline_reductions) {
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: pipeline_reductions,
                         overlap_global_reductions: async_waits,
@@ -489,7 +521,7 @@ impl FgmresSolver {
                     };
                     return Ok(SolveStats::new(
                         total_iters,
-                        res,
+                        true_res,
                         ConvergedReason::StoppedByMonitor,
                     )
                     .with_counters(counters));
@@ -554,7 +586,15 @@ impl FgmresSolver {
                     reason,
                     ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                 ) {
-                    stats.final_residual = res;
+                    stats.final_residual = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
                     stats.iterations = total_iters;
                     converged = true;
                     break;
@@ -584,7 +624,6 @@ impl FgmresSolver {
                 } else {
                     ConvergedReason::ConvergedRtol
                 };
-                stats.final_residual = res;
                 break;
             }
 

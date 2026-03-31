@@ -22,6 +22,7 @@
 //!   -matrix <path>             Matrix file path [default: examples/e05r0300/e05r0300.mtx]
 //!   -rhs <path>                RHS vector file path [default: examples/e05r0300/e05r0300_rhs1.mtx]
 //!   --reference-mode <mode>    auto|local|distributed|skip [default: auto]
+//!   --diagnostic-profile <p>   off|right-krylov [default: off]
 //!   --allow-divergence         Return success even if iterative phase fails verification
 
 #[cfg(feature = "complex")]
@@ -61,6 +62,12 @@ enum ReferenceMode {
     DistributedDirect,
     LocalDirectReplicated,
     Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiagnosticProfile {
+    Off,
+    RightKrylovResidualAudit,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +286,38 @@ fn parse_reference_mode_arg(args: &[String]) -> Result<ReferenceMode, Box<dyn st
     Ok(ReferenceMode::Auto)
 }
 
+fn parse_diagnostic_profile_arg(
+    args: &[String],
+) -> Result<DiagnosticProfile, Box<dyn std::error::Error>> {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        if args[idx] == "--diagnostic-profile" {
+            let value = args
+                .get(idx + 1)
+                .ok_or("--diagnostic-profile requires one of: off, right-krylov")?;
+            return match value.as_str() {
+                "off" => Ok(DiagnosticProfile::Off),
+                "right-krylov" => Ok(DiagnosticProfile::RightKrylovResidualAudit),
+                _ => Err(format!(
+                    "Invalid --diagnostic-profile '{}'; expected one of: off, right-krylov",
+                    value
+                )
+                .into()),
+            };
+        }
+        idx += 1;
+    }
+    Ok(DiagnosticProfile::Off)
+}
+
+fn monitor_semantics_tag(solver: &str, pc_side: &str) -> &'static str {
+    if solver.eq_ignore_ascii_case("fgmres") || pc_side.eq_ignore_ascii_case("right") {
+        "true"
+    } else {
+        "preconditioned"
+    }
+}
+
 #[derive(Debug)]
 enum ReferenceResult {
     Solved {
@@ -418,11 +457,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = env::args().collect();
     let cli_reference_mode = parse_reference_mode_arg(&args)?;
+    let diagnostic_profile = parse_diagnostic_profile_arg(&args)?;
 
     let mut parse_args = Vec::with_capacity(args.len());
     let mut idx = 0usize;
     while idx < args.len() {
         if args[idx] == "--reference-mode" {
+            idx += 2;
+            continue;
+        }
+        if args[idx] == "--diagnostic-profile" {
             idx += 2;
             continue;
         }
@@ -480,6 +524,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Matrix file: {}", matrix_file);
         println!("  RHS file: {}", rhs_file);
         println!("  Reference mode (CLI): {:?}", cli_reference_mode);
+        println!("  Diagnostic profile: {:?}", diagnostic_profile);
         println!();
     }
 
@@ -817,6 +862,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let iterative_relative_residual =
         compute_relative_residual(csr_op.as_ref(), &solution, &rhs, &comm);
+    let iterative_monitor_residual = convergence_history.last().map(|(_, r)| *r);
     let use_reference_output = !sanity_pass && reference_solution.is_some();
     let output_solution: &[f64] = if use_reference_output {
         reference_solution
@@ -875,6 +921,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        println!();
+        println!("Residual summary table:");
+        println!("  phase                      monitor_tag      monitor(last)    true(||b-Ax||)");
+        println!(
+            "  {:<26} {:<16} {:>14.6e} {:>14.6e}",
+            "iterative",
+            monitor_semantics_tag(&iterative_solver, &iterative_pc_side),
+            iterative_monitor_residual.unwrap_or(f64::NAN),
+            stats.final_residual,
+        );
+
         let total_time = io_time + reference_setup + reference_solve + setup_time + solve_time;
         println!();
         println!("Performance breakdown:");
@@ -895,6 +952,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("  Total time:  {:.3}s", total_time.as_secs_f64());
         println!();
+    }
+
+    if diagnostic_profile == DiagnosticProfile::RightKrylovResidualAudit {
+        if rank == 0 {
+            println!();
+            println!(
+                "Running diagnostic profile: forced right-preconditioned GMRES/FGMRES residual audit"
+            );
+        }
+        let mut diagnostic_rows: Vec<(&str, SolveStats<f64>, Option<f64>)> = Vec::new();
+        for solver_name in ["gmres", "fgmres"] {
+            let (diag_stats, _diag_solution, diag_history, _, _) = collective_phase_result(
+                "diagnostic-right-krylov",
+                run_phase(
+                    &format!("diagnostic-{solver_name}-right"),
+                    solver_name,
+                    &iterative_pc,
+                    "right",
+                    rtol,
+                    atol,
+                    dtol,
+                    max_iters,
+                    restart,
+                    &rhs,
+                    csr_op.clone(),
+                    comm.clone(),
+                    PhaseMode::Distributed,
+                    false,
+                    rank,
+                ),
+                &comm,
+                rank,
+            )?;
+            diagnostic_rows.push((
+                solver_name,
+                diag_stats,
+                diag_history.last().map(|(_, r)| *r),
+            ));
+        }
+        if rank == 0 {
+            println!("Residual summary table (diagnostic profile):");
+            println!(
+                "  phase                      monitor_tag      monitor(last)    true(||b-Ax||)"
+            );
+            for (solver_name, diag_stats, monitor_last) in diagnostic_rows {
+                println!(
+                    "  {:<26} {:<16} {:>14.6e} {:>14.6e}",
+                    format!("diagnostic-{solver_name}-right"),
+                    monitor_semantics_tag(solver_name, "right"),
+                    monitor_last.unwrap_or(f64::NAN),
+                    diag_stats.final_residual,
+                );
+            }
+        }
     }
 
     if rank == 0 {
