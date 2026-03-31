@@ -82,11 +82,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ksp = KspContext::new();
 
     // Set solver type (default: gmres - more robust for general problems)
-    let solver_type = ksp_opts.ksp_type.as_deref().unwrap_or("gmres");
+    let solver_type = ksp_opts.ksp_type.as_deref().unwrap_or("fgmres");
     ksp.set_type_from_str(solver_type)?;
 
     // Set preconditioner type (default: ilu0 - more robust than jacobi)
-    let pc_type = pc_opts.pc_type.as_deref().unwrap_or("ilu0");
+    let pc_type = pc_opts.pc_type.as_deref().unwrap_or("chebyshev");
     ksp.set_pc_type_from_str(pc_type)?;
 
     // Set tolerances and iteration limits (more conservative defaults)
@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ksp.set_tolerances(rtol, atol, dtol, max_iters);
 
     // Set restart parameter for GMRES-type solvers (larger restart for better convergence)
-    let restart = ksp_opts.restart.unwrap_or(50);
+    let restart = ksp_opts.restart.unwrap_or(1000);
     ksp.set_restart(restart);
 
     // Set preconditioning side (default to left preconditioning)
@@ -208,8 +208,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitor = Box::new(move |iter: usize, residual: f64, _reductions: usize| {
         if let Ok(mut data) = monitor_data_clone.lock() {
             data.push((iter, residual));
-            // Print every 10th iteration for rank 0 to avoid spam
-            if rank == 0 && (iter == 0 || iter % 10 == 0 || residual < rtol) {
+            // Print every 1000th iteration for rank 0 to avoid spam
+            if rank == 0 && (iter == 0 || iter % 1000 == 0 || residual < rtol) {
                 println!("    Iteration {:4}: residual = {:.6e}", iter, residual);
             }
         }
