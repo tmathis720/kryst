@@ -87,18 +87,31 @@ fn gmres_classic_reduction_count_within_expected_bounds() -> Result<(), KError> 
         None,
         Some(&mut ws),
     )?;
-    crate::utils::reduction::take_test_counter();
+    let counters = crate::utils::reduction::take_test_counter();
     crate::utils::reduction::install_test_counter(false);
-    let reported = stats.counters.num_global_reductions;
-    if reported > 0 {
-        assert!(reported >= stats.iterations);
+
+    if counters.allreduces > 0 {
         let upper_bound = 2 * stats.iterations + solver.restart + 8;
         assert!(
-            reported <= upper_bound,
-            "reported reductions {reported} exceeds upper bound {upper_bound} (iters={}, restart={})",
+            counters.allreduces <= upper_bound,
+            "observed allreduces {} exceeds upper bound {upper_bound} (iters={}, restart={})",
+            counters.allreduces,
             stats.iterations,
             solver.restart
         );
+    }
+
+    let reported = stats.counters.num_global_reductions;
+    if reported > 0 {
+        assert!(reported >= stats.iterations);
+        if counters.allreduces > 0 {
+            assert!(
+                reported >= counters.allreduces,
+                "reported reductions {} should include at least allreduce launches {}",
+                reported,
+                counters.allreduces
+            );
+        }
     }
     Ok(())
 }
