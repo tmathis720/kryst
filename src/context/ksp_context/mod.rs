@@ -875,6 +875,7 @@ impl KspContext {
             if let Some(mode) = opts.threads_mode.as_deref() {
                 match mode {
                     "context" => {}
+                    "hybrid" => {}
                     "global" => {}
                     "serial" => {
                         self.exec.threading = ThreadingPolicy::Serial;
@@ -891,7 +892,7 @@ impl KspContext {
 
             if let Some(n) = opts.threads {
                 match opts.threads_mode.as_deref().unwrap_or("context") {
-                    "context" => {
+                    "context" | "hybrid" => {
                         self.exec = self.exec.clone().with_threads(n)?;
                         self.scoped_threads.set_outer_threads(Some(n));
                     }
