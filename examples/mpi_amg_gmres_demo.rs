@@ -409,6 +409,56 @@ enum ReferenceResult {
     Skipped(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferenceSolveStatus {
+    Succeeded,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WrittenOutputVerificationStatus {
+    Verified,
+    Marginal,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IterativeSanityGateStatus {
+    Passed,
+    ExperimentalFailed,
+}
+
+fn format_phase_status_summary(
+    reference_status: ReferenceSolveStatus,
+    output_status: WrittenOutputVerificationStatus,
+    sanity_status: IterativeSanityGateStatus,
+) -> Vec<String> {
+    let reference_line = match reference_status {
+        ReferenceSolveStatus::Succeeded => "reference solve status: succeeded",
+        ReferenceSolveStatus::Skipped => "reference solve status: skipped",
+    };
+    let output_line = match output_status {
+        WrittenOutputVerificationStatus::Verified => {
+            "written-output verification status: written output verified successfully"
+        }
+        WrittenOutputVerificationStatus::Marginal => {
+            "written-output verification status: marginal residual quality"
+        }
+        WrittenOutputVerificationStatus::Failed => "written-output verification status: failed",
+    };
+    let sanity_line = match sanity_status {
+        IterativeSanityGateStatus::Passed => "iterative sanity-gate status: passed",
+        IterativeSanityGateStatus::ExperimentalFailed => {
+            "iterative sanity-gate status: iterative phase failed sanity gate"
+        }
+    };
+    vec![
+        reference_line.to_string(),
+        output_line.to_string(),
+        sanity_line.to_string(),
+    ]
+}
+
 fn run_local_dense_reference(
     matrix_data: &MatrixMarketData,
     rhs: &[f64],
@@ -867,6 +917,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reference_solution: Option<Vec<f64>> = None;
     let mut reference_setup = Duration::from_secs(0);
     let mut reference_solve = Duration::from_secs(0);
+    let reference_status;
 
     if rank == 0 {
         println!("Resolved reference mode: {:?}", reference_mode);
@@ -891,6 +942,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             solve_time,
             solver_label,
         } => {
+            reference_status = ReferenceSolveStatus::Succeeded;
             if rank == 0 && reference_mode == ReferenceMode::LocalDirectReplicated {
                 println!("Reference phase (local replicated): {solver_label}");
             }
@@ -914,6 +966,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ReferenceResult::Skipped(reason) => {
+            reference_status = ReferenceSolveStatus::Skipped;
             if rank == 0 {
                 println!("Reference phase skipped: {reason}");
                 println!();
@@ -1064,6 +1117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let sanity_pass = local_sanity_true_rr < 1e-6 && wrapped_sanity_true_rr < 1e-6;
+    let sanity_status = if sanity_pass {
+        IterativeSanityGateStatus::Passed
+    } else {
+        IterativeSanityGateStatus::ExperimentalFailed
+    };
 
     let (stats, solution, convergence_history, setup_time, solve_time) = collective_phase_result(
         "iterative",
@@ -1257,30 +1315,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         write_vector_market("mpi_ksp_solution.mtx", &output_solution_original)?;
     }
 
+    let output_status = if output_relative_residual_original < 1e-6 {
+        WrittenOutputVerificationStatus::Verified
+    } else if output_relative_residual_original < 1e-3 {
+        WrittenOutputVerificationStatus::Marginal
+    } else {
+        WrittenOutputVerificationStatus::Failed
+    };
+
     if rank == 0 {
         println!("Verification (true residual):");
         println!(
             "  Relative residual: {:.6e}",
             output_relative_residual_original
         );
-        if stats.reason.is_converged() && output_relative_residual_original < 1e-6 {
-            println!("✓ Iterative solution verified successfully.");
-        } else if output_relative_residual_original < 1e-3 {
-            println!("⚠ Iterative solve is only marginally acceptable on this configuration.");
-        } else {
-            println!("❌ Iterative solution verification failed.");
+        match output_status {
+            WrittenOutputVerificationStatus::Verified => {
+                println!("✓ written output verified successfully");
+            }
+            WrittenOutputVerificationStatus::Marginal => {
+                println!("⚠ written output is only marginally acceptable on this configuration.");
+            }
+            WrittenOutputVerificationStatus::Failed => {
+                println!("❌ written-output verification failed.");
+            }
+        }
+
+        println!("Status summary:");
+        for line in format_phase_status_summary(reference_status, output_status, sanity_status) {
+            println!("  - {line}");
+        }
+        if sanity_status == IterativeSanityGateStatus::ExperimentalFailed {
+            println!(
+                "⚠ iterative phase failed sanity gate (experimental path); output may still be valid when backed by reference."
+            );
         }
     }
 
-    let iterative_success = stats.reason.is_converged() && output_relative_residual_original < 1e-6;
-    if !iterative_success && !allow_divergence {
+    let iterative_path_success =
+        stats.reason.is_converged() && output_status == WrittenOutputVerificationStatus::Verified;
+    let overall_success = (reference_status == ReferenceSolveStatus::Succeeded
+        && output_status == WrittenOutputVerificationStatus::Verified)
+        || (reference_status == ReferenceSolveStatus::Skipped && iterative_path_success);
+    if !overall_success && !allow_divergence {
         return Err(format!(
-            "Iterative phase failed (reason={:?}, original_relative_residual={:.6e}); rerun with --allow-divergence to keep this as an experiment.",
-            stats.reason, output_relative_residual_original
+            "Run failed overall (reference_solve_status={:?}, written_output_status={:?}, iterative_sanity_status={:?}, iterative_reason={:?}, original_relative_residual={:.6e}); rerun with --allow-divergence to keep this as an experiment.",
+            reference_status,
+            output_status,
+            sanity_status,
+            stats.reason,
+            output_relative_residual_original
         )
         .into());
     }
 
     comm.barrier();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        IterativeSanityGateStatus, ReferenceSolveStatus, WrittenOutputVerificationStatus,
+        format_phase_status_summary,
+    };
+
+    #[test]
+    fn phase_status_summary_uses_required_output_strings() {
+        let lines = format_phase_status_summary(
+            ReferenceSolveStatus::Succeeded,
+            WrittenOutputVerificationStatus::Verified,
+            IterativeSanityGateStatus::ExperimentalFailed,
+        );
+        assert!(lines.contains(&"reference solve status: succeeded".to_string()));
+        assert!(lines.contains(
+            &"written-output verification status: written output verified successfully".to_string()
+        ));
+        assert!(
+            lines.contains(
+                &"iterative sanity-gate status: iterative phase failed sanity gate".to_string()
+            )
+        );
+    }
 }
