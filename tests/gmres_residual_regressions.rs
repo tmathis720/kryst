@@ -5,7 +5,7 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::LinOp;
 use kryst::matrix::op::CsrOp;
-use kryst::matrix::sparse::CsrMatrix as RealCsrMatrix;
+use kryst::matrix::sparse::CsrMatrix;
 use kryst::solver::MonitorAction;
 
 struct DenseOp {
@@ -103,27 +103,21 @@ fn gmres_sparse_no_pc_reports_true_residual_in_stats() {
     let n = 6usize;
     let row_ptr = vec![0, 2, 5, 8, 11, 14, 16];
     let col_idx = vec![0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5];
-    let vals = vec![
+    let vals: Vec<S> = vec![
         5.0, -0.3, 0.2, 5.4, -0.5, 0.1, 5.2, -0.4, 0.3, 5.1, -0.6, 0.2, 5.3, -0.4, 0.1, 5.0,
-    ];
+    ]
+    .into_iter()
+    .map(S::from_real)
+    .collect();
 
-    let csr = Arc::new(RealCsrMatrix::from_csr(n, n, row_ptr, col_idx, vals));
+    let csr = Arc::new(CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals));
     let op = Arc::new(CsrOp::new(csr));
 
     let x_true: Vec<S> = (0..n)
         .map(|i| S::from_real(1.0 + (i as f64) * 0.2))
         .collect();
     let mut b = vec![S::zero(); n];
-    // Build RHS explicitly in the real backend and convert into `S`.
-    {
-        let dense_like = op.clone();
-        let x_real: Vec<f64> = x_true.iter().map(|v| v.real()).collect();
-        let mut b_real = vec![0.0; n];
-        dense_like.matvec(&x_real, &mut b_real);
-        for i in 0..n {
-            b[i] = S::from_real(b_real[i]);
-        }
-    }
+    op.matvec(&x_true, &mut b);
 
     let mut x = vec![S::zero(); n];
     let mut ksp = KspContext::new();
@@ -136,12 +130,7 @@ fn gmres_sparse_no_pc_reports_true_residual_in_stats() {
     let stats = ksp.solve(&b, &mut x).expect("gmres solve");
 
     let mut ax = vec![S::zero(); n];
-    let x_real: Vec<f64> = x.iter().map(|v| v.real()).collect();
-    let mut ax_real = vec![0.0; n];
-    op.matvec(&x_real, &mut ax_real);
-    for i in 0..n {
-        ax[i] = S::from_real(ax_real[i]);
-    }
+    op.matvec(&x, &mut ax);
     let mut num = 0.0;
     for i in 0..n {
         let ri = (b[i] - ax[i]).real();
