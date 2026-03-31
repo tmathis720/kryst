@@ -815,7 +815,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rank,
     )?;
 
-    let relative_residual = compute_relative_residual(csr_op.as_ref(), &solution, &rhs, &comm);
+    let iterative_relative_residual =
+        compute_relative_residual(csr_op.as_ref(), &solution, &rhs, &comm);
     let use_reference_output = !sanity_pass && reference_solution.is_some();
     let output_solution: &[f64] = if use_reference_output {
         reference_solution
@@ -824,6 +825,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         &solution
     };
+    let output_relative_residual =
+        compute_relative_residual(csr_op.as_ref(), output_solution, &rhs, &comm);
 
     if rank == 0 {
         println!();
@@ -831,17 +834,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("=========================");
         println!("Solve time: {:.3}s", solve_time.as_secs_f64());
         println!("Iterations: {}", stats.iterations);
-        println!("Final internal residual: {:.2e}", stats.final_residual);
+        println!(
+            "Final true residual from solver stats: {:.2e}",
+            stats.final_residual
+        );
+        if let Some((_, last_monitor_residual)) = convergence_history.last() {
+            println!("Last monitor residual: {:.2e}", last_monitor_residual);
+        }
         println!("Convergence reason: {:?}", stats.reason);
         println!(
-            "True relative residual ||b-Ax||/||b||: {:.2e}",
-            relative_residual
+            "True relative residual ||b-Ax||/||b|| (iterative solution): {:.2e}",
+            iterative_relative_residual
         );
+        if use_reference_output {
+            println!(
+                "True relative residual ||b-Ax||/||b|| (written output solution): {:.2e}",
+                output_relative_residual
+            );
+        }
 
         if let Some(rr_ref) = reference_rel_residual {
             println!(
                 "Residual ratio versus reference: {:.2e}",
-                relative_residual / rr_ref.max(1e-30)
+                iterative_relative_residual / rr_ref.max(1e-30)
             );
         }
 
@@ -894,21 +909,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if rank == 0 {
         println!("Verification (true residual):");
-        println!("  Relative residual: {:.6e}", relative_residual);
-        if stats.reason.is_converged() && relative_residual < 1e-6 {
+        println!("  Relative residual: {:.6e}", output_relative_residual);
+        if stats.reason.is_converged() && output_relative_residual < 1e-6 {
             println!("✓ Iterative solution verified successfully.");
-        } else if relative_residual < 1e-3 {
+        } else if output_relative_residual < 1e-3 {
             println!("⚠ Iterative solve is only marginally acceptable on this configuration.");
         } else {
             println!("❌ Iterative solution verification failed.");
         }
     }
 
-    let iterative_success = stats.reason.is_converged() && relative_residual < 1e-6;
+    let iterative_success = stats.reason.is_converged() && iterative_relative_residual < 1e-6;
     if !iterative_success && !allow_divergence {
         return Err(format!(
             "Iterative phase failed (reason={:?}, relative_residual={:.6e}); rerun with --allow-divergence to keep this as an experiment.",
-            stats.reason, relative_residual
+            stats.reason, iterative_relative_residual
         )
         .into());
     }
