@@ -203,7 +203,7 @@ fn run_phase(
     let monitor = Box::new(move |iter: usize, residual: f64, _reductions: usize| {
         if let Ok(mut data) = monitor_data_clone.lock() {
             data.push((iter, residual));
-            if rank == 0 && (iter == 0 || print_every_iter || iter % 200 == 0 || residual < rtol) {
+            if rank == 0 && (iter == 0 || iter % 1000 == 0 || residual < rtol) {
                 println!(
                     "    [{}] iter {:4}: internal residual = {:.6e}",
                     phase_name_owned, iter, residual
