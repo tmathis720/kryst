@@ -160,7 +160,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "GMRES (ILU) - benchmark-preferred for Sherman3",
             expected_iterations: 50,
             fallback_solver: "bicgstab",
-            fallback_pc: "ilu",
+            fallback_pc: "ilut",
         },
         "add20" => OptimalConfig {
             solver: "cg",
@@ -288,12 +288,19 @@ fn direct_reference_policy(a_mat: &CsrMatrix<f64>) -> (bool, String) {
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn compare_with_direct_reference(
+    matrix_name: &str,
     a_mat: &CsrMatrix<f64>,
     rhs: &[f64],
     iterative_solution: &[f64],
 ) -> Result<Option<DirectReferenceComparison>, Box<dyn std::error::Error>> {
-    let (enabled, policy_note) = direct_reference_policy(a_mat);
-    if !enabled {
+    let (enabled, mut policy_note) = direct_reference_policy(a_mat);
+    let force_direct = matrix_name == "fidap005";
+    if force_direct {
+        policy_note =
+            "forced: fidap005 policy prioritizes direct reference path for side-by-side checks"
+                .to_string();
+    }
+    if !enabled && !force_direct {
         return Ok(Some(DirectReferenceComparison {
             abs_error_norm: f64::NAN,
             rel_error_norm: f64::NAN,
@@ -335,6 +342,85 @@ fn compare_with_direct_reference(
         matches_verified_answer,
         note: policy_note,
     }))
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn build_preconditioner_options(
+    matrix_name: &str,
+    solver: &str,
+    pc: &str,
+    is_fallback: bool,
+) -> Option<PcOptions> {
+    if pc == "amg" {
+        if solver != "cg" {
+            let mut opts = PcOptions::default();
+            opts.amg_require_spd = Some(false);
+            opts.amg_relax_type = Some("chebyshev".into());
+            return Some(opts);
+        }
+        return None;
+    }
+
+    if pc != "ilu" && pc != "ilut" {
+        return None;
+    }
+
+    let mut opts = PcOptions::default();
+    opts.ilu_type = Some(if pc == "ilut" { "ilut" } else { "iluk" }.to_string());
+    opts.ilu_level_of_fill = Some(1);
+    opts.ilu_max_fill_per_row = Some(24);
+    opts.ilu_offdiag_drop_tolerance = Some(1e-4);
+    opts.ilu_reordering_type = Some("rcm".to_string());
+    opts.ilu_triangular_solve = Some("gauss-seidel".to_string());
+    opts.ilu_pivot_threshold = Some(1e-10);
+    opts.pc_scale = Some("both".to_string());
+    opts.pc_scale_norm = Some("inf".to_string());
+
+    match matrix_name {
+        "e05r0100" if is_fallback && pc == "ilut" => {
+            opts.ilu_max_fill_per_row = Some(48);
+            opts.ilu_offdiag_drop_tolerance = Some(1e-6);
+            opts.ilu_reordering_type = Some("amd".to_string());
+            opts.ilu_triangular_solve = Some("exact".to_string());
+            opts.ilu_pivot_threshold = Some(1e-12);
+        }
+        "sherman3" => {
+            if is_fallback {
+                opts.ilu_type = Some("ilut".to_string());
+                opts.ilu_max_fill_per_row = Some(64);
+                opts.ilu_offdiag_drop_tolerance = Some(5e-7);
+                opts.ilu_reordering_type = Some("amd".to_string());
+                opts.ilu_triangular_solve = Some("exact".to_string());
+                opts.ilu_pivot_threshold = Some(1e-12);
+            } else {
+                opts.ilu_type = Some("iluk".to_string());
+                opts.ilu_level_of_fill = Some(2);
+                opts.ilu_max_fill_per_row = Some(40);
+                opts.ilu_offdiag_drop_tolerance = Some(5e-5);
+            }
+        }
+        "fidap001" => {
+            opts.ilu_type = Some("ilut".to_string());
+            opts.ilu_max_fill_per_row = Some(72);
+            opts.ilu_offdiag_drop_tolerance = Some(1e-7);
+            opts.ilu_reordering_type = Some("amd".to_string());
+            opts.ilu_triangular_solve = Some("exact".to_string());
+            opts.ilu_pivot_threshold = Some(1e-12);
+            opts.pc_scale = Some("row".to_string());
+        }
+        "fidap005" => {
+            opts.ilu_type = Some("ilut".to_string());
+            opts.ilu_max_fill_per_row = Some(56);
+            opts.ilu_offdiag_drop_tolerance = Some(1e-6);
+            opts.ilu_reordering_type = Some("amd".to_string());
+            opts.ilu_triangular_solve = Some("exact".to_string());
+            opts.ilu_pivot_threshold = Some(1e-12);
+            opts.pc_scale_norm = Some("1".to_string());
+        }
+        _ => {}
+    }
+
+    Some(opts)
 }
 
 /// Test a solver configuration and return detailed results
@@ -379,17 +465,15 @@ fn test_optimal_solver(
     let mut ksp = KspContext::new();
     let st = SolverType::from_str(&decision.primary_solver)?;
     let pct = PcType::from_str(&decision.primary_pc)?;
-    let amg_opts = if decision.primary_pc == "amg" && decision.primary_solver != "cg" {
-        let mut opts = PcOptions::default();
-        opts.amg_require_spd = Some(false);
-        opts.amg_relax_type = Some("chebyshev".into());
-        Some(opts)
-    } else {
-        None
-    };
-    let amg_opts_ref = amg_opts.as_ref();
+    let primary_opts = build_preconditioner_options(
+        matrix_name,
+        &decision.primary_solver,
+        &decision.primary_pc,
+        false,
+    );
+    let primary_opts_ref = primary_opts.as_ref();
     ksp.set_type(st)?
-        .set_pc_type(pct, amg_opts_ref)?
+        .set_pc_type(pct, primary_opts_ref)?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
     // Solve and residual checks both use the same A_op.
@@ -469,9 +553,15 @@ fn test_optimal_solver(
                 let mut ksp_fallback = KspContext::new();
                 let st_fb = SolverType::from_str(&decision.fallback_solver)?;
                 let pc_fb = PcType::from_str(&decision.fallback_pc)?;
+                let fallback_opts = build_preconditioner_options(
+                    matrix_name,
+                    &decision.fallback_solver,
+                    &decision.fallback_pc,
+                    true,
+                );
                 ksp_fallback
                     .set_type(st_fb)?
-                    .set_pc_type(pc_fb, None)?
+                    .set_pc_type(pc_fb, fallback_opts.as_ref())?
                     .set_tolerances(1e-6, 1e-12, 1e3, 1000);
                 ksp_fallback.set_operators(Arc::clone(&a_op), p_op.clone());
                 ksp_fallback.setup()?;
@@ -494,8 +584,12 @@ fn test_optimal_solver(
                             "primary {}: {}; fallback succeeded with {}",
                             primary_failure, primary_reason, fallback_method
                         );
-                        let direct_comparison =
-                            compare_with_direct_reference(a_mat, &rhs_vec, &solution_fallback)?;
+                        let direct_comparison = compare_with_direct_reference(
+                            matrix_name,
+                            a_mat,
+                            &rhs_vec,
+                            &solution_fallback,
+                        )?;
                         let _ = solve_time_fallback;
                         Ok((
                             primary_method,
@@ -535,7 +629,8 @@ fn test_optimal_solver(
                 }
             } else {
                 let status = "ok".to_string();
-                let direct_comparison = compare_with_direct_reference(a_mat, &rhs_vec, &solution)?;
+                let direct_comparison =
+                    compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
                 Ok((
                     primary_method,
                     "-".to_string(),
@@ -566,9 +661,15 @@ fn test_optimal_solver(
             let mut ksp_fallback = KspContext::new();
             let st_fb = SolverType::from_str(&decision.fallback_solver)?;
             let pc_fb = PcType::from_str(&decision.fallback_pc)?;
+            let fallback_opts = build_preconditioner_options(
+                matrix_name,
+                &decision.fallback_solver,
+                &decision.fallback_pc,
+                true,
+            );
             ksp_fallback
                 .set_type(st_fb)?
-                .set_pc_type(pc_fb, None)?
+                .set_pc_type(pc_fb, fallback_opts.as_ref())?
                 .set_tolerances(1e-6, 1e-12, 1e3, 1000);
             ksp_fallback.set_operators(Arc::clone(&a_op), p_op);
             ksp_fallback.setup()?;
@@ -591,8 +692,12 @@ fn test_optimal_solver(
                         "primary {}: {}; fallback succeeded with {}",
                         primary_failure, primary_reason, fallback_method
                     );
-                    let direct_comparison =
-                        compare_with_direct_reference(a_mat, &rhs_vec, &solution_fallback)?;
+                    let direct_comparison = compare_with_direct_reference(
+                        matrix_name,
+                        a_mat,
+                        &rhs_vec,
+                        &solution_fallback,
+                    )?;
                     let _ = solve_time_fallback;
                     Ok((
                         primary_method,
@@ -948,8 +1053,8 @@ fn select_solver_policy(
     let baseline = get_optimal_config(matrix_name);
     let mut primary_solver = baseline.solver.to_string();
     let mut primary_pc = baseline.preconditioner.to_string();
-    let fallback_solver = baseline.fallback_solver.to_string();
-    let fallback_pc = baseline.fallback_pc.to_string();
+    let mut fallback_solver = baseline.fallback_solver.to_string();
+    let mut fallback_pc = baseline.fallback_pc.to_string();
     let mut rationale = vec![format!(
         "matrix hint '{}': {}",
         matrix_name, baseline._description
@@ -997,6 +1102,46 @@ fn select_solver_policy(
                 }
             }
         }
+    }
+
+    match matrix_name {
+        "e05r0100" => {
+            primary_solver = "gmres".to_string();
+            primary_pc = "none".to_string();
+            fallback_solver = "bicgstab".to_string();
+            fallback_pc = "ilut".to_string();
+            rationale.push(
+                "policy override: keep GMRES+NONE baseline and route fallback to tuned BiCGStab+ILUT"
+                    .to_string(),
+            );
+        }
+        "sherman3" => {
+            fallback_solver = "bicgstab".to_string();
+            fallback_pc = "ilut".to_string();
+            rationale.push(
+                "policy override: on stagnation promote from baseline ILU to stronger ILUT profile"
+                    .to_string(),
+            );
+        }
+        "fidap001" => {
+            if !cg_screen.cg_safe {
+                primary_solver = "gmres".to_string();
+                primary_pc = "ilut".to_string();
+                fallback_solver = "bicgstab".to_string();
+                fallback_pc = "ilut".to_string();
+                rationale.push(
+                    "policy override: CG screen failed; go directly to tuned nonsymmetric ILUT path"
+                        .to_string(),
+                );
+            }
+        }
+        "fidap005" => {
+            rationale.push(
+                "policy override: prioritize direct-reference verification and retain iterative solve for comparison"
+                    .to_string(),
+            );
+        }
+        _ => {}
     }
 
     SelectionDecision {
