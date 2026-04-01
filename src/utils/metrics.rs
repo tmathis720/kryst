@@ -1,3 +1,5 @@
+use crate::matrix::op::LinOp;
+
 #[cfg(feature = "metrics")]
 mod enabled {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,6 +108,20 @@ mod disabled {
 
 #[cfg(not(feature = "metrics"))]
 pub use disabled::*;
+
+/// Compute the true residual norm `||b - A x||_2` for real-valued linear systems.
+pub fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], x: &[f64]) -> f64 {
+    let mut ax = vec![0.0; rhs.len()];
+    op.matvec(x, &mut ax);
+    rhs.iter()
+        .zip(ax.iter())
+        .map(|(b, ax_i)| {
+            let r = b - ax_i;
+            r * r
+        })
+        .sum::<f64>()
+        .sqrt()
+}
 
 /// Estimate the error of a preconditioner using random Rademacher probes.
 ///
