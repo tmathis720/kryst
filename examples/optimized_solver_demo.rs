@@ -70,7 +70,7 @@ use kryst::matrix::sparse::CsrMatrix;
 ))]
 use kryst::solver::dense_lu;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::classify_acceptance_status;
+use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::conditioning::analyze_csr;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -454,6 +454,7 @@ fn test_optimal_solver(
         String,
         f64,
         f64,
+        f64,
         usize,
         String,
         bool,
@@ -502,6 +503,9 @@ fn test_optimal_solver(
     ksp.setup()?;
 
     let result = ksp.solve(&rhs_vec, &mut solution);
+    const CONTRACT_RTOL: f64 = 1e-6;
+    const CONTRACT_ATOL: f64 = 1e-12;
+    const CONTRACT_SLACK: f64 = 1.05;
 
     fn classify_failure(msg: &str) -> &'static str {
         let m = msg.to_ascii_lowercase();
@@ -525,29 +529,94 @@ fn test_optimal_solver(
         }
     }
 
+    fn true_residual_metrics(a_op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) -> (f64, f64) {
+        let true_abs_res = true_residual_norm(a_op, rhs, solution);
+        let b_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let true_rel_res = if b_norm > 0.0 {
+            true_abs_res / b_norm
+        } else if true_abs_res == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        };
+        (true_abs_res, true_rel_res)
+    }
+
+    fn classify_acceptance(
+        reason: ConvergedReason,
+        true_abs_res: f64,
+        true_rel_res: f64,
+        rtol: f64,
+        atol: f64,
+        slack: f64,
+    ) -> AcceptanceStatus {
+        let rtol_ok = true_rel_res.is_finite() && true_rel_res <= rtol * slack;
+        let atol_ok = true_abs_res.is_finite() && true_abs_res <= atol * slack;
+        let meets_any_contract = rtol_ok || atol_ok;
+        match reason {
+            ConvergedReason::ConvergedRtol => {
+                if rtol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
+            }
+            ConvergedReason::ConvergedAtol => {
+                if atol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
+            }
+            ConvergedReason::DivergedBreakdown
+            | ConvergedReason::DivergedBreakdownBiCG
+            | ConvergedReason::DivergedNan
+            | ConvergedReason::DivergedInf
+            | ConvergedReason::DivergedIndefiniteMatrix
+            | ConvergedReason::DivergedIndefinitePC => {
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Breakdown }
+            }
+            ConvergedReason::ConvergedTrustRegion | ConvergedReason::ConvergedHappyBreakdown => {
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::ContractMismatch }
+            }
+            ConvergedReason::DivergedDtol
+            | ConvergedReason::DivergedMaxIts
+            | ConvergedReason::StoppedByMonitor => {
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Stagnated }
+            }
+            ConvergedReason::DivergedPcSetupFailed
+            | ConvergedReason::DivergedPcFailed
+            | ConvergedReason::Continued => {
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Failed }
+            }
+        }
+    }
+
     fn needs_fallback(
         stats: &kryst::utils::convergence::SolveStats<f64>,
-        true_residual: f64,
-        tol: f64,
+        true_abs_res: f64,
+        true_rel_res: f64,
+        rtol: f64,
+        atol: f64,
+        slack: f64,
     ) -> bool {
-        !classify_acceptance_status(stats.reason, true_residual, tol).is_accepted()
+        !classify_acceptance(stats.reason, true_abs_res, true_rel_res, rtol, atol, slack).is_accepted()
     }
 
     match result {
         Ok(stats) => {
-            let true_residual = true_residual_norm(a_op.as_ref(), &rhs_vec, &solution);
+            let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
             let primary_method = format!(
                 "{} + {}",
                 decision.primary_solver.to_uppercase(),
                 decision.primary_pc.to_uppercase()
             );
-            if needs_fallback(&stats, true_residual, 1e-6) {
+            if needs_fallback(&stats, true_abs_res, true_rel_res, CONTRACT_RTOL, CONTRACT_ATOL, CONTRACT_SLACK) {
                 let primary_reason = format!(
-                    "soft failure: reason={:?}, true_residual={:.3e} (tol=1.000e-6), internal_classical_retry={}",
-                    stats.reason, true_residual, stats.gmres_classical_retry
+                    "soft failure: reason={:?}, true_abs_res={:.3e}, true_rel_res={:.3e} (rtol={:.3e}, atol={:.3e}, slack={:.3}), internal_classical_retry={}",
+                    stats.reason, true_abs_res, true_rel_res, CONTRACT_RTOL, CONTRACT_ATOL, CONTRACT_SLACK, stats.gmres_classical_retry
                 );
-                let primary_failure =
-                    classify_acceptance_status(stats.reason, true_residual, 1e-6).as_str();
+                let primary_failure = classify_acceptance(
+                    stats.reason,
+                    true_abs_res,
+                    true_rel_res,
+                    CONTRACT_RTOL,
+                    CONTRACT_ATOL,
+                    CONTRACT_SLACK,
+                )
+                .as_str();
                 if is_root_rank {
                     println!(
                         "    Primary method did not meet convergence contract, trying fallback..."
@@ -589,10 +658,16 @@ fn test_optimal_solver(
                 );
                 match fallback_solve {
                     Ok(stats_fallback) => {
-                        let true_residual =
-                            true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                        let acceptance_status =
-                            classify_acceptance_status(stats_fallback.reason, true_residual, 1e-6);
+                        let (true_abs_res, true_rel_res) =
+                            true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution_fallback);
+                        let acceptance_status = classify_acceptance(
+                            stats_fallback.reason,
+                            true_abs_res,
+                            true_rel_res,
+                            CONTRACT_RTOL,
+                            CONTRACT_ATOL,
+                            CONTRACT_SLACK,
+                        );
                         let status = acceptance_status.as_str().to_string();
                         let converged = acceptance_status.is_accepted();
                         let fallback_outcome = if acceptance_status.is_accepted() {
@@ -622,7 +697,8 @@ fn test_optimal_solver(
                             fallback_method,
                             solver_reason,
                             reason,
-                            true_residual,
+                            true_abs_res,
+                            true_rel_res,
                             stats_fallback.final_residual,
                             stats_fallback.iterations,
                             status,
@@ -648,6 +724,7 @@ fn test_optimal_solver(
                             ),
                             f64::NAN,
                             f64::NAN,
+                            f64::NAN,
                             0,
                             status,
                             false,
@@ -656,8 +733,14 @@ fn test_optimal_solver(
                     }
                 }
             } else {
-                let acceptance_status =
-                    classify_acceptance_status(stats.reason, true_residual, 1e-6);
+                let acceptance_status = classify_acceptance(
+                    stats.reason,
+                    true_abs_res,
+                    true_rel_res,
+                    CONTRACT_RTOL,
+                    CONTRACT_ATOL,
+                    CONTRACT_SLACK,
+                );
                 let status = acceptance_status.as_str().to_string();
                 let solver_reason = stats.reason.petsc_reason().to_string();
                 let reason = format!(
@@ -671,7 +754,8 @@ fn test_optimal_solver(
                     "-".to_string(),
                     solver_reason,
                     reason,
-                    true_residual,
+                    true_abs_res,
+                    true_rel_res,
                     stats.final_residual,
                     stats.iterations,
                     status,
@@ -728,10 +812,16 @@ fn test_optimal_solver(
             );
             match fallback_solve {
                 Ok(stats_fallback) => {
-                    let true_residual =
-                        true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                    let acceptance_status =
-                        classify_acceptance_status(stats_fallback.reason, true_residual, 1e-6);
+                    let (true_abs_res, true_rel_res) =
+                        true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution_fallback);
+                    let acceptance_status = classify_acceptance(
+                        stats_fallback.reason,
+                        true_abs_res,
+                        true_rel_res,
+                        CONTRACT_RTOL,
+                        CONTRACT_ATOL,
+                        CONTRACT_SLACK,
+                    );
                     let status = acceptance_status.as_str().to_string();
                     let converged = acceptance_status.is_accepted();
                     let fallback_outcome = if acceptance_status.is_accepted() {
@@ -761,7 +851,8 @@ fn test_optimal_solver(
                         fallback_method,
                         solver_reason,
                         reason,
-                        true_residual,
+                        true_abs_res,
+                        true_rel_res,
                         stats_fallback.final_residual,
                         stats_fallback.iterations,
                         status,
@@ -785,6 +876,7 @@ fn test_optimal_solver(
                             "primary {}: {}; fallback {}: {}",
                             primary_failure, primary_reason, fallback_failure, fallback_reason
                         ),
+                        f64::NAN,
                         f64::NAN,
                         f64::NAN,
                         0,
@@ -1140,20 +1232,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_root_rank {
         println!(
-            "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+            "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
             "Matrix",
             "Primary",
             "Fallback",
             "SolverReason",
             "Reason",
-            "TrueRes",
+            "TrueAbsRes",
+            "TrueRelRes",
             "StatsRes",
             "Iterations",
             "AcceptanceStatus",
             "Verified?",
             "Performance vs Benchmark"
         );
-        println!("{}", "=".repeat(210));
+        println!("{}", "=".repeat(224));
     }
 
     for (matrix_name, _description) in test_matrices {
@@ -1176,12 +1269,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
                         matrix_name,
                         "-",
                         "-",
                         "-",
                         "files_missing",
+                        "N/A",
                         "N/A",
                         "N/A",
                         "N/A",
@@ -1220,12 +1314,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
-                    "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+                    "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
                     matrix_name,
                     "-",
                     "-",
                     "-",
                     "too_large",
+                    "N/A",
                     "N/A",
                     "N/A",
                     "SKIP",
@@ -1252,7 +1347,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fallback,
                 solver_reason,
                 reason,
-                true_residual,
+                true_abs_res,
+                true_rel_res,
                 prec_residual,
                 iters,
                 status,
@@ -1277,13 +1373,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12.2e} {:<12.2e} {:<10} {:<18} {:<10} {}",
+                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12.2e} {:<12.2e} {:<12.2e} {:<10} {:<18} {:<10} {}",
                         matrix_name,
                         primary,
                         fallback,
                         solver_reason,
                         reason,
-                        true_residual,
+                        true_abs_res,
+                        true_rel_res,
                         prec_residual,
                         iters,
                         status,
@@ -1342,12 +1439,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
                         matrix_name,
                         "-",
                         "-",
                         "-",
                         "failed",
+                        "N/A",
                         "N/A",
                         "N/A",
                         "N/A",
