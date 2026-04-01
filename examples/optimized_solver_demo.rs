@@ -63,6 +63,8 @@ use kryst::context::pc_context::PcType;
 use kryst::matrix::op::{CsrOp, LinOp};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
+#[cfg(all(feature = "backend-faer", feature = "dense-direct", not(feature = "complex")))]
+use kryst::solver::dense_lu;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
 
@@ -222,49 +224,6 @@ fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) ->
     norm_sq.sqrt()
 }
 
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-fn solve_dense_lu(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
-    let n = b.len();
-    for k in 0..n {
-        let mut pivot = k;
-        let mut max_val = a[k][k].abs();
-        for (i, row) in a.iter().enumerate().skip(k + 1).take(n - (k + 1)) {
-            if row[k].abs() > max_val {
-                max_val = row[k].abs();
-                pivot = i;
-            }
-        }
-        if max_val <= 1e-15 || !max_val.is_finite() {
-            return None;
-        }
-        if pivot != k {
-            a.swap(k, pivot);
-            b.swap(k, pivot);
-        }
-        let piv = a[k][k];
-        for i in (k + 1)..n {
-            let factor = a[i][k] / piv;
-            a[i][k] = 0.0;
-            for j in (k + 1)..n {
-                a[i][j] -= factor * a[k][j];
-            }
-            b[i] -= factor * b[k];
-        }
-    }
-
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut sum = b[i];
-        for (j, &xj) in x.iter().enumerate().skip(i + 1).take(n - (i + 1)) {
-            sum -= a[i][j] * xj;
-        }
-        if a[i][i].abs() <= 1e-15 || !a[i][i].is_finite() {
-            return None;
-        }
-        x[i] = sum / a[i][i];
-    }
-    Some(x)
-}
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn direct_reference_policy(a_mat: &CsrMatrix<f64>) -> (bool, String) {
@@ -327,39 +286,50 @@ fn compare_with_direct_reference(
         }));
     }
 
-    let dense = a_mat.to_dense()?;
-    let n = rhs.len();
-    let mut dense_rows = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            dense_rows[i][j] = dense[(i, j)];
+    #[cfg(feature = "dense-direct")]
+    {
+        let dense_mat = a_mat.to_dense()?;
+        let mut reference_solution = vec![0.0; rhs.len()];
+        if let Err(err) = dense_lu::solve(&dense_mat, rhs, &mut reference_solution) {
+            return Ok(Some(DirectReferenceComparison {
+                abs_error_norm: f64::NAN,
+                rel_error_norm: f64::NAN,
+                matches_verified_answer: false,
+                note: format!("{}; direct LU failed ({err})", policy_note),
+            }));
         }
-    }
-    let Some(reference_solution) = solve_dense_lu(dense_rows, rhs.to_vec()) else {
+
+        let mut diff_sq = 0.0;
+        let mut ref_sq = 0.0;
+        for (&x_it, &x_ref) in iterative_solution.iter().zip(reference_solution.iter()) {
+            let d = x_it - x_ref;
+            diff_sq += d * d;
+            ref_sq += x_ref * x_ref;
+        }
+        let abs_error_norm = diff_sq.sqrt();
+        let rel_error_norm = abs_error_norm / ref_sq.sqrt().max(1e-32);
+        let matches_verified_answer = rel_error_norm <= 1e-6;
         return Ok(Some(DirectReferenceComparison {
+            abs_error_norm,
+            rel_error_norm,
+            matches_verified_answer,
+            note: policy_note,
+        }));
+    }
+
+    #[cfg(not(feature = "dense-direct"))]
+    {
+        let _ = (rhs, iterative_solution);
+        Ok(Some(DirectReferenceComparison {
             abs_error_norm: f64::NAN,
             rel_error_norm: f64::NAN,
             matches_verified_answer: false,
-            note: format!("{}; direct LU failed (near-singular pivot)", policy_note),
-        }));
-    };
-
-    let mut diff_sq = 0.0;
-    let mut ref_sq = 0.0;
-    for (&x_it, &x_ref) in iterative_solution.iter().zip(reference_solution.iter()) {
-        let d = x_it - x_ref;
-        diff_sq += d * d;
-        ref_sq += x_ref * x_ref;
+            note: format!(
+                "{}; direct LU failed (dense-direct feature is disabled)",
+                policy_note
+            ),
+        }))
     }
-    let abs_error_norm = diff_sq.sqrt();
-    let rel_error_norm = abs_error_norm / ref_sq.sqrt().max(1e-32);
-    let matches_verified_answer = rel_error_norm <= 1e-6;
-    Ok(Some(DirectReferenceComparison {
-        abs_error_norm,
-        rel_error_norm,
-        matches_verified_answer,
-        note: policy_note,
-    }))
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
