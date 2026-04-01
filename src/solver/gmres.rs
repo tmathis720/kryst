@@ -1163,6 +1163,9 @@ impl GmresSolver {
                         recurrence_residual: Some(cycle_res_est),
                     },
                 );
+                log::info!(
+                    "GMRES(cycle-end): monitor_residual={monitor_residual:.6e}, true_residual={true_residual:.6e}, ls_residual={ls_residual:.6e}"
+                );
             }
 
             stats.iterations = total_iters;
@@ -2091,6 +2094,9 @@ impl GmresSolver {
                         recurrence_residual: Some(cycle_res_est),
                     },
                 );
+                log::info!(
+                    "GMRES(s-step cycle-end): monitor_residual={monitor_residual:.6e}, true_residual={true_residual:.6e}, ls_residual={ls_residual:.6e}"
+                );
             }
 
             stats.iterations = total_iters;
@@ -2266,7 +2272,10 @@ impl GmresSolver {
             };
             return fallback
                 .solve(a, pc, b, x, pc_side, comm, monitors, None)
-                .map(|s| s.with_reduction_model(self.reduction_model()));
+                .map(|s| {
+                    s.with_reduction_model(self.reduction_model())
+                        .with_gmres_classical_retry(true)
+                });
         }
         Ok(stats)
     }
