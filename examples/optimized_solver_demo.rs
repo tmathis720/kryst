@@ -60,9 +60,7 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::matrix::op::DenseOp;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::matrix::op::LinOp;
+use kryst::matrix::op::{CsrOp, DenseOp, LinOp};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -190,17 +188,25 @@ fn test_optimal_solver(
 ) -> Result<(usize, f64, f64, f64, bool, String), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
 
-    // Keep the original operator for solve + residual checks.
-    let dense_a_matrix = Arc::new(a_mat.to_dense()?);
-    let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(DenseOp::<f64>::new(Arc::clone(&dense_a_matrix)));
-    // Optional repaired/scaled matrix for preconditioner construction only.
+    // Sparse-first path: keep A/P in CSR form so AMG/ILU/Jacobi comparisons reflect
+    // actual sparse operator semantics used by iterative methods.
+    let csr_a_matrix = Arc::new(a_mat.clone());
+    let mut a_op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::clone(&csr_a_matrix)));
+    // Optional repaired/scaled matrix for preconditioner construction only (also sparse).
     let p_op: Option<Arc<dyn LinOp<S = f64>>> = match p_mat {
-        Some(p) => {
-            let dense_p = Arc::new(p.to_dense()?);
-            Some(Arc::new(DenseOp::<f64>::new(dense_p)))
-        }
+        Some(p) => Some(Arc::new(CsrOp::new(Arc::new(p.clone())))),
         None => None,
     };
+    // Dense/direct reference path is intentionally opt-in and size-gated to avoid
+    // forcing densification in the normal iterative benchmark workflow.
+    let allow_direct_reference = std::env::var("KRYST_ENABLE_DIRECT_REFERENCE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    let small_matrix_for_direct = a_mat.nrows() <= 1024 && a_mat.ncols() <= 1024;
+    if allow_direct_reference && small_matrix_for_direct {
+        let dense_a_matrix = Arc::new(a_mat.to_dense()?);
+        a_op = Arc::new(DenseOp::<f64>::new(dense_a_matrix));
+    }
     let rhs_vec = rhs.to_vec();
 
     // Try primary configuration
@@ -220,7 +226,7 @@ fn test_optimal_solver(
         .set_pc_type(pct, amg_opts_ref)?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
-    // Always solve against A_op; use optional P_op only to build the preconditioner.
+    // Solve and residual checks both use the same A_op.
     ksp.set_operators(Arc::clone(&a_op), p_op.clone());
     ksp.setup()?;
 
