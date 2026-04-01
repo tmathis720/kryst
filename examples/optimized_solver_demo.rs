@@ -185,7 +185,7 @@ fn test_optimal_solver(
     config: &OptimalConfig,
     _matrix_name: &str,
     is_root_rank: bool,
-) -> Result<(usize, f64, f64, f64, bool, String), Box<dyn std::error::Error>> {
+) -> Result<(String, String, String, f64, f64, usize, String, bool), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
 
     // Sparse-first path: keep A/P in CSR form so AMG/ILU/Jacobi comparisons reflect
@@ -230,29 +230,59 @@ fn test_optimal_solver(
     ksp.set_operators(Arc::clone(&a_op), p_op.clone());
     ksp.setup()?;
 
-    let start = Instant::now();
     let result = ksp.solve(&rhs_vec, &mut solution);
-    let solve_time = start.elapsed().as_secs_f64();
+
+    fn classify_failure(msg: &str) -> &'static str {
+        let m = msg.to_ascii_lowercase();
+        if m.contains("contract") || m.contains("cg rejected") || m.contains("wrong method") {
+            "contract_mismatch"
+        } else if m.contains("breakdown")
+            || m.contains("nan")
+            || m.contains("inf")
+            || m.contains("zero pivot")
+            || m.contains("singular")
+        {
+            "breakdown"
+        } else if m.contains("stagnat")
+            || m.contains("max iter")
+            || m.contains("did not converge")
+            || m.contains("no convergence")
+        {
+            "stagnated"
+        } else {
+            "failed"
+        }
+    }
 
     match result {
         Ok(stats) => {
             let true_residual = true_residual_norm(a_op.as_ref(), &rhs_vec, &solution);
             let converged = true_residual < 1e-6;
-            let method_used = format!(
+            let primary_method = format!(
                 "{} + {}",
                 config.solver.to_uppercase(),
                 config.preconditioner.to_uppercase()
             );
+            let status = if converged { "ok" } else { "stagnated" }.to_string();
             Ok((
-                stats.iterations,
+                primary_method,
+                "-".to_string(),
+                "-".to_string(),
                 true_residual,
                 stats.final_residual,
-                solve_time,
+                stats.iterations,
+                status,
                 converged,
-                method_used,
             ))
         }
-        Err(_) => {
+        Err(primary_err) => {
+            let primary_reason = primary_err.to_string();
+            let primary_failure = classify_failure(&primary_reason).to_string();
+            let primary_method = format!(
+                "{} + {}",
+                config.solver.to_uppercase(),
+                config.preconditioner.to_uppercase()
+            );
             // Try fallback configuration
             if is_root_rank {
                 println!("    Primary method failed, trying fallback...");
@@ -270,24 +300,58 @@ fn test_optimal_solver(
             ksp_fallback.setup()?;
 
             let start_fallback = Instant::now();
-            let stats_fallback = ksp_fallback.solve(&rhs_vec, &mut solution_fallback)?;
+            let fallback_solve = ksp_fallback.solve(&rhs_vec, &mut solution_fallback);
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
-
-            let true_residual = true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-            let converged = true_residual < 1e-6;
-            let method_used = format!(
-                "{} + {} (fallback)",
+            let fallback_method = format!(
+                "{} + {}",
                 config.fallback_solver.to_uppercase(),
                 config.fallback_pc.to_uppercase()
             );
-            Ok((
-                stats_fallback.iterations,
-                true_residual,
-                stats_fallback.final_residual,
-                solve_time_fallback,
-                converged,
-                method_used,
-            ))
+            match fallback_solve {
+                Ok(stats_fallback) => {
+                    let true_residual =
+                        true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
+                    let converged = true_residual < 1e-6;
+                    let status = if converged { "ok" } else { "stagnated" }.to_string();
+                    let reason = format!(
+                        "primary {}: {}; fallback succeeded with {}",
+                        primary_failure, primary_reason, fallback_method
+                    );
+                    let _ = solve_time_fallback;
+                    Ok((
+                        primary_method,
+                        fallback_method,
+                        reason,
+                        true_residual,
+                        stats_fallback.final_residual,
+                        stats_fallback.iterations,
+                        status,
+                        converged,
+                    ))
+                }
+                Err(fallback_err) => {
+                    let fallback_reason = fallback_err.to_string();
+                    let fallback_failure = classify_failure(&fallback_reason);
+                    let status = if primary_failure == "contract_mismatch" {
+                        "contract_mismatch".to_string()
+                    } else {
+                        fallback_failure.to_string()
+                    };
+                    Ok((
+                        primary_method,
+                        fallback_method,
+                        format!(
+                            "primary {}: {}; fallback {}: {}",
+                            primary_failure, primary_reason, fallback_failure, fallback_reason
+                        ),
+                        f64::NAN,
+                        f64::NAN,
+                        0,
+                        status,
+                        false,
+                    ))
+                }
+            }
         }
     }
 }
@@ -632,17 +696,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_root_rank {
         println!(
-            "{:<15} {:<8} {:<12} {:<12} {:<10} {:<8} {:<25} {}",
+            "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
             "Matrix",
-            "Iters",
+            "Primary",
+            "Fallback",
+            "Reason",
             "TrueRes",
-            "PrecRes",
-            "Time(s)",
+            "StatsRes",
+            "Iterations",
             "Status",
-            "Method",
             "Performance vs Benchmark"
         );
-        println!("{}", "=".repeat(107));
+        println!("{}", "=".repeat(150));
     }
 
     for (matrix_name, _description) in test_matrices {
@@ -665,8 +730,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Files not found",
-                        matrix_name, "N/A", "N/A", "N/A", "⚠", "N/A"
+                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
+                        matrix_name, "-", "-", "files_missing", "N/A", "N/A", "N/A", "failed", "-"
                     );
                 }
                 continue;
@@ -743,8 +808,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
-                    "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Matrix too large for demo",
-                    matrix_name, "SKIP", "N/A", "N/A", "⚠", "N/A"
+                    "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
+                    matrix_name, "-", "-", "too_large", "N/A", "N/A", "SKIP", "failed", "-"
                 );
             }
             continue;
@@ -759,28 +824,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             matrix_name,
             is_root_rank,
         ) {
-            Ok((iters, true_residual, prec_residual, time, converged, method)) => {
-                let status = if converged { "✓" } else { "✗" };
+            Ok((primary, fallback, reason, true_residual, prec_residual, iters, status, converged)) => {
 
                 // Compare with benchmark expectations
-                let iter_performance = if iters <= config.expected_iterations {
+                let iter_performance = if converged && iters <= config.expected_iterations {
                     "Better than expected"
-                } else if iters <= config.expected_iterations * 2 {
+                } else if converged && iters <= config.expected_iterations * 2 {
                     "Within expected range"
-                } else {
+                } else if converged {
                     "Slower than expected"
+                } else {
+                    "-"
                 };
 
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<8} {:<12.2e} {:<12.2e} {:<10.3} {:<8} {:<25} {}",
+                        "{:<15} {:<22} {:<22} {:<18} {:<12.2e} {:<12.2e} {:<10} {:<14} {}",
                         matrix_name,
-                        iters,
+                        primary,
+                        fallback,
+                        reason,
                         true_residual,
                         prec_residual,
-                        time,
                         status,
-                        method,
+                        iters,
                         iter_performance
                     );
                 }
@@ -808,8 +875,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Error: {}",
-                        matrix_name, "FAIL", "N/A", "N/A", "✗", "N/A", e
+                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
+                        matrix_name, "-", "-", "failed", "N/A", "N/A", "N/A", "failed", e
                     );
                 }
             }
