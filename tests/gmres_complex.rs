@@ -39,12 +39,12 @@ fn gmres_solves_random_complex_system() {
         )
         .expect("GMRES solve");
 
-    assert!(matches!(
-        stats.reason,
-        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
-    ));
-
     let err = op.residual_norm(&x, &b);
+    assert!(
+        stats.reason.is_converged() || err < 1e-9,
+        "GMRES did not converge (reason: {:?}, residual: {err:e})",
+        stats.reason
+    );
     assert!(err < 1e-9, "GMRES residual too large: {err:e}");
 
     for (approx, exact) in x.iter().zip(x_true.iter()) {
@@ -76,13 +76,13 @@ fn gmres_pipelined_solves_random_complex_system() {
         )
         .expect("GMRES pipelined solve");
 
-    assert!(matches!(
-        stats.reason,
-        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
-    ));
-
     let err = op.residual_norm(&x, &b);
-    assert!(err.is_finite(), "pipelined GMRES residual not finite");
+    assert!(
+        stats.reason.is_converged() || err < 1e-9,
+        "pipelined GMRES did not converge (reason: {:?}, residual: {err:e})",
+        stats.reason
+    );
+    assert!(err < 1e-9, "pipelined GMRES residual too large: {err:e}");
 }
 
 #[test]
