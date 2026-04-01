@@ -8,6 +8,7 @@ pub mod diagnostics;
 pub mod invariants;
 #[cfg(feature = "backend-faer")]
 pub mod matrix_market;
+pub mod matrix_screening;
 pub mod merge;
 pub mod metrics;
 pub mod monitor;
