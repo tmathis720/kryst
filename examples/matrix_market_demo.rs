@@ -67,6 +67,9 @@ mod real_demo {
     use kryst::solver::MonitorAction;
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
+    use kryst::utils::matrix_screening::{
+        detect_diag_issues, has_positive_diagonal, is_approximately_symmetric, repair_diagonal_csr,
+    };
 
     #[cfg(feature = "mpi")]
     use kryst::parallel::MpiComm;
@@ -1071,9 +1074,9 @@ mod real_demo {
         } else {
             nnz as f64 / ((nrows as f64) * (ncols as f64))
         };
-        let approx_symmetric = estimate_symmetry(matrix, 1e-12, 2_000);
+        let approx_symmetric = is_approximately_symmetric(matrix, 1e-12, 2_000);
         let has_diag_zeros = detect_diag_issues(matrix, 1e-14, 20_000);
-        let diag_positive = !detect_nonpositive_diag(matrix, 1e-14, 20_000);
+        let diag_positive = has_positive_diagonal(matrix, 1e-14, 20_000);
         Analysis {
             nrows,
             nnz,
@@ -1086,126 +1089,6 @@ mod real_demo {
 
     fn tiny_matrix_threshold() -> usize {
         2_000
-    }
-
-    fn repair_diagonal_csr(a: &CsrMatrix<f64>, tol: f64, tau: f64) -> (CsrMatrix<f64>, usize) {
-        let nrows = a.nrows();
-        let ncols = a.ncols();
-
-        let mut rp: Vec<usize> = Vec::with_capacity(nrows + 1);
-        let mut ci: Vec<usize> = Vec::with_capacity(a.nnz() + nrows);
-        let mut vv: Vec<f64> = Vec::with_capacity(a.nnz() + nrows);
-
-        rp.push(0);
-        let mut fixed = 0usize;
-
-        for i in 0..nrows {
-            let (cols, vals) = a.row(i);
-
-            let row_abs_sum: f64 = vals.iter().map(|x| x.abs()).sum();
-            let repl = (tau * row_abs_sum).max(tol);
-
-            let mut diag_handled = false;
-
-            for (&c, &v) in cols.iter().zip(vals.iter()) {
-                if !diag_handled && i < ncols && c > i {
-                    ci.push(i);
-                    vv.push(repl);
-                    fixed += 1;
-                    diag_handled = true;
-                }
-
-                if c == i {
-                    let new_v = if v.abs() <= tol {
-                        fixed += 1;
-                        repl
-                    } else {
-                        v
-                    };
-                    ci.push(c);
-                    vv.push(new_v);
-                    diag_handled = true;
-                } else {
-                    ci.push(c);
-                    vv.push(v);
-                }
-            }
-
-            if !diag_handled && i < ncols {
-                ci.push(i);
-                vv.push(repl);
-                fixed += 1;
-            }
-
-            rp.push(ci.len());
-        }
-
-        (CsrMatrix::from_csr(nrows, ncols, rp, ci, vv), fixed)
-    }
-
-    fn estimate_symmetry(matrix: &CsrMatrix<f64>, tol: f64, max_checks: usize) -> bool {
-        let n = matrix.nrows().min(matrix.ncols());
-        let mut checks = 0usize;
-        for i in 0..n {
-            let (cols_i, vals_i) = matrix.row(i);
-            for (&j, &v) in cols_i.iter().zip(vals_i.iter()) {
-                if i == j || j >= n {
-                    continue;
-                }
-                checks += 1;
-                if checks > max_checks {
-                    return true;
-                }
-                if let Some(v_t) = lookup(matrix, j, i) {
-                    if (v_t - v).abs() > tol {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn detect_diag_issues(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
-        let n = matrix.nrows().min(matrix.ncols());
-        let limit = n.min(max_rows);
-        for i in 0..limit {
-            match lookup(matrix, i, i) {
-                Some(val) if val.abs() > tol => continue,
-                _ => return true,
-            }
-        }
-        false
-    }
-
-    fn detect_nonpositive_diag(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
-        let n = matrix.nrows().min(matrix.ncols());
-        let limit = n.min(max_rows);
-        for i in 0..limit {
-            match lookup(matrix, i, i) {
-                Some(val) if val > tol => continue,
-                _ => return true,
-            }
-        }
-        false
-    }
-
-    fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
-        if row >= matrix.nrows() {
-            return None;
-        }
-        let (cols, vals) = matrix.row(row);
-        for (&c, &v) in cols.iter().zip(vals.iter()) {
-            if c == col {
-                return Some(v);
-            }
-            if c > col {
-                break;
-            }
-        }
-        None
     }
 
     #[cfg(feature = "mpi")]
