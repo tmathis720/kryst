@@ -302,6 +302,7 @@ pub struct PcOptions {
     pub pc_ksp_gmres_restart: Option<usize>,
     pub pc_ksp_fgmres_restart: Option<usize>,
     pub pc_ksp_gmres_orthog: Option<String>,
+    pub pc_ksp_gmres_reorth: Option<String>,
     pub pc_ksp_fgmres_orthog: Option<String>,
     pub pc_ksp_monitor_rank0: Option<bool>,
     pub pc_ksp_monitor_policy: Option<String>,
@@ -729,6 +730,9 @@ impl PcOptions {
             }
             if ksp_opts.gmres_orthog.is_none() {
                 ksp_opts.gmres_orthog = self.pc_ksp_gmres_orthog.clone();
+            }
+            if ksp_opts.gmres_reorth.is_none() {
+                ksp_opts.gmres_reorth = self.pc_ksp_gmres_reorth.clone();
             }
             if ksp_opts.fgmres_orthog.is_none() {
                 ksp_opts.fgmres_orthog = self.pc_ksp_fgmres_orthog.clone();
@@ -1382,6 +1386,8 @@ impl Sink for PcOptions {
                 set_opt!(&mut self.pc_ksp_fgmres_restart, parse_as::<usize>(v, spec)?)
             }
             "pc_ksp_gmres_orthog" => set_opt!(&mut self.pc_ksp_gmres_orthog, v.to_lowercase()),
+            "pc_ksp_gmres_reorth" => set_opt!(&mut self.pc_ksp_gmres_reorth, v.to_lowercase()),
+            "ksp_gmres_reorth" => set_opt!(&mut self.pc_ksp_gmres_reorth, v.to_lowercase()),
             "pc_ksp_fgmres_orthog" => set_opt!(&mut self.pc_ksp_fgmres_orthog, v.to_lowercase()),
             "pc_ksp_monitor_rank0" => {
                 set_opt!(&mut self.pc_ksp_monitor_rank0, parse_as::<bool>(v, spec)?)
@@ -2054,6 +2060,9 @@ impl PcOptions {
         if self.pc_ksp_gmres_orthog.is_some() {
             ksp.gmres_orthog = self.pc_ksp_gmres_orthog.clone();
         }
+        if self.pc_ksp_gmres_reorth.is_some() {
+            ksp.gmres_reorth = self.pc_ksp_gmres_reorth.clone();
+        }
         if self.pc_ksp_fgmres_orthog.is_some() {
             ksp.fgmres_orthog = self.pc_ksp_fgmres_orthog.clone();
         }
@@ -2624,6 +2633,7 @@ impl PcOptions {
         o!(pc_ksp_gmres_restart);
         o!(pc_ksp_fgmres_restart);
         o!(pc_ksp_gmres_orthog);
+        o!(pc_ksp_gmres_reorth);
         o!(pc_ksp_fgmres_orthog);
         o!(pc_ksp_monitor_rank0);
         o!(pc_ksp_monitor_policy);
@@ -3638,6 +3648,8 @@ mod old_tests {
             "13",
             "-pc_ksp_gmres_orthog",
             "cgs",
+            "-pc_ksp_gmres_reorth",
+            "always",
             "-pc_ksp_monitor_rank0",
             "true",
             "-pc_ksp_monitor_policy",
@@ -3667,6 +3679,7 @@ mod old_tests {
         assert_eq!(opts.pc_ksp_gmres_restart, Some(11));
         assert_eq!(opts.pc_ksp_fgmres_restart, Some(13));
         assert_eq!(opts.pc_ksp_gmres_orthog.as_deref(), Some("cgs"));
+        assert_eq!(opts.pc_ksp_gmres_reorth.as_deref(), Some("always"));
         assert_eq!(opts.pc_ksp_monitor_rank0, Some(true));
         assert_eq!(opts.pc_ksp_monitor_policy.as_deref(), Some("rank0"));
         assert_eq!(opts.pc_ksp_propagate_converged_reason, Some(false));
@@ -3685,6 +3698,7 @@ mod old_tests {
             pc_ksp_maxits: Some(8),
             pc_ksp_restart: Some(12),
             pc_ksp_gmres_restart: Some(18),
+            pc_ksp_gmres_reorth: Some("always".into()),
             pc_ksp_pc_side: Some("right".into()),
             pc_ksp_ksp_options: Some(KspOptions {
                 ksp_type: Some("fgmres".into()),
@@ -3704,6 +3718,7 @@ mod old_tests {
         assert_eq!(ksp.ksp_type.as_deref(), Some("gmres"));
         assert_eq!(ksp.maxits, Some(8));
         assert_eq!(ksp.pc_side.as_deref(), Some("right"));
+        assert_eq!(ksp.gmres_reorth.as_deref(), Some("always"));
         assert_eq!(ksp.effective_restart_for(KspType::GMRES), Some(18));
         assert_eq!(ksp.effective_restart_for(KspType::FGMRES), Some(7));
 

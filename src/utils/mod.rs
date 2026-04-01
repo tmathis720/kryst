@@ -19,6 +19,7 @@ pub mod profiling;
 pub mod reduction;
 #[cfg(feature = "backend-faer")]
 pub mod reordering;
+pub mod solver_policy;
 #[cfg(all(feature = "tuning", not(feature = "complex")))]
 pub mod tuning;
 pub mod verification;
