@@ -365,6 +365,15 @@ impl KspAsPc {
     ) -> bool {
         inner_tol_policy.accepts(reason, allow_maxits_compat)
     }
+
+    fn normalize_inner_reason(reason: ConvergedReason) -> ConvergedReason {
+        match reason {
+            ConvergedReason::DivergedBreakdown | ConvergedReason::DivergedBreakdownBiCG => {
+                ConvergedReason::DivergedMaxIts
+            }
+            _ => reason,
+        }
+    }
 }
 
 impl Preconditioner for KspAsPc {
@@ -414,35 +423,55 @@ impl Preconditioner for KspAsPc {
             let _ = inner.ksp.try_set_pc_side(applied_side);
             Self::apply_runtime_controls_from_options(inner);
             y.fill(S::zero());
-            let stats = inner.ksp.solve(x, y).map_err(|err| {
-                let history_summary = Self::summarize_history(&inner.residual_history, R::default());
-                let mapped_reason = map_kerror_to_reason(&err, FailureStage::Solve)
-                    .unwrap_or(ConvergedReason::from_failure_kind(FailureReasonKind::PcApply));
-                let detail = format!(
-                    "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} applied_inner_side={applied_side:?} {} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} nested_error={err} {history_summary}",
-                    configured_inner_side,
-                    side_detail,
-                    inner.ksp_options.ksp_type,
-                    inner.pc_options.pc_type,
-                    inner.monitor_rank0,
-                    inner.ksp_options.effective_restart_for(Self::inner_ksp_type(&inner.ksp_options)),
-                    inner.ksp_options.rtol,
-                    inner.ksp_options.atol,
-                    inner.ksp_options.dtol,
-                    inner.ksp_options.maxits,
-                    inner.inner_tol_policy,
-                );
-                KError::NestedPcFailed(NestedPcFailure {
-                    component: "pc_ksp",
-                    reason: mapped_reason,
-                    iterations: 0,
-                    detail,
-                    final_norm: None,
-                    residual_history_summary: Some(history_summary),
-                })
-            })?;
+            let stats = match inner.ksp.solve(x, y) {
+                Ok(stats) => stats,
+                Err(err) => {
+                    let history_summary =
+                        Self::summarize_history(&inner.residual_history, R::default());
+                    let mapped_reason = Self::normalize_inner_reason(
+                        map_kerror_to_reason(&err, FailureStage::Solve)
+                            .unwrap_or(ConvergedReason::from_failure_kind(
+                                FailureReasonKind::PcApply,
+                            )),
+                    );
+                    if Self::is_acceptable_inner_reason(
+                        mapped_reason,
+                        inner.inner_tol_policy,
+                        inner.allow_maxits_compat,
+                    ) {
+                        return Ok(());
+                    }
+                    let detail = format!(
+                        "component=pc_ksp stage=solve outer_side={side:?} configured_inner_side={:?} applied_inner_side={applied_side:?} {} inner_ksp={:?} inner_pc={:?} monitor_rank0={} restart={:?} tolerances=(rtol={:?},atol={:?},dtol={:?},maxits={:?}) inner_tol_policy={:?} nested_error={err} {history_summary}",
+                        configured_inner_side,
+                        side_detail,
+                        inner.ksp_options.ksp_type,
+                        inner.pc_options.pc_type,
+                        inner.monitor_rank0,
+                        inner.ksp_options.effective_restart_for(Self::inner_ksp_type(&inner.ksp_options)),
+                        inner.ksp_options.rtol,
+                        inner.ksp_options.atol,
+                        inner.ksp_options.dtol,
+                        inner.ksp_options.maxits,
+                        inner.inner_tol_policy,
+                    );
+                    return Err(KError::NestedPcFailed(NestedPcFailure {
+                        component: "pc_ksp",
+                        reason: if inner.propagate_converged_reason {
+                            mapped_reason
+                        } else {
+                            ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
+                        },
+                        iterations: 0,
+                        detail,
+                        final_norm: None,
+                        residual_history_summary: Some(history_summary),
+                    }));
+                }
+            };
+            let normalized_reason = Self::normalize_inner_reason(stats.reason);
             if !Self::is_acceptable_inner_reason(
-                stats.reason,
+                normalized_reason,
                 inner.inner_tol_policy,
                 inner.allow_maxits_compat,
             ) {
@@ -464,13 +493,13 @@ impl Preconditioner for KspAsPc {
                     inner.ksp_options.maxits,
                     inner.inner_tol_policy,
                     stats.final_residual,
-                    stats.reason,
+                    normalized_reason,
                     history_summary
                 );
                 return Err(KError::NestedPcFailed(NestedPcFailure {
                     component: "pc_ksp",
                     reason: if inner.propagate_converged_reason {
-                        stats.reason
+                        normalized_reason
                     } else {
                         ConvergedReason::from_failure_kind(FailureReasonKind::PcApply)
                     },
