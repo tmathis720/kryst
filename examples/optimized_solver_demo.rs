@@ -93,6 +93,12 @@ struct AmgDecision {
     reason: String,
 }
 
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+struct CgCompatibility {
+    cg_safe: bool,
+    reason: String,
+}
+
 /// Get the optimal solver configuration for a specific matrix
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
@@ -313,6 +319,99 @@ fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
     let is_well_conditioned = condition_estimate < 100.0;
 
     (density, condition_estimate, is_well_conditioned)
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn cg_compatibility_screen(matrix: &CsrMatrix<f64>, diag_issues: bool) -> CgCompatibility {
+    let n = matrix.nrows().min(matrix.ncols());
+    let sample_rows = n.min(1024);
+    let symmetry_tol = 1e-7;
+
+    let mut sampled_pairs = 0usize;
+    let mut symmetry_violations = 0usize;
+    let mut non_positive_diagonal = 0usize;
+    let mut weak_gershgorin_rows = 0usize;
+
+    for i in 0..sample_rows {
+        let (cols, vals) = matrix.row(i);
+        let mut row_abs_offdiag_sum = 0.0;
+        let mut diag = None;
+
+        for (&j, &a_ij) in cols.iter().zip(vals.iter()) {
+            if j == i {
+                diag = Some(a_ij);
+                continue;
+            }
+            row_abs_offdiag_sum += a_ij.abs();
+            if j < sample_rows {
+                sampled_pairs += 1;
+                let a_ji = lookup(matrix, j, i).unwrap_or(0.0);
+                if (a_ij - a_ji).abs() > symmetry_tol {
+                    symmetry_violations += 1;
+                }
+            }
+        }
+
+        let d = diag.unwrap_or(0.0);
+        if d <= 0.0 {
+            non_positive_diagonal += 1;
+        }
+        if d <= row_abs_offdiag_sum {
+            weak_gershgorin_rows += 1;
+        }
+    }
+
+    let symmetry_ok = sampled_pairs == 0 || symmetry_violations * 100 <= sampled_pairs;
+    let diag_ok = non_positive_diagonal == 0 && !diag_issues;
+    let gershgorin_ok = weak_gershgorin_rows * 5 <= sample_rows.max(1); // <=20% weak rows
+    let cg_safe = symmetry_ok && diag_ok && gershgorin_ok;
+
+    if cg_safe {
+        return CgCompatibility {
+            cg_safe: true,
+            reason: format!(
+                "CG contract accepted: sampled symmetry/SPD heuristic passed (sym diff {:.2}%, weak Gershgorin rows {}/{}, diag issues: {})",
+                if sampled_pairs > 0 {
+                    100.0 * symmetry_violations as f64 / sampled_pairs as f64
+                } else {
+                    0.0
+                },
+                weak_gershgorin_rows,
+                sample_rows,
+                if diag_issues { "yes" } else { "no" }
+            ),
+        };
+    }
+
+    let mut causes = Vec::new();
+    if !symmetry_ok {
+        causes.push(format!(
+            "sampled nonsymmetry {:.2}%>{:.2}%",
+            100.0 * symmetry_violations as f64 / sampled_pairs.max(1) as f64,
+            1.0
+        ));
+    }
+    if !diag_ok {
+        causes.push(format!(
+            "non-positive/missing diagonal rows {} + diag_issues={}",
+            non_positive_diagonal, diag_issues
+        ));
+    }
+    if !gershgorin_ok {
+        causes.push(format!(
+            "weak Gershgorin rows {}/{}",
+            weak_gershgorin_rows, sample_rows
+        ));
+    }
+
+    CgCompatibility {
+        cg_safe: false,
+        reason: format!(
+            "wrong method for matrix contract: CG rejected by compatibility screen ({})",
+            causes.join("; ")
+        ),
+    }
 }
 
 #[cfg(not(feature = "complex"))]
@@ -572,6 +671,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Get optimal configuration for this matrix
         let mut config = get_optimal_config(matrix_name);
         let mut amg_reason = "not selected for this matrix".to_string();
+        let mut method_contract_reason = "method compatible with matrix contract".to_string();
+
+        let cg_screen = cg_compatibility_screen(&matrix, diag_issues);
+        if config.solver == "cg" && !cg_screen.cg_safe {
+            let fallback_solver =
+                if config.fallback_solver == "gmres" || config.fallback_solver == "bicgstab" {
+                    config.fallback_solver
+                } else {
+                    "gmres"
+                };
+            config.solver = fallback_solver;
+            config.preconditioner = "ilut";
+            method_contract_reason = format!(
+                "{}; switched to {} + ILUT",
+                cg_screen.reason,
+                fallback_solver.to_uppercase()
+            );
+        } else if config.solver == "cg" {
+            method_contract_reason = cg_screen.reason;
+        }
+
         if config.preconditioner == "amg" {
             let amg_decision = choose_amg_mode(&matrix, diag_issues);
             amg_reason = amg_decision.reason;
@@ -592,6 +712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if is_root_rank {
             println!("    → AMG reason: {}", amg_reason);
+            println!("    → Solver contract: {}", method_contract_reason);
         }
 
         // Analyze matrix properties
