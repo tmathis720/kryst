@@ -442,6 +442,9 @@ pub struct SolveStats<R> {
     pub nested_pc_failure: Option<NestedPcFailure>,
     /// Stable per-category reason counters for diagnostics automation.
     pub reason_counters: ReasonDiagnosticsCounters,
+    /// True when GMRES internally retried by resetting `x` and falling back to
+    /// a classical GMRES pass.
+    pub gmres_classical_retry: bool,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -460,6 +463,7 @@ impl<R: Default> SolveStats<R> {
             metrics: SolveMetrics::default(),
             nested_pc_failure: None,
             reason_counters: ReasonDiagnosticsCounters::default(),
+            gmres_classical_retry: false,
         }
     }
 
@@ -483,6 +487,12 @@ impl<R: Default> SolveStats<R> {
     /// Attach nested preconditioner failure metadata.
     pub fn with_nested_pc_failure(mut self, failure: NestedPcFailure) -> Self {
         self.nested_pc_failure = Some(failure);
+        self
+    }
+
+    /// Mark whether GMRES performed an internal retry to classical GMRES.
+    pub fn with_gmres_classical_retry(mut self, used: bool) -> Self {
+        self.gmres_classical_retry = used;
         self
     }
 

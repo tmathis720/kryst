@@ -527,6 +527,34 @@ fn test_optimal_solver(
         }
     }
 
+    fn classify_status_from_stats(
+        stats: &kryst::utils::convergence::SolveStats<f64>,
+        true_residual: f64,
+        tol: f64,
+    ) -> &'static str {
+        use kryst::utils::convergence::ConvergedReason;
+        match stats.reason {
+            ConvergedReason::DivergedIndefiniteMatrix | ConvergedReason::DivergedIndefinitePC => {
+                "contract_mismatch"
+            }
+            ConvergedReason::DivergedBreakdown
+            | ConvergedReason::DivergedBreakdownBiCG
+            | ConvergedReason::DivergedNan
+            | ConvergedReason::DivergedInf => "breakdown",
+            ConvergedReason::ConvergedRtol
+            | ConvergedReason::ConvergedAtol
+            | ConvergedReason::ConvergedTrustRegion
+            | ConvergedReason::ConvergedHappyBreakdown => {
+                if true_residual.is_finite() && true_residual < tol {
+                    "ok"
+                } else {
+                    "contract_mismatch"
+                }
+            }
+            _ => "stagnated",
+        }
+    }
+
     fn needs_fallback(
         stats: &kryst::utils::convergence::SolveStats<f64>,
         true_residual: f64,
@@ -552,20 +580,11 @@ fn test_optimal_solver(
             );
             if needs_fallback(&stats, true_residual, 1e-6) {
                 let primary_reason = format!(
-                    "soft failure: reason={:?}, true_residual={:.3e} (tol=1.000e-6)",
-                    stats.reason, true_residual
+                    "soft failure: reason={:?}, true_residual={:.3e} (tol=1.000e-6), internal_classical_retry={}",
+                    stats.reason, true_residual, stats.gmres_classical_retry
                 );
-                let primary_failure = if matches!(
-                    stats.reason,
-                    kryst::utils::convergence::ConvergedReason::DivergedIndefiniteMatrix
-                        | kryst::utils::convergence::ConvergedReason::DivergedIndefinitePC
-                ) {
-                    "contract_mismatch".to_string()
-                } else if !stats.reason.is_converged() {
-                    "stagnated".to_string()
-                } else {
-                    "failed".to_string()
-                };
+                let primary_failure =
+                    classify_status_from_stats(&stats, true_residual, 1e-6).to_string();
                 if is_root_rank {
                     println!(
                         "    Primary method did not meet convergence contract, trying fallback..."
@@ -602,11 +621,16 @@ fn test_optimal_solver(
                     Ok(stats_fallback) => {
                         let true_residual =
                             true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                        let converged = !needs_fallback(&stats_fallback, true_residual, 1e-6);
-                        let status = if converged { "ok" } else { "stagnated" }.to_string();
+                        let status =
+                            classify_status_from_stats(&stats_fallback, true_residual, 1e-6)
+                                .to_string();
+                        let converged = status == "ok";
                         let reason = format!(
-                            "primary {}: {}; fallback succeeded with {}",
-                            primary_failure, primary_reason, fallback_method
+                            "primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                            primary_failure,
+                            primary_reason,
+                            fallback_method,
+                            stats_fallback.gmres_classical_retry
                         );
                         let direct_comparison = compare_with_direct_reference(
                             matrix_name,
@@ -653,12 +677,13 @@ fn test_optimal_solver(
                 }
             } else {
                 let status = "ok".to_string();
+                let reason = format!("internal_classical_retry={}", stats.gmres_classical_retry);
                 let direct_comparison =
                     compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
                 Ok((
                     primary_method,
                     "-".to_string(),
-                    "-".to_string(),
+                    reason,
                     true_residual,
                     stats.final_residual,
                     stats.iterations,
@@ -711,11 +736,15 @@ fn test_optimal_solver(
                 Ok(stats_fallback) => {
                     let true_residual =
                         true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                    let converged = true_residual < 1e-6;
-                    let status = if converged { "ok" } else { "stagnated" }.to_string();
+                    let status = classify_status_from_stats(&stats_fallback, true_residual, 1e-6)
+                        .to_string();
+                    let converged = status == "ok";
                     let reason = format!(
-                        "primary {}: {}; fallback succeeded with {}",
-                        primary_failure, primary_reason, fallback_method
+                        "primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                        primary_failure,
+                        primary_reason,
+                        fallback_method,
+                        stats_fallback.gmres_classical_retry
                     );
                     let direct_comparison = compare_with_direct_reference(
                         matrix_name,
