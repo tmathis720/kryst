@@ -181,7 +181,8 @@ fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) ->
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn test_optimal_solver(
-    matrix: &CsrMatrix<f64>,
+    a_mat: &CsrMatrix<f64>,
+    p_mat: Option<&CsrMatrix<f64>>,
     rhs: &[f64],
     config: &OptimalConfig,
     _matrix_name: &str,
@@ -189,10 +190,17 @@ fn test_optimal_solver(
 ) -> Result<(usize, f64, f64, f64, bool, String), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
 
-    // Convert sparse matrix to dense for KspContext
-    let dense_matrix = Arc::new(matrix.to_dense()?);
-    let dense_op: Arc<dyn LinOp<S = f64>> =
-        Arc::new(DenseOp::<f64>::new(Arc::clone(&dense_matrix)));
+    // Keep the original operator for solve + residual checks.
+    let dense_a_matrix = Arc::new(a_mat.to_dense()?);
+    let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(DenseOp::<f64>::new(Arc::clone(&dense_a_matrix)));
+    // Optional repaired/scaled matrix for preconditioner construction only.
+    let p_op: Option<Arc<dyn LinOp<S = f64>>> = match p_mat {
+        Some(p) => {
+            let dense_p = Arc::new(p.to_dense()?);
+            Some(Arc::new(DenseOp::<f64>::new(dense_p)))
+        }
+        None => None,
+    };
     let rhs_vec = rhs.to_vec();
 
     // Try primary configuration
@@ -212,8 +220,8 @@ fn test_optimal_solver(
         .set_pc_type(pct, amg_opts_ref)?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
-    // provide operator and prepare workspace
-    ksp.set_operators(Arc::clone(&dense_op), None);
+    // Always solve against A_op; use optional P_op only to build the preconditioner.
+    ksp.set_operators(Arc::clone(&a_op), p_op.clone());
     ksp.setup()?;
 
     let start = Instant::now();
@@ -222,7 +230,7 @@ fn test_optimal_solver(
 
     match result {
         Ok(stats) => {
-            let true_residual = true_residual_norm(dense_op.as_ref(), &rhs_vec, &solution);
+            let true_residual = true_residual_norm(a_op.as_ref(), &rhs_vec, &solution);
             let converged = true_residual < 1e-6;
             let method_used = format!(
                 "{} + {}",
@@ -252,14 +260,14 @@ fn test_optimal_solver(
                 .set_type(st_fb)?
                 .set_pc_type(pc_fb, None)?
                 .set_tolerances(1e-6, 1e-12, 1e3, 1000);
-            ksp_fallback.set_operators(Arc::clone(&dense_op), None);
+            ksp_fallback.set_operators(Arc::clone(&a_op), p_op);
             ksp_fallback.setup()?;
 
             let start_fallback = Instant::now();
             let stats_fallback = ksp_fallback.solve(&rhs_vec, &mut solution_fallback)?;
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
 
-            let true_residual = true_residual_norm(dense_op.as_ref(), &rhs_vec, &solution_fallback);
+            let true_residual = true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
             let converged = true_residual < 1e-6;
             let method_used = format!(
                 "{} + {} (fallback)",
@@ -659,13 +667,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // Convert to Kryst formats
-        let matrix = matrix_data.to_csr_matrix()?;
-        let (matrix, repaired) = repair_diagonal_csr(&matrix, 1e-14, 1e-8);
+        // Keep original operator matrix; optionally build repaired matrix for preconditioner setup only.
+        let a_op = matrix_data.to_csr_matrix()?;
+        let (p_candidate, repaired) = repair_diagonal_csr(&a_op, 1e-14, 1e-8);
+        let p_mat = if repaired > 0 {
+            Some(p_candidate)
+        } else {
+            None
+        };
         if is_root_rank && repaired > 0 {
-            println!("    → Repaired {repaired} diagonal entries (|diag|<=1e-14 or missing).");
+            println!(
+                "    → Preconditioner matrix repaired: {repaired} diagonal entries (|diag|<=1e-14 or missing)."
+            );
         }
-        let diag_issues = detect_diag_issues(&matrix, 1e-14, 20_000);
+        let diag_issues = detect_diag_issues(&a_op, 1e-14, 20_000);
         let rhs = rhs_data.to_vector()?;
 
         // Get optimal configuration for this matrix
@@ -673,7 +688,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut amg_reason = "not selected for this matrix".to_string();
         let mut method_contract_reason = "method compatible with matrix contract".to_string();
 
-        let cg_screen = cg_compatibility_screen(&matrix, diag_issues);
+        let cg_screen = cg_compatibility_screen(&a_op, diag_issues);
         if config.solver == "cg" && !cg_screen.cg_safe {
             let fallback_solver =
                 if config.fallback_solver == "gmres" || config.fallback_solver == "bicgstab" {
@@ -693,7 +708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if config.preconditioner == "amg" {
-            let amg_decision = choose_amg_mode(&matrix, diag_issues);
+            let amg_decision = choose_amg_mode(&a_op, diag_issues);
             amg_reason = amg_decision.reason;
             match amg_decision.mode {
                 AmgMode::DefaultSpd => {}
@@ -716,10 +731,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Analyze matrix properties
-        let (density, condition_est, is_well_conditioned) = analyze_matrix_properties(&matrix);
+        let (density, condition_est, is_well_conditioned) = analyze_matrix_properties(&a_op);
 
         // Skip very large matrices for this demo
-        if matrix.nrows() > 6000 {
+        if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
                     "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Matrix too large for demo",
@@ -730,7 +745,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Test with optimal configuration
-        match test_optimal_solver(&matrix, &rhs, &config, matrix_name, is_root_rank) {
+        match test_optimal_solver(
+            &a_op,
+            p_mat.as_ref(),
+            &rhs,
+            &config,
+            matrix_name,
+            is_root_rank,
+        ) {
             Ok((iters, true_residual, prec_residual, time, converged, method)) => {
                 let status = if converged { "✓" } else { "✗" };
 
