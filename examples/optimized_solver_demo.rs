@@ -275,26 +275,128 @@ fn test_optimal_solver(
         }
     }
 
+    fn needs_fallback(
+        stats: &kryst::utils::convergence::SolveStats<f64>,
+        true_residual: f64,
+        tol: f64,
+    ) -> bool {
+        let contract_mismatch = matches!(
+            stats.reason,
+            kryst::utils::convergence::ConvergedReason::DivergedIndefiniteMatrix
+                | kryst::utils::convergence::ConvergedReason::DivergedIndefinitePC
+        );
+        let explicit_nonconverged_reason = !stats.reason.is_converged();
+        let missed_true_residual_contract = !true_residual.is_finite() || true_residual >= tol;
+        contract_mismatch || explicit_nonconverged_reason || missed_true_residual_contract
+    }
+
     match result {
         Ok(stats) => {
             let true_residual = true_residual_norm(a_op.as_ref(), &rhs_vec, &solution);
-            let converged = true_residual < 1e-6;
             let primary_method = format!(
                 "{} + {}",
                 decision.primary_solver.to_uppercase(),
                 decision.primary_pc.to_uppercase()
             );
-            let status = if converged { "ok" } else { "stagnated" }.to_string();
-            Ok((
-                primary_method,
-                "-".to_string(),
-                "-".to_string(),
-                true_residual,
-                stats.final_residual,
-                stats.iterations,
-                status,
-                converged,
-            ))
+            if needs_fallback(&stats, true_residual, 1e-6) {
+                let primary_reason = format!(
+                    "soft failure: reason={:?}, true_residual={:.3e} (tol=1.000e-6)",
+                    stats.reason, true_residual
+                );
+                let primary_failure = if matches!(
+                    stats.reason,
+                    kryst::utils::convergence::ConvergedReason::DivergedIndefiniteMatrix
+                        | kryst::utils::convergence::ConvergedReason::DivergedIndefinitePC
+                ) {
+                    "contract_mismatch".to_string()
+                } else if !stats.reason.is_converged() {
+                    "stagnated".to_string()
+                } else {
+                    "failed".to_string()
+                };
+                if is_root_rank {
+                    println!(
+                        "    Primary method did not meet convergence contract, trying fallback..."
+                    );
+                }
+                let mut solution_fallback = vec![0.0; rhs.len()];
+
+                let mut ksp_fallback = KspContext::new();
+                let st_fb = SolverType::from_str(&decision.fallback_solver)?;
+                let pc_fb = PcType::from_str(&decision.fallback_pc)?;
+                ksp_fallback
+                    .set_type(st_fb)?
+                    .set_pc_type(pc_fb, None)?
+                    .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+                ksp_fallback.set_operators(Arc::clone(&a_op), p_op.clone());
+                ksp_fallback.setup()?;
+
+                let start_fallback = Instant::now();
+                let fallback_solve = ksp_fallback.solve(&rhs_vec, &mut solution_fallback);
+                let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
+                let fallback_method = format!(
+                    "{} + {}",
+                    decision.fallback_solver.to_uppercase(),
+                    decision.fallback_pc.to_uppercase()
+                );
+                match fallback_solve {
+                    Ok(stats_fallback) => {
+                        let true_residual =
+                            true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
+                        let converged = !needs_fallback(&stats_fallback, true_residual, 1e-6);
+                        let status = if converged { "ok" } else { "stagnated" }.to_string();
+                        let reason = format!(
+                            "primary {}: {}; fallback succeeded with {}",
+                            primary_failure, primary_reason, fallback_method
+                        );
+                        let _ = solve_time_fallback;
+                        Ok((
+                            primary_method,
+                            fallback_method,
+                            reason,
+                            true_residual,
+                            stats_fallback.final_residual,
+                            stats_fallback.iterations,
+                            status,
+                            converged,
+                        ))
+                    }
+                    Err(fallback_err) => {
+                        let fallback_reason = fallback_err.to_string();
+                        let fallback_failure = classify_failure(&fallback_reason);
+                        let status = if primary_failure == "contract_mismatch" {
+                            "contract_mismatch".to_string()
+                        } else {
+                            fallback_failure.to_string()
+                        };
+                        Ok((
+                            primary_method,
+                            fallback_method,
+                            format!(
+                                "primary {}: {}; fallback {}: {}",
+                                primary_failure, primary_reason, fallback_failure, fallback_reason
+                            ),
+                            f64::NAN,
+                            f64::NAN,
+                            0,
+                            status,
+                            false,
+                        ))
+                    }
+                }
+            } else {
+                let status = "ok".to_string();
+                Ok((
+                    primary_method,
+                    "-".to_string(),
+                    "-".to_string(),
+                    true_residual,
+                    stats.final_residual,
+                    stats.iterations,
+                    status,
+                    true,
+                ))
+            }
         }
         Err(primary_err) => {
             let primary_reason = primary_err.to_string();
