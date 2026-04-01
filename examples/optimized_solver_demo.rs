@@ -925,8 +925,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         reason,
                         true_residual,
                         prec_residual,
-                        status,
                         iters,
+                        status,
                         iter_performance
                     );
                     println!(
