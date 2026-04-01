@@ -75,6 +75,7 @@ struct OptimalConfig {
     expected_iterations: usize,
     fallback_solver: &'static str,
     fallback_pc: &'static str,
+    amg_nonsymmetric_override: bool,
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -96,6 +97,8 @@ struct SelectionDecision {
     rationale: Vec<String>,
     contract_checks: Vec<String>,
     expected_iterations: usize,
+    amg_mode: AmgMode,
+    amg_status_label: String,
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -137,6 +140,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 100,
             fallback_solver: "gmres",
             fallback_pc: "ilu",
+            amg_nonsymmetric_override: false,
         },
         "e05r0100" => OptimalConfig {
             solver: "gmres",
@@ -145,6 +149,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 250,
             fallback_solver: "bicgstab",
             fallback_pc: "ilut",
+            amg_nonsymmetric_override: false,
         },
         "fidap001" => OptimalConfig {
             solver: "gmres",
@@ -153,6 +158,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 500,
             fallback_solver: "bicgstab",
             fallback_pc: "jacobi",
+            amg_nonsymmetric_override: false,
         },
         "sherman3" => OptimalConfig {
             solver: "gmres",
@@ -161,6 +167,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 50,
             fallback_solver: "bicgstab",
             fallback_pc: "ilut",
+            amg_nonsymmetric_override: false,
         },
         "add20" => OptimalConfig {
             solver: "cg",
@@ -169,6 +176,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 10,
             fallback_solver: "bicgstab",
             fallback_pc: "ilu",
+            amg_nonsymmetric_override: false,
         },
         "memplus" => OptimalConfig {
             solver: "bicgstab",
@@ -177,6 +185,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 10,
             fallback_solver: "gmres",
             fallback_pc: "ilu",
+            amg_nonsymmetric_override: false,
         },
         _ => OptimalConfig {
             solver: "gmres",
@@ -185,6 +194,7 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             expected_iterations: 500,
             fallback_solver: "bicgstab",
             fallback_pc: "jacobi",
+            amg_nonsymmetric_override: false,
         },
     }
 }
@@ -349,15 +359,19 @@ fn build_preconditioner_options(
     matrix_name: &str,
     solver: &str,
     pc: &str,
+    amg_mode: AmgMode,
     is_fallback: bool,
 ) -> Option<PcOptions> {
     if pc == "amg" {
-        if solver != "cg" {
+        if amg_mode == AmgMode::ExplicitNonSpd {
             let mut opts = PcOptions::default();
             opts.amg_require_spd = Some(false);
-            opts.amg_relax_type = Some("chebyshev".into());
+            opts.amg_relax_type = Some("jacobi".into());
+            opts.amg_smoother = Some("jacobi".into());
+            opts.amg_coarse_solver = Some("ilu".into());
             return Some(opts);
         }
+        let _ = solver;
         return None;
     }
 
@@ -469,6 +483,7 @@ fn test_optimal_solver(
         matrix_name,
         &decision.primary_solver,
         &decision.primary_pc,
+        decision.amg_mode,
         false,
     );
     let primary_opts_ref = primary_opts.as_ref();
@@ -557,6 +572,7 @@ fn test_optimal_solver(
                     matrix_name,
                     &decision.fallback_solver,
                     &decision.fallback_pc,
+                    AmgMode::Disabled,
                     true,
                 );
                 ksp_fallback
@@ -665,6 +681,7 @@ fn test_optimal_solver(
                 matrix_name,
                 &decision.fallback_solver,
                 &decision.fallback_pc,
+                AmgMode::Disabled,
                 true,
             );
             ksp_fallback
@@ -980,7 +997,11 @@ fn has_positive_diagonal(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> 
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-fn choose_amg_mode(matrix: &CsrMatrix<f64>, diag_issues: bool) -> AmgDecision {
+fn choose_amg_mode_with_override(
+    matrix: &CsrMatrix<f64>,
+    diag_issues: bool,
+    allow_nonsymmetric_override: bool,
+) -> AmgDecision {
     let approx_symmetric = is_approximately_symmetric(matrix, 1e-8, 4_000);
     let positive_diag = has_positive_diagonal(matrix, 1e-14, 20_000);
     let spd_like = !diag_issues && approx_symmetric && positive_diag;
@@ -991,14 +1012,17 @@ fn choose_amg_mode(matrix: &CsrMatrix<f64>, diag_issues: bool) -> AmgDecision {
         };
     }
 
-    if !diag_issues && approx_symmetric {
+    if allow_nonsymmetric_override && !diag_issues {
         return AmgDecision {
             mode: AmgMode::ExplicitNonSpd,
-            reason: "accepted with explicit non-SPD AMG options (relaxed SPD requirement for nearly symmetric matrix)".to_string(),
+            reason: "accepted: explicit nonsymmetric AMG override selected (require_spd=false, Jacobi smoother, ILU-like coarse solve)".to_string(),
         };
     }
 
     let mut causes = Vec::new();
+    if !allow_nonsymmetric_override {
+        causes.push("default AMG is SPD-only and no nonsymmetric override was selected");
+    }
     if diag_issues {
         causes.push("diagonal issues");
     }
@@ -1060,6 +1084,7 @@ fn select_solver_policy(
         matrix_name, baseline._description
     )];
     let mut contract_checks = Vec::new();
+    let mut amg_mode = AmgMode::Disabled;
 
     let cg_screen = cg_compatibility_screen(matrix, !screen.diagonal_healthy);
     if primary_solver == "cg" && !cg_screen.cg_safe {
@@ -1081,7 +1106,12 @@ fn select_solver_policy(
     }
 
     if primary_pc == "amg" {
-        let amg_decision = choose_amg_mode(matrix, !screen.diagonal_healthy);
+        let amg_decision = choose_amg_mode_with_override(
+            matrix,
+            !screen.diagonal_healthy,
+            baseline.amg_nonsymmetric_override,
+        );
+        amg_mode = amg_decision.mode;
         rationale.push(format!("AMG policy: {}", amg_decision.reason));
         match amg_decision.mode {
             AmgMode::DefaultSpd => {}
@@ -1152,6 +1182,16 @@ fn select_solver_policy(
         rationale,
         contract_checks,
         expected_iterations: baseline.expected_iterations,
+        amg_mode,
+        amg_status_label: if baseline.preconditioner != "amg" {
+            "AMG: not used".to_string()
+        } else {
+            match amg_mode {
+                AmgMode::DefaultSpd => "AMG: SPD default mode".to_string(),
+                AmgMode::ExplicitNonSpd => "AMG: nonsymmetric override mode".to_string(),
+                AmgMode::Disabled => "AMG: disabled (fallback path)".to_string(),
+            }
+        },
     }
 }
 
@@ -1376,6 +1416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         screen.size_class,
                         screen.condition_heuristic
                     );
+                    println!("    → {}", decision.amg_status_label);
                     println!(
                         "    → Decision rationale: {}",
                         decision.rationale.join(" | ")
