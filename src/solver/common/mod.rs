@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod exit_checks;
 pub mod givens;
 
 #[allow(unused_imports)]
