@@ -1,6 +1,7 @@
 mod aug_recycling;
 mod block_arnoldi;
 mod block_solvers;
+mod breakdown_true_residual;
 mod cg_pipelined;
 mod cg_side;
 mod gmres_left_right;

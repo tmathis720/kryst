@@ -32,6 +32,9 @@ use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::common::ReductCtx;
 use crate::solver::common::call_monitors;
+use crate::solver::common::exit_checks::{
+    true_residual_converged_reason, true_residual_norm as eval_true_residual_norm,
+};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
 use crate::utils::convergence::{ConvergedReason, Convergence, ReductionModel, SolveStats};
@@ -230,15 +233,11 @@ impl GmresSolver {
         a: &A,
         b: &[S],
         x: &[S],
-        red: &dyn crate::parallel::ReductionEngine,
+        red: &ReductCtx,
         tmp: &mut [S],
         scratch: &mut BridgeScratch,
     ) -> R {
-        a.matvec_s(x, tmp, scratch);
-        for i in 0..tmp.len() {
-            tmp[i] = b[i] - tmp[i];
-        }
-        red.norm2_s(tmp)
+        eval_true_residual_norm(a, b, x, red, tmp, scratch)
     }
 
     fn classical_mgs_orthogonalize(
@@ -593,8 +592,7 @@ impl GmresSolver {
         }
 
         if call_monitors(mons, 0, res, reduction_count) {
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
                 overlap_global_reductions: async_waits,
@@ -607,8 +605,7 @@ impl GmresSolver {
         }
         #[cfg(feature = "logging")]
         if log::log_enabled!(log::Level::Info) {
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
             reduction_count += 1;
             #[cfg(feature = "metrics")]
             {
@@ -650,8 +647,7 @@ impl GmresSolver {
             );
         }
         if res <= thr {
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
             let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
             stats.reason = if true_reason.is_converged() {
                 true_reason
@@ -935,14 +931,8 @@ impl GmresSolver {
                 k_steps = k + 1;
 
                 if call_monitors(mons, total_iters, res, reduction_count) {
-                    let true_res = Self::true_residual_norm(
-                        a,
-                        b,
-                        x,
-                        red.engine(),
-                        &mut ws.tmp1,
-                        &mut ws.bridge,
-                    );
+                    let true_res =
+                        Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: reduction_count,
                         overlap_global_reductions: async_waits,
@@ -957,14 +947,8 @@ impl GmresSolver {
                 }
                 #[cfg(feature = "logging")]
                 if log::log_enabled!(log::Level::Info) {
-                    let true_res = Self::true_residual_norm(
-                        a,
-                        b,
-                        x,
-                        red.engine(),
-                        &mut ws.tmp1,
-                        &mut ws.bridge,
-                    );
+                    let true_res =
+                        Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                     reduction_count += 1;
                     #[cfg(feature = "metrics")]
                     {
@@ -1135,6 +1119,13 @@ impl GmresSolver {
                 );
             }
             if (breakdown_residual - cycle_res_est).abs() > breakdown_tol * breakdown_scale {
+                let mismatch_reason = true_residual_converged_reason(
+                    true_residual,
+                    bnorm,
+                    self.conv.atol,
+                    self.conv.rtol,
+                )
+                .unwrap_or(ConvergedReason::DivergedBreakdown);
                 let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
                 let async_reductions =
                     end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -1144,13 +1135,9 @@ impl GmresSolver {
                     overlap_global_reductions: async_waits,
                     residual_replacements: async_waits,
                 };
-                return Ok(SolveStats::new(
-                    total_iters,
-                    true_residual,
-                    ConvergedReason::DivergedBreakdown,
-                )
-                .with_counters(counters)
-                .with_reduction_model(self.reduction_model()));
+                return Ok(SolveStats::new(total_iters, true_residual, mismatch_reason)
+                    .with_counters(counters)
+                    .with_reduction_model(self.reduction_model()));
             }
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {
@@ -1210,7 +1197,7 @@ impl GmresSolver {
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {
                 let true_res =
-                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                    Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                 reduction_count += 1;
                 #[cfg(feature = "metrics")]
                 {
@@ -1253,15 +1240,11 @@ impl GmresSolver {
             }
         }
 
-        let true_res =
-            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
-        let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
-        stats.reason = if true_reason.is_converged() {
-            true_reason
-        } else {
-            reason
-        };
+        stats.reason =
+            true_residual_converged_reason(true_res, bnorm, self.conv.atol, self.conv.rtol)
+                .unwrap_or(reason);
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
@@ -1491,8 +1474,7 @@ impl GmresSolver {
         }
 
         if call_monitors(mons, 0, res, reduction_count) {
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: reduction_count,
                 overlap_global_reductions: async_waits,
@@ -1505,8 +1487,7 @@ impl GmresSolver {
         }
         #[cfg(feature = "logging")]
         if log::log_enabled!(log::Level::Info) {
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
             reduction_count += 1;
             #[cfg(feature = "metrics")]
             {
@@ -1548,8 +1529,7 @@ impl GmresSolver {
             );
         }
         if res <= thr {
-            let true_res =
-                Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+            let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
             let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
             stats.reason = if true_reason.is_converged() {
                 true_reason
@@ -1921,14 +1901,8 @@ impl GmresSolver {
                     cycle_res_est = res;
 
                     if call_monitors(mons, total_iters, res, reduction_count) {
-                        let true_res = Self::true_residual_norm(
-                            a,
-                            b,
-                            x,
-                            red.engine(),
-                            &mut ws.tmp1,
-                            &mut ws.bridge,
-                        );
+                        let true_res =
+                            Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                         let counters = crate::utils::convergence::SolverCounters {
                             num_global_reductions: reduction_count,
                             overlap_global_reductions: async_waits,
@@ -1943,14 +1917,8 @@ impl GmresSolver {
                     }
                     #[cfg(feature = "logging")]
                     if log::log_enabled!(log::Level::Info) {
-                        let true_res = Self::true_residual_norm(
-                            a,
-                            b,
-                            x,
-                            red.engine(),
-                            &mut ws.tmp1,
-                            &mut ws.bridge,
-                        );
+                        let true_res =
+                            Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                         reduction_count += 1;
                         #[cfg(feature = "metrics")]
                         {
@@ -2167,7 +2135,7 @@ impl GmresSolver {
 
             if call_monitors(mons, total_iters, res, reduction_count) {
                 let true_res =
-                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                    Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                 let counters = crate::utils::convergence::SolverCounters {
                     num_global_reductions: reduction_count,
                     overlap_global_reductions: async_waits,
@@ -2183,7 +2151,7 @@ impl GmresSolver {
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {
                 let true_res =
-                    Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+                    Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
                 reduction_count += 1;
                 #[cfg(feature = "metrics")]
                 {
@@ -2226,8 +2194,7 @@ impl GmresSolver {
             }
         }
 
-        let true_res =
-            Self::true_residual_norm(a, b, x, red.engine(), &mut ws.tmp1, &mut ws.bridge);
+        let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
         let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
         stats.reason = if true_reason.is_converged() {
