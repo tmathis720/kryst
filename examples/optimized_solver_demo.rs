@@ -78,6 +78,27 @@ struct OptimalConfig {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+struct ScreenReport {
+    symmetry_hint: bool,
+    spd_like_hint: bool,
+    diagonal_healthy: bool,
+    density: f64,
+    size_class: &'static str,
+    condition_heuristic: f64,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+struct SelectionDecision {
+    primary_solver: String,
+    primary_pc: String,
+    fallback_solver: String,
+    fallback_pc: String,
+    rationale: Vec<String>,
+    contract_checks: Vec<String>,
+    expected_iterations: usize,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AmgMode {
     DefaultSpd,
@@ -182,7 +203,7 @@ fn test_optimal_solver(
     a_mat: &CsrMatrix<f64>,
     p_mat: Option<&CsrMatrix<f64>>,
     rhs: &[f64],
-    config: &OptimalConfig,
+    decision: &SelectionDecision,
     _matrix_name: &str,
     is_root_rank: bool,
 ) -> Result<(String, String, String, f64, f64, usize, String, bool), Box<dyn std::error::Error>> {
@@ -211,9 +232,9 @@ fn test_optimal_solver(
 
     // Try primary configuration
     let mut ksp = KspContext::new();
-    let st = SolverType::from_str(config.solver)?;
-    let pct = PcType::from_str(config.preconditioner)?;
-    let amg_opts = if config.preconditioner == "amg" && config.solver != "cg" {
+    let st = SolverType::from_str(&decision.primary_solver)?;
+    let pct = PcType::from_str(&decision.primary_pc)?;
+    let amg_opts = if decision.primary_pc == "amg" && decision.primary_solver != "cg" {
         let mut opts = PcOptions::default();
         opts.amg_require_spd = Some(false);
         opts.amg_relax_type = Some("chebyshev".into());
@@ -260,8 +281,8 @@ fn test_optimal_solver(
             let converged = true_residual < 1e-6;
             let primary_method = format!(
                 "{} + {}",
-                config.solver.to_uppercase(),
-                config.preconditioner.to_uppercase()
+                decision.primary_solver.to_uppercase(),
+                decision.primary_pc.to_uppercase()
             );
             let status = if converged { "ok" } else { "stagnated" }.to_string();
             Ok((
@@ -280,8 +301,8 @@ fn test_optimal_solver(
             let primary_failure = classify_failure(&primary_reason).to_string();
             let primary_method = format!(
                 "{} + {}",
-                config.solver.to_uppercase(),
-                config.preconditioner.to_uppercase()
+                decision.primary_solver.to_uppercase(),
+                decision.primary_pc.to_uppercase()
             );
             // Try fallback configuration
             if is_root_rank {
@@ -290,8 +311,8 @@ fn test_optimal_solver(
             let mut solution_fallback = vec![0.0; rhs.len()];
 
             let mut ksp_fallback = KspContext::new();
-            let st_fb = SolverType::from_str(config.fallback_solver)?;
-            let pc_fb = PcType::from_str(config.fallback_pc)?;
+            let st_fb = SolverType::from_str(&decision.fallback_solver)?;
+            let pc_fb = PcType::from_str(&decision.fallback_pc)?;
             ksp_fallback
                 .set_type(st_fb)?
                 .set_pc_type(pc_fb, None)?
@@ -304,8 +325,8 @@ fn test_optimal_solver(
             let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
             let fallback_method = format!(
                 "{} + {}",
-                config.fallback_solver.to_uppercase(),
-                config.fallback_pc.to_uppercase()
+                decision.fallback_solver.to_uppercase(),
+                decision.fallback_pc.to_uppercase()
             );
             match fallback_solve {
                 Ok(stats_fallback) => {
@@ -636,6 +657,104 @@ fn choose_amg_mode(matrix: &CsrMatrix<f64>, diag_issues: bool) -> AmgDecision {
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn screen_matrix(matrix: &CsrMatrix<f64>) -> ScreenReport {
+    let diag_issues = detect_diag_issues(matrix, 1e-14, 20_000);
+    let approx_symmetric = is_approximately_symmetric(matrix, 1e-8, 4_000);
+    let positive_diag = has_positive_diagonal(matrix, 1e-14, 20_000);
+    let (density, condition_heuristic, _is_well_conditioned) = analyze_matrix_properties(matrix);
+    let n = matrix.nrows().max(matrix.ncols());
+    let size_class = if n <= 512 {
+        "small"
+    } else if n <= 4_096 {
+        "medium"
+    } else {
+        "large"
+    };
+    let spd_like_hint = !diag_issues && approx_symmetric && positive_diag;
+    ScreenReport {
+        symmetry_hint: approx_symmetric,
+        spd_like_hint,
+        diagonal_healthy: !diag_issues,
+        density,
+        size_class,
+        condition_heuristic,
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn select_solver_policy(
+    matrix_name: &str,
+    screen: &ScreenReport,
+    matrix: &CsrMatrix<f64>,
+) -> SelectionDecision {
+    let baseline = get_optimal_config(matrix_name);
+    let mut primary_solver = baseline.solver.to_string();
+    let mut primary_pc = baseline.preconditioner.to_string();
+    let fallback_solver = baseline.fallback_solver.to_string();
+    let fallback_pc = baseline.fallback_pc.to_string();
+    let mut rationale = vec![format!(
+        "matrix hint '{}': {}",
+        matrix_name, baseline._description
+    )];
+    let mut contract_checks = Vec::new();
+
+    let cg_screen = cg_compatibility_screen(matrix, !screen.diagonal_healthy);
+    if primary_solver == "cg" && !cg_screen.cg_safe {
+        let safe_solver =
+            if baseline.fallback_solver == "gmres" || baseline.fallback_solver == "bicgstab" {
+                baseline.fallback_solver
+            } else {
+                "gmres"
+            };
+        primary_solver = safe_solver.to_string();
+        primary_pc = "ilut".to_string();
+        contract_checks.push(cg_screen.reason);
+        rationale.push(format!(
+            "CG screened out; switched primary to {} + ILUT",
+            safe_solver.to_uppercase()
+        ));
+    } else {
+        contract_checks.push(cg_screen.reason);
+    }
+
+    if primary_pc == "amg" {
+        let amg_decision = choose_amg_mode(matrix, !screen.diagonal_healthy);
+        rationale.push(format!("AMG policy: {}", amg_decision.reason));
+        match amg_decision.mode {
+            AmgMode::DefaultSpd => {}
+            AmgMode::ExplicitNonSpd => {
+                if primary_solver == "cg" {
+                    primary_solver = "gmres".to_string();
+                    rationale.push("AMG non-SPD mode requires non-CG Krylov primary".to_string());
+                }
+            }
+            AmgMode::Disabled => {
+                primary_pc = if screen.diagonal_healthy {
+                    "ilut".to_string()
+                } else {
+                    "ilu".to_string()
+                };
+                if primary_solver == "cg" {
+                    primary_solver = "gmres".to_string();
+                }
+            }
+        }
+    }
+
+    SelectionDecision {
+        primary_solver,
+        primary_pc,
+        fallback_solver,
+        fallback_pc,
+        rationale,
+        contract_checks,
+        expected_iterations: baseline.expected_iterations,
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
     if row >= matrix.nrows() {
         return None;
@@ -751,58 +870,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "    → Preconditioner matrix repaired: {repaired} diagonal entries (|diag|<=1e-14 or missing)."
             );
         }
-        let diag_issues = detect_diag_issues(&a_op, 1e-14, 20_000);
         let rhs = rhs_data.to_vector()?;
 
-        // Get optimal configuration for this matrix
-        let mut config = get_optimal_config(matrix_name);
-        let mut amg_reason = "not selected for this matrix".to_string();
-        let mut method_contract_reason = "method compatible with matrix contract".to_string();
-
-        let cg_screen = cg_compatibility_screen(&a_op, diag_issues);
-        if config.solver == "cg" && !cg_screen.cg_safe {
-            let fallback_solver =
-                if config.fallback_solver == "gmres" || config.fallback_solver == "bicgstab" {
-                    config.fallback_solver
-                } else {
-                    "gmres"
-                };
-            config.solver = fallback_solver;
-            config.preconditioner = "ilut";
-            method_contract_reason = format!(
-                "{}; switched to {} + ILUT",
-                cg_screen.reason,
-                fallback_solver.to_uppercase()
-            );
-        } else if config.solver == "cg" {
-            method_contract_reason = cg_screen.reason;
-        }
-
-        if config.preconditioner == "amg" {
-            let amg_decision = choose_amg_mode(&a_op, diag_issues);
-            amg_reason = amg_decision.reason;
-            match amg_decision.mode {
-                AmgMode::DefaultSpd => {}
-                AmgMode::ExplicitNonSpd => {
-                    if config.solver == "cg" {
-                        config.solver = "gmres";
-                    }
-                }
-                AmgMode::Disabled => {
-                    config.preconditioner = if diag_issues { "ilu" } else { "ilut" };
-                    if config.solver == "cg" {
-                        config.solver = "gmres";
-                    }
-                }
-            }
-        }
-        if is_root_rank {
-            println!("    → AMG reason: {}", amg_reason);
-            println!("    → Solver contract: {}", method_contract_reason);
-        }
-
-        // Analyze matrix properties
-        let (density, condition_est, is_well_conditioned) = analyze_matrix_properties(&a_op);
+        let screen = screen_matrix(&a_op);
+        let decision = select_solver_policy(matrix_name, &screen, &a_op);
 
         // Skip very large matrices for this demo
         if a_op.nrows() > 6000 {
@@ -820,16 +891,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &a_op,
             p_mat.as_ref(),
             &rhs,
-            &config,
+            &decision,
             matrix_name,
             is_root_rank,
         ) {
-            Ok((primary, fallback, reason, true_residual, prec_residual, iters, status, converged)) => {
-
+            Ok((
+                primary,
+                fallback,
+                reason,
+                true_residual,
+                prec_residual,
+                iters,
+                status,
+                converged,
+            )) => {
                 // Compare with benchmark expectations
-                let iter_performance = if converged && iters <= config.expected_iterations {
+                let iter_performance = if converged && iters <= decision.expected_iterations {
                     "Better than expected"
-                } else if converged && iters <= config.expected_iterations * 2 {
+                } else if converged && iters <= decision.expected_iterations * 2 {
                     "Within expected range"
                 } else if converged {
                     "Slower than expected"
@@ -850,25 +929,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         iters,
                         iter_performance
                     );
+                    println!(
+                        "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}",
+                        screen.symmetry_hint,
+                        screen.spd_like_hint,
+                        screen.diagonal_healthy,
+                        screen.density,
+                        screen.size_class,
+                        screen.condition_heuristic
+                    );
+                    println!(
+                        "    → Decision rationale: {}",
+                        decision.rationale.join(" | ")
+                    );
+                    println!(
+                        "    → Contract checks: {}",
+                        decision.contract_checks.join(" | ")
+                    );
                 }
 
                 // Additional diagnostics for interesting cases
-                if is_root_rank && !is_well_conditioned {
+                if is_root_rank && screen.condition_heuristic >= 100.0 {
                     println!(
                         "    → Ill-conditioned matrix (est. cond. ≈ {:.1e})",
-                        condition_est
+                        screen.condition_heuristic
                     );
                 }
-                if is_root_rank && density > 0.1 {
+                if is_root_rank && screen.density > 0.1 {
                     println!(
                         "    → Dense matrix ({:.1}% fill) - direct methods may be preferred",
-                        density * 100.0
+                        screen.density * 100.0
                     );
                 }
-                if is_root_rank && converged && iters < config.expected_iterations / 2 {
+                if is_root_rank && converged && iters < decision.expected_iterations / 2 {
                     println!(
                         "    → Excellent performance: {} iterations vs {} expected",
-                        iters, config.expected_iterations
+                        iters, decision.expected_iterations
                     );
                 }
             }
