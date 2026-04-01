@@ -382,6 +382,7 @@ fn build_preconditioner_options(
     opts.ilu_max_fill_per_row = Some(24);
     opts.ilu_offdiag_drop_tolerance = Some(1e-4);
     opts.ilu_reordering_type = Some("rcm".to_string());
+    opts.ilu_reordering = Some("rcm".to_string());
     opts.ilu_triangular_solve = Some("gauss-seidel".to_string());
     opts.ilu_pivot_threshold = Some(1e-10);
     opts.pc_scale = Some("both".to_string());
@@ -392,6 +393,7 @@ fn build_preconditioner_options(
             opts.ilu_max_fill_per_row = Some(48);
             opts.ilu_offdiag_drop_tolerance = Some(1e-6);
             opts.ilu_reordering_type = Some("amd".to_string());
+            opts.ilu_reordering = Some("amd_nonsym".to_string());
             opts.ilu_triangular_solve = Some("exact".to_string());
             opts.ilu_pivot_threshold = Some(1e-12);
         }
@@ -401,6 +403,7 @@ fn build_preconditioner_options(
                 opts.ilu_max_fill_per_row = Some(64);
                 opts.ilu_offdiag_drop_tolerance = Some(5e-7);
                 opts.ilu_reordering_type = Some("amd".to_string());
+                opts.ilu_reordering = Some("amd_nonsym".to_string());
                 opts.ilu_triangular_solve = Some("exact".to_string());
                 opts.ilu_pivot_threshold = Some(1e-12);
             } else {
@@ -415,6 +418,7 @@ fn build_preconditioner_options(
             opts.ilu_max_fill_per_row = Some(72);
             opts.ilu_offdiag_drop_tolerance = Some(1e-7);
             opts.ilu_reordering_type = Some("amd".to_string());
+            opts.ilu_reordering = Some("amd_nonsym".to_string());
             opts.ilu_triangular_solve = Some("exact".to_string());
             opts.ilu_pivot_threshold = Some(1e-12);
             opts.pc_scale = Some("row".to_string());
@@ -424,6 +428,7 @@ fn build_preconditioner_options(
             opts.ilu_max_fill_per_row = Some(56);
             opts.ilu_offdiag_drop_tolerance = Some(1e-6);
             opts.ilu_reordering_type = Some("amd".to_string());
+            opts.ilu_reordering = Some("amd_nonsym".to_string());
             opts.ilu_triangular_solve = Some("exact".to_string());
             opts.ilu_pivot_threshold = Some(1e-12);
             opts.pc_scale_norm = Some("1".to_string());
